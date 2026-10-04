@@ -105,6 +105,83 @@ pub enum ThreadRequest {
         /// The most sessions to list.
         limit: u32,
     },
+    /// What was said in the threads this worker holds: every word of `query` in the person's
+    /// messages, the agent's answers and reasoning, its calls' titles and its notices, as the
+    /// worker's log of each thread keeps them (a text clipped there is searched as far as it
+    /// is kept). Answered with [`ThreadHits`] on the control stream.
+    Search {
+        /// The words; nothing is found for none.
+        query: String,
+        /// The most threads to answer with, up to [`SEARCH_THREADS`].
+        limit: u32,
+    },
+}
+
+/// The most threads a [`ThreadRequest::Search`] answers with.
+pub const SEARCH_THREADS: u32 = 50;
+
+/// The most of a thread's items with a match a [`ThreadHit`] carries.
+pub const HITS_PER_THREAD: usize = 3;
+
+/// How much of an item an [`ItemHit`] carries, in bytes: the part round its first match.
+pub const ITEM_HIT_BYTES: usize = 240;
+
+/// What a [`ThreadRequest::Search`] found.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ThreadHits {
+    /// The words asked for, as they were asked.
+    pub query: String,
+    /// The threads with a match, the best first: by their best item's match, then by when it
+    /// was said, the latest first.
+    pub threads: Vec<ThreadHit>,
+    /// The threads with a match left out past the limit.
+    pub more: u32,
+}
+
+/// A thread with a match. Its title, agent and folder are its row in the table.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ThreadHit {
+    /// The thread.
+    pub thread: ThreadId,
+    /// Its items with a match, the best first, at most [`HITS_PER_THREAD`].
+    pub hits: Vec<ItemHit>,
+    /// Its items with a match left out.
+    pub more: u32,
+}
+
+/// An item that matched, as much of it as shows where.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ItemHit {
+    /// The item, to scroll the thread to.
+    pub item: ItemId,
+    /// Its turn, to page the thread back to.
+    pub turn: TurnId,
+    /// Open, what kind of words they are: [`ItemHit::PERSON`], [`ItemHit::AGENT`],
+    /// [`ItemHit::REASONING`], [`ItemHit::TOOL`], [`ItemHit::NOTICE`].
+    pub said: String,
+    /// The words, cut to [`ITEM_HIT_BYTES`] round the first match.
+    pub text: String,
+    /// Where the words asked for are in [`Self::text`], in order, never overlapping.
+    pub spans: Vec<Span>,
+    /// Text of the item before [`Self::text`] was cut off.
+    pub cut_before: bool,
+    /// Text of the item after [`Self::text`] was cut off.
+    pub cut_after: bool,
+    /// When it was said.
+    pub at_ms: WallMs,
+}
+
+impl ItemHit {
+    /// The agent's answer.
+    pub const AGENT: &'static str = "agent";
+    /// A notice of the agent's own.
+    pub const NOTICE: &'static str = "notice";
+    /// The person's message.
+    pub const PERSON: &'static str = "person";
+    /// The agent's reasoning.
+    pub const REASONING: &'static str = "reasoning";
+    /// A call's title.
+    pub const TOOL: &'static str = "tool";
 }
 
 /// A thread to start.
@@ -157,14 +234,6 @@ pub enum Intent {
         /// The intent that sent it.
         pending: IntentId,
     },
-    /// Move a message that has not gone yet to just before another, or to the end of the list
-    /// ([`Cap::QUEUE`]): queued messages go in the list's order.
-    Reorder {
-        /// The intent that sent it.
-        pending: IntentId,
-        /// The intent of the message it goes before; `None` for the end.
-        before: Option<IntentId>,
-    },
     /// Stop the turn under way.
     Interrupt,
     /// Answer a request.
@@ -180,9 +249,7 @@ pub enum Intent {
         /// several picks of one question joined with `", "` and the words of one's own last
         /// ([`detail::Answer::JOIN`](super::detail::Answer::JOIN)). Claude Code takes the list
         /// as `AskUserQuestion`'s answers as they are; an adapter whose agent takes picks apart
-        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)). For an
-        /// approval whose call the person changed, the fields changed
-        /// ([`Editable::choice`](super::Editable::choice)).
+        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)).
         choice: String,
         /// Words to go with it, where the agent takes them.
         message: Option<String>,
@@ -229,13 +296,6 @@ pub enum Intent {
         /// The last turn the new thread shares with this one; `None` for all of them.
         after: Option<TurnId>,
     },
-    /// Put the agent to sleep at rest ([`Cap::SLEEP`]): its process ends and the thread is kept
-    /// with its session ([`Liveness::Asleep`](super::Liveness::Asleep)). Refused, in words, while
-    /// anything is under way: a turn, a question, a waiting message, background work.
-    Sleep,
-    /// Wake an agent put to sleep: its session is taken up again through the agent's own
-    /// resume. The next message wakes it too.
-    Wake,
     /// Go on from this thread in a new one on agent `agent` (this one's own, to start afresh)
     /// ([`Cap::CONTINUE`]). The new thread starts with nothing sent: its first message, a
     /// portable account of this one (the person's messages and the answers, newest first, the
@@ -262,6 +322,22 @@ pub enum Intent {
         /// The folder goes back to the turn's before-snapshot too.
         files: bool,
     },
+    /// Set how hard the model thinks, by the agent's own name for the level
+    /// ([`ThreadMeta::efforts`](super::ThreadMeta::efforts)).
+    SetEffort {
+        /// The level.
+        effort: String,
+    },
+    /// Ask aside: branch the whole thread into a new one marked as its aside
+    /// ([`ThreadMeta::ASIDE_FACT`](super::ThreadMeta::ASIDE_FACT)), for a side question that
+    /// stays out of this thread and shares its context ([`Cap::FORK`]). Answered with
+    /// [`Outcome::Started`] and the aside, which takes the question as its first message.
+    Aside,
+    /// Close an aside for good: its agent ends and the worker forgets it. Its agent's session
+    /// stays wherever the agent keeps it. Refused for a thread that is not an aside.
+    Discard,
+    /// Keep an aside as an ordinary thread of its own: it shows from then on.
+    KeepAside,
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -286,24 +362,20 @@ impl Intent {
     pub const fn needs(&self) -> &'static str {
         match self {
             Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
-            Self::Send {
-                delivery: Delivery::At { .. } | Delivery::After { .. } | Delivery::Draft,
-                ..
-            } => Cap::SCHEDULE,
+            Self::Send { delivery: Delivery::At { .. } | Delivery::Draft, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
-            | Self::Edit { .. }
-            | Self::Reorder { .. } => Cap::QUEUE,
+            | Self::Edit { .. } => Cap::QUEUE,
             Self::Send { delivery: Delivery::Interrupt, .. } | Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,
+            Self::SetEffort { .. } => Cap::SET_EFFORT,
             Self::Compact => Cap::COMPACT,
             Self::Handoff | Self::TakeBack => Cap::HANDOFF,
             Self::StopTask { .. } => Cap::STOP_TASK,
-            Self::Fork { .. } => Cap::FORK,
+            Self::Fork { .. } | Self::Aside | Self::Discard | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
-            Self::Sleep | Self::Wake => Cap::SLEEP,
             Self::Continue { .. } => Cap::CONTINUE,
             Self::Rewind { .. } => Cap::REWIND,
         }

@@ -13,16 +13,19 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Map, Value};
 
 /// The requests Slopty sends.
-const CLIENT_REQUESTS: [&str; 14] = [
+const CLIENT_REQUESTS: [&str; 17] = [
     "initialize",
     "thread/start",
     "thread/resume",
+    "thread/unarchive",
     "thread/fork",
     "thread/read",
     "thread/list",
     "thread/loaded/list",
     "thread/unsubscribe",
     "thread/name/set",
+    "thread/settings/update",
+    "thread/goal/get",
     "turn/start",
     "turn/steer",
     "turn/interrupt",
@@ -40,18 +43,24 @@ const SERVER_REQUESTS: [&str; 5] = [
 ];
 
 /// The notifications Slopty reads.
-const SERVER_NOTIFICATIONS: [&str; 27] = [
+const SERVER_NOTIFICATIONS: [&str; 34] = [
     "error",
     "warning",
     "thread/started",
     "thread/status/changed",
     "thread/closed",
     "thread/name/updated",
+    "thread/settings/updated",
+    "thread/reverted",
+    "thread/goal/updated",
+    "thread/goal/cleared",
     "thread/tokenUsage/updated",
     "thread/compacted",
     "thread/queue/changed",
     "turn/started",
     "turn/completed",
+    "hook/started",
+    "hook/completed",
     "turn/diff/updated",
     "turn/plan/updated",
     "item/started",
@@ -66,6 +75,7 @@ const SERVER_NOTIFICATIONS: [&str; 27] = [
     "item/fileChange/patchUpdated",
     "item/mcpToolCall/progress",
     "serverRequest/resolved",
+    "mcpServer/startupStatus/updated",
     "account/rateLimits/updated",
     "model/rerouted",
 ];

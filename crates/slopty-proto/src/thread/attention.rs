@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
 use super::wire::ThreadRow;
-use super::{Liveness, Phase, ThreadId};
+use super::{Phase, ThreadId};
 use crate::orchestration::TermRef;
 use crate::project::{ProjectId, TaskId};
 
@@ -25,8 +25,6 @@ use crate::project::{ProjectId, TaskId};
     Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default, Serialize, Deserialize,
 )]
 pub enum Rung {
-    /// Its agent was put to sleep by the person: quieter than at rest, until it is woken.
-    Sleeping,
     /// At rest with nothing to look at.
     #[default]
     Idle,
@@ -44,18 +42,10 @@ pub enum Rung {
 
 impl Rung {
     /// Every rung, highest first.
-    pub const DOWN: [Self; 7] = [
-        Self::NeedsYou,
-        Self::Failed,
-        Self::ToReview,
-        Self::Working,
-        Self::Waiting,
-        Self::Idle,
-        Self::Sleeping,
-    ];
+    pub const DOWN: [Self; 6] =
+        [Self::NeedsYou, Self::Failed, Self::ToReview, Self::Working, Self::Waiting, Self::Idle];
 
-    /// Where the thread `row` stands. An agent put to sleep stands below the rest, unless what
-    /// it left still asks for a look: changes to review, or the error it stopped on.
+    /// Where the thread `row` stands.
     #[must_use]
     pub const fn of(row: &ThreadRow) -> Self {
         if !row.requests.is_empty() {
@@ -67,17 +57,11 @@ impl Rung {
             Phase::Working => Self::Working,
             Phase::Waiting => Self::Waiting,
             Phase::Idle | Phase::Done | Phase::Stopped if row.to_review => Self::ToReview,
-            Phase::Idle | Phase::Done | Phase::Stopped
-                if matches!(row.status.liveness, Liveness::Asleep { .. }) =>
-            {
-                Self::Sleeping
-            }
             Phase::Idle | Phase::Done | Phase::Stopped => Self::Idle,
         }
     }
 
-    /// Its word, the same on every surface; none at rest. Asleep is said, quietly: the agent
-    /// no longer runs.
+    /// Its word, the same on every surface; none at rest.
     #[must_use]
     pub const fn word(self) -> Option<&'static str> {
         match self {
@@ -87,7 +71,6 @@ impl Rung {
             Self::Working => Some("Working"),
             Self::Waiting => Some("Waiting"),
             Self::Idle => None,
-            Self::Sleeping => Some("Asleep"),
         }
     }
 }
@@ -107,8 +90,6 @@ pub struct Counts {
     pub waiting: u32,
     /// At rest.
     pub idle: u32,
-    /// Put to sleep.
-    pub sleeping: u32,
 }
 
 impl Counts {
@@ -122,7 +103,6 @@ impl Counts {
             Rung::Working => self.working,
             Rung::Waiting => self.waiting,
             Rung::Idle => self.idle,
-            Rung::Sleeping => self.sleeping,
         }
     }
 
@@ -140,7 +120,6 @@ impl Counts {
             Rung::Working => &mut self.working,
             Rung::Waiting => &mut self.waiting,
             Rung::Idle => &mut self.idle,
-            Rung::Sleeping => &mut self.sleeping,
         };
         *at = at.saturating_add(n);
     }
@@ -154,7 +133,6 @@ impl Counts {
             .saturating_add(self.working)
             .saturating_add(self.waiting)
             .saturating_add(self.idle)
-            .saturating_add(self.sleeping)
     }
 }
 

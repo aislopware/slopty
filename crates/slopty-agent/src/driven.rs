@@ -1,7 +1,7 @@
 //! What every adapter that drives its agent over a protocol (pi's RPC mode, ACP) maps the same way.
 //!
-//! How much of a text a thread keeps, a thread's title, its capabilities, an answer offered, and
-//! what a thread is left as when its agent ends unheard.
+//! How much of a text a thread keeps, a thread's title, its capabilities, an effort's name, an
+//! answer offered, and what a thread is left as when its agent ends unheard.
 
 use slopty_core::WallMs;
 use slopty_proto::thread::detail::Clip;
@@ -24,6 +24,21 @@ pub fn caps(names: &[&str]) -> Vec<Cap> {
     caps.sort();
     caps.dedup();
     caps
+}
+
+/// A reasoning effort's name for people, from the agent's own (`high` is "High"; `xhigh`, which
+/// Codex and pi both name so, is "Extra high", as Codex's picker says it).
+#[must_use]
+pub fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+        }
+    }
 }
 
 /// An answer the agent offers.

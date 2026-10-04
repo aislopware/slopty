@@ -42,10 +42,10 @@ use slopty_proto::conversation::{
 };
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped,
-    Compaction, ContentRef, Drive, Editable, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness,
-    Meters, Model, Notice, PartKey, Phase, Plan, Request, RequestState, Retry, Status, Step,
-    ThreadId, ThreadMeta, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait,
-    detail, kind,
+    Compaction, ContentRef, Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
+    Model, Notice, PartKey, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId,
+    ThreadMeta, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait, detail,
+    kind,
 };
 
 use crate::live;
@@ -62,7 +62,7 @@ pub enum Out {
 
 /// The capabilities an observed Claude Code has through Slopty before its hooks are heard;
 /// [`Cap::APPROVALS`] joins them once they are.
-pub const CAPS: [&str; 11] = [
+pub const CAPS: [&str; 10] = [
     Cap::CONTINUE,
     Cap::FORK,
     Cap::INTERRUPT,
@@ -71,7 +71,6 @@ pub const CAPS: [&str; 11] = [
     Cap::QUEUE,
     Cap::SET_MODEL,
     Cap::SCHEDULE,
-    Cap::SLEEP,
     Cap::SNAPSHOTS,
     Cap::STEER,
 ];
@@ -131,9 +130,6 @@ pub fn text_ref(content: &ContentRef) -> Option<(conv::ThreadId, TextRef)> {
 /// prompt, with the person's `message`; `None` for a choice it never offered.
 #[must_use]
 pub fn verdict(choice: &str, message: Option<&str>) -> Option<Verdict> {
-    if let Some(fields) = Editable::read(choice) {
-        return serde_json::to_string(&fields).ok().map(|input| Verdict::AllowEdited { input });
-    }
     let message = message.unwrap_or_default().to_owned();
     match choice {
         "allow" => Some(Verdict::Allow),
@@ -149,9 +145,6 @@ fn choice_of(verdict: &Verdict) -> String {
     match verdict {
         Verdict::Allow => "allow".to_owned(),
         Verdict::AllowAlways => "always".to_owned(),
-        Verdict::AllowEdited { input } => Editable::choice(
-            &serde_json::from_str::<BTreeMap<String, String>>(input).unwrap_or_default(),
-        ),
         Verdict::Deny { interrupt: false, .. } => "deny".to_owned(),
         Verdict::Deny { interrupt: true, .. } => "deny-stop".to_owned(),
         Verdict::Answer { answers } => serde_json::to_string(answers).unwrap_or_default(),
@@ -321,6 +314,7 @@ impl Observed {
         caps.sort();
         let meta = ThreadMeta {
             modes: Vec::new(),
+            efforts: Vec::new(),
             id,
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: version.to_owned(),
@@ -681,7 +675,6 @@ impl Observed {
             && due;
         if let (true, Some(wait)) = (asks, status.wait.as_ref()) {
             let request = Request {
-                editable: Vec::new(),
                 id: terminal_ask(since),
                 item: None,
                 kind: kind.to_owned(),
@@ -1623,7 +1616,6 @@ fn request(prompt: &PermissionPrompt) -> Request {
             (Request::APPROVAL, format!("Allow {}?", prompt.tool), options, Vec::new(), proposed)
         }
     };
-    let editable = if kind == Request::APPROVAL { prompt.editable.clone() } else { Vec::new() };
     let text = match &prompt.detail {
         conv::ToolDetail::Bash(b) => Some(clipped(&thread, &b.command)),
         conv::ToolDetail::Plan { plan } => Some(clipped(&thread, plan)),
@@ -1638,7 +1630,6 @@ fn request(prompt: &PermissionPrompt) -> Request {
         options,
         questions,
         proposed,
-        editable,
         schema_json: None,
         url: None,
         state: RequestState::Open,

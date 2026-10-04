@@ -18,15 +18,9 @@ mod tests {
         Status, ThreadState, ToolDetail, ToolState, TurnId, TurnState,
     };
 
-    /// The notifications Slopty passes over: the app-server's remote-control state, its
-    /// deprecation notices, thread goals, and a thread's settings (its collaboration mode, which
-    /// the thread does not show yet).
-    const PASSED_OVER: [&str; 4] = [
-        "remoteControl/status/changed",
-        "deprecationNotice",
-        "thread/goal/cleared",
-        "thread/settings/updated",
-    ];
+    /// The notifications Slopty passes over: the app-server's remote-control state and its
+    /// deprecation notices.
+    const PASSED_OVER: [&str; 2] = ["remoteControl/status/changed", "deprecationNotice"];
 
     struct Line {
         client: String,
@@ -806,12 +800,123 @@ mod tests {
         let approval: p::AskForApproval = serde_json::from_value(json!("on-request")).unwrap();
         let sandbox: p::SandboxPolicy =
             serde_json::from_value(json!({"type": "workspaceWrite"})).unwrap();
-        for action in &shared.settings(approval, &sandbox) {
+        let settings = shared::Settings {
+            approval,
+            sandbox: &sandbox,
+            model: thread.model.as_deref().unwrap_or_default(),
+            effort: Some("high"),
+        };
+        for action in &shared.settings(&settings) {
             state.apply(action);
         }
         assert_eq!(state.meters.mode.as_deref(), Some("on-request"));
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("workspaceWrite"));
-        assert!(shared.settings(approval, &sandbox).is_empty(), "nothing moved");
+        assert!(shared.settings(&settings).is_empty(), "nothing moved");
+    }
+
+    /// Codex's model catalog as `model/list` answers it (Codex 0.160.0's schema): two models
+    /// with their reasoning efforts, and a hidden one.
+    fn catalog(running: &str) -> Vec<p::Model> {
+        let model = |slug: &str, name: &str, hidden: bool, efforts: &[&str], default: &str| {
+            json!({
+                "id": slug, "model": slug, "displayName": name, "description": "",
+                "hidden": hidden, "isDefault": false, "defaultReasoningEffort": default,
+                "supportedReasoningEfforts": efforts.iter().map(|e| json!({
+                    "reasoningEffort": e, "description": format!("{e} effort")
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let list = json!({ "data": [
+            model(running, "Running", false, &["low", "medium", "high", "xhigh"], "medium"),
+            model("gpt-mini", "Mini", false, &["low", "medium"], "low"),
+            model("gpt-secret", "Secret", true, &["high"], "high"),
+        ], "nextCursor": null });
+        serde_json::from_value::<p::ModelListResponse>(list).unwrap().data
+    }
+
+    /// What Codex offers is what the thread can be switched to: its models but the hidden one,
+    /// the running model's efforts, and the three approval policies as its modes. A switch
+    /// names only what it changes (`thread/settings/update`); a model that lacks the thread's
+    /// effort goes with its own default effort, as Codex's own picker sets it. Anything not
+    /// offered is refused in words, and a switch Codex took shows in the meters at once.
+    #[test]
+    fn a_thread_switches_among_what_codex_offers() {
+        use shared::Setting;
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let mut thread = started.msg["result"]["thread"].clone();
+        thread["reasoningEffort"] = json!("high");
+        thread["model"] = json!("mock-model");
+        let thread: p::Thread = serde_json::from_value(thread).unwrap();
+        let (mut shared, actions) = Shared::new(&thread, None);
+        let mut state = ThreadState::new(shared.meta().clone());
+        for action in actions.iter().chain(&shared.models(&catalog("mock-model"))) {
+            state.apply(action);
+        }
+        let models: Vec<&str> = state.meta.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(models, ["mock-model", "gpt-mini"], "the hidden model is left out");
+        assert_eq!(state.meters.model.as_deref(), Some("Running"), "its name for people");
+        let efforts: Vec<(&str, &str)> =
+            state.meta.efforts.iter().map(|e| (e.id.as_str(), e.label.as_str())).collect();
+        assert_eq!(
+            efforts,
+            [("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high")]
+        );
+        let modes: Vec<&str> = state.meta.modes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(modes, ["untrusted", "on-request", "never"]);
+        for cap in ["set-model", "set-effort", "set-mode"] {
+            assert!(state.meta.can(cap), "{cap}");
+        }
+
+        let to_mini = shared.switch(&Setting::Model("gpt-mini".to_owned())).unwrap();
+        let sent = serde_json::to_value(&to_mini).unwrap();
+        let native = &thread.id;
+        assert_eq!(
+            sent,
+            json!({ "threadId": native, "model": "gpt-mini", "effort": "low" }),
+            "high is not Mini's, so Mini's own default goes with it"
+        );
+        let effort = shared.switch(&Setting::Effort("xhigh".to_owned())).unwrap();
+        assert_eq!(
+            serde_json::to_value(&effort).unwrap(),
+            json!({ "threadId": native, "effort": "xhigh" })
+        );
+        let mode = shared.switch(&Setting::Mode("never".to_owned())).unwrap();
+        assert_eq!(
+            serde_json::to_value(&mode).unwrap(),
+            json!({ "threadId": native, "approvalPolicy": "never" })
+        );
+        for refused in [
+            Setting::Model("gpt-secret".to_owned()),
+            Setting::Effort("max".to_owned()),
+            Setting::Mode("granular".to_owned()),
+        ] {
+            let why = shared.switch(&refused).unwrap_err();
+            assert!(!why.is_empty(), "{refused:?}");
+        }
+
+        for action in &shared.switched(&to_mini) {
+            state.apply(action);
+        }
+        assert_eq!(state.meters.model_id.as_deref(), Some("gpt-mini"));
+        assert_eq!(state.meters.model.as_deref(), Some("Mini"));
+        assert_eq!(state.meters.effort.as_deref(), Some("low"));
+        let efforts: Vec<&str> = state.meta.efforts.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(efforts, ["low", "medium"], "the efforts of the model it runs now");
+
+        // What another client switched, as Codex tells every client.
+        let said =
+            lines.iter().find(|l| !l.sent && l.msg["method"] == "thread/settings/updated").unwrap();
+        let Incoming::Notification { note, .. } = rpc::read(&said.msg.to_string()).unwrap() else {
+            panic!("a notification");
+        };
+        for action in &shared.notification(&note, WallMs::ZERO) {
+            state.apply(action);
+        }
+        let held = &said.msg["params"]["threadSettings"];
+        assert_eq!(state.meters.model_id.as_deref(), held["model"].as_str());
+        assert_eq!(state.meters.mode.as_deref(), held["approvalPolicy"].as_str());
+        assert_eq!(state.meters.effort.as_deref(), held["effort"].as_str());
     }
 
     /// A fork names Codex's own id of the turn it branches after, or none for the whole thread,
@@ -878,14 +983,93 @@ mod tests {
     }
 
     /// The recorded notification `method` of `name`'s fixture, as its params.
+    /// A call keeps when it began once Codex says it is whole, and ends when Codex says; a hook
+    /// that blocked, failed or left words is a hook notice in its turn, one that ran quietly is
+    /// none; an MCP server that did not start says why, or that it needs signing in again.
+    #[test]
+    fn calls_keep_their_times_and_hooks_and_mcp_failures_are_said() {
+        let (mut shared, mut state) = begun();
+        let turn = recorded_note("question.jsonl", "turn/started");
+        hear(&mut shared, &mut state, "turn/started", &turn);
+        let turn_id = turn["turn"]["id"].clone();
+        let thread = turn["threadId"].clone();
+        let mut call = json!({"aggregatedOutput": null, "command": "cargo test",
+            "commandActions": [], "cwd": "/work", "durationMs": null, "exitCode": null,
+            "id": "call-9", "pluginId": null, "processId": null, "scriptPath": null,
+            "source": "agent", "status": "inProgress", "type": "commandExecution"});
+        let started = json!({"item": call, "startedAtMs": 1_000, "threadId": thread,
+            "turnId": turn_id});
+        hear(&mut shared, &mut state, "item/started", &started);
+        call["status"] = json!("completed");
+        call["exitCode"] = json!(0);
+        let done = json!({"item": call, "completedAtMs": 4_000, "threadId": thread,
+            "turnId": turn_id});
+        hear(&mut shared, &mut state, "item/completed", &done);
+        let item = state.items.iter().find(|i| i.id.0 == "call-9").unwrap();
+        assert_eq!(item.at_ms, WallMs::from_millis(1_000), "when it began");
+        let ItemBody::Tool(tool) = &item.body else { panic!("a call") };
+        assert_eq!(tool.ended_ms, Some(WallMs::from_millis(4_000)), "when it ended");
+
+        let run = |id: &str, status: &str, message: Value, entries: Value| {
+            json!({"threadId": thread, "turnId": turn_id, "run": {
+                "id": id, "displayOrder": 0, "entries": entries, "eventName": "preToolUse",
+                "executionMode": "sync", "handlerType": "command", "scope": "thread",
+                "sourcePath": "/work/.codex/hooks.json", "startedAt": 5_000,
+                "completedAt": 5_200, "status": status, "statusMessage": message}})
+        };
+        let quiet = run("h1", "completed", Value::Null, json!([]));
+        hear(&mut shared, &mut state, "hook/completed", &quiet);
+        let blocked = run(
+            "h2",
+            "blocked",
+            json!("rm -rf is not allowed"),
+            json!([{"kind": "feedback", "text": "Use trash instead"}]),
+        );
+        hear(&mut shared, &mut state, "hook/completed", &blocked);
+        let mcp = |name: &str, status: &str, error: Value, reason: Value| {
+            json!({"threadId": thread, "name": name, "status": status, "error": error,
+                "failureReason": reason})
+        };
+        hear(
+            &mut shared,
+            &mut state,
+            "mcpServer/startupStatus/updated",
+            &mcp("docs", "ready", Value::Null, Value::Null),
+        );
+        hear(
+            &mut shared,
+            &mut state,
+            "mcpServer/startupStatus/updated",
+            &mcp("linear", "failed", json!("connection refused"), Value::Null),
+        );
+        hear(
+            &mut shared,
+            &mut state,
+            "mcpServer/startupStatus/updated",
+            &mcp("github", "failed", Value::Null, json!("reauthenticationRequired")),
+        );
+        let said: Vec<(String, String)> =
+            notices(&state).into_iter().map(|n| (n.kind, n.text.text)).collect();
+        let want = [
+            (Notice::HOOK, "PreToolUse hook blocked: rm -rf is not allowed\nUse trash instead"),
+            (Notice::INFO, "MCP server linear didn't start: connection refused"),
+            (Notice::INFO, "MCP server github needs signing in again"),
+        ];
+        let want: Vec<(String, String)> =
+            want.iter().map(|(k, t)| ((*k).to_owned(), (*t).to_owned())).collect();
+        assert_eq!(said, want);
+        let hook = state.items.iter().find(|i| i.id.0 == "hook:h2").unwrap();
+        assert_eq!(hook.turn, state.turns.last().unwrap().id, "in its turn");
+    }
+
     fn recorded_note(name: &str, method: &str) -> Value {
         fixture(name).into_iter().find(|l| l.msg["method"] == method).unwrap().msg["params"].clone()
     }
 
-    /// Messages held while a turn runs keep the order the person gives them, and one promoted
-    /// leaves the queue and goes into the turn under way as a steer, the rest still held.
+    /// A message held while a turn runs, once promoted, leaves the queue and goes into the turn
+    /// under way as a steer, the rest still held.
     #[test]
-    fn a_held_message_moves_in_the_queue_or_steers_the_turn() {
+    fn a_held_message_promoted_steers_the_turn() {
         use slopty_proto::thread::{Delivery, IntentId};
         let (mut shared, mut state) = begun();
         hear(
@@ -907,12 +1091,6 @@ mod tests {
         }
         let order =
             |state: &ThreadState| state.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
-        for action in &shared.reorder(ids[2], Some(ids[0])).unwrap() {
-            state.apply(action);
-        }
-        assert_eq!(order(&state), ["three", "one", "two"]);
-        assert!(shared.reorder(ids[0], Some(IntentId::new())).is_none(), "before nothing held");
-
         let (send, actions) = shared.promote(ids[0]).unwrap();
         for action in &actions {
             state.apply(action);
@@ -920,7 +1098,7 @@ mod tests {
         let shared::Send::Steer(steer) = send else { panic!("a steer: {send:?}") };
         assert_eq!(steer.expected_turn_id, turn);
         assert_eq!(serde_json::to_value(&steer.input).unwrap()[0]["text"], "one");
-        assert_eq!(order(&state), ["three", "two"], "the rest still held");
+        assert_eq!(order(&state), ["two", "three"], "the rest still held");
         assert!(shared.promote(ids[0]).is_none(), "gone once");
     }
 
@@ -1002,6 +1180,92 @@ mod tests {
         );
         assert!(state.pending.is_empty(), "no longer waiting");
         assert!(shared.next_queued().is_none());
+    }
+
+    /// A goal Codex works toward shows on the thread as Codex holds it, its state in Slopty's
+    /// open words, and goes once Codex clears it. Nothing here sets one.
+    #[test]
+    fn a_codex_goal_shows_as_codex_holds_it() {
+        let (mut shared, mut state) = begun();
+        let native = shared.meta().native.clone();
+        let goal = json!({"threadId": native, "turnId": null, "goal": {
+            "threadId": native, "objective": "Make every fixture pass", "status": "budgetLimited",
+            "tokensUsed": 41_000, "tokenBudget": 500_000, "timeUsedSeconds": 380,
+            "createdAt": 1_790_000_000_i64, "updatedAt": 1_790_000_380_i64}});
+        hear(&mut shared, &mut state, "thread/goal/updated", &goal);
+        let held = state.goal.clone().expect("a goal");
+        assert_eq!(
+            (held.objective.as_str(), held.state.as_str()),
+            ("Make every fixture pass", "budget-limited")
+        );
+        assert_eq!(
+            (held.tokens_used, held.token_budget, held.time_used_s),
+            (41_000, Some(500_000), 380)
+        );
+        assert_eq!(held.updated_ms, WallMs::from_millis(1_790_000_380_000));
+        assert!(!held.is_active());
+        hear(&mut shared, &mut state, "thread/goal/cleared", &json!({"threadId": native}));
+        assert_eq!(state.goal, None);
+    }
+
+    /// The person's stop holds what is queued: the turn is interrupted, every message queued
+    /// says it waits on the stop, and none goes as the turn ends. Their next message lets them
+    /// go again in their order, ahead of it; sending one held now lets the rest go after it.
+    #[test]
+    fn a_stop_holds_the_queue_until_the_person_sends_again() {
+        use slopty_proto::thread::{Delivery, IntentId, Pending};
+        let (mut shared, mut state) = begun();
+        let started = recorded_note("question.jsonl", "turn/started");
+        let completed = recorded_note("question.jsonl", "turn/completed");
+        let apply = |state: &mut ThreadState, actions: &[Action]| {
+            for action in actions {
+                state.apply(action);
+            }
+        };
+        let queue = |shared: &mut Shared, state: &mut ThreadState, text: &str| {
+            let intent = IntentId::new();
+            let shared::Send::Held(actions) = shared.send(text, vec![], Delivery::Queue, intent)
+            else {
+                panic!("held: {text}")
+            };
+            apply(state, &actions);
+            intent
+        };
+        let words = |turn: &p::TurnStartParams| {
+            serde_json::to_value(turn).unwrap()["input"][0]["text"].as_str().unwrap().to_owned()
+        };
+        assert!(shared.stop().is_none(), "nothing to stop at rest");
+        hear(&mut shared, &mut state, "turn/started", &started);
+        let one = queue(&mut shared, &mut state, "one");
+        queue(&mut shared, &mut state, "two");
+
+        let (interrupt, held) = shared.stop().expect("a turn to stop");
+        assert_eq!(interrupt.turn_id, shared.current().unwrap());
+        apply(&mut state, &held);
+        assert!(state.pending.iter().all(Pending::stopped), "{:?}", state.pending);
+        hear(&mut shared, &mut state, "turn/completed", &completed);
+        assert!(shared.next_queued().is_none(), "the stop holds them");
+
+        let three = queue(&mut shared, &mut state, "three");
+        assert!(state.pending.iter().all(|p| !p.stopped()), "let go: {:?}", state.pending);
+        let (turn, taken) = shared.next_queued().expect("the first held goes");
+        apply(&mut state, &taken);
+        assert_eq!(words(&turn), "one");
+        let order =
+            |state: &ThreadState| state.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+        assert_eq!(order(&state), ["two", "three"], "the rest in their order, the new one last");
+
+        hear(&mut shared, &mut state, "turn/started", &started);
+        let (_, held) = shared.stop().unwrap();
+        apply(&mut state, &held);
+        hear(&mut shared, &mut state, "turn/completed", &completed);
+        let (send, taken) = shared.promote(three).expect("held");
+        apply(&mut state, &taken);
+        let shared::Send::Start(turn) = send else { panic!("a turn of its own: {send:?}") };
+        assert_eq!(words(&turn), "three", "the one sent now goes first");
+        assert_eq!(order(&state), ["two"]);
+        assert!(!state.pending[0].stopped(), "the rest go after it");
+        assert!(shared.promote(one).is_none(), "gone already");
     }
 
     /// An MCP server's form, asked through Codex, is a request whose questions are its fields,

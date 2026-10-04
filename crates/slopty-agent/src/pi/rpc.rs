@@ -122,6 +122,8 @@ pub enum Command {
     },
     /// Every model pi can use.
     GetAvailableModels,
+    /// The thinking levels the model in use supports (`["off"]` for one that does not reason).
+    GetAvailableThinkingLevels,
     /// How hard the model thinks.
     SetThinkingLevel {
         /// `off` to `max`.

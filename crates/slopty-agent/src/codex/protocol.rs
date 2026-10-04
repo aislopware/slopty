@@ -49,6 +49,12 @@ impl Method for ThreadResumeParams {
     const METHOD: &'static str = "thread/resume";
 }
 
+impl Method for ThreadUnarchiveParams {
+    type Response = ThreadUnarchiveResponse;
+
+    const METHOD: &'static str = "thread/unarchive";
+}
+
 impl Method for ThreadForkParams {
     type Response = ThreadForkResponse;
 
@@ -83,6 +89,18 @@ impl Method for ThreadSetNameParams {
     type Response = ThreadSetNameResponse;
 
     const METHOD: &'static str = "thread/name/set";
+}
+
+impl Method for ThreadSettingsUpdateParams {
+    type Response = ThreadSettingsUpdateResponse;
+
+    const METHOD: &'static str = "thread/settings/update";
+}
+
+impl Method for ThreadGoalGetParams {
+    type Response = ThreadGoalGetResponse;
+
+    const METHOD: &'static str = "thread/goal/get";
 }
 
 impl Method for TurnStartParams {
@@ -218,6 +236,14 @@ pub enum ServerNotification {
     ThreadClosed(ThreadClosedNotification),
     /// `thread/name/updated`.
     ThreadNameUpdated(ThreadNameUpdatedNotification),
+    /// `thread/settings/updated`.
+    ThreadSettingsUpdated(ThreadSettingsUpdatedNotification),
+    /// `thread/reverted`.
+    ThreadReverted(ThreadRevertedNotification),
+    /// `thread/goal/updated`.
+    ThreadGoalUpdated(ThreadGoalUpdatedNotification),
+    /// `thread/goal/cleared`.
+    ThreadGoalCleared(ThreadGoalClearedNotification),
     /// `thread/tokenUsage/updated`.
     ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification),
     /// `thread/compacted`.
@@ -228,6 +254,10 @@ pub enum ServerNotification {
     TurnStarted(TurnStartedNotification),
     /// `turn/completed`.
     TurnCompleted(TurnCompletedNotification),
+    /// `hook/started`.
+    HookStarted(HookStartedNotification),
+    /// `hook/completed`.
+    HookCompleted(HookCompletedNotification),
     /// `turn/diff/updated`.
     TurnDiffUpdated(TurnDiffUpdatedNotification),
     /// `turn/plan/updated`.
@@ -256,6 +286,8 @@ pub enum ServerNotification {
     ItemMcpToolCallProgress(McpToolCallProgressNotification),
     /// `serverRequest/resolved`.
     ServerRequestResolved(ServerRequestResolvedNotification),
+    /// `mcpServer/startupStatus/updated`.
+    McpServerStartupStatusUpdated(McpServerStatusUpdatedNotification),
     /// `account/rateLimits/updated`.
     AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification),
     /// `model/rerouted`.
@@ -281,6 +313,12 @@ impl ServerNotification {
             }
             "thread/closed" => serde_json::from_value(params).map(Self::ThreadClosed),
             "thread/name/updated" => serde_json::from_value(params).map(Self::ThreadNameUpdated),
+            "thread/settings/updated" => {
+                serde_json::from_value(params).map(Self::ThreadSettingsUpdated)
+            }
+            "thread/reverted" => serde_json::from_value(params).map(Self::ThreadReverted),
+            "thread/goal/updated" => serde_json::from_value(params).map(Self::ThreadGoalUpdated),
+            "thread/goal/cleared" => serde_json::from_value(params).map(Self::ThreadGoalCleared),
             "thread/tokenUsage/updated" => {
                 serde_json::from_value(params).map(Self::ThreadTokenUsageUpdated)
             }
@@ -288,6 +326,8 @@ impl ServerNotification {
             "thread/queue/changed" => serde_json::from_value(params).map(Self::ThreadQueueChanged),
             "turn/started" => serde_json::from_value(params).map(Self::TurnStarted),
             "turn/completed" => serde_json::from_value(params).map(Self::TurnCompleted),
+            "hook/started" => serde_json::from_value(params).map(Self::HookStarted),
+            "hook/completed" => serde_json::from_value(params).map(Self::HookCompleted),
             "turn/diff/updated" => serde_json::from_value(params).map(Self::TurnDiffUpdated),
             "turn/plan/updated" => serde_json::from_value(params).map(Self::TurnPlanUpdated),
             "item/started" => serde_json::from_value(params).map(Self::ItemStarted),
@@ -320,6 +360,9 @@ impl ServerNotification {
             "serverRequest/resolved" => {
                 serde_json::from_value(params).map(Self::ServerRequestResolved)
             }
+            "mcpServer/startupStatus/updated" => {
+                serde_json::from_value(params).map(Self::McpServerStartupStatusUpdated)
+            }
             "account/rateLimits/updated" => {
                 serde_json::from_value(params).map(Self::AccountRateLimitsUpdated)
             }
@@ -338,11 +381,17 @@ impl ServerNotification {
             Self::ThreadStatusChanged(_) => "thread/status/changed",
             Self::ThreadClosed(_) => "thread/closed",
             Self::ThreadNameUpdated(_) => "thread/name/updated",
+            Self::ThreadSettingsUpdated(_) => "thread/settings/updated",
+            Self::ThreadReverted(_) => "thread/reverted",
+            Self::ThreadGoalUpdated(_) => "thread/goal/updated",
+            Self::ThreadGoalCleared(_) => "thread/goal/cleared",
             Self::ThreadTokenUsageUpdated(_) => "thread/tokenUsage/updated",
             Self::ThreadCompacted(_) => "thread/compacted",
             Self::ThreadQueueChanged(_) => "thread/queue/changed",
             Self::TurnStarted(_) => "turn/started",
             Self::TurnCompleted(_) => "turn/completed",
+            Self::HookStarted(_) => "hook/started",
+            Self::HookCompleted(_) => "hook/completed",
             Self::TurnDiffUpdated(_) => "turn/diff/updated",
             Self::TurnPlanUpdated(_) => "turn/plan/updated",
             Self::ItemStarted(_) => "item/started",
@@ -357,6 +406,7 @@ impl ServerNotification {
             Self::ItemFileChangePatchUpdated(_) => "item/fileChange/patchUpdated",
             Self::ItemMcpToolCallProgress(_) => "item/mcpToolCall/progress",
             Self::ServerRequestResolved(_) => "serverRequest/resolved",
+            Self::McpServerStartupStatusUpdated(_) => "mcpServer/startupStatus/updated",
             Self::AccountRateLimitsUpdated(_) => "account/rateLimits/updated",
             Self::ModelRerouted(_) => "model/rerouted",
         }
@@ -1519,6 +1569,117 @@ pub struct GrantedPermissionProfile {
     pub network: Option<AdditionalNetworkPermissions>,
 }
 
+/// `HookCompletedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct HookCompletedNotification {
+    /// `run`.
+    pub run: HookRunSummary,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `turnId`.
+    #[serde(rename = "turnId", default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// `HookEventName`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookEventName {
+    /// `preToolUse`.
+    #[serde(rename = "preToolUse")]
+    PreToolUse,
+    /// `permissionRequest`.
+    #[serde(rename = "permissionRequest")]
+    PermissionRequest,
+    /// `postToolUse`.
+    #[serde(rename = "postToolUse")]
+    PostToolUse,
+    /// `preCompact`.
+    #[serde(rename = "preCompact")]
+    PreCompact,
+    /// `postCompact`.
+    #[serde(rename = "postCompact")]
+    PostCompact,
+    /// `sessionStart`.
+    #[serde(rename = "sessionStart")]
+    SessionStart,
+    /// `sessionEnd`.
+    #[serde(rename = "sessionEnd")]
+    SessionEnd,
+    /// `userPromptSubmit`.
+    #[serde(rename = "userPromptSubmit")]
+    UserPromptSubmit,
+    /// `subagentStart`.
+    #[serde(rename = "subagentStart")]
+    SubagentStart,
+    /// `subagentStop`.
+    #[serde(rename = "subagentStop")]
+    SubagentStop,
+    /// `stop`.
+    #[serde(rename = "stop")]
+    Stop,
+    /// `interrupt`.
+    #[serde(rename = "interrupt")]
+    Interrupt,
+}
+
+/// `HookExecutionMode`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookExecutionMode {
+    /// `sync`.
+    #[serde(rename = "sync")]
+    Sync,
+    /// `async`.
+    #[serde(rename = "async")]
+    Async,
+}
+
+/// `HookHandlerType`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookHandlerType {
+    /// `command`.
+    #[serde(rename = "command")]
+    Command,
+    /// `mcpTool`.
+    #[serde(rename = "mcpTool")]
+    McpTool,
+    /// `prompt`.
+    #[serde(rename = "prompt")]
+    Prompt,
+    /// `agent`.
+    #[serde(rename = "agent")]
+    Agent,
+}
+
+/// `HookOutputEntry`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct HookOutputEntry {
+    /// `kind`.
+    pub kind: HookOutputEntryKind,
+    /// `text`.
+    pub text: String,
+}
+
+/// `HookOutputEntryKind`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookOutputEntryKind {
+    /// `warning`.
+    #[serde(rename = "warning")]
+    Warning,
+    /// `stop`.
+    #[serde(rename = "stop")]
+    Stop,
+    /// `feedback`.
+    #[serde(rename = "feedback")]
+    Feedback,
+    /// `context`.
+    #[serde(rename = "context")]
+    Context,
+    /// `error`.
+    #[serde(rename = "error")]
+    Error,
+}
+
 /// `HookPromptFragment`, as Codex's schema names it.
 #[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct HookPromptFragment {
@@ -1527,6 +1688,131 @@ pub struct HookPromptFragment {
     pub hook_run_id: String,
     /// `text`.
     pub text: String,
+}
+
+/// `HookRunStatus`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookRunStatus {
+    /// `running`.
+    #[serde(rename = "running")]
+    Running,
+    /// `completed`.
+    #[serde(rename = "completed")]
+    Completed,
+    /// `failed`.
+    #[serde(rename = "failed")]
+    Failed,
+    /// `blocked`.
+    #[serde(rename = "blocked")]
+    Blocked,
+    /// `stopped`.
+    #[serde(rename = "stopped")]
+    Stopped,
+}
+
+/// `HookRunSummary`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct HookRunSummary {
+    /// `completedAt`.
+    #[serde(rename = "completedAt", default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    /// `displayOrder`.
+    #[serde(rename = "displayOrder")]
+    pub display_order: i64,
+    /// `durationMs`.
+    #[serde(rename = "durationMs", default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// `entries`.
+    pub entries: Vec<HookOutputEntry>,
+    /// `eventName`.
+    #[serde(rename = "eventName")]
+    pub event_name: HookEventName,
+    /// `executionMode`.
+    #[serde(rename = "executionMode")]
+    pub execution_mode: HookExecutionMode,
+    /// `handlerType`.
+    #[serde(rename = "handlerType")]
+    pub handler_type: HookHandlerType,
+    /// `id`.
+    pub id: String,
+    /// `scope`.
+    pub scope: HookScope,
+    /// `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<HookSource>,
+    /// `sourcePath`.
+    #[serde(rename = "sourcePath")]
+    pub source_path: AbsolutePathBuf,
+    /// `startedAt`.
+    #[serde(rename = "startedAt")]
+    pub started_at: i64,
+    /// `status`.
+    pub status: HookRunStatus,
+    /// `statusMessage`.
+    #[serde(rename = "statusMessage", default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
+}
+
+/// `HookScope`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookScope {
+    /// `thread`.
+    #[serde(rename = "thread")]
+    Thread,
+    /// `turn`.
+    #[serde(rename = "turn")]
+    Turn,
+}
+
+/// `HookSource`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum HookSource {
+    /// `system`.
+    #[serde(rename = "system")]
+    System,
+    /// `user`.
+    #[serde(rename = "user")]
+    User,
+    /// `project`.
+    #[serde(rename = "project")]
+    Project,
+    /// `mdm`.
+    #[serde(rename = "mdm")]
+    Mdm,
+    /// `sessionFlags`.
+    #[serde(rename = "sessionFlags")]
+    SessionFlags,
+    /// `plugin`.
+    #[serde(rename = "plugin")]
+    Plugin,
+    /// `cloudRequirements`.
+    #[serde(rename = "cloudRequirements")]
+    CloudRequirements,
+    /// `cloudManagedConfig`.
+    #[serde(rename = "cloudManagedConfig")]
+    CloudManagedConfig,
+    /// `legacyManagedConfigFile`.
+    #[serde(rename = "legacyManagedConfigFile")]
+    LegacyManagedConfigFile,
+    /// `legacyManagedConfigMdm`.
+    #[serde(rename = "legacyManagedConfigMdm")]
+    LegacyManagedConfigMdm,
+    /// `unknown`.
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+/// `HookStartedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct HookStartedNotification {
+    /// `run`.
+    pub run: HookRunSummary,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `turnId`.
+    #[serde(rename = "turnId", default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// `ImageDetail`, as Codex's schema names it.
@@ -2183,6 +2469,49 @@ pub struct McpServerElicitationRequestResponse {
     /// This is nullable because `decline/cancel` responses have no content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
+}
+
+/// `McpServerStartupFailureReason`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum McpServerStartupFailureReason {
+    /// `reauthenticationRequired`.
+    #[serde(rename = "reauthenticationRequired")]
+    ReauthenticationRequired,
+}
+
+/// `McpServerStartupState`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum McpServerStartupState {
+    /// `starting`.
+    #[serde(rename = "starting")]
+    Starting,
+    /// `ready`.
+    #[serde(rename = "ready")]
+    Ready,
+    /// `failed`.
+    #[serde(rename = "failed")]
+    Failed,
+    /// `cancelled`.
+    #[serde(rename = "cancelled")]
+    Cancelled,
+}
+
+/// `McpServerStatusUpdatedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct McpServerStatusUpdatedNotification {
+    /// `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `failureReason`.
+    #[serde(rename = "failureReason", default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<McpServerStartupFailureReason>,
+    /// `name`.
+    pub name: String,
+    /// `status`.
+    pub status: McpServerStartupState,
+    /// `threadId`.
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 /// `McpToolCallAppContext`, as Codex's schema names it.
@@ -3729,6 +4058,93 @@ pub struct ThreadForkResponse {
     pub thread: Thread,
 }
 
+/// `ThreadGoal`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ThreadGoal {
+    /// `createdAt`.
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    /// `objective`.
+    pub objective: String,
+    /// `status`.
+    pub status: ThreadGoalStatus,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `timeUsedSeconds`.
+    #[serde(rename = "timeUsedSeconds")]
+    pub time_used_seconds: i64,
+    /// `tokenBudget`.
+    #[serde(rename = "tokenBudget", default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<i64>,
+    /// `tokensUsed`.
+    #[serde(rename = "tokensUsed")]
+    pub tokens_used: i64,
+    /// `updatedAt`.
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+/// `ThreadGoalClearedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadGoalClearedNotification {
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadGoalGetParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadGoalGetParams {
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadGoalGetResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadGoalGetResponse {
+    /// `goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<ThreadGoal>,
+}
+
+/// `ThreadGoalStatus`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ThreadGoalStatus {
+    /// `active`.
+    #[serde(rename = "active")]
+    Active,
+    /// `paused`.
+    #[serde(rename = "paused")]
+    Paused,
+    /// `blocked`.
+    #[serde(rename = "blocked")]
+    Blocked,
+    /// `usageLimited`.
+    #[serde(rename = "usageLimited")]
+    UsageLimited,
+    /// `budgetLimited`.
+    #[serde(rename = "budgetLimited")]
+    BudgetLimited,
+    /// `complete`.
+    #[serde(rename = "complete")]
+    Complete,
+}
+
+/// `ThreadGoalUpdatedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ThreadGoalUpdatedNotification {
+    /// `goal`.
+    pub goal: ThreadGoal,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `turnId`.
+    #[serde(rename = "turnId", default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
 /// `ThreadHistoryMode`, as Codex's schema names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ThreadHistoryMode {
@@ -4359,6 +4775,14 @@ pub struct ThreadResumeResponse {
     pub turns_backwards_cursor: Option<String>,
 }
 
+/// `ThreadRevertedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadRevertedNotification {
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
 /// An independently persisted, user-visible thread section.
 #[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadSection {
@@ -4394,6 +4818,119 @@ pub struct ThreadSetNameParams {
 
 /// `ThreadSetNameResponse`, as Codex's schema names it.
 pub type ThreadSetNameResponse = BTreeMap<String, serde_json::Value>;
+
+/// `ThreadSettings`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ThreadSettings {
+    /// `activePermissionProfile`.
+    #[serde(rename = "activePermissionProfile", default, skip_serializing_if = "Option::is_none")]
+    pub active_permission_profile: Option<ActivePermissionProfile>,
+    /// `approvalPolicy`.
+    #[serde(rename = "approvalPolicy")]
+    pub approval_policy: AskForApproval,
+    /// `approvalsReviewer`.
+    #[serde(rename = "approvalsReviewer")]
+    pub approvals_reviewer: ApprovalsReviewer,
+    /// `collaborationMode`.
+    #[serde(rename = "collaborationMode")]
+    pub collaboration_mode: CollaborationMode,
+    /// `cwd`.
+    pub cwd: AbsolutePathBuf,
+    /// Saved list of disabled plugin `IDs`. Does not yet filter plugin capabilities.
+    #[serde(rename = "disabledPluginIds", default, skip_serializing_if = "Option::is_none")]
+    pub disabled_plugin_ids: Option<Vec<String>>,
+    /// `effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// `model`.
+    pub model: String,
+    /// `modelProvider`.
+    #[serde(rename = "modelProvider")]
+    pub model_provider: String,
+    /// @deprecated Always `explicitRequestOnly`. Use `effort` for Ultra behavior.
+    #[serde(rename = "multiAgentMode", default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_mode: Option<MultiAgentMode>,
+    /// @deprecated Reports the saved setting; `friendly` and `pragmatic` no longer select a style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<Personality>,
+    /// `sandboxPolicy`.
+    #[serde(rename = "sandboxPolicy")]
+    pub sandbox_policy: SandboxPolicy,
+    /// `serviceTier`.
+    #[serde(rename = "serviceTier", default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummary>,
+}
+
+/// `ThreadSettingsUpdateParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadSettingsUpdateParams {
+    /// Override the approval policy for subsequent turns.
+    #[serde(rename = "approvalPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<AskForApproval>,
+    /// Override where approval requests are routed for subsequent turns.
+    #[serde(rename = "approvalsReviewer", default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    /// EXPERIMENTAL - Set a pre-set collaboration mode for subsequent turns.
+    ///
+    /// For `collaboration_mode.settings.developer_instructions`, `null` means "use the built-in
+    /// instructions for the selected mode".
+    #[serde(rename = "collaborationMode", default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode: Option<CollaborationMode>,
+    /// Override the working directory for subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Replace this thread's disabled plugin `IDs`. `Omitted/null` preserves the list; `[]` clears
+    /// it.
+    #[serde(rename = "disabledPluginIds", default, skip_serializing_if = "Option::is_none")]
+    pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Override the reasoning effort for subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// Override the model for subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior.
+    #[serde(rename = "multiAgentMode", default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_mode: Option<MultiAgentMode>,
+    /// Select a named permissions profile id for subsequent turns. Cannot be combined with
+    /// `sandboxPolicy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    /// @deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not
+    /// rewrite the thread's existing instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<Personality>,
+    /// Override the sandbox policy for subsequent turns.
+    #[serde(rename = "sandboxPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<SandboxPolicy>,
+    /// Override the service tier for subsequent turns. `null` clears the current service tier;
+    /// omission leaves it unchanged.
+    #[serde(rename = "serviceTier", default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Override the reasoning summary for subsequent turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummary>,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadSettingsUpdateResponse`, as Codex's schema names it.
+pub type ThreadSettingsUpdateResponse = BTreeMap<String, serde_json::Value>;
+
+/// `ThreadSettingsUpdatedNotification`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ThreadSettingsUpdatedNotification {
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `threadSettings`.
+    #[serde(rename = "threadSettings")]
+    pub thread_settings: ThreadSettings,
+}
 
 /// `ThreadSortKey`, as Codex's schema names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -4668,6 +5205,21 @@ pub struct ThreadTokenUsageUpdatedNotification {
     /// `turnId`.
     #[serde(rename = "turnId")]
     pub turn_id: String,
+}
+
+/// `ThreadUnarchiveParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadUnarchiveParams {
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadUnarchiveResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ThreadUnarchiveResponse {
+    /// `thread`.
+    pub thread: Thread,
 }
 
 /// `ThreadUnsubscribeParams`, as Codex's schema names it.

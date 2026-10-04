@@ -286,6 +286,7 @@ mod tests {
             caps: Vec::new(),
             models: Vec::new(),
             modes: Vec::new(),
+            efforts: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: WallMs::ZERO,
         })

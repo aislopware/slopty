@@ -8,7 +8,7 @@ use slopty_core::WallMs;
 
 use super::wire::{Page, RequestCard, TableFrame, ThreadRow};
 use super::{
-    Action, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Item, ItemBody, ItemId,
+    Action, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item, ItemBody, ItemId,
     Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, ToolState, Turn, TurnId,
 };
 
@@ -46,6 +46,8 @@ pub struct ThreadState {
     pub commands: Vec<Command>,
     /// Whether its tree holds changes the person has not kept ([`Action::ToReview`]).
     pub to_review: bool,
+    /// The goal its agent works toward ([`Action::GoalSet`]).
+    pub goal: Option<Goal>,
 }
 
 impl ThreadState {
@@ -65,6 +67,7 @@ impl ThreadState {
             meters: Meters::default(),
             commands: Vec::new(),
             to_review: false,
+            goal: None,
         }
     }
 
@@ -135,6 +138,7 @@ impl ThreadState {
                 }
             }
             Action::ToReview(to_review) => self.to_review = *to_review,
+            Action::GoalSet(goal) => self.goal.clone_from(goal),
         }
     }
 

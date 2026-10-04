@@ -263,13 +263,12 @@ impl Cap {
     /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
     /// the message until its moment, or the person's word for a draft.
     pub const SCHEDULE: &'static str = "schedule";
+    /// [`wire::Intent::SetEffort`].
+    pub const SET_EFFORT: &'static str = "set-effort";
     /// [`wire::Intent::SetMode`].
     pub const SET_MODE: &'static str = "set-mode";
     /// [`wire::Intent::SetModel`].
     pub const SET_MODEL: &'static str = "set-model";
-    /// Its agent can be put to sleep at rest and woken on its own session: its process ends and
-    /// the thread is kept ([`Liveness::Asleep`]).
-    pub const SLEEP: &'static str = "sleep";
     /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
@@ -320,6 +319,10 @@ pub struct ThreadMeta {
     /// The modes it can be switched to ([`wire::Intent::SetMode`]), as its agent publishes
     /// them (an ACP agent's session modes); empty where it publishes none.
     pub modes: Vec<Mode>,
+    /// How hard its model can be set to think ([`wire::Intent::SetEffort`]), as its agent names
+    /// the levels for the model it runs now (Codex's reasoning efforts, pi's thinking levels, an
+    /// ACP agent's thought levels); empty where it offers none.
+    pub efforts: Vec<Effort>,
     /// Open facts about it: its project, task, branch, pull request, model.
     pub facts: BTreeMap<String, String>,
     /// When it began.
@@ -327,6 +330,9 @@ pub struct ThreadMeta {
 }
 
 impl ThreadMeta {
+    /// The fact an aside carries ([`wire::Intent::Aside`]): the thread it was asked beside, by
+    /// its id. A list, the inbox, attention and notifications pass over a thread with it.
+    pub const ASIDE_FACT: &'static str = "slopty.aside";
     /// Started by an automation.
     pub const AUTOMATION: &'static str = "automation";
     /// Branched from another thread.
@@ -343,6 +349,12 @@ impl ThreadMeta {
     pub fn can(&self, cap: &str) -> bool {
         self.caps.iter().any(|c| c.0 == cap)
     }
+
+    /// The thread this one is an aside of ([`Self::ASIDE_FACT`]), while it is one.
+    #[must_use]
+    pub fn aside_of(&self) -> Option<ThreadId> {
+        self.facts.get(Self::ASIDE_FACT).and_then(|id| id.parse().ok())
+    }
 }
 
 /// A model a thread's agent can be switched to.
@@ -358,6 +370,17 @@ pub struct Model {
 /// `code`), by its own name.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Mode {
+    /// The agent's own name for it, as its switch takes it.
+    pub id: String,
+    /// Its name for people.
+    pub label: String,
+    /// What it does, in the agent's words, when it says.
+    pub description: Option<String>,
+}
+
+/// How hard a thread's model can be set to think, by its agent's own name (`low`, `high`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Effort {
     /// The agent's own name for it, as its switch takes it.
     pub id: String,
     /// Its name for people.
@@ -448,12 +471,6 @@ pub enum Liveness {
     },
     /// It runs but has said nothing for a while.
     Silent {
-        /// Since when.
-        since_ms: WallMs,
-    },
-    /// Put to sleep on the person's word: its agent was ended at rest, and the thread is kept
-    /// with its session, which a wake or the next message takes up again.
-    Asleep {
         /// Since when.
         since_ms: WallMs,
     },
@@ -819,9 +836,6 @@ pub struct Request {
     pub questions: Vec<detail::Question>,
     /// The change it would make, for an approval of an edit.
     pub proposed: Option<Patch>,
-    /// The parts of the call's input the person may change before allowing it, where the
-    /// agent takes an allow with the input changed ([`Editable::choice`]).
-    pub editable: Vec<Editable>,
     /// For a form: its JSON schema.
     pub schema_json: Option<String>,
     /// For a form the person fills in elsewhere: where.
@@ -865,46 +879,6 @@ pub struct Choice {
     pub scope: Option<String>,
     /// It also stops the turn.
     pub stops: bool,
-}
-
-/// A part of a call's input the person may change before allowing it: an edit's new text, a
-/// written file's content.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Editable {
-    /// The input's field, as the agent names it (`new_string`, `content`).
-    pub field: String,
-    /// What the agent proposed for it.
-    pub text: String,
-}
-
-impl Editable {
-    /// The key of the JSON object an edited allow is ([`Editable::choice`]).
-    const EDITED: &'static str = "allow-edited";
-    /// The longest text offered for editing, in bytes: a longer proposal is allowed or denied
-    /// whole.
-    pub const TEXT_MAX: usize = 256 * 1024;
-
-    /// The choice of an [`Intent::Answer`](wire::Intent::Answer) that allows the call with
-    /// `fields` changed, each a field and its text as the person left it: a JSON object, which
-    /// no other choice is.
-    #[must_use]
-    pub fn choice(fields: &BTreeMap<String, String>) -> String {
-        let edited: BTreeMap<&str, &BTreeMap<String, String>> =
-            BTreeMap::from([(Self::EDITED, fields)]);
-        serde_json::to_string(&edited).unwrap_or_default()
-    }
-
-    /// The fields an edited allow's [`choice`](Self::choice) changes; `None` for any other
-    /// choice.
-    #[must_use]
-    pub fn read(choice: &str) -> Option<BTreeMap<String, String>> {
-        if !choice.starts_with('{') {
-            return None;
-        }
-        let mut edited: BTreeMap<String, BTreeMap<String, String>> =
-            serde_json::from_str(choice).ok()?;
-        edited.remove(Self::EDITED)
-    }
 }
 
 /// What an answer means, so a client can tell yes from no without knowing the agent.
@@ -961,32 +935,35 @@ pub struct Pending {
 }
 
 impl Pending {
-    /// Move the message of intent `which` in `list` to just before the one of `before`, or to
-    /// the end when `before` is `None` ([`wire::Intent::Reorder`]); `id` names each entry's
-    /// intent. Whether both were there: when not, `list` is as it was.
-    pub fn reorder<T>(
-        list: &mut [T],
-        id: impl Fn(&T) -> IntentId,
-        which: IntentId,
-        before: Option<IntentId>,
-    ) -> bool {
-        let Some(from) = list.iter().position(|t| id(t) == which) else { return false };
-        let to = match before {
-            None => list.len(),
-            Some(before) => match list.iter().position(|t| id(t) == before) {
-                Some(to) => to,
-                None => return false,
-            },
-        };
-        // Moved right, it lands before what was at `to`, which shifts left as it leaves.
-        if from < to {
-            if let Some(run) = list.get_mut(from..to) {
-                run.rotate_left(1);
-            }
-        } else if let Some(run) = list.get_mut(to..=from) {
-            run.rotate_right(1);
+    /// Why a queued message waits once the person stopped the turn: a stop is their word to
+    /// halt, so nothing queued goes on its own until they send again ([`wire::Intent::Send`]
+    /// or [`wire::Intent::Promote`]), which lets the rest go after it in their order.
+    pub const STOPPED: &'static str = "Held since you stopped the turn";
+
+    /// Whether it waits on the person's stop ([`Self::STOPPED`]).
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        matches!(&self.state, PendingState::Held { reason } if reason == Self::STOPPED)
+    }
+
+    /// Hold it for the person's stop when it is a queued message not yet on its way; whether
+    /// it was.
+    pub fn hold_for_stop(&mut self) -> bool {
+        let queued = self.delivery == Delivery::Queue && self.state != PendingState::Sending;
+        if queued {
+            self.state = PendingState::Held { reason: Self::STOPPED.to_owned() };
         }
-        true
+        queued
+    }
+
+    /// Let it wait for its turn again once the person speaks after their stop; whether it was
+    /// held for it.
+    pub fn release_stop(&mut self) -> bool {
+        let held = self.stopped();
+        if held {
+            self.state = PendingState::Waiting;
+        }
+        held
     }
 }
 
@@ -1003,15 +980,6 @@ pub enum Delivery {
         /// When.
         at_ms: WallMs,
     },
-    /// Once another thread has rested for a while: held on the worker until thread `thread`
-    /// has been at rest for `settle_ms`, its turn ended and nothing asked, and then queued
-    /// ([`Cap::SCHEDULE`]).
-    After {
-        /// The thread waited on.
-        thread: ThreadId,
-        /// How long it rests first.
-        settle_ms: u32,
-    },
     /// On the person's word alone: a draft held on the worker, through a restart, never sent
     /// on its own. Sending it ([`wire::Intent::Promote`]) queues it; it can be changed or
     /// withdrawn until then ([`Cap::SCHEDULE`]). A continued thread's first message waits so
@@ -1025,18 +993,17 @@ pub enum Delivery {
 }
 
 impl Delivery {
-    /// Whether the worker keeps the message ([`Self::At`], [`Self::After`], [`Self::Draft`]),
-    /// rather than the agent's queue.
+    /// Whether the worker keeps the message ([`Self::At`], [`Self::Draft`]), rather than the
+    /// agent's queue.
     #[must_use]
     pub const fn is_kept(self) -> bool {
-        matches!(self, Self::At { .. } | Self::After { .. } | Self::Draft)
+        matches!(self, Self::At { .. } | Self::Draft)
     }
 
-    /// Whether the message goes on its own at a moment the worker watches for ([`Self::At`],
-    /// [`Self::After`]).
+    /// Whether the message goes on its own at a moment the worker watches for ([`Self::At`]).
     #[must_use]
     pub const fn is_scheduled(self) -> bool {
-        matches!(self, Self::At { .. } | Self::After { .. })
+        matches!(self, Self::At { .. })
     }
 }
 
@@ -1250,6 +1217,39 @@ pub enum Action {
     /// the worker compares it with what they kept, or the thread's first snapshot when they
     /// have kept nothing.
     ToReview(bool),
+    /// The goal the agent works toward, as it holds it; `None` once it has none.
+    GoalSet(Option<Goal>),
+}
+
+/// A goal an agent works toward across turns, starting turns of its own until it is met
+/// (Codex's `/goal`). Shown as the agent holds it, and set or paused only in the agent's own
+/// TUI.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Goal {
+    /// What it is for, in the words it was set with.
+    pub objective: String,
+    /// Where it stands, as the agent names it. Open: [`Goal::ACTIVE`], `paused`, `blocked`,
+    /// `usage-limited`, `budget-limited`, `complete`.
+    pub state: String,
+    /// The tokens spent on it so far.
+    pub tokens_used: u64,
+    /// The tokens it may spend, when it is bounded.
+    pub token_budget: Option<u64>,
+    /// The time spent on it, in seconds.
+    pub time_used_s: u64,
+    /// When it last changed.
+    pub updated_ms: WallMs,
+}
+
+impl Goal {
+    /// The agent works on it, and may start a turn of its own once a turn ends.
+    pub const ACTIVE: &'static str = "active";
+
+    /// Whether the agent works on it.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.state == Self::ACTIVE
+    }
 }
 
 /// A place in a thread's log, or in a worker's thread table.

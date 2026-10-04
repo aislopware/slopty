@@ -15,12 +15,13 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        Expanded, FileDiff, Intent, IntentDone, Outcome, Page, PastSession, PastSessions, Pick,
-        PromptHit, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
+        Expanded, FileDiff, Intent, IntentDone, ItemHit, Outcome, Page, PastSession, PastSessions,
+        Pick, PromptHit, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadHit,
+        ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
-        Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Editable, Effect, Fork, Image,
+        Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image,
         IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice,
         PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status,
         Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn,
@@ -83,6 +84,11 @@ mod golden_thread {
                 id: "plan".to_owned(),
                 label: "Plan".to_owned(),
                 description: Some("Reads and plans, changes nothing".to_owned()),
+            }],
+            efforts: vec![Effort {
+                id: "high".to_owned(),
+                label: "High".to_owned(),
+                description: Some("Thinks longer".to_owned()),
             }],
             facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
             created_ms: ms(1_000),
@@ -203,10 +209,6 @@ mod golden_thread {
             ],
             questions: vec![],
             proposed: Some(patch()),
-            editable: vec![Editable {
-                field: "new_string".to_owned(),
-                text: "fn b() {}".to_owned(),
-            }],
             schema_json: None,
             url: None,
             state: RequestState::Open,
@@ -222,6 +224,17 @@ mod golden_thread {
             attachments: vec!["/Users/me/.slopty/drop/x/shot.png".to_owned()],
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
+        }
+    }
+
+    fn goal() -> Goal {
+        Goal {
+            objective: "Make the parser pass every fixture".to_owned(),
+            state: Goal::ACTIVE.to_owned(),
+            tokens_used: 41_000,
+            token_budget: Some(500_000),
+            time_used_s: 380,
+            updated_ms: ms(1_800),
         }
     }
 
@@ -262,6 +275,7 @@ mod golden_thread {
             Action::PendingSet(vec![pending()]),
             Action::MetersSet(meters()),
             Action::ToReview(true),
+            Action::GoalSet(Some(goal())),
         ] {
             state.apply(&action);
         }
@@ -310,6 +324,10 @@ mod golden_thread {
                 query: "flaky login".to_owned(),
                 limit: 20,
             },
+        );
+        snap(
+            "client_thread_search",
+            &ThreadRequest::Search { query: "flaky login".to_owned(), limit: 20 },
         );
         snap(
             "client_start",
@@ -370,17 +388,6 @@ mod golden_thread {
             }),
         );
         snap(
-            "intent_send_after",
-            &send(Intent::Send {
-                text: "Review what it changed".to_owned(),
-                delivery: Delivery::After {
-                    thread: ThreadId::from_uuid(Uuid::from_u128(0x9a)),
-                    settle_ms: 10_000,
-                },
-                attachments: Vec::new(),
-            }),
-        );
-        snap(
             "intent_send_draft",
             &send(Intent::Send {
                 text: "Go on from where it stopped".to_owned(),
@@ -402,13 +409,6 @@ mod golden_thread {
             &send(Intent::Edit { pending: intent(), text: "then the README".to_owned() }),
         );
         snap("intent_promote", &send(Intent::Promote { pending: intent() }));
-        snap(
-            "intent_reorder",
-            &send(Intent::Reorder {
-                pending: intent(),
-                before: Some(IntentId::from_uuid(Uuid::from_u128(8))),
-            }),
-        );
         snap("intent_interrupt", &send(Intent::Interrupt));
         snap(
             "intent_answer",
@@ -418,28 +418,19 @@ mod golden_thread {
                 message: Some("fine".to_owned()),
             }),
         );
-        snap(
-            "intent_answer_edited",
-            &send(Intent::Answer {
-                ask: AskId("ask-1".to_owned()),
-                choice: Editable::choice(&BTreeMap::from([(
-                    "new_string".to_owned(),
-                    "fn b() -> u8 { 1 }".to_owned(),
-                )])),
-                message: None,
-            }),
-        );
         snap("intent_release", &send(Intent::Release { ask: AskId("ask-1".to_owned()) }));
         snap("intent_set_model", &send(Intent::SetModel { model: "claude-opus-5-5".to_owned() }));
         snap("intent_set_mode", &send(Intent::SetMode { mode: "plan".to_owned() }));
+        snap("intent_set_effort", &send(Intent::SetEffort { effort: "high".to_owned() }));
+        snap("intent_aside", &send(Intent::Aside));
+        snap("intent_discard", &send(Intent::Discard));
+        snap("intent_keep_aside", &send(Intent::KeepAside));
         snap("intent_compact", &send(Intent::Compact));
         snap("intent_handoff", &send(Intent::Handoff));
         snap("intent_take_back", &send(Intent::TakeBack));
         snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
         snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
-        snap("intent_sleep", &send(Intent::Sleep));
-        snap("intent_wake", &send(Intent::Wake));
         snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
         snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(3), files: true }));
     }
@@ -519,12 +510,6 @@ mod golden_thread {
                 phase: Phase::Waiting,
                 wait: None,
                 liveness: Liveness::Sleeping { until_ms: ms(9) },
-                since_ms: ms(3),
-            }),
-            Action::Status(Status {
-                phase: Phase::Done,
-                wait: None,
-                liveness: Liveness::Asleep { since_ms: ms(5) },
                 since_ms: ms(3),
             }),
             Action::Status(Status {
@@ -640,6 +625,8 @@ mod golden_thread {
                 tree: TreeRef("9f2e".to_owned()),
             },
             Action::ToReview(true),
+            Action::GoalSet(Some(goal())),
+            Action::GoalSet(None),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }
@@ -885,6 +872,27 @@ mod golden_thread {
                 cut: Some("Claude Code's prompt history is read from its last 64 MiB".to_owned()),
             }),
         );
+        snap(
+            "link_worker_thread_hits",
+            &WorkerMsg::ThreadHits(ThreadHits {
+                query: "flaky login".to_owned(),
+                threads: vec![ThreadHit {
+                    thread: thread(),
+                    hits: vec![ItemHit {
+                        item: ItemId("msg-4".to_owned()),
+                        turn: TurnId(3),
+                        said: ItemHit::AGENT.to_owned(),
+                        text: "The flaky login test races".to_owned(),
+                        spans: vec![Span { start: 4, end: 9 }, Span { start: 10, end: 15 }],
+                        cut_before: true,
+                        cut_after: false,
+                        at_ms: ms(1_850_000),
+                    }],
+                    more: 2,
+                }],
+                more: 1,
+            }),
+        );
         snap("link_uni_thread", &UniHead::Thread { thread: thread() });
     }
 
@@ -939,7 +947,6 @@ mod golden_thread {
                 working: 4,
                 waiting: 5,
                 idle: 6,
-                sleeping: 7,
             },
             top: Some(at),
             since_ms: ms(1_500),

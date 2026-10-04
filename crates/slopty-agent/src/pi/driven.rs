@@ -36,7 +36,7 @@ use slopty_core::WallMs;
 use slopty_proto::thread::detail::{ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail};
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
-    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
+    Effort, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
     Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState, ToolCall,
     ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
@@ -57,9 +57,9 @@ pub const CAPS: [&str; 12] = [
     Cap::HANDOFF,
     Cap::INTERRUPT,
     Cap::LIVE_TEXT,
+    Cap::SET_EFFORT,
     Cap::SET_MODEL,
     Cap::SCHEDULE,
-    Cap::SLEEP,
     Cap::SNAPSHOTS,
     Cap::STEER,
 ];
@@ -199,6 +199,7 @@ impl Driven {
     pub fn new(session: &str, version: &str, cwd: &str, now: WallMs) -> (Self, Vec<Action>) {
         let meta = ThreadMeta {
             modes: Vec::new(),
+            efforts: Vec::new(),
             id: thread_of(session),
             agent: AgentId::named(AgentId::PI),
             agent_version: version.to_owned(),
@@ -522,6 +523,29 @@ impl Driven {
         vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
+    /// The thinking levels the model in use supports, from `get_available_thinking_levels`: what
+    /// the thread's effort can be set to. A model that does not reason has only `off`, which is
+    /// nothing to choose from.
+    pub fn efforts(&mut self, levels: &[String]) -> Vec<Action> {
+        let efforts = if levels.len() > 1 {
+            levels
+                .iter()
+                .map(|level| Effort {
+                    id: level.clone(),
+                    label: crate::driven::effort_label(level),
+                    description: None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if efforts == self.meta.efforts {
+            return Vec::new();
+        }
+        self.meta.efforts = efforts;
+        vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
     /// pi is gone, at `now`, for the reason in `why` when it failed: the thread can be taken up
     /// again from its session. What it was doing is cut short: its dialogs are no longer asked,
     /// its calls are cancelled, and the turn under way ends stopped, or failed with `why`.
@@ -609,6 +633,13 @@ impl Driven {
         }
         self.aborting = true;
         Some(Command::Abort)
+    }
+
+    /// What sets the thinking level to `level`, one [`Driven::efforts`] offers. pi says the
+    /// level it took (`thinking_level_changed`), clamped to what the model supports.
+    #[must_use]
+    pub fn set_effort(level: &str) -> Command {
+        Command::SetThinkingLevel { level: level.to_owned() }
     }
 
     /// What switches to model `model` (`provider/id`, as [`Driven::models`] names it).
@@ -951,7 +982,6 @@ impl Driven {
         };
         self.open.insert(ask.clone(), Open { asks, title: title.clone(), until });
         let request = Ask {
-            editable: Vec::new(),
             id: ask,
             item: None,
             kind: Ask::QUESTION.to_owned(),
@@ -976,7 +1006,6 @@ impl Driven {
         let asks = Asks::Gate { call: gate.call.clone() };
         self.open.insert(ask.clone(), Open { asks, title: title.clone(), until: None });
         let request = Ask {
-            editable: Vec::new(),
             id: ask.clone(),
             item: Some(ItemId(gate.call.clone())),
             kind: Ask::APPROVAL.to_owned(),

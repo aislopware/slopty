@@ -33,7 +33,7 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
-    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Delivery, Drive, Effect,
+    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Delivery, Drive, Effect, Effort,
     IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
     PendingState, Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState,
     ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
@@ -283,6 +283,7 @@ impl Session {
     ) -> (Self, Vec<Action>) {
         let meta = ThreadMeta {
             modes: Vec::new(),
+            efforts: Vec::new(),
             id: thread,
             agent,
             agent_version: String::new(),
@@ -393,13 +394,6 @@ impl Session {
         self.meta.caps.retain(|c| *c != fork);
         if can.session_capabilities.fork.is_some() {
             self.meta.caps.push(fork);
-            self.meta.caps.sort();
-        }
-        // Put to sleep, it wakes only by loading its session.
-        let sleep = Cap::named(Cap::SLEEP);
-        self.meta.caps.retain(|c| *c != sleep);
-        if self.loadable {
-            self.meta.caps.push(sleep);
             self.meta.caps.sort();
         }
         if let Some(info) = &response.agent_info {
@@ -721,7 +715,6 @@ impl Session {
         };
         self.asked.insert(ask.clone(), asked);
         let card = thread::Request {
-            editable: Vec::new(),
             id: ask.clone(),
             item: Some(ItemId(call.clone())),
             kind: thread::Request::APPROVAL.to_owned(),
@@ -806,47 +799,73 @@ impl Session {
         Some(Cancelled { notification, answers, actions })
     }
 
-    /// Hold `text` and the files at `attachments`, sent as intent `intent`, until the turn ends.
-    pub fn queue(&mut self, intent: IntentId, text: &str, attachments: Vec<String>) -> Vec<Action> {
-        self.queued.push_back(Pending {
+    /// Hold `text` and the files at `attachments`, sent as intent `intent`, until the turn ends:
+    /// last, or `first`, before everything held, for a message sent by interrupt
+    /// ([`Delivery::Interrupt`]).
+    pub fn queue(
+        &mut self,
+        intent: IntentId,
+        text: &str,
+        attachments: Vec<String>,
+        first: bool,
+    ) -> Vec<Action> {
+        let held = Pending {
             intent,
             text: text.to_owned(),
             attachments,
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
-        });
-        vec![self.pending_now()]
+        };
+        if first {
+            self.queued.push_front(held);
+        } else {
+            self.queued.push_back(held);
+        }
+        vec![self.pending()]
     }
 
     /// Take back the message held for `intent`; `None` when none is.
     pub fn withdraw(&mut self, intent: IntentId) -> Option<Vec<Action>> {
         let at = self.queued.iter().position(|p| p.intent == intent)?;
         self.queued.remove(at);
-        Some(vec![self.pending_now()])
+        Some(vec![self.pending()])
     }
 
     /// Make the message held for `intent` say `text`; `None` when none is.
     pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Vec<Action>> {
         let held = self.queued.iter_mut().find(|p| p.intent == intent)?;
         text.clone_into(&mut held.text);
-        Some(vec![self.pending_now()])
+        Some(vec![self.pending()])
     }
 
-    /// Move the message held for `intent` to just before the one held for `before`, or to the
-    /// end; `None` when either is not held.
-    pub fn reorder(&mut self, intent: IntentId, before: Option<IntentId>) -> Option<Vec<Action>> {
-        let queued = self.queued.make_contiguous();
-        Pending::reorder(queued, |p| p.intent, intent, before).then(|| vec![self.pending_now()])
+    /// Hold every message queued for the person's stop ([`Pending::STOPPED`]): none goes until
+    /// they send again. The actions that show it, when anything was queued.
+    pub fn hold_queue(&mut self) -> Vec<Action> {
+        let mut held = false;
+        for pending in &mut self.queued {
+            held |= pending.hold_for_stop();
+        }
+        if held { vec![self.pending()] } else { Vec::new() }
     }
 
-    /// The next message held, taken off the queue, once no turn is under way: its intent, its
-    /// words and its files.
+    /// Let what the person's stop held wait for its turn again, as they speak; whether
+    /// anything was held.
+    pub fn release_queue(&mut self) -> bool {
+        let mut released = false;
+        for pending in &mut self.queued {
+            released |= pending.release_stop();
+        }
+        released
+    }
+
+    /// The next message held, taken off the queue, once no turn is under way and the person's
+    /// stop holds nothing: its intent, its words and its files.
     pub fn next_queued(&mut self) -> Option<(Pending, Vec<Action>)> {
-        if self.running {
+        if self.running || self.queued.front().is_some_and(Pending::stopped) {
             return None;
         }
         let next = self.queued.pop_front()?;
-        Some((next, vec![self.pending_now()]))
+        Some((next, vec![self.pending()]))
     }
 
     /// What switches the session to mode `mode` (an id it offers), when it can be.
@@ -865,6 +884,14 @@ impl Session {
     pub fn set_model(&self, model: &str) -> Option<Switch> {
         let option = self.option_of(&acp::SessionConfigOptionCategory::Model)?;
         select_offers(option, model).then(|| self.set_option(option, model))
+    }
+
+    /// What sets how hard the model thinks to `effort` (an id of the agent's thought-level
+    /// option), when the agent offers that option and the value.
+    #[must_use]
+    pub fn set_effort(&self, effort: &str) -> Option<Switch> {
+        let option = self.option_of(&acp::SessionConfigOptionCategory::ThoughtLevel)?;
+        select_offers(option, effort).then(|| self.set_option(option, effort))
     }
 
     /// The session's mode is `mode` now, as the agent agreed.
@@ -1296,6 +1323,20 @@ impl Session {
         let mut meters = self.meters.clone();
         let model = self.option_of(&acp::SessionConfigOptionCategory::Model).cloned();
         let mode = self.option_of(&acp::SessionConfigOptionCategory::Mode).cloned();
+        let thought = self.option_of(&acp::SessionConfigOptionCategory::ThoughtLevel).cloned();
+        meta.efforts = thought
+            .as_ref()
+            .map(|option| {
+                select_options(option)
+                    .into_iter()
+                    .map(|o| Effort {
+                        id: o.value.0.to_string(),
+                        label: o.name.clone(),
+                        description: o.description.clone().filter(|d| !d.trim().is_empty()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         meters.effort =
             self.option_of(&acp::SessionConfigOptionCategory::ThoughtLevel).and_then(|option| {
                 let current = select_current(option);
@@ -1351,14 +1392,14 @@ impl Session {
         if self.meta.can(Cap::FORK) {
             names.push(Cap::FORK);
         }
-        if self.meta.can(Cap::SLEEP) {
-            names.push(Cap::SLEEP);
-        }
         if mode.is_some() || !self.modes.is_empty() {
             names.push(Cap::SET_MODE);
         }
         if model.is_some() {
             names.push(Cap::SET_MODEL);
+        }
+        if thought.is_some() {
+            names.push(Cap::SET_EFFORT);
         }
         meta.caps = caps(&names);
         let mut actions = Vec::new();
@@ -1378,7 +1419,9 @@ impl Session {
         vec![Action::MetersSet(self.meters.clone())]
     }
 
-    fn pending_now(&self) -> Action {
+    /// The messages held, as they stand.
+    #[must_use]
+    pub fn pending(&self) -> Action {
         Action::PendingSet(self.queued.iter().cloned().collect())
     }
 
@@ -1474,16 +1517,20 @@ fn patch_of(old: &str, new: &str) -> Patch {
 }
 
 /// A select option's choices, its groups flattened: each value and its name.
-fn select_choices(option: &acp::SessionConfigOption) -> Vec<(String, String)> {
+/// A select option's values, its groups flattened.
+fn select_options(option: &acp::SessionConfigOption) -> Vec<&acp::SessionConfigSelectOption> {
     let acp::SessionConfigKind::Select(select) = &option.kind else { return Vec::new() };
-    let flat: Vec<&acp::SessionConfigSelectOption> = match &select.options {
+    match &select.options {
         acp::SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
         acp::SessionConfigSelectOptions::Grouped(groups) => {
             groups.iter().flat_map(|g| g.options.iter()).collect()
         }
         _ => Vec::new(),
-    };
-    flat.into_iter().map(|o| (o.value.0.to_string(), o.name.clone())).collect()
+    }
+}
+
+fn select_choices(option: &acp::SessionConfigOption) -> Vec<(String, String)> {
+    select_options(option).into_iter().map(|o| (o.value.0.to_string(), o.name.clone())).collect()
 }
 
 fn select_current(option: &acp::SessionConfigOption) -> Option<String> {

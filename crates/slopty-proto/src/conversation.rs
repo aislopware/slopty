@@ -1190,9 +1190,6 @@ pub struct PermissionPrompt {
     pub suggestions: Vec<Suggestion>,
     /// The session's permission mode (`default`, `plan`, `acceptEdits`, …).
     pub mode: Option<String>,
-    /// The parts of the call's input the person may change before allowing it
-    /// ([`Verdict::AllowEdited`]): an edit's new text, a written file's content.
-    pub editable: Vec<crate::thread::Editable>,
     /// When Claude Code asked, by the worker's clock.
     pub asked_ms: WallMs,
     /// When the worker gives up holding it and the TUI's dialog shows instead, on that clock.
@@ -1256,13 +1253,6 @@ pub enum Verdict {
         /// One per question answered, by the question's text; the options of a multi-select
         /// question joined with `", "`, or the words typed instead of an option.
         answers: Vec<Answer>,
-    },
-    /// Allow it with some of its input changed by the person: Claude Code runs the call as
-    /// changed (the hook's `updatedInput`), checked again against its rules.
-    AllowEdited {
-        /// The fields changed, as the text of a JSON object laid over the call's own input:
-        /// only fields it has as text ([`PermissionPrompt::editable`]) are taken.
-        input: String,
     },
 }
 

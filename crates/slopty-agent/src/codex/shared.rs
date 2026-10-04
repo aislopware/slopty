@@ -24,10 +24,16 @@
 //! - **Forms.** An MCP server's form ([`super::form`]) is a request whose questions are its fields,
 //!   with declining and cancelling as its answers; its answers go back as the form's content. A
 //!   page to open or a device check is left to Codex's own terminal.
+//! - **Settings.** The thread's model, its reasoning effort and its approval policy (its mode) are
+//!   switched for its next turns with `thread/settings/update`, among what Codex offers: its models
+//!   (`model/list`), the running model's efforts, and three approval policies. The sandbox stays as
+//!   the person's configuration sets it. What Codex then holds comes back to every client
+//!   (`thread/settings/updated`), so a switch made in the TUI shows here too.
 //! - **The queue.** A message queued while a turn runs waits here, where it can be changed, taken
-//!   back, moved in the queue or sent at once as a steer. Otherwise it goes as the next turn once
-//!   Codex says the turn under way ended ([`Shared::next_queued`]): Codex's own TUI queues in
-//!   itself, and the app-server has no queue of its own.
+//!   back or sent at once as a steer. Otherwise it goes as the next turn once Codex says the turn
+//!   under way ended ([`Shared::next_queued`]): Codex's own TUI queues in itself, and the
+//!   app-server has no queue of its own. The person's stop holds it ([`Shared::stop`],
+//!   [`Pending::STOPPED`]) until they send again, which lets it go after what they sent.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -40,10 +46,10 @@ use slopty_proto::thread::detail::{
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
-    Effect, Fork, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey,
-    Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status, Step,
-    ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
-    UserMessage, Wait, kind,
+    Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
+    Mode, Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry,
+    Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState,
+    Usage, UserMessage, Wait, kind,
 };
 
 use super::form::Form;
@@ -55,7 +61,7 @@ use super::protocol::{
 use crate::attach::Attached;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 12] = [
+pub const CAPS: [&str; 14] = [
     Cap::APPROVALS,
     Cap::CONTINUE,
     Cap::FORK,
@@ -65,10 +71,33 @@ pub const CAPS: [&str; 12] = [
     Cap::QUEUE,
     Cap::REWIND,
     Cap::SCHEDULE,
-    Cap::SLEEP,
+    Cap::SET_EFFORT,
+    Cap::SET_MODE,
+    Cap::SET_MODEL,
     Cap::SNAPSHOTS,
     Cap::STEER,
 ];
+
+/// The approval policies a thread can be switched to, as its modes: Codex's name for each,
+/// a name for people, and what it does. The sandbox is not among them: it stays as the person's
+/// own Codex configuration sets it.
+const MODES: [(&str, &str, &str); 3] = [
+    ("untrusted", "Untrusted", "Asks before any command it doesn't trust"),
+    ("on-request", "On request", "Asks when it judges it should"),
+    ("never", "Never asks", "Never asks; what fails goes back to the model"),
+];
+
+/// A setting of a thread's that a client switches (`thread/settings/update`), each by
+/// Codex's own name for its value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// The model, by its slug (`model/list`'s `model`).
+    Model(String),
+    /// The reasoning effort, one the model supports.
+    Effort(String),
+    /// The approval policy: `untrusted`, `on-request` or `never`.
+    Mode(String),
+}
 
 /// A form's answer that declines it, and the one that cancels it. Their ids start with a
 /// colon, so words typed into a form's one field are not taken for them.
@@ -202,6 +231,32 @@ struct Open {
     answered: Option<(Answerer, String)>,
 }
 
+/// A thread's settings as Codex says them ([`Shared::settings`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Settings<'a> {
+    /// The approval policy.
+    pub approval: p::AskForApproval,
+    /// The sandbox.
+    pub sandbox: &'a p::SandboxPolicy,
+    /// The model's slug.
+    pub model: &'a str,
+    /// The reasoning effort, when one is set.
+    pub effort: Option<&'a str>,
+}
+
+impl<'a> Settings<'a> {
+    /// The settings Codex tells every client once one switched them.
+    #[must_use]
+    pub fn of(said: &'a p::ThreadSettings) -> Self {
+        Self {
+            approval: said.approval_policy,
+            sandbox: &said.sandbox_policy,
+            model: &said.model,
+            effort: said.effort.as_deref(),
+        }
+    }
+}
+
 /// What goes to the app-server for a message the person sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Send {
@@ -239,8 +294,13 @@ pub struct Shared {
     /// The calls begun and not yet whole, as last told, so a request about one marks it
     /// waiting on the person: Codex begins a call before it asks about it.
     calls: HashMap<ItemId, Item>,
+    /// When each item begun and not yet whole began: Codex dates an item's completion by when
+    /// it completed, and the item keeps when it began.
+    began: HashMap<ItemId, WallMs>,
     /// Messages held until the turn under way ends, in their order.
     queued: VecDeque<(Pending, Vec<Attached>)>,
+    /// The models Codex offers (`model/list`), hidden ones left out.
+    catalog: Vec<p::Model>,
 }
 
 impl Shared {
@@ -278,8 +338,17 @@ impl Shared {
         } else {
             ThreadMeta::PERSON
         };
+        let modes = MODES
+            .iter()
+            .map(|(id, label, description)| Mode {
+                id: (*id).to_owned(),
+                label: (*label).to_owned(),
+                description: Some((*description).to_owned()),
+            })
+            .collect();
         let meta = ThreadMeta {
-            modes: Vec::new(),
+            modes,
+            efforts: Vec::new(),
             id,
             agent: AgentId::named(AgentId::CODEX),
             agent_version: thread.cli_version.clone(),
@@ -314,7 +383,9 @@ impl Shared {
             said: None,
             begun: HashMap::new(),
             calls: HashMap::new(),
+            began: HashMap::new(),
             queued: VecDeque::new(),
+            catalog: Vec::new(),
         };
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
         for turn in &thread.turns {
@@ -356,6 +427,13 @@ impl Shared {
                 self.meta.title = name;
                 vec![Action::Meta(Box::new(self.meta.clone()))]
             }
+            ServerNotification::ThreadSettingsUpdated(updated) => {
+                self.settings(&Settings::of(&updated.thread_settings))
+            }
+            ServerNotification::ThreadGoalUpdated(updated) => {
+                vec![Action::GoalSet(Some(goal_of(&updated.goal)))]
+            }
+            ServerNotification::ThreadGoalCleared(_) => vec![Action::GoalSet(None)],
             ServerNotification::ThreadClosed(_) => {
                 let status = Status {
                     phase: Phase::Idle,
@@ -440,6 +518,32 @@ impl Shared {
                 let turn = self.current.clone().map_or(TurnId::BEFORE, |t| self.turn(&t));
                 self.notice(turn, Notice::INFO, &warning.message, now)
             }
+            ServerNotification::HookCompleted(done) => {
+                let turn = match done.turn_id.as_deref() {
+                    Some(codex) => self.turn(codex),
+                    None => self.latest(),
+                };
+                hook_said(&done.run).map_or_else(Vec::new, |text| {
+                    let item = Item {
+                        id: ItemId(format!("hook:{}", done.run.id)),
+                        turn,
+                        at_ms: done.run.completed_at.map_or(now, millis),
+                        body: ItemBody::Notice(Notice::new(Notice::HOOK, Clipped::whole(&text))),
+                    };
+                    vec![Action::ItemCompleted(item)]
+                })
+            }
+            ServerNotification::McpServerStartupStatusUpdated(updated) => {
+                let Some(text) = mcp_said(updated) else { return Vec::new() };
+                let turn = self.latest();
+                let item = Item {
+                    id: ItemId(format!("mcp:{}", updated.name)),
+                    turn,
+                    at_ms: now,
+                    body: ItemBody::Notice(Notice::new(Notice::INFO, Clipped::whole(&text))),
+                };
+                vec![Action::ItemCompleted(item)]
+            }
             ServerNotification::AccountRateLimitsUpdated(updated) => {
                 self.rate_limits(&updated.rate_limits)
             }
@@ -471,30 +575,152 @@ impl Shared {
         }
     }
 
-    /// The thread's approval policy and sandbox, as Codex's answer to starting or resuming it
-    /// says them: the policy is the thread's mode, the sandbox one of its facts.
-    pub fn settings(
-        &mut self,
-        approval: p::AskForApproval,
-        sandbox: &p::SandboxPolicy,
-    ) -> Vec<Action> {
-        let mode = match serde_json::to_value(approval) {
+    /// The thread's settings, as Codex's answer to starting, resuming or forking it says them,
+    /// or as it tells every client once one switched them (`thread/settings/updated`): the
+    /// approval policy is the thread's mode, the sandbox one of its facts, and the model and its
+    /// reasoning effort its meters'.
+    pub fn settings(&mut self, now: &Settings<'_>) -> Vec<Action> {
+        let mode = match serde_json::to_value(now.approval) {
             Ok(Value::String(name)) => name,
             Ok(Value::Object(tagged)) => tagged.keys().next().cloned().unwrap_or_default(),
             _ => String::new(),
         };
-        let sandbox = serde_json::to_value(sandbox)
+        let sandbox = serde_json::to_value(now.sandbox)
             .ok()
             .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_default();
+        let mut meta = self.meta.clone();
+        if !sandbox.is_empty() {
+            meta.facts.insert("sandbox".to_owned(), sandbox);
+        }
+        let mut meters = self.meters.clone();
+        meters.mode = Some(mode).filter(|m| !m.is_empty());
+        if !now.model.is_empty() {
+            meters.model_id = Some(now.model.to_owned());
+        }
+        meters.effort = now.effort.map(str::to_owned).filter(|e| !e.is_empty());
+        self.offered(meta, meters)
+    }
+
+    /// The models Codex offers (`model/list`), the hidden ones left out: what the thread can be
+    /// switched to, and the reasoning efforts of the model it runs.
+    pub fn models(&mut self, catalog: &[p::Model]) -> Vec<Action> {
+        self.catalog = catalog.iter().filter(|m| !m.hidden).cloned().collect();
+        self.offered(self.meta.clone(), self.meters.clone())
+    }
+
+    /// What switches the thread's `setting` for its next turns (`thread/settings/update`), the
+    /// TUI's included; why not, in words, when Codex offers no such value. A model whose
+    /// efforts do not include the thread's goes with its own default effort, as Codex's own
+    /// model picker sets it.
+    ///
+    /// # Errors
+    ///
+    /// When the model, the effort or the mode is none Codex offers the thread.
+    pub fn switch(&self, setting: &Setting) -> Result<p::ThreadSettingsUpdateParams, String> {
+        let mut params = p::ThreadSettingsUpdateParams {
+            thread_id: self.meta.native.clone(),
+            ..p::ThreadSettingsUpdateParams::default()
+        };
+        match setting {
+            Setting::Model(model) => {
+                let offered = self
+                    .catalog
+                    .iter()
+                    .find(|m| m.model == *model)
+                    .ok_or_else(|| format!("Codex offers no model {model} here"))?;
+                let keeps = self.meters.effort.as_ref().is_none_or(|effort| {
+                    offered
+                        .supported_reasoning_efforts
+                        .iter()
+                        .any(|e| e.reasoning_effort == *effort)
+                });
+                if !keeps {
+                    params.effort = Some(offered.default_reasoning_effort.clone());
+                }
+                params.model = Some(model.clone());
+            }
+            Setting::Effort(effort) => {
+                if !self.meta.efforts.iter().any(|e| e.id == *effort) {
+                    let model = self.meters.model.as_deref().unwrap_or("This model");
+                    return Err(format!("{model} has no reasoning effort {effort}"));
+                }
+                params.effort = Some(effort.clone());
+            }
+            Setting::Mode(mode) => {
+                if !MODES.iter().any(|(id, ..)| id == mode) {
+                    return Err(format!("Codex has no approval policy {mode}"));
+                }
+                let policy = serde_json::from_value(Value::String(mode.clone()))
+                    .map_err(|e| format!("Codex has no approval policy {mode}: {e}"))?;
+                params.approval_policy = Some(policy);
+            }
+        }
+        Ok(params)
+    }
+
+    /// Codex took `update` ([`Self::switch`]): the meters say it at once, before Codex tells
+    /// every client the settings it now holds.
+    pub fn switched(&mut self, update: &p::ThreadSettingsUpdateParams) -> Vec<Action> {
+        let mut meters = self.meters.clone();
+        if let Some(model) = &update.model {
+            meters.model_id = Some(model.clone());
+        }
+        if let Some(effort) = &update.effort {
+            meters.effort = Some(effort.clone());
+        }
+        if let Some(policy) = update.approval_policy {
+            meters.mode = Some(wire(&policy)).filter(|m| !m.is_empty());
+        }
+        self.offered(self.meta.clone(), meters)
+    }
+
+    /// Codex refused a switch, at `now`, in its words `why`: the thread says so, since the
+    /// intent was done once it went.
+    pub fn unswitched(&mut self, why: &str, now: WallMs) -> Vec<Action> {
+        let turn = self.latest();
+        self.notice(turn, Notice::INFO, &format!("Codex didn't switch: {why}"), now)
+    }
+
+    /// `meta` and `meters` as the catalog and the model the thread runs leave them: the models
+    /// to switch to, the model's name for people, and its efforts.
+    fn offered(&mut self, mut meta: ThreadMeta, mut meters: Meters) -> Vec<Action> {
+        let running = meters.model_id.as_deref();
+        let model = self.catalog.iter().find(|m| Some(m.model.as_str()) == running);
+        meta.models = self
+            .catalog
+            .iter()
+            .map(|m| slopty_proto::thread::Model {
+                id: m.model.clone(),
+                label: Some(m.display_name.clone())
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| m.model.clone()),
+            })
+            .collect();
+        meta.efforts = model
+            .map(|m| {
+                m.supported_reasoning_efforts
+                    .iter()
+                    .map(|e| Effort {
+                        id: e.reasoning_effort.clone(),
+                        label: crate::driven::effort_label(&e.reasoning_effort),
+                        description: Some(e.description.clone()).filter(|d| !d.trim().is_empty()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        meters.model = match (model, running) {
+            (Some(m), _) if !m.display_name.trim().is_empty() => Some(m.display_name.clone()),
+            (_, Some(id)) => Some(id.to_owned()),
+            (_, None) => meters.model,
+        };
         let mut actions = Vec::new();
-        if !sandbox.is_empty() && self.meta.facts.get("sandbox") != Some(&sandbox) {
-            self.meta.facts.insert("sandbox".to_owned(), sandbox);
+        if meta != self.meta {
+            self.meta = meta;
             actions.push(Action::Meta(Box::new(self.meta.clone())));
         }
-        let mode = Some(mode).filter(|m| !m.is_empty());
-        if mode != self.meters.mode {
-            self.meters.mode = mode;
+        if meters != self.meters {
+            self.meters = meters;
             actions.push(Action::MetersSet(self.meters.clone()));
         }
         actions
@@ -697,7 +923,6 @@ impl Shared {
             Some((ThreadStatus::NotLoaded | ThreadStatus::SystemError, _)) => None,
         };
         let request = Request {
-            editable: Vec::new(),
             id: ask,
             item,
             kind: kind.to_owned(),
@@ -785,7 +1010,12 @@ impl Shared {
         delivery: Delivery,
         intent: IntentId,
     ) -> Send {
-        if delivery == Delivery::Queue && self.current.is_some() {
+        // The person speaking again lets what their stop held go, before a message they queue.
+        let mut released = false;
+        for (pending, _) in &mut self.queued {
+            released |= pending.release_stop();
+        }
+        if delivery == Delivery::Queue && (self.current.is_some() || released) {
             let pending = Pending {
                 intent,
                 text: text.to_owned(),
@@ -831,21 +1061,16 @@ impl Shared {
     }
 
     /// The message held for `intent`, sent now: into the turn under way as a steer, or as a
-    /// turn of its own when none is. What goes to the app-server and the actions that take it
-    /// off the queue; `None` when none is held.
+    /// turn of its own when none is, and what a stop held let go behind it. What goes to the
+    /// app-server and the actions that take it off the queue; `None` when none is held.
     pub fn promote(&mut self, intent: IntentId) -> Option<(Send, Vec<Action>)> {
         let at = self.queued.iter().position(|(p, _)| p.intent == intent)?;
         let (held, attached) = self.queued.remove(at)?;
+        for (p, _) in &mut self.queued {
+            p.release_stop();
+        }
         let send = self.send(&held.text, attached, Delivery::Steer, intent);
         Some((send, vec![self.pending_now()]))
-    }
-
-    /// Move the message held for `intent` to just before the one held for `before`, or to the
-    /// end; `None` when either is not held.
-    pub fn reorder(&mut self, intent: IntentId, before: Option<IntentId>) -> Option<Vec<Action>> {
-        let queued = self.queued.make_contiguous();
-        Pending::reorder(queued, |(p, _)| p.intent, intent, before)
-            .then(|| vec![self.pending_now()])
     }
 
     /// Whether the thread rests: no turn under way, nothing asked of the person, no message
@@ -859,9 +1084,9 @@ impl Shared {
     }
 
     /// The next message held, as the turn that sends it and the actions that take it off the
-    /// queue, once no turn is under way.
+    /// queue, once no turn is under way and the person's stop holds nothing.
     pub fn next_queued(&mut self) -> Option<(Box<p::TurnStartParams>, Vec<Action>)> {
-        if self.current.is_some() {
+        if self.current.is_some() || self.queued.front().is_some_and(|(p, _)| p.stopped()) {
             return None;
         }
         let (next, attached) = self.queued.pop_front()?;
@@ -870,6 +1095,23 @@ impl Shared {
             return None;
         };
         Some((params, vec![self.pending_now()]))
+    }
+
+    /// The messages held, taken out in their order: the thread is about to be read again
+    /// ([`Self::requeue`] puts them back).
+    pub fn take_queued(&mut self) -> VecDeque<(Pending, Vec<Attached>)> {
+        std::mem::take(&mut self.queued)
+    }
+
+    /// `queued`, taken from the thread as it was read before, held again ahead of anything
+    /// held since.
+    pub fn requeue(&mut self, mut queued: VecDeque<(Pending, Vec<Attached>)>) -> Vec<Action> {
+        if queued.is_empty() {
+            return Vec::new();
+        }
+        queued.append(&mut self.queued);
+        self.queued = queued;
+        vec![self.pending_now()]
     }
 
     fn pending_now(&self) -> Action {
@@ -934,6 +1176,23 @@ impl Shared {
     pub fn interrupt(&self) -> Option<p::TurnInterruptParams> {
         let turn = self.current.clone()?;
         Some(p::TurnInterruptParams { thread_id: self.meta.native.clone(), turn_id: turn })
+    }
+
+    /// The person's stop: what stops the turn under way, when one is, and the actions that
+    /// hold every message queued until they send again ([`Pending::STOPPED`]).
+    pub fn stop(&mut self) -> Option<(p::TurnInterruptParams, Vec<Action>)> {
+        let params = self.interrupt()?;
+        let mut held = false;
+        for (pending, _) in &mut self.queued {
+            held |= pending.hold_for_stop();
+        }
+        Some((params, if held { vec![self.pending_now()] } else { Vec::new() }))
+    }
+
+    /// The thread's latest turn, or [`TurnId::BEFORE`] before its first: where what Codex says
+    /// outside a turn goes.
+    fn latest(&self) -> TurnId {
+        TurnId(u32::try_from(self.turns.len()).unwrap_or(u32::MAX))
     }
 
     fn turn(&mut self, codex: &str) -> TurnId {
@@ -1100,7 +1359,18 @@ impl Shared {
             self.meta.title = crate::driven::title_of(&message.text.text);
             actions.push(Action::Meta(Box::new(self.meta.clone())));
         }
-        let item = Item { id, turn, at_ms: at, body };
+        let mut body = body;
+        let at_ms = if whole {
+            let began = self.began.remove(&id);
+            if let (ItemBody::Tool(call), Some(_)) = (&mut body, began) {
+                call.ended_ms = Some(at);
+            }
+            began.unwrap_or(at)
+        } else {
+            self.began.insert(id.clone(), at);
+            at
+        };
+        let item = Item { id, turn, at_ms, body };
         if whole {
             self.calls.remove(&item.id);
         } else if matches!(item.body, ItemBody::Tool(_)) {
@@ -1527,6 +1797,73 @@ fn seconds(at: i64) -> WallMs {
 /// A Unix time in milliseconds, as Codex writes an item's.
 fn millis(at: i64) -> WallMs {
     WallMs::from_millis(u64::try_from(at).unwrap_or_default())
+}
+
+/// What a hook Codex ran says, when it says anything worth a line: one that did not simply
+/// complete, or that left words (a warning, feedback, context, an error, why it stopped). A
+/// hook that ran and said nothing is passed over, as Claude Code's are.
+fn hook_said(run: &p::HookRunSummary) -> Option<String> {
+    let event = wire(&run.event_name);
+    let mut chars = event.chars();
+    let event: String =
+        chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    let how = match run.status {
+        p::HookRunStatus::Completed => None,
+        p::HookRunStatus::Running => Some("is still running"),
+        p::HookRunStatus::Failed => Some("failed"),
+        p::HookRunStatus::Blocked => Some("blocked"),
+        p::HookRunStatus::Stopped => Some("stopped the turn"),
+    };
+    let said: Vec<&str> = run
+        .status_message
+        .iter()
+        .map(String::as_str)
+        .chain(run.entries.iter().map(|e| e.text.as_str()))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if how.is_none() && said.is_empty() {
+        return None;
+    }
+    let head = format!("{event} hook {}", how.unwrap_or("said"));
+    Some(if said.is_empty() { head } else { format!("{head}: {}", said.join("\n")) })
+}
+
+/// What an MCP server's start says, when it did not start: Codex's words for why, or that it
+/// needs the person to sign in to it again.
+fn mcp_said(updated: &p::McpServerStatusUpdatedNotification) -> Option<String> {
+    if !matches!(updated.status, p::McpServerStartupState::Failed) {
+        return None;
+    }
+    let name = &updated.name;
+    Some(match (updated.failure_reason, updated.error.as_deref().map(str::trim)) {
+        (Some(p::McpServerStartupFailureReason::ReauthenticationRequired), _) => {
+            format!("MCP server {name} needs signing in again")
+        }
+        (None, Some(why)) if !why.is_empty() => format!("MCP server {name} didn't start: {why}"),
+        (None, _) => format!("MCP server {name} didn't start"),
+    })
+}
+
+/// The goal Codex holds for a thread, as the thread model shows it: its state in the open
+/// words Slopty uses (`usageLimited` reads `usage-limited`).
+#[must_use]
+pub fn goal_of(goal: &p::ThreadGoal) -> Goal {
+    let state = wire(&goal.status).chars().fold(String::new(), |mut words, c| {
+        if c.is_ascii_uppercase() {
+            words.push('-');
+        }
+        words.push(c.to_ascii_lowercase());
+        words
+    });
+    Goal {
+        objective: goal.objective.clone(),
+        state,
+        tokens_used: u64::try_from(goal.tokens_used).unwrap_or_default(),
+        token_budget: goal.token_budget.and_then(|b| u64::try_from(b).ok()),
+        time_used_s: u64::try_from(goal.time_used_seconds).unwrap_or_default(),
+        updated_ms: seconds(goal.updated_at),
+    }
 }
 
 /// `value`'s name on the wire: a string enum's value.

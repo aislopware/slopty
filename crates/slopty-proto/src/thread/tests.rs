@@ -7,6 +7,7 @@ use super::*;
 fn meta() -> ThreadMeta {
     ThreadMeta {
         modes: Vec::new(),
+        efforts: Vec::new(),
         id: ThreadId::from_uuid(Uuid::from_u128(1)),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: "2.1.286".to_owned(),
@@ -71,7 +72,6 @@ fn tool(id: &str, state: ToolState) -> Item {
 
 fn request(id: &str) -> Request {
     Request {
-        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),
@@ -420,99 +420,30 @@ fn a_subagents_thread_is_named_by_its_session_and_agent() {
     assert_eq!(main.subagent("a1b2").to_string(), "1fc1bce5-1343-8f7f-9a36-75875446afad");
 }
 
-/// An edited allow reads back as the fields the person changed, and no other choice reads as
-/// one: an option's id, a question's answers or its words.
+/// What a resting thread left that asks for a look (changes to review, its error) ranks it
+/// above one at rest. Every rung is counted, and the ladder runs down to rest.
 #[test]
-fn an_edited_allow_reads_back_and_nothing_else_does() {
-    let fields = BTreeMap::from([("new_string".to_owned(), "fn b() {}\n".to_owned())]);
-    let choice = Editable::choice(&fields);
-    assert_eq!(Editable::read(&choice), Some(fields));
-    let answers = r#"[{"question":"Which?","answer":"Split"}]"#;
-    for other in ["allow", "deny-stop", answers, "{ not json", r#"{"answers":{}}"#, ""] {
-        assert_eq!(Editable::read(other), None, "{other}");
-    }
-}
-
-/// A reordered message lands just before the one named, or last; the rest keep their order;
-/// a message not in the list, or before one not in it, moves nothing.
-#[test]
-fn a_message_moves_before_another_or_to_the_end() {
-    let ids: Vec<IntentId> = (1..=4).map(|n| IntentId::from_uuid(Uuid::from_u128(n))).collect();
-    let [a, b, c, d] = [ids[0], ids[1], ids[2], ids[3]];
-    let moved = |which, before| {
-        let mut list = ids.clone();
-        let done = Pending::reorder(&mut list, |id| *id, which, before);
-        (done, list)
-    };
-    assert_eq!(moved(d, Some(b)), (true, vec![a, d, b, c]), "earlier");
-    assert_eq!(moved(a, Some(c)), (true, vec![b, a, c, d]), "later");
-    assert_eq!(moved(b, None), (true, vec![a, c, d, b]), "last");
-    assert_eq!(moved(b, Some(b)), (true, ids.clone()), "before itself");
-    let gone = IntentId::from_uuid(Uuid::from_u128(9));
-    assert_eq!(moved(gone, Some(a)), (false, ids.clone()));
-    assert_eq!(moved(a, Some(gone)), (false, ids.clone()));
-}
-
-proptest! {
-    /// Any move keeps every message once, and puts the one moved right before its mark.
-    #[test]
-    fn a_reorder_is_a_move(len in 1_u128..8, which in 0_u128..8, before in proptest::option::of(0_u128..8)) {
-        let ids: Vec<IntentId> = (0..len).map(|n| IntentId::from_uuid(Uuid::from_u128(n))).collect();
-        let id = |n: u128| IntentId::from_uuid(Uuid::from_u128(n));
-        let mut list = ids.clone();
-        let done = Pending::reorder(&mut list, |i| *i, id(which), before.map(id));
-        prop_assert_eq!(done, which < len && before.is_none_or(|b| b < len));
-        let mut sorted = list.clone();
-        sorted.sort();
-        let mut want = ids.clone();
-        want.sort();
-        prop_assert_eq!(sorted, want);
-        if done {
-            let at = list.iter().position(|i| *i == id(which)).unwrap_or(usize::MAX - 1);
-            match before.filter(|b| *b != which) {
-                Some(b) => prop_assert_eq!(list.get(at.saturating_add(1)), Some(&id(b))),
-                None if before.is_none() => prop_assert_eq!(list.last(), Some(&id(which))),
-                None => prop_assert_eq!(&list, &ids),
-            }
-            let rest: Vec<IntentId> = list.iter().copied().filter(|i| *i != id(which)).collect();
-            let was: Vec<IntentId> = ids.iter().copied().filter(|i| *i != id(which)).collect();
-            prop_assert_eq!(rest, was);
-        } else {
-            prop_assert_eq!(list, ids);
-        }
-    }
-}
-
-/// An agent put to sleep stands on the lowest rung, said quietly, below one at rest; what it
-/// left that asks for a look (changes to review, its error) still ranks it, and so does an
-/// open request. Every rung is counted, and the ladder runs down to it.
-#[test]
-fn an_agent_put_to_sleep_stands_below_one_at_rest() {
+fn what_a_resting_thread_left_ranks_it_above_rest() {
     use attention::{Counts, Rung};
     let mut state = ThreadState::new(meta());
     state.status = Status {
         phase: Phase::Done,
         wait: None,
-        liveness: Liveness::Asleep { since_ms: WallMs::from_millis(5) },
+        liveness: Liveness::Exited { resumable: true },
         since_ms: WallMs::from_millis(5),
     };
     let rung = |state: &ThreadState| Rung::of(&state.row(WallMs::ZERO));
-    assert_eq!(rung(&state), Rung::Sleeping);
-    assert!(Rung::Sleeping < Rung::Idle);
-    assert_eq!(Rung::Sleeping.word(), Some("Asleep"));
+    assert_eq!(rung(&state), Rung::Idle);
     assert_eq!(Rung::Idle.word(), None);
     state.to_review = true;
     assert_eq!(rung(&state), Rung::ToReview);
     state.to_review = false;
     state.status.phase = Phase::Failed;
     assert_eq!(rung(&state), Rung::Failed);
-    state.status.phase = Phase::Done;
-    state.status.liveness = Liveness::Live;
-    assert_eq!(rung(&state), Rung::Idle, "awake again");
-    assert_eq!(Rung::DOWN.last(), Some(&Rung::Sleeping));
+    assert_eq!(Rung::DOWN.last(), Some(&Rung::Idle));
     let mut counts = Counts::default();
     for rung in Rung::DOWN {
         counts.count(rung);
     }
-    assert_eq!((counts.on(Rung::Sleeping), counts.total()), (1, 7));
+    assert_eq!((counts.on(Rung::Idle), counts.total()), (1, 6));
 }
