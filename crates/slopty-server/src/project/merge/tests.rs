@@ -250,3 +250,37 @@ fn a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own() {
     assert!(kept.verdict.findings[..2].iter().all(|f| f.blocking), "what blocks is kept first");
     assert!(kept.approx_bytes() <= ReviewRun::MAX_BYTES, "{}", kept.approx_bytes());
 }
+
+/// Work judged afresh forgets the step that judged the old work, and keeps the trip that
+/// brought the new work home: the card still says where the branch landed, as a task with no
+/// checks is done the moment it arrives.
+#[test]
+fn work_judged_afresh_keeps_where_its_branch_came_home() {
+    let mut p = projects(None);
+    let a = task(&mut p, "A");
+    let step = |kind, state| TaskStep {
+        kind,
+        worker: WorkerId::new(),
+        state,
+        since_ms: at(1),
+        term: None,
+        commits: None,
+    };
+    let fresh = || Advance { fresh: true, ..Advance::default() };
+    let failed = StepState::Failed { why: "cargo gate failed".to_owned() };
+    p.set_step(&id(), a, step(StepKind::Verify, failed), at(1)).unwrap();
+    let (judged, _) = p.advance(&id(), a, fresh(), at(2)).unwrap();
+    assert_eq!(judged.step, None, "the old verdict is forgotten");
+
+    let why = "the orchestrator's clone lacks the branch's history".to_owned();
+    p.set_step(&id(), a, step(StepKind::Home, StepState::Failed { why }), at(3)).unwrap();
+    let (judged, _) = p.advance(&id(), a, fresh(), at(4)).unwrap();
+    assert_eq!(judged.step, None, "a trip that failed brought nothing");
+
+    let detail = "worktree-a as slopty/demo/1 at a31deb0 in /w/demo".to_owned();
+    let home = step(StepKind::Home, StepState::Done { detail });
+    p.set_step(&id(), a, home.clone(), at(5)).unwrap();
+    let done = Advance { state: Some(TaskState::Done), ..fresh() };
+    let (judged, _) = p.advance(&id(), a, done, at(6)).unwrap();
+    assert_eq!(judged.step, Some(home), "where the new work is stays on its card");
+}

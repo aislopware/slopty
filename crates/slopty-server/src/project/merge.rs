@@ -41,7 +41,8 @@ pub(crate) struct Advance {
     pub verified: Option<VerifierRun>,
     /// What its reviewer said.
     pub reviewed: Option<ReviewRun>,
-    /// Forget what was judged of earlier work first, its step with it: the work changed.
+    /// Forget what was judged of earlier work first, its step with it: the work changed. A
+    /// branch just brought home stays on the card, as where the changed work is.
     pub fresh: bool,
     /// Its place in the queue, or its merge.
     pub merge: Queue,
@@ -143,7 +144,11 @@ impl Projects {
         if advance.fresh {
             t.verified = None;
             t.reviewed = None;
-            t.step = None;
+            // The trip that brought the changed work home judged nothing of the old.
+            t.step = t
+                .step
+                .take()
+                .filter(|s| s.kind == StepKind::Home && matches!(s.state, StepState::Done { .. }));
         }
         if let Some(to) = advance.state {
             t.state = to;
