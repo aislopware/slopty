@@ -1,0 +1,50 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ e2e-worker
+Button │ New shell on e2e-worker
+Button │ Machine actions, e2e-worker
+Button │ Check the editor, Working
+Image │ Working
+Button │ Close tile
+Button │ Terminal
+Button │ Close tile
+Button │ Navigator
+Group │ Where
+Button │ e2e-worker
+Button │ New
+Button │ Needs you
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Check the editor
+Heading │ terminal Check the editor
+Image │ Working
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Article │ You: Check the editor's page scrolls
+Button │ Branch from here
+Button │ Copy message
+Article │ I'll look at the editor and scroll its page.
+Button │ Copy message
+Button │ computer-use: app_click
+Status │ Working
+MultilineTextInput │ Message (focused)
+Button │ Attach files
+Button │ Ask aside
+Button │ Model, Claude
+Button │ Commit
+Button │ Watch Synthetic editor
+Button │ Stop
+Group │ Status
+Status │ e2e-worker
+Group │ Agents
+Button │ Claude Code · Check the editor's page scrolls

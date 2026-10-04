@@ -10,15 +10,18 @@
 //!
 //! Goldens: the thread with a request over the composer, light and dark; its questions; a settled
 //! turn and a subagent's own thread; a file attached by a drop; the thread on a phone-width window;
-//! a step the model is still writing; and the work beyond words (a pasted picture, the plan, a
-//! build in the background), folded and with every step open.
+//! a step the model is still writing; the work beyond words (a pasted picture, the plan, a
+//! build in the background), folded and with every step open; and the screen an agent drives,
+//! offered beside its thread.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Value, json};
+use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
-use crate::gallery::{STEP, first_shell, golden};
+use crate::gallery::{STEP, first_shell, golden, settled};
 
 /// The thread's renders: room for the list, the request card and the header's chips.
 const WINDOW: (f32, f32) = (1000.0, 720.0);
@@ -853,7 +856,7 @@ mod frame_time {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn the_thread_draws_a_streaming_answer_within_a_frame() {
-        let run = std::time::Duration::from_secs(5);
+        let run = Duration::from_secs(5);
         // The thread keeps GPUI's motion, which the self-test otherwise holds still.
         let mut stack =
             Stack::launch_with("e2e-worker", &[("SLOPTY_E2E_MOTION", "1")]).await.unwrap();
@@ -922,7 +925,7 @@ mod frame_time {
         // (k) a streamed word to the frame that shows it: each word a token of its own, added to
         // the answer while the list follows its tail, timed from its post to the first dump
         // whose tree has it, so the dump's own round trip, timed alone, is in every sample.
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let mut stale = 0_usize;
         let mut alone = Vec::new();
         for _ in 0..40 {
@@ -948,7 +951,7 @@ mod frame_time {
                 assert!(begin.elapsed() < STEP, "{token} never showed: {answers:?}");
             }
             shown.push(ms(begin.elapsed()));
-            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
         let at = |v: &mut Vec<f64>, q: f64| {
             v.sort_by(f64::total_cmp);
@@ -1000,11 +1003,11 @@ mod frame_time {
                 if pan {
                     let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
                     stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
-                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                    tokio::time::sleep(Duration::from_millis(8)).await;
                     stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
-                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                    tokio::time::sleep(Duration::from_millis(8)).await;
                 } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                    tokio::time::sleep(Duration::from_millis(16)).await;
                 }
                 n = n.saturating_add(1);
             }
@@ -1076,7 +1079,7 @@ async fn private_ref(repo: &Path, end: &str) -> String {
             return found;
         }
         assert!(started.elapsed() < STEP, "no ref ending {end}");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1293,5 +1296,142 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     let drv = &mut stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     golden(drv, &dir, "review-agent-dark").await;
+    stack.shutdown().await;
+}
+
+/// The drawn screen's first window, as the worker's `synthetic::WINDOWS` lists it.
+const SYNTHETIC_EDITOR: u32 = 7001;
+
+/// The screen an agent drives beside its thread: the agent's computer-use call names a window
+/// of the worker's (the drawn screen's editor), the worker names it in the thread, and the
+/// composer offers it. Opened, it streams beside the thread, watched: its pill says Claude Code
+/// drives it. "Take control" stops the turn under way through the agent's own door (Esc into
+/// its terminal, a stand-in that keeps what it is given) and gives the person the screen;
+/// "Hand back" watches again. Goldens of the thread with its offer, light and dark; the stream,
+/// whose picture moves, is rendered to the artifacts for review only.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+#[expect(clippy::too_many_lines, reason = "one screen, from the call to the take-over")]
+async fn the_screen_an_agent_drives_opens_beside_its_thread() {
+    let synthetic = ("SLOPTY_SYNTHETIC_SCREEN", "1");
+    let mut stack = Stack::launch_with("e2e-worker", &[synthetic]).await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(&mut stack.driver).await;
+    let drv = &mut stack.driver;
+    let before: Vec<String> =
+        drv.dump().await.unwrap().terminals.into_iter().map(|t| t.session).collect();
+    drv.open(&["sh", "-c", "printf '\\033]0;Check the editor\\007'; exec cat"], 1).await.unwrap();
+    let dump = drv
+        .wait_for("the agent's terminal", STEP, |d| {
+            d.terminals.iter().any(|t| !before.contains(&t.session))
+        })
+        .await
+        .unwrap();
+    let session =
+        dump.terminals.iter().find(|t| !before.contains(&t.session)).unwrap().session.clone();
+    drv.reveal(&session).await.unwrap();
+
+    let main = stack.path("projects").join("s1.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    let transcript = main.to_string_lossy().into_owned();
+    let home = stack.path("home");
+    let hook = |event: &str, more: Value| {
+        let mut payload = json!({
+            "hook_event_name": event, "session_id": "s1", "transcript_path": transcript,
+            "cwd": home,
+        });
+        if let (Some(payload), Some(more)) = (payload.as_object_mut(), more.as_object()) {
+            payload.extend(more.clone());
+        }
+        payload
+    };
+    let relay = async |stack: &Stack, payload: Value| {
+        let done = stack.relay_hook(&session, &[], &payload).unwrap().wait().await.unwrap();
+        assert!(done.success(), "the relay ran");
+    };
+    std::fs::write(&main, "").unwrap();
+    relay(&stack, hook("SessionStart", json!({ "source": "startup" }))).await;
+
+    // The turn: the agent looks at the editor through computer use, and clicks in it.
+    let prompt = "Check the editor's page scrolls";
+    relay(&stack, hook("UserPromptSubmit", json!({ "prompt": prompt }))).await;
+    append(
+        &main,
+        &record(
+            "u1",
+            None,
+            "00:00",
+            json!({ "type": "user", "message": { "role": "user", "content": prompt } }),
+        ),
+    );
+    append(
+        &main,
+        &record(
+            "a1",
+            Some("u1"),
+            "00:05",
+            said_by_claude("I'll look at the editor and scroll its page."),
+        ),
+    );
+    append(
+        &main,
+        &record(
+            "c1",
+            Some("a1"),
+            "00:10",
+            json!({ "type": "assistant", "message": {
+                "role": "assistant", "model": "claude-opus-5-5", "stop_reason": "tool_use",
+                "content": [{ "type": "tool_use", "id": "toolu_c1",
+                    "name": "mcp__computer-use__app_click",
+                    "input": { "window_id": SYNTHETIC_EDITOR, "coordinate": [640, 400] } }],
+                "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 60 },
+            }}),
+        ),
+    );
+
+    let drv = &mut stack.driver;
+    drv.wait_for("the screen offered", STEP, |d| {
+        thread_shows(d) && has(d, "Button", "Watch Synthetic editor")
+    })
+    .await
+    .unwrap();
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    golden(drv, &dir, "agent-screen").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "agent-screen-dark").await;
+    stack.set_appearance("light").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
+
+    click(drv, "Button", "Watch Synthetic editor").await;
+    let dump = drv
+        .wait_for("the editor streaming, watched", Duration::from_secs(90), |d| {
+            d.items.iter().any(|i| i.kind == "window")
+                && d.screens.first().is_some_and(|s| s.frames > 0)
+                && any_label(d, "Claude Code is driving")
+        })
+        .await
+        .unwrap();
+    assert!(has(&dump, "Button", "Take control"), "{:#?}", labels(&dump, "Button"));
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    settled(drv).await;
+    drv.render(&artifacts_dir().join("agent-screen-watched.png")).await.unwrap();
+
+    click(drv, "Button", "Take control").await;
+    let dump = drv
+        .wait_for("the person in control", STEP, |d| any_label(d, "You have control"))
+        .await
+        .unwrap();
+    assert!(has(&dump, "Button", "Hand back"), "{:#?}", labels(&dump, "Button"));
+    drv.wait_for("the turn stopped through the agent's terminal", STEP, |d| {
+        d.terminal(&session).is_some_and(|t| t.rows.concat().contains("^["))
+    })
+    .await
+    .unwrap();
+    click(drv, "Button", "Hand back").await;
+    drv.wait_for("watched again", STEP, |d| any_label(d, "Claude Code is driving")).await.unwrap();
     stack.shutdown().await;
 }
