@@ -1130,4 +1130,120 @@ mod codex {
         assert_eq!(state.meters.model_id.as_deref(), Some("mock-model"), "refused, so kept");
         assert_eq!(state.meters.effort.as_deref(), Some("high"));
     }
+
+    /// A stand-in daemon that has the recording's thread loaded and runs its second turn on the
+    /// first `turn/start`, as the recording did. On each word from `reverts` it says another
+    /// client rewrote the thread's history (`thread/reverted`). Its first resume answers with the
+    /// thread as the recording left it, the second with the second turn still running, and every
+    /// later one with that turn undone. Every frame the worker sent goes to `heard`.
+    async fn reverter(
+        listener: UnixListener,
+        heard: mpsc::UnboundedSender<Value>,
+        mut reverts: mpsc::UnboundedReceiver<()>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let resumed = resumed();
+        let native = resumed["result"]["thread"]["id"].clone();
+        let second = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.sent && l.msg["method"] == "turn/start")
+            .nth(1)
+            .unwrap()
+            .0;
+        let asked = &lines[second].msg["id"];
+        let rest = &lines[second..];
+        let turn = rest.iter().find(|l| !l.sent && l.msg["id"] == *asked).unwrap().msg.clone();
+        let started = rest.iter().find(|l| l.msg["method"] == "turn/started").unwrap().msg.clone();
+        let mut running = resumed.clone();
+        let thread = &mut running["result"]["thread"];
+        thread["turns"].as_array_mut().unwrap().push(turn["result"]["turn"].clone());
+        thread["status"] = json!({ "type": "active", "activeFlags": [] });
+        let (mut resumes, mut turns) = (0_u32, 0_u32);
+        loop {
+            let msg = tokio::select! {
+                msg = next(&mut ws, &heard) => match msg { Some(msg) => msg, None => return },
+                Some(()) = reverts.recv() => {
+                    let reverted = json!({ "method": "thread/reverted", "params": {
+                        "threadId": native } });
+                    say(&mut ws, &reverted).await;
+                    continue;
+                }
+            };
+            let mut answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") => {
+                    resumes = resumes.saturating_add(1);
+                    if resumes == 2 { running.clone() } else { resumed.clone() }
+                }
+                Some("turn/start") if turns == 0 => {
+                    turns = 1;
+                    turn.clone()
+                }
+                _ => continue,
+            };
+            answer["id"] = msg["id"].clone();
+            say(&mut ws, &answer).await;
+            if msg["method"] == "turn/start" {
+                say(&mut ws, &started).await;
+            }
+        }
+    }
+
+    /// A thread another client rewrote (`thread/reverted`) is taken up again and read whole, and
+    /// the message the person queued stays held through it. While the re-read thread still runs
+    /// its turn the message waits for it; once a re-read shows that turn undone, nothing is left
+    /// to end, so the message goes as the next turn.
+    #[tokio::test]
+    async fn a_reverted_thread_is_read_again_and_keeps_its_held_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let (revert, reverts) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(reverter(listener, tx, reverts));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        until_sent(&mut heard, "thread/resume").await;
+        until(&host, thread, |s| s.turns.len() == 1).await;
+
+        let first = "Make a file called made-by-codex.".to_owned();
+        handle.send(thread, first, Vec::new(), Delivery::Steer, IntentId::new());
+        until_sent(&mut heard, "turn/start").await;
+        polled(&host, thread, |s| s.turns.len() == 2).await;
+        let queued = IntentId::new();
+        handle.send(thread, "Then say done.".to_owned(), Vec::new(), Delivery::Queue, queued);
+        let held = |s: &ThreadState| s.pending.iter().map(|p| p.intent).eq([queued]);
+        polled(&host, thread, held).await;
+
+        revert.send(()).unwrap();
+        let sent = until_sent(&mut heard, "account/usage/read").await;
+        let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+        let read = ["thread/resume", "thread/goal/get", "account/usage/read"];
+        assert_eq!(methods, read, "read again, and the turn still runs: nothing sent");
+        let (state, _) = host.state(thread).unwrap();
+        assert_eq!(state.turns.len(), 2, "as the re-read says");
+        assert!(held(&state), "held through it: {:?}", state.pending);
+
+        revert.send(()).unwrap();
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(methods, ["thread/resume", "turn/start"], "the turn undone: it goes");
+        let params = &sent[1]["params"];
+        assert_eq!(params["threadId"], native.as_str());
+        assert_eq!(params["input"][0]["text"], "Then say done.");
+        assert_eq!(params["clientUserMessageId"], queued.to_string());
+        let (state, _) = host.state(thread).unwrap();
+        assert_eq!(state.turns.len(), 1, "the undone turn is gone");
+        assert!(state.pending.is_empty(), "taken off the queue: {:?}", state.pending);
+    }
 }

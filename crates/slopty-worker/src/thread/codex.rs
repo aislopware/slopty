@@ -1071,6 +1071,15 @@ impl Session {
                             effort: resumed.reasoning_effort.as_deref(),
                         };
                         self.settled(&resumed.thread.id, &settings);
+                        // A revert that undid the turn a message was held for leaves nothing
+                        // to end, so what it held goes now.
+                        let next = self.threads.get_mut(&native).and_then(|followed| {
+                            followed.shared.next_queued().map(|next| (followed.id, next))
+                        });
+                        if let Some((thread, (params, taken))) = next {
+                            self.host.apply(thread, taken);
+                            self.request(params.as_ref(), Waiting::Turn { thread }).await?;
+                        }
                         for ask in self.waking.remove(&native).unwrap_or_default() {
                             self.ask(ask).await?;
                         }
