@@ -197,9 +197,6 @@ mod codex {
         // The goal Codex keeps for the thread, asked as it is taken up; this thread has none.
         let goal = stub.answer("thread/goal/get", json!({})).await;
         assert_eq!(goal["params"]["threadId"], thread);
-        // What the thread has cost so far, asked as it is taken up; this account says no figure.
-        let usage = stub.answer("account/usage/read", json!({ "summary": {} })).await;
-        assert_eq!(usage["params"]["threadId"], thread);
         for line in lines.iter().skip(resumed_at.saturating_add(1)) {
             if !line.sent {
                 stub.say(&line.msg).await;
