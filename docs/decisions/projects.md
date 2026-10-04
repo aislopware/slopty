@@ -1,20 +1,24 @@
 # Projects
 
-A project is one goal worked on by many agents across the fleet. The user talks to one
-orchestrator agent. It splits the goal into tasks, hands each task to an agent on a worker that
-can do it (a Linux worker for the server and the Linux crates, a Mac for anything Apple), and
-merges what they finish. Every agent in the tree can be seen and opened while it works. Nothing
-runs where the user can't follow it.
+A project is one goal worked on by many agents across the fleet. The person talks to one
+orchestrator agent. It splits the goal into tasks, starts each task's agent on the worker it
+names (a Linux worker for the server and the Linux crates, a Mac for anything Apple), and the
+server verifies and merges what they finish. Every agent in the project can be seen and opened
+while it works. Nothing runs where the person can't follow it.
 
 The research behind these rulings, with sources, is in `.research/projects-research-2026-09-30.md`
-(primitives, products, distribution, measured cost) and `.research/projects-foundations-2026-09-30.md`
-(what Slopty already has).
+(primitives, products, distribution, measured cost), `.research/projects-foundations-2026-09-30.md`
+(what Slopty already has) and `.research/feature-prune-frontier-2026-10-04.md` (what a frontier
+model no longer needs).
 
-**The orchestrator is a Claude Code session with Slopty's tools, not a driver.** ✅ 2026-09-30
-- The orchestrator is an ordinary interactive `claude` session in a PTY tile. What Slopty adds is
-  a tool surface: the existing MCP verbs (`spawn_agent`, `agent_status`, `read_thread`,
-  `events`, the file and terminal verbs), plus the project verbs below. The
-  agent chooses to call them, and the TUI stays the source of truth, as for every agent.
+**The orchestrator is an agent with the project's tools, not a driver.** ✅ 2026-09-30
+- The orchestrator is an ordinary interactive agent session (Claude Code in a PTY tile, or any
+  agent Slopty runs). What Slopty adds is the project's tools over MCP (`slopty mcp`):
+  `project_status`, `task_get`, `task_start`, `task_update`, `task_report`, `task_tell`,
+  `task_wait` and `read_thread`. Everything else (the workers and their facts, terminals,
+  files, the workspace) is the `slopty` command, which the agent runs in its shell like any
+  other. The agent chooses to call them, and its TUI stays the source of truth, as for every
+  agent.
 - Rejected:
   - **Claude Code's own Projects as the backbone.** It is a public beta on Pro and Max, and its
     orchestrator conversation lives at claude.ai, off the tailnet.
@@ -22,98 +26,111 @@ The research behind these rulings, with sources, is in `.research/projects-resea
     teammate in a worktree.
   - **Wrapping the CLI and parsing its screen.** Omnara abandoned exactly that as "unfeasible to
     maintain".
-- Kept for later: bridging to Claude Code Projects through Remote Control, if the user wants to
-  steer from claude.ai too.
+- Kept for later: bridging to Claude Code Projects through Remote Control, if the person wants
+  to steer from claude.ai too.
 
-**Two levels by default, and every level is a visible session.** ✅ 2026-09-30
-- The tree is: orchestrator → one sub-orchestrator per area or host class → worker agents. Inside
-  one host, a sub-orchestrator may fan out with Claude Code's own subagents or workflows, since
-  those are cheap and share the host's worktrees.
+**One level of tasks, and every task is a visible session.** ✅ 2026-09-30, narrowed 2026-10-04
+- The project is the orchestrator and its tasks, side by side. A task's agent starts no task
+  and tells none: it does its work and reports it. Inside one session an agent may still fan
+  out with its own subagents or workflows, which show as its task's natives.
 - The measurements favour shallow, centralised trees. Google's scaling study measured
   independent agents amplifying errors 17.2× and centralised ones 4.4×, and coordination
   collapsed throughput in Cursor's experiments.
-- Every session Slopty spawns is a PTY tile with the brief typed as its first prompt
-  (`spawn_agent` already does this). A native subagent inside a session appears as a child node
-  from its `SubagentStart`/`SubagentStop` hooks, and its transcript opens read-only in the
-  conversation face.
+- Every session Slopty starts is a tile with the brief as its first prompt. A native subagent
+  inside a session appears under its task from its `SubagentStart`/`SubagentStop` hooks, or
+  from its thread's row for other agents.
+
+**A frontier model is steered by a sentence, not by machinery.** ✅ 2026-10-04
+- The person's direction is frontier models only: a premium agentic app where remote work feels
+  local. Under it, every piece of the projects mode that steered the orchestrator by rule where
+  a sentence does was cut or merged. Claude Code's own Projects does the same jobs with plain
+  instructions and one hard cap, and Amp's record of removals says a simple shell tool is often
+  enough.
+- What went, and what carries the job now:
+  - **Placement rules and project needs** (CEL over the workers' facts, `placement_suggest`,
+    and the forked `cel` crate). The orchestrator reads the facts (`slopty --json workers`) and
+    names the worker in `task_start`; its role says that work needing no Apple platform belongs
+    on Linux. The server still checks that the worker is online and has the agent installed.
+  - **Budgets and per-project caps.** A plan already caps itself, and Slopty runs the person's
+    own subscription binaries. One hard cap stays, the fleet's live agents, as Claude Code keeps
+    one daily cap, and so does the review limit.
+  - **The server's reviewer stage.** Review goes through the agent's own door: the review tile
+    gains a way to ask the thread's agent for its own review (Claude Code's `/code-review`,
+    Codex's `/review`), with the findings as line comments. An orchestrator may still start a
+    read-only task to review, in words.
+  - **Path claims.** Worktrees isolate writers, and a conflict comes back as a give-back on
+    rebase. Claude Code Projects and Cursor coordinate without claims.
+  - **Report kinds other than done.** `task_report` means done. A need or a block reaches the
+    orchestrator as the turn end it already hears, and the person as the agent's own question.
+  - **Asking before each task starts** (`ask_to_start` and its proposals). A project's rules
+    say it in a line when the person wants it.
+  - **Dollar cost.** Slopty touches no credential, so it cannot know how a run is billed.
+    Tokens, the context and the plan's windows stay.
+  - **Most MCP tools.** `slopty mcp` serves the eight project tools above, not 46. An agent
+    Slopty starts outside a project gets no Slopty MCP at all, and reaches the rest through
+    the `slopty` command. Every agent saves a tool block of about 24 KB of descriptions, and
+    Codex retired its own MCP server for the same reason.
+  - **`slopty git`.** A person or an agent at a shell already has git and gh. The person's
+    commit sheet in the app stays.
+- Rejected: keeping them as hidden options. An unused feature is deleted, not hidden.
 
 **Project state lives on the server.** ✅ 2026-09-30
 - The server holds, in a store beside `workers.json`:
   - the project: its name, repository, target branch, verifier command and orchestrator session;
-  - its tasks: title, brief, kind, owned paths, placement rules, parent and dependencies, state
-    and status text, assigned worker and session, branch, the verifier's result and the merge,
+  - its tasks: title, brief, kind, dependencies, the worker it is pinned to, state and status
+    text, its assignment (worker and session), branch, the verifier's result and the merge,
     and free-form metadata;
   - an append-only event timeline.
 - Workers report; clients mirror, as they mirror the item registry. The project outlives any
-  client, and a phone sees the same tree as the Mac.
+  client, and a phone sees the same project as the Mac.
 - `AgentBranch` stops being dropped at the worker's server link, so the hub learns every PR and
   worktree.
 
-**Code moves through a hub repository on the server, over Slopty's own link.** ✅ 2026-09-30
-- The server keeps a bare repository per project. Each worker keeps a mirror of it and gives
-  every task a `git worktree` on branch `slopty/<project>/<task>`.
-- Fetch and push go through `git-remote-slopty`, a git remote helper that carries git's
-  pack protocol over the worker's existing server link. So there is no SSH setup and no second
-  credential, and the link is the one everything else already trusts.
-- Superseded on 2026-10-01, never built: each worker clones from the forge with its own git
-  ("A repository is the same on every machine that has a clone"), and a branch crosses
-  machines as a bundle through the server ("A finished task's branch comes home as a bundle").
+**Code moves through each worker's own clone.** ✅ 2026-09-30, revised 2026-10-01
+- Each worker clones the repository from the forge with its own git, and a task's agent works
+  in a worktree of its own ("A task placed where there is no clone gets one"). A finished
+  branch crosses machines as a bundle through the server ("A finished task's branch comes home
+  as a bundle"). There is no bare repository on the server and no remote helper of Slopty's.
 - `.git` is never file-synced (Mutagen documents why not). Worktrees on one host share objects;
   across hosts they fetch.
 
-**Placement is open: rules over what each worker says of itself.** ✅ 2026-09-30
-- A fixed list of needs (an OS, the Apple SDK, capture) cannot say "the box with the GPU", "a
-  Mac on AC power" or "where the nightly toolchain is". So each worker reports open facts, and a
-  task's placement is rules over them, in the phase 1 rulings below. The user asked for this
-  after reviewing the first design.
-- A pin is never overridden. An orchestrator that reads the facts and pins a task is as
-  first-class as one that writes rules. `placement_suggest` shows the ranking with its reasons
-  before anything starts.
-- Mirror presence becomes a fact once mirrors exist (phase 2).
-
-**Tasks own disjoint paths.** ✅ 2026-09-30
-- A task names the paths it owns, and the server refuses a claim that overlaps a live task's.
-  This is the rule this repository already works by: one owner per crate or file, and a shared
-  crate lands before the work that depends on it.
-- Cognition and Cursor both found that parallel writers to shared code fail. Reads are free.
-
-**A task is done when its verifier passes; the server merges one at a time.** ✅ 2026-09-30
+**A task is done when its verifier passes; the server merges one at a time.** ✅ 2026-09-30,
+merging on the person's word since 2026-10-04
 - The project names its verifier (`cargo gate` here). A finished task's branch runs it on a host
-  that can, and the result is recorded on the task.
-- The server's merge queue then rebases each passing branch onto the target branch, runs the
-  verifier again, and fast-forwards, one branch at a time. A conflict or a failure goes back to
+  that can, and the result is recorded on the task. A pass leaves the task ready to merge.
+- The person's Merge puts it in the server's merge queue, which rebases each branch onto the
+  target branch, runs the verifier again, and fast-forwards, one branch at a time. What the
+  person can review sets the pace, so merging is theirs alone. A conflict or a failure goes back to
   the owning agent as a message with the details. There is no integrator agent: Cursor found
   that role became the bottleneck.
-- Before a merge, the orchestrator can ask a reviewer with fresh context (a new session that sees
-  only the diff and the brief). Cognition reports that such a reviewer catches about two bugs per
-  pull request.
 
-**The user's plan quota bounds concurrency.** ✅ 2026-09-30
-- All agents draw on one Claude plan (a 5-hour window and a weekly cap). Multi-agent runs cost
-  7-15× the tokens of one session.
-- A project caps its live agents per worker and in all. The person's bounds in the server's
-  settings cap every project and the fleet as a whole. The project view shows each agent's
-  tokens as the transcript reports them.
+**The person's plan bounds concurrency, with one hard cap and the review limit.** ✅
+2026-09-30, narrowed 2026-10-04
+- All agents draw on the person's plans, and multi-agent runs cost 7-15× the tokens of one
+  session.
+- The person's `live_agents` bound in the server's settings caps live agents across the fleet.
+  A project's review limit (3 by default, the person's alone) stops new starts while that many
+  of its tasks wait on the person, so what the person can review sets the pace. The board
+  shows each agent's tokens, context and plan windows as its agent reports them.
 
 **What the user sees.** ✅ 2026-09-30
 - A project opens as a tile. It shows:
-  - the tree, each node with its worker (and OS), branch, state (working, waiting, blocked,
-    verifying, merged), tokens and last line;
-  - a timeline of the events that matter (spawned, blocked on you, verifier passed or failed,
+  - its tasks, each with its worker (and OS), branch, state (working, waiting, blocked,
+    verifying, merged), time at work and last line;
+  - a timeline of the events that matter (started, blocked on you, verifier passed or failed,
     merged, conflict);
-  - at the top, anything waiting on the user, such as an approval or a question.
-- Clicking a node opens that agent's tile, as its TUI or its conversation face. The composer
-  talks to the orchestrator only. Minimal, in the Warp and Linear school, and every colour a
-  token.
+  - at the top, anything waiting on the person, such as a permission or a question.
+- Clicking a task opens its agent's tile. The board's line talks to the orchestrator only.
+  Minimal, in the Warp and Linear school, and every colour a token.
 
 **Tests use a stub agent.** ✅ 2026-09-30
 - End-to-end tests run a stub `claude` (a test binary that speaks the hook protocol and makes
   scripted commits), never the real one. This proves the project end to end without spending
   quota:
-  1. The orchestrator spawns.
-  2. A task is placed on the Linux container worker (`cargo xtask linux run`), and its branch
-     comes home as a bundle through the server.
-  3. The verifier runs, the merge queue merges, and the tree and timeline show each step.
+  1. The orchestrator starts.
+  2. A task starts on the worker named, and its branch comes home as a bundle through the
+     server.
+  3. The verifier runs, the merge queue merges, and the board and timeline show each step.
 
 **Deferred.** ⏸ 2026-09-30
 - A shared build cache across workers: sccache with the server as its backend. It helps only
@@ -132,11 +149,11 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   agent says "task 3" and the orchestrator reads it back.
 - Wire types are in `slopty-proto::project`. The verbs are in `slopty-proto::orchestration`:
   `ProjectCreate`, `ProjectSet`, `ProjectList`, `ProjectStatus` (a long poll on a timeline
-  cursor), `TaskCreate`, `TaskClaim`, `TaskUpdate`, `TaskAssign`, `TaskSpawn`, `TaskReport`,
-  `TaskGet`, `WorkingOn`, `PlacementSuggest` and `WorkerFacts`. They are served as MCP tools
-  (`project_create` … `task_spawn`, `task_report`, `task_get`, `placement_suggest`, and
-  `list_workers` with the facts) and as `slopty project …`, `slopty task …` (with
-  `task suggest`, `task report` and `task get`) and `slopty workers --json`.
+  cursor), `TaskCreate`, `TaskUpdate`, `TaskSpawn`, `TaskReport`, `TaskGet`, `TaskTell`,
+  `WorkingOn` and `WorkerFacts`, among others. The CLI serves them all (`slopty project …`,
+  `slopty task …`, `slopty workers --json`). `slopty mcp` serves the eight that a project's
+  agents need: `task_start` makes a task and starts it in one call (`TaskCreate` then
+  `TaskSpawn`), as `slopty task start` does.
 - A task's verifier run names the commits it judged (`VerifierRun { head, base }`, in hex), so
   a verdict never outlives the work it saw.
 
@@ -144,16 +161,15 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - A task has a free-form `kind` (up to 64 characters), a `status` text beside its fixed state
   (up to 512), and `metadata`, any JSON object up to 16 KiB. A project has metadata too.
 - `depends_on` names other tasks of the project. The graph must stay acyclic, so a dependency
-  that closes a cycle, or names an unknown task, is refused.
-- Tasks nest to any depth up to the project's `depth` limit.
-- A task runs a `Runner`: Claude Code with its prompt and arguments, or a command (any other
-  agent's CLI, a build, a script; the login shell when empty). A task may name its own verifier
-  over the project's.
-- A read-only task owns no paths. It can run beside any writer, and a read-only task that
-  names paths is refused.
+  that closes a cycle, or names an unknown task, is refused. A task whose dependencies are not
+  done is refused its start unless the start says to ignore them, and kept to start later.
+- Tasks do not nest: every task belongs to the project directly.
+- A task runs a `Runner`: Claude Code with its prompt and arguments, Codex, any agent as a
+  thread, or a command (a build, a script; the login shell when empty). A task may name its
+  own verifier over the project's.
+- A read-only task runs in the clone itself, not in a worktree of its own.
 - Every move between states is checked (`TaskState::may_become`). Merged is final, and only a
-  done or verifying task merges. A move back into a live state claims the task's paths again,
-  so reopening a finished task cannot slip past a claim made since.
+  done or verifying task merges.
 
 **Workers report open facts.** ✅ 2026-09-30
 - A fact is a flag, a number, a word, or a list or map of them (`Fact`). Each worker sends its
@@ -166,72 +182,37 @@ The research behind these rulings, with sources, is in `.research/projects-resea
     read as `probes.<name>`.
 - The server adds what it knows itself, over anything a worker sent under the same name: name,
   worker, os, os_version, arch, cpus, memory_mb, encoders, displays, capture and input, load,
-  online, live_agents and repos. Facts travel beside `WorkerInfo`, not in it, so the directory's wire
-  shape is unchanged. `list_workers` and `WorkerFacts` show them all.
+  online, live_agents and repos. Facts travel beside `WorkerInfo`, not in it, so the directory's
+  wire shape is unchanged. `slopty workers --json` and `WorkerFacts` show them all.
+- The facts are for the orchestrator to read. It names the worker a task runs on; nothing on
+  the server judges rules over them ("A frontier model is steered by a sentence", above).
+- A worker's facts are cut to bounds as they arrive (1024 items per list or map, 4 KiB per
+  text, 4096 facts in all).
 
-**Placement rules are CEL.** ✅ 2026-09-30
-- `Placement { pin, require, prefer: [(expr, weight)], near, avoid }`:
-  - Every `require` rule must hold. A rule that errors, such as one reading a missing fact,
-    does not hold, and says why.
-  - Each `prefer` rule adds its weight when true, or its value times the weight when it is a
-    number (`load / double(cpus)` weighted -20).
-  - `near` and `avoid` name tasks or workers and move the score by 100. They steer and never
-    refuse.
-  - A worker at the project's per-worker limit does not fit.
-  - The tie-breaks are fewer live agents, then load per cpu, then name.
-- Every fact is a variable by its name, and all of them are also in a `facts` map, so
-  `has(facts.gpus)` asks whether a worker reported one.
-- Why CEL:
-  - It is a published language that always terminates: no loops and no recursion, so its
-    cost grows only with the rule and the facts it reads. Kubernetes (admission policies, CRD validation) and Envoy use it for this job,
-    so agents already write it.
-  - `cel` compiles a rule to a program and reports a bad one with its line and column.
-    It evaluates over plain values, so facts map to it directly.
-  - It gives arithmetic, `in`, map access and `has()` without our writing a grammar.
-- Rejected:
-  - **A hand-rolled `{fact, op, value}` matcher.** It would need its own `and`/`or`, lists,
-    maps, arithmetic and error positions, and would grow with every need.
-  - **Rhai or Lua.** Turing-complete, so every rule needs a sandbox and a fuel limit.
-  - **JSONLogic.** Verbose for an agent to write, and it has no positions in its errors.
-- The rules are agents' input, and the parser recurses. So a rule is at most 1024 bytes,
-  nested at most 32 deep, and a placement has at most 32 rules. A test runs the worst of them
-  on a 2 MiB thread. The cost is about 2.3 MB of server binary.
-- CEL terminates, but a comprehension over a comprehension over a long list still costs its
-  product. So a rule's worst case is counted as it compiles: every node once per element of
-  each comprehension around it, a list read from the facts counted as 1024 elements, the most
-  a worker's fact may hold. A rule over 65 536 steps, or a placement over 262 144, is refused
-  before it runs, with the count. A worker's facts are cut to those bounds as they arrive (1024
-  items per list or map, 4 KiB per text, 64 KiB in all).
-- The same rule gives the same verdict every time: `cel` is patched to our fork at upstream
-  master (`aislopware/cel-rust`), which iterates a map in key order and lets a comprehension
-  absorb an error that a later element settles. The fork's own change sorts keys only when a
-  comprehension walks a map. The fork also builds the standard library once per process
-  instead of once per context, which placement builds per worker.
-- Ranking runs outside the hub's lock, on the blocking pool, two at a time, and stops judging
-  after 2 s; a rule not judged by then does not hold. Ranking 32 workers under four rules takes
-  0.22 ms, compile included (`docs/MEASUREMENTS.md`). The chosen worker is then reserved
-  under the lock, which checks the cap again.
-- `placement_suggest` ranks every worker for a task or for rules given, each with its reasons
-  (rule, held, points, detail). A pinned worker fits over every rule, and the rules it failed
-  still show. A pin to a worker that is offline or full is refused; it never moves elsewhere.
+**Where a task starts.** ✅ 2026-09-30, narrowed 2026-10-04
+- A task runs on the worker its start names (`task_start`'s `worker`, a name or an id), or on
+  one the person picked with "Run on…". A start that names none goes to a worker with room:
+  beside a clone of the project's repository when the task named no directory and a worker has
+  one, then the fewest live agents, the least load per cpu, and the name.
+- Wherever it goes, the worker is online and has the agent installed ("An agent goes only where
+  it is installed, pinned or not", below). A start pinned to a worker that is offline or lacks
+  the agent is refused and never moves elsewhere.
 
-**Every limit is a setting, under the person's bounds.** ✅ 2026-09-30
-- A project's `Limits` are live agents per worker (4), live agents in the project (12), task
-  depth (8) and timeline entries kept (4096). They are set at `project_create` and changed with
-  `project_update`.
-- The person's `[server.projects]` bounds in `settings.toml` cap them: live agents across the
-  fleet (24), per worker (8), per project (24), depth (16) and timeline entries (65 536). The
-  server reads the file at start (`Hub::set_policy`). Agents read the bounds and the live
-  counts in `project_status`, and cannot raise them. A limit set above its bound is refused,
-  naming the setting.
-- Only protective rules stay hard: the plan quota, consent and approvals, and disjoint write
-  claims.
+**One cap is a setting, under the person's bounds.** ✅ 2026-09-30, narrowed 2026-10-04
+- The person's `[server.projects]` bounds in `settings.toml` hold two things: `live_agents`,
+  the most live agents across the fleet (24), and `permission_flags`, the projects whose agents
+  may be given flags that loosen Claude Code's permissions. The server reads the file at start
+  (`Hub::set_policy`). Agents read the bounds and the live counts in `project_status` and cannot
+  raise them.
+- A project's own `Limits` hold the review limit alone, which only the person sets.
+- The other sizes are constants in the server, not settings: projects kept (64), tasks per
+  project (512), title, brief and timeline lengths.
 
 **Counts follow live terminals, not task states.** ✅ 2026-09-30
-- A task's run counts from the moment it is placed until its terminal ends, whatever its state
-  says. A start whose caller left, an assign that failed, or an agent that marked its own task
-  done cannot escape the cap. A start counts for up to 30 s after its worker answers, until
-  the worker announces the terminal.
+- A task's run counts from the moment it is started until its terminal ends, whatever its state
+  says. A start whose caller left, or an agent that marked its own task done, cannot escape the
+  cap. A start counts for up to 30 s after its worker answers, until the worker announces the
+  terminal.
 - The hub chooses the id of every terminal it starts (`SpawnAgent` and `OpenTerminal` carry
   it), and a caller never can. So a start whose answer was lost still counts for its 30 s, and
   when its worker announces that id the terminal goes on its task as if the answer had come.
@@ -241,15 +222,12 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   limit while it rests, and counts again as soon as it works ("A finished task's agent stops
   counting", below).
 - The fleet bound counts every live terminal with an agent in it, in a project or not, plus
-  every start in flight. A plain `spawn_agent` is refused at the bound as a task's start is.
+  every start in flight. A plain `slopty agent spawn` is refused at the bound as a task's start
+  is.
 - A project's orchestrator counts only while its terminal is live.
-- A terminal its worker has opened but not yet announced may be assigned at once, and counts
-  for the task's project from then.
 - A terminal an agent opens counts against the fleet bound as a start does, and a terminal an
   agent typed into counts as an agent from then, so a plain shell cannot carry an agent past
-  the bound. An assign is refused when the project is at its live or per-worker limit, unless
-  the terminal is already counted there. An assign cannot take a terminal whose start another
-  task still waits on.
+  the bound.
 
 **An agent never has more than the person gave it.** ✅ 2026-09-30
 - Every link says whom it speaks for. A client is the person and an MCP surface is an agent.
@@ -268,10 +246,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   changes none.
   - An orchestrator works in its whole project. Only an orchestrator, or the person, makes a
     project or sets one.
-  - A task's agent works in its own task and what is split from it. A task it creates goes
-    under its own task unless it names a parent inside that subtree, so what it splits off
-    counts against the project's depth like everything else. Before, it could root tasks at
-    the top of the tree, past the depth limit.
+  - A task's agent works in its own task alone: it moves and reports that task, and makes,
+    starts and tells none, since tasks are one level.
   - A terminal an agent names as orchestrator or assignee is its own, one it opened, one the
     project holds (its orchestrator's, a task's, a start's for it), or one another agent of the
     project opened. The person's own terminals are the person's to give. Before, an agent could
@@ -289,7 +265,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   is the person's word on what counts as done. Only the person's read of a thread holds its
   prompts, so an agent reading another's never hides a prompt from the TUI.
 - Every way to start `claude` is judged by its arguments against an allowlist
-  (`slopty_proto::project::SAFE_FLAGS`): `spawn_agent`, `task_spawn`, and a terminal whose
+  (`slopty_proto::project::SAFE_FLAGS`): `SpawnAgent`, `TaskSpawn`, and a terminal whose
   command runs `claude`, directly, through a runtime (`node …/claude`) or anywhere in a shell
   line (`sh -c "cd x && claude …"`, after assignments or `exec`/`env`/`nohup`). The shell line is
   split as POSIX does, quotes and operators included (`slopty_agent::detect::shell_agent_args`).
@@ -332,8 +308,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   spoken from (`AgentNotReady`).
 - A report's hook ends its turn only once: at a `Stop` that a hook already held
   (`stop_hook_active`), reports wait for the next prompt or the inbox, so reports that keep
-  coming never keep an agent from resting. A task that asks in a loop reaches its parent once a
-  minute with its latest question, not once per report.
+  coming never keep an agent from resting.
 - The idempotency keys are scoped by caller and compared by a blake3 digest of the whole verb,
   so one caller cannot learn or replay another's answer under the same key. A start whose
   worker answered is replayed with that answer, and one that was lost in flight (interrupted,
@@ -347,20 +322,6 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   - Anything running as the person's user can reach the worker's socket and speak as a
     client, and can read the worker's key and so any session's token. Tailscale bounds who
     reaches a host; the uid is the boundary on it.
-
-**Claims are prefixes at component granularity, compared as APFS compares names.** ✅ 2026-09-30
-- A path is normalised to `/`-separated components relative to the repository root, and to
-  NFC. The empty path is the root and owns everything. `crates/a` overlaps `crates/a/src/x.rs`;
-  it does not overlap `crates/ab`.
-- Paths compare case-folded, as the default APFS volume does, so `Docs` and `docs` are one
-  claim.
-- A glob owns what comes before its first wildcard, so it never owns less than it matches.
-  Any false conflicts are the safe kind.
-- A task holds its paths until it is merged or failed. A claim that overlaps a live task's is
-  refused with `Conflict`, naming the task and the path. Overlap is checked within a project
-  only, since two projects are two repositories.
-- Symlinks are not resolved: the server sees no worker's disk. The worktree that phase 2
-  prepares can resolve them on the worker.
 
 **A caller's own task is the server's record first.** ✅ 2026-09-30
 - With no project or task named, a tool acts on the caller's own. That is the task whose live
@@ -380,15 +341,16 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - A worker that registers again is reconciled against its session list. A task whose terminal
   ended while the server was away is freed, instead of waiting for a close it will never hear.
 
-**`task_spawn` is the linkage; `spawn_agent` keeps its wire shape.** ✅ 2026-09-30
-- The server places the task's run and forwards an ordinary `SpawnAgent`, or `OpenTerminal`
+**`TaskSpawn` is the linkage; `SpawnAgent` keeps its wire shape.** ✅ 2026-09-30
+- The server chooses the task's worker and forwards an ordinary `SpawnAgent`, or `OpenTerminal`
   for a command. `SLOPTY_PROJECT` and `SLOPTY_TASK` go last in its env, so they win over the
   caller's. The new terminal is then assigned to the task.
 - The start is detached from its caller, so a caller that goes away mid-start still leaves its
   terminal on the task. A terminal that its task can no longer take (merged meanwhile, say) is
   closed, not left running outside any count.
-- The MCP `spawn_agent` tool's `project`, `task` and `parent` arguments route through it. When
-  no task is named, one is created and titled from the prompt's first line.
+- `task_start` (and `slopty task start`) is the one way work starts: it makes the task and
+  sends `TaskSpawn` in one call, or starts a task the project already has. A plain
+  `slopty agent spawn` starts an agent in no task.
 - The worker's own spawn adds `--mcp-config=<json>` naming `slopty mcp` on stdio. The flag is
   variadic in Claude Code, so the `=` form keeps the next argument from being taken as a second
   config.
@@ -398,9 +360,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - A task's agent starts with a conversation id the server chose (`--session-id`, unless its
   arguments pick one), kept in its assignment (`Assignment.conversation`), so the task knows
   its transcript before the first hook.
-- A task's agent is told its role (`--append-system-prompt`): its project and task, its paths,
-  whom it reports to and how (`task_report`), and the project's `agent_rules` from its metadata
-  when set. The orchestrator is told its own, with `orchestrator_rules`, as its first delivery
+- A task's agent is told its role (`--append-system-prompt`): its project and task, whom it
+  reports to and how (`task_report`), and the project's `agent_rules` from its metadata when
+  set. The orchestrator is told its own, with `orchestrator_rules`, as its first delivery
   (below), since the person started it and the server adds no flags to it. A rules text is at
   most 2 KiB.
 
@@ -430,7 +392,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   client must drop any `Project` event at or below it, since a replay after a lag would
   otherwise undo newer state.
 - Change verbs go through the hub's idempotency ledger (the last 1024 keys), so a retried
-  `task_spawn` or `slopty open` never starts a second terminal; the key is the caller's own
+  `TaskSpawn` or `slopty open` never starts a second terminal; the key is the caller's own
   (above).
 - The snapshot carries each task as its card (no brief, no natives; `task_get` has the rest)
   and comes in parts of at most 8 MiB, marked first and last; a project too large for one part
@@ -458,13 +420,13 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - `project_status` returns the latest 64 timeline entries unless given a cursor.
 
 **Reports go up through hooks.** ✅ 2026-09-30
-- A task's agent reports to the node that split its task off, its parent task's agent or the
-  project's orchestrator (`task_report`: checkpoint, needs input, stuck, done, with a note,
-  artifacts, a branch or a pull request). The report lands on the task's timeline at once.
-- Reports wait per node on the server (`slopty-server::deliver`) and go when their kind says:
-  a need at once; a block at once but at most once per task every 3 minutes; a finish once it
-  has settled for 2 minutes, a later report replacing it; a checkpoint with whatever goes next,
-  or after an hour. A batch is at most 9000 bytes, and each node has one batch outstanding.
+- A task's agent reports its work done to the project's orchestrator (`task_report`, with a
+  note, artifacts, a branch or a pull request). A report means done: a need or a block reaches
+  the orchestrator as the turn end it already hears ("A task's outcome reaches the
+  orchestrator without a report", below). The report lands on the task's timeline at once.
+- Reports wait per node on the server (`slopty-server::deliver`). A finish goes once it has
+  settled for 2 minutes, a later report of the task replacing it. A batch is at most 9000
+  bytes, and each node has one batch outstanding.
 - A batch goes to the worker of the node's live terminal (`FromServer::Deliver`), which keeps
   it in a file for that session beside its control socket. A node with no terminal waits,
   parked until its next terminal opens.
@@ -513,8 +475,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   keeps it while a session is in it (`repo::Identities`). The sessions in it are sent again
   once it is known. One found without a first commit is asked again after 30 s.
 - The server adds `repos` to each worker's facts: every key of every repository a shell there
-  is in, mapped to the clone's path. `"github.com/o/r" in repos` places a task beside a clone,
-  and `repos["github.com/o/r"]` says where. An orchestrator's role names its repository by that
+  is in, mapped to the clone's path, so `repos["github.com/o/r"]` says where a clone is. An orchestrator's role names its repository by that
   key and lists the workers with a clone and their paths.
 - The navigator's "By repository" lens is to group by the same keys, so one repository cloned
   on two workers is one group. The grouping is `slopty_ui::repo_groups::group`, a pure
@@ -535,9 +496,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   (`Project::repo_id`): when the project is created or its orchestrator named, and whenever
   that terminal's summary first names one. It is learned once, so the orchestrator walking into
   another checkout later does not move where tasks go.
-- `task_spawn` with an empty `cwd` adds a rule to the task's placement: either key of that
-  identity is in the worker's `repos`. The task then starts in the clone's root on the worker
-  chosen. When no worker fits, the refusal says the task needed a clone, and of what.
+- A start with an empty `cwd` prefers a worker whose `repos` hold either key of that identity,
+  and the task starts in the clone's root on the worker chosen.
 - An agent that writes starts with `--worktree slopty-<project>-<task>`, unless its arguments
   name a worktree already. Claude Code makes the worktree under the clone's `.claude/worktrees/`
   on branch `worktree-<name>`, and reopens it when the task is started again. Its status line
@@ -549,7 +509,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   already reaches the board through the status line. A verb of our own would duplicate all of
   that and still need the status line to report it.
 - The orchestrator's role says this, and that work needing no Apple platform belongs on a
-  Linux worker, said once as the project's needs (below).
+  Linux worker.
 - Tests: `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (hub, with a
   Linux clone found by its first commit only), and
   `a_task_with_no_directory_starts_in_a_worktree_of_the_project_s_clone` in
@@ -616,9 +576,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - `apps/slopty-cli/tests/projects.rs` runs it under a real server, ptyd and worker. It proves:
   - the env, the MCP config, the hooks, the tool defaulting to the agent's own project, and
     the tree with its natives and branch;
-  - labels and probes from the worker's settings reaching `slopty workers --json`, a CLI-made
-    command task placed by rules over them, ranked by `task suggest`, and run with its
-    project and task in its env;
+  - labels and probes from the worker's settings reaching `slopty workers --json`, and a
+    command task made and started in one `slopty task start` on the worker it names, run with
+    its project and task in its env;
   - an agent started with a stale `SLOPTY_TASK`, then assigned to another task, updating the
     task the server says it is on.
 - The model (`slopty-server::project`), the placement (`slopty-server::placement`) and the hub
@@ -626,11 +586,11 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   concurrent starts at the cap, a caller that leaves, a lost start adopted, the fleet bound,
   the permission flags on every path (shell lines included), the mode and command-line
   backstops, a shell an agent drove speaking as an agent, an agent's environment, typing into an
-  agent's TUI and naming a verifier refused, an agent's terminals under the fleet bound, an
-  assign under the project's limits, keyed starts replayed and scoped to their caller, reports
-  batched, paced and parked, and a restart's reconcile. They also cover an agent's scope: the
+  agent's TUI and naming a verifier refused, an agent's terminals under the fleet bound,
+  keyed starts replayed and scoped to their caller, reports batched, paced and parked, and a
+  restart's reconcile. They also cover an agent's scope: the
   terminals it may put to work, a project's allowance for its own agents only, the terminals
-  it opened kept across a restart, and a task's agent splitting work only under its own task.
+  it opened kept across a restart, and a task's agent refused every task but its own.
   The store tests replay a log past its snapshot, over a torn last line and a bad middle one.
 
 **The board says each thing once, in one neutral scale.** ✅ 2026-09-30 (design review of
@@ -658,8 +618,8 @@ MonoCode)
 **A task placed where there is no clone gets one, made by that worker's own git.** ✅ 2026-10-01
 - Before, a task with no `cwd` could start only on a worker that already had a clone, so an
   orchestrator could not send work to a fresh Linux box. Now, when no worker with a clone fits,
-  the task goes where its rules would put it without the clone rule, and that worker clones
-  the repository first. A pin to a worker with no clone does the same.
+  the task goes to the worker named or the one with most room, and that worker clones the
+  repository first.
 - The address comes from the orchestrator's clone: `RepoId::url`, the origin's URL as its
   config spells it, with an HTTP user and password and any other scheme's password left out
   (`repo::clone_url`). An SSH user such as `git@` stays, since it names the account the key
@@ -775,10 +735,12 @@ Not built in Phase 1:
 - What they agree on, and what Slopty does:
   - Rebase onto the target, run the verifier on the rebased commit, and fast-forward the
     target to that commit (`Verb::Rebase`, `Verb::Verify`, `Verb::FastForward`, served by
-    `slopty-worker::repo::verify`).
+    `slopty-worker::repo::verify`). Each rebased commit carries where it came from as
+    trailers (`Slopty-Task`, and `Slopty-Thread` when the thread is known).
   - Fast-forward only, so the target never holds a merge commit the verifier did not see.
-  - When the rebase leaves the commit that already passed, because the target had not moved,
-    the verifier is not run again. This is Mergify's direct merge.
+  - When the rebase leaves the tree that already passed, because the target had not moved,
+    the verifier is not run again, though the trailers changed the commits. This is
+    Mergify's direct merge.
   - When the target moves between the rebase and the fast-forward, the queue rebases the same
     work again, up to 3 tries, and then holds.
 - Moving the target is a compare and swap. `FastForward` names the commit the rebase went
@@ -834,9 +796,9 @@ Not built in Phase 1:
   when the task is judged again.
 - A terminal the person closes before the verifier ends counts as a failure with no exit code.
   There is no timeout, because the person can see the run and stop it.
-- A pass puts the task in the queue (`Task.merge = Merge::Queued { since_ms }`). The queue is
-  its tasks, done and queued, in the order they joined. Verifying comes before merging, since
-  an agent waits on each verdict and every pass feeds the queue.
+- A pass leaves the task done, ready to merge. The person's Merge puts it in the queue
+  (`Task.merge = Merge::Queued { since_ms }`). The queue is its tasks, done and queued, in the
+  order they joined. Verifying comes before merging, since an agent waits on each verdict.
 
 **A failure goes back to the agent that can fix it, as a report.** ✅ 2026-10-01
 - A failed verifier, a conflict, or anything else wrong with the work gives the task back:
@@ -849,17 +811,26 @@ Not built in Phase 1:
     next: fix, commit, and report done again.
   - A conflict names its paths.
   - A newer notice about the same task replaces an older one that has not been delivered yet.
-- The node above the task hears too, at once:
+- The orchestrator hears too, at once:
   - "given back" with the reason;
   - "merged into <target> at <short>", since what depends on the task can start then.
 - A job that stops for a reason that is not the task's holds the lane with that reason on the
   step, and the task keeps its place. Examples: the worker is away, or the person's checkout of
   the target has changes in the way. A worker registering again starts the lanes once more, and
   so does the next change that concerns the project.
-- Only the person asks for a merge outside a done report (`TaskMerge`, `slopty task merge`).
-  An agent's call is `Forbidden`. A task with a verifier is verified first, and one with none
-  joins the queue at once. `Verify`, `Rebase` and `FastForward` are the server's own verbs and
+- Only the person asks for a merge (`TaskMerge`, `slopty task merge`). An agent's call is
+  `Forbidden`, telling it to report its work done. A task whose verifier has not passed is
+  verified first, and one that passed or has none joins the queue at once. `Verify`, `Rebase` and `FastForward` are the server's own verbs and
   `Forbidden` to every caller.
+
+**At most three automatic give-backs.** ✅ 2026-10-04
+- A failed verifier or a rebase conflict goes back to the task's agent at most
+  `GIVE_BACKS_MAX` (3) times, counted together (`Task::give_backs`). The next failure is held
+  for the person: the agent is not told, and the task waits on the person until they say what
+  next. Their next word on the task starts the count again.
+- Why: an agent that cannot fix its work would otherwise loop on the plan, one verifier run
+  per try, with nobody looking.
+- Test: `a_task_given_back_three_times_waits_on_the_person` (`slopty-server::hub::queue`).
 
 **The queue survives a restart.** ✅ 2026-10-01
 - The lane keeps nothing the store does not. Each time, it reads its next job from the tasks
@@ -886,7 +857,7 @@ Not built in Phase 1:
   would show the same tasks again. So the lanes take the queue's order:
   - Ready to merge runs as the queue does, the task waiting longest first, and so the one
     merging. Each card says where it stands ("Next to merge", "2nd to merge"). A done task the
-    queue does not hold, because it has no verifier and the person has not asked, comes last.
+    queue does not hold yet, waiting for the person's Merge, comes last.
   - Verifying puts the run under way first, then the rest in the order the server takes them.
 - A task's verifier shows under it (`Board::verdict`, `ProjectView::check_block`):
   - its mark and word (Verifying, Passed, Failed);
@@ -942,109 +913,6 @@ Not built in Phase 1:
      merge`.
   5. The branch comes home again and is verified, and `main` fast-forwards to the resolved
      work with nothing pushed.
-
-**A reviewer reads the work with fresh eyes before it merges.** ✅ 2026-10-01
-- Research, read 2026-10-01:
-  - Claude Code's `/review` (now an alias of `/code-review`) and `/security-review`. The
-    security review reads the diff against the merge base with read-only tools and drops
-    findings under 8 of 10 confidence. Anthropic's code-review plugin runs parallel finder
-    agents, then a validating subagent per finding, and keeps those scored 80 or more.
-  - Anthropic's managed Code Review never blocks: it is always a neutral check, with findings
-    ranked Important, Nit and Pre-existing. Anthropic reports that pull requests with
-    substantive comments rose from 16% to 54%, and that under 1% of findings were marked
-    incorrect. claude-code-action cannot approve a pull request.
-  - A Claude Code subagent that is not a fork starts with a fresh context. The docs' reviewer
-    example has only `Read, Glob, Grep`.
-  - CodeRabbit blocks only when `request_changes_workflow` is turned on, which it is not by
-    default. The person can overrule it (`@coderabbitai resolve`, `approve`). Graphite's
-    reviewer comments on a stack and never merges.
-  - Cognition reports that Devin Review catches about 2 bugs per pull request, about 58% of
-    them severe, and finds that a reviewer works best with none of the author's context.
-  - Claude Code features that fit: `--session-id`, `--permission-mode`,
-    `--append-system-prompt` and `--disallowedTools` work in an interactive session.
-    `--json-schema` works only in print mode (`-p`).
-- What they agree on, and what Slopty does:
-  - The reviewer reads the diff against the base, with read-only tools, and has none of the
-    author's context.
-  - Each finding is structured (path, line, severity, blocking) and states what to do.
-  - Only the top severity blocks, and the person can overrule it, with the overruling
-    recorded.
-- The person turns it on per project with a brief: on the board (the header's checks toggle, or
-  "Verifier and review…" in the palette, opens a panel that sets the verifier and the review
-  together), or `slopty project create --review <brief>` and `project update --review` (an
-  empty brief turns it off). Only the person sets it, as with the verifier.
-- Once the verifier passes (at once with no verifier), the task stays Verifying and the lane's
-  next job is `Job::Review`:
-  1. `Verb::ReviewCheckout` makes a detached checkout of the verified commit of its own
-     (`~/slopty/verify/<project>-review-<task>`). Beside it is `.slopty-review.diff`, the
-     output of `git diff base..head`.
-  2. The server starts `claude` in it on the orchestrator's worker with `Verb::SpawnAgent`,
-     with `--disallowedTools Edit,Write,NotebookEdit`, its own `--session-id`, a role through
-     `--append-system-prompt` (the person's brief, the diff's path, how to answer), and
-     `SLOPTY_PROJECT` and `SLOPTY_TASK`.
-  3. The task's step is Review, running, naming the reviewer's terminal.
-- The reviewer is a real Claude Code session in a terminal, and the person can open it from
-  the board. The lane does not wait on it: the next task is verified alongside it.
-- It answers with the `review_report` tool (`Verb::TaskReview`). Only that session, proven by
-  its link, or the person may give the verdict; the task's own agent cannot. The run keeps at
-  most 8 findings, the blocking ones first, and counts the rest (`ReviewRun::more`).
-  - **Approved:** the task is Done and queued, and the reviewer's session closes.
-  - **Changes asked:** the task is given back as a failed verifier is. Its agent's next prompt
-    hook carries the findings, what blocks first ("What blocks the merge:", "Also noted:"). The
-    reviewer's session is kept to be read.
-  - **The person** (`slopty task review --approve | --changes --finding <path:line: words>`)
-    may answer at any time, over the reviewer or after it. An approval needs a verifier that
-    passed. It closes whichever reviewer session is open or kept.
-- A reviewer that ends with no verdict leaves the step failed, "The reviewer ended without a
-  verdict". The task waits for the person and is not read again on its own. `task merge`
-  starts the checks afresh. A reviewer whose terminal ended while the server was away leaves
-  the step failed the same way, "The reviewer ended while the server was away".
-- A new head clears the old word. Each report of done, `task merge` and the person's ask for a
-  merge drop the last verifier run, the last review and the step, and close a reviewer still
-  reading.
-- On the board, the review shows the way the verifier's run does (`Board::review`,
-  `ProjectView::check_block`):
-  - "Reviewing" while it reads;
-  - "Approved" or "Changes asked", the commits read, "by you" when it was the person, the
-    count of blocking findings, and how long it read;
-  - for each finding, its severity, its file and line in the mono face, and its first line.
-  - "Reviewer" opens the session (`ProjectEvent::Reviewer`).
-  - The project's line says "reviewed before it merges".
-  - An approval speaks while the task waits to merge. Changes asked speak until the work is
-    checked again or merged.
-- Rejected:
-  - `claude -p --json-schema` as a hidden process. It would give a typed verdict for free,
-    but the person could not watch the review or ask the reviewer anything. A session hidden
-    behind the TUI breaks the rule that the TUI stays the source of truth.
-  - Plan mode for the reviewer. `--disallowedTools` keeps the tools it may read with (Bash
-    for `git log`, the tests) and removes those that write. Plan mode would also stop it at
-    a plan prompt.
-  - Blocking by default, and no reviewer by default. A project opts in with a brief. Once on,
-    a blocker blocks, since that is what the person asked for, and the person can always
-    overrule it.
-  - Parallel finders with validators, as the code-review plugin has. They cost several
-    sessions of the plan per task. One reviewer with a brief, told to report only what it
-    would defend, is the measured start. Finders can come later, once misses show they are
-    needed.
-  - A reviewer subagent inside the task's own session. It would share the author's context,
-    which is what review exists to avoid, and its verdict could not be proven to be anyone's
-    but the author's.
-- Measured, with the stub claude on one worker: 0.47 to 0.88 s from the agent's spawn to the
-  reviewer's word (`docs/MEASUREMENTS.md`). That is the server's path and not the review itself.
-- Tests:
-  - `a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own` (store): the job
-    order, a reviewer holding only its own task, a restart, and the bound on findings.
-  - `a_reviewer_reads_the_verified_work_and_its_verdict_decides_the_merge` and
-    `a_reviewer_that_ends_without_a_verdict_leaves_it_to_the_person` (hub, scripted worker).
-  - `a_reviewer_reads_the_task_s_own_diff_in_a_checkout_of_its_own` (worker, real git).
-  - `a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it` (CLI): real
-    workers, git and the stub claude as the reviewer.
-  - `a_review_speaks_while_it_holds_and_says_what_it_found` (model) and
-    `a_reviewer_shows_on_its_task_and_opens_its_session` (workspace).
-  - The `project-*` goldens, which hold a task with changes asked.
-
-Known gaps:
-- The review's cost per task is not on the board yet. It comes with the tokens per agent.
 
 Tests:
 - `slopty-server::project::merge::tests`: the queue's order and its reload from the store's file
@@ -1107,16 +975,14 @@ Tests:
 ## The board acts, and a project can be let go (2026-10-01)
 
 **What moves a task on is a button on its row and its card.** ✅ 2026-10-01
-- Before: the board only showed. Merging a task no check queued, trying a failed step again,
-  or overruling a reviewer took `slopty task merge` or `slopty task review` in a shell.
+- Before: the board only showed. Merging a task no check queued, or trying a failed step
+  again, took `slopty task merge` in a shell.
 - Now `Board::actions` names what the person can do to each task, and the row and the card
-  draw it as small buttons. The palette and the keys `m`, `r` and `a` do the same to the task
+  draw it as small buttons. The palette and the keys `m` and `r` do the same to the task
   the board stands on:
-  - **Merge** a finished task the merge queue does not hold;
-  - **Retry** a failed home, verify, review or merge step. Both send `TaskMerge`, which runs
-    the verifier again on the branch;
-  - **Approve** over a reviewer that asked for changes or ended with nothing said, once the
-    verifier passed. This sends `TaskReview`, approving, as the person.
+  - **Merge** a finished task the merge queue does not hold yet, which is how work joins it;
+  - **Retry** a failed home, verify or merge step. Both send `TaskMerge`, which runs the
+    verifier again on the branch.
 - A task that only reads, or is merged, offers nothing. A failed clone is the worker's to make
   again, so it offers no Retry.
 - A button holds back the row's own click, so pressing one never opens the agent. A refusal is
@@ -1129,8 +995,8 @@ Tests:
 
 **A project is the person's to let go: `ProjectDelete`.** ✅ 2026-10-01
 - The verb removes the project, its tasks and its timeline from the store, with a `Forget`
-  record in the log. Its reviewers' sessions close. The agents' terminals stay, since they
-  may hold work the person still wants.
+  record in the log. The agents' terminals stay, since they may hold work the person still
+  wants.
 - An agent asking for it is refused with `Forbidden`. The verb is server-only: no worker
   carries it, and no MCP tool offers it.
 - `ProjectUpdate` has no removal. So the server sends every client a fresh projects
@@ -1140,7 +1006,7 @@ Tests:
   second within 5 s sends the verb. The CLI's `slopty project delete <name>` sends it at once,
   since a typed name is deliberate.
 - Tests: `the_person_lets_a_project_go_and_every_client_hears_it` (`slopty-server`), the
-  `project_delete` golden, and the CLI reviewer e2e ending in `slopty project delete`.
+  `project_delete` golden.
 
 **"Start a project here".** ✅ 2026-10-01
 - The palette's line makes the focused terminal the orchestrator of a new project, and its
@@ -1155,15 +1021,14 @@ Tests:
   - warn for *Needs you*, and error for *Failed*;
   - every other mark, state word and lane in the muted ink, with finished lanes a step
     brighter.
-- "Passed", "Approved" and "Changes asked" are words with a glyph, not colours. Red is kept for
-  a run that failed. A blocking finding is the default ink with a ✕.
+- "Passed" and "Failed" are words with a glyph, not colours. Red is kept for a run that
+  failed.
 - A row's or card's second line holds three facts at most, so two separators. They are what
   moves the task on, what its agent says, then where it runs. "Not placed" is gone, since it
   repeated on almost every row.
 - The header's line is a sentence ("slopty → main, verified by cargo gate"). The live count
   and the progress are readouts at the right.
 - The bar's hover says what each segment counts.
-- A finding wraps to two lines, so it is no longer cut to a few characters in a narrow lane.
 
 **Short lanes stack; the board never wraps a row of lanes under another.** ✅ 2026-10-03
 (design review `.research/design-review-2026-10-03.md` #1, #4)
@@ -1184,7 +1049,7 @@ Tests:
   then Working, then Up next, then Ready to merge over Merged. Every lane stands in the first
   screen.
 - A lane's height is counted, not measured: a card's lines from the parts it draws (title,
-  second line, place, pipeline, check, its tail or findings, a subtask's word, its buttons),
+  second line, place, pipeline, check, its tail, its buttons),
   and the heading as two (`ProjectView::card_lines`). Only the balance rests on the count, and
   a card drawn a line taller or shorter than counted moves nothing else.
 - A verdict names its verifier ("Verifier failed", "Verifier passed"), as the timeline does. A
@@ -1195,65 +1060,25 @@ Tests:
   `the_board_says_each_thing_once_and_fills_its_tile` unchanged. The `project-lanes` golden
   was retaken.
 
-## Where tasks run, and starts that wait for the person (2026-10-02)
+## Where tasks run (2026-10-02)
 
-**The board has a machines lens, and every placement keeps its reasons.** ✅ 2026-10-02
-- Before: the server ranked the workers at each spawn (`placement::rank`), then dropped the
-  ranking. The board showed which worker a task was on, but never why it went there, nor which
-  machines had room.
-- Now `assign` records `Assignment.placed` (`Placed { pinned, score, why }`), taken from the
-  chosen worker's `Suggestion`. `Suggestion::why` puts the ranking into words: "pinned" first,
-  then the scored rules by weight (`os == "macos" +10`), then the required rules that held. For
-  a worker that does not fit, it gives the failed rules' details. It keeps at most three parts
-  and `STATUS_MAX` bytes. Rules every worker passes (`online`, the live limits) are left out,
-  since naming them says nothing.
+**The board has a machines lens, and the person can move a task before it starts.** ✅
+2026-10-02, narrowed 2026-10-04
+- Before: the board showed which worker a task was on, but never which machines had room.
 - The machines lens (key `4`) asks for `WorkerFacts` every 5 s while it is shown, and stops
   when it is not. It groups the tasks by host: first the workers holding tasks, then the online
   ones, then the ones away, each by name. A host's heading gives its kind ("macOS, 12 cores,
-  64 GB"), its load and its live agents. Each task's row says why it went there. The tasks that
-  have not started sit under "Not started".
+  64 GB"), its load and its live agents. The tasks that have not started sit under "Not
+  started".
 - **Run on…** (key `o`) opens a picker on a task that has not started. It lists "Anywhere" and
-  the workers in the server's own ranking order (`PlacementSuggest`), each with its `why`. A
-  pick sends `TaskUpdate { run_on }` (`RunOn::Worker` or `RunOn::Anywhere`). This changes only
-  `placement.pin`, so the task's other rules still hold. `TaskCard.pin` shows the pin to the
-  board. The CLI's `slopty task update --run-on <worker|anywhere>` does the same.
-- Tests: `a_ranking_says_what_decides_it` (`slopty-proto`),
-  `a_task_runs_where_the_person_says_and_keeps_why_it_went_there` (`slopty-server`), and
+  every worker by name with its system, the agents it runs and whether it is online. A pick
+  sends `TaskUpdate { run_on }` (`RunOn::Worker` or `RunOn::Anywhere`), which sets or clears
+  the task's pin. `TaskCard.pin` shows the pin to the board. The CLI's `slopty task update
+  --run-on <worker|anywhere>` does the same.
+- Tests: `a_task_runs_where_the_person_says_and_keeps_why_it_went_there` (`slopty-server`) and
   `the_machines_lens_shows_where_everything_runs_and_where_a_task_will` (`slopty-ui::workspace`).
 
-**A project can ask before each task starts, and the person starts them.** ✅ 2026-10-02
-- `Project.ask_to_start` is a per-project autonomy setting, and only the person sets it. An
-  agent's `ProjectSet` that names it is refused with `Forbidden`, so an orchestrator cannot
-  grant itself autonomy.
-- Once it is set, an agent's `task_spawn` only proposes. The server checks the launch exactly
-  as it would for a start (the loosening and the placement rules). Then it stores
-  `Task.proposal`: the launch, plus `Proposed { since_ms, runs, on, why }`, giving the worker
-  the ranking would choose now and why, or "no worker fits now: …". It logs
-  `Moment::Proposed { on }`. No worker is asked and nothing is reserved, so a proposal costs
-  nothing until it starts.
-- `Verb::TaskStart { project, task, pin }` runs the stored launch through the same
-  `start_task_once` as a direct spawn, so idempotency and reservation are shared. The person's
-  pin wins over the agent's. `assign` clears the proposal. The verb is the person's alone: an
-  agent is refused, no worker carries it, and no MCP tool offers it. The CLI has
-  `slopty task start` (`--on <worker>` to pin), and `project create --ask-to-start` /
-  `project update --ask-to-start <bool>`.
-- The board draws the proposals as a plan band above the lens. Each row reads "Would start on
-  studio: os == "macos"" and has **Start** (key `s`) and **Run on…**; a pick from the picker
-  starts the task there. **Start all** sends one `TaskStart` per proposal. The orchestrator's
-  row says "Waits on you to start N tasks". The header's hand toggle sets `ask_to_start`.
-- The estimate on the band comes from this project's own timeline. It is the median time from
-  a spawned assignment to Verifying or Done, over finished tasks of the same kind if there are
-  any, otherwise over all of them. It says what it is drawn from ("about 20 min each, from 2
-  finished of the kind"). The server keeps no token count, so the estimate is in time, not in
-  money. Before any task has finished, the band says there is nothing to estimate from yet.
-- "Start a project here" creates the project with `ask_to_start` on. Direct spawns stay the
-  default for the CLI and the MCP `project_create`, where a script expects work to start.
-- Tests: `proposed_start` (goldens `task_proposed`, `task_proposed_card` and `task_start`),
-  `an_agent_s_start_waits_for_the_person_when_they_ask_to_start_tasks` (`slopty-server`),
-  `a_plan_is_estimated_from_the_tasks_that_finished` (`slopty-ui::project`), and
-  `a_plan_waits_for_the_person_who_starts_one_or_all` (`slopty-ui::workspace`).
-
-## What changed while you were away, and what it cost (2026-10-02)
+## What changed while you were away, and the time it took (2026-10-02)
 
 **A board opens onto what changed since this client last looked.** ✅ 2026-10-02
 - Before: coming back to a project meant reading the timeline from the top and guessing where
@@ -1265,9 +1090,8 @@ Tests:
   launches. It is per device, as the plan asks: a look on the iPad does not empty the Mac's
   recap.
 - Opening the board compares the cursor with the timeline. `Recap::of` keeps the kinds that
-  move the person: changes asked, a verifier or a step that failed, a stuck report, an agent
-  that ended before its work was done, a proposed start, and then merged, verified, started
-  and created. Each kind is one line naming its tasks in the order they last moved
+  move the person: a verifier, checks or a step that failed, a conflict, an agent that ended
+  before its work was done, and then merged, verified, started and created. Each kind is one line naming its tasks in the order they last moved
   ("Verifier failed on #5 and #6", "Merged #4 Write the decision"), and a line counts past
   three. What needs the person comes first, marked in the warning tone. Project-wide entries
   and notes are left to the timeline.
@@ -1284,7 +1108,7 @@ Tests:
   `a_board_opens_onto_what_changed_since_you_last_looked` (`slopty-ui::workspace`, over
   `ServerCaller::queued`).
 
-**Time at work per node and subtree, the orchestrator's share apart.** ✅ 2026-10-02
+**Time at work per task, the orchestrator's share apart.** ✅ 2026-10-02
 - Before: the board had no notion of what a task cost. Wall time from the timeline counted
   every wait at the prompt or on the person as work.
 - The server already follows every agent's status for its task. It now also keeps `Spent {
@@ -1301,30 +1125,28 @@ Tests:
   under way, since the server cannot know the gap was work. A closed terminal ends its
   stretch.
 - `TaskCard.spent` carries it to the board. A row shows its time beside its state, from a
-  minute, its subtree's when it split work off ("worked 42m, 12m itself"). The header shows
-  the project's total, with the tasks' and the orchestrator's shares on hover.
-- The plan band's estimate now uses the finished tasks' time at work instead of the
-  timeline's wall time, so it no longer depends on what the timeline still holds: "about 20
-  min of work each".
-- **Cost, context and quota are the agents' threads' word.** `slopty_proto::thread::Meters`
-  carries a session's cost, its context and the plan's rate windows from the agent's own
-  status line, so no credential is read. The workspace takes them per session
-  (`WorkspaceView::thread_meters`), and the board rolls them up the same way:
-  - cost per node and subtree, and the orchestrator's apart;
+  minute. The header shows the project's total, with the tasks' and the orchestrator's shares
+  on hover.
+- **Context and quota are the agents' threads' word.** `slopty_proto::thread::Meters`
+  carries a session's context and the plan's rate windows from the agent's own status line, so
+  no credential is read. The workspace takes them per session
+  (`WorkspaceView::thread_meters`), and the board shows:
   - the context as a figure beside the time, hidden under 20 % and warning from 80 %;
   - each rate window in the header at the fullest any agent reports, warning from 80 %.
+- Dollar cost was cut on 2026-10-04: Slopty touches no credential, so it cannot know how a
+  run is billed.
 - A node whose thread this client has not heard shows its time alone. Tokens beyond the
   context are not summed, since the meters carry the context's size, not a running count.
 - Tests: `spent_counts_the_stretches_at_work` (`slopty-proto`),
   `time_at_work_is_counted_per_task_and_apart_for_the_orchestrator` (`slopty-server`),
-  `time_and_cost_roll_up_the_tree_with_the_orchestrator_apart` (`slopty-ui::project`) and
+  `time_adds_up_with_the_orchestrator_apart` (`slopty-ui::project`) and
   `the_board_says_what_its_agents_spent` (`slopty-ui::workspace`). The goldens
   `project_snapshot`, `project_reply_status`, `task_merged_card` and others carry the new
   fields.
 
 **The board's next steps are the person's words to the task's agent.** ✅ 2026-10-02
-- Before: when a task's verifier failed, its review asked for changes or its rebase
-  conflicted, the server told its agent once. If the agent stopped short, the person had to
+- Before: when a task's verifier failed, its pull request's review asked for changes or
+  its rebase conflicted, the server told its agent once. If the agent stopped short, the person had to
   open its TUI and type. Retry checked the same work again, which fails the same way.
 - `Verb::TaskTell { project, task, text }` carries the person's own words to a task's agent,
   through the same delivery the reports take: the worker hands them over through the agent's
@@ -1337,16 +1159,15 @@ Tests:
   timeline keeps `Moment::Told`.
 - `TaskTell` is the person's alone, since an agent reports upward with `task_report`.
   It needs an agent running on the task, so a word is never parked for an agent that may
-  never come. The CLI has `slopty task tell <words>`. No MCP tool offers it. (Narrowed on
-  2026-10-03: an agent may tell a task under it, "An agent tells the tasks under it", below.)
+  never come. The CLI has `slopty task tell <words>`. (Narrowed on 2026-10-03: the
+  orchestrator may tell its tasks too, "The orchestrator tells its tasks", below.)
 - While a task's agent runs, `Board::actions` puts its next step first on its row and card,
   and the palette offers each one for the task the board stands on:
   - **Fix CI** while its verifier's failure still speaks;
-  - **Address comments** while its review, or its pull request's review, asks for changes;
+  - **Address comments** while its pull request's review asks for changes;
   - **Resolve conflicts** after a rebase onto the target conflicted.
   `Board::told` writes the words from what the board knows: the verifier's command, commit
-  and first line; the review's summary and up to five findings with their places; the pull
-  request; and git's word on the conflict. Each ends with what to do next. Retry for a failed
+  and first line; the pull request; and git's word on the conflict. Each ends with what to do next. Retry for a failed
   verifier or rebase waits until no agent runs, since checking unchanged work fails the same
   way.
 - A conflict is now its own step, `StepKind::Rebase`, failed. Before, it was a failed merge
@@ -1387,12 +1208,12 @@ Tests:
 - **The pipeline row.** Once a task's work is on its way (verifying, done, judged, queued or
   with a pull request), its board card draws one row of quiet chips:
   - its branch;
-  - what the verifier and the reviewer said;
+  - what the verifier said;
   - its place in the queue;
   - "PR #n", its checks in words ("1 of 6 checks fail", "2 of 6 checks running", "checks
     pass") and "Changes requested", each a chip of its own so a narrow lane wraps them rather
     than cutting one long chip;
-  - the to-dos still open.
+  - the to-dos still open, shown so the person sees them before a merge; they hold nothing.
 
   The chips use neutral text. A stage that holds the merge back is drawn in the stronger ink,
   never in red, because a red mark belongs to a run that failed and none of these is an alarm
@@ -1408,17 +1229,13 @@ Tests:
 - While agents work, the tree and the board move their time on every 10 s, so a readout
   that crosses a minute is never more than a moment late. Before, it moved once a minute and
   could be a minute behind.
-- **To-dos block merge.** Claude Code's own task list is the agent's word for what is left.
-  The merge queue gives back work whose list still has items open, naming up to five of them,
-  before it rebases anything. The board hides Merge while they are open and shows "N to-dos
-  open" on the row.
 - Tests:
   - `pull_request_checks` (goldens `pull_checks`, `outcome_checks`, `moment_checks`);
   - `the_forge_s_command_is_run_in_the_checkout` and the JSON readers
     (`slopty-worker::repo::checks`, with `#!/bin/sh` stand-ins for `gh` and `glab`);
-  - `a_pull_request_s_checks_are_read_where_its_work_is` and
-    `open_to_dos_keep_work_from_merging` (`slopty-server`, through a worker's link);
-  - `a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge` (`slopty-ui::project`);
+  - `a_pull_request_s_checks_are_read_where_its_work_is` (`slopty-server`, through a worker's
+    link);
+  - `a_task_s_pipeline_says_each_stage_and_its_open_to_dos` (`slopty-ui::project`);
   - `a_card_draws_its_pipeline_once_its_work_is_on_its_way` (`slopty-ui::workspace`).
 
 ## The board talks to the orchestrator (2026-10-02)
@@ -1448,64 +1265,22 @@ Tests:
   with the orchestrator's node) and `the_board_talks_to_its_orchestrator`
   (`slopty-ui::workspace`).
 
-## Where the work goes, by what it needs (2026-10-02)
-
-**A project says what each kind of its work needs of a machine.** ✅ 2026-10-02
-- Before: every task carried its own placement rules, so an orchestrator had to repeat "this
-  needs a Mac" on each task it made. The role told it to add `os == "linux"` by hand, and the
-  board could only show the raw rule as the reason a task went where it did.
-- Now `Project.needs` holds `Need { name, paths, require, prefer }`, said with
-  `Verb::ProjectNeeds` (MCP `project_needs`, `slopty project need`). A task owning one of a
-  need's paths, a path within one or one that holds one, has that need; a need with no paths is
-  every task's. Its rules join the task's own wherever the task is ranked: a spawn, a proposal,
-  "Run on…" and `placement_suggest`. A rule the task holds already is not added twice.
-- The rules stay CEL over the workers' open facts, so a need is as open as a rule: "Apple
-  work" over the app's paths requires `os == "macos"`, "Linux first" over everything prefers
-  `os == "linux"`, "GPU work" requires `has(probes.cuda)`. The name is free text the person or
-  the orchestrator chooses; nothing in Slopty knows a list of them.
-- Explainable: each `Reason` a need brought carries the need's name (`Reason.need`), and
-  `Suggestion::why` says the name in the rule's place: the card's place reads "Apple work", a
-  ranking "Linux first +20", and a worker kept out "fails Apple work (os == "macos")". The rule
-  itself stays in the reason for anyone who asks.
-- Only the person or the orchestrator says the needs; a task's agent is refused. A rule that
-  does not compile is refused naming its need, and so are the needs together when they would
-  hold more rules than one placement may (32 of each kind), since a task with every need has
-  all of them. A task whose own rules and its needs' come to more is refused naming the needs.
-  A change is a timeline entry (`Moment::Needs`), since it moves where work goes from then on.
-- The machines lens lists the needs under "What the work needs", each with the paths it covers
-  and what it asks. Each row of the tree, and each card, ends in a place chip: the worker and
-  its system ("studio · macOS"), how it is there (runs, ran, pinned, would start), its worktree,
-  branch and reason in the hint. A click on a task not started yet opens "Run on…"; on any
-  other it shows the machines lens. The chips sit at the end of the line so they read as one
-  column down the tree.
-- Rejected: a fixed list of platforms or capabilities on a task. It could not say "a Mac on AC
-  power" or "the box with the GPU", which open facts and CEL already do.
-- Tests: `a_need_follows_the_paths_a_task_owns` and `a_ranking_says_what_decides_it`
-  (`slopty-proto`), `work_goes_where_its_needs_say_and_the_board_says_which` (`slopty-server`),
-  `a_need_and_the_reasons_it_brings_say_its_name` (`slopty-tools`),
-  `a_need_says_what_it_covers_and_what_it_asks` and
-  `a_node_says_where_it_runs_and_why_and_whether_it_can_move` (`slopty-ui::project`),
-  `every_node_says_where_it_runs_and_a_waiting_one_moves_from_there` (`slopty-ui::workspace`),
-  and `a_live_task_shows_its_checks_its_time_and_its_next_steps` (app e2e, where the project
-  needs a Mac for its Apple work and the card says so).
+## Agents beyond Claude Code, and projects by their members (2026-10-02)
 
 **An agent goes only where it is installed, pinned or not.** ✅ 2026-10-02
 - A start that runs an agent (Claude Code, Codex, or a command whose program is one of them)
-  is ranked with a built-in check, `agent`: the worker's `agents` facts must list it. A pin
-  does not get round it, unlike a rule: opening a program that is not there only fails later,
-  in a terminal nobody is watching.
+  is checked against the worker: its `agents` facts must list it. A pin does not get round it:
+  opening a program that is not there only fails later, in a terminal nobody is watching.
 - The agents a worker registered with (`WorkerCaps.agents`) count as installed before its own
   facts arrive, so a worker that just started takes Claude Code tasks at once. A worker that
   has not reported its facts yet is refused for any other agent with "has not said yet whether
   codex is installed", which an orchestrator can retry; one that has reported says "codex is not
   installed".
-- A held `agent` check is left out of `why`, like `online`, since every worker that fits shares
-  it.
 - Tests: `an_agent_goes_only_where_it_is_installed_even_pinned` (`slopty-server::placement`) and
   `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`).
 
 **Codex runs a task, with Slopty's tools.** ✅ 2026-10-02
-- `Runner::Codex { prompt, args }` (MCP `task_spawn` with `agent: "codex"`, `slopty task spawn
+- `Runner::Codex { prompt, args }` (`task_start` with `agent: "codex"`, `slopty task start
   --agent codex`) opens the person's own `codex`, unmodified. The server gives it its role through
   Codex's own `developer_instructions` config (`-c developer_instructions="…"`), the place Codex
   documents for instructions a tool adds, rather than inside the first prompt. The brief stays
@@ -1531,8 +1306,8 @@ Tests:
   `codex_starts_with_its_role_and_its_brief` (`slopty-server::hub::codex`),
   `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`),
   `codex_opened_on_a_worker_with_a_server_gets_slopty_s_tools` (`slopty-worker`, the stub
-  standing in for `codex`), and the `task_spawn` and `project_needs` cases of
-  `the_project_tools_default_to_the_caller_s_own_project_and_task` (`slopty-tools`).
+  standing in for `codex`), and the codex case of
+  `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` (`slopty-tools`).
 
 **A project is a name and its members; orchestration is a part it may have.** ✅ 2026-10-03
 - The person works on a few projects spread over many machines and wants Slopty organised by
@@ -1544,8 +1319,7 @@ Tests:
   an open map of fact key to the value a tile must have, or for a path the directory it must be
   in (`{repo: github.com/o/api}`, `{machine: studio, cwd: ~/notes}`). So one project may hold
   two repositories, or one folder name on two machines. Matchers are evaluated on the client
-  over the facts it already assembles, so no expression language runs off the server (CEL stays
-  the placement language).
+  over the facts it already assembles, so no expression language runs anywhere.
 - `ProjectCreate` takes the members and `ProjectSet` replaces them whole (absent leaves them).
   The server trims each value and refuses an empty matcher (it would match nothing), one named
   twice, more than `Project::MEMBERS_MAX` (32) or a matcher past `Project::member_fits` (8
@@ -1568,62 +1342,58 @@ Tests:
   `slopty-server` `a_project_without_an_orchestrator_is_kept_and_listed`,
   `members_name_clones_and_folders`.
 
-## What a task's agent came to, finished tasks settle, and agents speak down the tree (2026-10-03)
+## What a task's agent came to, finished tasks settle, and the orchestrator speaks to its tasks (2026-10-03)
 
 From the T3 Code orchestrator study (`.research/t3code-orchestrator-2026-10-03.md`, R1 and
 R2).
 
-**A task's outcome reaches the node above it without a report.** ✅ 2026-10-03
-- Before: the node that split a task off heard of it only through the agent's own
-  `task_report` or the merge queue's notices. Agents often end a turn with the answer in their
-  last words and no report, exit, or stop on a permission, and then the orchestrator idled
-  with nothing delivered until it polled `project_status`.
+**A task's outcome reaches the orchestrator without a report.** ✅ 2026-10-03
+- Before: the orchestrator heard of a task only through the agent's own `task_report` or the
+  merge queue's notices. Agents often end a turn with the answer in their last words and no
+  report, exit, or stop on a permission, and then the orchestrator idled with nothing
+  delivered until it polled `project_status`.
 - Prior art: T3 Code publishes a child's last assistant message, or its error, to the parent
-  when the child's run ends, and holds the task open while the child's own children work.
-  Claude Code's agent teams tell the lead when a teammate stops, with its final answer. T3's
-  open #13343 adds telling the parent when a child waits for input.
+  when the child's run ends. Claude Code's agent teams tell the lead when a teammate stops,
+  with its final answer. T3's open #13343 adds telling the parent when a child waits for input.
 - The server follows each task's agent through its turns (`project::turns`), from the same
-  statuses the task's state follows, and the node above hears, as a server notice:
-  - **it ended its turn without a word of its own.** A need, a block or a finish reported
-    during the turn is its word; a checkpoint is progress and is not. The rest is held while
-    any task under it still works, since the result is not in yet, and heard once they rest,
-    the deepest task first. It is delivered as a finish is, after `DONE_SETTLE`, with the
-    agent's last line from its thread's row (`ThreadRow::last_line`, at most 2 KiB), read
-    again until it goes, since the row with the final line can come after the status that
-    ended the turn;
+  statuses the task's state follows, and the orchestrator hears, as a server notice:
+  - **it ended its turn without a report.** A report during the turn is its word. The rest is
+    delivered as a finish is, after `DONE_SETTLE`, with the agent's last line from its thread's
+    row (`ThreadRow::last_line`, at most 2 KiB), read again until it goes, since the row with
+    the final line can come after the status that ended the turn;
   - **it waits on the person**, naming the open request's title, or the permission or
     question when its thread names none. Heard once per wait, after it has lasted
-    `WAIT_SETTLE` (30 s), so a permission the person answers at once wakes nobody, and paced as
-    a need. The words say only the person answers it: the orchestrator is told so it stops
-    waiting blindly, and nothing ever answers for the person;
+    `WAIT_SETTLE` (30 s), so a permission the person answers at once wakes nobody. The words
+    say only the person answers it: the orchestrator is told so it stops waiting blindly, and
+    nothing ever answers for the person;
   - **it exited, or its terminal closed**, while its task still followed it. Heard once, at
-    once, paced as a block, with its last words.
+    once, with its last words.
 - When the agent goes back to work, what was waiting to be said of it is taken back. The
   agent's own report replaces it, and its next outcome does too. One that says again the same
   words of the same kind as the last sent for that task is dropped as it falls due, so an
   agent that flips between idle and working says nothing new. A task verifying, done, merged
   or given up is the merge queue's or the person's to speak of, and is not heard of here.
-- It goes through the reports' own delivery: hooks and the inbox socket, held while the
-  project is at its budget, and a `Delivered` moment on the timeline once handed over. Nothing
-  is typed, and only published doors (hook statuses and the thread table the adapters build)
-  are read. No wire change: the full final message (`ThreadRow::last_said`) waits for a proto
-  change that every adapter fills.
-- Kept in memory only. After a restart, an agent's next status starts its turn afresh, and a
-  terminal gone meanwhile is heard as an exit.
-- Tests: `the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing`,
-  `a_rest_is_heard_once_the_tasks_under_it_rest` (`slopty-server::project`),
-  `the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own` (`slopty-server::deliver`) and
-  `a_task_s_outcome_reaches_the_orchestrator_without_a_report` (`slopty-server`, through a
-  worker's link on a paused clock).
+- It goes through the reports' own delivery: hooks and the inbox socket, and a `Delivered`
+  moment on the timeline once handed over. Nothing is typed, and only published doors (hook
+  statuses and the thread table the adapters build) are read. The full final message
+  (`ThreadRow::last_said`) waits for a proto change that every adapter fills.
+- Kept in memory, but a server that comes back takes up each turn its store says was under
+  way, so a turn that ended while it was away is still heard, and a terminal gone meanwhile is
+  heard as an exit.
+- Tests: `the_orchestrator_hears_what_a_task_s_agent_came_to_when_it_said_nothing` and
+  `a_turn_that_ended_while_the_server_was_away_is_still_heard` (`slopty-server::project`),
+  `the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own` (`slopty-server::deliver`),
+  `a_task_s_outcome_reaches_the_orchestrator_without_a_report` and
+  `a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator` (`slopty-server`,
+  through a worker's link on a paused clock).
 
 **A finished task's agent stops counting, and is closed once it rests.** ✅ 2026-10-03
-- Before: merging closed only the verifier's and the reviewer's terminals. A merged task's
-  agent idled at its prompt, counted against the per-worker and per-project caps (4 and 12 by
-  default), and a long project filled its caps with finished agents until every start was
-  refused. T3 Code's settlement detaches idle sessions and closes terminals idle at a prompt,
+- Before: merging closed only the verifier's terminal. A merged task's agent idled at its
+  prompt, counted against the live caps, and a long project filled them with finished agents
+  until every start was refused. T3 Code's settlement detaches idle sessions and closes terminals idle at a prompt,
   and its #15146 shows the cost of never freeing what finished work holds.
 - A task merged or given up (`Failed`, whoever said it) whose agent is not at work counts
-  against no limit: not the project's, not the person's per worker, not the fleet's. Its
+  against the fleet's live agents. Its
   terminal stays open and its assignment stays, so the board still links it and the person can
   look back or carry on. An agent that works again counts again, so an agent that gives up its
   own task and goes on working frees nothing.
@@ -1639,41 +1409,38 @@ R2).
 - Tests: `a_finished_task_s_agent_counts_only_while_it_works` (`slopty-server::project`) and
   `a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests` (`slopty-server`).
 
-**An agent tells the tasks under it.** ✅ 2026-10-03 (reverses part of 2026-10-02)
-- Before: `TaskTell` was the person's alone. An orchestrator could redirect a child only by
-  starting it again, so it could not carry a review's findings to the same agent, or say
-  "also cover X" while the child worked.
+**The orchestrator tells its tasks.** ✅ 2026-10-03 (reverses part of 2026-10-02), narrowed
+2026-10-04
+- Before: `TaskTell` was the person's alone. An orchestrator could redirect a task only by
+  starting it again, so it could not carry what it found to the same agent, or say "also
+  cover X" while the task worked.
 - Prior art: T3 Code's `t3_thread_send` (auto, queue, steer or restart, its provenance kept
   as the agent's and the MCP's), Codex's `followup` ("trigger a turn if it is idle … deliver
   at message boundaries"), Amp's Agent to Agent, Vibe Kanban's `run_session_prompt` and
   Nimbalyst's `send_prompt` all let an orchestrator speak to its children.
-- Now an agent may `TaskTell` a task under it: the orchestrator any task of its own project,
-  a task's agent the tasks split from its own (`agent_scope`). It never tells the node above
-  it (that is `task_report`), its own task, a task of another project or subtree, and an
-  agent's surface that proves no terminal tells nothing. The MCP tool is `task_tell`; the
-  CLI's `slopty task tell` does the same inside an agent's session.
+- Now the orchestrator may `TaskTell` any task of its own project (`agent_scope`). A task's
+  agent tells none (that is `task_report`'s direction), nor does an agent of another project,
+  and an agent's surface that proves no terminal tells nothing. The MCP tool is `task_tell`;
+  the CLI's `slopty task tell` does the same inside the orchestrator's session.
 - Why it is safe:
   - it goes through the reports' delivery, the agent's own hooks and inbox, so nothing is
     typed into a terminal, and the inbox post keeps to `may_type`, so it never lands on the
     person's draft or prompt;
   - the agent reads it under "Your orchestrator says (an agent, not the person; it answers
-    nothing the person is asked):", or the same for the agent of the task above, never under
-    the person's tag (`deliver::By::Above`);
+    nothing the person is asked):", never under the person's tag;
   - it never answers for the person: a task waiting on the person (a permission, a question)
     is refused until it moves on, and the words say they answer nothing the person was asked;
-  - the person's words keep priority: they come first in a batch, an agent's tell never
-    replaces them, and a project held at its budget holds an agent's tell as it holds reports
-    while the person's words still go;
-  - it is paced as a report: one waits per node, the latest replacing the one still unread,
-    so a loop of tells costs the child one turn at a time.
-- The timeline says who told: a note "The orchestrator told it: …" or "Task n's agent told
-  it: …", apart from the person's `Told`. A `Told { by }` would need a wire change, so the
-  note stands until one lands with other proto work.
-- The roles tell both: the orchestrator's that `task_tell` says more to a task's agent, a
-  task's agent's that it can tell the subtasks it split off.
-- Tests: `an_agent_tells_only_a_task_under_it_that_does_not_wait_on_the_person`
-  (`slopty-server::project`), `an_agent_above_speaks_after_the_person_and_never_in_their_place`
-  (`slopty-server::deliver`), `an_agent_tells_the_tasks_under_it_in_its_own_words`
+  - the person's words keep priority: they come first in a batch, and the orchestrator's tell
+    never replaces them;
+  - it is paced as a report: one waits per task, the latest replacing the one still unread,
+    so a loop of tells costs the task one turn at a time.
+- The timeline says who told: a note "The orchestrator told it: …", apart from the person's
+  `Told`. A `Told { by }` would need a wire change, so the note stands until one lands with
+  other proto work.
+- The orchestrator's role says that `task_tell` says more to a task's agent.
+- Tests: `the_orchestrator_tells_only_a_task_that_does_not_wait_on_the_person`
+  (`slopty-server::project`), `the_orchestrator_speaks_after_the_person_and_never_in_their_place`
+  (`slopty-server::deliver`), `only_the_orchestrator_tells_a_task_in_its_own_words`
   (`slopty-server`, through a worker's link) and `task_tell_names_its_task_and_carries_the_words`
   (`slopty-tools`).
 
@@ -1687,7 +1454,7 @@ R2).
 - `task_wait { tasks, until: any | all, since, timeout_ms }` (MCP, and `slopty task wait`) is
   built in `slopty-tools` over the `ProjectStatus` long wait, so it costs a read per change of
   the project, never a poll, and needs no new verb. News of a task is a report, a move of its
-  state, its terminal gone, its verifier, review or checks, or a step that ended. A delivery,
+  state, its terminal gone, its verifier or checks, or a step that ended. A delivery,
   a note or a tell is not.
 - A turn that ended with no report is news because the server now writes it on the timeline,
   as the task's move from running to waiting, once per such turn (`Projects::rested`, from the
@@ -1749,12 +1516,12 @@ adapter's tool wiring follows in the agents lane)
   but never run a task with Slopty's tools, a role and a count. The whole project model knew
   an agent only by the terminal it ran in.
 - Prior art: T3 Code's `delegate_task`, which targets any provider instance and model.
-- `Runner::Agent { agent, prompt, model, args }` names any agent by the thread model's id. MCP
-  `task_spawn` and `slopty task spawn --agent <name>` take `claude` (the default) and `codex`,
+- `Runner::Agent { agent, prompt, model, args }` names any agent by the thread model's id.
+  `task_start` and `slopty task start --agent <name>` take `claude` (the default) and `codex`,
   which keep their own runners in a terminal, and `pi`, `acp:<name>` or an ACP agent's bare
   registry name, which become `Runner::Agent`. `model` goes as Claude Code's and Codex's
   `--model`, and as the thread's model for the rest.
-- Placement holds it to a worker that has the agent installed, as it does Claude Code and
+- The start holds it to a worker that has the agent installed, as it does Claude Code and
   Codex: built-in agents under the `agents` facts, ACP agents under `acp` by the registry's
   name. The server cannot judge pi's or an ACP agent's flags, so without the person's
   `permission_flags` such an agent takes no arguments, and the first is named in the refusal.
@@ -1792,8 +1559,8 @@ adapter's tool wiring follows in the agents lane)
 
 **A step a restart left under way is taken up again.** ✅ 2026-10-04
 - Before: a step running when the server stopped was marked failed as the store loaded. A
-  verifier still running on its worker was then run again from the start. A reviewer at work
-  left its task for the person, and a branch on its way home or a clone stopped half done.
+  verifier still running on its worker was then run again from the start, and a branch on its
+  way home or a clone stopped half done.
 - On load the step stays running, its phase "Taken up again once its worker is back", with
   when it began and the commits it works on. The step as it stood is kept in memory
   (`Projects::restarted`). When its worker registers, the server takes it up
@@ -1806,22 +1573,14 @@ adapter's tool wiring follows in the agents lane)
   - **Verify:** a verifier whose terminal still runs is followed to its verdict, which is
     judged like any other. It is not run a second time, and the timeline has one start. One
     whose terminal is gone is run again by the lane, which closes the old terminal first.
-  - **Review:** a reviewer whose terminal still runs is at work again on the commits it was
-    reading, and its verdict counts. One whose terminal ended leaves the step failed and the
-    task to the person, as a reviewer ending without a verdict does. One still waiting to
-    start is started by the lane.
   - **Merge and rebase:** the lane runs them again from the queue. They start from the
     target as it is now, as after any failure, so repeating them does no harm.
-- `TaskStep.commits` (head and base) is what makes a verifier or reviewer resumable. It is
+- `TaskStep.commits` (head and base) is what makes a verifier resumable. It is
   stored as soon as it arrives, although the progress between a step's start and end is not.
-- Rejected: **failing every step on load.** That runs a long verifier twice and throws away a
-  review the reviewer is still writing.
+- Rejected: **failing every step on load.** That runs a long verifier twice.
 - Tests: `a_step_is_shown_as_it_goes_and_is_taken_up_after_a_restart`,
-  `the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart`,
-  `a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own`,
-  `a_verifier_left_running_by_a_restart_is_followed_to_its_verdict` and
-  `a_reviewer_left_reading_by_a_restart_is_heard_once_its_worker_is_back` (`slopty-server`),
-  and the golden `step_review_commits`.
+  `the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart` and
+  `a_verifier_left_running_by_a_restart_is_followed_to_its_verdict` (`slopty-server`).
 
 ## Phases
 
@@ -1830,20 +1589,16 @@ adapter's tool wiring follows in the agents lane)
      `SLOPTY_PROJECT` and `SLOPTY_TASK` in their environment.
    - The project and task store on the server, with verbs in `slopty-proto::orchestration`
      served through `slopty-tools`.
-   - `spawn_agent` gains `project`, `task` and `parent`.
    - `SubagentStart`/`SubagentStop`/`TaskCreated`/`TaskCompleted` are forwarded, and so is
      `AgentBranch`.
-   - A first project tile shows the tree and opens nodes.
+   - A first project tile shows the tasks and opens them.
 2. **Code across machines.**
    - Clones from the forge on each worker and branches carried home as bundles (the plan's
      `git-remote-slopty` and server-side bare repositories were dropped on 2026-10-01).
-   - A worker verb that prepares a mirror and a worktree for a task.
-   - Mirror presence as a placement fact (placement itself was built in Phase 1).
    - A worktree setup file (A3).
    - Linux worker hardening: systemd, x86_64 and a real network e2e.
-3. **Verify and merge.** The verifier, the merge queue and the reviewer built 2026-10-01.
+3. **Verify and merge.** The verifier and the merge queue built 2026-10-01.
    - The verifier runs per task, and the merge queue on the server.
-   - The fresh-context reviewer.
    - The timeline, and tokens per agent.
 4. **Scale.** The shared build cache, channel push and moving agents between workers, each only
    after it is measured.
@@ -1901,87 +1656,15 @@ stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
 - Tests: `a_project_starts_in_the_focused_terminal`, `an_agent_becomes_a_project_s_orchestrator`
   and `a_task_stood_on_can_be_stopped_or_cancelled` (`slopty-ui::workspace`).
 
-**A project may have a budget per meter.** ✅ wire 2026-10-04 (rulings §5d; the gate to follow)
-- `Limits::budget` is an open map of a meter's name to its cap (`Budget`). `usd` caps the
-  estimated cost in millionths of a dollar. Any other name is a plan window as the agents name
-  it (`five-hour`), capped in hundredths of a percent. `Budget::fits` bounds it: at most 8
-  meters, a name with no space, a cap above nothing, a window's no more than the whole. The
-  server refuses one that does not fit, and an empty one takes the budget away.
-- `Project::spend` is what the server tallies (`Spend`), and `Moment::Budget` the timeline's
-  near (80 %, `Budget::NEAR_BP`) and reached moments.
-- **The server tallies and enforces it** (N21, 2026-10-04). The figures come with the thread
-  table every worker already publishes to the server (`ToServer::Threads`). Each row carries
-  its thread's meters, and the whole table goes again at each registration, so a figure said
-  while the link was down is not lost. A first cut sent a report of its own per thread
-  (`AgentReport::Spent`); it only repeated the rows, so it was taken out.
-  - The server counts each thread's figure under the terminal its family runs in: its own,
-    or for a subagent its root's. It keeps every thread's latest figure on the project that
-    terminal works for, as its orchestrator or on a task (`Tally`). A later figure replaces
-    the earlier one; a task given again, or a subagent, adds a thread of its own; a terminal
-    working for no project counts for none. The cost is the sum. A window is the fullest any
-    thread read that has not reset since. Past 512 threads the least recently heard folds
-    into a settled sum, so the total stays whole.
-  - Claude Code's thread takes the status line's meters heard before the thread began
-    (before Claude Code named its session), not only those heard after.
-  - Rising past 80 % of a cap, and past the whole, is each a timeline moment, written. The
-    figures between are pushed and written at most once a minute: after a restart, each
-    agent's next figure puts its thread right. A cap lowered under the spend says it is
-    reached at once.
-  - At a cap, `task_spawn` and `task_start` are refused with `Limit` and words that say how
-    much of which meter was spent. Every report and notice to the project's agents waits,
-    parked, since each would start a turn; the person's own words still go. Raising the cap
-    lifts both. A plan window that resets lifts them with no agent speaking, since the
-    delivery loop wakes at the next reset of a capped window.
-  - Turns under way finish, so the spend may pass the cap by up to one turn per live agent.
-  - Only the person sets a budget: an agent's `project_update` naming one is refused, as
-    pushing and ask-to-start are. The CLI takes `--budget usd=50 --budget five-hour=80%`
-    (`none` takes it away) on `project create` and `project update`; `project status` says
-    each meter against its cap, fullest first, marked estimated. The parsing and the figures
-    are `Budget::cap_of` and `Budget::figure`, one place for the CLI, the board and the
-    server's words.
-  - The board's header shows the cost against its cap, warning from 80 %, and counts what the
-    server tallied when that is more than this client heard: an agent replaced, or one it
-    never followed (the old undercount). At the cap, *Needs you* says what was spent of what,
-    with *Raise budget*. The panel ("Budget…" in the palette) takes the cost cap in dollars
-    and the windows as `five-hour 80%, seven-day 50%`, so a window an agent names later needs
-    no new field.
-  - **No `--max-budget-usd`.** Claude Code's flag works in print mode only, and Slopty runs
-    Claude Code in its TUI; no other agent Slopty starts takes a dollar cap. The server's hold
-    is the cap.
-  - **Codex's cost is not filled yet.** Codex reports tokens only. Its own estimate
-    (`account/usage/read`, `estimatedUsageUsdMicros` for a thread) answers ChatGPT sign-ins
-    alone, and comes from OpenAI's backend. A price table kept here would go stale, and could
-    not see Fast mode's double rate. The next step is to read Codex's own estimate. That needs
-    `account/usage/read` added to the generated Codex protocol (`xtask/src/codex/generate.rs`).
-    Until then, a Codex project caps by its plan windows.
-  - Tests:
-    - `slopty-server`: `a_project_at_its_budget_starts_nothing_until_it_is_raised`,
-      `every_thread_counts_its_latest_figure_once`, `a_thread_past_those_kept_still_counts`,
-      `a_meter_says_each_line_it_rises_past_once`, `a_held_project_hears_only_the_person`,
-      `a_project_s_spend_comes_with_its_threads_rows`.
-    - `meters_heard_before_the_thread_begins_are_its_own` (`slopty-worker`).
-    - `slopty-tools`: `a_budget_is_written_in_dollars_and_percents`,
-      `a_budget_reads_back_fullest_first`.
-    - `slopty-ui`: `the_panel_reads_dollars_and_windows_by_name`,
-      `a_spent_budget_needs_you_and_is_raised_from_the_board`,
-      `a_budget_under_its_cap_is_quiet_and_set_from_the_palette`.
-    - End to end, `an_agent_started_for_a_task_has_the_tools_and_grows_the_tree`
-      (`slopty-cli`): a stand-in agent's status-line cost reaches the project through its
-      thread, the CLI caps it below, `project status` says so, and the next start is refused.
-- Tests: `a_budget_weighs_each_capped_meter_and_says_which_is_reached` (`slopty-proto`) and
-  the goldens `project_create` and `project_event_pushed`.
-
-- ✅ **What holds a task up is said as it lands** (2026-10-04, readiness N16). A failed merge,
-  a red verifier or a spent budget showed only on the board, so it was seen only once someone
-  looked.
-  - Moments that hold a task up or wait on the person are news: failing checks with their
-    names, a verifier that failed, a step that stopped with why, an agent that reports it is
-    stuck, a proposed task waiting to be started, and a budget at or past a threshold. A
-    step done, a merge and a task's progress are not.
+- ✅ **What holds a task up is said as it lands** (2026-10-04, readiness N16). A failed merge
+  or a red verifier showed only on the board, so it was seen only once someone looked.
+  - Moments that hold a task up are news: failing checks with their names, a verifier that
+    failed, and a step that stopped with why. A step done, a merge and a task's progress are
+    not.
   - With the app in front, the news is a toast "Title: #3 fix: its verifier failed", unless
     that project's board is already in the focused tile. With the app away, it is a
     notification that opens on the orchestrator, and it is withdrawn with the rest.
-  - Tests: `only_what_holds_a_task_up_or_waits_on_the_person_is_news` (`project/tests.rs`),
+  - Tests: `only_what_holds_a_task_up_is_news` (`project/tests.rs`),
     `a_project_s_failure_is_said_as_it_lands` (`tests/projects.rs`).
 
 **Any agent's thread is read and answered alike.** ✅ 2026-10-04 (R10; the worker's thread
@@ -2028,50 +1711,6 @@ door is wired in the agents lane)
   where a played Claude Code session's thread is read over the CLI and its prompt is answered
   there.
 
-**A task is tried by several agents at once, and the attempt picked lands.** ✅ 2026-10-04
-(R11)
-- Before: a task had one agent. Comparing agents, models or machines on the same work meant
-  making near-identical tasks by hand, whose paths clashed, and merging whichever finished
-  first.
-- Prior art: T3 Code runs one prompt several ways and keeps one. Here the attempts spread over
-  the fleet, so each can run on its own machine.
-- `TaskAttempts { project, task, launches }` makes one sub-task per launch, of kind `attempt`,
-  up to `ATTEMPTS_MAX` (6) per task. Each gets the task's brief, placement, verifier and
-  dependencies, and each starts as `TaskSpawn` would. The task itself keeps `Attempts { tried,
-  picked }` and goes running, and it starts no agent of its own. A task with an agent of its
-  own is not tried, nor is an attempt, nor a merged task.
-- Every attempt writes the same paths, so none owns any (a path claim would clash with its
-  siblings and its task). The task tried holds the paths, an attempt's claim is refused, and
-  its agent's role says why.
-- An attempt pinned to a worker goes there. An unpinned one goes to the best-ranked worker that
-  fits and that no other attempt took, so the attempts spread before they share a machine.
-  They all start at once. An attempt that did not start says why on its card. The call is
-  refused only when none started. An agent in a project that asks to start its tasks
-  proposes each attempt instead.
-- Each attempt is verified and reviewed as any task is, but none joins the merge queue until
-  it is picked. A pass that would queue it leaves it done and outside the queue, and the
-  person cannot merge it either.
-- `TaskPick { project, attempt }` comes from the person, or from an agent above the task
-  tried; an attempt's own agent may not pick. The other attempts are given up and their
-  status says which attempt lands. Their agents are closed and their worktrees freed with
-  `landed` the target alone, so a branch whose work did not land is kept. The attempt picked
-  joins the queue at once when its work is done and checked already. Picking it again changes
-  nothing, and once one is picked no other can be, and no more attempts are made.
-- When the attempt picked merges, the task it tried is merged with the same merge.
-- Tools `task_attempts` and `task_pick`; CLI `slopty task attempts <task> --try
-  codex,model=o3,on=studio --try pi` and `slopty task pick <attempt>`. The JSON task and card
-  views carry `attempts`.
-- Left for later: a reviewer that compares the attempts side by side, and a cost estimate
-  before trying a task several ways. The board shows `attempts` on the card once the UI lane
-  draws it.
-- Tests: `an_attempt_waits_outside_the_queue_until_picked_and_merging_it_merges_its_task` and
-  `attempts_try_a_task_no_agent_works_on` (`project::attempts`),
-  `a_task_is_tried_on_each_machine_and_the_attempt_picked_is_kept` (hub: one attempt on each
-  worker, the pick closing the other and freeing its worktree),
-  `a_task_is_tried_by_several_agents_and_one_attempt_is_picked` (`slopty-tools`),
-  `an_attempt_names_its_agent_then_its_model_and_worker` (`slopty-cli`), and the goldens
-  `task_attempts` and `task_pick`, with `attempts` on every task golden.
-
 **A thread's subagents are its task's natives, whatever the agent.** ✅ 2026-10-04 (R7
 follow-up)
 - Before: the tree's natives came only from Claude Code's hooks. A Codex, pi or ACP task's
@@ -2109,55 +1748,6 @@ follow-up)
   read as finished. That default is gone.
 - Test: `a_thread_put_to_sleep_is_no_news` (`hub::ladder`).
 
-**A project runs tasks on a schedule the person sets.** ✅ 2026-10-04 (R12)
-- Before: recurring work (a nightly dependency bump, a weekly audit) needed the person, or an
-  orchestrator kept alive for it, to start each run by hand.
-- Prior art: T3 Code's `schedule_task` family of tools.
-- `Project.schedules` holds up to `SCHEDULES_MAX` (16) schedules. Each `Schedule { id, spec,
-  next_ms, last, created_ms }` keeps a `ScheduleSpec`, made of:
-  - the task each run makes, as a `TaskSpec` that hangs from no task and depends on none;
-  - its `TaskLaunch`;
-  - `when`, five cron fields (minute, hour, day of the month, month, day of the week, with
-    lists, ranges, steps and names) or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`;
-  - `zone`, an IANA time zone;
-  - `paused`.
-  The verbs are `ScheduleSet { project, schedule, spec }` (a new schedule, or one set anew),
-  `ScheduleDelete` and `ScheduleRun`.
-- **The person's alone.** Every run spends the plan, so the server refuses all three from an
-  agent, and there is no MCP tool for them. Agents see the schedules in `project_status`. The
-  CLI has `slopty project schedule set|rm|run|ls`.
-- **In the person's time.** A rule is read in its zone, not the server's. The CLI sends this
-  machine's zone (`TZ`, else where `/etc/localtime` points) unless `--zone` names one, and the
-  server fills in its own zone when none is given.
-  - The server ships as a static binary that often runs in a container with no zone
-    database, so jiff's database is built in (`tzdb-bundle-always`). A zone the system
-    cannot resolve is looked up in the built-in copy. jiff is the one new dependency, and it
-    was already in the lock.
-  - The cron matching is the server's own (`project::when`), about 150 lines.
-  - A time that a change to summer time skips runs at the first moment after it. A time
-    that the change back repeats runs once.
-- **When due.** The delivery loop also wakes for the earliest `next_ms` and runs every
-  schedule that is due.
-  - A run makes the task, marked `{"schedule": n}` in its metadata, and starts it as
-    `task_spawn` would, under the project's placement, limits and budget.
-  - The next run is set past now, so a run missed while the server was down runs once when
-    it is back, never once per missed time.
-  - A run whose last task is still under way is skipped. A run that made no task, or whose
-    task did not start, says why on `last` and on the timeline.
-- Setting, changing and taking away a schedule are timeline notes. The tasks a schedule made
-  stay after it is gone.
-- Tests:
-  - `project::when`: a rule in the person's zone across Berlin's change of clocks, from the
-    built-in database, and cron's grammar and refusals.
-  - `project::schedule`: the next run in the zone, paused, refusals, due runs that never
-    pile up, and a missed run that runs once.
-  - `a_schedule_is_the_person_s_and_runs_its_task_once_at_a_time` (hub).
-  - `a_schedule_set_from_the_cli_runs_its_task_on_the_worker` (CLI e2e, a real server and
-    worker).
-  - The goldens `schedule_set`, `schedule_delete` and `schedule_run`, with a schedule on the
-    golden project.
-- Left for later: the board showing the schedules (lane D).
-
 **The person commits, pushes and opens a pull request from any thread.** ✅ 2026-10-04
 - Before: only a project's task had a way to its branch's end (`TaskPush`, the merge queue).
   A thread outside any project left its changes in the working tree, so the person went to a
@@ -2165,15 +1755,13 @@ follow-up)
 - Prior art: T3 Code's thread-level commit dialog (`.research/t3code-ui-2026-10-03.md`,
   "Larger, unranked"). The person picks files, writes the message, and chooses commit, commit
   and push, or open a pull request.
-- `slopty_proto::git` carries it, over two routes to the same worker code
-  (`slopty_worker::repo::commit`):
-  - the app's commit sheet asks the worker straight, with `ClientMsg::Git { request, repo, op }`
-    answered by `WorkerMsg::GitDone`. It rides the client's save queue, so a file saved and
-    then committed is committed as saved. A status or a commit runs in that order. A push or a
-    pull request waits on the network, so it runs beside later saves, after what came before;
-  - the CLI goes through the server, with `Verb::Git { worker, repo, op }` and `Outcome::Git`.
-    It is `slopty git status|commit|push|pr open|pr status|pr merge`. `push` and `pull` were already the file transfer
-    verbs, so git gets its own noun.
+- `slopty_proto::git` carries it to the worker code (`slopty_worker::repo::commit`). The
+  app's commit sheet asks the worker straight, with `ClientMsg::Git { request, repo, op }`
+  answered by `WorkerMsg::GitDone`. It rides the client's save queue, so a file saved and then
+  committed is committed as saved. A status or a commit runs in that order. A push or a pull
+  request waits on the network, so it runs beside later saves, after what came before.
+- There is no `slopty git` (cut on 2026-10-04): a person or an agent at a shell already has git
+  and gh, and no top-tier tool ships a git wrapper of its own.
 - `GitOp` is `Status`, `Commit { paths, message }`, `Push` and `PullRequest { title, body,
   base, draft }`.
   - A status is `git status --porcelain=v2 --branch -z`. Each file keeps git's own two letters
@@ -2200,19 +1788,14 @@ follow-up)
     opens nothing.
   - No message is ever made up. An empty one is refused, since a commit takes the person's.
 - **Not an agent's.** An agent commits, pushes and opens pull requests with its own git and
-  gh in its own terminal, so it gets no MCP tool. The server refuses `Verb::Git` from an agent
-  as the person's commit sheet.
-- The sheet in the thread and review tiles is lane D's (`target/lanes/ui-queue.md`).
+  gh in its own terminal. The sheet is the person's, in the app.
+- The sheet is drawn in the thread and review tiles (`conversation/thread/commit.rs`).
 - Tests:
   - `repo::commit` (`slopty-worker`): git's records parsed; the chosen files committed with
     the message, other staged files left staged, a push that sets the upstream and then one
     that does not; and refusals in git's words, from a failing hook to a rejected push.
   - `a_file_saved_then_committed_is_committed_as_saved` (`slopty-workerd` e2e, the direct
     route).
-  - `a_thread_s_changes_are_committed_pushed_and_proposed_from_the_cli` (CLI e2e, a real
-    server, worker, repository and bare remote). The `gh` there is a stand-in the test writes
-    on the worker's `PATH`, which records what it was asked. A real gh would reach for the
-    person's GitHub sign-in, and a test never runs anything signed in.
   - The goldens in `golden_git`.
 
 **A branch's pull request reads where it stands, and merges on the person's word.** ✅ 2026-10-04
@@ -2247,23 +1830,21 @@ follow-up)
   - `head` passes `--match-head-commit`, so gh merges only the commit the person looked at.
     A push after they looked makes gh refuse, in its words.
   - The answer carries what gh said and the pull request read again.
-  - The whole sheet is refused to agents (`Verb::Git`), merge included: an agent that may
-    merge does so with its own gh.
+  - The whole sheet is the person's, merge included: an agent that may merge does so with its
+    own gh.
 - gh runs as everywhere else, found on `PATH` or where Homebrew and the system put it
   (`repo::checks::find`), with prompts off. `repo::commit::Programs` names the git and gh an
   op runs, so tests hand it a stand-in gh and never reach a person's sign-in.
-- CLI: `slopty git pr open|status|merge`. `--json` adds `standing` beside the forge's facts.
 - Not GitLab yet: gh speaks for GitHub alone, and on a GitLab remote it refuses in its own
   words. A task's merge request checks stay as they were (`Verb::PullChecks`, `glab`).
-- The thread and review tiles' pull request view is lane D's (`target/lanes/ui-queue.md`).
+- The thread and review tiles show the pull request where it stands (`conversation/thread/git.rs`,
+  `review/view.rs`).
 - Tests:
   - `repo::pull` (`slopty-worker`), with a stand-in gh: the forge's words read from jobs and
     commit statuses with their pages; no pull request reads as none, and no gh says so; a
     merge by the method named at the head seen, with branch deletion; a method gh lacks is
     refused before it runs; and gh's refusal comes back in its words.
   - `git::tests` (`slopty-proto`): buckets and standing.
-  - The CLI E2E `a_thread_s_changes_are_committed_pushed_and_proposed_from_the_cli` adds a
-    status read, a read after a push, and a merge at the head commit.
   - The goldens `client_git_pull_status`, `client_git_merge`, `worker_git_pull_status`,
     `worker_git_no_pull`, `worker_git_merged` and `verb_git_merge`. `worker_git_pushed`
     changed: a push now carries the pull request.
@@ -2306,12 +1887,11 @@ follow-up)
   - An agent runs its own commands in its own terminal anyway, so a script gains it nothing.
     Its output would land in a tile the person owns, which the agent does not read.
   - A script opens a terminal on a machine of the person's choosing, which is a person's
-    decision, as a schedule's run is.
+    decision.
   - An agent that wants the command reads it from the status and runs it itself.
 - CLI: `slopty project script set|rm|ls|run`. `run` takes `--worker` and `--task` and prints
   the TERM.
-- The run action in the board, the palette and a project's tiles is lane D's
-  (`target/lanes/ui-queue.md`).
+- The run action in the board, the palette and a project's tiles is still to come.
 - Tests:
   - `hub::projects::scripts` (`slopty-server`): kept by name and sorted, refusals,
     the most kept, taken away with a timeline note, an agent reading them in the status but
