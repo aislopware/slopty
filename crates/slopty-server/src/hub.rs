@@ -26,14 +26,15 @@
 //! Every change of liveness, terminal and agent status goes into a bounded log of [`HubEvent`]s
 //! under one sequence, and the same event goes out to every link as it is logged: a link pushed
 //! it and a [`Verb::Events`] reading from a cursor see one vocabulary in one order, and one call
-//! watches the whole fleet, over MCP's stateless HTTP as well as a QUIC link.
+//! watches the whole fleet.
 //!
 //! Projects are the hub's own too ([`crate::project`], `projects`): their verbs are answered
-//! here from the store's records, what runs for a task is placed by rules over the workers'
-//! facts and started with the project and task in its environment ([`Verb::TaskSpawn`]), every
-//! agent's start is counted against the person's bounds, and what the workers report of their
-//! agents (status, branches, Claude Code's own subagents) moves the tasks they work on. Every
-//! change is a [`Happening::Project`] in the one log, and the projects file is written after it.
+//! here from the store's records, what runs for a task goes to the worker its start names or
+//! one with room and is started with the project and task in its environment
+//! ([`Verb::TaskSpawn`]), every agent's start is counted against the person's bounds, and what
+//! the workers report of their agents (status, branches, Claude Code's own subagents) moves the
+//! tasks they work on. Every change is a [`Happening::Project`] in the one log, and the projects
+//! file is written after it.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -855,11 +856,6 @@ impl Hub {
             Verb::RunScript { .. } => error(
                 ErrorCode::Forbidden,
                 "the server opens a script's terminal itself; ask it with script run",
-            ),
-            Verb::Git { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "the commit sheet is the person's; an agent commits, pushes and opens pull \
-                 requests with its own git and gh",
             ),
             Verb::PullChecks { .. } => error(
                 ErrorCode::Forbidden,
@@ -1688,7 +1684,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
         | Verb::FsChange { worker, .. }
-        | Verb::Git { worker, .. }
         | Verb::RunScript { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }

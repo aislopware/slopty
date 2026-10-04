@@ -846,17 +846,6 @@ pub enum Verb {
         /// What to do.
         op: FsOp,
     },
-    /// Do something in a worker's git repository ([`crate::git`]): its status, a commit of the
-    /// person's, a push, a pull request. Answered with [`Outcome::Git`]; the person's alone,
-    /// since an agent commits with its own git.
-    Git {
-        /// Where.
-        worker: WorkerId,
-        /// A folder in the repository: absolute, or `~/…`.
-        repo: String,
-        /// What to do.
-        op: crate::git::GitOp,
-    },
     /// Keep `script` in `project`, in place of one of its name. Answered with
     /// [`Outcome::Project`]. The person's alone.
     ScriptSet {
@@ -991,7 +980,6 @@ impl Verb {
             | Self::ScriptDelete { .. }
             | Self::ScriptRun { .. }
             | Self::RunScript { .. } => true,
-            Self::Git { op, .. } => !matches!(op, crate::git::GitOp::Status),
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1464,8 +1452,6 @@ pub enum Outcome {
         /// The path.
         path: String,
     },
-    /// For [`Verb::Git`]: what it did.
-    Git(Box<crate::git::GitDone>),
 }
 
 /// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.

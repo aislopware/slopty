@@ -46,7 +46,6 @@ use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::folder::{FsOutcome, FsRefusal};
-use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
@@ -560,19 +559,6 @@ impl Orchestrator {
                     FsOutcome::Done { path } => Ok(Outcome::FsDone { path }),
                     FsOutcome::Refused(refusal) => Err(refused(&refusal)),
                     FsOutcome::Failed { error } => Err(Failure::new(ErrorCode::Failed, error)),
-                }
-            }
-            Verb::Git { worker, repo, op } => {
-                self.mine(worker)?;
-                match crate::repo::commit::apply(&crate::repo::commit::Programs::here(), &repo, op)
-                    .await
-                {
-                    GitOutcome::Done(done) => Ok(Outcome::Git(Box::new(done))),
-                    GitOutcome::Refused { why } => Err(Failure::new(ErrorCode::Invalid, why)),
-                    GitOutcome::Unavailable { why, .. } => {
-                        Err(Failure::new(ErrorCode::Unsupported, why))
-                    }
-                    GitOutcome::Failed { said } => Err(Failure::new(ErrorCode::Failed, said)),
                 }
             }
             Verb::Search { worker, root, query, max_lines } => {

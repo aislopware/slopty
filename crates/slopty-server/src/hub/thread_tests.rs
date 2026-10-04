@@ -143,13 +143,6 @@ async fn read_where_it_is(
     };
     let by_agent = hub.dispatch_as(Speaker::Proven(term.session), None, answering).await;
     assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to answer"));
-    let sheet = Verb::Git {
-        worker: term.worker,
-        repo: "/w".to_owned(),
-        op: slopty_proto::git::GitOp::Status,
-    };
-    let by_agent = hub.dispatch_as(Speaker::Agent, None, sheet).await;
-    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("its own git"));
 }
 
 /// The subagents of a task's thread with no hooks are its node's natives, from the rows that

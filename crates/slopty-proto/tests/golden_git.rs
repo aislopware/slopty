@@ -1,18 +1,13 @@
 //! Golden byte snapshots of the person's git ops on a folder's repository
-//! (`slopty_proto::git`): asked of the worker straight by the commit sheet, and through the
-//! server by the CLI. A changed snapshot is a wire change: accept it deliberately
-//! (`cargo insta review`).
+//! (`slopty_proto::git`), asked of the worker straight by the commit sheet. A changed snapshot is a
+//! wire change: accept it deliberately (`cargo insta review`).
 
 #[cfg(test)]
 mod golden_git {
-    use slopty_core::WorkerId;
     use slopty_proto::git::{
         GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus,
     };
-    use slopty_proto::orchestration::{Outcome, Verb};
-    use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
-    use uuid::Uuid;
 
     fn hex(bytes: &[u8]) -> String {
         bytes
@@ -144,23 +139,5 @@ mod golden_git {
         let failed =
             GitOutcome::Failed { said: "! [rejected] feature -> feature (fetch first)".to_owned() };
         snap("worker_git_failed", &done(5, failed));
-    }
-
-    #[test]
-    fn server_git_verbs() {
-        let worker =
-            WorkerId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0001));
-        let request = |op| ToServer::Request {
-            id: 21,
-            key: None,
-            verb: Verb::Git { worker, repo: "~/src/demo".to_owned(), op },
-        };
-        snap("verb_git_commit", &request(commit()));
-        snap("verb_git_pull_request", &request(pull_request()));
-        snap("verb_git_merge", &request(merge()));
-        snap(
-            "outcome_git_status",
-            &FromServer::Reply { id: 21, outcome: Outcome::Git(Box::new(status())) },
-        );
     }
 }

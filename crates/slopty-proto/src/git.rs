@@ -4,8 +4,8 @@
 //! branch, and a pull request through their own `gh` (`docs/decisions/projects.md`, "The
 //! person commits, pushes and opens a pull request from any thread").
 //!
-//! Asked of the worker straight (`ClientMsg::Git`, answered with `WorkerMsg::GitDone`) or
-//! through the server ([`crate::orchestration::Verb::Git`]). The worker runs the person's own
+//! Asked of the worker straight (`ClientMsg::Git`, answered with `WorkerMsg::GitDone`), by
+//! the app alone: an agent commits with its own git. The worker runs the person's own
 //! git and gh, with their configuration, hooks and credential helpers as they are: Slopty
 //! touches no credential and makes up no message. A refusal is in git's or gh's own words.
 
