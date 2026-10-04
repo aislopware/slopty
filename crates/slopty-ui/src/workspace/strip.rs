@@ -1179,6 +1179,28 @@ impl WorkspaceView {
             let workers = self.workers.iter().enumerate().map(|(ix, (key, w))| {
                 let key = *key;
                 let health = super::navigator::worker_health(&w.status);
+                // A worker on another build opens nothing until it is updated: its row offers
+                // the update, as its navigator row does.
+                let update = self.update_run(key, cx).map(|run| {
+                    let el = kit::pill_frame(theme, 1.0)
+                        .id(("empty-update", ix))
+                        .debug_selector(move || format!("empty-update-{ix}"))
+                        .role(gpui::accesskit::Role::Button)
+                        .aria_label(SharedString::from(format!("Update {}", w.name)))
+                        .flex_none()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.accent))
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hsla(s.hover)))
+                        .child(crate::add_worker::UPDATE)
+                        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |_this, _ev, window, cx| {
+                            cx.stop_propagation();
+                            let run = Rc::clone(&run);
+                            cx.defer_in(window, move |_this, window, cx| run(window, cx));
+                        }));
+                    crate::a11y::tab_stop(el, s.accent)
+                });
                 let label = match health {
                     Some((_, word)) => format!("New terminal on {}, {word}", w.name),
                     None => format!("New terminal on {}", w.name),
@@ -1211,6 +1233,7 @@ impl WorkspaceView {
                             .text_color(muted)
                             .child(word)
                     }))
+                    .children(update)
                     .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark), 1.0));
                 crate::a11y::tab_stop(row, s.accent)
                     .on_click(

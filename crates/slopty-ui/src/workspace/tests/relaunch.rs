@@ -247,3 +247,58 @@ fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppC
     assert!(note_kept);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A tile the device kept nothing of (the cache unset, or unreadable by this build) is still
+/// drawn while its worker is away: the worker's name over the pill saying where it is. A worker
+/// on another build offers its Update there, and once it is back without the item the tile
+/// leaves.
+#[gpui::test]
+fn a_tile_kept_nowhere_says_where_its_worker_is(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use slopty_client::update::{Of, UpdateNotice};
+
+    let (dir, path) = layout_file();
+    let shell = {
+        let (view, vcx) = workspace(cx);
+        view.update(vcx, |v, _| v.set_layout_path(path.clone()));
+        let studio = connect(&view, vcx, 1, "studio");
+        let shell = opens(&view, vcx, &studio, SessionId::new(), studio.me, 1);
+        vcx.executor().advance_clock(SAVE_AFTER);
+        vcx.run_until_parked();
+        shell
+    };
+
+    let (view, cx) = relaunched(cx, &path);
+    let key = shell.worker;
+    view.update_in(cx, |v, _w, cx| v.add_worker(key, "studio".to_owned(), cx));
+    cx.run_until_parked();
+    let id = shell.item.as_uuid();
+    let item = Box::leak(format!("item-{id}").into_boxed_str());
+    assert!(view.read_with(cx, |v, _| v.item(shell).is_none()), "nothing kept");
+    assert!(cx.debug_bounds(item).is_some(), "drawn, not a hole");
+    assert!(cx.debug_bounds(format!("missing-{id}").leak()).is_some());
+    assert!(cx.debug_bounds(format!("state-{id}").leak()).is_some(), "saying it is away");
+
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seen = Rc::clone(&asked);
+    cx.update(|_w, cx| {
+        let start: crate::add_worker::Update =
+            Rc::new(move |host: &str, _w, _cx| seen.borrow_mut().push(host.to_owned()));
+        cx.set_global(crate::add_worker::Updates { start: Some(start), ..Default::default() });
+    });
+    let notice =
+        UpdateNotice { of: Of::Worker, host: "studio.ts.net".to_owned(), peer: "0.0.9".to_owned() };
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NeedsUpdate(notice), cx));
+    cx.run_until_parked();
+    let update = cx.debug_bounds(format!("update-worker-{id}").leak()).expect("Update offered");
+    cx.simulate_click(update.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), ["studio.ts.net"], "the placeholder's Update");
+
+    let _studio = back(&view, cx, 1, Vec::new(), Vec::new());
+    assert!(view.read_with(cx, |v, _| !v.layout.contains(shell)), "back without it: it leaves");
+    assert!(cx.debug_bounds(item).is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -797,7 +797,9 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let Some(item) = self.item(tile) else {
-            return self.render_starting(placed, chrome, cx);
+            return self
+                .render_starting(placed, chrome, cx)
+                .or_else(|| self.render_missing(placed, chrome, cx));
         };
         let theme = &self.theme;
         let id = item.id;
@@ -2166,20 +2168,8 @@ impl WorkspaceView {
     /// What the body cannot show and why, if anything: the worker out of reach, the shell
     /// exited, the session gone.
     pub(super) fn body_state(&self, tile: TileRef, item: &Item) -> Option<BodyState> {
-        let worker = self.workers.get(&tile.worker);
-        if worker.is_none_or(|w| w.link.is_none()) {
-            let name = worker.map_or("The machine", |w| w.name.as_str());
-            return Some(match worker.map(|w| &w.status) {
-                Some(WorkerStatus::NeedsUpdate(notice)) => BodyState::NeedsUpdate(notice.clone()),
-                Some(WorkerStatus::Unreachable) => {
-                    BodyState::Away(format!("{name} is unreachable").into())
-                }
-                Some(WorkerStatus::Gone) => BodyState::Away(format!("{name} is gone").into()),
-                Some(WorkerStatus::NotGranted) => {
-                    BodyState::Away(format!("{name} does not let this device in").into())
-                }
-                _ => BodyState::Away(RECONNECTING.into()),
-            });
+        if let Some(away) = self.away_state(tile.worker) {
+            return Some(away);
         }
         let ItemKind::Terminal { session } = item.kind else { return None };
         match self.summary(session).map(|s| &s.state) {
@@ -2188,6 +2178,27 @@ impl WorkspaceView {
             None if self.terminals.contains_key(&session) => None,
             None => Some(BodyState::Ended),
         }
+    }
+
+    /// What every tile of `worker` says while its link is down: how it is out of reach, or the
+    /// build it runs; `None` while it is linked.
+    pub(super) fn away_state(&self, worker: WorkerKey) -> Option<BodyState> {
+        let worker = self.workers.get(&worker);
+        if worker.is_some_and(|w| w.link.is_some()) {
+            return None;
+        }
+        let name = worker.map_or("The machine", |w| w.name.as_str());
+        Some(match worker.map(|w| &w.status) {
+            Some(WorkerStatus::NeedsUpdate(notice)) => BodyState::NeedsUpdate(notice.clone()),
+            Some(WorkerStatus::Unreachable) => {
+                BodyState::Away(format!("{name} is unreachable").into())
+            }
+            Some(WorkerStatus::Gone) => BodyState::Away(format!("{name} is gone").into()),
+            Some(WorkerStatus::NotGranted) => {
+                BodyState::Away(format!("{name} does not let this device in").into())
+            }
+            _ => BodyState::Away(RECONNECTING.into()),
+        })
     }
 
     /// What the away pill offers for `worker`: the tailnet grant to copy when its policy turns
@@ -2206,10 +2217,10 @@ impl WorkspaceView {
 
     /// The pill at the foot of a body saying what is wrong and what to do about it, over
     /// whatever the body still shows. Never a dialog: the rest of the workspace goes on.
-    fn render_state_pill(
+    pub(super) fn render_state_pill(
         &self,
         tile: TileRef,
-        item: &Item,
+        session: Option<SessionId>,
         state: &BodyState,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
@@ -2235,10 +2246,6 @@ impl WorkspaceView {
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(ChromeText::new(label, px(theme.typography.small()), k));
             tab_stop(el, s.accent)
-        };
-        let session = match item.kind {
-            ItemKind::Terminal { session } => Some(session),
-            _ => None,
         };
         let restart = match (state, session) {
             (BodyState::Exited(_), Some(session)) => Some(button("restart", "Restart").on_click(
@@ -2453,7 +2460,11 @@ impl WorkspaceView {
         }
         let content = self.set_back_in_doubt(placed.tile, content);
         let Some(state) = state else { return content };
-        let pill = self.render_state_pill(placed.tile, item, &state, chrome, cx);
+        let session = match item.kind {
+            ItemKind::Terminal { session } => Some(session),
+            _ => None,
+        };
+        let pill = self.render_state_pill(placed.tile, session, &state, chrome, cx);
         div()
             .flex_1()
             .min_h_0()
