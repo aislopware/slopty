@@ -17,7 +17,10 @@
 //! - **Live blocks.** Where the mod is heard, a block the model is writing is an item of its own,
 //!   appended to as it grows, and removed once the transcript's entry settles it
 //!   ([`crate::live::Overlay`], which this keeps for the thread). A tool call's live block takes
-//!   the call's own id, so the transcript's entry replaces it.
+//!   the call's own id, so the transcript's entry replaces it. A block goes in its thread's open
+//!   turn; one that begins before the transcript has its prompt (the hook and the mod run ahead of
+//!   the file) waits for that prompt, with what it says meanwhile, so it never stands in the turn
+//!   before.
 //! - **Requests.** A permission prompt the worker holds is a request with the answers Claude Code
 //!   takes: allow, allow always (with what the suggestions grant), deny, and deny and stop.
 //!   [`verdict`] maps a chosen answer back. A prompt is held only through the `PermissionRequest`
@@ -235,6 +238,16 @@ struct Provisional {
     tool: bool,
 }
 
+/// A live block that began while its thread had no turn open: its prompt is not in the
+/// transcript yet. It is held, with what it said meanwhile, until that prompt opens its turn.
+#[derive(Debug)]
+struct Deferred {
+    thread: conv::ThreadId,
+    id: LiveId,
+    kind: LiveKind,
+    text: String,
+}
+
 /// One observed Claude Code session.
 #[derive(Debug)]
 pub struct Observed {
@@ -244,6 +257,8 @@ pub struct Observed {
     spawned: HashMap<String, (conv::ThreadId, String)>,
     overlay: live::Overlay,
     live: HashMap<LiveId, Provisional>,
+    /// Live blocks held until their prompt opens their turn, oldest first.
+    deferred: Vec<Deferred>,
     meters: Meters,
     /// The status last told, and the requests open: a thread begun anew from the transcript
     /// gets them again, since the transcript has neither.
@@ -346,6 +361,7 @@ impl Observed {
             spawned: HashMap::new(),
             overlay: live::Overlay::default(),
             live: HashMap::new(),
+            deferred: Vec::new(),
             meters: Meters::default(),
             status: None,
             open: Vec::new(),
@@ -441,6 +457,10 @@ impl Observed {
             match change {
                 Live::Start { thread, id, kind } => self.live_start(&thread, id, &kind),
                 Live::Append { id, text } => {
+                    if let Some(held) = self.deferred.iter_mut().find(|d| d.id == id) {
+                        held.text.push_str(&text);
+                        continue;
+                    }
                     let Some(p) = self.live.get(&id) else { continue };
                     let part = if p.tool { PartKey::Input } else { PartKey::Body };
                     let (thread, item) = (p.thread.clone(), p.item.clone());
@@ -602,7 +622,6 @@ impl Observed {
                 .zip(meters.context_window)
                 .map(|(pct, window)| share(window, pct)),
             context_window: meters.context_window,
-            cost_micro_usd: meters.cost_usd.map(|usd| share(100_000_000, usd)),
             limits: limits
                 .into_iter()
                 .filter_map(|(name, window)| {
@@ -799,6 +818,7 @@ impl Observed {
             }
         }
         self.live.clear();
+        self.deferred.clear();
         let _shown = self.overlay.clear_all();
     }
 
@@ -844,7 +864,7 @@ impl Observed {
         }
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let mut actions = Vec::new();
-        let mut began = false;
+        let (mut began, mut opened) = (false, false);
         let turn = match (&entry.body, mapped.items.get(&entry.id)) {
             (_, Some((turn, _))) => *turn,
             (Body::Prompt(_), None) => {
@@ -866,6 +886,7 @@ impl Observed {
                 mapped.turns.insert(turn, started.clone());
                 actions.push(Action::TurnStarted(started));
                 began = *thread == conv::ThreadId::Main;
+                opened = true;
                 turn
             }
             (_, None) => mapped.turn,
@@ -906,10 +927,29 @@ impl Observed {
         for action in actions {
             self.push(id, action);
         }
+        if opened {
+            self.place_deferred(thread);
+        }
         self.rewait();
         // A new prompt leaves the failure behind: its own turn's end says how it went.
         if began {
             self.failed = false;
+        }
+    }
+
+    /// `thread`'s prompt opened its turn: the live blocks held for it begin there, after it,
+    /// with what they said meanwhile.
+    fn place_deferred(&mut self, thread: &conv::ThreadId) {
+        let (held, kept): (Vec<Deferred>, Vec<Deferred>) =
+            std::mem::take(&mut self.deferred).into_iter().partition(|d| d.thread == *thread);
+        self.deferred = kept;
+        for Deferred { thread, id, kind, text } in held {
+            self.live_start(&thread, id.clone(), &kind);
+            let Some(p) = self.live.get(&id).filter(|_| !text.is_empty()) else { continue };
+            let part = if p.tool { PartKey::Input } else { PartKey::Body };
+            let item = p.item.clone();
+            let thread = self.ensure(&thread);
+            self.push(thread, Action::Append { item, part, text });
         }
     }
 
@@ -1036,10 +1076,18 @@ impl Observed {
         }
     }
 
+    /// A live block begins: an item in its thread's open turn. With no turn open (the last one
+    /// ended, or none began), the block's prompt is not in the transcript yet, and an item now
+    /// would stand ahead of it: the block waits for the prompt ([`Deferred`]).
     fn live_start(&mut self, thread: &conv::ThreadId, id: LiveId, kind: &LiveKind) {
         let thread_id = self.ensure(thread);
         let Some(mapped) = self.threads.get(thread) else { return };
         let turn = mapped.turn;
+        if turn == TurnId::BEFORE || mapped.ended.contains(&turn) {
+            let (thread, kind) = (thread.clone(), kind.clone());
+            self.deferred.push(Deferred { thread, id, kind, text: String::new() });
+            return;
+        }
         let (item, body, tool) = match kind {
             LiveKind::Text => (live_item(&id), ItemBody::Text(Clipped::default()), false),
             LiveKind::Thinking => (live_item(&id), ItemBody::Reasoning(Clipped::default()), false),
@@ -1072,6 +1120,7 @@ impl Observed {
     fn cleared(&mut self, cleared: &[Live]) {
         for change in cleared {
             let Live::Clear { id } = change else { continue };
+            self.deferred.retain(|d| d.id != *id);
             let Some(p) = self.live.remove(id) else { continue };
             let thread = self.ensure(&p.thread);
             let settled =

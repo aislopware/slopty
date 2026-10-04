@@ -19,7 +19,7 @@ mod claude_threads {
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
     use slopty_proto::terminal::{SessionState, SessionSummary};
-    use slopty_proto::thread::{Cap, Phase, ThreadId, ThreadState};
+    use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState};
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
     use slopty_worker::thread::Host;
@@ -232,7 +232,7 @@ mod claude_threads {
             .items
             .iter()
             .find_map(|i| match &i.body {
-                slopty_proto::thread::ItemBody::Tool(call) => call.child,
+                ItemBody::Tool(call) => call.child,
                 _ => None,
             })
             .expect("an Agent call names its thread");
@@ -341,8 +341,8 @@ mod claude_threads {
         );
     }
 
-    /// Where the mod is heard, what the model writes shows as items before the transcript has
-    /// it, and goes once the transcript settles it.
+    /// Where the mod is heard, what the model writes shows as items, after the prompt, before
+    /// the transcript has it, and goes once the transcript settles it.
     #[tokio::test]
     async fn the_mods_blocks_stream_and_settle() {
         let rig = Rig::new();
@@ -352,6 +352,24 @@ mod claude_threads {
         rig.status(AgentStatus::Working);
         until(&host, thread, |_| true).await;
         let recorded = fixture("mod", "bash");
+        // Written now, not when it was recorded: an entry stamped long before its block was
+        // first shown is an older one, so the stamps go.
+        let records: Vec<String> = std::fs::read_to_string(recorded.join("transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("timestamp");
+                format!("{record}\n")
+            })
+            .collect();
+        // The prompt reaches the transcript first, as Claude Code writes it before the model
+        // answers.
+        let prompt = records.iter().position(|r| r.contains(r#""type":"user""#)).unwrap();
+        std::fs::write(&rig.main, records[..=prompt].concat()).unwrap();
+        rig.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
+        let asked = |s: &ThreadState| s.items.iter().any(|i| matches!(i.body, ItemBody::User(_)));
+        until(&host, thread, asked).await;
         let text = std::fs::read_to_string(recorded.join("events.jsonl")).unwrap();
         let mut board = Board::default();
         let now = Instant::now();
@@ -368,17 +386,9 @@ mod claude_threads {
         }
         rig.seen.seen.send_modify(|seen| seen.live = board);
         let live = |s: &ThreadState| s.items.iter().filter(|i| i.id.0.starts_with("live:")).count();
-        until(&host, thread, |s| live(s) > 0).await;
-        // Written now, not when it was recorded: an entry stamped long before its block was
-        // first shown is an older one, so the stamps go.
-        let mut transcript = String::new();
-        for line in std::fs::read_to_string(recorded.join("transcript.jsonl")).unwrap().lines() {
-            let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
-            record.as_object_mut().unwrap().remove("timestamp");
-            transcript.push_str(&record.to_string());
-            transcript.push('\n');
-        }
-        std::fs::write(&rig.main, transcript).unwrap();
+        let state = until(&host, thread, |s| live(s) > 0).await;
+        assert!(matches!(state.items[0].body, ItemBody::User(_)), "{:?}", state.items);
+        std::fs::write(&rig.main, records.concat()).unwrap();
         rig.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
         let state = until(&host, thread, |s| live(s) == 0 && !s.items.is_empty()).await;
         assert!(state.items.iter().all(|i| !i.id.0.starts_with("live:")));
@@ -454,19 +464,19 @@ mod claude_threads {
     }
 
     /// The status line's meters heard before the session's thread begins are its first: a
-    /// cost said once, before Claude Code named its session, is not lost until the next.
+    /// window said once, before Claude Code named its session, is not lost until the next.
     #[tokio::test]
     async fn meters_heard_before_the_thread_begins_are_its_own() {
         let rig = Rig::new();
         let host = rig.host();
         let _observer = rig.observe(&host);
         let meters = slopty_proto::conversation::Meters {
-            cost_usd: Some(1.25),
+            context_window: Some(1_000_000),
             ..slopty_proto::conversation::Meters::default()
         };
         rig.seen.seen.send_modify(|seen| seen.meters = Some(meters));
         rig.status(AgentStatus::Working);
-        let state = until(&host, thread_of(NATIVE), |s| s.meters.cost_micro_usd.is_some()).await;
-        assert_eq!(state.meters.cost_micro_usd, Some(1_250_000));
+        let state = until(&host, thread_of(NATIVE), |s| s.meters.context_window.is_some()).await;
+        assert_eq!(state.meters.context_window, Some(1_000_000));
     }
 }

@@ -940,20 +940,6 @@ mod threads {
         };
         let live = |s: &ThreadState| texts(s).len() + streaming(s).len();
 
-        // The first step, as the model writes it: the answer, then the Bash call's input.
-        for batch in &batches[..first_stop] {
-            assert_eq!(post(&socket, batch).await, 204);
-        }
-        let first_step = |c: &Client| {
-            let s = c.state();
-            texts(s) == ["Let me run it."]
-                && streaming(s) == [r#"{"command": "echo hi", "description": "Say hi"}"#]
-        };
-        a.until(first_step).await;
-        assert_eq!(a.state().items.len(), 2, "nothing in the transcript yet");
-
-        // The step stops and the transcript gets the answer and the call: both settle.
-        assert_eq!(post(&socket, &batches[first_stop]).await, 204);
         // Written now, not when it was recorded: an entry stamped long before the follower saw
         // the block is an older one, so the stamps go.
         let transcript: Vec<String> = std::fs::read_to_string(recorded.join("transcript.jsonl"))
@@ -965,18 +951,47 @@ mod threads {
                 record.to_string()
             })
             .collect();
-        let result = transcript.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
-        let (before, after) = transcript.split_at(result);
         let append = |lines: &[String]| {
             let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
             std::io::Write::write_all(&mut file, format!("{}\n", lines.join("\n")).as_bytes())
                 .unwrap();
             std::time::Instant::now()
         };
+        // Claude Code writes the prompt before the model answers it.
+        let prompt = transcript.iter().position(|l| l.contains(r#""type":"user""#)).unwrap();
+        let (asked, rest) = transcript.split_at(prompt + 1);
+        let _written = append(asked);
+        let prompted =
+            |c: &Client| c.state().items.iter().any(|i| matches!(i.body, ItemBody::User(_)));
+        a.until(prompted).await;
+
+        // The first step, as the model writes it: the answer, then the Bash call's input.
+        for batch in &batches[..first_stop] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let first_step = |c: &Client| {
+            let s = c.state();
+            texts(s) == ["Let me run it."]
+                && streaming(s) == [r#"{"command": "echo hi", "description": "Say hi"}"#]
+        };
+        a.until(first_step).await;
+        let shown = &a.state().items;
+        assert_eq!(shown.len(), 3, "the prompt, and nothing more of the transcript yet");
+        assert!(matches!(shown[0].body, ItemBody::User(_)), "the blocks follow their prompt");
+
+        // The step stops and the transcript gets the answer and the call: both settle.
+        assert_eq!(post(&socket, &batches[first_stop]).await, 204);
+        let result = rest.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
+        let (before, after) = rest.split_at(result);
         // Settled by the entries, well before the grace that clears a block nothing settles.
         let soon = slopty_agent::live::SETTLE_GRACE / 2;
         let written = append(before);
-        a.until(|c| live(c.state()) == 0 && c.state().items.len() > 2).await;
+        let answered = |s: &ThreadState| {
+            s.items
+                .iter()
+                .any(|i| !i.id.0.starts_with("live:") && matches!(i.body, ItemBody::Text(_)))
+        };
+        a.until(|c| live(c.state()) == 0 && answered(c.state())).await;
         assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
 
         // The second step streams, and settles when the transcript has the rest.
@@ -1000,7 +1015,7 @@ mod threads {
             now == want
         };
         a.until(settled).await;
-        a.until(|c| c.state().meters.cost_micro_usd.is_some()).await;
+        a.until(|c| c.state().meters.context_window.is_some()).await;
         assert_eq!(a.state().meters.context_window, Some(200_000), "the mod's measure");
         assert_eq!(post(&socket, &batches[bye]).await, 204);
 

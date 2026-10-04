@@ -180,10 +180,26 @@ fn read_a_line_at_a_time_it_ends_the_same() {
     }
 }
 
-/// The mod's blocks show as items while they are written, and once the transcript settles
-/// them they are gone, leaving what the transcript alone gives.
+/// The mod's blocks show as items while they are written, after the prompt they answer, and
+/// once the transcript settles them they are gone, leaving what the transcript alone gives.
+///
+/// The mod runs ahead of the transcript: blocks that begin before the file has their prompt
+/// wait for it, with what they said meanwhile, rather than stand in the turn before it.
 #[test]
-fn live_blocks_stream_then_the_transcript_settles_them() {
+fn live_blocks_stream_after_their_prompt_then_the_transcript_settles_them() {
+    let appends = |outs: &[Out]| {
+        outs.iter()
+            .map(|o| match o {
+                Out::Actions(_, actions) => {
+                    actions.iter().filter(|a| matches!(a, Action::Append { .. })).count()
+                }
+                Out::Begin(_) => 0,
+            })
+            .sum::<usize>()
+    };
+    let provisional = |host: &Host| {
+        host.threads.values().flat_map(|t| &t.items).filter(|i| i.id.0.starts_with("live:")).count()
+    };
     for scenario in ["bash", "think", "agent"] {
         let dir = dir("mod", scenario);
         let text = std::fs::read_to_string(dir.join("events.jsonl")).expect("events");
@@ -192,7 +208,6 @@ fn live_blocks_stream_then_the_transcript_settles_them() {
         let mut live = observed();
         let mut host = Host::default();
         host.take(live.drain());
-        let mut appended = 0;
         for line in text.lines() {
             let batch: live::Batch = serde_json::from_str(line).expect("a batch");
             for event in batch.decoded().iter().filter(|e| {
@@ -200,27 +215,30 @@ fn live_blocks_stream_then_the_transcript_settles_them() {
             }) {
                 board.apply(event, now);
             }
-            let outs = live.live(&board, now, WallMs::ZERO);
-            appended += outs
-                .iter()
-                .map(|o| match o {
-                    Out::Actions(_, actions) => {
-                        actions.iter().filter(|a| matches!(a, Action::Append { .. })).count()
-                    }
-                    Out::Begin(_) => 0,
-                })
-                .sum::<usize>();
-            host.take(outs);
+            host.take(live.live(&board, now, WallMs::ZERO));
         }
-        assert!(appended > 0, "{scenario}: text streamed");
-        let provisional = |host: &Host| {
-            host.threads
-                .values()
-                .flat_map(|t| &t.items)
-                .filter(|i| i.id.0.starts_with("live:"))
-                .count()
-        };
+        assert_eq!(provisional(&host), 0, "{scenario}: nothing ahead of the prompt");
+
+        // The transcript as far as the prompt: the blocks held for it follow it.
+        let whole = std::fs::read_to_string(dir.join("transcript.jsonl")).expect("transcript");
+        let upto = whole.lines().position(|l| l.contains(r#""type":"user""#)).expect("a prompt");
+        let scratch = tempfile::tempdir().expect("a temp dir");
+        let partial = scratch.path().join("s.jsonl");
+        let head: Vec<&str> = whole.lines().take(upto.saturating_add(1)).collect();
+        std::fs::write(&partial, format!("{}\n", head.join("\n"))).expect("written");
+        let changes = Conversation::default().read(&mut Tail::default(), &partial).expect("read");
+        let outs = live.transcript(&changes, &[]);
+        assert!(appends(&outs) > 0, "{scenario}: what the blocks said meanwhile");
+        host.take(outs);
         assert!(provisional(&host) > 0, "{scenario}: live items shown");
+        let main = host.thread(live.main());
+        let prompt = main.items.iter().position(|i| matches!(i.body, ItemBody::User(_)));
+        let first_live = main.items.iter().position(|i| i.id.0.starts_with("live:"));
+        if let (Some(prompt), Some(first_live)) = (prompt, first_live) {
+            assert!(prompt < first_live, "{scenario}: {:?}", main.items);
+        }
+        assert!(prompt.is_some(), "{scenario}: the prompt");
+
         let changes = Transcripts::default().read(&dir.join("transcript.jsonl"), &subagents(&dir));
         host.take(live.transcript(&changes, &[]));
         assert_eq!(provisional(&host), 0, "{scenario}: every live item settled");
