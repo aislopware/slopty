@@ -3549,7 +3549,7 @@ impl WorkspaceView {
             label.into(),
             selected,
         );
-        Self::tile_menu_press(row, tile, true, cx)
+        Self::tile_menu_press(row, tile, super::context_menus::Pressed::Navigator, cx)
             .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
             .group(row_group)
             // The two lines sit in the middle of the row at either density, the kind beside the

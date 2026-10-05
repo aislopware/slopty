@@ -25,6 +25,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::actions::{AddWindow, CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
+use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
 use super::strip::Handed;
 use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
@@ -1020,7 +1021,7 @@ impl WorkspaceView {
         // At the overview's small zoom the miniature's label names the tile; a band on top of it in
         // another step, and a hairline under only some of them, read as tiles half drawn.
         let shapes = k < SHAPES_BELOW;
-        let header = Self::tile_menu_press(div().id("title"), tile, false, cx)
+        let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
             .role(Role::Heading)
@@ -1521,9 +1522,9 @@ impl WorkspaceView {
             )
             .on_click(cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)))
             .when(!shown, |el| el.invisible().group_hover(TAB_GROUP, gpui::Styled::visible));
+            let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
             Some(
-                div()
-                    .id(SharedString::from(format!("tab-{}", id.as_uuid())))
+                Self::tile_menu_press(el, tab, Pressed::Tab, cx)
                     .debug_selector(move || format!("tab-{}", id.as_uuid()))
                     .group(TAB_GROUP)
                     .role(Role::Tab)

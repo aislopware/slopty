@@ -76,3 +76,26 @@ fn a_right_click_or_a_long_press_opens_a_things_own_menu(cx: &mut TestAppContext
     cx.run_until_parked();
     assert!(tree(cx).iter().any(|n| n.is("Menu", Some("Tile"))), "a long press opens it too");
 }
+
+/// A tab's menu adds what a tabbed column offers: Move out of the column puts its tile in a
+/// column of its own, and Close other tabs is there beside Close tile.
+#[gpui::test]
+fn a_tabs_menu_moves_its_tile_out_of_the_column(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    cx.simulate_keystrokes("cmd-[");
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+    assert_eq!(column_of(&view, cx, first), column_of(&view, cx, second), "one column");
+
+    right_click(cx, selector("tab", first.item));
+    let shown = rows(cx);
+    for row in ["Rename", "Move out of the column", "Close tile", "Close other tabs"] {
+        assert!(shown.iter().any(|r| r == row), "{row}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|r| r == "Open"), "the tab is open: {shown:?}");
+    pick(cx, "Move out of the column");
+    assert_ne!(column_of(&view, cx, first), column_of(&view, cx, second), "a column of its own");
+}

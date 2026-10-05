@@ -144,7 +144,7 @@ impl WorkspaceView {
     }
 
     /// Run a layout action at the clock, then follow the focus and save.
-    fn layout_action(
+    pub(super) fn layout_action(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut slopty_client::layout::Layout),

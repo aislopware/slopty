@@ -7389,8 +7389,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     drawn. A view's own menu is built late in a frame, so the element that had the keyboard and
     the panel both claimed it in one frame (a screen reader is told of one focus a frame). The
     panel now takes it once the frame is drawn.
-  - **Still to come.** Tabs and review files.
+  - **A tab.** A tabbed column's tab opens its tile's menu with Move out of the column (its
+    tile into a column of its own) and Close other tabs beside Close tile.
+  - **Still to come.** Review files.
   - Tests: `conversation::thread::tests::composing::a_right_click_on_a_message_quotes_or_copies_it`,
     `conversation::thread::view::message_menu::tests::a_quote_marks_every_line_and_keeps_the_blank_ones`,
     `workspace::tests::context_menus::a_right_click_or_a_long_press_opens_a_things_own_menu`,
+    `workspace::tests::context_menus::a_tabs_menu_moves_its_tile_out_of_the_column`,
     `workspace::tests::folders::a_right_click_on_a_row_offers_what_its_keys_do`.

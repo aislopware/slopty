@@ -26,6 +26,17 @@ pub(super) struct ContextMenu {
     pub entries: Vec<MenuEntry>,
 }
 
+/// Where a tile's menu was opened from, which decides a row or two of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Pressed {
+    /// Its navigator row: Open leads, as the tile may be out of view.
+    Navigator,
+    /// Its own header.
+    Header,
+    /// Its tab in a tabbed column: what to do to the column's other tabs, too.
+    Tab,
+}
+
 /// A tile's menu, as a screen reader names it.
 pub(super) const TILE_MENU: &str = "Tile";
 
@@ -68,12 +79,11 @@ impl WorkspaceView {
         self.open_menu_at(MenuKind::Context, at, window, cx);
     }
 
-    /// `el` opening `tile`'s menu on a right click or a long press. From the navigator the menu
-    /// leads with Open; on the tile itself it is already open.
+    /// `el` opening `tile`'s menu on a right click or a long press, as [`Pressed`] there.
     pub(super) fn tile_menu_press<E>(
         el: E,
         tile: TileRef,
-        in_navigator: bool,
+        pressed: Pressed,
         cx: &Draw<'_, Self>,
     ) -> E
     where
@@ -82,7 +92,7 @@ impl WorkspaceView {
         let this = cx.weak_entity();
         crate::kit::menu_press(el, move |at, window, cx| {
             let _gone = this.update(cx, |this, cx| {
-                let entries = this.tile_entries(tile, in_navigator, cx);
+                let entries = this.tile_entries(tile, pressed, cx);
                 if !entries.is_empty() {
                     let menu = ContextMenu { name: TILE_MENU, entries };
                     this.open_context_menu(menu, at, window, cx);
@@ -124,18 +134,13 @@ impl WorkspaceView {
         })
     }
 
-    /// `tile`'s rows: Open (from the navigator), Rename, Fullscreen, Copy path where it has
-    /// one, then Close.
-    fn tile_entries(
-        &self,
-        tile: TileRef,
-        in_navigator: bool,
-        cx: &Context<Self>,
-    ) -> Vec<MenuEntry> {
+    /// `tile`'s rows: Open (from the navigator), Rename, Fullscreen, Move out of the column (from
+    /// a tab), Copy path where it has one, then Close and, from a tab, Close other tabs.
+    fn tile_entries(&self, tile: TileRef, pressed: Pressed, cx: &Context<Self>) -> Vec<MenuEntry> {
         let Some(item) = self.item(tile) else { return Vec::new() };
         let path = tile_path(&item.kind).or_else(|| self.cwd_of(item));
         let mut rows: Vec<(MenuGroup, &'static str, Option<&dyn gpui::Action>, Run)> = Vec::new();
-        if in_navigator {
+        if pressed == Pressed::Navigator {
             rows.push((
                 MenuGroup::Navigation,
                 "Open",
@@ -158,6 +163,17 @@ impl WorkspaceView {
                 this.width_action(cx, Layout::toggle_fullscreen);
             }),
         ));
+        if pressed == Pressed::Tab {
+            rows.push((
+                MenuGroup::Navigation,
+                "Move out of the column",
+                None,
+                Rc::new(move |this, _w, cx| {
+                    this.focus_tile(tile, cx);
+                    this.layout_action(cx, Layout::consume_or_expel_window_right);
+                }),
+            ));
+        }
         if let Some(path) = path {
             rows.push((
                 MenuGroup::Navigation,
@@ -174,6 +190,19 @@ impl WorkspaceView {
             Some(&CloseItem),
             Rc::new(move |this, window, cx| this.close_tile(tile, window, cx)),
         ));
+        if pressed == Pressed::Tab {
+            rows.push((
+                MenuGroup::Removal,
+                "Close other tabs",
+                None,
+                Rc::new(move |this, window, cx| {
+                    for other in this.column_of(tile).into_iter().filter(|t| *t != tile) {
+                        this.close_tile(other, window, cx);
+                    }
+                    this.focus_tile(tile, cx);
+                }),
+            ));
+        }
         let bindings = super::key_bindings();
         rows.into_iter()
             .map(|(group, label, bound, run)| {
@@ -230,6 +259,19 @@ impl WorkspaceView {
                 let _gone = this.update(cx, |this, cx| run(this, window, cx));
             }),
         }
+    }
+}
+
+impl WorkspaceView {
+    /// The tiles of the column `tile` is in, top to bottom.
+    fn column_of(&self, tile: TileRef) -> Vec<TileRef> {
+        let Some(pos) = self.layout.position(tile) else { return Vec::new() };
+        self.layout
+            .workspaces()
+            .get(pos.workspace)
+            .and_then(|w| w.columns().get(pos.column))
+            .map(|c| c.tiles().iter().map(slopty_client::layout::Tile::tile).collect())
+            .unwrap_or_default()
     }
 }
 
