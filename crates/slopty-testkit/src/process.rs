@@ -201,8 +201,23 @@ mod tests {
             "a million additions retire at least a million instructions: {before:?} {after:?}"
         );
         assert!(after.footprint > 0 && after.peak_footprint >= after.footprint, "{after:?}");
-        assert!(after.energy_nj > before.energy_nj, "the additions cost energy: {after:?}");
         assert!(after.cycles > before.cycles, "and cycles: {after:?}");
+        // The kernel bills energy in steps, not per instruction: a million additions on a busy
+        // Mac can end inside one (land run of 2026-10-05). More of them always cross the next.
+        let mut spent = after;
+        for _ in 0..1_000 {
+            if spent.energy_nj > before.energy_nj {
+                break;
+            }
+            for i in 0..1_000_000_u64 {
+                x = std::hint::black_box(x.wrapping_add(i));
+            }
+            spent = own().unwrap();
+        }
+        assert!(
+            spent.energy_nj > before.energy_nj,
+            "the additions cost energy: {before:?} {spent:?}"
+        );
         let fds = open_fds(me).unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(open_fds(me).unwrap(), fds + 1, "one more file, one more descriptor");
