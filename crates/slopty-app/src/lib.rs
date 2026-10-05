@@ -4007,6 +4007,13 @@ pub fn open_workspace(
     options: impl Fn(&App) -> WindowOptions + 'static,
 ) -> anyhow::Result<()> {
     let options: window::MakeOptions = Rc::new(options);
+    // The self-test's window keeps the size its test asks for on any screen, a CI Mac's short
+    // one too (`slopty_platform::asked_size`); before the window is made, which AppKit fits.
+    #[cfg(feature = "e2e")]
+    if std::env::var_os(slopty_e2e::SOCKET_ENV).is_some() && cfg!(target_os = "macos") {
+        let kept = slopty_platform::asked_size::keep_asked_sizes(c"GPUIWindow");
+        tracing::info!(kept, "the self-test's windows keep the size they ask for");
+    }
     // The chrome's symbols, drawn on background threads while the window is made: the first
     // symbol of a process loads the system's catalogue, 40–70 ms the first frame must not wait
     // for (docs/MEASUREMENTS.md, "SF Symbols as masks"). Those the last launch's first frames

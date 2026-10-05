@@ -1,6 +1,7 @@
 //! What only the main thread can see (macOS): a download's progress as Finder sees it
 //! (`slopty_platform::continued`), a browser page's Web Inspector (`slopty_platform::web`), and
-//! the sidebar material under a window (`slopty_platform::material`).
+//! the sidebar material under a window (`slopty_platform::material`), and a self-test window's
+//! size on a screen too short for it (`slopty_platform::asked_size`).
 //!
 //! Finder subscribes to the progress published for a file URL, and Foundation hands the publish
 //! to a subscriber on its main thread; a `WKWebView` is made only there. libtest never gives a
@@ -27,7 +28,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 4] = [
+    pub const TESTS: [(&str, fn()); 5] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -41,7 +42,60 @@ mod mac {
             "the_glass_lies_under_the_whole_window_through_any_resize",
             the_glass_lies_under_the_whole_window_through_any_resize,
         ),
+        (
+            "a_self_test_window_keeps_its_size_on_a_short_screen",
+            a_self_test_window_keeps_its_size_on_a_short_screen,
+        ),
     ];
+
+    /// AppKit fits a plain window into a screen too short for it; a window class the self-test
+    /// asked to keep its sizes keeps the frame it is given, and is asked only once. No window
+    /// is shown: AppKit is asked what it would fit the frame to.
+    fn a_self_test_window_keeps_its_size_on_a_short_screen() {
+        use objc2::runtime::{AnyClass, ClassBuilder};
+        use objc2::{ClassType as _, msg_send};
+        use objc2_app_kit::{NSBackingStoreType, NSScreen, NSWindow, NSWindowStyleMask};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        use slopty_platform::asked_size::keep_asked_sizes;
+
+        let mtm = MainThreadMarker::new().unwrap();
+        let screen = NSScreen::mainScreen(mtm).unwrap();
+        let visible = screen.visibleFrame();
+        let tall = NSRect::new(
+            visible.origin,
+            NSSize::new(visible.size.width.min(1000.0), visible.size.height + 400.0),
+        );
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Resizable;
+        let made = |class: &AnyClass| -> Retained<NSWindow> {
+            // SAFETY: Objective-C runtime rule: `+alloc` on an `NSWindow` subclass returns an
+            // uninitialised instance of it, which `initWithContentRect:…` takes.
+            let allocated = unsafe { msg_send![class, alloc] };
+            // SAFETY: AppKit rule: a window made on the main thread, never shown, released
+            // with its last reference (`releasedWhenClosed` is not used: it is never closed).
+            unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    allocated,
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0)),
+                    style,
+                    NSBackingStoreType::Buffered,
+                    true,
+                )
+            }
+        };
+
+        let plain = made(NSWindow::class());
+        let fitted = plain.constrainFrameRect_toScreen(tall, Some(&screen));
+        assert!(fitted.size.height < tall.size.height, "AppKit fits a plain window: {fitted:?}");
+
+        let kept_class =
+            ClassBuilder::new(c"SloptyAskedSizeTestWindow", NSWindow::class()).unwrap().register();
+        assert!(keep_asked_sizes(c"SloptyAskedSizeTestWindow"), "the class keeps its sizes");
+        assert!(!keep_asked_sizes(c"SloptyAskedSizeTestWindow"), "asked once, it is kept");
+        assert!(!keep_asked_sizes(c"NoSuchWindowClass"), "no such class");
+        let kept = made(kept_class);
+        let asked = kept.constrainFrameRect_toScreen(tall, Some(&screen));
+        assert_eq!(asked, tall, "the frame asked for, on a screen too short for it");
+    }
 
     /// Run the main run loop until `done`, twenty seconds at most: a page loads under a loaded
     /// machine too.

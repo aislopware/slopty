@@ -20,6 +20,7 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+pub mod asked_size;
 pub mod continued;
 pub mod dirs;
 #[cfg(target_vendor = "apple")]

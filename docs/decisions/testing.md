@@ -1160,3 +1160,19 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   what a run killed outright, or a daemon still writing as its root went, left behind.
   - Tests: `harness::tests::a_passing_test_takes_its_root_away_and_a_failing_one_keeps_it`,
     `harness::tests::kept_roots_are_capped_and_stale_ones_swept`.
+
+- ✅ **A self-test window keeps its size on any screen** (2026-10-06). CI's app e2e ran 63 tests
+  and its renders were thought to match the goldens. They did not: 31 renders differed by 0.1 to
+  22 % of their pixels (CI e2e runs 37359580819 and 37379213283), and every one of them came
+  from a window taller than 677 pt that came out 677 pt tall. A hosted CI Mac's screen is
+  1024 × 768, and AppKit fits a window into its screen's visible frame when it shows it and when
+  a frame is set (`-[NSWindow constrainFrameRect:toScreen:]`). The words matched, so only the
+  pixels said so.
+  - The e2e build answers that method on GPUI's window class with the frame unchanged, before
+    the window is made (`slopty_platform::asked_size`, called from `open_workspace` when the
+    self-test socket is set). A render then has its golden's size on any screen, and the goldens
+    need no CI copies. A person's build never calls it.
+  - Not a CI display mode: a hosted runner's virtual display cannot be counted on to offer a
+    taller mode, and a test that passes only on some screens is not a test.
+  - Test: `main_thread::a_self_test_window_keeps_its_size_on_a_short_screen` (AppKit fits a plain
+    window into a screen too short for it; the kept class does not). No window is shown.
