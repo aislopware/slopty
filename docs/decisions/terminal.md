@@ -3510,17 +3510,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     one: "Copy block output", and "Attach block to agent", which hands the workspace the block
     as Markdown (`block_context`: what ran, its status when it failed, the output in a fence no
     backtick run inside closes).
-  - **Where an attached block goes.** To the agent running in that terminal, else to the agent
-    tile focused last on the same worker (`WorkspaceView::block_target`). That tile comes
-    forward on its face, and the block lands at the end of its draft, a blank line after what
-    was typed, with the keyboard (`Target::quote`, over the face's or the thread view's
-    composer). A thread view is only made while its face shows, so the text waits up to four
-    frames for the composer to exist. With no agent to take it, the block menu has no "Attach
+  - **Where an attached block goes.** To the thread of the agent running in that terminal,
+    else to the thread of the agent tile focused last on the same worker, a terminal on its
+    thread or a thread's own tile, whatever the agent, while that agent is live
+    (`WorkspaceView::block_target`, a `ThreadId`; `workspace.md` has the ruling). Whichever
+    tile holds a composer of the thread comes forward (`quote_to_thread`), and the block lands
+    at the end of its draft, a blank line after what was typed, with the keyboard
+    (`Target::quote`, over the face's or the thread view's composer). A thread view is only
+    made while it shows, so the text waits for the composer, each frame, up to 5 s
+    (`settle_quotes`, `QUOTE_WAIT`).
+    With no agent to take it, the block menu has no "Attach
     to agent" and the palette no line, and a key bound to the action says there is no agent:
     it is never offered to do nothing. The view asks a probe the workspace gives it
     (`set_attach_probe`) when the menu opens and when the action runs, never while drawing: a
     read of the workspace in the terminal's render tied the terminal's redraw to the strip's.
-    Test: workspace `a_block_from_a_shell_lands_in_the_last_agents_draft`.
+    Tests: workspace `a_block_from_a_shell_lands_in_the_last_agents_draft`,
+    `a_block_goes_to_a_thread_tile_whatever_its_agent`.
   - Tests: engine `blocks_go_out_as_news_and_whole`; client
     `block_marks_follow_the_workers_list`; worker `command_blocks_reach_every_viewer`; element
     `block_marks_sit_on_the_track_where_their_prompts_are`; view

@@ -1642,3 +1642,17 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     from any folder in it, and refuses in words for a folder in no repository.
   - Tests: `workspace::tests::review_tile::a_shell_opened_from_a_thread_or_its_review_starts_where_the_agent_works`,
     `workspace::tests::thread_start::the_folder_step_takes_a_typed_folder_and_a_threads_repository`.
+
+- ✅ **A block or a selection goes to any thread, by thread** (2026-10-05, readiness 10-06 N15).
+  - *Any agent.* "Attach block to agent" and "Attach selection to agent" picked their target
+    among terminals with an agent in them. A Codex or pi thread driven over its protocol, which
+    has a tile of its own and no terminal, was never one, though files and review comments
+    already reached every thread. The target is now a thread (`WorkspaceView::block_target`
+    returns a `ThreadId`): the agent's in that terminal, else that of the agent tile focused last
+    on the same worker, a terminal on its thread or a thread's own tile. Only a thread whose
+    agent is live takes one, since an exited thread's composer has given way to Resume.
+  - *One way in.* Blocks, selections and review comments all go through `quote_to_thread`,
+    which brings up whichever tile holds a composer of the thread, or opens one. The quote that
+    waited on a terminal's face by its session (`quote_to_agent`, `QuoteFor`) is deleted.
+  - Test: `workspace::tests::attach_block::{a_block_from_a_shell_lands_in_the_last_agents_draft,
+    a_block_goes_to_a_thread_tile_whatever_its_agent}`.

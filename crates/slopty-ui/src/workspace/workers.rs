@@ -80,44 +80,38 @@ impl WorkspaceView {
         self.tailnet_grant = grant.map(gpui::SharedString::from);
     }
 
-    /// The agent a command block from `session`'s terminal goes to as context: the agent in
-    /// that terminal, else the agent tile last focused on the same worker. `None` hides the
-    /// offer to attach.
-    pub(super) fn block_target(&self, session: SessionId) -> Option<SessionId> {
-        let is_agent = |s: SessionId| self.agent_state(s).is_some();
-        if is_agent(session) {
-            return Some(session);
+    /// The thread a command block from `session`'s terminal goes to as context: that of the
+    /// agent in that terminal, else that of the agent tile last focused on the same worker,
+    /// whatever the agent and whichever tile holds it (a terminal on its thread, or a thread's
+    /// own tile). Only a thread whose agent is live takes one. `None` hides the offer to attach.
+    pub(super) fn block_target(&self, session: SessionId) -> Option<ThreadId> {
+        let agent_thread = |s: SessionId| self.agent_state(s).and_then(|_| self.session_thread(s));
+        if let Some(thread) = agent_thread(session) {
+            return Some(thread);
         }
         let worker = self.worker_of_session(session)?;
+        let live = |t: &ThreadId| self.thread_stand(*t).is_some_and(|s| !s.exited);
         self.recency.iter().rev().find_map(|id| {
             let tile = self.tile_of(*id)?;
-            let ItemKind::Terminal { session: other } = self.item(tile)?.kind else { return None };
-            (tile.worker == worker && is_agent(other)).then_some(other)
+            if tile.worker != worker {
+                return None;
+            }
+            match self.item(tile)?.kind {
+                ItemKind::Terminal { session: other } => agent_thread(other),
+                ItemKind::Thread { thread } => Some(thread).filter(live),
+                _ => None,
+            }
         })
     }
 
-    /// A command block from `from`'s terminal, as Markdown, into the draft of the agent
-    /// [`Self::block_target`] picks: its tile is brought into view on its face, and the text
-    /// lands once the face's composer is there, with the keyboard.
+    /// A command block from `from`'s terminal, as Markdown, into the draft of the thread
+    /// [`Self::block_target`] picks ([`Self::quote_to_thread`]).
     fn attach_block(&mut self, from: SessionId, text: String, cx: &mut Context<Self>) {
-        let Some(agent) = self.block_target(from) else {
+        let Some(thread) = self.block_target(from) else {
             self.show_notice("No agent to attach the block to".to_owned(), cx);
             return;
         };
-        self.quote_to_agent(agent, text, cx);
-    }
-
-    /// `text` at the end of `agent`'s draft: its tile is brought into view on its face, and the
-    /// text lands once the face's composer is there, with the keyboard.
-    pub(super) fn quote_to_agent(
-        &mut self,
-        agent: SessionId,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.reveal_session(agent, cx);
-        self.show_face(agent, true, cx);
-        self.quote_into(QuoteFor::Agent(agent), text, Box::new(|_taken, _cx| {}), cx);
+        self.quote_to_thread(thread, text, cx, |_taken, _cx| {});
     }
 
     /// `text` at the end of `thread`'s draft, whatever its agent and wherever it shows: its
@@ -143,12 +137,12 @@ impl WorkspaceView {
             done(false, cx);
             return;
         }
-        self.quote_into(QuoteFor::Thread(thread), text, Box::new(done), cx);
+        self.quote_into(thread, text, Box::new(done), cx);
     }
 
     /// Put `text` in the composer it is for once that is made: the next frames look for it
     /// ([`Self::settle_quotes`]), and after [`QUOTE_WAIT`] it is given up, the person told.
-    fn quote_into(&mut self, to: QuoteFor, text: String, done: Done, cx: &mut Context<Self>) {
+    fn quote_into(&mut self, to: ThreadId, text: String, done: Done, cx: &mut Context<Self>) {
         let id = self.quotes.next;
         self.quotes.next = id.wrapping_add(1);
         self.quotes.waiting.push(Quote { id, to, text, done });
@@ -168,11 +162,11 @@ impl WorkspaceView {
         }
         let here = window.window_handle();
         for quote in std::mem::take(&mut self.quotes.waiting) {
-            let Some(composer) = quote.to.composer(self, cx) else {
+            let Some(composer) = self.composer_of_thread(quote.to, cx) else {
                 self.quotes.waiting.push(quote);
                 continue;
             };
-            let popped = quote.to.tile(self).and_then(|t| self.popouts.window(t.item));
+            let popped = self.tile_of_thread(quote.to).and_then(|t| self.popouts.window(t.item));
             let into = popped.unwrap_or(here);
             let Quote { text, done, .. } = quote;
             // Outside this draw, so the composer redraws with the words in it.
@@ -1568,38 +1562,12 @@ fn shown_rtt(pinned: Option<Duration>, live: Option<Duration>) -> Option<Duratio
 /// Whether a composer took a quote.
 type Done = Box<dyn FnOnce(bool, &mut App)>;
 
-/// What a quote is for.
-#[derive(Clone, Copy)]
-enum QuoteFor {
-    /// The agent in a terminal, on its tile's face.
-    Agent(SessionId),
-    /// A thread, in a composer of it wherever that shows.
-    Thread(ThreadId),
-}
-
-impl QuoteFor {
-    /// The composer it goes into, once on show.
-    fn composer(self, w: &WorkspaceView, cx: &App) -> Option<crate::conversation::attach::Target> {
-        match self {
-            Self::Agent(session) => w.shown_composer(session),
-            Self::Thread(thread) => w.composer_of_thread(thread, cx),
-        }
-    }
-
-    /// The tile that composer is on.
-    fn tile(self, w: &WorkspaceView) -> Option<TileRef> {
-        match self {
-            Self::Agent(session) => w.tile_of_session(session),
-            Self::Thread(thread) => w.tile_of_thread(thread),
-        }
-    }
-}
-
 /// A quote on its way to a composer that may not be made yet.
 struct Quote {
     /// Which, to find it again when its time is up.
     id: u64,
-    to: QuoteFor,
+    /// The thread it is for, in a composer of it wherever that shows.
+    to: ThreadId,
     text: String,
     done: Done,
 }
