@@ -510,13 +510,13 @@ impl Orchestrator {
             | Verb::FastForward { .. }
             | Verb::RemoveWorktree { .. }
             | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
-            Verb::StartThread { worker, start, seat, env, role, worktree } => {
+            Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
                 let threads = inner.task_threads.get().cloned().ok_or_else(|| {
                     Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
                 })?;
                 let mut start = *start;
-                let made = match worktree {
+                let made = match start.worktree.take() {
                     Some(name) => Some(self.worktree_for(&start.cwd, &name).await?),
                     None => None,
                 };

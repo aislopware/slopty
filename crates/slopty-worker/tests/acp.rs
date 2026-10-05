@@ -96,6 +96,7 @@ mod acp {
                 prompt: Some(prompt.to_owned()),
                 model: None,
                 args: Vec::new(),
+                worktree: None,
             })
         }
 

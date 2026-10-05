@@ -181,6 +181,7 @@ mod pi {
                 prompt: Some(prompt.to_owned()),
                 model: None,
                 args: vec!["--offline".to_owned()],
+                worktree: None,
             })
         }
 

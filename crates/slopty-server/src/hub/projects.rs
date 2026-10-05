@@ -1673,14 +1673,13 @@ impl Hub {
                     Some(Worktree::Named(name)) => Some(name),
                     Some(Worktree::Codex) | None => None,
                 };
-                let start = Start { agent, cwd, drive: None, prompt, model, args };
+                let start = Start { agent, cwd, drive: None, prompt, model, args, worktree };
                 let start = Verb::StartThread {
                     worker,
                     start: Box::new(start),
                     seat: term.session,
                     env,
                     role: Some(role),
-                    worktree,
                 };
                 (start, None)
             }

@@ -142,6 +142,7 @@ mod claude_start {
                 prompt: prompt.map(str::to_owned),
                 model: Some("opus".to_owned()),
                 args: Vec::new(),
+                worktree: None,
             }
         }
 

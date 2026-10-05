@@ -354,6 +354,23 @@ mod golden_thread {
                     prompt: Some("fix the build".to_owned()),
                     model: Some("gpt-5.5".to_owned()),
                     args: vec!["--yolo".to_owned()],
+                    worktree: None,
+                }),
+            },
+        );
+        // A start in a worktree of its own, made from the clone `cwd` is in.
+        snap(
+            "client_start_in_worktree",
+            &ThreadRequest::Start {
+                id: intent(),
+                start: Box::new(Start {
+                    agent: AgentId::named(AgentId::CLAUDE_CODE),
+                    cwd: "/work/web".to_owned(),
+                    drive: None,
+                    prompt: None,
+                    model: None,
+                    args: Vec::new(),
+                    worktree: Some("claude-3f9a2c".to_owned()),
                 }),
             },
         );

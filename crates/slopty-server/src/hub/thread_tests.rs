@@ -57,13 +57,11 @@ async fn any_agent_runs_a_task_as_a_thread() {
 
     let asked = spawn(&hub, spawn_verb(as_thread(pi(), &[])));
     let (id, verb) = request(&mut linux_rx).await;
-    let Verb::StartThread { worker, start, seat, env, role, worktree } = verb else {
-        panic!("{verb:?}")
-    };
+    let Verb::StartThread { worker, start, seat, env, role } = verb else { panic!("{verb:?}") };
     assert_eq!(worker, linux);
     assert_eq!((start.agent.clone(), start.model.as_deref()), (pi(), Some("sonnet")));
     assert_eq!(start.cwd, "~/src/slopty");
-    assert_eq!(worktree, None, "a named folder: no worktree");
+    assert_eq!(start.worktree, None, "a named folder: no worktree");
     assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == task.to_string()), "{env:?}");
     assert!(role.is_some_and(|r| r.starts_with("You are the agent of task")));
     let thread = ThreadId::new();

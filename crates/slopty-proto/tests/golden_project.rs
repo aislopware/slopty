@@ -483,6 +483,7 @@ mod golden_project {
             prompt: Some("Read your brief.".to_owned()),
             model: None,
             args: Vec::new(),
+            worktree: Some("slopty-slopty-6".to_owned()),
         };
         snap(
             "start_thread",
@@ -492,7 +493,6 @@ mod golden_project {
                 seat: term().session,
                 env: vec![("SLOPTY_TASK".to_owned(), "6".to_owned())],
                 role: Some("You are the agent of task 6.".to_owned()),
-                worktree: Some("slopty-slopty-6".to_owned()),
             }),
         );
         let made = Worktree {

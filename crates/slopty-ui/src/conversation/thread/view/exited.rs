@@ -72,6 +72,7 @@ pub fn gone(state: &ThreadState) -> Option<Gone> {
         prompt: None,
         model,
         args,
+        worktree: None,
     }))
 }
 

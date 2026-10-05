@@ -38,7 +38,15 @@ where
         None if state.turns.is_empty() => return refused("There is nothing to go on from yet"),
         None => {
             let cwd = state.meta.cwd.clone();
-            let start = Start { agent, cwd, drive: None, prompt: None, model: None, args: vec![] };
+            let start = Start {
+                agent,
+                cwd,
+                drive: None,
+                prompt: None,
+                model: None,
+                args: vec![],
+                worktree: None,
+            };
             begin(id, start).await
         }
     };

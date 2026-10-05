@@ -247,6 +247,11 @@ pub struct Start {
     pub model: Option<String>,
     /// More arguments for the agent, checked by its adapter.
     pub args: Vec<String>,
+    /// A git worktree of its own to work in, by name: the worker makes it from the clone
+    /// `cwd` is in (`.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s
+    /// default branch, else `HEAD`), or reopens it when it is there, and the agent starts in
+    /// it where `cwd` stands in the clone. A start whose `cwd` is in no clone is refused.
+    pub worktree: Option<String>,
 }
 
 /// Something a client asks a thread to do.

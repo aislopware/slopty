@@ -85,6 +85,7 @@ mod codex_rest {
                     prompt: None,
                     model: None,
                     args: Vec::new(),
+                    worktree: None,
                 };
                 let outcome = handle.start(IntentId::new(), start).await;
                 assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");

@@ -1161,6 +1161,7 @@ mod threads {
             prompt: Some("Say hello.".to_owned()),
             model: None,
             args: Vec::new(),
+            worktree: None,
         };
         a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
         let outcome = a
@@ -1207,6 +1208,7 @@ mod threads {
             prompt: None,
             model: None,
             args: Vec::new(),
+            worktree: None,
         };
         a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
         let outcome = a

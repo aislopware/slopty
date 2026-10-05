@@ -806,12 +806,11 @@ pub enum Verb {
     /// row carries [`crate::project::SEAT_FACT`], its Slopty tools speak as `seat` with the
     /// worker's token for it and `env`, and `role` reaches it through its agent's own door (a
     /// system prompt where it takes one, else ahead of its first prompt). An agent whose
-    /// thread runs in a terminal runs in one opened under `seat`. With `worktree`, it works in
-    /// a git worktree of that name the worker makes under the clone at the start's `cwd`
-    /// (`.claude/worktrees/<name>`, on branch `worktree-<name>`, from `origin`'s default
-    /// branch, else `HEAD`), or reopens when it is there. A repeat with a `seat` already
-    /// started answers that thread. Answered with [`Outcome::ThreadStarted`];
-    /// [`ErrorCode::Unsupported`] for an agent the worker cannot start.
+    /// thread runs in a terminal runs in one opened under `seat`. A start that names a
+    /// worktree ([`crate::thread::wire::Start::worktree`]) works in it, made or reopened, and
+    /// the answer says where. A repeat with a `seat` already started answers that thread. Answered
+    /// with [`Outcome::ThreadStarted`]; [`ErrorCode::Unsupported`] for an agent the worker
+    /// cannot start.
     StartThread {
         /// Where.
         worker: WorkerId,
@@ -823,8 +822,6 @@ pub enum Verb {
         env: Vec<(String, String)>,
         /// What the agent is told it is for.
         role: Option<String>,
-        /// The name of the worktree of its own it works in, for an agent that writes.
-        worktree: Option<String>,
     },
     /// Make a folder, move or rename an entry, or put one in the OS's trash, as a folder tile
     /// does ([`FsOp`]): nothing is replaced and nothing unlinked. Answered with
