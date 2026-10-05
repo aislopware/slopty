@@ -162,6 +162,12 @@ actions!(
 /// The palette's name for [`SaveCopy`].
 pub const SAVE_A_COPY: &str = "Save a copy\u{2026}";
 
+/// The palette's line for ⌘⇧M while the focused stream's sound plays.
+pub const MUTE_SOUND: &str = "Mute sound";
+
+/// The same line while it is muted.
+pub const UNMUTE_SOUND: &str = "Unmute sound";
+
 /// ⌘1…⌘9: focus column `index` (0-based) of the active workspace, as a browser's tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
@@ -319,7 +325,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Next thing that needs you", IconName::BellRing, Box::new(NextAttention)),
         w("Show what needs you", IconName::Bell, Box::new(ShowNeedsYou)),
         w("Filter the navigator", IconName::ListFilter, Box::new(FilterNavigator)),
-        w("Mute sound", IconName::VolumeX, Box::new(ToggleMute)),
+        w(MUTE_SOUND, IconName::VolumeX, Box::new(ToggleMute)),
         w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
         w(
             crate::screen::TRACKPAD_MODE,
@@ -382,6 +388,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
+    items.extend(crate::conversation::palette_items(&workspace));
     items.extend(crate::project::palette_items(&workspace));
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only the Mac has a Web Inspector window of its own; iOS reaches it from Safari on a Mac.

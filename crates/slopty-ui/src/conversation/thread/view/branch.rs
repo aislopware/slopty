@@ -137,14 +137,14 @@ impl ThreadView {
     }
 
     /// Whether the thread can branch at all.
-    fn branches(&self, cx: &App) -> bool {
+    pub(super) fn branches(&self, cx: &App) -> bool {
         self.state(cx).is_some_and(|st| {
             [Cap::FORK, Cap::REWIND, Cap::CONTINUE].iter().any(|c| st.meta.can(c))
         })
     }
 
     /// Open the panel under the message `item` of `turn`, or shut it when it is open there.
-    fn toggle_branch(&mut self, item: &ItemId, turn: TurnId, cx: &mut Context<Self>) {
+    pub(super) fn toggle_branch(&mut self, item: &ItemId, turn: TurnId, cx: &mut Context<Self>) {
         if self.branching.as_ref().is_some_and(|b| b.item == *item) {
             self.branching = None;
         } else if let Some(state) = self.state(cx) {

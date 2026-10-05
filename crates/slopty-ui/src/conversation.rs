@@ -19,53 +19,36 @@ pub mod menu;
 pub mod thread;
 
 pub use actions::{
-    AskAside, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
-    RefreshPullRequest, ReviewWithAgent, WatchAgentScreen,
+    AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort, EditLastQueued, Interrupt,
+    OpenCommit, QueueMessage, RefreshPullRequest, ResumeAgent, ReviewChanges, ReviewWithAgent,
+    ShowAgentTerminal, TakeBack, WatchAgentScreen,
 };
 pub use attach::Attach;
 
-/// The thread's and the review's own lines in the palette: the commit sheet, the pull
-/// request's refresh, the agent's own review and its screen, which no button carries a key for.
+/// The thread's and the review's own lines in the palette.
+///
+/// The commit sheet, the pull request's refresh, the agent's own review and its screen, and
+/// every button of the thread's that the keyboard reaches no other way. A line shows only where
+/// the focused thread or review answers it.
 #[must_use]
 pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
     use crate::icons::IconName;
+    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    };
     vec![
-        crate::palette::PaletteItem::new(
-            "Commit\u{2026}",
-            IconName::GitBranch,
-            Box::new(OpenCommit),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            "Review with the agent",
-            IconName::ListChecks,
-            Box::new(ReviewWithAgent),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            "Watch the agent's screen",
-            IconName::Monitor,
-            Box::new(WatchAgentScreen),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            "Refresh pull request",
-            IconName::GitPullRequest,
-            Box::new(RefreshPullRequest),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            "Ask aside",
-            IconName::MessageCircleQuestionMark,
-            Box::new(AskAside),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            "Next effort level",
-            IconName::Brain,
-            Box::new(CycleEffort),
-            bindings,
-        ),
+        line("Review changes", IconName::FilePen, Box::new(ReviewChanges)),
+        line("Show the agent's terminal", IconName::SquareTerminal, Box::new(ShowAgentTerminal)),
+        line("Take back from the terminal", IconName::Undo2, Box::new(TakeBack)),
+        line("Compact context", IconName::Shrink, Box::new(CompactContext)),
+        line("Branch from here\u{2026}", IconName::GitBranch, Box::new(BranchFromHere)),
+        line("Resume the agent", IconName::Play, Box::new(ResumeAgent)),
+        line("Commit\u{2026}", IconName::GitBranch, Box::new(OpenCommit)),
+        line("Review with the agent", IconName::ListChecks, Box::new(ReviewWithAgent)),
+        line("Watch the agent's screen", IconName::Monitor, Box::new(WatchAgentScreen)),
+        line("Refresh pull request", IconName::GitPullRequest, Box::new(RefreshPullRequest)),
+        line("Ask aside", IconName::MessageCircleQuestionMark, Box::new(AskAside)),
+        line("Next effort level", IconName::Brain, Box::new(CycleEffort)),
     ]
 }
 

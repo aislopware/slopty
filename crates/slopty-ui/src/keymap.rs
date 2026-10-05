@@ -262,7 +262,8 @@ pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{
-        AskAside, CycleDensity, CycleEffort, EditLastQueued, Interrupt, QueueMessage,
+        AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort, EditLastQueued,
+        Interrupt, QueueMessage, ResumeAgent, ReviewChanges, ShowAgentTerminal, TakeBack,
     };
     use crate::terminal as t;
 
@@ -392,6 +393,12 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
         c(Conversation, "cycle_effort", CycleEffort, &[], &[FACE]),
         c(Conversation, "ask_aside", AskAside, &[], &[FACE]),
+        c(Conversation, "review_changes", ReviewChanges, &[], &[FACE]),
+        c(Conversation, "show_agent_terminal", ShowAgentTerminal, &[], &[FACE]),
+        c(Conversation, "take_back", TakeBack, &[], &[FACE]),
+        c(Conversation, "compact_context", CompactContext, &[], &[FACE]),
+        c(Conversation, "branch_from_here", BranchFromHere, &[], &[FACE]),
+        c(Conversation, "resume_agent", ResumeAgent, &[], &[FACE]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),

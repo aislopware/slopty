@@ -135,7 +135,7 @@ impl ThreadView {
     }
 
     /// Whether this client's `intent` is on its way and not yet answered.
-    fn moving(&self, cx: &App, intent: &Intent) -> bool {
+    pub(super) fn moving(&self, cx: &App, intent: &Intent) -> bool {
         self.hub
             .read(cx)
             .threads()

@@ -82,7 +82,7 @@ impl ThreadView {
     }
 
     /// Take the thread's exited agent up again by `start`.
-    fn resume(&self, start: Start, cx: &mut Context<Self>) {
+    pub(super) fn resume(&self, start: Start, cx: &mut Context<Self>) {
         let thread = self.thread;
         let _id = self.hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
     }

@@ -113,6 +113,7 @@ pub mod denying;
 mod finding;
 mod goal;
 mod going;
+mod keyed;
 #[cfg(test)]
 pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
 pub mod exited;
@@ -260,6 +261,8 @@ pub struct ThreadView {
     /// Times this view was rendered rather than replayed from the view cache.
     renders: u32,
     focus: FocusHandle,
+    /// The field went while it held the keyboard, which the thread holds until it is back.
+    kept_keyboard: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -388,6 +391,7 @@ impl ThreadView {
             asides_heard: None,
             renders: 0,
             focus: cx.focus_handle(),
+            kept_keyboard: false,
             _subscriptions: vec![composing, hearing, watching],
         };
         view.hub.update(cx, |hub, cx| hub.open(thread, cx));
@@ -499,6 +503,25 @@ impl ThreadView {
     /// Give the composer the keyboard.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
+    /// The field goes while the agent's own TUI holds the session or its agent has exited for
+    /// good: the keyboard it held stays on the thread, where Take back and Resume are keys, and
+    /// goes back to the field when it returns. A focus on what is no longer drawn would reach
+    /// nothing of the thread's.
+    fn keep_keyboard(&mut self, composes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let field_gone = !composes
+            || self.tui_holds(cx) == Some(true)
+            || self.gone(cx).is_some_and(|g| g != exited::Gone::ByMessage);
+        if field_gone && self.composer.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+            self.kept_keyboard = true;
+        } else if !field_gone
+            && std::mem::take(&mut self.kept_keyboard)
+            && self.focus.is_focused(window)
+        {
+            self.focus(window, cx);
+        }
     }
 
     fn z(&self, v: f32) -> gpui::Pixels {
@@ -1942,6 +1965,7 @@ impl Render for ThreadView {
         let composes = !self.in_subagent();
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
         let composer = composes.then(|| self.composer_box(bar.is_some(), cx));
+        self.keep_keyboard(composes, window, cx);
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())
@@ -1967,6 +1991,7 @@ impl Render for ThreadView {
             .on_action(cx.listener(|this, _: &AskAside, window, cx| this.ask_aside(window, cx)))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .map(|el| self.keyed(el, cx))
             .when(self.agent_screen(cx).is_some(), |el| {
                 el.on_action(
                     cx.listener(|this, _: &WatchAgentScreen, _w, cx| this.watch_screen(cx)),

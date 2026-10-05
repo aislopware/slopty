@@ -9,6 +9,7 @@ use slopty_proto::terminal::RepoChanges;
 
 use super::*;
 use crate::icons::Status;
+use crate::workspace::actions::{MUTE_SOUND, UNMUTE_SOUND};
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
@@ -404,11 +405,22 @@ fn a_workers_tiles_share_its_one_sound_and_say_its_mute_together(cx: &mut TestAp
     });
     cx.run_until_parked();
     assert_eq!(muted(&view, cx), [true, true], "silenced from one tile, said by both");
+    let palette_says = |cx: &mut VisualTestContext| {
+        let lines = view.update_in(cx, |v, _w, cx| v.palette_lines(cx));
+        let sound = [MUTE_SOUND, UNMUTE_SOUND];
+        lines
+            .into_iter()
+            .map(|l| l.label)
+            .filter(|l| sound.contains(&l.as_str()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(palette_says(cx), [UNMUTE_SOUND], "the palette's line says what it does now");
     assert_eq!(pills(cx), [true, true], "a silenced tile says so, whichever was pressed");
     assert_eq!(tile::mute_label("studio"), "Mute studio's sound");
 
     click(cx, leak(format!("mute-{}", tiles[1].item.as_uuid())));
     assert_eq!(muted(&view, cx), [false, false], "resumed from the other tile's pill");
+    assert_eq!(palette_says(cx), [MUTE_SOUND]);
     assert_eq!(pills(cx), [false, false]);
 }
 

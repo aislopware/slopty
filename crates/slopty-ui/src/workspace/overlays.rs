@@ -107,7 +107,9 @@ impl WorkspaceView {
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
         items.extend(self.closed_lines());
-        items.extend(super::actions::palette_items());
+        items.extend(
+            super::actions::palette_items().into_iter().map(|line| self.sound_line(line, cx)),
+        );
         items.extend(self.attach_lines(cx));
         items.extend(self.group_lines());
         items.extend(self.scope_lines());
@@ -119,6 +121,20 @@ impl WorkspaceView {
         items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());
         items
+    }
+
+    /// `line`, or "Unmute sound" in its place while it is ⌘⇧M's and the focused stream is
+    /// muted: the line says what picking it does.
+    fn sound_line(&self, line: PaletteItem, cx: &Context<Self>) -> PaletteItem {
+        let mute = run_action(&line).is_some_and(|a| a.partial_eq(&super::actions::ToggleMute));
+        if !mute || !self.active_screen().is_some_and(|v| v.read(cx).muted()) {
+            return line;
+        }
+        PaletteItem {
+            label: super::actions::UNMUTE_SOUND.to_owned(),
+            icon: crate::icons::Glyph::Icon(crate::icons::IconName::Volume2),
+            ..line
+        }
     }
 
     /// What an agent's session is about, for the palette to find it by: its thread's title and

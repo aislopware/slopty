@@ -6616,3 +6616,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   report now says where the pointer was, whether the keyboard was the last input, and what
   held the focus, which is what told this apart from a hover.
 
+- ✅ **Every thread button is an action too, answered only while it shows** (2026-10-05,
+  readiness 10-05 G5). Review, Show the agent's terminal, Take back from the terminal, Compact
+  context, Branch from here… and Resume the agent were buttons only, so the keyboard could not
+  reach them and the palette did not list them. Each is now an action in the `conversation`
+  namespace with a palette line and an unbound keymap entry (keys are the person's to give,
+  and the palette shows one once given). The thread view listens for an action only while its
+  button would show (`thread/view/keyed.rs`): Review over a last turn that changed files, the
+  terminal while the thread has one, Take back while the agent's TUI holds the session and no
+  take-back is on its way, Compact where the agent compacts through Slopty, Branch from here
+  under the person's last message (scrolled into view), Resume once the agent has exited and
+  can be taken up. So the palette, which keeps a line only where the focus answers it ("The
+  palette offers what the focus can do"), never offers one that does nothing. The thread's
+  palette lines (`conversation::palette_items`) had been written and never added to the
+  workspace's, so Commit…, Refresh pull request, Review with the agent, Watch the agent's
+  screen, Ask aside and Next effort level reach the palette with them now.
+  - *The keyboard stays on the thread when the field goes.* The field leaves while the
+    agent's own TUI holds the session and once an agent has exited for good, the two states
+    whose buttons matter most here. A focus on what is no longer drawn reaches nothing, so the
+    thread's actions went unanswered from the keyboard exactly then. The thread takes the
+    keyboard as the field goes and hands it back when the field returns.
+  - *"Mute sound" says "Unmute sound"* while the focused stream is muted, so the line says
+    what picking it does.
+  - Tests: `conversation::thread::tests::doors::every_button_of_the_thread_is_an_action_while_it_shows`,
+    `workspace::tests::facts::a_workers_tiles_share_its_one_sound_and_say_its_mute_together`.
