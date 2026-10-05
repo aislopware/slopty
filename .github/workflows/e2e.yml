@@ -7,8 +7,9 @@ name: E2E
 # its build never holds the gate's concurrency group, and `promote` waits for none of it: it is
 # not a gate lane until its renders are shown to match the goldens drawn on a Mac with a GPU of
 # its own. A changed frame leaves its render and diff in the `e2e-app` artifact, which
-# `cargo xtask e2e app --accept` reproduces locally. Only the newest push matters, so a newer one
-# cancels the run in progress.
+# `cargo xtask e2e app --accept` reproduces locally. A run in progress finishes: cancelled by each
+# newer push, its first runs never reported, since a land comes oftener than its 40 minutes.
+# GitHub keeps one run pending, the newest, which covers every commit under it.
 on:
   push:
     branches: [ gate ]
@@ -16,7 +17,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read

@@ -1033,6 +1033,9 @@ more full-window layer.
     (over 30 minutes on its first run, 37341280953) kept the run going after every gate lane
     had passed. That held the next push's run in the queue, and `xtask promote`, which waited
     for the whole run. `promote` now asks only that every gate lane passed.
+  - A run in progress there finishes, and only the newest push waits. When each newer push
+    cancelled it, its first runs never reported, since a land comes oftener than its 40
+    minutes.
   - The cost is a red run found later: about 5.7 minutes per land on CI's wall clock (the entry
     above), while the agents keep working, against minutes of every core here per land. Agents
     still run clippy and their own crate's tests as they code.
