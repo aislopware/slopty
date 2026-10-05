@@ -7448,3 +7448,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The words.** Away from a terminal, the refusal now names the way that works: "A project
     is run by an agent in a terminal: start one with "New project…"".
   - Test: `workspace::tests::projects::new_project_starts_its_orchestrator_then_asks_for_the_project`.
+- ✅ **A phone has one bar, the focused tile's** (2026-10-06, `.research/ux-audit-2026-10-05.md`
+  §11 #16, P3). A phone stacked a navigation bar with the workspace's name over the tile's own
+  header, so two rows of chrome stood over every screen of work.
+  - **The bar.** On a phone the bar is now the focused tile's: its kind (or its agent's mark),
+    its title, and how it is doing, at the size and weight the breadcrumb uses on a wider
+    window. Its heading says all the agent's pill would ("…, Needs approval: Run ls"). With no
+    tile focused it names the workspace.
+  - **No header.** The tile draws no header of its own (`WorkspaceView::header_h` is 0), so
+    its body runs up to the bar.
+  - **The "…" menu.** It leads with the tile's own rows (`MenuGroup::Tile`): the agent's other
+    faces ("Show thread", "Show terminal", "Show board"), Rename, Copy path and Close tile.
+    There is no Fullscreen, since the tile fills the screen already. What "+" opens follows.
+  - **The palette.** It is a sheet from the bottom, as iOS search in a toolbar is. Its field
+    sits just above the keyboard, in a thumb's reach, and what it finds sits above the field.
+    The sheet starts under the status bar with its top corners rounded, rises in on the
+    sheet's pace and goes back down to leave.
+  - **Still to come.** The drawer names the workspace, after the navigator's material change.
+  - Tests: `workspace::tests::tiles::a_phone_bar_is_a_navigation_bar`,
+    `workspace::tests::tiles::a_tile_that_fills_a_phone_offers_no_fullscreen`,
+    `workspace::tests::faces::a_pill_says_the_state_and_a_phone_bar_says_it_all`,
+    `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`; e2e
+    `conversation::a_phone_opens_on_the_thread`. Golden: `thread-phone`.

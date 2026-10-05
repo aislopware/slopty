@@ -170,12 +170,11 @@ fn closing_the_tile_or_the_agent_leaving_lets_the_thread_go(cx: &mut TestAppCont
     assert!(thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }));
 }
 
-/// On a phone the title of an agent's tile reads whole beside its pill. The pill says the
-/// state alone ("Needs approval") on any screen, since what the agent asks is the navigator's
-/// line and the pointer's, and a screen reader still hears all of it. Nothing runs past the
-/// header.
+/// An agent's pill says the state alone ("Needs approval"), since what the agent asks is the
+/// navigator's line and the pointer's; a screen reader still hears all of it. On a phone the
+/// tile has no header: the bar is the tile's, its heading the title and all the pill would say.
 #[gpui::test]
-fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext) {
+fn a_pill_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     cx.run_until_parked();
@@ -191,26 +190,20 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
         v.agent_event(asks, cx);
         // On its TUI, where the header's pill speaks for it.
         v.show_face(session, false, cx);
+        v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    let widths = |cx: &mut VisualTestContext| {
+    let width = |cx: &mut VisualTestContext| {
         let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
         let pill = cx.debug_bounds(selector("agent", tile.item)).expect("the pill");
         let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
         assert!(pill.left() >= name.right(), "side by side: {name:?} {pill:?}");
         assert!(pill.right() <= header.right(), "inside the header: {pill:?} {header:?}");
-        (f32::from(name.size.width), f32::from(pill.size.width))
+        f32::from(pill.size.width)
     };
-    let (title, desk) = widths(cx);
-
-    cx.simulate_resize(size(px(390.0), px(844.0)));
-    cx.run_until_parked();
-    let (phone_title, word) = widths(cx);
-    assert!((phone_title - title).abs() < 0.5, "the whole title: {phone_title} of {title}");
-    assert!((word - desk).abs() < 0.5, "the state alone on both: {word} against {desk}");
-    let nodes = tree(cx);
+    let word = width(cx);
     let full = "Needs approval: Run touch a-file-with-a-rather-long-name-for-a-phone.txt";
-    assert!(nodes.iter().any(|n| n.label.as_deref() == Some(full)), "all of it, said");
+    assert!(tree(cx).iter().any(|n| n.label.as_deref() == Some(full)), "all of it, said");
     let brief = AgentEvent {
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
         detail: Some("$ ls".into()),
@@ -218,8 +211,16 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
     };
     view.update_in(cx, |v, _w, cx| v.agent_event(brief, cx));
     cx.run_until_parked();
-    let (_, other) = widths(cx);
-    assert!((other - word).abs() < 0.5, "the word, not the ask: {other} against {word}");
+    assert!((width(cx) - word).abs() < 0.5, "the word, not the ask");
+
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("title", tile.item)).is_none(), "no header on a phone");
+    let heading = tree(cx).into_iter().find(|n| {
+        n.role == "Heading"
+            && n.label.as_deref().is_some_and(|l| l.ends_with("Needs approval: Run ls"))
+    });
+    assert!(heading.is_some(), "the bar says all of it: {:#?}", tree(cx));
 }
 
 /// While the agent's thread says a turn runs, its tile is marked working though the worker's

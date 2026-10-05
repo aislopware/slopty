@@ -451,7 +451,7 @@ impl WorkspaceView {
         let frame = self.layout.frame();
         let Some(placed) = frame.tiles.iter().find(|p| p.tile == tile) else { return };
         let scale = window.scale_factor();
-        let pixels = body_pixels(placed.target, self.theme.density.header, scale);
+        let pixels = body_pixels(placed.target, self.header_h(), scale);
         let shape = display::shape(pixels, scale, crate::screen::main_refresh_hz());
         if let Some(w) = self.workers.get_mut(&tile.worker) {
             w.sized = Some(Sized::new(tile.item, shape));
@@ -515,7 +515,7 @@ impl WorkspaceView {
         }
         let now = cx.background_executor().now();
         let scale = window.scale_factor();
-        let header = self.theme.density.header;
+        let header = self.header_h();
         let mut due: Option<Instant> = None;
         for w in self.workers.values_mut() {
             let Some(sized) = w.sized.as_mut() else { continue };

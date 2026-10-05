@@ -1371,7 +1371,7 @@ pub struct CommandPalette {
     /// Its lines are the workspace's own list ([`Self::set_live`]), so they follow it while
     /// it is open; a find or a list of workers keeps the lines it was opened with.
     live: bool,
-    /// A window narrower than this (a phone's) gets the palette as a sheet from the top.
+    /// A window narrower than this (a phone's) gets the palette as a sheet from the bottom.
     sheet_below: f32,
     /// The last frame drew it as a phone's sheet.
     sheet: bool,
@@ -1549,7 +1549,7 @@ impl CommandPalette {
         self.fades_in
     }
 
-    /// Show as a sheet from the top in a window narrower than `width`.
+    /// Show as a sheet from the bottom in a window narrower than `width`.
     pub const fn set_sheet_below(&mut self, width: f32) {
         self.sheet_below = width;
     }
@@ -1927,9 +1927,9 @@ impl CommandPalette {
     }
 
     /// Stop taking the keys and the pointer and draw the way out: on a desktop a fade on
-    /// [`Pace::Exit`], as every overlay leaves; on a phone the sheet back up in three quarters of
-    /// its way in. How long that takes, for the owner to keep drawing it before dropping it;
-    /// nothing under Reduce Motion.
+    /// [`Pace::Exit`], as every overlay leaves; on a phone the sheet goes back down in three
+    /// quarters of its way in. How long that takes, for the owner to keep drawing it before
+    /// dropping it; nothing under Reduce Motion.
     pub fn leave(&mut self, cx: &mut Context<Self>) -> Duration {
         self.leaving = true;
         cx.notify();
@@ -1940,7 +1940,7 @@ impl CommandPalette {
     }
 }
 
-/// How long the phone's sheet takes to go back up: three quarters of its way in, since what is
+/// How long the phone's sheet takes to go back down: three quarters of its way in, since what is
 /// dismissed is no longer looked at.
 fn sheet_leaving_time() -> Duration {
     Pace::Sheet.duration().mul_f32(0.75)
@@ -1978,21 +1978,26 @@ impl Render for CommandPalette {
         // A list typed at floats over the work (`kit::anchor`); only a touch screen's palette,
         // the phone's sheet or the iPad's with no keyboard, dims what it came over.
         let backdrop = crate::kit::anchor(&theme, window);
-        let backdrop = if sheet { backdrop.px_0().pt_0() } else { backdrop };
+        let backdrop = if sheet {
+            // A sheet from the bottom, as iOS search in a toolbar is: its field just above the
+            // keyboard, in a thumb's reach, and what it finds above the field.
+            backdrop.px_0().pt(safe_top + px(theme.spacing.sm)).justify_end()
+        } else {
+            backdrop
+        };
         let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
         let dialog = if sheet {
-            // A sheet from the top: the window's width, down to the keyboard. Its surface runs
-            // up under the status bar and the island, and its field starts below them. The
-            // scrim sets it off, so it casts no shadow into the keyboard's grey.
+            // A sheet from the bottom: the window's width, from under the status bar down to
+            // the keyboard, its top corners rounded as a sheet's are. The scrim sets it off, so
+            // it casts no shadow into the keyboard's grey.
             dialog
                 .max_w_full()
                 .max_h_full()
                 .flex_1()
                 .mb_0()
-                .pt(safe_top)
-                .border_t_0()
+                .border_b_0()
                 .border_x_0()
-                .rounded_t(px(0.0))
+                .rounded_b(px(0.0))
                 .shadow_none()
         } else {
             let ceiling = crate::kit::Overlay::List.bounds().1;
@@ -2003,59 +2008,65 @@ impl Render for CommandPalette {
             crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
                 .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(PaletteEvent::Dismiss)))
         });
+        // The typed text starts on the rows' text: the edge grid.
+        let field = field_row(&theme, &self.input, "Command")
+            .debug_selector(|| "palette-field".to_owned())
+            .gap(px(theme.spacing.md))
+            .children(cancel);
+        let list = more_below(
+            &theme,
+            &self.list,
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.plate.under(&theme))
+                .child(
+                    div()
+                        .id("palette-list")
+                        .debug_selector(|| "palette-list".to_owned())
+                        .role(gpui::accesskit::Role::ListBox)
+                        .aria_label("Commands")
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .when(!self.lines.is_empty(), |el| {
+                            el.child(
+                                gpui::list(
+                                    self.list.clone(),
+                                    cx.processor(|this, ix, _window, cx| this.line(ix, cx)),
+                                )
+                                .with_sizing_behavior(ListSizingBehavior::Infer)
+                                .flex_1()
+                                .min_h_0()
+                                .py(px(list_pad(&theme))),
+                            )
+                        })
+                        .when(nothing, |el| {
+                            el.py(px(list_pad(&theme))).child(quiet_line(
+                                &theme,
+                                "palette-empty",
+                                self.empty.clone(),
+                            ))
+                        }),
+                ),
+        );
+        let foot = self.chords.then(|| legend(&theme, verb));
         let panel = dialog
             .id("palette")
             .debug_selector(|| "palette".to_owned())
             .role(gpui::accesskit::Role::Dialog)
             .aria_label("Commands")
-            // The typed text starts on the rows' text: the edge grid.
-            .child(
-                field_row(&theme, &self.input, "Command")
-                    .gap(px(theme.spacing.md))
-                    .children(cancel),
-            )
-            .child(more_below(
-                &theme,
-                &self.list,
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(self.plate.under(&theme))
-                    .child(
-                        div()
-                            .id("palette-list")
-                            .debug_selector(|| "palette-list".to_owned())
-                            .role(gpui::accesskit::Role::ListBox)
-                            .aria_label("Commands")
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_col()
-                            .when(!self.lines.is_empty(), |el| {
-                                el.child(
-                                    gpui::list(
-                                        self.list.clone(),
-                                        cx.processor(|this, ix, _window, cx| this.line(ix, cx)),
-                                    )
-                                    .with_sizing_behavior(ListSizingBehavior::Infer)
-                                    .flex_1()
-                                    .min_h_0()
-                                    .py(px(list_pad(&theme))),
-                                )
-                            })
-                            .when(nothing, |el| {
-                                el.py(px(list_pad(&theme))).child(quiet_line(
-                                    &theme,
-                                    "palette-empty",
-                                    self.empty.clone(),
-                                ))
-                            }),
-                    ),
-            ))
-            .when(self.chords, |el| el.child(legend(&theme, verb)));
+            .map(|el| {
+                if sheet {
+                    el.child(list).children(foot).child(field)
+                } else {
+                    el.child(field).child(list).children(foot)
+                }
+            });
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
         // finger taps to close it, where a desktop's Esc would.
         let scrim = (sheet || !self.chords).then(|| {
@@ -2132,7 +2143,7 @@ impl Render for CommandPalette {
 
 /// The palette arriving. On a desktop it fades in where it stands, with no travel: it is a
 /// surface for the keyboard, and what the keyboard summons does not move. The phone's sheet
-/// comes down its whole height from the window's top edge, on a sheet's time and curve. The
+/// comes up its whole height from the bottom, on a sheet's time and curve. The
 /// field has the keys from the first frame either way: only paint moves.
 fn enter_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
     if !sheet {
@@ -2144,13 +2155,13 @@ fn enter_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui:
     panel
         .relative()
         .with_animation("palette-sheet-in", Pace::Sheet.animation(), |el, t| {
-            el.top(gpui::relative(t - 1.0))
+            el.top(gpui::relative(1.0 - t))
         })
         .into_any_element()
 }
 
 /// The palette leaving: on a desktop it fades where it is on [`Pace::Exit`], with no travel;
-/// the sheet goes back up. Under Reduce Motion it is gone at once, as its owner drops it at
+/// the sheet goes back down. Under Reduce Motion it is gone at once, as its owner drops it at
 /// once.
 fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
     if !crate::kit::motion(cx) {
@@ -2159,9 +2170,7 @@ fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui:
     if sheet {
         panel
             .relative()
-            .with_animation("palette-sheet-out", sheet_leaving(), |el, t| {
-                el.top(gpui::relative(-t))
-            })
+            .with_animation("palette-sheet-out", sheet_leaving(), |el, t| el.top(gpui::relative(t)))
             .into_any_element()
     } else {
         panel

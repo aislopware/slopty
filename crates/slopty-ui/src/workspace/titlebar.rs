@@ -39,6 +39,7 @@ use gpui::{
 };
 use slopty_client::groups::Group;
 use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
+use slopty_proto::items::ItemKind;
 use slopty_theme::Typography;
 
 use super::actions::{
@@ -149,11 +150,6 @@ impl WorkspaceView {
     /// frame is a step and a dump must see where things land.
     pub(super) fn chrome_moves(&self, cx: &gpui::App) -> bool {
         self.animate && kit::motion(cx)
-    }
-
-    /// Whether the bar is a phone's navigation bar.
-    fn phone_bar(&self, window: &Window) -> bool {
-        self.width(window) < self.layout.config().phone_below
     }
 
     /// Whether a round trip going from `was` to `now` is on screen: the navigator prints those
@@ -316,7 +312,7 @@ impl WorkspaceView {
         let docked = self.nav.drawn == Some(Mode::Docked);
         let leading = if docked { spacing.sm } else { LEADING_INSET + f32::from(safe.left) };
         let trailing = spacing.md + f32::from(safe.right);
-        let phone = self.phone_bar(window);
+        let phone = self.phone;
         let place = has_workers
             .then(|| if phone { self.render_phone_title() } else { self.render_breadcrumb(cx) });
         let theme = &self.theme;
@@ -469,28 +465,57 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A phone's title: the active workspace's name, as an iOS navigation bar names its screen,
-    /// at the size and weight the breadcrumb names it in on a wider window: the chrome has no
-    /// display type. The navigator and a swipe go between workspaces; a breadcrumb has no room
-    /// at this width.
+    /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
+    /// (or its agent's mark) before its name and how it is doing after, at the size and weight
+    /// the breadcrumb names a workspace in on a wider window: the chrome has no display type.
+    /// The tile has no header of its own on a phone, so its rows are the bar's "…". With no
+    /// tile focused it names the workspace.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
         let theme = &self.theme;
-        let (label, _rollup) = self.workspace_words(ix);
-        div()
-            .id(("ws-tab", ix))
-            .debug_selector(move || format!("ws-tab-{ix}"))
-            .role(Role::Heading)
-            .aria_label(label)
-            .flex_shrink(1.0)
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_size(px(theme.typography.ui_size))
-            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            .text_color(hsla(theme.surfaces.text))
-            .child(SharedString::from(self.workspace_name_at(ix)))
+        let s = &theme.surfaces;
+        let focused = self.focused().and_then(|tile| self.item(tile).map(|item| (tile, item)));
+        let Some((tile, item)) = focused else {
+            let (label, _rollup) = self.workspace_words(ix);
+            return phone_heading(theme, label)
+                .child(SharedString::from(self.workspace_name_at(ix)))
+                .into_any_element();
+        };
+        let id = item.id;
+        let title = self.tile_title(item);
+        let state = self.tile_status(tile, item).filter(|st| *st != Status::Idle);
+        // What its header's agent pill would say, whole, for a screen reader; else its state.
+        let agent = match item.kind {
+            ItemKind::Terminal { session } => self.agent_state(session),
+            ItemKind::Thread { thread } => self.thread_stand(thread),
+            _ => None,
+        };
+        let said = agent
+            .filter(|agent| {
+                state.is_some() && super::agents::agent_mark_of(agent) != Status::Working
+            })
+            .map(super::agents::agent_status_text)
+            .or_else(|| state.map(|st| st.label().to_owned()));
+        let label = match said {
+            Some(said) => format!("{title}, {said}"),
+            None => title.clone(),
+        };
+        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text), 1.0)
+            .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
+        phone_heading(theme, SharedString::from(label))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .child(lead)
+            .child(
+                div()
+                    .debug_selector(move || format!("phone-title-{}", id.as_uuid()))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(title)),
+            )
+            .children(state.map(|st| crate::icons::status_mark(theme, Some(st), 1.0)))
             .into_any_element()
     }
 
@@ -619,9 +644,16 @@ impl WorkspaceView {
             }
             MenuKind::More => {
                 // A phone's bar has no "+": what it opens leads its "…".
-                let phone = self.phone_bar(window);
-                let mut entries: Vec<MenuEntry> =
-                    if phone { Self::new_entries(&entry) } else { Vec::new() };
+                let phone = self.phone;
+                // A phone's bar is the focused tile's: its own rows lead its "…".
+                let mut entries: Vec<MenuEntry> = if phone {
+                    self.phone_tile_entries(cx)
+                        .into_iter()
+                        .chain(Self::new_entries(&entry))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 entries.extend([
                     action("Command palette", &OpenPalette, |this, w, cx| {
                         this.open_palette(&OpenPalette, w, cx);
@@ -768,6 +800,23 @@ impl WorkspaceView {
             _ => menu_name(which),
         }
     }
+}
+
+/// A phone bar's heading: one line, the body's size in the medium weight, giving way at its end.
+fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("phone-title")
+        .debug_selector(|| "phone-title".to_owned())
+        .role(Role::Heading)
+        .aria_label(label)
+        .flex_shrink(1.0)
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_size(px(theme.typography.ui_size))
+        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+        .text_color(hsla(theme.surfaces.text))
 }
 
 /// What a bar's menu is called, as a screen reader names it.

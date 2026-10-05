@@ -768,6 +768,12 @@ impl WorkspaceView {
         Some(cwd_tail(s.cwd.as_deref()?, home))
     }
 
+    /// How tall a tile's header is: none on a phone, whose bar above the strip is the focused
+    /// tile's (its mark, its title, and its rows in "…"), so the screen keeps one bar of chrome.
+    pub(super) const fn header_h(&self) -> f32 {
+        if self.phone { 0.0 } else { self.theme.density.header }
+    }
+
     /// `worker`'s home directory, once it has said.
     pub(super) fn home_of(&self, worker: WorkerKey) -> Option<&str> {
         self.workers.get(&worker)?.home.as_deref()
@@ -794,7 +800,8 @@ impl WorkspaceView {
         let title = self.tile_title(item);
         let label = SharedString::from(title.clone());
         let shows = self.tile_shows(item);
-        let header = self.render_header(placed, item, title, chrome, cx);
+        // A phone's bar is the focused tile's ([`Self::header_h`]): no header of its own.
+        let header = (!self.phone).then(|| self.render_header(placed, item, title, chrome, cx));
         let body = self.render_body(placed, item, chrome, window, cx);
         // Files dropped on a shell go to its directory; on a thread, to its composer; on a
         // remote window, to the worker's clipboard; on a folder, into it.
@@ -855,7 +862,7 @@ impl WorkspaceView {
                         },
                     ))
                 })
-                .child(header)
+                .children(header)
                 .child(body)
                 .children(
                     (takes_files && self.files_over == Some(tile) && cx.has_active_drag())
@@ -884,7 +891,7 @@ impl WorkspaceView {
             .left(px(inset))
             .right(px(inset))
             .bottom(px(inset))
-            .top(px(theme.density.header.mul_add(k, inset)))
+            .top(px(self.header_h().mul_add(k, inset)))
             .flex()
             .items_center()
             .justify_center()
@@ -2872,7 +2879,7 @@ impl WorkspaceView {
         let k = chrome.k;
         let worker_up = self.workers.get(&placed.tile.worker).is_some_and(|w| w.link.is_some());
         let rest_w = (placed.target.w * k).max(1.0);
-        let rest_h = ((placed.target.h - theme.density.header) * k).max(1.0);
+        let rest_h = ((placed.target.h - self.header_h()) * k).max(1.0);
         let fixed = |el: gpui::AnyElement| {
             div()
                 .flex_1()
@@ -3025,7 +3032,7 @@ impl WorkspaceView {
             },
             ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
                 Some(view) => {
-                    let (width, height) = (placed.target.w, placed.target.h - theme.density.header);
+                    let (width, height) = (placed.target.w, placed.target.h - self.header_h());
                     let handed = Handed::Review { zoom: k, width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
                         v.set_layout(k, width, height, cx);
@@ -3037,7 +3044,7 @@ impl WorkspaceView {
             },
             ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
                 Some(view) => {
-                    let (width, height) = (placed.target.w, placed.target.h - theme.density.header);
+                    let (width, height) = (placed.target.w, placed.target.h - self.header_h());
                     let handed = Handed::Review { zoom: k, width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
                         v.set_layout(k, width, height, cx);

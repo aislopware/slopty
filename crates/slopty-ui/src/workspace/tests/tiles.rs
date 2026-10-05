@@ -826,24 +826,22 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     assert_eq!(left, vec![first], "its close closed that tab's tile");
 }
 
-/// On a phone a column is the screen's width already, so its header offers no fullscreen;
-/// on a desktop, where a column is part of the strip, it does.
+/// On a phone a column is the screen's width already and the tile has no header: its rows are
+/// the bar's "…", which offers to close it but not to fill the screen it fills. On a desktop,
+/// where a column is part of the strip, the header offers fullscreen.
 #[gpui::test]
 fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    let button = |cx: &mut VisualTestContext| {
-        let id = format!("fullscreen-{}", shell.item.as_uuid());
-        cx.debug_bounds(Box::leak(id.into_boxed_str())).is_some()
-    };
-    assert!(button(cx), "a desktop column can fill the strip");
+    assert!(cx.debug_bounds(selector("fullscreen", shell.item)).is_some(), "on a desktop");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(!button(cx), "a phone's column already does");
-    assert!(cx.debug_bounds(selector("close", shell.item)).is_some(), "close stays");
+    click(cx, "more");
+    let rows: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
+    assert!(rows.iter().any(|r| r == "Close tile"), "close stays: {rows:?}");
+    assert!(!rows.iter().any(|r| r == "Fullscreen"), "a phone's column already does: {rows:?}");
 }
 
 /// Two shells of one worker that would read alike are told apart, in the order they were
@@ -960,20 +958,29 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     assert!(quads.iter().any(|q| q.border_color == ring), "the ring in the text's tone");
 }
 
-/// On a phone the bar names the workspace as a navigation bar does, at the size the breadcrumb
-/// names it in on a wider window (no display type in the chrome), with no "+": what it opened
-/// leads the "…" menu.
+/// On a phone the bar is the focused tile's, as a navigation bar names its screen: its kind and
+/// its title, at the size the breadcrumb names a workspace in on a wider window (no display
+/// type in the chrome), and the tile draws no header of its own, so the screen keeps one bar.
+/// There is no "+": the tile's own rows lead the "…" menu, then what "+" opened.
 #[gpui::test]
 fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let crumb = cx.debug_bounds("crumb-workspace-name").expect("the breadcrumb's name");
+    assert!(cx.debug_bounds(selector("title", shell.item)).is_some(), "a header on a desktop");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("title", shell.item)).is_none(), "no header on a phone");
+    assert!(cx.debug_bounds(selector("phone-kind", shell.item)).is_some(), "the tile's kind");
+    let title = view.read_with(cx, |v, _| v.item(shell).map(|i| v.tile_title(i))).unwrap();
+    let heading = tree(cx)
+        .into_iter()
+        .find(|n| n.role == "Heading" && n.label.as_deref() == Some(title.as_str()));
+    assert!(heading.is_some(), "the bar is titled by the tile: {title}");
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
-    let name = cx.debug_bounds("ws-tab-0").expect("the name");
-    assert!(cx.debug_bounds("breadcrumb").is_none(), "the name alone, no breadcrumb");
+    let name = cx.debug_bounds("phone-title").expect("the focused tile's title");
+    assert!(cx.debug_bounds("breadcrumb").is_none(), "the title alone, no breadcrumb");
     assert!((name.size.height - crumb.size.height).abs() < px(0.5), "{name:?} {crumb:?}");
     click(cx, "more");
     cx.update(|window, _cx| window.set_a11y_active(true));
@@ -981,7 +988,8 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let rows: Vec<String> =
         tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
-    assert_eq!(rows.first().map(String::as_str), Some("New terminal"), "{rows:?}");
+    assert_eq!(rows.first().map(String::as_str), Some("Rename"), "the tile's rows: {rows:?}");
+    assert!(rows.iter().any(|r| r == "New terminal"), "{rows:?}");
     assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
 }
 

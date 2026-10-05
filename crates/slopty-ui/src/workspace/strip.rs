@@ -319,7 +319,7 @@ impl WorkspaceView {
     pub(super) fn under(&self, p: Point<Pixels>) -> Option<(TileRef, bool)> {
         let zoom = self.drawn.zoom.get();
         self.drawn.placed.borrow().iter().rev().find(|(_, b)| b.contains(&p)).map(|(tile, b)| {
-            let body = p.y > b.origin.y + px(self.theme.density.header * zoom);
+            let body = p.y > b.origin.y + px(self.header_h() * zoom);
             (*tile, body)
         })
     }
@@ -852,7 +852,7 @@ impl WorkspaceView {
         let item = p.tile.item;
         let spacing = self.theme.spacing;
         let r = p.rect;
-        let header = self.theme.density.header * chrome.k;
+        let header = self.header_h() * chrome.k;
         Some(
             div()
                 .debug_selector(move || format!("tile-notices-{}", item.as_uuid()))

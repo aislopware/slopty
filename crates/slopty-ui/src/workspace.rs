@@ -552,6 +552,8 @@ pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 /// The sections of the titlebar's menus, in their order, a hairline between each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum MenuGroup {
+    /// A phone's "…": the focused tile's own rows, which its header holds on a wider screen.
+    Tile,
     /// The breadcrumb's: the workspaces, or a repository's checkouts.
     Places,
     /// "+": the worker a new tile goes to, where there are several.
@@ -934,6 +936,9 @@ pub struct WorkspaceView {
     drop_landing: Option<std::path::PathBuf>,
     /// The tile a drag of files from elsewhere is over, which says where they would land.
     files_over: Option<TileRef>,
+    /// The workspace is a phone's this frame: its bar is the focused tile's, and tiles have no
+    /// header of their own.
+    phone: bool,
     /// Where a drag of worker files out of the app goes: a system drag, unless the self-test
     /// keeps the promises itself.
     #[cfg(target_os = "macos")]
@@ -1141,6 +1146,7 @@ impl WorkspaceView {
             transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
             files_over: None,
+            phone: false,
             #[cfg(target_os = "macos")]
             drag_sink: None,
             #[cfg(target_os = "macos")]
@@ -1857,6 +1863,7 @@ impl gpui::Render for WorkspaceView {
         }
         self.frame_projects.hold(true, cx);
         self.retitle_window(window);
+        self.phone = self.width(window) < self.layout.config().phone_below;
         self.reduced = cx.reduce_motion();
         let animate = self.animate && !self.reduced;
         if self.layout.config().animate != animate {

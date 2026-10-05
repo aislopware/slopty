@@ -427,9 +427,9 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
 
 /// On a desktop the palette hangs a fifth of the way down the window (the one modal anchor)
 /// and takes at most three fifths of its height under its ceiling, shorter still when it lists
-/// less. On a phone it is a sheet from the top, the window's width,
-/// down to the keyboard, with its foot in view. On both a fade covers the list's end while
-/// more runs on below it.
+/// less. On a phone it is a sheet from the bottom, the window's width, from under the status
+/// bar down to the keyboard, its field at its foot above the keyboard and its foot in view. On both
+/// a fade covers the list's end while more runs on below it.
 #[gpui::test]
 fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -465,8 +465,13 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     next_frame(cx);
     let palette = cx.debug_bounds("palette").expect("drawn");
     let foot = cx.debug_bounds("palette-legend").expect("the foot is drawn");
-    assert!(f32::from(palette.top()).abs() < 0.5, "from the top: {palette:?}");
+    let gap = Theme::default().spacing.sm;
+    assert!((f32::from(palette.top()) - gap).abs() < 0.5, "a gap under the top: {palette:?}");
     assert!((f32::from(palette.bottom()) - short).abs() < 0.5, "to the keyboard: {palette:?}");
+    let field = cx.debug_bounds("palette-field").expect("the field");
+    let list = cx.debug_bounds("palette-list").expect("the list");
+    assert!(field.top() >= list.bottom(), "the field under what it finds: {field:?} {list:?}");
+    assert!((field.bottom() - palette.bottom()).abs() < px(0.5), "at the foot: {field:?}");
     assert!(
         f32::from(palette.left()).abs() < 0.5 && (f32::from(palette.right()) - phone_w).abs() < 0.5,
         "the window's width: {palette:?}"

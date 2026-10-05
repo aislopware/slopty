@@ -15,6 +15,7 @@ use slopty_client::layout::{Layout, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{CloseItem, FullscreenTile, RenameItem};
+use super::faces::Face;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::draw::Draw;
@@ -154,15 +155,18 @@ impl WorkspaceView {
             Some(&RenameItem),
             Rc::new(move |this, window, cx| this.start_rename(tile, window, cx)),
         ));
-        rows.push((
-            MenuGroup::Navigation,
-            "Fullscreen",
-            Some(&FullscreenTile),
-            Rc::new(move |this, _w, cx| {
-                this.focus_tile(tile, cx);
-                this.width_action(cx, Layout::toggle_fullscreen);
-            }),
-        ));
+        // On a phone a column is the screen's width already: fullscreen would add nothing.
+        if !self.phone {
+            rows.push((
+                MenuGroup::Navigation,
+                "Fullscreen",
+                Some(&FullscreenTile),
+                Rc::new(move |this, _w, cx| {
+                    this.focus_tile(tile, cx);
+                    this.width_action(cx, Layout::toggle_fullscreen);
+                }),
+            ));
+        }
         if pressed == Pressed::Tab {
             rows.push((
                 MenuGroup::Navigation,
@@ -213,6 +217,28 @@ impl WorkspaceView {
                 Self::entry(group, label, detail, run, cx)
             })
             .collect()
+    }
+
+    /// A phone's "…" leads with the focused tile's rows, which its header holds on a wider
+    /// screen: the agent's other faces to show, then its menu's rows.
+    pub(super) fn phone_tile_entries(&self, cx: &Context<Self>) -> Vec<MenuEntry> {
+        let Some(tile) = self.focused() else { return Vec::new() };
+        let mut entries = Vec::new();
+        if let Some(ItemKind::Terminal { session }) = self.item(tile).map(|item| &item.kind) {
+            let session = *session;
+            let shown = self.tile_face(session);
+            for face in self.faces_of(session).into_iter().filter(|face| *face != shown) {
+                let run: Run = Rc::new(move |this, _w, cx| this.set_face(session, face, cx));
+                entries.push(Self::entry(MenuGroup::Tile, show_face(face), String::new(), run, cx));
+            }
+        }
+        entries.extend(self.tile_entries(tile, Pressed::Header, cx).into_iter().map(
+            |mut entry| {
+                entry.group = MenuGroup::Tile;
+                entry
+            },
+        ));
+        entries
     }
 
     /// A project's rows: a new shell in its clone, where it has one, and folding it.
@@ -272,6 +298,15 @@ impl WorkspaceView {
             .and_then(|w| w.columns().get(pos.column))
             .map(|c| c.tiles().iter().map(slopty_client::layout::Tile::tile).collect())
             .unwrap_or_default()
+    }
+}
+
+/// The row that shows `face` in its tile.
+const fn show_face(face: Face) -> &'static str {
+    match face {
+        Face::Thread => "Show thread",
+        Face::Terminal => "Show terminal",
+        Face::Board => "Show board",
     }
 }
 
