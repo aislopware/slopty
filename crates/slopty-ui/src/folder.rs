@@ -8,6 +8,11 @@
 //! goes up, and so does the header's arrow. A row dragged out of the tile is a file promise, as
 //! a path dragged out of a shell is; files dropped on the tile go up into the folder.
 //!
+//! New folder, Rename or move and Move to Trash ask the worker through [`FsOp`]s; a name is
+//! written in a field in the row's place, and the folder's watch lists it again once the op is
+//! done. A folder past [`slopty_proto::folder::FOLDER_ENTRIES`] entries comes a page at a time
+//! as the rows near its end are drawn ([`FolderPages`]).
+//!
 //! On iOS the Files picker stands in for Finder: the path bar's upload button ("Upload from
 //! Files…") sends picked files up into the folder, and the selected row's save button ("Save to
 //! Files…") brings it down and saves it there. Both are palette commands too. An iPad's touch
@@ -20,13 +25,17 @@ use std::time::SystemTime;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Bounds, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
-    SharedString, StatefulInteractiveElement as _, Styled as _, UniformListScrollHandle, Window,
-    div, px, uniform_list,
+    AnyElement, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
+use gpui_kit::component::input::{self as input, Input, InputEvent, InputState};
+use gpui_kit::component::{Sizable as _, Size};
+use slopty_client::folders::FolderPages;
 use slopty_core::ItemId;
-use slopty_proto::folder::{FolderEntry, Listing};
+use slopty_proto::ClientMsg;
+use slopty_proto::folder::{After, FolderEntry, FsOp, Listing};
 use slopty_proto::orchestration::FileKind;
 use slopty_theme::Theme;
 
@@ -57,12 +66,18 @@ mod actions {
             /// Bring the selected entry down and save it here: with the Files app on iOS, into
             /// a folder picked on a Mac.
             SaveToFiles,
+            /// Make a folder here, named in a field at the top of the rows.
+            NewFolder,
+            /// Rename the selected entry, or move it by a path, in a field in its row.
+            RenameSelected,
+            /// Move the selected entry to the worker's trash.
+            TrashSelected,
         ]
     );
 }
 pub use actions::{
-    OpenParent, OpenSelected, SaveToFiles, SelectFirst, SelectLast, SelectNext, SelectPrevious,
-    UploadFromFiles,
+    NewFolder, OpenParent, OpenSelected, RenameSelected, SaveToFiles, SelectFirst, SelectLast,
+    SelectNext, SelectPrevious, TrashSelected, UploadFromFiles,
 };
 
 /// The key context of a folder tile; its keys are bound in it.
@@ -84,6 +99,14 @@ pub const SAVE_TO_FILES: &str = "Save to Files\u{2026}";
 pub const UPLOAD: &str = "Upload\u{2026}";
 /// The palette's download where a folder picked here takes the selected entry: a Mac.
 pub const DOWNLOAD: &str = "Download\u{2026}";
+/// The palette's line, and the field's name, for a new folder.
+pub const NEW_FOLDER: &str = "New folder";
+/// The palette's line for a rename, and a move by a path.
+pub const RENAME_OR_MOVE: &str = "Rename or move\u{2026}";
+/// The palette's line that trashes the selected entry.
+pub const MOVE_TO_TRASH: &str = "Move to Trash";
+/// Rows from the end of those listed at which the next page is asked for.
+const PAGE_AHEAD: usize = 40;
 
 /// Whether the Files picker stands in for Finder here: iOS, where nothing else reaches the
 /// Files app, and no file can be dragged in or out of an iPhone.
@@ -100,8 +123,12 @@ const SIZE_W: f32 = 64.0;
 const AGE_W: f32 = 32.0;
 
 /// What a folder tile tells the workspace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FolderViewEvent {
+    /// Send this to the worker: the next page of the folder.
+    Ask(ClientMsg),
+    /// Ask the worker to change its files: a new folder, a rename or move, a trash.
+    Op(FsOp),
     /// The tile moved to this directory: the item follows, and the worker is asked for it.
     Browse(String),
     /// A file was opened: a file tile for it beside this one.
@@ -126,16 +153,21 @@ pub struct FolderView {
     id: ItemId,
     /// The directory the tile is at, as the item names it.
     path: String,
-    /// What the worker last said, for `listed`; kept while the next listing is on its way so a
-    /// move does not flash an empty tile.
-    listing: Option<Listing>,
+    /// What the worker last said, its pages joined, for `listed`; kept while the next listing
+    /// is on its way so a move does not flash an empty tile.
+    pages: FolderPages,
     /// The path `listing` answers.
     listed: Option<String>,
     /// The worker is to be asked for `path` ([`Self::take_request`]).
     wants: bool,
     selected: Option<usize>,
-    /// The entry to select when the next listing comes: the folder just gone up from.
+    /// The entry to select when the next listing comes: the folder just gone up from, or one
+    /// just made or renamed.
     came_from: Option<String>,
+    /// A name being written: a new folder's, or a new name for an entry.
+    naming: Option<Naming>,
+    /// The changes asked from this tile, drawn as done until the folder lists their result.
+    asked: Vec<Asked>,
     /// The worker's home, which the path bar calls `~`.
     home: Option<String>,
     /// A row pressed and where, until it is let go or dragged out.
@@ -168,11 +200,13 @@ impl FolderView {
         Self {
             id,
             path: path.to_owned(),
-            listing: None,
+            pages: FolderPages::new(path.to_owned()),
             listed: None,
             wants: true,
             selected: None,
             came_from: None,
+            naming: None,
+            asked: Vec::new(),
             home: None,
             press: None,
             dragged: false,
@@ -200,13 +234,13 @@ impl FolderView {
     /// What the worker last said, once it has.
     #[must_use]
     pub const fn listing(&self) -> Option<&Listing> {
-        self.listing.as_ref()
+        self.pages.listing()
     }
 
     /// The directory listed, absolute, once the worker has listed one.
     #[must_use]
     pub fn dir(&self) -> Option<&str> {
-        match &self.listing {
+        match self.listing() {
             Some(Listing::Listed { dir, .. }) => Some(dir),
             _ => None,
         }
@@ -215,7 +249,7 @@ impl FolderView {
     /// The entries listed, folders first.
     #[must_use]
     pub fn entries(&self) -> &[FolderEntry] {
-        match &self.listing {
+        match self.listing() {
             Some(Listing::Listed { entries, .. }) => entries,
             _ => &[],
         }
@@ -242,7 +276,7 @@ impl FolderView {
     /// Where the entries are, for the self-test's dump: a summary as a screen reader hears it.
     #[must_use]
     pub fn summary(&self) -> String {
-        match &self.listing {
+        match self.listing() {
             None => crate::file::READING.to_owned(),
             Some(Listing::NotFolder) => NOT_A_FOLDER.to_owned(),
             Some(Listing::Missing { error }) => error.clone(),
@@ -311,21 +345,58 @@ impl FolderView {
         let reveal = !same_dir || came_from.is_some();
         let wanted = came_from.or(if same_dir { kept } else { None });
         let was = self.selected.filter(|_| same_dir);
-        self.selected = match &listing {
-            Listing::Listed { entries, .. } if !entries.is_empty() => Some(
-                wanted
-                    .and_then(|name| entries.iter().position(|e| e.name == name))
-                    .or_else(|| was.map(|ix| ix.min(entries.len().saturating_sub(1))))
-                    .unwrap_or(0),
-            ),
-            _ => None,
-        };
-        self.listing = Some(listing);
+        if same_dir {
+            self.asked.retain(|a| !a.answered);
+        } else {
+            self.pages = FolderPages::new(asked.to_owned());
+            self.asked.clear();
+        }
+        let next = self.pages.listed(listing);
         self.listed = Some(asked.to_owned());
+        let entries = self.entries();
+        self.selected = (!entries.is_empty()).then(|| {
+            wanted
+                .and_then(|name| entries.iter().position(|e| e.name == name))
+                .or_else(|| was.map(|ix| ix.min(entries.len().saturating_sub(1))))
+                .unwrap_or(0)
+        });
         if let Some(ix) = self.selected.filter(|_| reveal) {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         }
+        if let Some(next) = next {
+            cx.emit(FolderViewEvent::Ask(next));
+        }
         cx.notify();
+    }
+
+    /// The worker sent the page of `asked` after `after`: its entries join the rows, and the
+    /// page after it is asked for while more are wanted. A page of a folder the tile has left
+    /// is dropped.
+    pub fn set_page(
+        &mut self,
+        asked: &str,
+        after: &After,
+        listing: Listing,
+        cx: &mut Context<Self>,
+    ) {
+        if self.listed.as_deref() != Some(asked) || asked != self.path {
+            return;
+        }
+        if let Some(next) = self.pages.page(after, listing) {
+            cx.emit(FolderViewEvent::Ask(next));
+        }
+        cx.notify();
+    }
+
+    /// The rows drawn reach `end`: near the last listed, the next page is asked for.
+    fn drawn_to(&mut self, end: usize, cx: &mut Context<Self>) {
+        let listed = self.entries().len();
+        if end.saturating_add(PAGE_AHEAD) >= listed
+            && self.pages.has_more()
+            && let Some(next) = self.pages.more()
+        {
+            cx.emit(FolderViewEvent::Ask(next));
+        }
     }
 
     /// Give the tile the keyboard.
@@ -392,8 +463,245 @@ impl FolderView {
         cx.emit(FolderViewEvent::Browse(path));
     }
 
+    /// Write the name of a new folder here, in a field at the top of the rows. Nothing while a
+    /// move waits for its listing.
+    pub fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dir().is_none() || self.browsing() {
+            return;
+        }
+        self.start_naming(Name::NewFolder, String::new(), window, cx);
+    }
+
+    /// Write a new name for the selected entry in its row: a plain name renames it, and a path
+    /// (`../done/a.txt`, `~/archive/`) moves it there.
+    pub fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.selected().filter(|_| !self.browsing()).map(|e| e.name.clone())
+        else {
+            return;
+        };
+        self.start_naming(Name::Rename { name: name.clone() }, name, window, cx);
+    }
+
+    /// Ask for the selected entry to go to the worker's trash.
+    pub fn trash_selected(&mut self, cx: &mut Context<Self>) {
+        let Some((path, _)) = self.selected.and_then(|ix| self.entry_path(ix)) else { return };
+        tracing::info!(%path, "folder trashes");
+        self.ask(FsOp::Trash { path }, cx);
+    }
+
+    /// Ask the worker for `op`, drawn as done from now on.
+    fn ask(&mut self, op: FsOp, cx: &mut Context<Self>) {
+        self.asked.push(Asked { op: op.clone(), answered: false });
+        cx.emit(FolderViewEvent::Op(op));
+        cx.notify();
+    }
+
+    /// The worker answered `op`, or the link that would have answered it went (`done` then
+    /// says whether the folder's next listing is to show it). Done, it stays drawn as done
+    /// until that listing comes, so nothing flickers back between the two; refused, it is
+    /// drawn as it was at once.
+    pub fn answered(&mut self, op: &FsOp, done: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.asked.iter().position(|a| a.op == *op && !a.answered) else {
+            return;
+        };
+        if done {
+            if let Some(a) = self.asked.get_mut(ix) {
+                a.answered = true;
+            }
+        } else {
+            self.asked.remove(ix);
+            cx.notify();
+        }
+    }
+
+    /// What is asked of the entry `name` of the folder listed: a new name, or its going.
+    pub(crate) fn fate(&self, name: &str) -> Option<Fate> {
+        let path = join(self.dir()?, name);
+        self.asked.iter().rev().find_map(|a| match &a.op {
+            FsOp::Trash { path: p } if *p == path => Some(Fate::Leaving),
+            FsOp::Move { from, to } if *from == path => {
+                let here = parent_of(to) == parent_of(&path);
+                let last = to.rsplit('/').next().filter(|_| here);
+                Some(last.map_or(Fate::Leaving, |last| Fate::Renamed(last.to_owned())))
+            }
+            _ => None,
+        })
+    }
+
+    /// The folders asked for here that the listing does not hold yet.
+    fn made(&self) -> Vec<&str> {
+        let Some(dir) = self.dir() else { return Vec::new() };
+        let entries = self.entries();
+        self.asked
+            .iter()
+            .filter_map(|a| match &a.op {
+                FsOp::MakeDir { parent, name }
+                    if parent.trim_end_matches('/') == dir.trim_end_matches('/')
+                        && !entries.iter().any(|e| e.name == *name) =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The field for `what`, holding `text`, takes the keyboard.
+    fn start_naming(
+        &mut self,
+        what: Name,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field =
+            cx.new(|cx| InputState::new(window, cx).placeholder(NEW_FOLDER).default_value(text));
+        let subscription = cx.subscribe_in(&field, window, |this, _field, event, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => this.finish_naming(true, window, cx),
+                // A click elsewhere: the name is not taken, and the click goes where it went.
+                InputEvent::Blur => {
+                    if this.naming.take().is_some() {
+                        cx.notify();
+                    }
+                }
+                InputEvent::Change | InputEvent::Focus => {}
+            }
+        });
+        field.update(cx, |f, cx| f.focus(window, cx));
+        self.naming = Some(Naming { field, what, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// The field closes: `take` asks for what it says, and the tile has the keyboard again.
+    fn finish_naming(&mut self, take: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(naming) = self.naming.take() else { return };
+        let text = naming.field.read(cx).value().trim().to_owned();
+        window.focus(&self.focus, cx);
+        cx.notify();
+        let Some(dir) = self.dir().map(str::to_owned).filter(|_| take && !text.is_empty()) else {
+            return;
+        };
+        let op = match naming.what {
+            Name::NewFolder => FsOp::MakeDir { parent: dir.clone(), name: text },
+            Name::Rename { name } if name == text => return,
+            Name::Rename { name } => {
+                FsOp::Move { from: join(&dir, &name), to: destination(&dir, &text, &name) }
+            }
+        };
+        // What was made or renamed here is selected when the folder lists it.
+        if let FsOp::MakeDir { name, .. } | FsOp::Move { to: name, .. } = &op {
+            let (parent, last) = name.rsplit_once('/').unwrap_or(("", name));
+            if parent.is_empty() || parent == dir.trim_end_matches('/') {
+                self.came_from = Some(last.to_owned());
+            }
+        }
+        tracing::info!(?op, "folder asks a change");
+        self.ask(op, cx);
+    }
+
+    /// The name being written, where it is written: in place of `name`'s, or a new folder's.
+    #[must_use]
+    pub fn naming(&self, cx: &gpui::App) -> Option<(Option<&str>, String)> {
+        let naming = self.naming.as_ref()?;
+        let at = match &naming.what {
+            Name::NewFolder => None,
+            Name::Rename { name } => Some(name.as_str()),
+        };
+        Some((at, naming.field.read(cx).value().to_string()))
+    }
+
+    /// The field, drawn where a name goes.
+    fn name_field(&self, label: &'static str) -> Option<AnyElement> {
+        let naming = self.naming.as_ref()?;
+        let theme = &self.theme;
+        Some(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(hsla(theme.surfaces.text))
+                .child(
+                    Input::new(&naming.field)
+                        .with_size(Size::Small)
+                        .text_size(px(theme.typography.ui_size * self.zoom))
+                        .aria_label(label),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Over the rows while a new folder is named: its mark and the field.
+    fn new_folder_row(&self) -> Option<AnyElement> {
+        if !matches!(self.naming.as_ref()?.what, Name::NewFolder) {
+            return None;
+        }
+        let theme = &self.theme;
+        let k = self.zoom;
+        let id = self.id.as_uuid();
+        Some(
+            div()
+                .id("folder-new")
+                .debug_selector(move || format!("folder-new-{id}"))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm * k))
+                .h(px(theme.density.row * k))
+                .px(px(theme.spacing.inset() * k))
+                .border_b(crate::kit::hair(theme))
+                .border_color(hsla(theme.surfaces.border_subtle))
+                .child(crate::icons::glyph(
+                    theme,
+                    Glyph::Icon(IconName::FolderPlus),
+                    px(theme.typography.icon() * k),
+                    hsla(theme.surfaces.text_secondary),
+                ))
+                .children(self.name_field(NEW_FOLDER))
+                .into_any_element(),
+        )
+    }
+
+    /// Over the rows, a folder asked for here and not yet listed, drawn as made.
+    fn made_row(&self, n: usize, name: &str) -> AnyElement {
+        let theme = &self.theme;
+        let k = self.zoom;
+        let id = self.id.as_uuid();
+        div()
+            .id(numbered("folder-made", n))
+            .debug_selector(move || format!("folder-made-{n}-{id}"))
+            .role(Role::ListBoxOption)
+            .aria_label(SharedString::from(name.to_owned()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .h(px(theme.density.row * k))
+            .px(px(theme.spacing.inset() * k))
+            .opacity(ASKED)
+            .child(crate::icons::glyph(
+                theme,
+                Glyph::Icon(IconName::Folder),
+                px(theme.typography.icon() * k),
+                hsla(theme.surfaces.text_secondary),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(theme.surfaces.text))
+                    .child(SharedString::from(name.to_owned())),
+            )
+            .into_any_element()
+    }
+
     /// A row pressed: selected at once, and remembered in case it becomes a drag.
     fn press(&mut self, ix: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.naming.is_some() {
+            return;
+        }
         self.press = Some((ix, at));
         self.dragged = false;
         self.select(ix, cx);
@@ -417,7 +725,7 @@ impl FolderView {
     /// gesture, and the end of a drag is not a click.
     fn clicked(&mut self, ix: usize, clicks: usize, cx: &mut Context<Self>) {
         self.press = None;
-        if std::mem::take(&mut self.dragged) || clicks > 1 {
+        if std::mem::take(&mut self.dragged) || clicks > 1 || self.naming.is_some() {
             return;
         }
         self.select(ix, cx);
@@ -636,7 +944,17 @@ impl FolderView {
             FileKind::File => Glyph::file(&entry.name),
             FileKind::Other => Glyph::Icon(IconName::File),
         };
-        let ink = RowInk::of(theme, entry, chosen);
+        let mut ink = RowInk::of(theme, entry, chosen);
+        let fate = self.fate(&entry.name);
+        ink.opacity = match fate {
+            None => ink.opacity,
+            Some(Fate::Renamed(_)) => ink.opacity.min(ASKED),
+            Some(Fate::Leaving) => LEAVING,
+        };
+        let shown_name = match fate {
+            Some(Fate::Renamed(name)) => name,
+            _ => entry.name.clone(),
+        };
         let detail = if folder {
             entry.items.map(count_label).unwrap_or_default()
         } else if entry.kind == FileKind::File {
@@ -710,7 +1028,7 @@ impl FolderView {
                 px(theme.typography.icon() * k),
                 hsla(ink.icon),
             ))
-            .child(
+            .child(self.renaming(&entry.name).unwrap_or_else(|| {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -721,8 +1039,9 @@ impl FolderView {
                     .when(chosen, |el| {
                         el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     })
-                    .child(SharedString::from(entry.name.clone())),
-            )
+                    .child(SharedString::from(shown_name))
+                    .into_any_element()
+            }))
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
                     crate::icons::icon(theme, IconName::Link, IconSize::Inline, hsla(s.text_muted))
@@ -743,6 +1062,14 @@ impl FolderView {
         if chosen { self.plate.mark(row, ix).into_any_element() } else { row.into_any_element() }
     }
 
+    /// The field in `name`'s row while it is being renamed.
+    fn renaming(&self, name: &str) -> Option<AnyElement> {
+        match &self.naming.as_ref()?.what {
+            Name::Rename { name: at } if at == name => self.name_field(RENAME_OR_MOVE),
+            _ => None,
+        }
+    }
+
     /// The rows, drawn as far as they are seen: a folder can hold thousands.
     fn list(&self, count: usize, cx: &Context<Self>) -> AnyElement {
         let id = self.id.as_uuid();
@@ -752,6 +1079,7 @@ impl FolderView {
             "folder-rows",
             count,
             cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                this.drawn_to(range.end, cx);
                 let now = SystemTime::now();
                 let entries = this.entries();
                 range
@@ -789,7 +1117,7 @@ impl FolderView {
             .into_any_element()
     }
 
-    /// The line under a listing the worker cut: how much of the folder the rows are.
+    /// The line under a listing with more to come: how much of the folder the rows are so far.
     fn foot(&self, shown: usize, total: u32) -> Option<AnyElement> {
         let shown = u32::try_from(shown).unwrap_or(u32::MAX);
         if shown >= total {
@@ -811,7 +1139,7 @@ impl FolderView {
                 .border_t(crate::kit::hair(theme))
                 .border_color(hsla(theme.surfaces.border_subtle))
                 .text_size(px(theme.typography.small() * k))
-                .child(format!("Showing the first {shown} of {total}"))
+                .child(format!("{shown} of {total} listed"))
                 .into_any_element(),
         )
     }
@@ -829,7 +1157,7 @@ impl Render for FolderView {
         let k = self.zoom;
         // A body without rows has none to be found under a touch.
         *self.drawn.borrow_mut() = Drawn::default();
-        let body: Vec<AnyElement> = match &self.listing {
+        let body: Vec<AnyElement> = match self.listing() {
             // Blank while an answer in time would fill it; past the grace, a word.
             None if !crate::screen::past_grace("folder-reading", window, cx) => Vec::new(),
             None => vec![self.notice(IconName::Folder, crate::file::READING, None)],
@@ -841,7 +1169,11 @@ impl Render for FolderView {
             )],
             Some(Listing::Listed { dir, entries, total }) => {
                 let mut body = vec![self.path_bar(dir, *total, cx)];
-                if entries.is_empty() {
+                body.extend(self.new_folder_row());
+                let made = self.made();
+                let none_made = made.is_empty();
+                body.extend(made.into_iter().enumerate().map(|(n, name)| self.made_row(n, name)));
+                if entries.is_empty() && none_made {
                     body.push(self.notice(IconName::FolderOpen, EMPTY_FOLDER, None));
                 } else {
                     body.push(self.list(entries.len(), cx));
@@ -858,18 +1190,42 @@ impl Render for FolderView {
             .role(Role::Group)
             .aria_label(SharedString::from(format!("Folder {}", self.dir().unwrap_or(&self.path))))
             .aria_value(SharedString::from(self.summary()))
-            .on_action(cx.listener(|this, _: &SelectNext, _window, cx| this.select_by(1, cx)))
-            .on_action(cx.listener(|this, _: &SelectPrevious, _window, cx| this.select_by(-1, cx)))
-            .on_action(
-                cx.listener(|this, _: &SelectFirst, _window, cx| this.select_by(isize::MIN, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &SelectLast, _window, cx| this.select_by(isize::MAX, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenSelected, _window, cx| this.open_selected(cx)))
-            .on_action(cx.listener(|this, _: &OpenParent, _window, cx| this.open_parent(cx)))
+            // While a name is written, the field has the keys: its ↩, ⌫ and arrows edit the
+            // name, never open, go up or walk the rows.
+            .when(self.naming.is_none(), |el| {
+                el.on_action(cx.listener(|this, _: &SelectNext, _window, cx| this.select_by(1, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &SelectPrevious, _window, cx| this.select_by(-1, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &SelectFirst, _window, cx| {
+                        this.select_by(isize::MIN, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectLast, _window, cx| {
+                        this.select_by(isize::MAX, cx);
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &OpenSelected, _window, cx| this.open_selected(cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &OpenParent, _window, cx| this.open_parent(cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &TrashSelected, _window, cx| this.trash_selected(cx)),
+                    )
+            })
             .on_action(cx.listener(|this, _: &UploadFromFiles, _window, cx| this.upload_here(cx)))
             .on_action(cx.listener(|this, _: &SaveToFiles, _window, cx| this.save_selected(cx)))
+            .on_action(cx.listener(|this, _: &NewFolder, window, cx| this.new_folder(window, cx)))
+            .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
+                this.rename_selected(window, cx);
+            }))
+            // Esc in the name's field puts it away; the folder has the keyboard again.
+            .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                if this.naming.is_some() {
+                    cx.stop_propagation();
+                    this.finish_naming(false, window, cx);
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -917,6 +1273,83 @@ pub fn files_palette_items(
     ]
 }
 
+/// The palette's lines that change a folder's entries: a new folder, a rename or move, the
+/// trash.
+#[must_use]
+pub fn folder_palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
+    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    };
+    vec![
+        line(NEW_FOLDER, IconName::FolderPlus, Box::new(NewFolder)),
+        line(RENAME_OR_MOVE, IconName::Pencil, Box::new(RenameSelected)),
+        line(MOVE_TO_TRASH, IconName::Trash, Box::new(TrashSelected)),
+    ]
+}
+
+/// A change asked from the tile.
+#[derive(Debug)]
+struct Asked {
+    op: FsOp,
+    /// Done or lost on the link: the folder's next listing shows how it went.
+    answered: bool,
+}
+
+/// What a change asked from the tile does to one of its rows until the folder lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Fate {
+    /// Renamed in place: the row wears the new name.
+    Renamed(String),
+    /// Moved out of the folder or trashed: the row is set back.
+    Leaving,
+}
+
+/// A name being written in a folder tile.
+struct Naming {
+    field: Entity<InputState>,
+    what: Name,
+    _subscription: Subscription,
+}
+
+/// What the name is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Name {
+    /// A folder to make here.
+    NewFolder,
+    /// A new name for the entry `name` here.
+    Rename {
+        /// Its name now.
+        name: String,
+    },
+}
+
+/// Where `written` sends the entry `name` of `dir`.
+///
+/// A plain name renames it in `dir`; a path moves it, relative to `dir` unless it starts at the
+/// root or the home, into the folder a trailing `/` names under its own name. `.` and `..` are
+/// resolved here, since the worker takes no path that climbs.
+#[must_use]
+pub fn destination(dir: &str, written: &str, name: &str) -> String {
+    let at = if written.starts_with('/') || written.starts_with('~') {
+        written.to_owned()
+    } else {
+        join(dir, written)
+    };
+    let at = if at.ends_with('/') { join(&at, name) } else { at };
+    let (root, rest) = at.strip_prefix('~').map_or(("", at.as_str()), |rest| ("~", rest));
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("{root}/{}", parts.join("/"))
+}
+
 /// How a row is inked: its icon, its name, and the whole row's opacity.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct RowInk {
@@ -943,6 +1376,11 @@ impl RowInk {
 
 /// How far a hidden row is set back: present, but behind the rest, as a read inbox row is.
 const HIDDEN: f32 = slopty_theme::alpha::STRONG;
+/// A row a change was asked of, drawn as done before the worker's listing says it is.
+const ASKED: f32 = slopty_theme::alpha::STRONG;
+/// A row on its way out of the folder: still there until the listing drops it, faded to the
+/// edge of being seen.
+const LEAVING: f32 = slopty_theme::alpha::RING;
 
 /// An element id for the `n`th of a kind.
 fn numbered(kind: &'static str, n: usize) -> gpui::ElementId {
@@ -991,6 +1429,21 @@ mod tests {
         assert_eq!(parent_of("/"), None);
         assert_eq!(count_label(1), "1 item");
         assert_eq!(count_label(0), "0 items");
+    }
+
+    /// A name written for an entry renames it beside itself; a path moves it, from this
+    /// folder unless it starts at the root or the home, under its own name into a folder that
+    /// ends in `/`, with `.` and `..` resolved.
+    #[test]
+    fn a_written_name_renames_and_a_path_moves() {
+        assert_eq!(destination("/w", "b.txt", "a.txt"), "/w/b.txt");
+        assert_eq!(destination("/w", "docs/b.txt", "a.txt"), "/w/docs/b.txt");
+        assert_eq!(destination("/w", "docs/", "a.txt"), "/w/docs/a.txt");
+        assert_eq!(destination("/w", "/tmp/", "a.txt"), "/tmp/a.txt");
+        assert_eq!(destination("/w", "~/old.txt", "a.txt"), "~/old.txt");
+        assert_eq!(destination("/w/src", "../done/", "a.txt"), "/w/done/a.txt");
+        assert_eq!(destination("/w", "./b.txt", "a.txt"), "/w/b.txt");
+        assert_eq!(destination("/w", "../../../x", "a.txt"), "/x", "no higher than the root");
     }
 
     /// A hidden entry reads as set back: its name falls well under the contrast of the sizes

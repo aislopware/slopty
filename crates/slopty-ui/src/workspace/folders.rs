@@ -21,7 +21,7 @@ use slopty_core::ItemId;
 use slopty_platform::file_drop::Dropped;
 use slopty_platform::file_drop::out::{self, Fetch, Offer};
 use slopty_proto::ClientMsg;
-use slopty_proto::folder::Listing;
+use slopty_proto::folder::{After, FsOp, FsOutcome, Listing};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 
 use super::WorkspaceView;
@@ -236,6 +236,8 @@ impl WorkspaceView {
         let view = cx.new(|cx| FolderView::new(id, path, theme, cx));
         cx.subscribe(&view, move |this, _view, event, cx| {
             match event {
+                FolderViewEvent::Ask(msg) => this.send(worker, msg.clone()),
+                FolderViewEvent::Op(op) => this.fs_op(worker, op.clone(), cx),
                 FolderViewEvent::Browse(path) => this.browse_folder(worker, id, path, cx),
                 FolderViewEvent::OpenFile(path) => this.open_file_beside(id, path, cx),
                 FolderViewEvent::DragOut(path) => {
@@ -291,6 +293,85 @@ impl WorkspaceView {
             view.update(cx, |v, _| v.refresh());
         }
         self.list_folder(tile.worker, id, cx);
+    }
+
+    /// Ask `worker` to change its files as `op` says; out of reach, nothing is asked and the
+    /// person is told.
+    pub(super) fn fs_op(&mut self, worker: WorkerKey, op: FsOp, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get_mut(&worker) else { return };
+        if !w.is_linked() {
+            let name = w.name.clone();
+            self.show_notice(format!("{name} is out of reach, so nothing was changed"), cx);
+            return;
+        }
+        let msg = w.fs_ops.ask(op);
+        self.send(worker, msg);
+    }
+
+    /// `key` answered the change to its files numbered `request`. A trash is said with the
+    /// way to put it back; a change refused or failed says why. A change done needs no word:
+    /// the folder's tile lists it, the entry selected.
+    pub fn fs_done(
+        &mut self,
+        key: WorkerKey,
+        request: slopty_proto::RequestId,
+        outcome: FsOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((op, outcome)) =
+            self.workers.get_mut(&key).and_then(|w| w.fs_ops.done(request, outcome))
+        else {
+            return;
+        };
+        self.folders_heard(key, &op, matches!(outcome, FsOutcome::Done { .. }), cx);
+        let words = slopty_client::folders::sentence(&op, &outcome);
+        match (&op, &outcome) {
+            (FsOp::Trash { path: was }, FsOutcome::Done { path }) => {
+                let back = FsOp::Move { from: path.clone(), to: was.clone() };
+                self.show_trashed(key, words, back, cx);
+            }
+            (_, FsOutcome::Done { .. }) => {}
+            (_, FsOutcome::Refused(_)) => self.show_notice(words, cx),
+            (_, FsOutcome::Failed { .. }) => self.show_failure(words, cx),
+        }
+    }
+
+    /// Every folder tile of `key` hears how `op` went: `done`, or refused and drawn as it was.
+    pub(super) fn folders_heard(
+        &self,
+        key: WorkerKey,
+        op: &FsOp,
+        done: bool,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.folders_of(key) {
+            view.update(cx, |v, cx| v.answered(op, done, cx));
+        }
+    }
+
+    /// The folder tiles of `key`.
+    fn folders_of(&self, key: WorkerKey) -> Vec<gpui::Entity<FolderView>> {
+        self.workers
+            .get(&key)
+            .into_iter()
+            .flat_map(|w| w.doc.items())
+            .filter_map(|item| self.folders.get(&item.id))
+            .cloned()
+            .collect()
+    }
+
+    /// `key` sent the page of `path` after `after`: every folder tile at `path` takes it.
+    pub fn folder_page(
+        &self,
+        key: WorkerKey,
+        path: &str,
+        after: &After,
+        listing: &Listing,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.folders_of(key) {
+            view.update(cx, |v, cx| v.set_page(path, after, listing.clone(), cx));
+        }
     }
 
     /// A file opened from folder tile `id`: its tile goes right of the folder's.

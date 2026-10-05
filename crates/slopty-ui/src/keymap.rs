@@ -481,6 +481,10 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "select_last", crate::folder::SelectLast, &["end"], &[FOLDER]),
         c(Folder, "open", crate::folder::OpenSelected, &["enter"], &[FOLDER]),
         c(Folder, "open_parent", crate::folder::OpenParent, &["backspace", "cmd-up"], &[FOLDER]),
+        // Finder's keys.
+        c(Folder, "new_folder", crate::folder::NewFolder, &["cmd-shift-n"], &[FOLDER]),
+        c(Folder, "rename", crate::folder::RenameSelected, &[], &[FOLDER]),
+        c(Folder, "move_to_trash", crate::folder::TrashSelected, &["cmd-backspace"], &[FOLDER]),
         // A board: the arrows walk its cards, ↩ opens one's agent.
         c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
         c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),

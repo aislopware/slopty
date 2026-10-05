@@ -153,6 +153,12 @@ pub fn sentence(op: &FsOp, outcome: &FsOutcome) -> String {
     }
 }
 
+/// What is said of `op` when the link to `worker` went before its answer came.
+#[must_use]
+pub fn unanswered(worker: &str, op: &FsOp) -> String {
+    format!("{worker} went out of reach before it said whether it could {}", verb(op))
+}
+
 fn done(op: &FsOp) -> String {
     match op {
         FsOp::MakeDir { name, .. } => format!("Made folder “{name}”"),

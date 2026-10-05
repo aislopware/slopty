@@ -229,6 +229,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(w) = self.workers.get_mut(&key) else { return };
+        let unanswered = w.fs_ops.lost();
+        let said: Vec<String> =
+            unanswered.iter().map(|op| slopty_client::folders::unanswered(&w.name, op)).collect();
         w.status = status;
         w.link = None;
         w.rtt = None;
@@ -267,6 +270,13 @@ impl WorkspaceView {
             if let Some(view) = &closed.file {
                 view.update(cx, FileView::link_lost);
             }
+        }
+        // The folder's next listing shows whether each was done.
+        for op in &unanswered {
+            self.folders_heard(key, op, true, cx);
+        }
+        for line in said {
+            self.show_notice(line, cx);
         }
         self.items_dirty = true;
         if self.picker.as_ref().is_some_and(|(k, _)| *k == key) {

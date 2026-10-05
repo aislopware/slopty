@@ -964,7 +964,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `a_file_deleted_under_the_tile_keeps_its_text_and_a_save_makes_it_again`.
 
 - ✅ **A folder's entries are made, moved and trashed on the worker, and a huge folder is
-  paged** (2026-10-04, readiness N20; wire, worker and client, the tile's rows to follow).
+  paged** (2026-10-04, readiness N20; wire, worker and client; the tile's side is "The folder
+  tile makes, renames, moves and trashes").
   A folder tile could only browse: the wire had no verb to change a file, and a folder past
   2000 entries showed its first 2000 and a count.
   - *Wire.* `ClientMsg::FsOp { request, op }`, answered with `WorkerMsg::FsDone { request,
@@ -998,8 +999,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     cursor on the last entry, not an offset, so an entry made or removed meanwhile neither
     repeats nor skips one. `slopty_client::folders::FolderPages` joins the pages, asks for one
     more as the person wants it, and asks again for as many after a relist. `FsOps` numbers
-    the ops and holds them until answered, so the tile shows them at once, and `sentence` says
-    how one went.
+    the ops and holds them until answered, and `sentence` says how one went.
   - *For agents and the CLI.* `Verb::FsChange { worker, op }` carries the same `FsOp` through
     the server, beside `ls`, `cat` and `stat`, and the worker answers it with
     `slopty_worker::fsop::apply`: `Outcome::FsDone { path }`, or an error in plain words that
@@ -1020,6 +1020,33 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     escaping, the Finder's trash); `slopty_client::folders`; and through a real worker
     `folder_ops_make_move_and_trash_through_the_worker` and
     `a_huge_folder_is_paged_through_the_worker`.
+- ✅ **The folder tile makes, renames, moves and trashes, and pages as it scrolls**
+  (2026-10-05, readiness 10-05 G6). The wire, worker and client parts above had no UI: the
+  tile only browsed, and stopped at a folder's first 2000 entries.
+  - *Keys, as Finder's.* ⌘⇧N "New folder" writes the name in a field over the rows; "Rename
+    or move…" (no default key, as Finder's ↩ opens here) writes it in the row itself, where a
+    plain name renames and a path moves (`../done/`, `~/archive/a.txt`; a trailing `/` keeps
+    the name, `folder::destination`); ⌘⌫ "Move to Trash". All three are palette lines while a
+    folder tile has the keyboard. While a name is written the field has the keys, so ↩, ⌫ and
+    the arrows edit it rather than open, go up or walk the rows; Esc or a click elsewhere puts
+    it away and asks nothing. What was made or renamed is selected once the folder lists it.
+  - *Shown at once.* The tile draws what it asked as done before the worker answers: a new
+    folder as a row over the list, a renamed row with its new name, a row moved away or
+    trashed faded nearly out. A change done stays drawn so until the folder's next listing
+    (the watch sends it), so nothing flickers back between the answer and the listing; a
+    refusal draws the row as it was at once and says why in a notice. A change done says
+    nothing, the row being the word, except a trash, whose notice carries "Put back": a move
+    from where the worker's trash put it back to where it was.
+  - *A link that drops* takes the answers with it: the tile asks for the folder again on the
+    next link, which shows whether each change was made, and a notice says the machine went
+    out of reach before it said.
+  - *Pages.* The list asks for the next page when the rows it draws come within 40 of the
+    last listed, so scrolling never meets the end of a page; a relist keeps as many pages as
+    were wanted (`FolderPages`). The workspace hands `WorkerMsg::{FolderPage, FsDone}` to
+    `WorkspaceView::{folder_page, fs_done}`.
+  - Tests: `workspace::tests::folders::a_folder_makes_renames_and_trashes_its_entries`,
+    `a_long_folder_comes_a_page_at_a_time`, and `folder::tests` for the destination of a
+    written path.
 
 - ✅ **A conflict can be compared before it is settled** (2026-10-04, design B9). "Changed on
   disk" offered only Reload, which drops the edit, and Overwrite, which drops the disk's text,

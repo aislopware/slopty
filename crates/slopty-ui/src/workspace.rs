@@ -451,6 +451,8 @@ struct Worker {
     /// The edits its programs wait on; kept across links, since the worker asks again under
     /// the same number after a reconnect.
     handoffs: slopty_client::handoff::Handoffs,
+    /// The changes to its files this client asked for, until it answers each.
+    fs_ops: slopty_client::folders::FsOps,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -487,6 +489,7 @@ impl Worker {
             awaiting_snapshot: false,
             queued: Vec::new(),
             handoffs: slopty_client::handoff::Handoffs::default(),
+            fs_ops: slopty_client::folders::FsOps::default(),
         }
     }
 

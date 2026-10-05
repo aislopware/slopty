@@ -558,3 +558,161 @@ fn a_folder_a_shell_hands_over_opens_as_a_folder_tile(cx: &mut TestAppContext) {
     let files = view.read_with(cx, |v, _| v.files.len());
     assert_eq!(files, 0, "no file tile");
 }
+
+/// The folder's own changes, keyed: ⌘⇧N names a new folder in a field over the rows, and ↩
+/// asks the worker to make it, the new folder selected once the folder lists it; "Rename or
+/// move…" writes a new name in the row, and a path in it moves the entry; ⌘⌫ trashes the
+/// selected entry, and the notice's "Put back" moves it back from the trash. A change refused
+/// says why, Esc puts a field away asking nothing, and a change whose answer went with the
+/// link says so.
+#[gpui::test]
+fn a_folder_makes_renames_and_trashes_its_entries(cx: &mut TestAppContext) {
+    use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal};
+
+    use crate::folder::Fate;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w".into() }, 1);
+    let top = listed("/w", vec![entry("docs", FileKind::Dir), entry("a.txt", FileKind::File)]);
+    answer(&view, cx, &studio, "/w", &top);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let ops = |fake: &mut Fake| -> Vec<(slopty_proto::RequestId, FsOp)> {
+        fake.drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::FsOp { request, op } => Some((request, op)),
+                _ => None,
+            })
+            .collect()
+    };
+    let done = |cx: &mut VisualTestContext, request, outcome| {
+        view.update_in(cx, |v, _w, cx| v.fs_done(key, request, outcome, cx));
+        cx.run_until_parked();
+    };
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(selector("folder-new", tile.item)).is_some(),
+        "the field over the rows"
+    );
+    cx.simulate_input("planz");
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("s");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let made = ops(&mut studio);
+    let [(request, op)] = made.as_slice() else { panic!("one op: {made:?}") };
+    assert_eq!(*op, FsOp::MakeDir { parent: "/w".into(), name: "plans".into() });
+    let drawn_made = |cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector("folder-made-0", tile.item)).is_some()
+    };
+    assert!(drawn_made(cx), "drawn as made at once");
+    done(cx, *request, FsOutcome::Done { path: "/w/plans".into() });
+    assert!(drawn_made(cx), "and still, until the folder lists it");
+    let with_plans = listed(
+        "/w",
+        vec![
+            entry("docs", FileKind::Dir),
+            entry("plans", FileKind::Dir),
+            entry("a.txt", FileKind::File),
+        ],
+    );
+    assert_eq!(folder_path(&view, cx, tile), "/w", "↩ in the field opens nothing");
+    answer(&view, cx, &studio, "/w", &with_plans);
+    assert_eq!(selected(&view, cx, tile), "plans", "the new folder, selected");
+    assert!(!drawn_made(cx), "one row for it, the listed one");
+    let fate = |cx: &mut VisualTestContext, name: &str| {
+        view.read_with(cx, |v, cx| v.folder(tile.item).and_then(|f| f.read(cx).fate(name)))
+    };
+
+    cx.simulate_keystrokes("end");
+    cx.dispatch_action(crate::folder::RenameSelected);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("docs/a.txt");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let moved = ops(&mut studio);
+    let [(request, op)] = moved.as_slice() else { panic!("one op: {moved:?}") };
+    assert_eq!(*op, FsOp::Move { from: "/w/a.txt".into(), to: "/w/docs/a.txt".into() });
+    assert_eq!(fate(cx, "a.txt"), Some(Fate::Leaving), "set back on its way out");
+    let clash = FsOutcome::Refused(FsRefusal::Clash { path: "/w/docs/a.txt".into() });
+    done(cx, *request, clash);
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("Something named “a.txt” is already there"));
+    assert_eq!(fate(cx, "a.txt"), None, "refused: drawn as it was");
+
+    cx.dispatch_action(crate::folder::RenameSelected);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(ops(&mut studio).is_empty(), "Esc asks nothing");
+
+    cx.simulate_keystrokes("cmd-backspace");
+    cx.run_until_parked();
+    let trashed = ops(&mut studio);
+    let [(request, op)] = trashed.as_slice() else { panic!("one op: {trashed:?}") };
+    assert_eq!(*op, FsOp::Trash { path: "/w/a.txt".into() });
+    assert_eq!(fate(cx, "a.txt"), Some(Fate::Leaving));
+    done(cx, *request, FsOutcome::Done { path: "/home/.Trash/a.txt".into() });
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("Moved “a.txt” to the Trash"));
+    let put_back = cx.debug_bounds("toast-put-back").expect("the way back");
+    cx.simulate_click(put_back.center(), Modifiers::none());
+    cx.run_until_parked();
+    let back = ops(&mut studio);
+    let [(request, op)] = back.as_slice() else { panic!("one op: {back:?}") };
+    assert_eq!(*op, FsOp::Move { from: "/home/.Trash/a.txt".into(), to: "/w/a.txt".into() });
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    cx.run_until_parked();
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    let unknown = "studio went out of reach before it said whether it could move “a.txt”";
+    assert_eq!(said.as_deref(), Some(unknown), "the answer went with the link");
+    done(cx, *request, FsOutcome::Failed { error: "late".into() });
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some(unknown), "an answer nobody waits on says nothing");
+}
+
+/// A folder past a page comes a page at a time: the rows near the end of those listed ask for
+/// the next, which joins them; a relist keeps as many pages as were wanted.
+#[gpui::test]
+fn a_long_folder_comes_a_page_at_a_time(cx: &mut TestAppContext) {
+    use slopty_proto::folder::After;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w".into() }, 1);
+    let page = |from: usize, to: usize| -> Vec<FolderEntry> {
+        (from..to).map(|n| entry(&format!("f{n:05}.txt"), FileKind::File)).collect()
+    };
+    let first = Listing::Listed { dir: "/w".into(), entries: page(0, 30), total: 50 };
+    answer(&view, cx, &studio, "/w", &first);
+    let pages = |fake: &mut Fake| -> Vec<After> {
+        fake.drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::FolderPage { after, .. } => Some(after),
+                _ => None,
+            })
+            .collect()
+    };
+    let asked = pages(&mut studio);
+    let last = After { folder: false, name: "f00029.txt".into() };
+    assert_eq!(asked, std::slice::from_ref(&last), "the rows drawn reach the end: the next page");
+    let rest = Listing::Listed { dir: "/w".into(), entries: page(30, 50), total: 50 };
+    view.update_in(cx, |v, _w, cx| v.folder_page(key, "/w", &last, &rest, cx));
+    cx.run_until_parked();
+    let shown =
+        view.read_with(cx, |v, cx| v.folder(tile.item).map_or(0, |f| f.read(cx).entries().len()));
+    assert_eq!(shown, 50, "the page joins the rows");
+    assert!(pages(&mut studio).is_empty(), "every entry is here");
+}

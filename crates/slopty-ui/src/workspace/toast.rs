@@ -75,6 +75,15 @@ pub(super) enum ToastKind {
     Failed(String),
     /// A page a program in a shell asked to open, held back: "Open" opens it.
     Offered(Box<super::handoffs::Offer>),
+    /// An entry went to a worker's trash: "Put back" moves it back where it was.
+    Trashed {
+        /// The worker.
+        worker: slopty_client::layout::WorkerKey,
+        /// The move that puts it back.
+        back: slopty_proto::folder::FsOp,
+        /// What happened.
+        line: String,
+    },
     /// A tile off screen came to need the person while the app is in front: "Go" goes to it. A
     /// pointer, never an answer: it carries no Allow, Deny or choice.
     Attention {
@@ -228,6 +237,17 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Failed(text), cx);
     }
 
+    /// Say an entry went to `worker`'s trash, with "Put back", which asks for `back`.
+    pub(super) fn show_trashed(
+        &mut self,
+        worker: slopty_client::layout::WorkerKey,
+        line: String,
+        back: slopty_proto::folder::FsOp,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_toast(ToastKind::Trashed { worker, back, line }, cx);
+    }
+
     /// The text of the newest notice up now, for tests and the self-test dump.
     #[must_use]
     pub fn toast_text(&self) -> Option<String> {
@@ -315,6 +335,17 @@ impl WorkspaceView {
                     }));
                 body = Some(self.offer_body(offer));
                 ("offered", Some(Glyph::Icon(IconName::Globe)), vec![open, dismiss])
+            }
+            ToastKind::Trashed { worker, back, .. } => {
+                let (worker, back, seq) = (*worker, back.clone(), shown.seq);
+                let put_back = action("toast-put-back", "Put back").on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
+                        this.drop_toasts(|shown| shown.seq == seq);
+                        this.fs_op(worker, back.clone(), cx);
+                        cx.notify();
+                    },
+                ));
+                ("trashed", Some(Glyph::Icon(IconName::Trash)), vec![put_back])
             }
             ToastKind::Attention { tile, status, .. } => {
                 let tile = *tile;
@@ -505,6 +536,6 @@ fn toast_line(what: &ToastKind) -> String {
         ToastKind::Closed { title, .. } => format!("Closed {title}"),
         ToastKind::Said(text) | ToastKind::Failed(text) => text.clone(),
         ToastKind::Offered(offer) => offer.line(),
-        ToastKind::Attention { line, .. } => line.clone(),
+        ToastKind::Attention { line, .. } | ToastKind::Trashed { line, .. } => line.clone(),
     }
 }
