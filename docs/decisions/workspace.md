@@ -1721,8 +1721,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - **Three facts, never a blank.** A first cut said a name and at most two facts, and a review
     found its cards emptier than the miniatures they replaced: a shell said "Terminal" in a tall
     grey box. Each line now always says something, a quieter fact standing in where the first
-    choice has nothing. How it stands comes first (in `text` when it needs the person or
-    failed, else `text_secondary`), then what it did last, then where it is (`text_muted`).
+    choice has nothing. How it stands comes first, in `text`, so the card reads state
+    first; then what it did last and where it is, in `text_muted`.
     - A shell: at its prompt, running a command with its clock, or exited with its code; the
       command it ran last and how that ended ("cargo test · Exit 1"), else "No commands yet";
       its directory and branch with its working tree's changes, else its machine. A program
@@ -1733,10 +1733,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
       done"), else whether its edit is on disk ("Unsaved", "Changed on disk", "Saved"); its
       folder.
   - **The quote gives the card weight.** Under a hairline, in the mono face at the caption
-    size and `text_muted`, clipped to the card: a shell's last rows, an agent's last words, a
-    file's first lines, up to six. A shell's or agent's longer text stands on the card's foot
-    so the newest line is never clipped; a short one hangs from the top as a fresh screen's
-    does. It is the one chrome use of the mono face besides the settings file and an address,
+    size and `text_muted`, up to six lines: a shell's last rows, an agent's last words, a
+    file's first lines. A line the card cuts ends in an ellipsis, as the facts do. A shell's
+    or agent's longer text stands on the card's foot so the newest line is never clipped; a
+    short one hangs from the top as a fresh screen's does. It is the one chrome use of the mono face besides the settings file and an address,
     since it quotes a body whose own face is mono (`kit.rs`'s lint lists it).
   - **Copied, never read while drawing.** The quote and what only the text says (a file's
     length, kind and task list) are copied out of the body when the overview opens, and again

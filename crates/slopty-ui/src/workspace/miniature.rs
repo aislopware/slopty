@@ -147,11 +147,7 @@ impl WorkspaceView {
                 .text_color(hsla(tone))
                 .child(SharedString::from(words))
         };
-        let standing = line(
-            "shapes-standing",
-            lines.standing,
-            if lines.warm { s.text } else { s.text_secondary },
-        );
+        let standing = line("shapes-standing", lines.standing, s.text);
         let doing = line("shapes-meta", lines.doing, s.text_muted);
         let changes =
             lines.changes.and_then(|(added, removed)| crate::kit::changes(theme, added, removed));
@@ -232,7 +228,13 @@ impl WorkspaceView {
             .line_height(px(size * TAIL_LINE))
             .text_color(hsla(s.text_muted))
             .children(digest.tail.iter().map(|row| {
-                div().flex_none().overflow_hidden().whitespace_nowrap().child(row.clone())
+                div()
+                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(row.clone())
             }))
     }
 
@@ -264,7 +266,6 @@ impl WorkspaceView {
             let line = meta_line([at, several.then_some(worker.as_str())]);
             if line.is_empty() { worker.clone() } else { line }
         };
-        let warm = mark.is_some_and(|m| matches!(m, Status::NeedsYou | Status::Failed));
         match &item.kind {
             ItemKind::Terminal { session } if self.agent_state(*session).is_some() => {
                 let (doing, _) = self.shell_doing(*session);
@@ -273,13 +274,12 @@ impl WorkspaceView {
                 let branch = summary.and_then(|s| s.branch.as_deref());
                 SummaryLines {
                     standing: self.tile_word(item, mark).unwrap_or_else(|| AT_REST.to_owned()),
-                    warm,
                     doing: doing.unwrap_or_else(|| self.agent_name(item)),
                     place: place(Some(&meta_line([at.as_deref(), branch]))),
                     changes: self.session_changes(*session),
                 }
             }
-            ItemKind::Terminal { session } => self.shell_lines(*session, warm, place),
+            ItemKind::Terminal { session } => self.shell_lines(*session, place),
             ItemKind::Thread { thread } => {
                 let stand = self.thread_stand(*thread);
                 let doing = stand
@@ -290,7 +290,6 @@ impl WorkspaceView {
                         .and_then(super::faces::ThreadStand::word)
                         .unwrap_or(AT_REST)
                         .to_owned(),
-                    warm,
                     doing: doing.unwrap_or_else(|| self.agent_name(item)),
                     place: place(self.tile_place(item).as_deref()),
                     changes: None,
@@ -303,7 +302,6 @@ impl WorkspaceView {
                     standing: self
                         .tile_word(item, mark)
                         .unwrap_or_else(|| kind_word(item).to_owned()),
-                    warm,
                     doing: if meta.is_empty() { worker.clone() } else { meta },
                     place: place(self.tile_place(item).as_deref()),
                     changes: None,
@@ -312,7 +310,6 @@ impl WorkspaceView {
             ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Browser { .. } => {
                 SummaryLines {
                     standing: kind_word(item).to_owned(),
-                    warm,
                     doing: worker.clone(),
                     place: place(None),
                     changes: None,
@@ -326,7 +323,6 @@ impl WorkspaceView {
     fn shell_lines(
         &self,
         session: SessionId,
-        warm: bool,
         place: impl Fn(Option<&str>) -> String,
     ) -> SummaryLines {
         let summary = self.summary(session);
@@ -370,7 +366,6 @@ impl WorkspaceView {
         let branch = summary.and_then(|s| s.branch.as_deref());
         SummaryLines {
             standing,
-            warm,
             doing,
             place: place(Some(&meta_line([at.as_deref(), branch]))),
             changes: self.session_changes(session),
@@ -414,7 +409,6 @@ impl WorkspaceView {
         let state = (facts.conflict || facts.unsaved || tasks.is_none()).then_some(state);
         SummaryLines {
             standing,
-            warm: facts.conflict || facts.unsaved,
             doing: meta_line([tasks.as_deref(), state]),
             place: place(self.tile_place_of(id).as_deref()),
             changes: None,
@@ -675,10 +669,8 @@ pub(super) struct Digest {
 
 /// The three fact lines of a summary.
 struct SummaryLines {
-    /// How it stands.
+    /// How it stands, drawn in the text's ink: the card reads state first.
     standing: String,
-    /// It waits on the person, or something went wrong: the line takes the text's tone.
-    warm: bool,
     /// What it did last, or is doing.
     doing: String,
     /// Where it is.
