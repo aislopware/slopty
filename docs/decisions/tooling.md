@@ -1125,3 +1125,21 @@ more full-window layer.
     with this sync.
   - **Our own commit on gpui-kit:** a guard test that an opening bracket stays on the line of
     the inline code after it (`12daeb01`).
+
+- ✅ **gpui-fast takes zed `dff53544` (with #64209) and our device-pixel masks** (2026-10-05,
+  `52b465bc`).
+  - **zed#64209, "Hash a GlobalElementId once, when it is built",** is upstream's own form of
+    the fork's `fast::global_id`. It uses an `ElementIdStack` with incremental path hashes and
+    `GlobalElementId::with_hash`. The fork takes it and deletes `fast/global_id.rs` whole.
+    - The fork's id cache handed out the same `Arc` across frames. Measured against upstream's
+      allocating `global_id()` with `gpui_perf --headless --frames 300` over seven scenarios,
+      it saved 1–11 % of allocations per frame but no instructions (−1.9 % to +0.7 %), so it
+      went too.
+    - `gpui_perf --verify` finds the painted frames identical in all 44 checks.
+  - **The dff53544 import** made `gpui_macos`'s Core Media and ScreenCaptureKit deps optional
+    behind `screen-capture`, and moved `taffy`, `font-kit`, `bytemuck` and six more into
+    `[workspace.dependencies]`. The fork adds those entries. It keeps `objc2-core-graphics`
+    non-optional, since its own cursor and scroll code uses it.
+  - **Ours:** `Window::paint_mask` paints a monochrome mask at exact device pixels and
+    rasterises it once per key and size (`fast/mask.rs`). The SF Symbols path in
+    `slopty-platform::symbols` is built on it.

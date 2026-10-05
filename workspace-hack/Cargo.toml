@@ -78,7 +78,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tracing-core = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v5", "v7"] }
 winnow = { version = "1" }
 writeable = { version = "0.6", default-features = false, features = ["alloc"] }
@@ -92,7 +91,6 @@ zerovec = { version = "0.11", default-features = false, features = ["alloc", "de
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 bstr = { version = "1" }
-collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -118,7 +116,6 @@ winnow = { version = "1" }
 [target.aarch64-apple-darwin.dependencies]
 block2 = { version = "0.6" }
 concurrent-queue = { version = "2" }
-either = { version = "1", default-features = false, features = ["use_std"] }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
@@ -140,23 +137,19 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["CMA
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "std"] }
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
 objc2-foundation = { version = "0.3" }
-objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["SCError", "SCScreenshotManager", "SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "std"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
 objc2-user-notifications = { version = "0.3" }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
-regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
-either = { version = "1", default-features = false, features = ["use_std"] }
 errno = { version = "0.3" }
 fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
-regex = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
 
@@ -175,9 +168,10 @@ notify = { version = "8" }
 objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGFont", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSLocale", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIGeometry", "UIGraphics", "UIImage", "UIImageConfiguration", "UIImageSymbolConfiguration", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "objc2-core-graphics", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 
 [target.aarch64-apple-ios.build-dependencies]
@@ -204,9 +198,10 @@ notify = { version = "8" }
 objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGFont", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSLocale", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIGeometry", "UIGraphics", "UIImage", "UIImageConfiguration", "UIImageSymbolConfiguration", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "objc2-core-graphics", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 
 [target.aarch64-apple-ios-sim.build-dependencies]
