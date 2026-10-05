@@ -222,6 +222,61 @@ impl AgentTerminalsTrait for AgentTerminals {
     }
 }
 
+/// The agents' terminals, each one opened told to every client as a client's own is: the
+/// thread names the terminal its agent runs in, and a client shows the agent there only once it
+/// knows that terminal is live.
+#[derive(Debug)]
+struct Announced {
+    terminals: Arc<AgentTerminals>,
+    daemon: Daemon,
+}
+
+impl Announced {
+    /// Tell every client of `session`, just opened.
+    async fn announce(&self, session: SessionId) {
+        if let Some(summary) = self.daemon.worker.summary(session).await {
+            let _sent = self.daemon.events.send(WorkerMsg::SessionChanged(summary));
+        }
+    }
+}
+
+impl AgentTerminalsTrait for Announced {
+    fn open(
+        &self,
+        command: Vec<String>,
+        cwd: String,
+        env: Vec<(String, String)>,
+    ) -> Pending<'_, Result<SessionId, String>> {
+        Box::pin(async move {
+            let session = self.terminals.open(command, cwd, env).await?;
+            self.announce(session).await;
+            Ok(session)
+        })
+    }
+
+    fn open_at(
+        &self,
+        seat: SessionId,
+        command: Vec<String>,
+        cwd: String,
+        env: Vec<(String, String)>,
+    ) -> Pending<'_, Result<SessionId, String>> {
+        Box::pin(async move {
+            let session = self.terminals.open_at(seat, command, cwd, env).await?;
+            self.announce(session).await;
+            Ok(session)
+        })
+    }
+
+    fn exited(&self, session: SessionId) -> Pending<'static, ()> {
+        self.terminals.exited(session)
+    }
+
+    fn close(&self, session: SessionId) -> Pending<'_, ()> {
+        self.terminals.close(session)
+    }
+}
+
 /// What the adapters take their asks from once they start.
 #[derive(Debug)]
 pub struct Observing {
@@ -246,7 +301,8 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks.claude));
-    let terminals: Arc<dyn AgentTerminalsTrait> = asks.terminals;
+    let terminals: Arc<dyn AgentTerminalsTrait> =
+        Arc::new(Announced { terminals: asks.terminals, daemon: daemon.clone() });
     drop(claude::start::spawn(
         threads.host.clone(),
         threads.claude.clone(),

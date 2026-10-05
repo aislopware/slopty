@@ -1255,7 +1255,9 @@ mod threads {
 
     /// The palette's start: no first message and a folder under the worker's home spelled
     /// with `~`, as a client that knows no home writes it. Claude Code opens in the home with
-    /// nothing on its command line after its own flags, waiting for the person.
+    /// nothing on its command line after its own flags, waiting for the person. The terminal it
+    /// runs in is news for the client, as one it opened would be: the client shows the agent
+    /// there.
     #[tokio::test]
     async fn a_claude_code_start_with_no_prompt_opens_in_the_home_it_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -1273,20 +1275,41 @@ mod threads {
             worktree: None,
         };
         a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+        let mut told = Vec::new();
         let outcome = a
             .heard(|msg| match msg {
                 WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
                     Some(outcome)
                 }
+                WorkerMsg::SessionChanged(summary) => {
+                    told.push(summary);
+                    None
+                }
                 _ => None,
             })
             .await;
-        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let Outcome::Started { thread } = outcome else { panic!("started: {outcome:?}") };
         let seen = recorded(&record).await;
         assert_eq!(seen["cwd"], root.to_string_lossy().as_ref(), "`~` is the worker's home");
         let argv: Vec<&str> =
             seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
         assert!(!argv.contains(&"--"), "no first message: {argv:?}");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.get(&thread).is_some_and(|r| r.terminal.is_some())).await;
+        let terminal = a.table.rows[&thread].terminal.expect("the table names its terminal");
+        let first = told.iter().find(|s| s.id == terminal).cloned();
+        let summary = if let Some(summary) = first {
+            summary
+        } else {
+            let told = a.heard(|msg| match msg {
+                WorkerMsg::SessionChanged(summary) if summary.id == terminal => Some(summary),
+                _ => None,
+            });
+            tokio::time::timeout(Duration::from_secs(10), told)
+                .await
+                .expect("the client is told of the agent's terminal")
+        };
+        assert_eq!(summary.state, slopty_proto::terminal::SessionState::Running, "{summary:?}");
     }
 
     /// A Claude Code session works where its hooks say, whatever folder its terminal reports:
