@@ -496,12 +496,29 @@ impl WorkspaceView {
             })
             .map(super::agents::agent_status_text)
             .or_else(|| state.map(|st| st.label().to_owned()));
+        // Named as its header would be on a wider screen: its kind, then its title.
+        let kind = super::tile::kind_name(item);
+        let named = if kind == title { title.clone() } else { format!("{kind} {title}") };
         let label = match said {
-            Some(said) => format!("{title}, {said}"),
-            None => title.clone(),
+            Some(said) => format!("{named}, {said}"),
+            None => named,
         };
         let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text), 1.0)
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
+        // Renamed, the field takes the title's place, as it does in a header.
+        if let Some(field) = self.rename_field(tile, id) {
+            return div()
+                .id("phone-renaming")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.ui_size))
+                .child(lead)
+                .child(field)
+                .into_any_element();
+        }
         phone_heading(theme, SharedString::from(label))
             .flex()
             .items_center()

@@ -1641,7 +1641,7 @@ impl WorkspaceView {
         if was.running != now.running {
             self.number_twins();
             App::notify(cx, navigator);
-            App::notify(cx, strip);
+            self.header_news(session, cx);
             // Still running at the threshold, the tile and its row say so: the readouts' clock
             // moves then, as well as each second ([`Self::keep_time`]).
             if now.running.is_some() {
@@ -1668,6 +1668,17 @@ impl WorkspaceView {
             cx.notify();
         } else if was.driving != now.driving {
             App::notify(cx, strip);
+        }
+    }
+
+    /// `session`'s header changed, news for the strip alone. On a phone the bar is the
+    /// focused tile's header, so a change to that tile's title, kind or state is the bar's
+    /// news too; any other tile's is not.
+    fn header_news(&self, session: SessionId, cx: &mut App) {
+        App::notify(cx, self.strip_host.entity_id());
+        let focused = self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
+        if self.phone && focused {
+            App::notify(cx, self.chrome.titlebar.entity_id());
         }
     }
 }

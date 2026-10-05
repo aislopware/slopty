@@ -1505,6 +1505,29 @@ impl WorkspaceView {
         )
     }
 
+    /// The field that renames `tile` (`id`) in its title's place while it is renamed (an
+    /// address the place's too): its header's, or on a phone the bar's. A click in it must not
+    /// start a move.
+    pub(super) fn rename_field(&self, tile: TileRef, id: ItemId) -> Option<gpui::AnyElement> {
+        let renaming = self.rename.as_ref().filter(|r| r.tile == tile)?;
+        let (part, label) = match renaming.field {
+            Field::Name => ("rename", "Tile name"),
+            Field::Address => ("address", ADDRESS),
+            Field::Project => ("project-name", "Project name"),
+        };
+        Some(
+            div()
+                .id(part)
+                .debug_selector(move || format!("{part}-{}", id.as_uuid()))
+                .flex_1()
+                .overflow_hidden()
+                .cursor_text()
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(Input::new(&renaming.input).aria_label(label))
+                .into_any_element(),
+        )
+    }
+
     /// The title, or the field that renames the tile in its place.
     fn header_name(
         &self,
@@ -1513,27 +1536,8 @@ impl WorkspaceView {
         title: String,
         chrome: Chrome,
     ) -> gpui::AnyElement {
-        let renaming =
-            self.rename.as_ref().filter(|r| r.tile == tile).map(|r| (r.field, r.input.clone()));
-        match renaming {
-            // The field takes the title's place (an address the place's too); a click in it
-            // must not start a move.
-            Some((field, input)) => {
-                let (part, label) = match field {
-                    Field::Name => ("rename", "Tile name"),
-                    Field::Address => ("address", ADDRESS),
-                    Field::Project => ("project-name", "Project name"),
-                };
-                div()
-                    .id(part)
-                    .debug_selector(move || format!("{part}-{}", id.as_uuid()))
-                    .flex_1()
-                    .overflow_hidden()
-                    .cursor_text()
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    .child(Input::new(&input).aria_label(label))
-                    .into_any_element()
-            }
+        match self.rename_field(tile, id) {
+            Some(field) => field,
             None => div()
                 .debug_selector(move || format!("name-{}", id.as_uuid()))
                 .min_w_0()

@@ -974,10 +974,10 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("title", shell.item)).is_none(), "no header on a phone");
     assert!(cx.debug_bounds(selector("phone-kind", shell.item)).is_some(), "the tile's kind");
     let title = view.read_with(cx, |v, _| v.item(shell).map(|i| v.tile_title(i))).unwrap();
-    let heading = tree(cx)
-        .into_iter()
-        .find(|n| n.role == "Heading" && n.label.as_deref() == Some(title.as_str()));
-    assert!(heading.is_some(), "the bar is titled by the tile: {title}");
+    let heading = tree(cx).into_iter().find(|n| {
+        n.role == "Heading" && n.label.as_deref() == Some(format!("terminal {title}").as_str())
+    });
+    assert!(heading.is_some(), "the bar is titled as the tile's header is: {title}");
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("phone-title").expect("the focused tile's title");
     assert!(cx.debug_bounds("breadcrumb").is_none(), "the title alone, no breadcrumb");
@@ -991,6 +991,33 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert_eq!(rows.first().map(String::as_str), Some("Rename"), "the tile's rows: {rows:?}");
     assert!(rows.iter().any(|r| r == "New terminal"), "{rows:?}");
     assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
+}
+
+/// A phone names its tile in the bar, which is the tile's header there: "Name this tile" turns
+/// the bar's title into the field, named as a header's is, and ↩ keeps the name it was given.
+#[gpui::test]
+fn a_phone_names_its_tile_in_the_bar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    view.update_in(cx, |v, window, cx| v.rename_item(&RenameItem, window, cx));
+    cx.run_until_parked();
+    let field = tree(cx)
+        .into_iter()
+        .find(|n| n.role == "TextInput" && n.label.as_deref() == Some("Tile name"));
+    assert!(field.is_some(), "the bar holds the field");
+    assert!(cx.debug_bounds(selector("rename", shell.item)).is_some());
+    assert!(cx.debug_bounds(selector("phone-kind", shell.item)).is_some(), "beside its kind");
+    cx.simulate_input("scratch");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let named = tree(cx)
+        .into_iter()
+        .any(|n| n.role == "Heading" && n.label.as_deref() == Some("terminal scratch"));
+    assert!(named, "named, the bar says so: {:?}", tree(cx));
+    assert!(cx.debug_bounds(selector("rename", shell.item)).is_none(), "and the field is gone");
 }
 
 /// Chrome moves where it may: a menu drops in, a notice rises in and fades when its time is

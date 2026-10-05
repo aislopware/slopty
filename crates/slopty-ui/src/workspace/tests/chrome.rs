@@ -959,3 +959,43 @@ fn measure_the_keyboard_moving_on_its_own_beside_the_chrome(cx: &mut TestAppCont
         strip.saturating_sub(start_builds.1),
     );
 }
+
+/// On a phone the bar is the focused tile's header: a command that starts there retitles the
+/// bar at once, the bar drawn again for it. One that starts in a tile out of view leaves the
+/// bar on the focused tile.
+#[gpui::test]
+fn a_command_in_the_focused_tile_retitles_a_phones_bar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let [(other, _), _, (session, tile)] = three_shells(&view, cx, &studio);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    let heading = |cx: &mut VisualTestContext| {
+        tree(cx).into_iter().find(|n| n.role == "Heading").and_then(|n| n.label)
+    };
+    // The accessibility tree draws every view, so it is read only once the counts are taken.
+    let prompt = SemanticMark::Prompt { exit: None, input: Some(2) };
+    // Typed at the prompt first, as the device has it: the command has not started.
+    let typed = [("$ cat -v", prompt)];
+    view.update_in(cx, |v, _w, cx| v.term_event(session, marked_frame(1, &typed, 0), cx));
+    cx.run_until_parked();
+    let before = renders(&view, cx);
+    let rows = [("$ cat -v", prompt), ("", SemanticMark::Output)];
+    view.update_in(cx, |v, _w, cx| v.term_event(session, marked_frame(2, &rows, 1), cx));
+    cx.run_until_parked();
+    let after = renders(&view, cx);
+    assert!(
+        after[1] > before[1],
+        "the bar draws the focused tile's command: {before:?} → {after:?}"
+    );
+    assert!(heading(cx).is_some_and(|h| h.starts_with("terminal cat -v")), "{:?}", heading(cx));
+
+    let rows = [("$ make", prompt), ("building", SemanticMark::Output)];
+    view.update_in(cx, |v, _w, cx| v.term_event(other, marked_frame(1, &rows, 1), cx));
+    cx.run_until_parked();
+    assert!(
+        heading(cx).is_some_and(|h| h.starts_with("terminal cat -v")),
+        "still the focused tile"
+    );
+}
