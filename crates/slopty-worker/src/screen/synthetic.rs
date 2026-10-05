@@ -1416,12 +1416,16 @@ mod tests {
             let router = ScreenRouter::new();
             let wire = Arc::new(Wire::new(router.clone(), None, None));
             let quality = Quality { scale: 0.25, ..Quality::default() };
-            let (mut stream, opened) = Pipeline::<Malfunctioning>::open(
+            // Stripes follow the engines' timing on the machine, a rebuild of their own on a
+            // runner where they pay: only the lost session is to build sessions here.
+            let coding = Coding { pad_to: None, stripes: Knob::Off };
+            let (mut stream, opened) = Pipeline::<Malfunctioning>::open_padded(
                 STREAM,
                 CaptureTarget::Display(DISPLAY.id),
                 quality,
                 wire,
                 |_event| {},
+                coding,
             )
             .await
             .unwrap();
