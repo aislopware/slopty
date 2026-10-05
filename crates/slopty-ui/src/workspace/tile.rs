@@ -3,6 +3,7 @@
 //! says when the body cannot show what it should.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -33,7 +34,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{AgentMark, Glyph, IconName, IconSize, Status};
+use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -48,8 +49,9 @@ type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
 
-/// The height of an upload's progress bar along the bottom of the header.
-const PROGRESS: f32 = 2.0;
+/// The width of a program's progress bar (`OSC 9;4`) in its terminal's header, beside its
+/// figure.
+const PROGRESS_W: f32 = 48.0;
 
 /// The group every tile's header actions hover with.
 const TILE_GROUP: &str = "tile";
@@ -77,6 +79,25 @@ const STRIP_SHRINK: f32 = 20.0;
 
 /// What the in-body pill says while a tile's worker is being dialled again.
 pub const RECONNECTING: &str = "Reconnecting…";
+
+/// How long a worker is out of reach before its tiles say for how long, and the step that
+/// count moves in: "Reconnecting for 20 s", "Reconnecting for 1m 10s".
+pub const AWAY_STEP: Duration = Duration::from_secs(10);
+
+/// What a tile says while its worker is dialled again, `away` after it went: the one word
+/// first, then for how long once that is worth saying, in [`AWAY_STEP`]s ([`kit::duration`]'s
+/// one form), whole minutes past an hour.
+#[must_use]
+pub fn reconnecting(away: Duration) -> String {
+    let secs = away.as_secs();
+    let step = AWAY_STEP.as_secs();
+    if secs < step {
+        return RECONNECTING.to_owned();
+    }
+    let grain = if secs < 3_600 { step } else { 60 };
+    let floored = secs.saturating_sub(secs.checked_rem(grain).unwrap_or_default());
+    format!("Reconnecting for {}", kit::duration(Duration::from_secs(floored)))
+}
 
 /// What the in-body pill says for a shell whose session is gone and whose status is not known.
 pub const SESSION_ENDED: &str = "Session ended";
@@ -188,8 +209,9 @@ pub fn file_dir(path: &str) -> Option<String> {
     parts.next().filter(|d| !d.is_empty()).map(str::to_owned)
 }
 
-/// Where a shell is, short: the last two components of `path`, with the home directory as `~`
-/// (`~`, `~/src`, `oss/slopty`). `home` is the worker's, once it has said; until then a home is
+/// Where a shell is, short: the last two components of `path`, the home directory as `~`.
+///
+/// `~`, `~/src`, `oss/slopty`. `home` is the worker's, once it has said; until then a home is
 /// recognised by its shape: `/Users/<name>` on a Mac, `/home/<name>` or `/root` elsewhere.
 #[must_use]
 pub fn cwd_tail(path: &str, home: Option<&str>) -> String {
@@ -460,15 +482,13 @@ impl WorkspaceView {
 }
 
 /// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
-/// agent runs in and a thread show the agent's mark (`agent`, an `AgentId`'s name).
-pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
-    if let (ItemKind::Terminal { .. } | ItemKind::Thread { .. }, Some(agent)) = (&item.kind, agent)
-    {
-        return Glyph::agent(agent);
-    }
+/// agent runs in (`agent`) and a thread show the one neutral agent glyph, whichever agent it
+/// is, and the agent is named in words.
+pub(super) fn kind_icon(item: &Item, agent: bool) -> Glyph {
     match &item.kind {
+        ItemKind::Terminal { .. } if agent => Glyph::AGENT,
         ItemKind::Terminal { .. } => Glyph::Icon(IconName::SquareTerminal),
-        ItemKind::Thread { .. } => Glyph::Agent(AgentMark::Other),
+        ItemKind::Thread { .. } => Glyph::AGENT,
         ItemKind::Window { .. } => Glyph::Icon(IconName::AppWindow),
         ItemKind::Display { .. } => Glyph::Icon(IconName::Monitor),
         ItemKind::File { path } => Glyph::file(path),
@@ -508,7 +528,29 @@ impl WorkspaceView {
     }
 
     /// [`Self::tile_place`] worked out, for an item whose derived title is `title`.
+    ///
+    /// An agent is named here in words, first, unless the title already is its name: no agent
+    /// wears a mark of its own, so this is where its row and its header say which it is.
     fn derived_place(&self, item: &Item, title: &str) -> Option<String> {
+        let agent = match &item.kind {
+            ItemKind::Terminal { session } => self.session_agent(*session),
+            ItemKind::Thread { thread } => self.thread_agent(*thread),
+            _ => None,
+        };
+        let named = agent
+            .map(|agent| super::projects::agent_label(&AgentId::named(agent)))
+            .filter(|name| name != title);
+        let place = self.derived_context(item, title);
+        match (named, place) {
+            (Some(name), Some(place)) => {
+                Some(format!("{name}{}{place}", super::rollup::META_SEPARATOR))
+            }
+            (name, place) => name.or(place),
+        }
+    }
+
+    /// Where the item is, for [`Self::derived_place`].
+    fn derived_context(&self, item: &Item, title: &str) -> Option<String> {
         match &item.kind {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
@@ -899,14 +941,7 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size * k))
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::companions::status_slot(
-                    theme,
-                    self.item_agent(item),
-                    self.kind_glyph(item),
-                    None,
-                    muted,
-                    k,
-                ))
+                .child(crate::palette::status_slot(theme, self.kind_glyph(item), None, muted, k))
                 .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
@@ -1029,27 +1064,27 @@ impl WorkspaceView {
                 self.finished_took(tile, session, f, chrome, cx)
             }
         });
-        // An upload in flight says how far it got; a click stops it. An attachment's is said
-        // by its chip over the composer, and said once.
+        // An upload in flight says how far it got, as the kit's ring and its figure in a pill;
+        // a click stops it. An attachment's is said by its chip over the composer, and said
+        // once. No line along the header's foot: a line on an edge read as a stray rule.
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
-            let pill = pill("upload", id, upload.label(), s.text_secondary, theme, chrome)
+            let figure =
+                kit::progress::Progress::Share(upload.fraction()).figure().unwrap_or_default();
+            let ring = kit::progress::ring(
+                theme,
+                SharedString::from(format!("upload-ring-{}", id.as_uuid())),
+                upload.fraction(),
+                s.accent_fill,
+                px(theme.typography.small() * k),
+            );
+            let pill = pill("upload", id, (Some(ring), figure), s.text_secondary, theme, chrome)
                 .role(Role::Button)
-                .aria_label("Cancel upload");
-            // How far it got, as a line along the header's foot in the accent fill.
-            let bar = div()
-                .debug_selector(move || format!("upload-progress-{}", id.as_uuid()))
-                .absolute()
-                .left_0()
-                .bottom_0()
-                .h(px(PROGRESS * k))
-                .w(gpui::relative(upload.fraction()))
-                .bg(hsla(s.accent_fill));
-            let pill = tab_stop(kit::tabular(pill), s.accent)
+                .aria_label("Cancel upload")
+                .aria_value(SharedString::from(upload.label()));
+            tab_stop(kit::tabular(pill), s.accent)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
-                .into_any_element();
-            (pill, bar)
+                .into_any_element()
         });
-        let (upload, progress) = upload.unzip();
         let branch =
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
@@ -1086,8 +1121,43 @@ impl WorkspaceView {
                 .child(text)
                 .into_any_element()
         });
+        // A program's progress report (`OSC 9;4`): the kit's bar with its figure beside it, where
+        // a tile says how it stands, not a line along the terminal's edge.
+        let report = match &item.kind {
+            ItemKind::Terminal { session } => {
+                self.terminals.get(session).and_then(|view| view.read(cx).progress())
+            }
+            _ => None,
+        };
+        let report = report.map(|progress| {
+            div()
+                .id("report")
+                .debug_selector(move || format!("report-{}", id.as_uuid()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs * k))
+                .child(
+                    div().w(px(PROGRESS_W * k)).child(
+                        kit::progress::Bar::new(
+                            theme,
+                            format!("report-bar-{}", id.as_uuid()),
+                            progress,
+                        )
+                        .height(px(theme.spacing.xs * k))
+                        .label("Progress"),
+                    ),
+                )
+                .children(progress.figure().map(|figure| {
+                    kit::tabular(div())
+                        .text_size(px(theme.typography.small() * k))
+                        .text_color(hsla(s.text_secondary))
+                        .child(SharedString::from(figure))
+                }))
+                .into_any_element()
+        });
         let readouts: Vec<gpui::AnyElement> =
-            badge.into_iter().chain(running).chain(finished).collect();
+            badge.into_iter().chain(report).chain(running).chain(finished).collect();
         let strip = self.trailing_strip(placed, readouts, face, k, cx);
         // The title's context: where a shell or a file is, a page's address when the title is
         // not it. Muted, in the UI face as every header's context
@@ -1239,7 +1309,7 @@ impl WorkspaceView {
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip)
         };
-        header.when_some(progress, gpui::ParentElement::child).into_any_element()
+        header.into_any_element()
     }
 
     /// The header's leading slot: the kind's icon at rest and the status mark once there is
@@ -1271,19 +1341,10 @@ impl WorkspaceView {
             .filter(|st| !(agent && matches!(st, Status::NeedsYou | Status::Idle)))
             .filter(|st| !(opening && *st == Status::Working));
         let ink = if focused { s.text_secondary } else { s.text_muted };
-        let slot = crate::companions::slot(
-            &self.theme,
-            self.item_agent(item),
-            self.kind_glyph(item),
-            status,
-        )
-        .posed(self.tile_status(tile, item))
-        .moments((!focused).then(|| format!("companion-{}", id.as_uuid()).into()))
-        .ink(hsla(ink))
-        .zoom(k)
-        .build()
-        .debug_selector(move || format!("status-{}", id.as_uuid()))
-        .into_any_element();
+        let slot =
+            crate::palette::status_slot(&self.theme, self.kind_glyph(item), status, hsla(ink), k)
+                .debug_selector(move || format!("status-{}", id.as_uuid()))
+                .into_any_element();
         self.file_proxy(item, tile, slot, k, cx)
     }
 
@@ -1413,16 +1474,9 @@ impl WorkspaceView {
             let shown = tab == placed.tile;
             let ink = title_ink(theme, shown && placed.focused);
             let status = self.tile_status(tab, item);
-            let agent = self.item_agent(item);
-            let slot = crate::companions::status_slot(
-                theme,
-                agent,
-                self.kind_glyph(item),
-                status,
-                hsla(ink),
-                k,
-            )
-            .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
+            let slot =
+                crate::palette::status_slot(theme, self.kind_glyph(item), status, hsla(ink), k)
+                    .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
             let title = self.tile_title(item);
             let label = SharedString::from(title.clone());
             let name = self.header_name(tab, id, title, chrome);
@@ -1541,7 +1595,7 @@ impl WorkspaceView {
     /// tile's header, its navigator row and the status bar count.
     ///
     /// [`RUNNING_AFTER`]: super::RUNNING_AFTER
-    pub(super) fn running_for(&self, session: SessionId) -> Option<std::time::Duration> {
+    pub(super) fn running_for(&self, session: SessionId) -> Option<Duration> {
         let (now, _) = self.ticked()?;
         let ran = now.saturating_duration_since(self.shell(session)?.started?);
         (ran >= self.running_after).then_some(ran)
@@ -1727,7 +1781,7 @@ impl WorkspaceView {
                 let session = &session;
                 // Another client's size rules this PTY: offer to take it.
                 if self.shell(*session).is_some_and(|s| !s.driving) {
-                    let pill = pill("take", id, TAKE, theme.surfaces.accent, theme, chrome)
+                    let pill = pill("take", id, (None, TAKE), theme.surfaces.accent, theme, chrome)
                         .role(Role::Button)
                         .aria_label(TAKE_OVER);
                     actions.push(
@@ -2123,7 +2177,11 @@ impl WorkspaceView {
             Some(WorkerStatus::NotGranted) => {
                 BodyState::Away(format!("{name} does not let this device in").into())
             }
-            _ => BodyState::Away(RECONNECTING.into()),
+            _ => {
+                let away =
+                    worker.and_then(|w| w.away_since).map(|since| self.now().saturating_sub(since));
+                BodyState::Away(reconnecting(away.unwrap_or_default()).into())
+            }
         })
     }
 
@@ -2143,14 +2201,24 @@ impl WorkspaceView {
 
     /// The pill at the foot of a body saying what is wrong and what to do about it, over
     /// whatever the body still shows. Never a dialog: the rest of the workspace goes on.
+    ///
+    /// Over a body with nothing to show (a tile kept from the last run whose worker has not
+    /// come back), `centred` says it as the body's one block instead: the state's mark in the
+    /// notice's disc, what is so, why, then what to do, in the middle where the eye goes, as a
+    /// window on its way says "Opening Safari on studio…".
     pub(super) fn render_state_pill(
         &self,
         tile: TileRef,
-        session: Option<SessionId>,
         state: &BodyState,
+        centred: bool,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
+        // A shell's pill restarts it: its session, while its item is here.
+        let session = self.item(tile).and_then(|item| match item.kind {
+            ItemKind::Terminal { session } => Some(session),
+            _ => None,
+        });
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = chrome.k;
@@ -2247,7 +2315,7 @@ impl WorkspaceView {
             button("update-worker", label).on_click(move |_ev, window, cx| start(&host, window, cx))
         });
         let bar = update.as_ref().and_then(|u| u.bar).and_then(|bar| {
-            add_worker::bar(theme, bar, "update-progress", cx).map(|bar| {
+            add_worker::bar(theme, bar, "update-progress").map(|bar| {
                 div()
                     .absolute()
                     .bottom_0()
@@ -2256,6 +2324,48 @@ impl WorkspaceView {
                     .child(bar)
             })
         });
+        if centred {
+            let mark = crate::icons::icon(
+                theme,
+                status.icon(),
+                IconSize::Inline,
+                hsla(status.tone(theme)),
+            )
+            .size(px(theme.typography.icon() * k));
+            let buttons = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_center()
+                .gap(px(theme.spacing.xs * k))
+                .mt(px(theme.spacing.sm * k))
+                .when_some(restart, gpui::ParentElement::child)
+                .when_some(close, gpui::ParentElement::child)
+                .when_some(update_button, gpui::ParentElement::child)
+                .when_some(copy, gpui::ParentElement::child)
+                .when_some(grant, gpui::ParentElement::child)
+                .when_some(wake, gpui::ParentElement::child)
+                .when_some(retry, gpui::ParentElement::child);
+            let notice = kit::notice(theme, k, mark, text.clone(), None)
+                .id("state")
+                .debug_selector(move || format!("state-{}", id.as_uuid()))
+                .role(Role::Status)
+                .aria_label(text)
+                .relative()
+                .text_size(px(theme.typography.small() * k))
+                .when_some(detail, gpui::ParentElement::child)
+                .child(buttons)
+                .when_some(bar, gpui::ParentElement::child);
+            return div()
+                .debug_selector(move || format!("state-centred-{}", id.as_uuid()))
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(notice)
+                .into_any_element();
+        }
         let actions = restart.is_some()
             || close.is_some()
             || copy.is_some()
@@ -2380,17 +2490,15 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let bare = chrome.k < SHAPES_BELOW;
         let state = self.body_state(placed.tile, item).filter(|_| !bare);
-        let content = self.render_content(placed, item, chrome, window, cx);
+        let empty = std::cell::Cell::new(false);
+        let content = self.render_content(placed, item, chrome, &empty, window, cx);
         if bare {
             return self.render_miniature(placed, item, content, cx);
         }
         let content = self.set_back_in_doubt(placed.tile, content);
         let Some(state) = state else { return content };
-        let session = match item.kind {
-            ItemKind::Terminal { session } => Some(session),
-            _ => None,
-        };
-        let pill = self.render_state_pill(placed.tile, session, &state, chrome, cx);
+        // A body with nothing in it says what is so in its middle, not at its foot.
+        let pill = self.render_state_pill(placed.tile, &state, empty.get(), chrome, cx);
         div()
             .flex_1()
             .min_h_0()
@@ -2511,11 +2619,16 @@ impl WorkspaceView {
     /// What the body shows under any state pill: the view, or an empty well where the pill
     /// says why there is none. A terminal under a state pill leaves out its own lines-below
     /// pill, which would sit in the same place.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the body's inputs, and `empty`, where it says it drew nothing for the pill"
+    )]
     fn render_content(
         &self,
         placed: &Placed,
         item: &Item,
         chrome: Chrome,
+        empty: &std::cell::Cell<bool>,
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
@@ -2533,8 +2646,12 @@ impl WorkspaceView {
                 .child(div().absolute().top_0().left_0().w(px(rest_w)).h(px(rest_h)).child(el))
                 .into_any_element()
         };
-        // The state pill says what is wrong; the body under it stays empty.
-        let well = || div().flex_1().w_full().into_any_element();
+        // The state pill says what is wrong; the body under it stays empty, and says so to
+        // `empty`, so the pill stands in its middle.
+        let well = || {
+            empty.set(true);
+            div().flex_1().w_full().into_any_element()
+        };
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
                 _ if self.board_shown(*session)
@@ -2710,7 +2827,8 @@ pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
 }
 
 /// A header action in words ("Take", "Mute", an upload's progress): the bare
-/// [`kit::pill_frame`], its words in its tone, and the `raised` fill under the pointer, so it
+/// [`kit::pill_frame`], a mark before its words where it has one (an upload's ring), its words
+/// in its tone, and the `raised` fill under the pointer, so it
 /// stands as tall as the state's pill beside it.
 /// A header holds one filled chip at most, the state's (the agent's pill); every other word
 /// in it is a ghost, so the state is the one shape that stands out. Scaled by the chrome's
@@ -2718,7 +2836,7 @@ pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
 fn pill(
     part: impl Into<SharedString>,
     item: ItemId,
-    label: impl Into<SharedString>,
+    (mark, label): (Option<gpui::AnyElement>, impl Into<SharedString>),
     tone: slopty_theme::Rgb,
     theme: &Theme,
     chrome: Chrome,
@@ -2735,6 +2853,8 @@ fn pill(
         .cursor_pointer()
         .hover(move |el| el.bg(hsla(hover)))
         .active(move |el| el.bg(hsla(pressed)))
+        .when(mark.is_some(), |el| el.gap(px(theme.spacing.xs * k)))
+        .children(mark)
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 

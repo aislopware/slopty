@@ -368,7 +368,7 @@ impl WorkspaceView {
 
     /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
     pub(super) fn kind_glyph(&self, item: &Item) -> crate::icons::Glyph {
-        super::tile::kind_icon(item, self.item_agent(item))
+        super::tile::kind_icon(item, self.item_agent(item).is_some())
     }
 
     /// Keep each worker's threads in `dir`, a directory per worker.

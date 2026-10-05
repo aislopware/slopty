@@ -30,7 +30,7 @@ use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
-    AgentId, Cap, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
+    AgentId, AskId, Cap, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
     ThreadState, ToolCall, ToolDetail, TurnId, TurnState, kind,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
@@ -43,10 +43,10 @@ use crate::colors::hsla;
 use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
-    AskAside, CTX, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
-    RefreshPullRequest, WatchAgentScreen,
+    AllowRequest, AskAside, CTX, CycleDensity, CycleEffort, DenyRequest, EditLastQueued, Interrupt,
+    OpenCommit, QueueMessage, RefreshPullRequest, WatchAgentScreen,
 };
-use crate::icons::{Glyph, IconName, IconSize, Status};
+use crate::icons::{IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
 
 /// The pointer group a message and its actions answer as one.
@@ -109,6 +109,7 @@ mod asking;
 mod branch;
 mod composer;
 mod composing;
+mod decision;
 pub mod denying;
 mod finding;
 mod goal;
@@ -226,6 +227,12 @@ pub struct ThreadView {
     asking: Option<asking::Asking>,
     /// A request being denied with a reason.
     denying: Option<denying::Denying>,
+    /// The request whose other ways to deny are open in their menu.
+    denials_open: Option<AskId>,
+    /// The composer's "+" menu is open: attach files, commands, files and symbols.
+    add_open: bool,
+    /// What the composer says before anything is typed, as last set.
+    placeholder: String,
     /// The agent's terminal comes into view once the thread names one: the person asked for
     /// it before the worker had opened it.
     reveal_terminal: bool,
@@ -261,6 +268,8 @@ pub struct ThreadView {
     /// Times this view was rendered rather than replayed from the view cache.
     renders: u32,
     focus: FocusHandle,
+    /// The request card's, which a press on it takes, so ⌘↵ and ⌘⌫ answer it.
+    request_focus: FocusHandle,
     /// The field went while it held the keyboard, which the thread holds until it is back.
     kept_keyboard: bool,
     _subscriptions: Vec<Subscription>,
@@ -374,6 +383,9 @@ impl ThreadView {
             pictures: RefCell::default(),
             asking: None,
             denying: None,
+            denials_open: None,
+            add_open: false,
+            placeholder: composer::PLACEHOLDER.to_owned(),
             reveal_terminal: false,
             marks: Cell::default(),
             unseen_from: None,
@@ -391,6 +403,7 @@ impl ThreadView {
             asides_heard: None,
             renders: 0,
             focus: cx.focus_handle(),
+            request_focus: cx.focus_handle(),
             kept_keyboard: false,
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -439,6 +452,18 @@ impl ThreadView {
     #[must_use]
     pub fn following(&self) -> bool {
         self.list.is_following_tail()
+    }
+
+    /// The composer's invitation names the thread's agent once the thread says which it is.
+    fn settle_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let words = self.state(cx).map_or_else(
+            || composer::PLACEHOLDER.to_owned(),
+            |st| composer::placeholder(&st.meta.agent),
+        );
+        if self.placeholder != words {
+            self.composer.update(cx, |c, cx| c.set_placeholder(words.clone(), window, cx));
+            self.placeholder = words;
+        }
     }
 
     /// What the composer holds.
@@ -785,8 +810,56 @@ impl ThreadView {
         }
     }
 
-    fn answer(&self, ask: slopty_proto::thread::AskId, choice: String, cx: &mut Context<Self>) {
+    fn answer(&self, ask: AskId, choice: String, cx: &mut Context<Self>) {
         let _id = self.intent(Intent::Answer { ask, choice, message: None }, cx);
+    }
+
+    /// What `read` makes of the request the tray or its call shows, the one ⌘↵ and ⌘⌫ answer
+    /// while it has the keyboard: the waiting one the person stepped to, else the first.
+    fn on_show<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(&slopty_proto::thread::Request) -> R,
+    ) -> Option<R> {
+        let state = self.state(cx)?;
+        let bar = crate::conversation::thread::activity::Activity::of(
+            self.hub.read(cx).threads(),
+            self.thread,
+            state,
+        );
+        let waiting: Vec<_> = bar.waiting().collect();
+        let at = self.asked_at.min(waiting.len().saturating_sub(1));
+        waiting.get(at).map(|asked| read(asked.request))
+    }
+
+    /// The answer ⌘↵ (`allow`) or ⌘⌫ gives the request on show: its plain allow, the
+    /// decision's one solid, or its plain deny; `None` for a request with no such answer.
+    fn key_answer(&self, allow: bool, cx: &App) -> Option<(AskId, String)> {
+        self.on_show(cx, |request| {
+            let choice = if allow {
+                decision::arrange(&request.options)
+                    .front
+                    .into_iter()
+                    .find(|(_, kind)| *kind == ButtonKind::Primary)
+                    .map(|(choice, _)| choice.id.clone())
+            } else {
+                denying::plain_deny(&request.options).map(|c| c.id.clone())
+            };
+            choice.map(|choice| (request.id.clone(), choice))
+        })
+        .flatten()
+    }
+
+    /// ⌘↵ or ⌘⌫ on the request that has the keyboard.
+    fn answer_by_key(&self, allow: bool, cx: &mut Context<Self>) {
+        if let Some((ask, choice)) = self.key_answer(allow, cx) {
+            self.answer(ask, choice, cx);
+        }
+    }
+
+    /// Whether ⌘↵ or ⌘⌫ would answer something here, for the palette to offer them.
+    fn answers_by_key(&self, allow: bool, cx: &App) -> bool {
+        self.key_answer(allow, cx).is_some()
     }
 
     /// ⌃O: every settled turn opens and every step with it, the turn under way's too; all
@@ -925,13 +998,6 @@ impl ThreadView {
 
     // ----- drawing: pieces -------------------------------------------------------------
 
-    /// An agent's mark, at the size of an icon or of a large one.
-    fn agent_mark(&self, agent: Option<&AgentId>, large: bool, tone: Rgb) -> AnyElement {
-        let theme = &self.theme;
-        let side = if large { theme.typography.icon_large() } else { theme.typography.icon() };
-        crate::icons::glyph(theme, agent_icon(agent), self.z(side), hsla(tone))
-    }
-
     /// A row's disclosure chevron under `id`, turning a quarter as the row opens or folds.
     fn chevron(&self, id: impl Into<SharedString>, open: bool) -> AnyElement {
         let side = self.z(self.theme.typography.icon());
@@ -948,6 +1014,18 @@ impl ThreadView {
     /// The square every mark sits in.
     fn slot(&self) -> Div {
         div().flex_none().size(self.z(TOOL_ROW)).flex().items_center().justify_center()
+    }
+
+    /// The mark of what waits on the person: [`Status::NeedsYou`] in the warn tone, the mark the
+    /// navigator's *Needs you* row and the bell wear. The calm dashed ring said "background
+    /// work" on the one row that most needs the person.
+    fn needs_you(&self) -> AnyElement {
+        crate::icons::status_icon(
+            &self.theme,
+            Status::NeedsYou,
+            self.z(self.theme.typography.icon()),
+            hsla(self.theme.surfaces.warn),
+        )
     }
 
     fn spinner(&self, calm: bool) -> AnyElement {
@@ -991,6 +1069,7 @@ impl ThreadView {
             .flex()
             .items_center()
             .justify_center()
+            .min_h(self.z(theme.density.control))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.xs))
             .border(kit::hair(theme))
@@ -1117,6 +1196,24 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Whether row `ix` is a line of the agent's work (a call, a group of calls, its reasoning,
+    /// a note) rather than prose (its answer, a plan, the person's message, a turn's fold).
+    fn lined(&self, ix: usize, cx: &App) -> bool {
+        match self.rows.get(ix) {
+            Some(Row::Tool { .. }) => !self.is_plan(ix, cx),
+            Some(Row::Group { .. } | Row::Reasoning { .. } | Row::Note { .. }) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether row `ix` is a plan the agent proposed, which reads as prose.
+    fn is_plan(&self, ix: usize, cx: &App) -> bool {
+        let Some(Row::Tool { item }) = self.rows.get(ix) else { return false };
+        self.item(ix, item, cx).is_some_and(|item| {
+            matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Plan { .. })))
+        })
+    }
+
     /// The column every row sits in: centred, its text 736 pt at most, 48 pt gutters in a
     /// wide tile and the narrow ones in a narrow tile.
     fn column(&self, child: impl IntoElement) -> Div {
@@ -1160,6 +1257,15 @@ impl ThreadView {
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
+        };
+        // A run of calls sits tight, but a run is set apart from the prose round it as a
+        // paragraph is: a call right under an answer sat a few points off it, and the answer
+        // after a run a paragraph away, so the stream's rhythm broke at every change of kind.
+        // A plan is prose, not a call.
+        let gap = match ix.checked_sub(1) {
+            Some(before) if self.lined(ix, cx) != self.lined(before, cx) => gap.max(spacing.md),
+            _ if self.is_plan(ix, cx) => gap.max(spacing.md),
+            _ => gap,
         };
         let found = self.find_row(cx) == Some(ix);
         let inner = if found {
@@ -1424,7 +1530,9 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text_secondary)))
-                    .child(self.slot().child(self.icon(IconName::Brain, s.text_muted)))
+                    // Its words say what it is: the slot holds nothing, so the words keep the
+                    // calls' edge.
+                    .child(self.slot())
                     .child(div().flex_none().debug_selector(move || head_id).child(head))
                     .when(!open, |el| {
                         el.child(
@@ -1705,29 +1813,16 @@ impl ThreadView {
             .min_h(self.z(TOOL_ROW))
             .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(
-                self.slot().child(
-                    crate::companions::at_work(
-                        &self.theme,
-                        self.state(cx),
-                        turn,
-                        stopping,
-                        self.z(self.theme.typography.icon()),
-                    )
-                    .unwrap_or_else(|| self.spinner(stopping || asks)),
-                ),
-            )
+            .child(self.slot().child(if asks && !stopping {
+                self.needs_you()
+            } else {
+                self.spinner(stopping)
+            }))
             .child(
                 div()
                     .when(retrying, |el| el.debug_selector(|| "thread-retrying".to_owned()))
                     .child(SharedString::from(words)),
             )
-            .children(crate::companions::trailing(
-                &self.theme,
-                self.state(cx),
-                turn,
-                self.z(self.theme.typography.icon()),
-            ))
             .child(div().flex_1())
             .children(elapsed.map(|e| {
                 kit::tabular(div())
@@ -1807,7 +1902,6 @@ impl ThreadView {
             .or_else(|| row.map(|r| r.title.clone()))
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "New thread".to_owned());
-        let agent = state.map(|st| &st.meta.agent).or_else(|| row.map(|r| &r.agent));
         let phase = state.map(|st| &st.status).or_else(|| row.map(|r| &r.status));
         let status = if hub.threads().linked() {
             phase.and_then(|p| status_of(p.phase))
@@ -1835,7 +1929,6 @@ impl ThreadView {
                 .min_h(self.z(kit::Row::Two.height(theme)))
                 .border_b(kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
-                .child(self.agent_mark(agent, false, s.text_secondary))
                 .child(
                     div()
                         .min_w_0()
@@ -1899,35 +1992,63 @@ impl ThreadView {
         )
     }
 
-    fn list_region(&self, cx: &Context<Self>) -> AnyElement {
+    /// What a thread with no rows says, centred where its rows would be: a new thread names
+    /// its agent, where it works and its model, and the composer under it is the action; one
+    /// being read says so once the read has taken [`crate::screen::LOADING_GRACE`]. A thread
+    /// whose only row is a request says nothing (the tray is the statement, and the navigator
+    /// says it too), and nor does one out of reach: its tile says so, with what to do about it.
+    fn empty_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
-        let s = theme.surfaces;
-        let region = div().relative().flex_1().min_h_0().w_full().overflow_hidden();
-        if self.rows.is_empty() {
-            let linked = self.hub.read(cx).threads().linked();
-            let words = if self.state(cx).is_some() {
-                "Nothing here yet"
-            } else if linked {
-                "Reading the thread…"
-            } else {
-                "The machine is out of reach"
-            };
-            let agent = self.state(cx).map(|st| &st.meta.agent);
-            return region
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(self.z(theme.spacing.sm))
+        let hub = self.hub.read(cx);
+        let k = self.zoom;
+        let notice = match self.state(cx) {
+            Some(state) => {
+                let bar = crate::conversation::thread::activity::Activity::of(
+                    hub.threads(),
+                    self.thread,
+                    state,
+                );
+                if bar.waiting().next().is_some() {
+                    return None;
+                }
+                let mark = crate::icons::glyph(
+                    crate::icons::Glyph::AGENT,
+                    self.z(theme.typography.icon()),
+                    hsla(theme.surfaces.text_secondary),
+                );
+                let title = format!("New {} thread", agent_label(&state.meta.agent));
+                let detail = new_thread_place(
+                    &state.meta.cwd,
+                    hub.worker(),
+                    composer::model_said(&state.meters).as_deref(),
+                );
+                kit::notice(theme, k, mark, title, Some(detail.into())).into_any_element()
+            }
+            None if hub.threads().linked() => crate::screen::AfterGrace::new(
+                SharedString::from(format!("thread-reading-{}", self.thread.as_uuid())),
+                kit::notice(theme, k, self.spinner(true), READING, None),
+            )
+            .into_any_element(),
+            None => return None,
+        };
+        Some(
+            div()
                 .id("thread-empty")
                 .debug_selector(|| "thread-empty".to_owned())
                 .role(Role::Status)
-                .aria_label(words)
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .children(agent.map(|agent| self.agent_mark(Some(agent), true, s.text_muted)))
-                .child(words)
-                .into_any_element();
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(notice)
+                .into_any_element(),
+        )
+    }
+
+    fn list_region(&self, cx: &Context<Self>) -> AnyElement {
+        let region = div().relative().flex_1().min_h_0().w_full().overflow_hidden();
+        if self.rows.is_empty() {
+            return region.children(self.empty_notice(cx)).into_any_element();
         }
         region
             .debug_selector(|| "thread-rows".to_owned())
@@ -1949,6 +2070,7 @@ impl Render for ThreadView {
         self.renders = self.renders.saturating_add(1);
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
+        self.settle_placeholder(window, cx);
         self.marks.set(self.read_marks(cx));
         self.count_unseen(cx);
         // The list lays out after this render: what its scroll then says is read once the
@@ -1964,7 +2086,9 @@ impl Render for ThreadView {
         // A subagent takes no messages: its thread is read, and answered from the bar.
         let composes = !self.in_subagent();
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
-        let composer = composes.then(|| self.composer_box(bar.is_some(), cx));
+        let tucked = bar.as_ref().is_some_and(|(_, tucked)| *tucked);
+        let bar = bar.map(|(bar, _)| bar);
+        let composer = composes.then(|| self.composer_box(tucked, cx));
         self.keep_keyboard(composes, window, cx);
         div()
             .id("thread")
@@ -1979,6 +2103,16 @@ impl Render for ThreadView {
             .on_action(cx.listener(|this, _: &EditLastQueued, window, cx| {
                 this.edit_last_queued(window, cx);
             }))
+            .when(self.answers_by_key(true, cx), |el| {
+                el.on_action(
+                    cx.listener(|this, _: &AllowRequest, _w, cx| this.answer_by_key(true, cx)),
+                )
+            })
+            .when(self.answers_by_key(false, cx), |el| {
+                el.on_action(
+                    cx.listener(|this, _: &DenyRequest, _w, cx| this.answer_by_key(false, cx)),
+                )
+            })
             // Esc outside the composer: a picture open large closes first, so the key that
             // closes it never also stops the turn.
             .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
@@ -2149,6 +2283,28 @@ pub(crate) fn agent_label(agent: &AgentId) -> String {
     }
 }
 
+/// What a thread with no rows says while the worker reads it.
+pub(crate) const READING: &str = "Reading the thread\u{2026}";
+
+/// Where a new thread works, under its name: "in ~/work on studio · Opus 5.5", each part only
+/// once it is known.
+fn new_thread_place(cwd: &str, worker: &str, model: Option<&str>) -> String {
+    let folder = (!cwd.trim().is_empty()).then(|| crate::workspace::cwd_tail(cwd, None));
+    let mut place = match (folder, worker.is_empty()) {
+        (Some(folder), false) => format!("in {folder} on {worker}"),
+        (Some(folder), true) => format!("in {folder}"),
+        (None, false) => format!("on {worker}"),
+        (None, true) => String::new(),
+    };
+    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
+        if !place.is_empty() {
+            place.push_str(crate::workspace::META_SEPARATOR);
+        }
+        place.push_str(model);
+    }
+    place
+}
+
 /// The start of a message too long to show whole at first, cut at a word, with an ellipsis;
 /// `None` for one short enough.
 fn clamp(words: &str) -> Option<String> {
@@ -2169,11 +2325,6 @@ fn clamp(words: &str) -> Option<String> {
         .filter(|_| by_chars)
         .map_or(head.as_str(), |at| head.get(..at).unwrap_or(&head));
     Some(format!("{}\u{2026}", cut.trim_end()))
-}
-
-/// The glyph of an agent's kind: its own mark where Slopty has one, else the neutral one.
-fn agent_icon(agent: Option<&AgentId>) -> Glyph {
-    Glyph::agent(agent.map_or("", |a| a.0.as_str()))
 }
 
 /// The one vocabulary's word for a phase; none for a thread at rest.
@@ -2307,6 +2458,19 @@ mod tests {
     use super::{ACP, agent_name};
 
     /// A thought says how long it took in whole seconds, the one way chrome says it.
+    /// A new thread's place reads "in ~/work on studio · Opus 5.5", each part once known.
+    #[test]
+    fn a_new_thread_says_where_it_works() {
+        use super::new_thread_place;
+        assert_eq!(
+            new_thread_place("/Users/w/work", "studio", Some("Opus 5.5")),
+            "in ~/work on studio \u{b7} Opus 5.5"
+        );
+        assert_eq!(new_thread_place("", "studio", None), "on studio");
+        assert_eq!(new_thread_place("/srv/app", "", Some(" ")), "in srv/app");
+        assert_eq!(new_thread_place("", "", Some("Opus 5.5")), "Opus 5.5");
+    }
+
     #[test]
     fn a_thought_says_how_long_it_took() {
         use std::time::Duration;

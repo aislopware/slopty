@@ -13,7 +13,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, relative,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_proto::thread::Goal;
 
@@ -93,27 +93,19 @@ impl ThreadView {
                     .child(SharedString::from(spent)),
             );
         let bar = budget_used(&goal).filter(|_| goal.state != "complete").map(|pct| {
-            let fill = hsla(context_tone(theme, pct));
-            let radius = self.z(theme.radii.xs);
             #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
             let share = (pct / 100.0).clamp(0.0, 1.0) as f32;
-            div()
-                .debug_selector(|| "thread-goal-bar".to_owned())
-                .w_full()
-                .h(self.z(theme.spacing.xxs))
-                .rounded(radius)
-                .bg(hsla(s.border_subtle))
-                .child(
-                    kit::Gliding::new("thread-goal-fill", share, move |share| {
-                        div()
-                            .h_full()
-                            .w(relative(share))
-                            .rounded(radius)
-                            .bg(fill)
-                            .into_any_element()
-                    })
-                    .fill(),
+            div().debug_selector(|| "thread-goal-bar".to_owned()).w_full().child(
+                kit::progress::Bar::new(
+                    theme,
+                    "thread-goal",
+                    kit::progress::Progress::Share(share),
                 )
+                .tone(context_tone(theme, pct))
+                .height(self.z(theme.spacing.xs))
+                .label("Budget used")
+                .at_once(),
+            )
         });
         Some(
             div()

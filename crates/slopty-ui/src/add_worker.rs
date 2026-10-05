@@ -10,18 +10,16 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px, relative,
+    App, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use slopty_theme::{Theme, Typography, alpha};
+use slopty_theme::{Theme, Typography};
 
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::{Status, status_mark};
 use crate::kit;
 
@@ -133,11 +131,6 @@ impl std::fmt::Debug for Updates {
     }
 }
 
-/// How long the busy bar's segment takes to cross: two seconds, the calm spinner's turn.
-const SWEEP: Duration = Duration::from_secs(2);
-/// The share of the track the busy bar's segment covers.
-const SEGMENT: f32 = 0.3;
-
 /// The steps, one line each, in one card ([`kit::card`]): a step over the page in dark, white
 /// with its hairline in light.
 #[must_use]
@@ -203,43 +196,22 @@ fn step_line(theme: &Theme, line: &StepLine) -> gpui::Stateful<Div> {
 
 /// The bar under the steps; `None` when nothing runs.
 ///
-/// It is `spacing.xxs` tall on a quiet track, filled to its share, or a segment crossing it for
-/// a step nobody can time, which stands still, set back, under Reduce Motion.
+/// It is the kit's bar ([`kit::progress::Bar`]), filled to its share, or breathing for a step
+/// nobody can time. The bar reads Reduce Motion itself.
 #[must_use]
-pub fn bar(theme: &Theme, bar: Bar, id: &'static str, cx: &App) -> Option<gpui::AnyElement> {
-    let s = theme.surfaces;
-    let track = div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .role(Role::ProgressIndicator)
-        .relative()
-        .w_full()
-        .h(px(theme.spacing.xxs))
-        .rounded(px(theme.radii.xs))
-        .overflow_hidden()
-        .bg(hsla(s.border_subtle));
-    let fill = div().absolute().top_0().bottom_0().rounded(px(theme.radii.xs));
-    let el = match bar {
+pub fn bar(theme: &Theme, bar: Bar, id: &'static str) -> Option<gpui::AnyElement> {
+    let progress = match bar {
         Bar::Hidden => return None,
-        Bar::Share(done) => track
-            .aria_label(SharedString::from(format!("{:.0}%", done.clamp(0.0, 1.0) * 100.0)))
-            .child(fill.left_0().w(relative(done.clamp(0.0, 1.0))).bg(hsla(s.accent_fill)))
-            .into_any_element(),
-        Bar::Busy if !kit::motion(cx) => track
-            .aria_label("Working")
-            .child(fill.left_0().w_full().bg(hsla_alpha(s.accent_fill, alpha::STRONG)))
-            .into_any_element(),
-        Bar::Busy => {
-            let segment = fill.w(relative(SEGMENT)).bg(hsla(s.accent_fill)).with_animation(
-                id,
-                Animation::new(SWEEP).repeat(),
-                // The segment enters from the left edge and leaves past the right one.
-                |el, t| el.left(relative(t.mul_add(1.0 + SEGMENT, -SEGMENT))),
-            );
-            track.aria_label("Working").child(segment).into_any_element()
-        }
+        Bar::Share(done) => kit::progress::Progress::Share(done),
+        Bar::Busy => kit::progress::Progress::Busy,
     };
-    Some(el)
+    Some(
+        div()
+            .debug_selector(move || id.to_owned())
+            .w_full()
+            .child(kit::progress::Bar::new(theme, id, progress).label("Installing"))
+            .into_any_element(),
+    )
 }
 
 /// Why it stopped: the title in the failure's tone, what to do, and the machine's last lines
@@ -291,6 +263,8 @@ pub fn failure(theme: &Theme, failed: &Failed) -> gpui::Stateful<Div> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn line(slug: &'static str, mark: Mark) -> StepLine {
@@ -321,17 +295,21 @@ mod tests {
         fn render(
             &mut self,
             _window: &mut Window,
-            cx: &mut gpui::Context<Self>,
+            _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             self.renders = self.renders.saturating_add(1);
-            div().w(px(300.0)).children(bar(&self.theme, Bar::Busy, "busy-bar", cx))
+            div().w(px(300.0)).children(bar(&self.theme, Bar::Busy, "busy-bar"))
         }
     }
 
-    /// The frames a busy bar draws in a second of 120 Hz frames, with Reduce Motion `reduced`.
+    /// The frames a busy bar draws in a second of 120 Hz frames once it shows, with Reduce Motion
+    /// `reduced`.
     fn busy_frames(cx: &mut gpui::TestAppContext, reduced: bool) -> u32 {
         cx.update(|cx| cx.set_reduce_motion(reduced));
         let (view, cx) = cx.add_window_view(|_, _| BusyBar { theme: Theme::default(), renders: 0 });
+        cx.run_until_parked();
+        // Past the wait before a bar shows: a bar not yet shown draws nothing.
+        cx.executor().advance_clock(kit::progress::SHOW_AFTER);
         cx.run_until_parked();
         let before = view.read_with(cx, |v, _| v.renders);
         for _ in 0..120 {
@@ -342,12 +320,14 @@ mod tests {
         view.read_with(cx, |v, _| v.renders).saturating_sub(before)
     }
 
-    /// A busy bar's segment sweeps, a frame at a time; under Reduce Motion it is a still,
-    /// lighter fill and asks for no frame.
+    /// A busy bar breathes on the working mark's clock, twelve frames a second and not one per
+    /// refresh; under Reduce Motion it stands still and asks for no frame.
     #[gpui::test]
-    fn a_busy_bar_sweeps_unless_motion_is_reduced(cx: &mut gpui::TestAppContext) {
-        let sweeping = busy_frames(cx, false);
-        assert!(sweeping > 60, "the sweep draws every frame: {sweeping}");
+    fn a_busy_bar_breathes_on_the_spin_clock_unless_motion_is_reduced(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let breathing = busy_frames(cx, false);
+        assert!((10..=14).contains(&breathing), "twelve steps a second: {breathing}");
         assert_eq!(busy_frames(cx, true), 0, "still under Reduce Motion");
     }
 

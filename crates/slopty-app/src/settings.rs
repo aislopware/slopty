@@ -7,8 +7,8 @@ use std::path::Path;
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, Companions, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Palette,
-    SecureEntry, Settings, SettingsError, bounds,
+    Appearance, Color, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Palette, SecureEntry,
+    Settings, SettingsError, bounds,
 };
 use slopty_theme::{Contrast, Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -156,11 +156,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
         hundredths(sized(settings.terminal.scroll_multiplier, &bounds::SCROLL, 1.0));
-    theme.behaviour.companions = match settings.theme.companions {
-        Companions::Off => slopty_theme::Companions::Off,
-        Companions::Quiet => slopty_theme::Companions::Quiet,
-        Companions::Lively => slopty_theme::Companions::Lively,
-    };
     theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
         CursorBlink::Program => slopty_theme::CursorBlink::Program,
         CursorBlink::Always => slopty_theme::CursorBlink::Always,
@@ -447,11 +442,6 @@ mod tests {
         assert_eq!(
             theme_for(&s, true, Contrast::Standard).behaviour.cursor_blink,
             slopty_theme::CursorBlink::Never
-        );
-        s.theme.companions = Companions::Quiet;
-        assert_eq!(
-            theme_for(&s, true, Contrast::Standard).behaviour.companions,
-            slopty_theme::Companions::Quiet
         );
         s.terminal.option_as_alt = OptionAsAlt::Left;
         assert_eq!(

@@ -28,6 +28,7 @@
 //! where the project lives. A query finds commands too, by their words, keys or name in the
 //! file.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +74,10 @@ pub const CANT_BIND: &str = "This key can't be bound";
 
 /// What a command's chords say when nothing runs it.
 pub const NO_KEYS: &str = "None";
+
+/// What a command with no chords offers where its chords would be, quietly: under the pointer,
+/// on the keyboard's focus, and on touch.
+pub const ADD_KEYS: &str = "Add shortcut";
 
 /// The name of a command's button that puts its default chords back.
 pub const RESET_KEYS: &str = "Reset to default";
@@ -954,25 +959,36 @@ impl SettingsForm {
         };
     }
 
-    /// A command: what it does and its name in the file, then its chords on key caps, which a
-    /// press records anew, and a way back to its defaults when the file sets it.
+    /// A command on one line: what it does, then its chords on key caps, which a press records
+    /// anew, and a way back to its defaults when the file sets it. Its name in the file is the
+    /// row's hint and its description for a screen reader; the TOML view shows it too.
+    ///
+    /// The caps stand bare at rest; the well under them (the hover wash, no shade) comes under
+    /// the pointer and while recording. A command with no keys shows nothing at rest and a quiet
+    /// "Add shortcut" where its caps would be under the pointer, on the keyboard's focus, and on
+    /// touch, where nothing hovers.
     fn key_line(&self, row: &KeyRow, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let ix = row.command;
+        let touch = theme.density == slopty_theme::Density::TOUCH;
+        let group = SharedString::from(format!("settings-key-group-{ix}"));
         let recording = self.recording.as_ref().filter(|r| r.command == ix).map(|r| r.said);
         let prompt = recording.map(|said| said.unwrap_or(PRESS_KEYS));
-        let meta = if row.set {
+        let was = row.set.then(|| {
             let was =
                 if row.defaults.is_empty() { NO_KEYS.to_owned() } else { row.defaults.join(", ") };
-            format!("{} \u{b7} default {was}", row.key)
-        } else {
-            row.key.clone()
-        };
+            format!("Default {was}")
+        });
+        let unbound = prompt.is_none() && row.keys.is_empty();
         let chords: AnyElement = if let Some(prompt) = prompt {
             div().text_color(hsla(s.accent)).child(prompt).into_any_element()
-        } else if row.keys.is_empty() {
-            div().text_color(hsla(s.text_muted)).child(NO_KEYS).into_any_element()
+        } else if unbound {
+            // No colour of its own: it takes the well's, clear at rest.
+            div()
+                .debug_selector(move || format!("settings-add-keys-{ix}"))
+                .child(ADD_KEYS)
+                .into_any_element()
         } else {
             div()
                 .flex()
@@ -981,18 +997,30 @@ impl SettingsForm {
                 .children(row.keys.iter().map(|k| crate::kit::key_cap(theme, k.clone())))
                 .into_any_element()
         };
-        let well = well(theme)
+        let quiet = hsla(s.text_muted);
+        let well = div()
             .id(("settings-chord", ix))
             .debug_selector(move || format!("settings-chord-{ix}"))
             .role(gpui::accesskit::Role::Button)
             .aria_label(format!("Keys for {}", row.label))
             .aria_value(prompt.map_or_else(|| row.keys.join(", "), str::to_owned))
+            .flex_none()
+            .h(px(theme.density.row))
+            .flex()
+            .items_center()
+            .rounded(px(theme.radii.sm))
             .min_w(px(FIELD_WIDTH))
             .justify_end()
             .px(px(crate::kit::FIELD_INSET))
             .text_size(px(theme.typography.small()))
             .cursor_pointer()
-            .when(prompt.is_none(), |el| el.hover(move |el| el.bg(hsla(s.selected))))
+            .when(unbound, |el| {
+                el.text_color(if touch { quiet } else { gpui::transparent_black() })
+                    .group_hover(group.clone(), move |st| st.text_color(quiet))
+                    .focus(move |st| st.text_color(quiet))
+            })
+            .when(prompt.is_some(), |el| el.bg(hsla(s.hover)))
+            .when(prompt.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover))))
             .on_click(cx.listener(move |this, _ev, window, cx| this.record_keys(ix, window, cx)))
             .child(chords);
         let well = match self.key_handles.get(ix) {
@@ -1008,9 +1036,41 @@ impl SettingsForm {
             )
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reset_keys(ix, cx)))
         });
+        let hint_theme = Rc::new(theme.clone());
+        let name = SharedString::from(row.key.clone());
+        let label = div()
+            .id(("settings-key-label", ix))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_baseline()
+            .gap(px(spacing.sm))
+            .map(crate::kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                let (name, theme) = (name.clone(), Rc::clone(&hint_theme));
+                cx.new(|_| crate::kit::Hint::new(name, "", theme).mono()).into()
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(theme.typography.ui_size))
+                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                    .text_color(hsla(s.text))
+                    .child(row.label.clone()),
+            )
+            .children(was.map(|was| {
+                crate::kit::meta(div(), theme)
+                    .debug_selector(move || format!("settings-key-was-{ix}"))
+                    .flex_shrink(1.0)
+                    .min_w_0()
+                    .truncate()
+                    .child(was)
+            }));
         div()
             .id(("settings-key", ix))
             .debug_selector(move || format!("settings-key-{ix}"))
+            .group(group)
             .role(gpui::accesskit::Role::ListItem)
             .aria_label(row.label.clone())
             .aria_value(row.keys.join(", "))
@@ -1018,25 +1078,8 @@ impl SettingsForm {
             .flex()
             .items_center()
             .gap(px(spacing.md))
-            .min_h(px(theme.density.row_two_line))
-            .py(px(spacing.xs))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(spacing.xxs))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(theme.typography.ui_size))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                            .text_color(hsla(s.text))
-                            .child(row.label.clone()),
-                    )
-                    .child(crate::kit::meta(div(), theme).truncate().child(meta)),
-            )
+            .min_h(px(theme.density.row))
+            .child(label)
             .child(
                 div()
                     .flex_none()

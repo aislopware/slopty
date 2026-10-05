@@ -71,11 +71,7 @@ impl Section {
 
 /// The pages' groups in order, each with its keys (`table.key`) in order.
 const LAYOUT: &[(Section, &str, &[&str])] = &[
-    (
-        Section::Appearance,
-        "Interface",
-        &["theme.appearance", "theme.companions", "font.ui_size", "font.prose_size"],
-    ),
+    (Section::Appearance, "Interface", &["theme.appearance", "font.ui_size", "font.prose_size"]),
     (
         Section::Appearance,
         "Light terminal colours",

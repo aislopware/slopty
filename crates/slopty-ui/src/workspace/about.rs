@@ -42,15 +42,13 @@ pub struct Mark {
     /// Drawn since the clock last ticked: a mark no longer drawn stops its clock.
     drawn: bool,
     blink: Option<Task<()>>,
-    /// How often Dot, beside the page's mark, was clicked: each is one hop.
-    pets: u32,
 }
 
 impl Mark {
     /// A mark, lit while `lit`.
     #[must_use]
     pub const fn new(theme: Theme, name: &'static str, lit: bool) -> Self {
-        Self { theme, name, lit, on: true, drawn: false, blink: None, pets: 0 }
+        Self { theme, name, lit, on: true, drawn: false, blink: None }
     }
 
     /// Whether a worker is reachable.
@@ -136,11 +134,6 @@ impl Render for Mark {
                     .when(at == CURSOR, |el| el.debug_selector(move || format!("{name}-cursor")))
             }))
         });
-        let pet = cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-            this.pets = this.pets.wrapping_add(1);
-            cx.notify();
-        });
-        let dot = crate::companions::beside_mark(&self.theme, cursor, self.pets, pet);
         div()
             .debug_selector(move || format!("{name}-mark"))
             .relative()
@@ -149,7 +142,6 @@ impl Render for Mark {
             .flex_col()
             .gap(px(gap))
             .children(rows)
-            .children(dot)
     }
 }
 

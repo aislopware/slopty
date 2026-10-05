@@ -228,6 +228,8 @@ const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 /// A thread view's composer (`thread::view::COMPOSER_CTX`), which waits a message for the
 /// turn under way.
 const THREAD_INPUT: Option<&str> = Some("ThreadComposer > Input");
+/// A request that has the keyboard: its answers in a thread, a *Needs you* row.
+const REQUEST: Option<&str> = Some(crate::conversation::REQUEST_CTX);
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
 /// A project's board: its rows hold no text, so bare keys walk them.
 const BOARD: Option<&str> = Some(crate::project::CTX);
@@ -262,8 +264,9 @@ pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{
-        AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort, EditLastQueued,
-        Interrupt, QueueMessage, ResumeAgent, ReviewChanges, ShowAgentTerminal, TakeBack,
+        AllowRequest, AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort,
+        DenyRequest, EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges,
+        ShowAgentTerminal, TakeBack,
     };
     use crate::terminal as t;
 
@@ -402,6 +405,8 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),
+        c(Conversation, "allow_request", AllowRequest, &["cmd-enter"], &[REQUEST]),
+        c(Conversation, "deny_request", DenyRequest, &["cmd-backspace"], &[REQUEST]),
         c(File, "save", crate::file::SaveFile, &["cmd-s"], &[FILE]),
         // In the editor too, over its own ⌘↩ (a new line), only while a program waits.
         c(File, "finish_edit", crate::file::FinishEdit, &["cmd-enter"], &[FILE, FILE_INPUT]),

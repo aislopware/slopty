@@ -77,14 +77,8 @@ fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut T
         height: 760.0,
         fullscreen: false,
     };
-    let agent = SessionAgent {
-        kind: AgentKind::ClaudeCode,
-        status: AgentStatus::Working,
-        source: AgentSource::Hook,
-        since_ms: WallMs::ZERO,
-        mode: None,
-    };
-    let running = SessionSummary { agent: Some(agent), ..summary(session, None) };
+    // Its agent is known by its thread ([`agent_thread`]), as every agent is.
+    let running = summary(session, None);
     let item = {
         let (view, vcx) = workspace(cx);
         view.update(vcx, |v, _| v.set_layout_path(path.clone()));
@@ -250,7 +244,8 @@ fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppC
 }
 
 /// A tile the device kept nothing of (the cache unset, or unreadable by this build) is still
-/// drawn while its worker is away: the worker's name over the pill saying where it is. A worker
+/// drawn while its worker is away: the worker's name over the words saying where it is, in the
+/// middle of its empty body. A worker
 /// on another build offers its Update there, and once it is back without the item the tile
 /// leaves.
 #[gpui::test]
@@ -280,7 +275,11 @@ fn a_tile_kept_nowhere_says_where_its_worker_is(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.item(shell).is_none()), "nothing kept");
     assert!(cx.debug_bounds(item).is_some(), "drawn, not a hole");
     assert!(cx.debug_bounds(format!("missing-{id}").leak()).is_some());
-    assert!(cx.debug_bounds(format!("state-{id}").leak()).is_some(), "saying it is away");
+    let state = cx.debug_bounds(format!("state-{id}").leak()).expect("saying it is away");
+    let body = cx.debug_bounds(format!("missing-{id}").leak()).expect("its body");
+    // Nothing else in the body: what is so stands in its middle, not at its foot.
+    assert!((state.center().y - body.center().y).abs() < px(1.0), "{state:?} in {body:?}");
+    assert!(cx.debug_bounds(format!("state-centred-{id}").leak()).is_some());
 
     let asked: Rc<RefCell<Vec<String>>> = Rc::default();
     let seen = Rc::clone(&asked);

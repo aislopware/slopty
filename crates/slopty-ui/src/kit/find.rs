@@ -34,6 +34,15 @@ pub const WHOLE_WORD: &str = "Match whole word";
 pub const REGEX: &str = "Use regular expression";
 /// The button that replaces the match on show.
 pub const REPLACE: &str = "Replace";
+
+/// Match case's face: the letters it tells apart.
+pub const CASE_FACE: &str = "Aa";
+
+/// Whole word's face.
+pub const WORD_FACE: &str = "W";
+
+/// A pattern's face: what a regular expression is written with.
+pub const REGEX_FACE: &str = ".*";
 /// The button that replaces every match.
 pub const REPLACE_ALL: &str = "Replace all";
 /// What the tally says when nothing matches.
@@ -278,9 +287,9 @@ impl RenderOnce for FindBar {
             _ => SharedString::from(words.clone()),
         };
         let toggles = query.map(|(query, on_toggle)| {
-            let toggle = |name: &str, icon, label, on, which| {
+            let toggle = |name: &str, face, label, on, which| {
                 let on_toggle = Rc::clone(&on_toggle);
-                super::icon_toggle(&theme, part(name), icon, label, on, k)
+                super::text_toggle(&theme, part(name), face, label, on, k)
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(move |_ev, window, cx| on_toggle(which, window, cx))
             };
@@ -288,21 +297,9 @@ impl RenderOnce for FindBar {
                 .flex()
                 .flex_none()
                 .items_center()
-                .child(toggle(
-                    "case",
-                    IconName::CaseSensitive,
-                    MATCH_CASE,
-                    query.match_case,
-                    Toggle::MatchCase,
-                ))
-                .child(toggle(
-                    "word",
-                    IconName::WholeWord,
-                    WHOLE_WORD,
-                    query.whole_word,
-                    Toggle::WholeWord,
-                ))
-                .child(toggle("regex", IconName::Regex, REGEX, query.regex, Toggle::Regex))
+                .child(toggle("case", CASE_FACE, MATCH_CASE, query.match_case, Toggle::MatchCase))
+                .child(toggle("word", WORD_FACE, WHOLE_WORD, query.whole_word, Toggle::WholeWord))
+                .child(toggle("regex", REGEX_FACE, REGEX, query.regex, Toggle::Regex))
         });
         let step = |name: &str, icon, label, delta: i8| {
             let on_step = on_step.clone();
@@ -352,9 +349,31 @@ impl RenderOnce for FindBar {
             }));
         let replace_row =
             replace.map(|(field, on_replace)| {
-                let button = |name: &str, icon, label, all: bool| {
+                // Replacing is said in words: a glyph for "replace" and one for "replace all"
+                // had to be told apart by a hint.
+                let button = |name: &str, label: &'static str, all: bool| {
                     let on_replace = Rc::clone(&on_replace);
-                    super::icon_button_at(&theme, part(name), icon, label, k)
+                    let id = part(name);
+                    let selector = id.to_string();
+                    let el = div()
+                        .id(id)
+                        .debug_selector(move || selector)
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .flex_none()
+                        .h(px(super::icon_button_side(&theme) * k))
+                        .px(px(theme.spacing.sm * k))
+                        .flex()
+                        .items_center()
+                        .rounded(px(theme.radii.sm * k))
+                        .text_size(px(theme.typography.small() * k))
+                        .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                        .text_color(hsla(s.text_secondary))
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                        .active(move |el| el.bg(hsla(s.pressed)))
+                        .child(label);
+                    crate::a11y::tab_stop(el, s.accent)
                         .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                         .on_click(move |_ev, window, cx| on_replace(all, window, cx))
                 };
@@ -366,8 +385,8 @@ impl RenderOnce for FindBar {
                     .child(div().flex_1().min_w_0().child(
                         Input::new(&field).appearance(false).aria_label(REPLACE_PLACEHOLDER),
                     ))
-                    .child(button("replace", IconName::Replace, REPLACE, false))
-                    .child(button("replace-all", IconName::ReplaceAll, REPLACE_ALL, true))
+                    .child(button("replace", REPLACE, false))
+                    .child(button("replace-all", REPLACE_ALL, true))
             });
         let selector = id.to_string();
         // The bar's own hairline of room round its buttons, which sit flush to its edge.

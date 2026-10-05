@@ -155,8 +155,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`icon-{16,32,128,512,1024}.png` and the five other appearances at 512 px) come from
     `cargo xtask icon target/e2e/artifacts`.
 
-- ✅ **Companions: a small pixel character for each agent, in its mark's place** (2026-10-04,
-  `.research/mascots-2026-10-04.md`). The user asked for small playful touches: pixel-art
+- ❌ **Deleted 2026-10-05.** The companions below are gone, whole: the characters, the yard,
+  the working line's and the subagents' companions, Dot beside the empty workspace's mark,
+  the `[theme] companions` setting and the theme's `Companions`
+  (`.research/icons-2026-10-05.md` §4.2). The person judged them tiny and ugly in a row's
+  slot and out of place in the bar. A 16 pt slot cannot hold a character that says a state at
+  1×, where Ember was eight pixels. In the slot it hid the one status vocabulary, so a row
+  that needed the person read as one amber pixel. The yard repeated the navigator's attention
+  order, and pixel art beside system type was a second drawing language. What stays is the
+  mark's blinking cursor on the empty workspace. The entry is kept as history.
+- ✅ ~~**Companions: a small pixel character for each agent, in its mark's place**~~ (2026-10-04,
+  `.research/mascots-2026-10-04.md`; deleted 2026-10-05, above). The user asked for small playful touches: pixel-art
   characters for Claude Code, Codex, pi and the other agents that move about and play. They
   are called companions in the chrome, and `[theme] companions` sets how much they do.
   - **The characters are Slopty's own** (study §3, §4.2). Ember (Claude Code) is a round body

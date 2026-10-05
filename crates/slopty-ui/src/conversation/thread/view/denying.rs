@@ -1,4 +1,6 @@
-//! "Deny…": a request turned down with the person's reason, in a line, for the agent to read.
+//! "Deny with a reason…": a request turned down with the person's reason, in a line, for the
+//! agent to read. It is the first of the other ways to deny, behind the deny's chevron
+//! (`decision`).
 //!
 //! The request's answers give way to a field and two buttons while the reason is written. ↵ or
 //! Deny sends the plain deny the agent offers ([`deny_choice`]) with the words as the answer's
@@ -50,23 +52,6 @@ pub fn plain_deny(options: &[Choice]) -> Option<&Choice> {
 }
 
 impl ThreadView {
-    /// The "Deny…" button of `request`, when it offers a deny.
-    pub(super) fn deny_with_reason_button(
-        &self,
-        request: &Request,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
-        let choice = deny_choice(request)?.id.clone();
-        let ask = request.id.clone();
-        Some(
-            self.button(format!("deny-why-{}", ask.0), "Deny\u{2026}", ButtonKind::Ghost)
-                .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.start_deny(ask.clone(), choice.clone(), window, cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
     /// Write the reason `ask` is denied with `choice`: the field takes the keyboard.
     pub(super) fn start_deny(
         &mut self,

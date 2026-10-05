@@ -9,9 +9,8 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Div, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, PathBuilder, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, point, px,
+    AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
@@ -24,8 +23,14 @@ use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
 use crate::kit::{self, ButtonKind};
 
-/// What the composer says before anything is typed: what it takes, and its two menus.
-pub(super) const PLACEHOLDER: &str = "Ask, build, / for commands, @ for references\u{2026}";
+/// What the composer says before anything is typed, while the thread has not said its agent.
+pub(super) const PLACEHOLDER: &str = "Ask\u{2026}";
+
+/// What the composer says before anything is typed: an invitation naming the agent, "Ask
+/// Claude Code…". What it takes ("/" and "@") is taught by the "+" menu, not by the field.
+pub(super) fn placeholder(agent: &slopty_proto::thread::AgentId) -> String {
+    format!("Ask {}\u{2026}", super::agent_label(agent))
+}
 
 /// Where the agent works, as the composer's top row reads it.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -222,8 +227,9 @@ impl ThreadView {
         )
     }
 
-    /// A small fact in the composer's top row: its mark, then its words.
-    fn fact(&self, icon: IconName, words: String) -> Div {
+    /// A small fact in the composer's toolbar, `name` its id's tail: its mark where it has one,
+    /// then its words.
+    fn fact(&self, name: &str, icon: Option<IconName>, words: String) -> Div {
         let theme = &self.theme;
         let s = theme.surfaces;
         div()
@@ -232,11 +238,11 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.xs))
-            .child(
+            .children(icon.map(|icon| {
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted))
-                    .size(self.z(theme.typography.small())),
-            )
-            .child(kit::fit_label(format!("thread-fact-{}", icon.path()), words, theme).fixed())
+                    .size(self.z(theme.typography.small()))
+            }))
+            .child(kit::fit_label(format!("thread-fact-{name}"), words, theme).fixed())
     }
 
     /// Where the thread works, in the composer's toolbar after its chips: the checkout, its
@@ -276,8 +282,14 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.sm))
-            .children(here.checkout.map(|c| self.fact(IconName::Folder, c).flex_shrink_1()))
-            .children(here.branch.map(|b| self.fact(IconName::GitBranch, b).flex_shrink_1()));
+            // The checkout by its name alone: a folder's glyph before it said nothing its name
+            // and its place do not. The branch keeps its glyph, the one cue that tells a
+            // branch's name from a folder's.
+            .children(here.checkout.map(|c| self.fact("checkout", None, c).flex_shrink_1()))
+            .children(
+                here.branch
+                    .map(|b| self.fact("branch", Some(IconName::GitBranch), b).flex_shrink_1()),
+            );
         // Where it works opens the commit sheet on that repository.
         let place = if self.repo(cx).is_some() {
             crate::a11y::tab_stop(
@@ -389,10 +401,8 @@ impl ThreadView {
         let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
         let name =
             model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
-        let mark = self.agent_mark(Some(&state.meta.agent), false, s.text_secondary);
         let chip = self
             .chip("thread-model", format!("Model, {name}"))
-            .child(mark)
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(
@@ -502,13 +512,8 @@ impl ThreadView {
             return None;
         }
         let words = named.or_else(|| switch.then(|| "Effort".to_owned()))?;
-        let chip = self
-            .chip("thread-effort", format!("Effort, {words}"))
-            .child(
-                crate::icons::icon(theme, IconName::Brain, IconSize::Inline, hsla(s.text_muted))
-                    .size(self.z(theme.typography.small())),
-            )
-            .child(SharedString::from(words));
+        let chip =
+            self.chip("thread-effort", format!("Effort, {words}")).child(SharedString::from(words));
         if !switch {
             return Some(chip.role(Role::Label).into_any_element());
         }
@@ -543,12 +548,14 @@ impl ThreadView {
             return None;
         }
         let words = super::tray::tasks_words(tasks);
+        // A mark only where it says something: running, or failed. Work that finished is said
+        // by its words.
         let mark = if tasks.iter().any(BackgroundTask::is_running) {
-            self.spinner(true)
+            Some(self.spinner(true))
         } else if tasks.iter().any(|t| t.state == BackgroundTask::FAILED) {
-            self.icon(IconName::CircleAlert, s.error)
+            Some(self.icon(IconName::CircleAlert, s.error))
         } else {
-            self.icon(IconName::Activity, s.text_muted)
+            None
         };
         let open = self.tasks_open;
         Some(
@@ -559,7 +566,7 @@ impl ThreadView {
                     .cursor_pointer()
                     .when(open, |el| el.bg(hsla(s.hover)))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                    .child(mark)
+                    .children(mark)
                     .child(kit::Rolling::new(
                         "thread-tasks-chip-figure",
                         words,
@@ -796,14 +803,7 @@ impl ThreadView {
                     .px(self.z(theme.spacing.sm))
                     .pb(self.z(theme.spacing.sm))
                     .pt(self.z(theme.spacing.xs))
-                    .when(!editing, |el| {
-                        el.child(
-                            self.icon_button("thread-attach", IconName::Plus, "Attach files")
-                                .on_click(cx.listener(|_this, _ev, _w, cx| {
-                                    cx.emit(ThreadViewEvent::PickFiles);
-                                })),
-                        )
-                    })
+                    .when(!editing, |el| el.child(self.add_button(cx)))
                     .children(self.model_chip(cx))
                     .children(self.effort_chip(cx))
                     .children(self.mode_chip(cx))
@@ -816,6 +816,120 @@ impl ThreadView {
             )
             .into_any_element()
     }
+}
+
+impl ThreadView {
+    /// The "+" at the foot's start and the menu it opens: attach files, then the two menus
+    /// the field takes, "/" for commands and "@" for files and symbols, so the field's own
+    /// words can be an invitation rather than a lesson.
+    fn add_button(&self, cx: &Context<Self>) -> AnyElement {
+        let menu = self.add_open.then(|| self.add_menu(cx));
+        div()
+            .relative()
+            .flex_none()
+            .child(self.icon_button(ADD_BUTTON, IconName::Plus, ADD_LABEL).on_click(cx.listener(
+                |this, _ev, _w, cx| {
+                    this.add_open = !this.add_open;
+                    cx.notify();
+                },
+            )))
+            .children(menu)
+            .into_any_element()
+    }
+
+    /// The "+" menu, hung above the button.
+    fn add_menu(&self, cx: &Context<Self>) -> AnyElement {
+        let this = cx.entity().downgrade();
+        let draft = self.draft(cx);
+        let mut menu = kit::Menu::new();
+        let to = this.clone();
+        menu.push(kit::MenuItem::new("files", ATTACH_FILES, move |_w, cx| {
+            let _gone = to.update(cx, |this, cx| {
+                this.add_open = false;
+                cx.emit(ThreadViewEvent::PickFiles);
+                cx.notify();
+            });
+        }));
+        if !draft.starts_with('/') {
+            let to = this.clone();
+            menu.push(
+                kit::MenuItem::new("commands", COMMANDS, move |window, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.add_open = false;
+                        let (text, caret) = with_command(&this.draft(cx));
+                        this.set_draft(&text, caret, window, cx);
+                        this.focus(window, cx);
+                    });
+                })
+                .detail("/"),
+            );
+        }
+        let to = this.clone();
+        menu.push(
+            kit::MenuItem::new("mentions", MENTIONS, move |window, cx| {
+                let _gone = to.update(cx, |this, cx| {
+                    this.add_open = false;
+                    let caret = this.composer.read(cx).cursor();
+                    let (text, caret) = with_mention(&this.draft(cx), caret);
+                    this.set_draft(&text, caret, window, cx);
+                    this.focus(window, cx);
+                });
+            })
+            .detail("@"),
+        );
+        let panel = kit::MenuPanel::new(
+            ADD_MENU,
+            ADD_LABEL,
+            std::rc::Rc::new(menu),
+            &self.theme,
+            move |window, cx| {
+                let _gone = this.update(cx, |this, cx| {
+                    this.add_open = false;
+                    this.focus(window, cx);
+                    cx.notify();
+                });
+            },
+        );
+        gpui::deferred(gpui::anchored().anchor(gpui::Anchor::BottomLeft).child(panel))
+            .with_priority(crate::palette::Layer::Submenu.priority())
+            .into_any_element()
+    }
+}
+
+/// The selector of the composer's "+".
+pub(crate) const ADD_BUTTON: &str = "thread-attach";
+
+/// The selector of the menu the "+" opens.
+pub(crate) const ADD_MENU: &str = "thread-add-menu";
+
+/// What the "+" is called.
+const ADD_LABEL: &str = "Add to the message";
+
+/// The "+" menu's row that picks files to send.
+pub(crate) const ATTACH_FILES: &str = "Attach files\u{2026}";
+
+/// The "+" menu's row that starts a command, as typing "/" does.
+pub(crate) const COMMANDS: &str = "Commands";
+
+/// The "+" menu's row that names a file or a symbol, as typing "@" does.
+pub(crate) const MENTIONS: &str = "Files and symbols";
+
+/// `draft` with a command begun at its start, and the caret after the "/": the agent reads a
+/// command only from a message's start, and what was written stays as the command's words.
+fn with_command(draft: &str) -> (String, usize) {
+    let text = if draft.is_empty() { "/".to_owned() } else { format!("/ {draft}") };
+    (text, 1)
+}
+
+/// `draft` with a mention begun at byte `caret`, set off from a word before it by a space, and
+/// the caret after the "@".
+fn with_mention(draft: &str, caret: usize) -> (String, usize) {
+    let caret =
+        (0..=caret.min(draft.len())).rev().find(|&at| draft.is_char_boundary(at)).unwrap_or(0);
+    let (before, after) = draft.split_at(caret);
+    let lead = if before.is_empty() || before.ends_with(char::is_whitespace) { "" } else { " " };
+    let text = format!("{before}{lead}@{after}");
+    (text, caret.saturating_add(lead.len()).saturating_add(1))
 }
 
 /// The tone the share of the context window in use is drawn in: warn past 80 %, error past
@@ -835,8 +949,9 @@ pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
 /// 80 %, error past 95 %). On the hairline the track all but vanished, and a lone arc beside the
 /// stop button read as a spinner; a closed ring reads as a gauge.
 ///
-/// The arc is a true one with round ends, and it glides to a new share
-/// ([`kit::Gliding`]), turning back from where it is drawn; under `id`, one per place it shows.
+/// It is the kit's ring ([`kit::progress::ring`]): a true arc with round ends on the soft
+/// track, gliding to a new share and turning back from where it is drawn; under `id`, one per
+/// place it shows.
 #[must_use]
 pub(super) fn context_ring(
     theme: &Theme,
@@ -844,65 +959,31 @@ pub(super) fn context_ring(
     used_pct: f64,
     side: f32,
 ) -> AnyElement {
-    let s = theme.surfaces;
-    let track = crate::colors::hsla_alpha(s.text_muted, slopty_theme::alpha::TINT);
-    let arc = hsla(context_tone(theme, used_pct));
     #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
     let share = (used_pct / 100.0).clamp(0.0, 1.0) as f32;
-    kit::Gliding::new(id, share, move |share| ring(share, side, track, arc)).into_any_element()
-}
-
-/// The ring at `share`: its track, and the used arc with round ends.
-fn ring(share: f32, side: f32, track: gpui::Hsla, arc: gpui::Hsla) -> AnyElement {
-    canvas(
-        |_bounds, _window, _cx| {},
-        move |bounds: Bounds<Pixels>, (), window, _cx| {
-            let width = (bounds.size.width.min(bounds.size.height) * 0.16).max(px(1.5));
-            let r = (bounds.size.width.min(bounds.size.height) - width) / 2.0;
-            let c = bounds.center();
-            let at = |t: f32| {
-                let a = t.mul_add(std::f32::consts::TAU, -std::f32::consts::FRAC_PI_2);
-                point(c.x + r * a.cos(), c.y + r * a.sin())
-            };
-            // Arcs of at most half a turn, so each is the short way round between its ends.
-            let stroke = |from: f32, to: f32| {
-                let mut path = PathBuilder::stroke(width);
-                path.move_to(at(from));
-                let mid = (from + 0.5).min(to);
-                path.arc_to(point(r, r), px(0.0), false, true, at(mid));
-                if mid < to {
-                    path.arc_to(point(r, r), px(0.0), false, true, at(to));
-                }
-                path.build().ok()
-            };
-            // A round end: a disc as wide as the stroke.
-            let cap = |t: f32| {
-                let (p, rc) = (at(t), width / 2.0);
-                let mut path = PathBuilder::fill();
-                path.move_to(point(p.x + rc, p.y));
-                path.arc_to(point(rc, rc), px(0.0), false, true, point(p.x - rc, p.y));
-                path.arc_to(point(rc, rc), px(0.0), false, true, point(p.x + rc, p.y));
-                path.close();
-                path.build().ok()
-            };
-            if let Some(path) = stroke(0.0, 1.0) {
-                window.paint_path(path, track);
-            }
-            if share > 0.0 {
-                for path in [stroke(0.0, share), cap(0.0), cap(share)].into_iter().flatten() {
-                    window.paint_path(path, arc);
-                }
-            }
-        },
-    )
-    .size(px(side))
-    .flex_none()
-    .into_any_element()
+    kit::progress::ring(theme, id, share, context_tone(theme, used_pct), px(side))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{checkout, meter_words, sentence};
+    use super::{checkout, meter_words, sentence, with_command, with_mention};
+
+    /// The "+" menu begins a command at the message's start and a mention at the caret, set
+    /// off from the word before it, with the caret after the sign each time.
+    #[test]
+    fn the_add_menu_begins_a_command_or_a_mention() {
+        assert_eq!(with_command(""), ("/".to_owned(), 1));
+        assert_eq!(with_command("fix it"), ("/ fix it".to_owned(), 1));
+        assert_eq!(with_mention("", 0), ("@".to_owned(), 1));
+        assert_eq!(with_mention("look at", 7), ("look at @".to_owned(), 9));
+        assert_eq!(with_mention("look ", 5), ("look @".to_owned(), 6));
+        assert_eq!(with_mention("ab", 1), ("a @b".to_owned(), 3));
+        assert_eq!(
+            with_mention("é", 1),
+            ("@é".to_owned(), 1),
+            "a caret inside a character backs off"
+        );
+    }
 
     /// The meter's hint names the context and each rate window as the agent names it.
     #[test]

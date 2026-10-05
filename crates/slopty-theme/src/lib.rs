@@ -565,6 +565,14 @@ impl Typography {
         (self.ui_size - 1.0).max(7.0)
     }
 
+    /// What a piece of work is called where it is the thing to act on: a request put to the
+    /// person, a task (base + 1, at the medium weight). A step over the chrome, so the decision
+    /// reads before the facts round it.
+    #[must_use]
+    pub fn task_title(&self) -> f32 {
+        self.ui_size + 1.0
+    }
+
     /// Titles of panels and dialogs (base + 2).
     #[must_use]
     pub fn title(&self) -> f32 {
@@ -765,12 +773,6 @@ pub mod alpha {
     /// point and a half it read as the old heavy outline of a chosen card; Geist and Radix
     /// draw theirs at about 15 to 30 %.
     pub const RING: f32 = 0.3;
-    /// The edge of a card whose thing failed, in the error tone: there to be found on a second
-    /// look, never louder than the words in it (`HeroUI` Pro's tool card, error at 30 %).
-    pub const FAILED_EDGE: f32 = 0.30;
-    /// The edge of a card that waits on the person, in the warn tone: a step surer than a
-    /// failure's, since it asks for a hand (warn at 40 %).
-    pub const ASKING_EDGE: f32 = 0.40;
     /// The window under a dark modal or sheet: Linear dims under 0.4, shadcn far less; at 0.6
     /// the settings blacked out the work behind them.
     pub const SCRIM: f32 = 0.45;
@@ -789,12 +791,6 @@ pub mod alpha {
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`).
 pub const BRAND: Rgb = Rgb::hex(0x004a_c06c);
-
-/// pi's three colours: its mark's top bar, left leg and right leg.
-///
-/// As its MIT mark draws them (`slopty-ui/assets/agents/pi.svg`, under `LICENSE-pi`), fixed in
-/// both variants as pi keeps them. Its companion wears them.
-pub const PI: [Rgb; 3] = [Rgb::hex(0x00e4_8a7a), Rgb::hex(0x004f_8eb3), Rgb::hex(0x00ea_b65d)];
 
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
 const AA: f32 = 4.5;
@@ -891,10 +887,6 @@ pub struct Surfaces {
     pub warn_fill: Rgb,
     /// Error as a mark: a failed block's wash, a dot, a badge.
     pub error_fill: Rgb,
-    /// The agent's own mark, as `MonoCode` spends its orange: the agent's glyph where it acts
-    /// and the file types it touched. Read as text, so it clears AA where a glyph's words
-    /// would; never a state (green is live, amber is waiting) nor a control.
-    pub agent: Rgb,
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
     /// Text on the accent fill: a badge's count on the green. A near-black green in both
@@ -971,18 +963,12 @@ struct Tones {
     warn_fill: Rgb,
     error_fill: Rgb,
     fill_fg: Rgb,
-    /// The agent's orange, before it is lifted.
-    agent: Oklch,
     /// The solid's ink: the far end of the ladder from the text.
     solid_ink: Step,
 }
 
 /// Slopty's green in OKLCH (`docs/decisions/brand.md`): [`BRAND`] is its sRGB.
 pub const BRAND_OKLCH: Oklch = Oklch { l: 0.72, c: 0.16, h: 150.0 };
-
-/// The agent's orange in OKLCH: `MonoCode`'s agent mark, a hue the brand's green and the
-/// waiting amber stay clear of.
-const AGENT_OKLCH: Oklch = Oklch { l: 0.72, c: 0.15, h: 45.0 };
 
 /// A near-black of the brand's hue: words on a green mark, in both variants.
 const ON_GREEN: Oklch = Oklch { l: 0.22, c: 0.04, h: BRAND_OKLCH.h };
@@ -1034,7 +1020,6 @@ const DARK_TONES: Tones = Tones {
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
-    agent: AGENT_OKLCH,
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
 
@@ -1070,7 +1055,7 @@ const LIGHT_TONES: Tones = Tones {
     accent: Oklch { l: 0.49, c: 0.135, h: BRAND_OKLCH.h },
     accent_fill: Oklch { l: 0.64, c: 0.16, h: BRAND_OKLCH.h },
     accent_ink: ON_GREEN,
-    // A touch more amber than brown, so waiting reads apart from the agent's orange.
+    // A touch more amber than brown, so waiting reads as amber and never as a brown.
     warn: Rgb::hex(0x8a5600),
     // A crimson: at the green's and the amber's lightness (`c7212c`) a deuteranope saw the
     // amber and the red as one brown (0.03 Oklab apart); this lightness keeps failed apart
@@ -1082,8 +1067,6 @@ const LIGHT_TONES: Tones = Tones {
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
-    // The orange at the lightness that reads AA on white.
-    agent: Oklch { l: 0.56, c: 0.15, h: AGENT_OKLCH.h },
     solid_ink: Step { toward: Toward::White, share: 1.0 },
 };
 
@@ -1263,7 +1246,6 @@ impl Surfaces {
             success_fill: green_fill,
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
-            agent: lift_to(t.agent.rgb(), &under, t.pole, word),
             fill_fg: t.fill_fg,
             accent_ink: t.accent_ink.rgb(),
             solid: text,
@@ -1652,8 +1634,6 @@ pub struct Behaviour {
     pub secure_entry: SecureEntry,
     /// What a remote window or display stream asks the worker for.
     pub stream: StreamPrefs,
-    /// How much the agents' pixel companions do (`[theme] companions`).
-    pub companions: Companions,
 }
 
 impl Default for Behaviour {
@@ -1670,21 +1650,8 @@ impl Default for Behaviour {
             natural_editing: true,
             secure_entry: SecureEntry::Passwords,
             stream: StreamPrefs::default(),
-            companions: Companions::Lively,
         }
     }
-}
-
-/// How much the agents' pixel companions do (`docs/decisions/brand.md`, "Companions").
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum Companions {
-    /// None: each agent shows its mark.
-    Off,
-    /// A pose for each state in the mark's slot; only a working one moves.
-    Quiet,
-    /// Quiet, and they wave, hop, play in the yard and sleep while the person is away.
-    #[default]
-    Lively,
 }
 
 /// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
@@ -2288,7 +2255,6 @@ mod tests {
                     ("accent", s.accent, MUTED_LC),
                     ("warn", s.warn, MUTED_LC),
                     ("error", s.error, MUTED_LC),
-                    ("agent", s.agent, MUTED_LC),
                 ] {
                     let lc = worst_lc(fg, &surfaces);
                     assert!(lc >= least || fg == pole, "{name} {contrast:?}: {ink} Lc {lc:.1}");
@@ -2616,9 +2582,8 @@ mod tests {
         assert!(lc >= 14.0, "light: the rule reads Lc {lc:.1}");
     }
 
-    /// One hue per meaning across the modes (R6): the green on the brand's 150°, waiting amber,
-    /// failed red and the agent's orange each in its own band in both, whatever lightness
-    /// each mode needs.
+    /// One hue per meaning across the modes (R6): the green on the brand's 150°, waiting amber
+    /// and failed red each in its own band in both, whatever lightness each mode needs.
     #[test]
     fn one_hue_per_meaning_across_modes() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2628,7 +2593,6 @@ mod tests {
                 ("accent_fill", s.accent_fill, 145.0..=155.0),
                 ("warn", s.warn, 65.0..=85.0),
                 ("error", s.error, 15.0..=30.0),
-                ("agent", s.agent, 40.0..=50.0),
             ] {
                 let h = colour.oklch().h;
                 assert!(band.contains(&h), "{variant:?}: {name} {colour:?} at {h:.1}°");
@@ -2828,23 +2792,6 @@ mod tests {
         assert!((theme.hair() - 0.5).abs() < f32::EPSILON);
         theme.contrast = Contrast::Increased;
         assert!((theme.hair() - 1.0).abs() < f32::EPSILON);
-    }
-
-    /// The agent's orange reads as text on every surface in both variants and contrasts, and
-    /// stays its own hue: apart from the green's and the amber's.
-    #[test]
-    fn the_agents_orange_reads_and_is_its_own() {
-        for (name, bg) in BACKGROUNDS {
-            let content = Rgb::hex(bg);
-            for (contrast, floor) in [(Contrast::Standard, AA), (Contrast::Increased, AAA)] {
-                let s = Surfaces::derive(content, contrast);
-                for (surface, under) in under_text(&s, content) {
-                    let seen = s.agent.contrast(under);
-                    assert!(seen >= floor, "{name} {contrast:?}: on {surface} {seen:.2}");
-                }
-                assert!(s.agent != s.warn && s.agent != s.accent, "{name}: its own tone");
-            }
-        }
     }
 
     /// A well on the chrome (the navigator's filter) and a row's hover stand off the bars in

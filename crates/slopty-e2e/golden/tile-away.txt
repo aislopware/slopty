@@ -12,4 +12,4 @@ Status │ Reconnecting…
 Button │ Retry now
 Group │ Status
 Status │ e2e-worker
-Status │ Connecting
+Status │ Reconnecting

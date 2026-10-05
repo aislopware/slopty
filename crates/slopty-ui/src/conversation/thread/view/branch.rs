@@ -335,12 +335,11 @@ impl ThreadView {
                 .enumerate()
                 .map(|(ix, agent)| {
                     let pick = agent.clone();
-                    let mark = self.agent_mark(Some(agent), false, s.text_secondary);
                     self.branch_choice(
                         format!("branch-agent-{ix}"),
                         SharedString::from(agent_label(agent)),
                         *agent == b.agent,
-                        Some(mark),
+                        None,
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         let pick = pick.clone();

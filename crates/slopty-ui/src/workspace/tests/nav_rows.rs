@@ -134,14 +134,16 @@ fn a_row_shows_its_sessions_progress_and_that_it_was_restored(cx: &mut TestAppCo
     cx.run_until_parked();
     let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
     let figure = cx.debug_bounds(leak(format!("nav-progress-{id}"))).expect("the figure");
-    let bar = cx.debug_bounds(leak(format!("nav-progress-bar-{id}"))).expect("the hairline");
+    let bar = cx.debug_bounds(leak(format!("nav-progress-bar-{id}"))).expect("the bar");
+    let fill = cx.debug_bounds(leak(format!("nav-progress-{id}-bar-fill"))).expect("its fill");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
     assert!(shown(cx, leak(format!("nav-restored-{id}"))), "the restored mark");
     assert!(figure.top() >= meta.top() - px(0.5), "on the second line: {figure:?} {meta:?}");
-    assert!(bar.top() >= meta.bottom() - px(0.5) && bar.bottom() <= row.bottom(), "{bar:?}");
-    let lines = cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines");
-    let share = f32::from(bar.size.width) / f32::from(lines.right() - bar.left());
-    assert!(share > 0.3 && share < 0.5, "about 40% of the lines: {share}");
+    assert!(bar.left() >= figure.right(), "after its figure: {bar:?} {figure:?}");
+    assert!(bar.top() >= meta.top() && bar.bottom() <= meta.bottom(), "on the line, not its foot");
+    assert!(bar.bottom() < row.bottom(), "never along the row's edge: {bar:?} {row:?}");
+    let share = f32::from(fill.size.width) / f32::from(bar.size.width);
+    assert!(share > 0.3 && share < 0.5, "about 40% of the bar: {share}");
 
     let quiet = summary(session, Some("/w/oss/slopty"));
     view.update_in(cx, |v, _w, cx| v.session_opened(key, quiet, cx));
@@ -246,37 +248,17 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     assert!(!washed, "a row waiting on the human is not washed a second time");
 
     // It is listed under *Needs you* too, in view or folded out of sight, whose row joins the
-    // agent's words and its place as a tile's second line does: the one separator, spaces and
-    // all, flush against both.
+    // agent's words and its place in one line as a tile's second line does, so the place gives
+    // way at the line's end and is never pressed to a lone ellipsis between its neighbours.
     assert!(shown(cx, "nav-needs-you"), "the section lists it in view");
     let project = GroupKey::new(fact::REPO, &groups::at(key, "/Users/me/oss/slopty"));
     click(cx, leak(format!("nav-group-{project}")));
     assert!(shown(cx, "nav-needs-you"), "and folded away");
-    let mut part = |name: &str| {
-        cx.debug_bounds(leak(format!("nav-waiting-{name}-{session}")))
-            .unwrap_or_else(|| panic!("the agent row's {name}"))
-    };
-    let (words, separator, place) = (part("words"), part("separator"), part("place"));
-    assert!((separator.left() - words.right()).abs() < px(0.5), "{words:?} {separator:?}");
-    assert!((place.left() - separator.right()).abs() < px(0.5), "{separator:?} {place:?}");
-    let spaced = cx.update(|window, _cx| {
-        let font_size = px(Theme::default().typography.small());
-        let run = |len| gpui::TextRun {
-            len,
-            font: window.text_style().font(),
-            color: gpui::black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let text = rollup::META_SEPARATOR;
-        let dot = "\u{b7}";
-        let shape = |s: &'static str| {
-            window.text_system().shape_line(s.into(), font_size, &[run(s.len())], None).width
-        };
-        (shape(text), shape(dot))
-    });
-    assert!(separator.size.width > spaced.1 + px(1.0), "the spaces stay: {spaced:?}");
+    assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "the words and the place");
+    for part in ["separator", "place"] {
+        let apart = leak(format!("nav-waiting-{part}-{session}"));
+        assert!(!shown(cx, apart), "the {part} is not a part of its own");
+    }
 }
 
 /// An open worker with no tile says so in one quiet line on its tiles' edge; a filter that

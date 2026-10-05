@@ -16,7 +16,9 @@ fn active(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> usize {
 }
 
 /// Docked, the navigator runs from the window's top and the title bar starts at its right
-/// edge; hidden, the bar takes the whole width and starts past the traffic lights.
+/// edge. The navigator's top row holds only the lights and the toggle, and the filter is the
+/// first row under it. Hidden, the bar takes the whole width and starts past the traffic
+/// lights, with the toggle where it stood.
 #[gpui::test]
 fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -29,7 +31,13 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert!(f32::from(nav.top()).abs() < 0.5, "from the top: {nav:?}");
     assert!((f32::from(nav.size.height) - VIEWPORT.1).abs() < 0.5, "to the bottom: {nav:?}");
     assert_eq!(bar.left(), nav.right(), "the bar starts at its edge");
-    assert!(bounds(cx, "nav-filter").top() < bar.bottom(), "the filter is in the top row");
+    let lights = bounds(cx, "nav-lights-row");
+    assert_eq!(lights.bottom(), bar.bottom(), "the lights row is the bar's height");
+    let docked = bounds(cx, "navigator-toggle");
+    assert!(lights.contains(&docked.center()), "the toggle is in the lights row: {docked:?}");
+    let field = bounds(cx, "nav-filter-field");
+    assert!(field.top() >= lights.bottom(), "the filter is under the lights row: {field:?}");
+    assert!(field.left() > nav.left() && field.right() < nav.right(), "in from the sides");
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
@@ -37,6 +45,10 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert!(f32::from(bar.left()).abs() < 0.5, "the whole width: {bar:?}");
     let toggle = bounds(cx, "navigator-toggle");
     assert!(f32::from(toggle.left()) >= titlebar::LEADING_INSET, "past the traffic lights");
+    assert!(
+        (f32::from(toggle.left()) - f32::from(docked.left())).abs() < 0.5,
+        "the toggle never moves: {docked:?} then {toggle:?}"
+    );
 }
 
 /// The breadcrumb's workspace segment is how the bar goes between workspaces: its menu lists

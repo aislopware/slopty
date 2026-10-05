@@ -109,17 +109,10 @@ impl ScreenView {
         let driver = self.driver.as_ref()?;
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (words, button, mark) = if self.control {
-            (IN_CONTROL.to_owned(), HAND_BACK, None)
+        let (words, button) = if self.control {
+            (IN_CONTROL.to_owned(), HAND_BACK)
         } else {
-            let glyph = crate::icons::Glyph::agent(&driver.agent.0);
-            let mark = crate::icons::glyph(
-                theme,
-                glyph,
-                px(theme.typography.icon()),
-                hsla(s.text_secondary),
-            );
-            (format!("{} is driving", driver.name), TAKE_CONTROL, Some(mark))
+            (format!("{} is driving", driver.name), TAKE_CONTROL)
         };
         let control = self.control;
         let act = kit::button(theme, "screen-driver-act", button, kit::ButtonKind::Secondary)
@@ -143,7 +136,6 @@ impl ScreenView {
             .text_color(hsla(s.text_secondary))
             // A press on the pill is the pill's: it never reaches the picture under it.
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .children(mark)
             .child(
                 div()
                     .id("screen-driver-words")

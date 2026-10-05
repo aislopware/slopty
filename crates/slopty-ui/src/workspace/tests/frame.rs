@@ -298,8 +298,9 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
     assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge: the toggle, the breadcrumb and "+",
-/// each clear of the next and of the bell, however long the workspace's name.
+/// The bar runs from the docked navigator's right edge: the breadcrumb and "+", each clear of
+/// the next and of the bell, however long the workspace's name. The toggle stays in the
+/// navigator's top row, clear of the bar.
 #[gpui::test]
 fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -321,8 +322,8 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
         bounds(cx, "new-menu"),
         bounds(cx, "bell"),
     );
-    assert!(navigator.right() <= toggle.left(), "the bar starts at the navigator's edge");
-    assert!(toggle.right() <= crumbs.left(), "{toggle:?} {crumbs:?}");
+    assert!(toggle.right() <= navigator.right(), "the toggle is the navigator's: {toggle:?}");
+    assert!(navigator.right() <= crumbs.left(), "the bar starts at the navigator's edge");
     assert!(crumbs.right() <= new.left(), "{crumbs:?} {new:?}");
     assert!(new.right() <= bell.left(), "+ covers the bell: {new:?} {bell:?}");
 }
@@ -672,6 +673,37 @@ fn a_slow_round_trip_shows_on_the_right_edge_and_holds_still(cx: &mut TestAppCon
     assert_eq!(moved.size, rtt.size, "the rollup before it");
     assert_eq!(moved.origin.x, rtt.origin.x, "back where it was");
     assert_eq!(moved.top() - row.top(), rtt.top() - header.top(), "on the row's line");
+}
+
+/// On touch a machine's "+" and "…" and a project's "+" stand at rest, after the readouts,
+/// since a finger has no hover; with a pointer they wait for it, over the readouts.
+#[gpui::test]
+fn a_finger_finds_the_navigators_actions_at_rest(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let (_, atlas) = palette::shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_millis(31)), cx));
+    let far = point(px(VIEWPORT.0 - 10.0), px(VIEWPORT.1 / 2.0));
+    cx.simulate_mouse_move(far, None, Modifiers::default());
+    cx.run_until_parked();
+    let group = view
+        .read_with(cx, |v, _| v.project_groups().group_of(atlas).map(|g| g.key.clone()))
+        .expect("atlas's group");
+    let add_here = leak(format!("nav-group-new-shell-{group}"));
+    assert!(cx.debug_bounds(add_here).is_none(), "a pointer's wait for it");
+
+    let touch = Theme { density: slopty_theme::Density::TOUCH, ..Theme::default() };
+    view.update(cx, |v, cx| v.set_theme(touch, cx));
+    cx.run_until_parked();
+    let at = |cx: &mut VisualTestContext, what: &str| {
+        let selector = leak(format!("{what}-{key}"));
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let (rtt, add, menu) = (at(cx, "nav-rtt"), at(cx, "nav-new-shell"), at(cx, "nav-machine-menu"));
+    assert!(rtt.right() <= add.left() + px(0.5), "after the readout: {rtt:?} {add:?}");
+    assert!(add.right() <= menu.left() + px(0.5), "then the menu: {add:?} {menu:?}");
+    assert!(cx.debug_bounds(add_here).is_some(), "a project's \"+\" at rest");
 }
 
 /// A pinned round trip is what every readout shows, whatever the link measures, and only for

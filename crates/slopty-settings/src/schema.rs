@@ -338,10 +338,6 @@ mod tests {
             [("false", "Off"), ("true", "Both"), ("left", "Left"), ("right", "Right")]
         );
         assert_eq!(field("theme", "appearance").default, Value::Str("system".to_owned()));
-        let Kind::Choice(levels) = &field("theme", "companions").kind else { panic!("a choice") };
-        let levels: Vec<_> = levels.iter().map(|c| (c.value.as_str(), c.title.as_str())).collect();
-        assert_eq!(levels, [("off", "Off"), ("quiet", "Quiet"), ("lively", "Lively")]);
-        assert_eq!(field("theme", "companions").default, Value::Str("lively".to_owned()));
         assert_eq!(field("font", "ligatures").kind, Kind::Switch);
         for table in ["colors.light", "colors.dark"] {
             assert_eq!(field(table, "cursor").kind, Kind::Colour, "{table}: a nested table's key");

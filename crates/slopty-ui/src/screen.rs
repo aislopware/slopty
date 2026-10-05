@@ -3480,7 +3480,7 @@ impl ScreenView {
             return Some(self.unlock_line());
         }
         let icon = match self.source {
-            SourceState::Away => crate::icons::IconName::MonitorOff,
+            SourceState::Away => crate::icons::IconName::Monitor,
             _ => crate::icons::IconName::Lock,
         };
         let unlock = (self.source == SourceState::Locked).then(|| {

@@ -73,10 +73,11 @@ impl WorkspaceView {
             .session_rows()
             .into_iter()
             .map(|row| {
-                let icon = self.session_agent(row.session).map_or(
-                    crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal),
-                    crate::icons::Glyph::agent,
-                );
+                let icon = if self.session_agent(row.session).is_some() {
+                    crate::icons::Glyph::AGENT
+                } else {
+                    crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal)
+                };
                 PaletteItem::session(&row.title, row.session)
                     .with_icon(icon)
                     .with_status(row.mark)
@@ -129,11 +130,7 @@ impl WorkspaceView {
         if !mute || !self.active_screen().is_some_and(|v| v.read(cx).muted()) {
             return line;
         }
-        PaletteItem {
-            label: super::actions::UNMUTE_SOUND.to_owned(),
-            icon: crate::icons::Glyph::Icon(crate::icons::IconName::Volume2),
-            ..line
-        }
+        PaletteItem { label: super::actions::UNMUTE_SOUND.to_owned(), ..line }
     }
 
     /// What an agent's session is about, for the palette to find it by: its thread's title and

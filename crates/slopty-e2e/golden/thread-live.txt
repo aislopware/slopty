@@ -1,13 +1,13 @@
 Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
+Button │ Navigator
 TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ scenario:bash run echo hi
 Button │ Close tile
-Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
@@ -15,7 +15,7 @@ Button │ Needs you
 Button │ More
 Group │ scenario:bash run echo hi
 Heading │ terminal scenario:bash run echo hi
-Label │ ~
+Label │ Claude Code · ~
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -27,11 +27,9 @@ Article │ Let me run it.
 Button │ Copy message
 Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Send
 Group │ Status
 Status │ e2e-worker
-Group │ Agents
-Button │ Claude Code · Idle

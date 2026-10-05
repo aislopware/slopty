@@ -158,7 +158,7 @@ pub(super) fn age_at(started_ms: u64, now: SystemTime) -> Option<Duration> {
 }
 
 /// What joins the parts of a meta line, as everywhere else in the chrome joins facts.
-pub(super) const META_SEPARATOR: &str = " \u{b7} ";
+pub(crate) const META_SEPARATOR: &str = " \u{b7} ";
 
 /// The navigator's second line: the parts that say something, joined by a middle dot.
 pub(super) fn meta_line<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {

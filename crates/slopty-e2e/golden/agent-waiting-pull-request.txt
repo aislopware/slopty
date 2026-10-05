@@ -17,13 +17,11 @@ Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
-Status │ Nothing here yet
+Status
 MultilineTextInput │ Message (focused)
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ Commit
 Button │ Send
 Group │ Status
 Status │ e2e-worker
-Group │ Agents
-Button │ Claude Code · Waiting on cargo test

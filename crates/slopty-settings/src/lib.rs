@@ -77,23 +77,6 @@ pub enum Appearance {
     Dark,
 }
 
-/// How much the agents' companions do: the small pixel characters that stand in their marks'
-/// slots (`docs/decisions/brand.md`, "Companions").
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Companions {
-    /// None: each agent shows its mark.
-    #[schemars(title = "Off")]
-    Off,
-    /// In their marks' slots, holding a pose; only a working one moves.
-    #[schemars(title = "Quiet")]
-    Quiet,
-    /// Quiet, and they wave, hop, play in the yard and fall asleep while you are away.
-    #[default]
-    #[schemars(title = "Lively")]
-    Lively,
-}
-
 /// When a terminal's bell, or an agent that needs the person, sounds the alert and bounces
 /// the Dock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -385,14 +368,6 @@ pub struct ThemeSettings {
     /// Follow the system, or stay light or dark.
     #[schemars(title = "Theme")]
     pub appearance: Appearance,
-    /// Small pixel characters for the agents; lively ones wave and play.
-    ///
-    /// Each agent's companion, a pixel character in its mark's place: off, quiet (a pose
-    /// that says the state, only a working one moving) or lively (they also wave, hop and
-    /// play in the yard, and fall asleep two minutes after your last input). Under Reduce
-    /// Motion every companion holds still.
-    #[schemars(title = "Companions")]
-    pub companions: Companions,
 }
 
 /// `[terminal]`.
@@ -1051,10 +1026,6 @@ prose_size = {prose_size}
 [theme]
 # \"dark\", \"light\" or \"system\" (follow the macOS appearance).
 appearance = {appearance}
-# The agents' pixel companions: \"off\", \"quiet\" (a pose for each state; only
-# a working one moves) or \"lively\" (they also wave, hop and play, and sleep
-# while you are away).
-companions = {companions}
 
 [terminal]
 # Least contrast ratio (1.0 to 21.0) between text and its background; text
@@ -1171,7 +1142,6 @@ editor = \"\"
             ui_size = toml_float(d.font.ui_size),
             prose_size = toml_float(d.font.prose_size),
             appearance = toml_string(appearance_name(d.theme.appearance)),
-            companions = toml_string(companions_name(d.theme.companions)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
             alert = toml_string(alert_name(d.terminal.alert)),
@@ -1338,14 +1308,6 @@ const fn appearance_name(a: Appearance) -> &'static str {
     }
 }
 
-const fn companions_name(c: Companions) -> &'static str {
-    match c {
-        Companions::Off => "off",
-        Companions::Quiet => "quiet",
-        Companions::Lively => "lively",
-    }
-}
-
 const fn cursor_style_name(c: CursorStyle) -> &'static str {
     match c {
         CursorStyle::Program => "program",
@@ -1414,7 +1376,6 @@ mod tests {
         assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
         assert_eq!(d.font.ui_size, 13.0);
         assert_eq!(d.theme.appearance, Appearance::System);
-        assert_eq!(d.theme.companions, Companions::Lively, "they run and play");
         assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
         assert_eq!(d.terminal.alert, Alert::Hidden, "heard while Slopty is hidden");
@@ -1642,20 +1603,6 @@ mod tests {
     }
 
     #[test]
-    fn companions_values() {
-        for (text, want) in
-            [("off", Companions::Off), ("quiet", Companions::Quiet), ("lively", Companions::Lively)]
-        {
-            let loaded = Settings::parse(&format!("[theme]\ncompanions = \"{text}\"\n"));
-            assert_eq!(loaded.settings.theme.companions, want, "{text}");
-            assert_eq!(companions_name(want), text, "written as read");
-        }
-        let bad = Settings::parse("[theme]\ncompanions = \"loud\"\n");
-        assert!(bad.error.is_some(), "an unknown level is an error");
-        assert_eq!(bad.settings, Settings::default());
-    }
-
-    #[test]
     fn unknown_keys_warn_but_load() {
         let loaded = Settings::parse(
             "[font]\nmono_size = 11.0\nkerning = true\n[terminal]\nscrollback_lines = 1\n",
@@ -1716,7 +1663,6 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
         assert!(text.contains("mono_size = 13.0"), "{text}");
         assert!(text.contains("appearance = \"system\""), "{text}");
-        assert!(text.contains("companions = \"lively\""), "{text}");
         assert!(text.contains("minimum_contrast = 3.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");

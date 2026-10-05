@@ -14,28 +14,24 @@ Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
-Status │ Nothing here yet
-Group │ Activity
 Dialog │ Wants to run a command
 Button │ Answer in the terminal
 MultilineTextInput │ Message
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
+Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
-Status │ Nothing here yet
+Status
 MultilineTextInput │ Message (focused)
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Send
 Group │ Status
 Status │ e2e-worker
-Group │ Agents
-Button │ Claude Code · Needs approval: Wants to run a command
-Button │ Claude Code · Idle

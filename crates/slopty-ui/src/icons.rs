@@ -22,7 +22,6 @@ use gpui::{
     radians, svg,
 };
 pub use gpui_kit::assets::IconName;
-use slopty_proto::thread::AgentId;
 use slopty_theme::{Rgb, Theme};
 
 use crate::colors::hsla;
@@ -185,22 +184,12 @@ drawn![
     "x",
 ];
 
-/// The agents' marks: pi's own, drawn from the layout its MIT source spells out
-/// (`assets/agents/LICENSE-pi`); `OpenCode`'s own, from its MIT repository
-/// (`assets/agents/LICENSE-opencode`) without the tile behind it; and Codex's stand-in,
-/// Hugeicons' `code-circle` (MIT, `assets/icons/LICENSE`) at this set's stroke.
-const AGENT_MARKS: &[(&str, &[u8])] = &[
-    ("agents/pi.svg", include_bytes!("../assets/agents/pi.svg")),
-    ("agents/opencode.svg", include_bytes!("../assets/agents/opencode.svg")),
-    (CODEX_MARK, include_bytes!("../assets/agents/code-circle.svg")),
-];
-
 /// The stroke gpui-kit's Lucide icons are drawn at, and the one this set's are.
 const LUCIDE_STROKE: &str = "stroke-width=\"2\"";
 const STROKE: &str = "stroke-width=\"1.75\"";
 
-/// The asset source every window registers: Hugeicons' drawings, the file types and the agent
-/// marks, then gpui-kit's bundle at this set's stroke.
+/// The asset source every window registers: Hugeicons' drawings and the file types, then
+/// gpui-kit's bundle at this set's stroke.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Assets;
 
@@ -208,7 +197,6 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let ours = DRAWN
             .iter()
-            .chain(AGENT_MARKS)
             .find(|(p, _)| *p == path)
             .map(|(_, bytes)| *bytes)
             .or_else(|| crate::file_types::load(path));
@@ -221,7 +209,6 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         let mut paths: Vec<SharedString> = DRAWN
             .iter()
-            .chain(AGENT_MARKS)
             .map(|(p, _)| SharedString::from(*p))
             .chain(crate::file_types::paths())
             .filter(|p| p.starts_with(path))
@@ -269,15 +256,17 @@ pub fn icon(theme: &Theme, name: IconName, size: IconSize, color: Hsla) -> Svg {
     svg().path(name.path()).flex_shrink_0().size(px(side)).text_color(color)
 }
 
-/// What a row or a header leads with: a chrome icon, a file's type, or an agent's mark.
+/// What a row or a header leads with: a chrome icon or a file's type.
+///
+/// No agent has a mark of its own (`docs/decisions/ui.md`, "No agent wears a mark"): an agent's
+/// row leads with its status, and at rest with the one neutral kind glyph ([`Glyph::AGENT`]),
+/// and its name is said in words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Glyph {
     /// A chrome icon, in the ink of the words beside it.
     Icon(IconName),
     /// A file's type, in its own colours.
     File(FileType),
-    /// An agent, by its own mark or the neutral one.
-    Agent(AgentMark),
 }
 
 impl From<IconName> for Glyph {
@@ -287,16 +276,15 @@ impl From<IconName> for Glyph {
 }
 
 impl Glyph {
+    /// Every agent's kind, whichever agent it is: one neutral mark in the ink beside it.
+    pub const AGENT: Self = Self::Icon(IconName::Sparkles);
+
     /// The asset it is drawn from.
     #[must_use]
     pub fn path(self) -> SharedString {
         match self {
             Self::Icon(name) => name.path(),
             Self::File(kind) => kind.path(),
-            Self::Agent(AgentMark::Pi) => SharedString::new_static(PI_MARK),
-            Self::Agent(AgentMark::OpenCode) => SharedString::new_static(OPENCODE_MARK),
-            Self::Agent(AgentMark::Codex) => SharedString::new_static(CODEX_MARK),
-            Self::Agent(AgentMark::ClaudeCode | AgentMark::Other) => IconName::Sparkles.path(),
         }
     }
 
@@ -306,73 +294,19 @@ impl Glyph {
     pub fn file(path: &str) -> Self {
         FileType::of(path).map_or(Self::Icon(IconName::File), Self::File)
     }
-
-    /// The agent named `agent` (an [`AgentId`]'s name).
-    #[must_use]
-    pub fn agent(agent: &str) -> Self {
-        Self::Agent(AgentMark::of(agent))
-    }
 }
 
-/// An agent's mark: its own where its licence allows one, else one of Slopty's that tells it
-/// apart from every other agent's.
-///
-/// Claude Code's and Codex's owners allow their marks only with their approval, so each takes
-/// a drawing of its own from the icon set: Claude Code the sparkles in the theme's agent
-/// orange, Codex a code mark in the ink beside it. Any other agent without a mark takes the
-/// sparkles in that ink, so the orange names one agent and no two agents share a mark.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AgentMark {
-    /// pi's four-by-four mark, in its own colours.
-    Pi,
-    /// `OpenCode`'s mark, in the ink beside it as its light and dark variants are.
-    OpenCode,
-    /// Claude Code's: the sparkles, in [`slopty_theme::Surfaces::agent`].
-    ClaudeCode,
-    /// Codex's: a code mark in a circle, in the ink beside it.
-    Codex,
-    /// Any other agent's: the sparkles, in the ink beside it.
-    Other,
-}
-
-impl AgentMark {
-    /// The mark of the agent named `agent`, reached directly or over ACP.
-    #[must_use]
-    pub fn of(agent: &str) -> Self {
-        match agent.strip_prefix(AgentId::ACP_PREFIX).unwrap_or(agent) {
-            AgentId::PI => Self::Pi,
-            "opencode" => Self::OpenCode,
-            AgentId::CLAUDE_CODE => Self::ClaudeCode,
-            AgentId::CODEX => Self::Codex,
-            _ => Self::Other,
-        }
-    }
-}
-
-/// `glyph`, `side` square. An icon and the marks of `OpenCode`, Codex and any other agent take
-/// `ink`; a file type and pi's mark keep their own colours; Claude Code's takes the theme's
-/// agent orange.
+/// `glyph`, `side` square: an icon in `ink`, a file's type in its own colours.
 #[must_use]
-pub fn glyph(theme: &Theme, glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement {
-    let mask = |path: SharedString, color: Hsla| {
-        svg().path(path).flex_shrink_0().size(side).text_color(color).into_any_element()
-    };
+pub fn glyph(glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement {
     let path = glyph.path();
     match glyph {
-        Glyph::Icon(_)
-        | Glyph::Agent(AgentMark::OpenCode | AgentMark::Codex | AgentMark::Other) => {
-            mask(path, ink)
+        Glyph::Icon(_) => {
+            svg().path(path).flex_shrink_0().size(side).text_color(ink).into_any_element()
         }
-        Glyph::File(_) | Glyph::Agent(AgentMark::Pi) => {
-            Picture { path, side, inner: None }.into_any_element()
-        }
-        Glyph::Agent(AgentMark::ClaudeCode) => mask(path, hsla(theme.surfaces.agent)),
+        Glyph::File(_) => Picture { path, side, inner: None }.into_any_element(),
     }
 }
-
-const PI_MARK: &str = "agents/pi.svg";
-const OPENCODE_MARK: &str = "agents/opencode.svg";
-const CODEX_MARK: &str = "agents/code-circle.svg";
 
 /// A drawing in its own colours, rasterised once for each size it shows at in the window's
 /// device pixels: as sharp as an icon, and there on the first frame, with no load to wait for.
@@ -901,20 +835,10 @@ impl Element for Spinner {
 }
 
 /// How long after the spin clock's start every working mark was last woken: the moment each
-/// drawing that steps with the marks (a companion) shows, so they step together.
+/// drawing that steps with the marks (a busy progress bar's breath) shows, so they step
+/// together.
 pub(crate) fn steps_shown(cx: &mut App) -> Duration {
     SpinClock::get(cx).shown
-}
-
-/// How long after the spin clock's start it is now.
-pub(crate) fn steps_now(cx: &mut App) -> Duration {
-    let now = cx.background_executor().now();
-    now.saturating_duration_since(SpinClock::get(cx).epoch)
-}
-
-/// Whether `view` drew a working mark since the clock's last step, so its next step wakes it.
-pub(crate) fn steps_wake(cx: &mut App, view: EntityId) -> bool {
-    SpinClock::get(cx).wake.contains(&view)
 }
 
 /// The view being painted draws again at the spin clock's next step, as one painting a
@@ -965,36 +889,13 @@ mod tests {
         let component = gpui_kit::assets::Assets.list("").unwrap_or_default();
         let first = component.first().map(SharedString::to_string).unwrap_or_default();
         assert!(Assets.load(&first).ok().flatten().is_some(), "component icon {first} lost");
-        for (path, _) in AGENT_MARKS {
-            assert!(Assets.load(path).ok().flatten().is_some(), "{path}");
-            assert!(Assets.list("agents/").unwrap_or_default().iter().any(|p| p == path));
-        }
     }
 
-    /// Each agent is known by its name, directly or over ACP. Claude Code and Codex, whose
-    /// owners allow their marks only with approval, take drawings of Slopty's, one each, and
-    /// no other agent shares either: a Codex thread never wears Claude Code's orange.
+    /// A file's type is its own drawing, and a type the set does not draw is the plain file.
     #[test]
-    fn an_agent_shows_its_own_mark_only_where_its_licence_allows() {
-        assert_eq!(AgentMark::of(AgentId::PI), AgentMark::Pi);
-        assert_eq!(AgentMark::of("acp:opencode"), AgentMark::OpenCode);
-        assert_eq!(AgentMark::of(AgentId::CLAUDE_CODE), AgentMark::ClaudeCode);
-        assert_eq!(AgentMark::of(AgentId::CODEX), AgentMark::Codex);
-        assert_eq!(AgentMark::of("acp:gemini"), AgentMark::Other);
-        let agents = [AgentId::CLAUDE_CODE, AgentId::CODEX, AgentId::PI, "acp:opencode", "gemini"];
-        let looks: std::collections::HashSet<(SharedString, bool)> = agents
-            .iter()
-            .map(|a| {
-                let glyph = Glyph::agent(a);
-                (glyph.path(), glyph == Glyph::Agent(AgentMark::ClaudeCode))
-            })
-            .collect();
-        assert_eq!(looks.len(), agents.len(), "no two agents look alike: {looks:?}");
+    fn a_file_leads_with_its_types_drawing() {
         assert_eq!(Glyph::file("/w/main.rs").path().as_ref(), "file-types/rust.svg");
         assert_eq!(Glyph::file("/w/notes"), Glyph::Icon(IconName::File));
-        for glyph in [Glyph::agent("pi"), Glyph::agent("opencode"), Glyph::agent("codex")] {
-            assert!(Assets.load(&glyph.path()).ok().flatten().is_some(), "{glyph:?}");
-        }
     }
 
     #[test]

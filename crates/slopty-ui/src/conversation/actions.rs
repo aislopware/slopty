@@ -37,5 +37,10 @@ gpui::actions!(
         BranchFromHere,
         /// Take the thread's exited agent up again.
         ResumeAgent,
+        /// Answer the request that has the keyboard with its plain allow: bound only where the
+        /// request itself is focused, so a request that arrives never changes what a key grants.
+        AllowRequest,
+        /// Answer the request that has the keyboard with its plain deny.
+        DenyRequest,
     ]
 );

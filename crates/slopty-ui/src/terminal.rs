@@ -4,7 +4,7 @@ mod copy_mode;
 mod element;
 pub mod latency;
 pub mod metrics;
-mod progress;
+pub(crate) mod progress;
 mod scrollbar;
 mod sprite;
 pub mod url;

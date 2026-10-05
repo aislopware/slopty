@@ -10,13 +10,12 @@ use gpui::{
     VisualTestContext, point, px, size,
 };
 pub(super) use played::Agents;
+use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{
-    AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
-};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
@@ -160,7 +159,6 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         state: SessionState::Running,
         viewers: 1,
         command: Vec::new(),
-        agent: None,
         progress: None,
         restored: None,
         repo_id: None,
@@ -1571,7 +1569,6 @@ mod attach_block;
 mod away;
 mod bars;
 mod bodies;
-mod companions;
 mod cwd;
 mod desktop;
 mod faces;

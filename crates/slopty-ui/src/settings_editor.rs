@@ -761,8 +761,6 @@ mod tests {
         press(cx, "right");
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("Light"));
         press(cx, "down");
-        assert_eq!(focused(cx), ("RadioGroup".to_owned(), Some("Companions".to_owned())));
-        press(cx, "down");
         assert_eq!(focused(cx), ("SpinButton".to_owned(), Some("Text size".to_owned())));
         press(cx, "right");
         press(cx, "right");
@@ -1003,11 +1001,20 @@ mod tests {
         cx.simulate_keystrokes("backspace");
         assert_eq!(applied(&events), "[keys.workspace]\nnew_note = \"\"\n");
         assert_eq!(value_of(cx, "Button", "Keys for New note").as_deref(), Some(""));
+        // One line: what it does and what it was, and where its caps would be the offer.
+        let (add, was) =
+            (leak(format!("settings-add-keys-{note}")), leak(format!("settings-key-was-{note}")));
+        let row = cx.debug_bounds(leak(format!("settings-key-{note}"))).expect("the row");
+        let one = Theme::default().density.row;
+        assert!((f32::from(row.size.height) - one).abs() < 0.5, "one line: {row:?}");
+        assert!(cx.debug_bounds(add).is_some(), "no keys: the offer of some");
+        assert!(cx.debug_bounds(was).is_some(), "set by the file: what it was");
 
         click(cx, leak(format!("settings-key-reset-{note}")));
         assert_eq!(applied(&events), "[keys.workspace]\n", "the line is gone");
         assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⇧⌘N"));
         assert!(cx.debug_bounds(leak(format!("settings-key-reset-{note}"))).is_none());
+        assert!(cx.debug_bounds(add).is_none() && cx.debug_bounds(was).is_none(), "its caps");
     }
 
     /// Recording takes a chord a terminal or a field would not type. A key alone (a letter)

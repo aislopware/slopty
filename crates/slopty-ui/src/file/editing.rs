@@ -24,7 +24,6 @@ use super::{
 };
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
-use crate::icons::IconName;
 use crate::palette::PaletteItem;
 
 /// The "go to line" field's placeholder.
@@ -46,26 +45,21 @@ pub(super) struct GoTo {
 /// The palette's lines for the editor's own commands, `bindings` giving their chords.
 #[must_use]
 pub fn palette_items(bindings: &[KeyBinding]) -> Vec<PaletteItem> {
-    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
-        PaletteItem::new(label, icon, action, bindings)
-    };
+    let line =
+        |label: &str, action: Box<dyn gpui::Action>| PaletteItem::new(label, action, bindings);
     vec![
-        line("Toggle comment", IconName::MessageSquare, Box::new(ToggleComment)),
-        line("Jump to line", IconName::ArrowRightToLine, Box::new(GoToLine)),
-        line("Move line up", IconName::MoveUp, Box::new(MoveLineUp)),
-        line("Move line down", IconName::MoveDown, Box::new(MoveLineDown)),
-        line("Duplicate line", IconName::Copy, Box::new(DuplicateLine)),
-        line("Jump to matching bracket", IconName::MoveHorizontal, Box::new(JumpToBracket)),
-        line("Wrap long lines", IconName::CornerDownLeft, Box::new(ToggleSoftWrap)),
-        line("Show preview or source", IconName::Eye, Box::new(TogglePreview)),
-        line("Find and replace", IconName::Replace, Box::new(ToggleReplace)),
-        line("Jump to symbol", IconName::ListTree, Box::new(GoToSymbol)),
-        line(
-            "Add the next match to the selection",
-            IconName::TextCursorInput,
-            Box::new(SelectNextOccurrence),
-        ),
-        line("Select every match", IconName::TextSearch, Box::new(SelectAllOccurrences)),
+        line("Toggle comment", Box::new(ToggleComment)),
+        line("Jump to line", Box::new(GoToLine)),
+        line("Move line up", Box::new(MoveLineUp)),
+        line("Move line down", Box::new(MoveLineDown)),
+        line("Duplicate line", Box::new(DuplicateLine)),
+        line("Jump to matching bracket", Box::new(JumpToBracket)),
+        line("Wrap long lines", Box::new(ToggleSoftWrap)),
+        line("Show preview or source", Box::new(TogglePreview)),
+        line("Find and replace", Box::new(ToggleReplace)),
+        line("Jump to symbol", Box::new(GoToSymbol)),
+        line("Add the next match to the selection", Box::new(SelectNextOccurrence)),
+        line("Select every match", Box::new(SelectAllOccurrences)),
     ]
 }
 

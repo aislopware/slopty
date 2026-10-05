@@ -8,7 +8,7 @@ use slopty_theme::alpha;
 
 use super::*;
 use crate::workspace::tile::{
-    CLOSE_TILE, COPY_COMMAND, RECONNECTING, command_words, cwd_tail, only_moves,
+    CLOSE_TILE, COPY_COMMAND, RECONNECTING, command_words, cwd_tail, only_moves, reconnecting,
 };
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
@@ -367,8 +367,6 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     let fills: Vec<&gpui::Quad> = quads
         .iter()
         .filter(|q| inside(q, header) && !q.background.is_transparent() && !surface(q))
-        // The slot's companion is the agent's mark drawn in cells, not a chip.
-        .filter(|q| !inside(q, slot))
         .collect();
     assert_eq!(fills.len(), 1, "one fill in the header: {fills:#?}");
     assert!(inside(fills[0], chip), "and it is the state's chip");
@@ -485,6 +483,48 @@ fn a_tile_whose_worker_dropped_says_reconnecting_at_its_foot(cx: &mut TestAppCon
     let body = cx.debug_bounds(selector("item", tile.item)).expect("the tile is drawn");
     assert!((pill.center().x - body.center().x).abs() < px(1.0), "centred");
     assert!(pill.center().y > body.center().y && pill.bottom() < body.bottom(), "at the foot");
+}
+
+/// The one word for a worker being dialled again, then for how long once that is worth
+/// saying, in ten-second steps, whole minutes past an hour.
+#[test]
+fn reconnecting_says_for_how_long() {
+    let at = |secs| reconnecting(Duration::from_secs(secs));
+    assert_eq!(at(0), RECONNECTING);
+    assert_eq!(at(9), RECONNECTING);
+    assert_eq!(at(10), "Reconnecting for 10 s");
+    assert_eq!(at(59), "Reconnecting for 50 s");
+    assert_eq!(at(75), "Reconnecting for 1m 10s");
+    assert_eq!(at(3_725), "Reconnecting for 1h 2m");
+}
+
+/// A tile's pill counts the time its worker has been out of reach on the workspace's clock,
+/// from when the link dropped; the navigator says the same one word, from the first dial on.
+#[gpui::test]
+fn a_tile_says_how_long_its_worker_has_been_away(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let key = fake.key;
+    let start = Duration::from_secs(100);
+    view.update_in(cx, |v, _w, cx| {
+        v.hold_clock(Some(start));
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    cx.run_until_parked();
+    let said = |cx: &mut VisualTestContext, words: &str| {
+        tree(cx).iter().any(|n| n.is("Status", Some(words)))
+    };
+    assert!(said(cx, RECONNECTING), "at once, the one word");
+    view.update(cx, |v, cx| {
+        v.hold_clock(Some(start.saturating_add(Duration::from_secs(75))));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(said(cx, "Reconnecting for 1m 10s"), "{:#?}", tree(cx));
+    let word = |status| navigator::worker_health(&status).map(|(_, w)| w);
+    assert_eq!(word(WorkerStatus::Connecting), Some("reconnecting"), "a first dial too");
+    assert_eq!(word(WorkerStatus::Reconnecting("lost".into())), Some("reconnecting"));
 }
 
 /// A tile whose worker runs another build says so calmly at its foot: the title, both builds,

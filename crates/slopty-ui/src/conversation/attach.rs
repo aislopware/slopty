@@ -156,12 +156,13 @@ impl Attachment {
         !self.paths.is_empty()
     }
 
-    /// What the chip says after the name while it uploads: `↑ 42%`.
+    /// How far it got while it uploads, for the chip's words: `42%`. The chip draws it as a
+    /// ring.
     #[must_use]
     pub fn progress(&self) -> String {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 100")]
         let percent = (self.fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
-        format!("\u{2191} {percent}%")
+        format!("{percent}%")
     }
 }
 
@@ -251,10 +252,10 @@ mod tests {
         let shot = attached.add(picture_name("png"));
         let other = attached.add("notes.txt".to_owned());
         assert_eq!(attached.chips()[0].name, "pasted-image.png");
-        assert_eq!(attached.chips()[0].progress(), "\u{2191} 0%");
+        assert_eq!(attached.chips()[0].progress(), "0%");
         assert!(attached.progress(shot, 0.42));
         assert!(!attached.progress(shot, 0.421), "the chip says the same");
-        assert_eq!(attached.chips()[0].progress(), "\u{2191} 42%");
+        assert_eq!(attached.chips()[0].progress(), "42%");
 
         let path = "/Users/me/.slopty/drop/x/pasted-image.png".to_owned();
         assert!(attached.land(shot, std::slice::from_ref(&path)));

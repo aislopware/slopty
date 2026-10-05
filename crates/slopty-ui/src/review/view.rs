@@ -78,6 +78,15 @@ pub const SENDING: &str = "Sending…";
 /// Said above the diff when the worker turns the comments' send down; they stay.
 pub const NOT_SENT: &str = "Comments not sent";
 
+/// The foot's way to put the comments in the thread's draft.
+const ADD_TO_MESSAGE: &str = "Add to message";
+
+/// The foot's way to keep every file as it is.
+const MARK_REVIEWED: &str = "Mark reviewed";
+
+/// How wide a letter of the foot's words is, as a share of their size.
+const FOOT_LETTER: f32 = 0.55;
+
 /// What the tile tells its host.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ReviewEvent {
@@ -225,6 +234,8 @@ pub struct ReviewView {
     /// number of the last hand-over.
     adding: Option<(u64, model::Batch)>,
     adds: u64,
+    /// The foot's "More" menu is open.
+    more_open: bool,
     /// The agent's own review, while it runs.
     reviewing: Option<Reviewing>,
     /// How the last one came out, until the person lets it go.
@@ -337,6 +348,7 @@ impl ReviewView {
             sending: None,
             adding: None,
             adds: 0,
+            more_open: false,
             reviewing: None,
             came: None,
             pinned: None,
@@ -1225,8 +1237,8 @@ impl ReviewView {
     fn review_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (agent, name) = self.door_of(cx)?;
-        let mark = self.agent_mark(&agent);
+        let (_, name) = self.door_of(cx)?;
+        let mark = self.agent_mark();
         let roomy = self.width >= LIST_FROM;
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
@@ -1285,13 +1297,12 @@ impl ReviewView {
         Some(crate::a11y::tab_stop(hinted(el, label), s.accent).into_any_element())
     }
 
-    /// `agent`'s mark at the size of an icon.
-    fn agent_mark(&self, agent: &AgentId) -> AnyElement {
+    /// The one neutral agent glyph at the size of an icon: what an agent wrote or does, whichever
+    /// agent it is, which its words name.
+    fn agent_mark(&self) -> AnyElement {
         let theme = &self.theme;
-        let glyph = crate::icons::Glyph::agent(&agent.0);
         crate::icons::glyph(
-            theme,
-            glyph,
+            crate::icons::Glyph::AGENT,
             self.z(theme.typography.icon()),
             hsla(theme.surfaces.text_secondary),
         )
@@ -1316,7 +1327,7 @@ impl ReviewView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.sm))
                 .py(self.z(theme.spacing.xs))
-                .children(agent.as_ref().map(|a| self.agent_mark(a)))
+                .children(agent.as_ref().map(|_| self.agent_mark()))
                 .child(
                     div()
                         .id("review-came-words")
@@ -1726,7 +1737,7 @@ impl ReviewView {
         let id = format!("review-line-{at}-{hunk}-{ix}");
         let new = line.new.filter(|_| line.kind != Kind::Removed);
         let tag = self.author_tag((at, hunk, ix), new, cx);
-        self.pickable(id, (at, hunk, ix), ink.unified(line), tag, cx)
+        self.pickable(id, (at, hunk, ix), ink.unified_numbered(line), tag, cx)
     }
 
     fn pair_row(&self, at: usize, hunk: usize, ix: usize, cx: &Context<Self>) -> AnyElement {
@@ -1803,7 +1814,7 @@ impl ReviewView {
         self.note()
             .debug_selector(move || format!("review-comment-{ix}"))
             .child(match &agent {
-                Some(agent) => self.agent_mark(agent),
+                Some(_) => self.agent_mark(),
                 None => self.icon(IconName::MessageSquare, s.text_muted),
             })
             .when(ranged, |el| {
@@ -1882,6 +1893,9 @@ impl ReviewView {
         self.theme.typography.mono_families.first().cloned().unwrap_or_default().into()
     }
 
+    /// The foot: what to do with the comments ("Add to message", "Send N comments") and
+    /// "Mark reviewed". What does not fit the tile's width goes behind "More" beside the send,
+    /// which always shows.
     fn foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -1892,7 +1906,18 @@ impl ReviewView {
             1 => "Send 1 comment".to_owned(),
             n => format!("Send {n} comments"),
         };
+        let mark = !self.model.listed().is_empty();
+        let fits = self.foot_fits(n > 0, &send_words, mark);
         let selector = "review-send";
+        let add = || {
+            self.action("review-add".to_owned(), ADD_TO_MESSAGE, false)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)))
+        };
+        let marked = || {
+            self.action("review-mark".to_owned(), MARK_REVIEWED, n == 0)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx)))
+        };
+        let more = (!fits).then(|| self.foot_more(n > 0, mark, cx));
         div()
             .flex_none()
             .w_full()
@@ -1905,17 +1930,16 @@ impl ReviewView {
             .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
             .child(div().flex_1())
+            .when(n > 0 && fits, |el| el.child(add()))
             .when(n > 0, |el| {
                 el.child(
-                    self.action("review-add".to_owned(), "Add to message", false)
-                        .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx))),
-                )
-                .child(
                     div()
                         .id(selector)
                         .debug_selector(move || selector.to_owned())
                         .role(Role::Button)
                         .aria_label(SharedString::from(send_words.clone()))
+                        .flex_none()
+                        .whitespace_nowrap()
                         .px(self.z(theme.spacing.md))
                         .py(self.z(theme.spacing.xs))
                         .rounded(self.z(theme.radii.sm))
@@ -1926,13 +1950,67 @@ impl ReviewView {
                         .on_click(cx.listener(|this, _ev, _w, cx| this.send_comments(cx))),
                 )
             })
-            .when(!self.model.listed().is_empty(), |el| {
-                el.child(
-                    self.action("review-mark".to_owned(), "Mark reviewed", n == 0)
-                        .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx))),
-                )
-            })
+            .when(mark && (fits || n == 0), |el| el.child(marked()))
+            .children(more)
             .into_any_element()
+    }
+
+    /// Whether the foot's buttons all fit the tile at rest: each one's words at about
+    /// [`FOOT_LETTER`] of the small size a letter, with its pads, the gaps between them and
+    /// the foot's own pads. With no comments "Mark reviewed" stands alone and always fits.
+    fn foot_fits(&self, comments: bool, send: &str, mark: bool) -> bool {
+        if !comments {
+            return true;
+        }
+        let theme = &self.theme;
+        let (sp, letter) = (theme.spacing, theme.typography.small() * FOOT_LETTER);
+        let words = |w: &str| f32::from(u16::try_from(w.chars().count()).unwrap_or(u16::MAX));
+        let add = words(ADD_TO_MESSAGE).mul_add(letter, sp.sm * 2.0);
+        let send = words(send).mul_add(letter, sp.md * 2.0);
+        let mut needed = sp.md.mul_add(2.0, add + send + sp.sm);
+        if mark {
+            needed += words(MARK_REVIEWED).mul_add(letter, sp.sm * 2.0) + sp.sm;
+        }
+        needed <= self.width
+    }
+
+    /// "More" at the foot's end, and its menu while open: the foot's buttons that did not fit.
+    fn foot_more(&self, comments: bool, mark: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let button = kit::icon_button(theme, "review-more", IconName::Ellipsis, "More")
+            .aria_expanded(self.more_open)
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.more_open = !this.more_open;
+                cx.notify();
+            }));
+        let this = cx.entity().downgrade();
+        let menu = self.more_open.then(|| {
+            let mut menu = kit::Menu::new();
+            if comments {
+                let to = this.clone();
+                menu.push(kit::MenuItem::new("add", ADD_TO_MESSAGE, move |_w, cx| {
+                    let _gone = to.update(cx, Self::add_to_message);
+                }));
+            }
+            if mark {
+                let to = this.clone();
+                menu.push(kit::MenuItem::new("mark", MARK_REVIEWED, move |_w, cx| {
+                    let _gone = to.update(cx, Self::mark_reviewed);
+                }));
+            }
+            let panel = kit::MenuPanel::new("review-more", "More", Rc::new(menu), theme, {
+                move |window, cx| {
+                    let _gone = this.update(cx, |this, cx| {
+                        this.more_open = false;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    });
+                }
+            });
+            gpui::deferred(gpui::anchored().anchor(gpui::Anchor::BottomRight).child(panel))
+                .with_priority(crate::palette::Layer::Submenu.priority())
+        });
+        div().relative().flex_none().child(button).children(menu).into_any_element()
     }
 
     fn body(&self, cx: &Context<Self>) -> AnyElement {

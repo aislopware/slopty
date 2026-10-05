@@ -99,7 +99,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{AgentMark, Glyph, IconName, IconSize, Status, icon, status_mark};
+use crate::icons::{Glyph, IconName, IconSize, Status, icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -264,6 +264,11 @@ impl NavList {
     /// A list at its very top stays there: a section that opens above the first row (*Needs
     /// you*, *To review*) shows, rather than pushing the view down past it.
     ///
+    /// A list scrolled down keeps the row it starts with. One splice runs from the first changed
+    /// row to the last, so a section opening at the top while a row at the foot grew a line
+    /// spans the whole list, and the list would go back to its top: the row at the view's top
+    /// is found again among the new rows and the view starts from it as before.
+    ///
     /// The scroll offset is read only when rows are spliced: this runs in the render, and a
     /// render that reads the offset makes every scroll a change of what the list's scroll layer
     /// holds, so the layer could never be composited.
@@ -280,12 +285,28 @@ impl NavList {
             let tail = was.iter().rev().zip(rows.iter().rev()).take(most).take_while(same);
             let tail = tail.count();
             let added = head..rows.len().saturating_sub(tail);
-            self.state.splice(head..old.saturating_sub(tail), added.len());
+            let changed = head..old.saturating_sub(tail);
+            // The first row at or under the view's top that is known again by what it shows,
+            // and where the view stood in it when it is that very row.
+            let anchor = (!at_top && changed.contains(&scrolled.item_ix))
+                .then(|| {
+                    was.iter().enumerate().skip(scrolled.item_ix).find_map(|(ix, row)| {
+                        let within =
+                            if ix == scrolled.item_ix { scrolled.offset_in_item } else { px(0.0) };
+                        row.anchor().map(|key| (key, within))
+                    })
+                })
+                .flatten();
+            self.state.splice(changed, added.len());
             if !added.is_empty() {
                 self.state.remeasure_items(added);
             }
             if at_top {
                 self.state.scroll_to(ListOffset::default());
+            } else if let Some((key, offset_in_item)) = anchor
+                && let Some(item_ix) = rows.iter().position(|row| row.anchor() == Some(key))
+            {
+                self.state.scroll_to(ListOffset { item_ix, offset_in_item });
             }
         }
         *was = rows;
@@ -360,10 +381,11 @@ pub(super) fn rtt_label(rtt: Duration) -> String {
 pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'static str)> {
     match status {
         WorkerStatus::Connected => None,
-        WorkerStatus::Connecting => Some((Status::Working, "connecting")),
         WorkerStatus::Silent(_) => Some((Status::Away, "silent")),
         WorkerStatus::Checking => Some((Status::Working, "checking")),
-        WorkerStatus::Relinking => Some((Status::Working, "reconnecting")),
+        WorkerStatus::Connecting | WorkerStatus::Relinking => {
+            Some((Status::Working, "reconnecting"))
+        }
         WorkerStatus::Reconnecting(_) => Some((Status::Away, "reconnecting")),
         WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
         WorkerStatus::Gone => Some((Status::Away, "gone")),
@@ -692,22 +714,8 @@ pub(super) fn progress_figure(progress: Progress) -> Option<String> {
     Some(format!("{}%", percent.min(100)))
 }
 
-/// The hairline a progress report draws along a row's foot: its tone, how strongly, and the
-/// share of the row it covers. A report with no figure covers the row, set back, and stands
-/// still: the navigator never moves on its own. The tones are the tile header's bar's.
-pub(super) fn progress_line(theme: &Theme, progress: Progress) -> Option<(Rgb, f32, f32)> {
-    let s = &theme.surfaces;
-    let tone = match progress.state {
-        ProgressState::None => return None,
-        ProgressState::Set | ProgressState::Indeterminate => s.accent,
-        ProgressState::Paused => s.text_muted,
-        ProgressState::Error => s.error,
-    };
-    Some(match (progress.state, progress.percent) {
-        (ProgressState::Indeterminate, _) | (_, None) => (tone, alpha::STRONG, 1.0),
-        (_, Some(percent)) => (tone, 1.0, f32::from(percent.min(100)) / 100.0),
-    })
-}
+/// The width of a report's bar at a row's end, beside its figure.
+const NAV_BAR_W: f32 = 24.0;
 
 /// A worker's row under *Workers*.
 #[derive(Clone)]
@@ -908,6 +916,36 @@ impl NavRow {
         };
         (discriminant(self), lines, gap)
     }
+
+    /// What the row shows, where that is one thing the list shows once: a tile, a worker, a
+    /// group, a thread, a board. A list scrolled down keeps its place by it across a splice.
+    const fn anchor(&self) -> Option<Anchor<'_>> {
+        match self {
+            Self::Tile(t) => Some(Anchor::Tile(t.tile)),
+            Self::Worker(h) => Some(Anchor::Worker(h.key)),
+            Self::Group(g) => Some(Anchor::Group(&g.key)),
+            Self::Thread(t) => Some(Anchor::Thread(t.thread)),
+            Self::Board(b) => Some(Anchor::Board(&b.project)),
+            Self::Heading { .. }
+            | Self::Agent(_)
+            | Self::Space(_)
+            | Self::NewSpace
+            | Self::Earlier(..)
+            | Self::EarlierMore(_)
+            | Self::Vacant(_)
+            | Self::Nothing => None,
+        }
+    }
+}
+
+/// A row known by what it shows ([`NavRow::anchor`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Anchor<'a> {
+    Tile(TileRef),
+    Worker(WorkerKey),
+    Group(&'a GroupKey),
+    Thread(ThreadId),
+    Board(&'a ProjectId),
 }
 
 impl WorkspaceView {
@@ -1052,14 +1090,14 @@ impl WorkspaceView {
         let keys = super::actions::key_bindings();
         let current = &self.layout.navigator().group_by;
         let mut lines = vec![if self.grouped_by_machine() {
-            PaletteItem::new(BY_PROJECT, IconName::Workflow, Box::new(ToggleNavigatorLens), &keys)
+            PaletteItem::new(BY_PROJECT, Box::new(ToggleNavigatorLens), &keys)
         } else {
-            PaletteItem::new(BY_MACHINE, IconName::Server, Box::new(ToggleNavigatorLens), &keys)
+            PaletteItem::new(BY_MACHINE, Box::new(ToggleNavigatorLens), &keys)
         }];
         let by_project = Navigator::by_project();
         if *current != by_project && !self.grouped_by_machine() {
             let action = GroupNavigatorBy { chain: by_project };
-            lines.push(PaletteItem::new(BY_PROJECT, IconName::Workflow, Box::new(action), &[]));
+            lines.push(PaletteItem::new(BY_PROJECT, Box::new(action), &[]));
         }
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for tile in self.layout.tiles() {
@@ -1073,7 +1111,7 @@ impl WorkspaceView {
             }
             let label = format!("Group the navigator by {key}");
             let action = GroupNavigatorBy { chain };
-            lines.push(PaletteItem::new(&label, group_glyph(&key), Box::new(action), &[]));
+            lines.push(PaletteItem::new(&label, Box::new(action), &[]));
         }
         lines
     }
@@ -1742,12 +1780,10 @@ impl WorkspaceView {
             if !matches(&query.text, &[&title, word.unwrap_or_default()]) {
                 continue;
             }
-            let glyph =
-                self.thread_agent(thread).map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
             let row = NavThread {
                 worker: stand.worker,
                 thread,
-                glyph,
+                glyph: Glyph::AGENT,
                 status: stand.status(),
                 title,
                 word,
@@ -1808,9 +1844,7 @@ impl WorkspaceView {
                 NavThread {
                     worker: stand.worker,
                     thread,
-                    glyph: self
-                        .thread_agent(thread)
-                        .map_or(Glyph::Agent(AgentMark::Other), Glyph::agent),
+                    glyph: Glyph::AGENT,
                     status: None,
                     title: self.thread_title(thread),
                     word: None,
@@ -2039,18 +2073,29 @@ impl WorkspaceView {
         }
     }
 
-    /// The top row, the title bar's height: room for the traffic lights on a Mac, then the
-    /// filter's field, a well a row tall on the selection's fill, the base unit in from the
-    /// panel's edge. The `raised` step sits a hundredth from the light panel's own tone, and the
-    /// field read as words on nothing; `MonoCode`'s sidebar search wears its selection fill. No
-    /// hairline under it: the panel is one surface from the top to the bottom, as T3 Code's and
-    /// Linear's sidebars are, and the rows under the field need no rule to start.
+    /// The navigator's top: the lights row, then the filter.
+    ///
+    /// The lights row is the title bar's height and holds only the traffic lights on a Mac and,
+    /// past them at the far leading edge, the navigator's toggle, where the title bar keeps it
+    /// while the navigator is hidden: it never moves. Apple's sidebars, Things and zeron keep
+    /// that corner to the window's controls; a white field crammed beside the lights was the
+    /// brightest, hardest-edged thing there.
+    ///
+    /// The filter is the panel's first row under it, as the HIG puts a sidebar's search at its
+    /// top: the kit's search capsule ([`kit::search_field`]) in the panel's own wash, a row
+    /// tall, the base unit in from the panel's sides. No hairline under either: the panel is one
+    /// surface from the top to the bottom, as T3 Code's and Linear's sidebars are.
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let leading = if cfg!(target_os = "macos") { LEADING_INSET } else { spacing.sm };
+        let focused = self.nav.filter.input.as_ref().is_some_and(|input| {
+            gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+        });
+        let toggle = (!self.workers.is_empty() && self.nav.drawn == Some(Mode::Docked))
+            .then(|| self.navigator_toggle(cx));
         let filtering = !self.nav.filter.query.is_empty();
         let input = self.nav.filter.input.as_ref().map(|input| {
             div()
@@ -2105,31 +2150,30 @@ impl WorkspaceView {
                 .max_w(px(self.navigator_width() / 2.0))
                 .child(SharedString::from(name))
         });
-        let field = kit::field(div(), theme)
+        let field = kit::search_field(theme, focused)
             .id("nav-filter-field")
-            .flex_1()
+            .debug_selector(|| "nav-filter-field".to_owned())
+            .w_full()
             .min_w_0()
-            // A touch row is nearly the title bar's height; the field keeps a step clear of
-            // its edges, as it does on the Mac.
-            .h(px(theme.density.row.min(spacing.xs.mul_add(-2.0, titlebar_height(theme)))))
-            .px(px(spacing.sm))
-            .flex()
-            .items_center()
-            .gap(px(spacing.xs + spacing.xxs))
-            .rounded(px(theme.radii.sm))
-            .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
             .children(scope)
             .children(input)
             .children(clear);
         div()
             .flex_none()
-            .h(px(titlebar_height(theme)) + safe.top)
-            .pt(safe.top)
-            .pl(px(leading))
-            .pr(px(spacing.sm))
             .flex()
-            .items_center()
-            .child(field)
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "nav-lights-row".to_owned())
+                    .h(px(titlebar_height(theme)) + safe.top)
+                    .pt(safe.top)
+                    .pl(px(leading))
+                    .pr(px(spacing.sm))
+                    .flex()
+                    .items_center()
+                    .children(toggle),
+            )
+            .child(div().px(px(spacing.sm)).pb(px(spacing.xs)).child(field))
     }
 
     /// Every row the list holds this frame: on a phone *Workspaces*, then *Needs you* while an
@@ -2536,7 +2580,7 @@ impl WorkspaceView {
                 return None;
             }
             let (glyph, ink) = match health {
-                Some((Status::Away, _)) => (IconName::ServerOff, s.text_muted),
+                Some((Status::Away, _)) => (IconName::Server, s.text_muted),
                 _ => (IconName::Server, s.text_secondary),
             };
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
@@ -2670,28 +2714,29 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .child(title(agent.title.clone(), hsla(s.text)))
             .children(time);
-        // The agent's words, then where it runs, as a tile's second line reads: joined by the
-        // same separator, spaces and all, so the two lines space their parts alike. What a
-        // waiting one asks is detail, muted, under the heading that says it waits. The words
-        // shrink before the answers do, which are the row's point.
-        let words = (!agent.words.is_empty()).then(|| {
+        // The agent's words, then where it runs, as a tile's second line reads: one line joined
+        // by the same separator, so the place is what gives way first and is never pressed to a
+        // lone ellipsis between the words and the answers. What a waiting one asks is detail,
+        // muted, under the heading that says it waits. The line shrinks before the answers do,
+        // which are the row's point.
+        let said = [&agent.words, &agent.place]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(META_SEPARATOR);
+        let blank = said.is_empty();
+        let words = (!blank).then(|| {
             let key = key.clone();
             div()
                 .debug_selector(move || format!("{prefix}-words-{key}"))
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(agent.words.clone())
+                .child(crate::palette::dotted(theme, said))
         });
         let answers = agent.answer.as_ref().map(|answer| self.approval_buttons(answer, cx));
-        let separator = (!agent.words.is_empty() && !agent.place.is_empty()).then(|| {
-            let key = key.clone();
-            div()
-                .debug_selector(move || format!("{prefix}-separator-{key}"))
-                .flex_none()
-                .text_color(crate::palette::separator_ink(theme))
-                .child(META_SEPARATOR)
-        });
         let line2 = meta(div(), theme)
             .h(px(second))
             .line_height(px(second))
@@ -2700,25 +2745,9 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .children(words)
-            .children(separator)
-            .child(
-                div()
-                    .debug_selector({
-                        let key = key.clone();
-                        move || format!("{prefix}-place-{key}")
-                    })
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(crate::palette::dotted(theme, agent.place.clone())),
-            )
+            .when(blank, |el| el.child(div().flex_1()))
             .children(answers);
         let step = agent.at;
-        let agent_name = match step {
-            Step::Session(at) => self.session_agent(at.session),
-            Step::Thread(at) => self.thread_agent(at.thread),
-        };
         row(
             theme,
             kit::Row::Two,
@@ -2729,17 +2758,31 @@ impl WorkspaceView {
         )
         .items_start()
         .pt(px(theme.spacing.xs))
+        // It leads with how it stands, as every row does: what it waits on is the point of
+        // the row, and the agent is named in its words.
         .child(lead_slot(theme, {
             let side = px(theme.typography.icon());
-            crate::companions::mark(theme, agent_name, Some(agent.status), side).unwrap_or_else(
-                || {
-                    let mark = agent_name.map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
-                    crate::icons::glyph(theme, mark, side, hsla(s.text_muted))
-                },
-            )
+            let tone = hsla(agent.status.tone(theme));
+            crate::icons::status_icon(theme, agent.status, side, tone).into_any_element()
         }))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
+        // Focused, the row answers as its buttons do: ⌘↵ allows, ⌘⌫ denies. Only here, where
+        // the person has put the keyboard on this one request.
+        .when_some(agent.answer.clone(), |el, answer| {
+            let deny = answer.clone();
+            el.key_context(crate::conversation::REQUEST_CTX)
+                .on_action(cx.listener(
+                    move |this, _: &crate::conversation::AllowRequest, _w, cx| {
+                        this.answer_row(&answer, true, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    move |this, _: &crate::conversation::DenyRequest, _w, cx| {
+                        this.answer_row(&deny, false, cx);
+                    },
+                ))
+        })
         .into_any_element()
     }
 
@@ -2814,20 +2857,22 @@ impl WorkspaceView {
             worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let lead =
-            match worker.health {
-                None => lead_slot(
+        let lead = match worker.health {
+            None => lead_slot(
+                theme,
+                icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted)),
+            ),
+            Some((Status::Away, _)) => lead_slot(
+                theme,
+                div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(icon(
                     theme,
-                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted)),
-                ),
-                Some((Status::Away, _)) => lead_slot(
-                    theme,
-                    div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(
-                        icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.text_muted)),
-                    ),
-                ),
-                Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
-            };
+                    IconName::Server,
+                    IconSize::Inline,
+                    hsla(s.text_muted),
+                )),
+            ),
+            Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
+        };
         let name = div()
             .debug_selector(move || format!("nav-worker-name-{key}"))
             .flex_1()
@@ -2862,7 +2907,6 @@ impl WorkspaceView {
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xs))
-            .group_hover(group.clone(), gpui::Styled::invisible)
             .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
             .children(worker.health.map(|(_, word)| readout(theme, word)))
             .children(worker.relay.clone().map(|relay| {
@@ -2980,20 +3024,18 @@ impl WorkspaceView {
         // never joins the keyboard's ring. Its own focus shows it, not `in_focus`, which is
         // true inside any focused ancestor: the workspace holding the keyboard would bring out
         // every row's actions.
+        // A finger has no hover: on touch they stand at rest, after the readouts.
+        let touch = theme.density == slopty_theme::Density::TOUCH;
         let revealed = |el: Stateful<Div>, shown: bool| {
-            el.when(!shown, |el| el.opacity(0.0))
+            el.when(!shown && !touch, |el| el.opacity(0.0))
                 .group_hover(group.clone(), |st| st.opacity(1.0))
                 .focus(|st| st.opacity(1.0))
                 .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).opacity(1.0))
         };
         let chevron = lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
-            .invisible()
-            .group_hover(group.clone(), gpui::Styled::visible);
+            .when(!touch, |el| el.invisible().group_hover(group.clone(), gpui::Styled::visible));
         let hover = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right_0()
+            .when(!touch, |el| el.absolute().top_0().bottom_0().right_0())
             .flex()
             .items_center()
             .justify_end()
@@ -3001,7 +3043,9 @@ impl WorkspaceView {
             .child(chevron)
             .children(add.map(|add| revealed(add, menu_up)))
             .child(revealed(menu, menu_up));
-        let rest = rest.when(menu_up, gpui::Styled::invisible);
+        let rest =
+            if touch { rest } else { rest.group_hover(group.clone(), gpui::Styled::invisible) }
+                .when(menu_up && !touch, gpui::Styled::invisible);
         let trailing = div()
             .debug_selector(move || format!("nav-worker-slot-{key}"))
             .relative()
@@ -3045,6 +3089,7 @@ impl WorkspaceView {
     fn group_header(&self, group: &NavGroup, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
+        let touch = theme.density == slopty_theme::Density::TOUCH;
         let key = group.key.clone();
         let folded = group.folded;
         let label = SharedString::from(format!(
@@ -3083,7 +3128,7 @@ impl WorkspaceView {
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xs))
-            .group_hover(hover_group.clone(), gpui::Styled::invisible)
+            .when(!touch, |el| el.group_hover(hover_group.clone(), gpui::Styled::invisible))
             .children(
                 rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{rollup_key}"), r, false)),
             )
@@ -3121,17 +3166,20 @@ impl WorkspaceView {
                 }));
             tab_stop(el, s.accent)
         });
+        // A finger has no hover: on touch they stand at rest, after the place.
         let hover = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right_0()
+            .when(!touch, |el| {
+                el.absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .invisible()
+                    .group_hover(hover_group.clone(), gpui::Styled::visible)
+            })
             .flex()
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xxs))
-            .invisible()
-            .group_hover(hover_group.clone(), gpui::Styled::visible)
             .child(lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted))))
             .children(add);
         let trailing = div()
@@ -3221,9 +3269,7 @@ impl WorkspaceView {
         let strength = row_strength(theme, t.status.or(Some(Status::Working)), false);
         let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
         let glyph = t.status.filter(|m| *m != Status::Idle);
-        let agent = self.thread_agent(t.thread);
-        let lead =
-            crate::companions::status_slot(theme, agent, t.glyph, glyph, faded(s.text_muted), 1.0);
+        let lead = crate::palette::status_slot(theme, t.glyph, glyph, faded(s.text_muted), 1.0);
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
         let (worker, thread) = (t.worker, t.thread);
@@ -3334,10 +3380,8 @@ impl WorkspaceView {
         // word on the title's line, where "Needs approval" took half a row's width from the
         // title; the second line says what is asked.
         let glyph = t.mark.filter(|m| *m != Status::Idle);
-        let agent = self.item(t.tile).and_then(|item| self.item_agent(item));
-        let lead =
-            crate::companions::status_slot(theme, agent, t.kind, glyph, faded(s.text_muted), 1.0)
-                .debug_selector(move || format!("nav-kind-{id}"));
+        let lead = crate::palette::status_slot(theme, t.kind, glyph, faded(s.text_muted), 1.0)
+            .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end: the unseen dot, else the clock of a command that runs,
         // else the age.
         let end = if t.unseen {
@@ -3420,21 +3464,19 @@ impl WorkspaceView {
         let restored = t.restored.then(|| {
             div().debug_selector(move || format!("nav-restored-{id}")).flex_none().child(RESTORED)
         });
+        // A report at the second line's end: its figure, then the kit's bar beside it, held
+        // still, as nothing in the navigator moves on its own. No line along the row's foot.
         let figure = t.progress.and_then(progress_figure).map(|figure| {
             readout(theme, figure).debug_selector(move || format!("nav-progress-{id}"))
         });
-        let bar =
-            t.progress.and_then(|p| progress_line(theme, p)).map(|(tone, strength, share)| {
-                div()
-                    .debug_selector(move || format!("nav-progress-bar-{id}"))
-                    .absolute()
-                    // Just under the second line, clear of its descenders.
-                    .bottom(px(-theme.spacing.xxs))
-                    .left_0()
-                    .h(px(theme.spacing.xxs))
-                    .w(gpui::relative(share))
-                    .bg(crate::colors::hsla_alpha(tone, strength))
-            });
+        let bar = t.progress.and_then(crate::terminal::progress::shown).map(|progress| {
+            div().debug_selector(move || format!("nav-progress-bar-{id}")).w(px(NAV_BAR_W)).child(
+                kit::progress::Bar::new(theme, format!("nav-progress-{id}-bar"), progress)
+                    .label("Progress")
+                    .still()
+                    .at_once(),
+            )
+        });
         let line2 = t.two_lines().then(|| {
             meta(div(), theme)
                 .text_color(faded(s.text_muted))
@@ -3459,6 +3501,7 @@ impl WorkspaceView {
                 .child(div().flex_1())
                 .children(changes)
                 .children(figure)
+                .children(bar)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
         row(
@@ -3495,8 +3538,7 @@ impl WorkspaceView {
                         .flex()
                         .flex_col()
                         .child(line1)
-                        .children(line2)
-                        .children(bar),
+                        .children(line2),
                 ),
         )
         .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
@@ -3649,34 +3691,14 @@ mod tests {
         assert_eq!(rest_words("  "), None);
     }
 
-    /// A report with a figure reads it against its sign; its line covers that share in its
-    /// state's tone, and one without a figure covers the row set back; no report draws nothing.
+    /// A report with a figure reads it against its sign; with none it says nothing in words,
+    /// its bar standing for it.
     #[test]
-    fn a_progress_report_is_a_figure_and_a_share_of_the_row() {
-        let theme = Theme::default();
-        let s = theme.surfaces;
+    fn a_progress_report_is_a_figure() {
         let report = |state, percent| Progress { state, percent };
         assert_eq!(progress_figure(report(ProgressState::Set, Some(42))).as_deref(), Some("42%"));
         assert_eq!(progress_figure(report(ProgressState::Set, Some(250))).as_deref(), Some("100%"));
         assert_eq!(progress_figure(report(ProgressState::Indeterminate, None)), None);
-        assert_eq!(progress_line(&theme, Progress::default()), None);
-        assert_eq!(
-            progress_line(&theme, report(ProgressState::Set, Some(42))),
-            Some((s.accent, 1.0, 0.42))
-        );
-        assert_eq!(
-            progress_line(&theme, report(ProgressState::Indeterminate, None)),
-            Some((s.accent, alpha::STRONG, 1.0))
-        );
-        assert_eq!(
-            progress_line(&theme, report(ProgressState::Error, Some(80))).map(|l| l.0),
-            Some(s.error)
-        );
-        assert_eq!(
-            progress_line(&theme, report(ProgressState::Paused, None)).map(|l| l.0),
-            Some(s.text_muted),
-            "a pause is not a warning"
-        );
         assert!(RESTORED.chars().next().is_some_and(char::is_uppercase), "sentence case");
     }
 

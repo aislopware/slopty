@@ -71,7 +71,6 @@ mod toast;
 mod turns;
 mod unsaved;
 mod workers;
-mod yard;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -85,6 +84,7 @@ use gpui::{
 };
 pub use machines::HostActions;
 pub use projects::worker_key;
+pub(crate) use rollup::META_SEPARATOR;
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
@@ -102,7 +102,7 @@ pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING,
     SESSION_ENDED, TAKE, TAKE_OVER,
 };
-pub use tile::{COPY_COMMAND, file_title};
+pub use tile::{COPY_COMMAND, cwd_tail, file_title};
 
 /// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
 /// badge's description and what "+" is called.
@@ -339,13 +339,12 @@ impl WorkerStatus {
     #[must_use]
     pub fn text(&self) -> String {
         match self {
-            Self::Connecting => "connecting…".to_owned(),
+            Self::Connecting | Self::Relinking => "reconnecting…".to_owned(),
             Self::Connected => "connected".to_owned(),
             Self::Silent(secs) => {
                 format!("silent {}", crate::kit::duration(Duration::from_secs(*secs)))
             }
             Self::Checking => "checking…".to_owned(),
-            Self::Relinking => "reconnecting…".to_owned(),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
@@ -394,6 +393,9 @@ struct Worker {
     name: String,
     status: WorkerStatus,
     link: Option<WorkerLink>,
+    /// Since when it has been out of reach on this client's clock: added and not yet linked,
+    /// or since its link dropped; `None` while linked. Its tiles say for how long.
+    away_since: Option<Duration>,
     /// How many links have come up to it: the self-test's proof that a relink landed.
     links: u64,
     doc: ItemDoc,
@@ -460,6 +462,7 @@ impl Worker {
             name,
             status: WorkerStatus::Connecting,
             link: None,
+            away_since: None,
             links: 0,
             doc: ItemDoc::default(),
             sessions: HashMap::new(),
@@ -658,6 +661,9 @@ pub struct WorkspaceView {
     layout: Layout,
     /// The layout's clock starts here.
     epoch: Instant,
+    /// A tick runs while a worker is out of reach, so its tiles' "Reconnecting for …" keeps
+    /// time; it stops once every worker is linked.
+    away_ticking: bool,
     /// The layout's clock held at a time, for tests that compare two frames drawn at one instant.
     #[cfg(test)]
     held_clock: Option<Duration>,
@@ -964,6 +970,7 @@ impl WorkspaceView {
             theme,
             layout,
             epoch: Instant::now(),
+            away_ticking: false,
             #[cfg(test)]
             held_clock: None,
             pinned_rtt: None,
@@ -1856,9 +1863,12 @@ impl gpui::Render for WorkspaceView {
         self.serve_browsers(cx);
         let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
         let menu = self.render_menu(window, cx);
-        let picker =
-            self.picker.as_ref().map(|(_, p)| p.clone()).or_else(|| self.picker_leaving.clone());
-        let palette = self.palette.clone().or_else(|| self.palette_leaving.clone());
+        // What is leaving is drawn under the menu and what is live over it: a palette fading
+        // out where a menu then opens must not take the menu's clicks.
+        let picker = self.picker.as_ref().map(|(_, p)| p.clone());
+        let palette = self.palette.clone();
+        let picker_leaving = picker.is_none().then(|| self.picker_leaving.clone()).flatten();
+        let palette_leaving = palette.is_none().then(|| self.palette_leaving.clone()).flatten();
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("Workspace");
         if self.page_keys(window, cx) {
@@ -1970,6 +1980,8 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_navigator_lens))
             .child(Self::measure_width(cx))
             .child(self.render_frame(strip, window, cx))
+            .when_some(picker_leaving, gpui::ParentElement::child)
+            .when_some(palette_leaving, gpui::ParentElement::child)
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)

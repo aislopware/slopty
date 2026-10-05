@@ -278,6 +278,10 @@ ListItem │ Next prompt │ ⌘↓
 Button │ Keys for Next prompt │ ⌘↓
 ListItem │ Find │ ⌘F
 Button │ Keys for Find │ ⌘F
+ListItem │ Allow the request │ ⌘↩
+Button │ Keys for Allow the request │ ⌘↩
+ListItem │ Deny the request │ ⌘⌫
+Button │ Keys for Deny the request │ ⌘⌫
 Heading │ Files
 ListItem │ Save file │ ⌘S
 Button │ Keys for Save file │ ⌘S

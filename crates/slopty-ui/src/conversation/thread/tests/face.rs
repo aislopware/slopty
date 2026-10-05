@@ -49,9 +49,9 @@ fn scroll(cx: &mut VisualTestContext, dy: f32) {
     cx.run_until_parked();
 }
 
-/// A request whose call is on screen is answered on the call's card, and the tray carries no
-/// copy; while the call is scrolled away the tray carries it with the way back to the call,
-/// which brings the answers back onto the card.
+/// A request whose call is on screen is answered under the call's line, and the tray carries
+/// no copy; while the call is scrolled away the tray carries it with the way back to the call,
+/// which brings the answers back under it.
 #[gpui::test]
 fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -91,9 +91,9 @@ fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContex
     cx.simulate_click(back, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("request-a").is_none(), "the call shows: the tray has no copy");
-    let card = cx.debug_bounds("call-card-x").expect("the call is a card");
-    let allow = cx.debug_bounds("answer-a-allow").expect("answered on the card");
-    assert!(card.contains(&allow.center()), "the answers sit on the call's card");
+    let card = cx.debug_bounds("call-x").expect("the call shows");
+    let allow = cx.debug_bounds("answer-a-allow").expect("answered under the call");
+    assert!(card.contains(&allow.center()), "the answers sit under the call's line");
 
     cx.simulate_click(allow.center(), Modifiers::none());
     assert!(
@@ -103,11 +103,11 @@ fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContex
     );
 }
 
-/// A call that asks as it arrives at the foot of the thread is answered on its card in the
+/// A call that asks as it arrives at the foot of the thread is answered under its line in the
 /// very frame that first shows it: no frame carries a copy in the tray that the list's layout
 /// then takes back, so nothing jumps.
 #[gpui::test]
-fn a_call_that_asks_as_it_arrives_is_answered_on_its_card_at_once(cx: &mut TestAppContext) {
+fn a_call_that_asks_as_it_arrives_is_answered_under_it_at_once(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -142,11 +142,11 @@ fn a_call_that_asks_as_it_arrives_is_answered_on_its_card_at_once(cx: &mut TestA
     let before = moved(cx);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
-    assert_eq!(moved(cx), before, "the first frame put the answers on the card");
+    assert_eq!(moved(cx), before, "the first frame put the answers under the call");
     assert!(cx.debug_bounds("request-a").is_none(), "no copy in the tray");
-    let card = cx.debug_bounds("call-card-x").expect("the call is a card");
-    let allow = cx.debug_bounds("answer-a-allow").expect("answered on the card");
-    assert!(card.contains(&allow.center()), "the answers sit on the call's card");
+    let card = cx.debug_bounds("call-x").expect("the call shows");
+    let allow = cx.debug_bounds("answer-a-allow").expect("answered under the call");
+    assert!(card.contains(&allow.center()), "the answers sit under the call's line");
 }
 
 /// The model chip opens the agent's models, and picking one asks the agent to switch.
@@ -595,11 +595,11 @@ fn the_latest_answer_s_new_words_lift_in(cx: &mut TestAppContext) {
     assert_eq!(lift_ticks(cx, &repaints), 0, "under Reduce Motion they land at once");
 }
 
-/// A plan put to the person is a card in the thread, its title from its heading, its head
+/// A plan put to the person stands in the thread as type, its title from its heading, its head
 /// shown until opened, the answers on it; scrolled away, the tray says "Plan ready" with the
 /// way back to it and no second copy of its words.
 #[gpui::test]
-fn a_plan_is_a_card_that_takes_its_answer(cx: &mut TestAppContext) {
+fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -637,15 +637,15 @@ fn a_plan_is_a_card_that_takes_its_answer(cx: &mut TestAppContext) {
         tree.iter().any(|n| n.is("Article", Some("Plan: Split the parser, Awaiting approval"))),
         "named by its heading and how it stands"
     );
-    let card = cx.debug_bounds("plan-plan").expect("a card");
+    let card = cx.debug_bounds("plan-plan").expect("the plan shows");
     let short = card.size.height;
     let more = cx.debug_bounds("plan-more-plan").expect("a long plan shows its head");
     cx.simulate_click(more.center(), Modifiers::none());
-    let opened = cx.debug_bounds("plan-plan").expect("still a card").size.height;
+    let opened = cx.debug_bounds("plan-plan").expect("still shows").size.height;
     assert!(opened > short, "opened, the whole plan: {short:?} then {opened:?}");
     assert!(cx.debug_bounds("plan-more-plan").is_none());
-    assert!(cx.debug_bounds("request-p").is_none(), "answered on the card");
-    let allow = cx.debug_bounds("answer-p-allow").expect("the answers on the card");
+    assert!(cx.debug_bounds("request-p").is_none(), "answered under the call");
+    let allow = cx.debug_bounds("answer-p-allow").expect("the answers under the plan");
     assert!(cx.debug_bounds("plan-plan").expect("drawn").contains(&allow.center()));
 
     // Taller than the view, so the newest row's place puts the plan above it.

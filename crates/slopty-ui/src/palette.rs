@@ -669,9 +669,9 @@ pub struct PaletteItem {
     pub keys: String,
     /// What runs.
     pub run: PaletteRun,
-    /// The icon in the leading slot: what a tile or a worker is, or what a command does. Every
-    /// line has one, so no title reads as indented under the one above it.
-    pub icon: Glyph,
+    /// The icon in the leading slot: what a thing is (a tile, a machine, a file, an agent).
+    /// A command has none: it is its words (`docs/decisions/ui.md`, "A command is its words").
+    pub icon: Option<Glyph>,
     /// How the tile or worker is doing: its mark takes the leading slot from the kind icon, and
     /// a tile's word takes the right edge while it is not idle.
     pub status: Option<Status>,
@@ -692,18 +692,18 @@ pub struct PaletteItem {
 }
 
 impl PaletteItem {
-    fn line(
+    const fn line(
         label: String,
         keys: String,
         run: PaletteRun,
-        icon: impl Into<Glyph>,
+        icon: Option<Glyph>,
         section: Section,
     ) -> Self {
         Self {
             label,
             keys,
             run,
-            icon: icon.into(),
+            icon,
             status: None,
             worker: None,
             cwd: None,
@@ -720,17 +720,12 @@ impl PaletteItem {
         matches!(self.run, PaletteRun::Action(_))
     }
 
-    /// An item for `action`, drawn with `icon`, its keys read from `bindings` (the first
-    /// binding for it).
+    /// A command for `action`, its keys read from `bindings` (the first binding for it). It
+    /// is its words: no icon, unless it lists a thing ([`Self::with_icon`]).
     #[must_use]
-    pub fn new(
-        label: &str,
-        icon: IconName,
-        action: Box<dyn Action>,
-        bindings: &[KeyBinding],
-    ) -> Self {
+    pub fn new(label: &str, action: Box<dyn Action>, bindings: &[KeyBinding]) -> Self {
         let keys = keys_for(action.as_ref(), bindings);
-        Self::line(label.to_owned(), keys, PaletteRun::Action(action), icon, Section::Commands)
+        Self::line(label.to_owned(), keys, PaletteRun::Action(action), None, Section::Commands)
     }
 
     /// A line that goes to a session in the workspace, by its title.
@@ -740,7 +735,7 @@ impl PaletteItem {
             title.to_owned(),
             String::new(),
             PaletteRun::Session(session),
-            IconName::SquareTerminal,
+            Some(IconName::SquareTerminal.into()),
             Section::Tiles,
         )
     }
@@ -752,7 +747,7 @@ impl PaletteItem {
             name.to_owned(),
             detail.to_owned(),
             PaletteRun::Worker(worker),
-            IconName::Server,
+            Some(IconName::Server.into()),
             Section::Workers,
         )
     }
@@ -761,41 +756,41 @@ impl PaletteItem {
     #[must_use]
     pub fn reopen(title: &str, seq: u64) -> Self {
         let run = PaletteRun::Reopen(seq);
-        Self::line(
-            format!("Reopen {title}"),
-            String::new(),
-            run,
-            IconName::Undo2,
-            Section::Commands,
-        )
+        Self::line(format!("Reopen {title}"), String::new(), run, None, Section::Commands)
     }
 
     /// `Wake <worker>` for a worker that sleeps.
     #[must_use]
     pub fn wake(name: &str, worker: slopty_client::layout::WorkerKey) -> Self {
         let run = PaletteRun::Wake(worker);
-        Self::line(format!("Wake {name}"), String::new(), run, IconName::Power, Section::Commands)
+        Self::line(format!("Wake {name}"), String::new(), run, None, Section::Commands)
     }
 
     /// A project by its title: ↩ shows its board.
     #[must_use]
     pub fn project(title: &str, project: slopty_proto::project::ProjectId) -> Self {
         let run = PaletteRun::Project(project);
-        Self::line(title.to_owned(), String::new(), run, IconName::Workflow, Section::Tiles)
+        Self::line(
+            title.to_owned(),
+            String::new(),
+            run,
+            Some(IconName::Workflow.into()),
+            Section::Tiles,
+        )
     }
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
     #[must_use]
     pub fn group(name: &str, glyph: IconName, group: slopty_client::layout::GroupKey) -> Self {
         let run = PaletteRun::Group(group);
-        Self::line(name.to_owned(), String::new(), run, glyph, Section::Projects)
+        Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
     }
 
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
     pub fn item(title: &str, icon: Glyph, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
-        Self::line(title.to_owned(), String::new(), run, icon, Section::Tiles)
+        Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Tiles)
     }
 
     /// The same line, with what its tile's header places its title by.
@@ -809,20 +804,14 @@ impl PaletteItem {
     #[must_use]
     pub fn url(label: &str, detail: &str, url: &str) -> Self {
         let run = PaletteRun::OpenUrl(url.to_owned());
-        Self::line(
-            label.to_owned(),
-            detail.to_owned(),
-            run,
-            IconName::ExternalLink,
-            Section::Commands,
-        )
+        Self::line(label.to_owned(), detail.to_owned(), run, None, Section::Commands)
     }
 
     /// A line that opens `url` in a browser tile, `detail` on the right.
     #[must_use]
     pub fn in_tile(label: &str, detail: &str, url: &str) -> Self {
         let run = PaletteRun::OpenInTile(url.to_owned());
-        Self::line(label.to_owned(), detail.to_owned(), run, IconName::Globe, Section::Commands)
+        Self::line(label.to_owned(), detail.to_owned(), run, None, Section::Commands)
     }
 
     /// `Open <relative>` for a file the worker found under `root`.
@@ -831,7 +820,7 @@ impl PaletteItem {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
         let glyph = Glyph::file(&path);
         let run = PaletteRun::OpenFile { path, line: None, found: true };
-        Self::line(format!("Open {relative}"), String::new(), run, glyph, Section::Files)
+        Self::line(format!("Open {relative}"), String::new(), run, Some(glyph), Section::Files)
     }
 
     /// A directory the worker found under `root`: a shell and a conversation in it.
@@ -851,7 +840,7 @@ impl PaletteItem {
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
         let keys = line.map(|n| format!("line {n}")).unwrap_or_default();
         let run = PaletteRun::OpenFile { path: path.to_owned(), line, found: false };
-        Self::line(format!("Open {path}"), keys, run, Glyph::file(path), Section::Files)
+        Self::line(format!("Open {path}"), keys, run, Some(Glyph::file(path)), Section::Files)
     }
 
     /// `Open folder <dir>` for a directory typed into the field: a folder tile there.
@@ -859,7 +848,7 @@ impl PaletteItem {
     pub fn open_folder(path: &str) -> Self {
         let run = PaletteRun::OpenFolder { path: path.to_owned() };
         let label = format!("Open folder {path}");
-        Self::line(label, String::new(), run, IconName::FolderOpen, Section::Files)
+        Self::line(label, String::new(), run, Some(IconName::Folder.into()), Section::Files)
     }
 
     /// `New terminal in <dir>` for a directory typed into the field.
@@ -867,7 +856,7 @@ impl PaletteItem {
     pub fn open_shell(cwd: &str) -> Self {
         let run = PaletteRun::OpenShell { cwd: cwd.to_owned() };
         let label = format!("New terminal in {cwd}");
-        Self::line(label, String::new(), run, IconName::SquareTerminal, Section::Files)
+        Self::line(label, String::new(), run, None, Section::Files)
     }
 
     /// `New agent in <dir>` for a directory typed into the field.
@@ -875,13 +864,13 @@ impl PaletteItem {
     pub fn open_agent(cwd: &str) -> Self {
         let run = PaletteRun::OpenAgent { cwd: cwd.to_owned() };
         let label = format!("New agent in {cwd}");
-        Self::line(label, String::new(), run, IconName::Sparkles, Section::Files)
+        Self::line(label, String::new(), run, None, Section::Files)
     }
 
     /// The same line with another kind icon.
     #[must_use]
     pub const fn with_icon(mut self, icon: Glyph) -> Self {
-        self.icon = icon;
+        self.icon = Some(icon);
         self
     }
 
@@ -1104,7 +1093,7 @@ pub(crate) fn status_slot(
         Some(status) => {
             icons::status_icon(theme, status, side, hsla(status.tone(theme))).into_any_element()
         }
-        None => icons::glyph(theme, kind.into(), side, ink),
+        None => icons::glyph(kind.into(), side, ink),
     };
     div()
         .id("status")
@@ -1117,6 +1106,11 @@ pub(crate) fn status_slot(
             el.role(gpui::accesskit::Role::Image).aria_label(status.label())
         })
         .child(mark)
+}
+
+/// A status slot holding nothing: a command's, beside lines that lead with a mark.
+fn empty_slot(theme: &Theme) -> gpui::Div {
+    div().flex_none().size(px(theme.typography.icon_large()))
 }
 
 /// An age as the inbox, the palette and the navigator print it: `now` under a minute, then
@@ -1330,6 +1324,8 @@ pub struct CommandPalette {
     /// The matches ([`Self::matches`]), worked out when the field, the path lines or the found
     /// files change, never for a frame alone: the plate's glide draws many.
     matched: Vec<At>,
+    /// Whether any line matched leads with a mark, so a command keeps an empty slot.
+    marked: bool,
     /// The list's lines: the matches, a heading where a group starts.
     lines: Vec<Line>,
     /// What the query matched in each match's label, as byte ranges, by its place in the
@@ -1434,6 +1430,7 @@ impl CommandPalette {
             input,
             scope: cx.focus_handle(),
             matched: Vec::new(),
+            marked: false,
             lines: Vec::new(),
             marks: Vec::new(),
             selected: 0,
@@ -1788,7 +1785,16 @@ impl CommandPalette {
                     Self::choose(&item, cx);
                 }
             }))
-            .child(status_slot(theme, item.icon, item.status, hsla(icon_ink), 1.0))
+            // A thing leads with what it is, or how it is doing; a command is its words. While
+            // any line shown leads with a mark, a command keeps the empty slot, so every title
+            // starts on one edge.
+            .children(match (item.icon, item.status) {
+                (None, None) => self.marked.then(|| empty_slot(theme).into_any_element()),
+                (icon, status) => Some(
+                    status_slot(theme, icon.unwrap_or(Glyph::AGENT), status, hsla(icon_ink), 1.0)
+                        .into_any_element(),
+                ),
+            })
             .child(
                 div()
                     .debug_selector(move || format!("palette-title-{ix}"))
@@ -1906,6 +1912,11 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let chosen = self.selected(self.matched.len());
+        self.marked = self
+            .matched
+            .iter()
+            .filter_map(|at| self.at(*at))
+            .any(|item| item.icon.is_some() || item.status.is_some());
         if std::mem::take(&mut self.reveal)
             && let Some(line) = self.lines.iter().position(|l| *l == Line::Match(chosen))
         {
@@ -2067,7 +2078,14 @@ impl Render for CommandPalette {
                 }),
             )
         };
-        gpui::deferred(root).with_priority(Layer::Dialog.priority())
+        // Leaving, it is drawn in its place among the workspace's overlays, under a menu opened
+        // meanwhile, rather than lifted over everything: a palette fading out must never take
+        // the press meant for what came after it.
+        if self.leaving {
+            root.into_any_element()
+        } else {
+            gpui::deferred(root).with_priority(Layer::Dialog.priority()).into_any_element()
+        }
     }
 }
 
@@ -2275,8 +2293,7 @@ mod tests {
     #[gpui::test]
     fn a_query_ranks_each_section_and_shows_what_it_matched(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let action =
-            |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
+        let action = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
         let items = vec![
             PaletteItem::session("Fix the page header", SessionId::new()),
             action("Open last offered page"),
@@ -2617,7 +2634,7 @@ mod tests {
         assert_eq!(label("cmd-="), "⌘=");
         assert_eq!(label("shift-pageup"), "⇧⇞", "a named key reads as its menu glyph");
         assert_eq!(label("cmd-end"), "⌘↘");
-        let item = |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
+        let item = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
         let items = vec![item("New note"), item("Move column left"), item("Move column right")];
         let labels =
             |q: &str| filter(q, &items).iter().map(|i| i.label.as_str()).collect::<Vec<_>>();
@@ -2634,11 +2651,11 @@ mod tests {
     fn lines_group_into_sections_in_a_fixed_order() {
         let worker = slopty_client::layout::WorkerKey::new(1);
         let items = [
-            PaletteItem::new("New note", IconName::Command, Box::new(MoveUp), &[]),
+            PaletteItem::new("New note", Box::new(MoveUp), &[]),
             PaletteItem::found_file("~", "notes.md"),
             PaletteItem::worker("studio", "connected", worker),
             PaletteItem::session("zsh", SessionId::new()),
-            PaletteItem::new("Larger text", IconName::Command, Box::new(MoveDown), &[]),
+            PaletteItem::new("Larger text", Box::new(MoveDown), &[]),
             PaletteItem::session("claude", SessionId::new()),
         ];
         let order = |path_first: bool| {
@@ -2663,8 +2680,7 @@ mod tests {
     #[test]
     fn an_empty_field_lists_the_tiles_and_the_recent_commands() {
         let worker = slopty_client::layout::WorkerKey::new(1);
-        let action =
-            |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
+        let action = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
         let mut items = vec![
             PaletteItem::session("zsh", SessionId::new()),
             PaletteItem::worker("studio", "", worker),
@@ -2690,8 +2706,7 @@ mod tests {
     #[test]
     fn the_recent_commands_have_their_own_group() {
         let recent = vec!["New note".to_owned()];
-        let command =
-            |label: &str| PaletteItem::new(label, IconName::Command, Box::new(MoveUp), &[]);
+        let command = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
         assert_eq!(group(&command("New note"), &recent), ("Recent", "recent"));
         assert_eq!(group(&command("Larger text"), &recent), ("Commands", "commands"));
         assert_eq!(group(&command("New note"), &[]), ("Commands", "commands"), "a typed query");
@@ -2723,8 +2738,8 @@ mod tests {
             .on_worker(Some("studio".to_owned()));
         assert_eq!(file.context(), "studio · docs");
         assert_eq!(file.trailing(), None);
-        let command = PaletteItem::new("New note", IconName::StickyNote, Box::new(MoveUp), &[]);
-        assert_eq!(command.icon, Glyph::Icon(IconName::StickyNote), "a command shows what it does");
+        let command = PaletteItem::new("New note", Box::new(MoveUp), &[]);
+        assert_eq!(command.icon, None, "a command is its words");
         let away =
             PaletteItem::worker("studio", "unreachable", slopty_client::layout::WorkerKey::new(1))
                 .with_status(Some(Status::Away));
@@ -2747,7 +2762,7 @@ mod tests {
         use gpui::AssetSource as _;
 
         let session = SessionId::new();
-        let mut names: Vec<Glyph> = vec![PaletteItem::session("zsh", session).icon];
+        let mut names: Vec<Option<Glyph>> = vec![PaletteItem::session("zsh", session).icon];
         names.push(PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1)).icon);
         names.extend(PaletteItem::found_dir("/w", "src").map(|line| line.icon));
         names.extend([
@@ -2758,12 +2773,12 @@ mod tests {
                 .icon,
         ]);
         assert_eq!(
-            PaletteItem::open_file("/w/a.rs", None).icon.path().as_ref(),
-            "file-types/rust.svg",
+            PaletteItem::open_file("/w/a.rs", None).icon.map(Glyph::path).as_deref(),
+            Some("file-types/rust.svg"),
             "a file line shows its type"
         );
         names.extend(crate::workspace::palette_items().into_iter().map(|line| line.icon));
-        for name in names {
+        for name in names.into_iter().flatten() {
             let bytes = icons::Assets.load(&name.path()).ok().flatten();
             assert!(bytes.is_some(), "{name:?} is not embedded");
         }

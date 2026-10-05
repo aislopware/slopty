@@ -459,7 +459,6 @@ impl WorkspaceView {
             transfers.map(gpui::IntoElement::into_any_element),
             release.map(gpui::IntoElement::into_any_element),
             frame.map(gpui::IntoElement::into_any_element),
-            (!phone).then(|| self.render_yard(window, cx)).flatten(),
         ];
         let mut right_parts: Vec<gpui::AnyElement> = Vec::new();
         for part in readouts.into_iter().flatten() {

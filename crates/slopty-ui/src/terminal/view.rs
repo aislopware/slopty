@@ -25,8 +25,7 @@ use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{
-    PasteChord, Placement, PointerShape, ProgressState, SearchMatch, TermEvent, TermRequest,
-    TermSize,
+    PasteChord, Placement, PointerShape, SearchMatch, TermEvent, TermRequest, TermSize,
 };
 use slopty_theme::{Colors, Theme, alpha};
 use tokio::sync::mpsc;
@@ -233,6 +232,9 @@ pub enum TerminalViewEvent {
     Exited(i32),
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
+    /// The program's progress report changed ([`TerminalView::progress`]): the tile's header
+    /// draws it.
+    Progress,
     /// The human confirmed closing this shell while its command runs: the workspace sends
     /// the worker `Close`.
     CloseConfirmed,
@@ -486,13 +488,8 @@ pub struct TerminalView {
     /// The tile shows a pill of its own at the body's foot (the worker away, the program
     /// exited), which says more than the lines below and takes their pill's place.
     covered: bool,
-    /// When the progress bar's sweep began (the executor's clock), while it sweeps.
-    sweep_since: Option<Instant>,
-    /// Wakes the view for each step of the sweep.
-    sweep_task: Option<gpui::Task<()>>,
-    /// The sweep was drawn since the last step woke the view: a view not drawn (scrolled off,
-    /// covered by the face) is not woken again until it is.
-    sweep_drawn: bool,
+    /// The program's progress report as the tile's header last heard of it.
+    progress_told: Option<crate::kit::progress::Progress>,
     /// The person ran the restored session's command again or put its chip away.
     restored_seen: bool,
 }
@@ -631,9 +628,7 @@ impl TerminalView {
             find_toggles: Query::default(),
             pending: None,
             covered: false,
-            sweep_since: None,
-            sweep_task: None,
-            sweep_drawn: false,
+            progress_told: None,
             restored_seen: false,
         }
     }
@@ -2673,54 +2668,19 @@ impl TerminalView {
                 }
             }
         }
-        self.sweep(cx);
+        let progress = self.progress();
+        if progress != self.progress_told {
+            self.progress_told = progress;
+            cx.emit(TerminalViewEvent::Progress);
+        }
         cx.notify();
     }
 
-    /// Start or stop the progress bar's sweep: it moves while the report has no measure and
-    /// motion is allowed.
-    fn sweep(&mut self, cx: &Context<Self>) {
-        if !self.sweeping(cx) {
-            self.sweep_since = None;
-            self.sweep_task = None;
-            return;
-        }
-        if self.sweep_task.is_some() {
-            return;
-        }
-        self.sweep_since = Some(cx.background_executor().now());
-        self.sweep_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(crate::icons::SPIN_STEP).await;
-                let more = this.update(cx, Self::sweep_tick).unwrap_or(false);
-                if !more {
-                    break;
-                }
-            }
-        }));
-    }
-
-    fn sweeping(&self, cx: &App) -> bool {
-        self.state.progress().state == ProgressState::Indeterminate && crate::kit::motion(cx)
-    }
-
-    /// A step of the sweep fell due. False ends the loop.
-    ///
-    /// A key waiting for its echo lets the step pass: the echo's frame draws the sweep where it
-    /// has got to, and a frame drawn for the step alone just before it would hold the echo back
-    /// a refresh.
-    fn sweep_tick(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.sweeping(cx) {
-            self.sweep_since = None;
-            self.sweep_task = None;
-            cx.notify();
-            return false;
-        }
-        if self.sweep_drawn && !self.latency.borrow().waiting() {
-            self.sweep_drawn = false;
-            cx.notify();
-        }
-        true
+    /// The program's progress report (`OSC 9;4`) in the kit's language, which the tile's
+    /// header draws; `None` while nothing is reported.
+    #[must_use]
+    pub fn progress(&self) -> Option<crate::kit::progress::Progress> {
+        super::progress::shown(self.state.progress())
     }
 
     /// The command a restored session was opened to run, as it would be typed; `None` for a
@@ -2805,18 +2765,6 @@ impl TerminalView {
                 .children(run)
                 .child(crate::a11y::tab_stop(dismiss, s.accent)),
         )
-    }
-
-    /// The program's progress along the top edge (`OSC 9;4`).
-    fn render_progress(&mut self, cx: &App) -> Option<gpui::Div> {
-        let step = self.sweep_since.map(|since| {
-            super::progress::sweep_step(
-                cx.background_executor().now().saturating_duration_since(since),
-            )
-        });
-        let fill = super::progress::fill(&self.theme, self.state.progress(), step);
-        self.sweep_drawn |= step.is_some() && fill.is_some();
-        super::progress::bar(&self.theme, fill)
     }
 
     /// Lines between the bottom of the view and the newest output: 0 while following it.
@@ -4254,7 +4202,6 @@ impl Render for TerminalView {
                 }
                 el.child(grid)
             })
-            .children(self.render_progress(cx))
             .children(self.render_restored(cx))
             .children(hovered)
             .children(header)
@@ -4534,7 +4481,7 @@ mod paint_oracle;
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Cell, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
-    use slopty_proto::terminal::{Frame, TermRequest};
+    use slopty_proto::terminal::{Frame, ProgressState, TermRequest};
 
     use super::*;
     use crate::terminal::element::separator_color;
@@ -9409,13 +9356,6 @@ mod tests {
         assert_eq!(cursor_style(PointerShape::Wait), CursorStyle::Arrow, "nothing like it");
     }
 
-    fn progress_fill(cx: &mut VisualTestContext) -> Option<(f32, f32)> {
-        let bar = cx.debug_bounds("terminal-progress")?;
-        let fill = cx.debug_bounds("terminal-progress-fill")?;
-        let (width, left) = (f32::from(bar.size.width), f32::from(fill.origin.x - bar.origin.x));
-        Some((left / width, f32::from(fill.size.width) / width))
-    }
-
     fn report(
         view: &Entity<TerminalView>,
         cx: &mut VisualTestContext,
@@ -9431,68 +9371,29 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// A report draws its share along the top edge, full width, and goes when it is removed.
+    /// A report is the tile header's to draw, in the kit's progress language: the terminal
+    /// draws no line of its own along its edge, and an unknown share asks for no frame of the
+    /// terminal's while it lasts.
     #[gpui::test]
-    fn a_progress_report_fills_its_share_of_the_top_edge(cx: &mut TestAppContext) {
+    fn a_progress_report_is_told_not_drawn_on_the_edge(cx: &mut TestAppContext) {
+        use crate::kit::progress::Progress;
         let (view, _rx, cx) = terminal(cx);
-        assert!(cx.debug_bounds("terminal-progress").is_none(), "no report, no bar");
+        let progress = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.progress());
+        assert_eq!(progress(cx), None, "nothing reported");
         report(&view, cx, ProgressState::Set, Some(40));
-        let bar = cx.debug_bounds("terminal-progress").expect("the bar");
-        let grid = cx.debug_bounds("terminal").expect("the terminal");
-        assert_eq!(
-            (bar.origin.y, bar.size.width),
-            (grid.origin.y, grid.size.width),
-            "the top edge"
-        );
-        let (start, width) = progress_fill(cx).unwrap();
-        assert!(start.abs() < 1e-3 && (width - 0.4).abs() < 1e-3, "{start} {width}");
+        assert_eq!(progress(cx), Some(Progress::Share(0.4)));
+        assert!(cx.debug_bounds("terminal-progress").is_none(), "no line along the edge");
         report(&view, cx, ProgressState::Error, None);
-        let (_, width) = progress_fill(cx).unwrap();
-        assert!((width - 1.0).abs() < 1e-3, "a failure with no figure fills the edge: {width}");
-        report(&view, cx, ProgressState::None, None);
-        assert!(cx.debug_bounds("terminal-progress").is_none(), "removed");
-    }
-
-    /// An indeterminate report sweeps a step at a time, redrawing the view per step, and a key
-    /// waiting for its echo lets a step pass; under Reduce Motion it stands over the whole edge
-    /// and wakes nothing.
-    #[gpui::test]
-    fn an_indeterminate_report_sweeps_unless_motion_is_reduced(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
+        assert_eq!(progress(cx), Some(Progress::Failed(None)));
+        report(&view, cx, ProgressState::Indeterminate, None);
+        assert_eq!(progress(cx), Some(Progress::Busy));
         let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
-        report(&view, cx, ProgressState::Indeterminate, None);
-        let before = renders(cx);
-        let mut spans = Vec::new();
-        for _ in 0..4 {
-            cx.background_executor.advance_clock(crate::icons::SPIN_STEP);
-            cx.run_until_parked();
-            spans.push(progress_fill(cx).unwrap());
-        }
-        assert_eq!(renders(cx), before.saturating_add(4), "a frame a step");
-        assert!(spans.windows(2).all(|w| w[1].0 + w[1].1 > w[0].0 + w[0].1), "it moves: {spans:?}");
-
-        // A typed key is out and its echo has not come: the steps due meanwhile wake nothing,
-        // and the echo's frame draws the sweep where it has got to.
-        cx.simulate_keystrokes("a");
-        cx.run_until_parked();
-        assert!(
-            view.read_with(cx, |v, _| v.latency.borrow().waiting()),
-            "the key waits for its echo"
-        );
-        let before = renders(cx);
-        cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(3));
-        cx.run_until_parked();
-        assert_eq!(renders(cx), before, "no frame of its own ahead of the echo");
-
-        report(&view, cx, ProgressState::None, None);
-        cx.update(|_w, cx| cx.set_reduce_motion(true));
-        report(&view, cx, ProgressState::Indeterminate, None);
-        let still = progress_fill(cx).unwrap();
-        assert!(still.0.abs() < 1e-3 && (still.1 - 1.0).abs() < 1e-3, "the whole edge: {still:?}");
         let before = renders(cx);
         cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(6));
         cx.run_until_parked();
-        assert_eq!(renders(cx), before, "nothing moves, nothing is drawn");
+        assert_eq!(renders(cx), before, "the terminal draws nothing for it");
+        report(&view, cx, ProgressState::None, None);
+        assert_eq!(progress(cx), None, "removed");
     }
 
     fn restore(view: &Entity<TerminalView>, cx: &mut VisualTestContext, command: &[&str]) {

@@ -6,7 +6,6 @@
 use gpui::{Action, KeyBinding, actions};
 
 use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
-use crate::icons::IconName;
 use crate::keymap::Scope;
 use crate::palette::PaletteItem;
 
@@ -323,98 +322,78 @@ pub fn palette_items() -> Vec<PaletteItem> {
     };
     let workspace = key_bindings();
     let terminal = crate::terminal::key_bindings();
-    let w = |label: &str, icon: IconName, action: Box<dyn Action>| {
-        PaletteItem::new(label, icon, action, &workspace)
-    };
-    let t = |label: &str, icon: IconName, action: Box<dyn Action>| {
-        PaletteItem::new(label, icon, action, &terminal)
-    };
+    let w = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &workspace);
+    let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
     let mut items = vec![
-        w("New terminal", IconName::SquareTerminal, Box::new(NewTerminal)),
-        w("New agent\u{2026}", IconName::Sparkles, Box::new(NewAgent)),
-        w(super::starting::PLAN_FIRST_LINE, IconName::ListTodo, Box::new(TogglePlanFirst)),
-        w("New note", IconName::StickyNote, Box::new(NewNote)),
-        w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
-        w("Open file…", IconName::FileText, Box::new(OpenFile)),
-        w("Open folder…", IconName::FolderOpen, Box::new(OpenFolder)),
-        w(super::reviews::REVIEW_CHANGES, IconName::FolderGit2, Box::new(ReviewChanges)),
-        w("Enclosing folder", IconName::ArrowUp, Box::new(crate::folder::OpenParent)),
-        w("Save file", IconName::Save, Box::new(crate::file::SaveFile)),
-        w("Done with this file", IconName::Check, Box::new(crate::file::FinishEdit)),
-        w(SAVE_A_COPY, IconName::Download, Box::new(SaveCopy)),
-        w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
-        w("Open last offered page", IconName::ExternalLink, Box::new(OpenLastOffer)),
-        w("Edit page address", IconName::Link, Box::new(EditAddress)),
-        w("Page back", IconName::ArrowLeft, Box::new(PageBack)),
-        w("Page forward", IconName::ArrowRight, Box::new(PageForward)),
-        w("Reload page", IconName::RotateCw, Box::new(ReloadPage)),
-        w("Close tile", IconName::X, Box::new(CloseItem)),
-        w("Undo close", IconName::Undo2, Box::new(UndoClose)),
-        w("Next thing that needs you", IconName::BellRing, Box::new(NextAttention)),
-        w("Show what needs you", IconName::Bell, Box::new(ShowNeedsYou)),
-        w("Filter the navigator", IconName::ListFilter, Box::new(FilterNavigator)),
-        w(MUTE_SOUND, IconName::VolumeX, Box::new(ToggleMute)),
-        w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
-        w(
-            crate::screen::TRACKPAD_MODE,
-            IconName::MousePointer2,
-            Box::new(crate::screen::ToggleTrackpad),
-        ),
-        w(
-            crate::screen::REMOTE_GESTURES,
-            IconName::Hand,
-            Box::new(crate::screen::ToggleRemoteGestures),
-        ),
-        w("Show or hide the navigator", IconName::PanelLeft, Box::new(ToggleNavigator)),
-        w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
-        w(super::project_search::SEARCH_IN_FILES, IconName::FolderSearch, Box::new(SearchInFiles)),
-        w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
-        w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),
-        w("Column to the right", IconName::ArrowRight, Box::new(FocusColumnRight)),
-        w("Tile or workspace above", IconName::ArrowUp, Box::new(FocusUp)),
-        w("Tile or workspace below", IconName::ArrowDown, Box::new(FocusDown)),
-        w("Workspace above", IconName::ChevronUp, Box::new(FocusWorkspaceUp)),
-        w("Workspace below", IconName::ChevronDown, Box::new(FocusWorkspaceDown)),
-        w("First workspace", IconName::LayoutDashboard, Box::new(FocusWorkspace { index: 0 })),
-        w("Move column left", IconName::MoveLeft, Box::new(MoveColumnLeft)),
-        w("Move column right", IconName::MoveRight, Box::new(MoveColumnRight)),
-        w("Move column to the start", IconName::ArrowLeftToLine, Box::new(MoveColumnToFirst)),
-        w("Move column to the end", IconName::ArrowRightToLine, Box::new(MoveColumnToLast)),
-        w("Move tile up", IconName::MoveUp, Box::new(MoveUp)),
-        w("Move tile down", IconName::MoveDown, Box::new(MoveDown)),
-        w(
-            "Into the column on the left",
-            IconName::BetweenHorizontalStart,
-            Box::new(ConsumeOrExpelLeft),
-        ),
-        w(
-            "Into the column on the right",
-            IconName::BetweenHorizontalEnd,
-            Box::new(ConsumeOrExpelRight),
-        ),
-        w("Next column width", IconName::ChevronsRight, Box::new(CycleWidth)),
-        w("Maximize column", IconName::Maximize2, Box::new(MaximizeColumn)),
-        w("Fullscreen tile", IconName::Expand, Box::new(FullscreenTile)),
-        w("Center column", IconName::AlignCenterHorizontal, Box::new(CenterColumn)),
-        w("Tabbed column", IconName::PanelsTopLeft, Box::new(ToggleTabbed)),
-        w("Overview", IconName::LayoutGrid, Box::new(ToggleOverview)),
-        w("Show conversation or terminal", IconName::MessageSquare, Box::new(ToggleConversation)),
-        w("Show project board or terminal", IconName::Workflow, Box::new(ToggleProjectBoard)),
-        w("Conversation density", IconName::ListChecks, Box::new(CycleDensity)),
-        w("Stop the agent", IconName::Square, Box::new(Interrupt)),
-        w("Queue message", IconName::Clock, Box::new(QueueMessage)),
-        w("Edit the last queued message", IconName::Pencil, Box::new(EditLastQueued)),
-        w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),
-        w("Smaller text", IconName::AArrowDown, Box::new(FontSmaller)),
-        w("Default text size", IconName::Type, Box::new(FontReset)),
-        t("Find in terminal, file or conversation", IconName::Search, Box::new(Find)),
-        t("Previous prompt", IconName::ChevronUp, Box::new(PrevPrompt)),
-        t("Next prompt", IconName::ChevronDown, Box::new(NextPrompt)),
-        t("Copy last output", IconName::Copy, Box::new(CopyLastOutput)),
-        t("Copy block output", IconName::Copy, Box::new(CopyBlockOutput)),
-        t("Copy mode", IconName::TextCursorInput, Box::new(CopyMode)),
-        t("Rerun last command", IconName::RotateCw, Box::new(RerunLast)),
-        t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
+        w("New terminal", Box::new(NewTerminal)),
+        w("New agent\u{2026}", Box::new(NewAgent)),
+        w(super::starting::PLAN_FIRST_LINE, Box::new(TogglePlanFirst)),
+        w("New note", Box::new(NewNote)),
+        w("Add a window or display", Box::new(AddWindow)),
+        w("Open file…", Box::new(OpenFile)),
+        w("Open folder…", Box::new(OpenFolder)),
+        w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
+        w("Enclosing folder", Box::new(crate::folder::OpenParent)),
+        w("Save file", Box::new(crate::file::SaveFile)),
+        w("Done with this file", Box::new(crate::file::FinishEdit)),
+        w(SAVE_A_COPY, Box::new(SaveCopy)),
+        w("Open URL…", Box::new(OpenUrl)),
+        w("Open last offered page", Box::new(OpenLastOffer)),
+        w("Edit page address", Box::new(EditAddress)),
+        w("Page back", Box::new(PageBack)),
+        w("Page forward", Box::new(PageForward)),
+        w("Reload page", Box::new(ReloadPage)),
+        w("Close tile", Box::new(CloseItem)),
+        w("Undo close", Box::new(UndoClose)),
+        w("Next thing that needs you", Box::new(NextAttention)),
+        w("Show what needs you", Box::new(ShowNeedsYou)),
+        w("Filter the navigator", Box::new(FilterNavigator)),
+        w(MUTE_SOUND, Box::new(ToggleMute)),
+        w("Stream stats", Box::new(ToggleStats)),
+        w(crate::screen::TRACKPAD_MODE, Box::new(crate::screen::ToggleTrackpad)),
+        w(crate::screen::REMOTE_GESTURES, Box::new(crate::screen::ToggleRemoteGestures)),
+        w("Show or hide the navigator", Box::new(ToggleNavigator)),
+        w("Name this tile", Box::new(RenameItem)),
+        w(super::project_search::SEARCH_IN_FILES, Box::new(SearchInFiles)),
+        w("Forwarded ports", Box::new(ListPorts)),
+        w("Column to the left", Box::new(FocusColumnLeft)),
+        w("Column to the right", Box::new(FocusColumnRight)),
+        w("Tile or workspace above", Box::new(FocusUp)),
+        w("Tile or workspace below", Box::new(FocusDown)),
+        w("Workspace above", Box::new(FocusWorkspaceUp)),
+        w("Workspace below", Box::new(FocusWorkspaceDown)),
+        w("First workspace", Box::new(FocusWorkspace { index: 0 })),
+        w("Move column left", Box::new(MoveColumnLeft)),
+        w("Move column right", Box::new(MoveColumnRight)),
+        w("Move column to the start", Box::new(MoveColumnToFirst)),
+        w("Move column to the end", Box::new(MoveColumnToLast)),
+        w("Move tile up", Box::new(MoveUp)),
+        w("Move tile down", Box::new(MoveDown)),
+        w("Into the column on the left", Box::new(ConsumeOrExpelLeft)),
+        w("Into the column on the right", Box::new(ConsumeOrExpelRight)),
+        w("Next column width", Box::new(CycleWidth)),
+        w("Maximize column", Box::new(MaximizeColumn)),
+        w("Fullscreen tile", Box::new(FullscreenTile)),
+        w("Center column", Box::new(CenterColumn)),
+        w("Tabbed column", Box::new(ToggleTabbed)),
+        w("Overview", Box::new(ToggleOverview)),
+        w("Show conversation or terminal", Box::new(ToggleConversation)),
+        w("Show project board or terminal", Box::new(ToggleProjectBoard)),
+        w("Conversation density", Box::new(CycleDensity)),
+        w("Stop the agent", Box::new(Interrupt)),
+        w("Queue message", Box::new(QueueMessage)),
+        w("Edit the last queued message", Box::new(EditLastQueued)),
+        w("Larger text", Box::new(FontLarger)),
+        w("Smaller text", Box::new(FontSmaller)),
+        w("Default text size", Box::new(FontReset)),
+        t("Find in terminal, file or conversation", Box::new(Find)),
+        t("Previous prompt", Box::new(PrevPrompt)),
+        t("Next prompt", Box::new(NextPrompt)),
+        t("Copy last output", Box::new(CopyLastOutput)),
+        t("Copy block output", Box::new(CopyBlockOutput)),
+        t("Copy mode", Box::new(CopyMode)),
+        t("Rerun last command", Box::new(RerunLast)),
+        t("Clear the screen and history", Box::new(ClearScreen)),
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
     items.extend(crate::folder::folder_palette_items(&workspace));
@@ -423,7 +402,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only the Mac has a Web Inspector window of its own; iOS reaches it from Safari on a Mac.
     if cfg!(target_os = "macos") {
-        items.push(w("Inspect page", IconName::Wrench, Box::new(InspectPage)));
+        items.push(w("Inspect page", Box::new(InspectPage)));
     }
     items
 }
@@ -439,16 +418,10 @@ impl super::WorkspaceView {
         }
         let terminal = crate::terminal::key_bindings();
         let block = Box::new(crate::terminal::AttachBlock);
-        let mut lines =
-            vec![PaletteItem::new("Attach block to agent", IconName::Paperclip, block, &terminal)];
+        let mut lines = vec![PaletteItem::new("Attach block to agent", block, &terminal)];
         if self.terminals.get(&session).is_some_and(|t| t.read(cx).has_selection()) {
             let selection = Box::new(crate::terminal::AttachSelection);
-            lines.push(PaletteItem::new(
-                "Attach selection to agent",
-                IconName::Paperclip,
-                selection,
-                &terminal,
-            ));
+            lines.push(PaletteItem::new("Attach selection to agent", selection, &terminal));
         }
         lines
     }

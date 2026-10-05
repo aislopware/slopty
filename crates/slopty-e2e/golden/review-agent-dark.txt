@@ -1,6 +1,7 @@
 Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
+Button │ Navigator
 TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
@@ -12,7 +13,6 @@ Button │ Terminal
 Button │ Close tile
 Button │ Review
 Button │ Close tile
-Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
@@ -28,6 +28,7 @@ Terminal │ shell │ ~ %
 Group │ Retry the refresh
 Heading │ terminal Retry the refresh
 Image │ Done
+Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -44,7 +45,7 @@ Button │ Copy message
 Article │ I reviewed the change and found two things to fix.
 Button │ Copy message
 MultilineTextInput │ Message
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Review the changes
@@ -75,5 +76,3 @@ Button │ Send 2 comments
 Button │ Mark reviewed
 Group │ Status
 Status │ e2e-worker
-Group │ Agents
-Button │ Claude Code · Turn finished

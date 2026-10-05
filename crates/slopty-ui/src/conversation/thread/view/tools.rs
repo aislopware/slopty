@@ -1,11 +1,12 @@
-//! A call, drawn as Zed's thread draws it.
+//! A call, drawn as Zed's and Codex's threads draw one: a line on the thread's plane.
 //!
-//! A read, a search, a fetch: one muted line with its mark, a disclosure that shows under the
-//! pointer, and once opened its output under a hairline rule, unfilled. An edit, a write, a
-//! command, and any call that waits on the person: a card resting on the thread, its edge in
-//! the warn tone while it waits and in the error tone once it failed, its file named first and
-//! its folder after, its diff or its command and output under a hairline inside. A request
-//! whose call is on screen is answered on the call's card.
+//! Every call is one line, whatever it did: its mark, what it did (a file named first and its
+//! folder after), how it stands, how long it took, and a disclosure that shows under the
+//! pointer. Opened, its diff, its command and output or its sources sit under it in a quiet
+//! well indented to its words. A call that only looked is muted; one that changed or ran
+//! something is a step stronger. How it stands is said by its mark and a word, never by an
+//! edge: no call is a card, so no row of the thread is boxed where its neighbours are not. A
+//! request whose call is on screen is answered under the call's line.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -17,31 +18,15 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
-use slopty_theme::{Rgb, Surfaces, alpha};
+use slopty_theme::{Rgb, Surfaces};
 
 use super::{PEEK_LINES, TOOL_ROW, ThreadView, call_path, patch_of, path_patch, tail, tool_icon};
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
 use crate::icons::{FileType, Glyph, IconName};
 use crate::kit;
-
-/// How a call is drawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Look {
-    /// One quiet line: it only looked.
-    Line,
-    /// A card: it changed something, ran something, or waits on the person.
-    Card,
-}
-
-impl Look {
-    /// How `call` is drawn.
-    pub(super) fn of(call: &ToolCall) -> Self {
-        if rows::quiet(call) { Self::Line } else { Self::Card }
-    }
-}
 
 /// `text` with the paths in it as a person reads them: under the agent's folder `cwd` relative
 /// to it (`/w/app/src/x.rs` reads `src/x.rs`, by either of macOS's names for a temporary
@@ -94,15 +79,16 @@ const fn failed(state: &ToolState) -> bool {
     matches!(state, ToolState::Failed | ToolState::Rejected | ToolState::Cancelled)
 }
 
-/// The tone a call's card is edged in, and how much of it: the warn tone while the call waits
-/// on the person, the error tone once it failed; none for the rest, which rests as any card.
-const fn edge_tone(state: &ToolState, s: &Surfaces) -> Option<(Rgb, f32)> {
-    if matches!(state, ToolState::Pending { .. }) {
-        Some((s.warn, alpha::ASKING_EDGE))
-    } else if failed(state) {
-        Some((s.error, alpha::FAILED_EDGE))
-    } else {
-        None
+/// What a call's line says of how it stands, and in which tone, once that is not "done" or
+/// "under way" (which its mark and its time say): it waits on the person, it failed, it was
+/// not allowed, or it was stopped. The word is the state's one cue besides the mark's tone.
+const fn standing(state: &ToolState, s: &Surfaces) -> Option<(&'static str, Rgb)> {
+    match state {
+        ToolState::Pending { .. } => Some(("Waiting for you", s.warn)),
+        ToolState::Failed => Some(("Failed", s.error)),
+        ToolState::Rejected => Some(("Not allowed", s.text_muted)),
+        ToolState::Cancelled => Some(("Stopped", s.text_muted)),
+        _ => None,
     }
 }
 
@@ -112,7 +98,6 @@ impl ThreadView {
         let ItemBody::Tool(call) = &item.body else { return div().into_any_element() };
         // A subagent's call opens its thread, once the table has it.
         let child = call.child.filter(|c| self.hub.read(cx).threads().rows().rows.contains_key(c));
-        let look = Look::of(call);
         let waiting = matches!(call.state, ToolState::Pending { .. });
         // What a call asks the person to allow shows unasked.
         let open = self.items_open.contains(id) || (waiting && child.is_none());
@@ -120,72 +105,50 @@ impl ThreadView {
             .ended_ms
             .filter(|end| *end > item.at_ms && !item.at_ms.is_zero())
             .map(|end| kit::duration(Duration::from_millis(end.millis_since(item.at_ms))));
-        let line = self.call_line(id, call, look, open, child, took, cx);
-        let body = open
-            .then(|| self.sources(id, call, look).or_else(|| self.tool_body(id, call, look)))
-            .flatten();
+        let line = self.call_line(id, call, open, child, took, cx);
+        let body =
+            open.then(|| self.sources(id, call).or_else(|| self.tool_body(id, call))).flatten();
         let pictures = if open { self.pictures_row(&call.images, false, cx) } else { None };
-        let answers = self
-            .answered_inline(ix)
-            .then(|| self.shown_waiting(cx).cloned())
-            .flatten()
-            .map(|request| self.answers_row(self.answer_buttons(&request, cx)));
+        let answers =
+            self.answered_inline(ix).then(|| self.shown_waiting(cx).cloned()).flatten().and_then(
+                |request| {
+                    let release = self.release_button(&request, cx);
+                    self.decision(&request, release, cx)
+                        .map(|d| div().w_full().py(self.z(self.theme.spacing.xs)).child(d))
+                },
+            );
         if let Some(ToolDetail::Plan { text }) = &call.detail {
             let answers = answers.map(gpui::IntoElement::into_any_element);
             return self.plan_card(id, call, text, answers, cx);
         }
         let theme = &self.theme;
-        let s = theme.surfaces;
-        match look {
-            Look::Line => div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(self.z(theme.spacing.xxs))
-                .child(line)
-                .children(body)
-                .children(pictures.map(|p| div().pl(self.z(TOOL_ROW)).child(p)))
-                .children(answers)
-                .into_any_element(),
-            Look::Card => kit::card(theme)
-                .debug_selector({
-                    let id = id.0.clone();
-                    move || format!("call-card-{id}")
-                })
-                .w_full()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .rounded(self.z(theme.radii.md))
-                // A dashed edge said "failed" by drawing, which GPUI fakes: the tone says it.
-                .map(|el| match edge_tone(&call.state, &s) {
-                    Some((tone, share)) => {
-                        el.border(kit::hair(theme)).border_color(hsla_alpha(tone, share))
-                    }
-                    None => el,
-                })
-                .child(line)
-                .children(body.map(|b| {
-                    div()
-                        .w_full()
-                        .border_t(kit::hair(theme))
-                        .border_color(hsla(s.border_subtle))
-                        .child(b)
-                }))
-                .children(pictures.map(|p| div().p(self.z(theme.spacing.xs)).child(p)))
-                .children(answers)
-                .into_any_element(),
-        }
+        // Under the line, indented to its words: the body in its well, the pictures, the
+        // answers.
+        let under =
+            |el: AnyElement| div().w_full().pl(self.z(TOOL_ROW + theme.spacing.xs)).child(el);
+        div()
+            .debug_selector({
+                let id = id.0.clone();
+                move || format!("call-{id}")
+            })
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(self.z(theme.spacing.xxs))
+            .child(line)
+            .children(body.map(under))
+            .children(pictures.map(|p| under(p.into_any_element())))
+            .children(answers.map(|a| under(a.into_any_element())))
+            .into_any_element()
     }
 
-    /// A call's own line: its mark, what it did (a file named first), how it stands, how long
-    /// it took, and the disclosure.
+    /// A call's own line: its mark (in the error tone once it failed), what it did (a file
+    /// named first), how it stands, how long it took, and the disclosure.
     #[expect(clippy::too_many_arguments, reason = "the parts of one line, read once")]
     fn call_line(
         &self,
         id: &ItemId,
         call: &ToolCall,
-        look: Look,
         open: bool,
         child: Option<slopty_proto::thread::ThreadId>,
         took: Option<String>,
@@ -195,20 +158,27 @@ impl ThreadView {
         let s = theme.surfaces;
         let mark = match call.state {
             ToolState::Streaming | ToolState::Running => self.spinner(false),
-            ToolState::Pending { .. } => self.spinner(true),
+            ToolState::Pending { .. } => self.needs_you(),
             _ => {
                 let kind = Glyph::Icon(tool_icon(&call.kind));
                 let glyph = call_path(call).and_then(FileType::of).map_or(kind, Glyph::File);
-                crate::icons::glyph(
-                    theme,
-                    glyph,
-                    self.z(theme.typography.icon()),
-                    hsla(s.text_muted),
-                )
+                let tone = if failed(&call.state) { s.error } else { s.text_muted };
+                crate::icons::glyph(glyph, self.z(theme.typography.icon()), hsla(tone))
             }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
-        let title = if call.title.is_empty() { call.name.clone() } else { tidy(&call.title, &cwd) };
+        // An MCP tool by what it does, then its server muted after it: "App click ·
+        // computer-use", never the agent's own "computer-use: app_click". The raw id stays in
+        // the open call's detail.
+        let mcp = match &call.detail {
+            Some(ToolDetail::Mcp(m)) => Some((humane(&m.tool), m.server.clone())),
+            _ => None,
+        };
+        let title = match &mcp {
+            Some((tool, server)) => format!("{tool} \u{b7} {server}"),
+            None if call.title.is_empty() => call.name.clone(),
+            None => tidy(&call.title, &cwd),
+        };
         let label = match (&call.state, child) {
             (ToolState::Streaming, _) => format!("Preparing {}", call.name),
             (_, Some(_)) => format!("Subagent {title}"),
@@ -218,13 +188,16 @@ impl ThreadView {
             let (name, dir) = lines::name_first(path);
             (name.to_owned(), tidy(&format!("{dir}/"), &cwd).trim_end_matches('/').to_owned())
         });
+        let a_file = file.is_some();
+        let file = file.or(mcp);
         let changes = patch_of(call).and_then(|p| kit::changes(theme, p.added, p.removed));
         let found = match &call.detail {
             Some(ToolDetail::WebSearch(search)) => sources_words(&search.links),
             _ => None,
         };
-        let quiet = look == Look::Line;
+        let quiet = rows::quiet(call);
         let ink = if quiet { s.text_muted } else { s.text_secondary };
+        let lead_ink = if a_file { s.text } else { ink };
         let group: SharedString = format!("call-{}", id.0).into();
         let what = match file {
             Some((name, dir)) => div()
@@ -239,7 +212,7 @@ impl ThreadView {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .text_color(hsla(s.text))
+                        .text_color(hsla(lead_ink))
                         .child(SharedString::from(name)),
                 )
                 .child(
@@ -284,7 +257,6 @@ impl ThreadView {
             .items_center()
             .gap(self.z(theme.spacing.xs))
             .min_h(self.z(TOOL_ROW))
-            .when(!quiet, |el| el.pr(self.z(theme.spacing.sm)))
             .text_size(self.z(theme.typography.small()))
             .cursor_pointer()
             .child(self.slot().child(mark))
@@ -300,10 +272,10 @@ impl ThreadView {
                     .child(SharedString::from(words))
             }))
             .children(changes)
-            .when(failed(&call.state), |el| el.child(self.icon(IconName::X, s.text_muted)))
-            .when(matches!(call.state, ToolState::Pending { .. }), |el| {
-                el.child(div().flex_none().text_color(hsla(s.text_muted)).child("Waiting for you"))
-            })
+            .children(
+                standing(&call.state, &s)
+                    .map(|(word, tone)| div().flex_none().text_color(hsla(tone)).child(word)),
+            )
             .child(
                 div()
                     .flex_none()
@@ -327,9 +299,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// What an opened call shows: its diff, or its command and output; on a card under its
-    /// line, for a quiet call under a hairline rule.
-    fn tool_body(&self, id: &ItemId, call: &ToolCall, look: Look) -> Option<AnyElement> {
+    /// What an opened call shows, in its [`Self::well`]: its diff, or its command and output.
+    fn tool_body(&self, id: &ItemId, call: &ToolCall) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         if let Some((path, patch)) = path_patch(call) {
@@ -356,10 +327,7 @@ impl ThreadView {
                 }
             }
             let code = ink.code().py(self.z(theme.spacing.xxs)).children(children);
-            return Some(match look {
-                Look::Card => code.into_any_element(),
-                Look::Line => self.ruled(code).into_any_element(),
-            });
+            return Some(self.well(code).into_any_element());
         }
         let command = match &call.detail {
             Some(ToolDetail::Exec(exec)) => Some(exec.command.text.clone()),
@@ -385,17 +353,15 @@ impl ThreadView {
                     .whitespace_normal()
                     .child(SharedString::from(o))
             }));
-        Some(match look {
-            Look::Card => {
-                text.px(self.z(theme.spacing.sm)).py(self.z(theme.spacing.xs)).into_any_element()
-            }
-            Look::Line => self.ruled(text).into_any_element(),
-        })
+        Some(
+            self.well(text.px(self.z(theme.spacing.sm)).py(self.z(theme.spacing.xs)))
+                .into_any_element(),
+        )
     }
 
     /// What a web search came back with, opened: its links numbered, each its title and its
     /// site, opening its page on a press, or on ↵ once Tab is on it.
-    fn sources(&self, id: &ItemId, call: &ToolCall, look: Look) -> Option<AnyElement> {
+    fn sources(&self, id: &ItemId, call: &ToolCall) -> Option<AnyElement> {
         let Some(ToolDetail::WebSearch(search)) = &call.detail else { return None };
         if search.links.is_empty() {
             return None;
@@ -462,25 +428,18 @@ impl ThreadView {
             .aria_label("Sources")
             .text_size(self.z(theme.typography.small()))
             .children(rows);
-        Some(match look {
-            Look::Card => list.p(self.z(theme.spacing.xs)).into_any_element(),
-            Look::Line => self.ruled(div().w_full().child(list)).into_any_element(),
-        })
+        Some(self.well(list.p(self.z(theme.spacing.xs))).into_any_element())
     }
 
-    /// A quiet call's output: under its mark, past a one-point rule, unfilled.
-    fn ruled(&self, content: Div) -> Div {
+    /// An opened call's well: set into the thread's plane ([`kit::inset`]) at the radius of
+    /// what is framed inside content, no edge, clipped to its corners.
+    fn well(&self, content: impl gpui::IntoElement) -> Div {
         let theme = &self.theme;
-        div().w_full().pl(self.z(TOOL_ROW / 2.0)).child(
-            div()
-                .w_full()
-                .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
-                .py(self.z(theme.spacing.xxs))
-                .border_l(kit::hair(theme))
-                .border_color(hsla(theme.surfaces.border_subtle))
-                .text_color(hsla(theme.surfaces.text_muted))
-                .child(content),
-        )
+        kit::inset(div(), theme)
+            .w_full()
+            .overflow_hidden()
+            .rounded(self.z(theme.radii.md))
+            .child(content)
     }
 }
 
@@ -513,11 +472,49 @@ fn sources_words(links: &[slopty_proto::thread::detail::WebLink]) -> Option<Stri
     )
 }
 
+/// A tool's id as words: `app_click`, `appClick` and `app-click` read "App click".
+fn humane(id: &str) -> String {
+    let mut words = String::with_capacity(id.len().saturating_add(2));
+    let mut last: Option<char> = None;
+    for c in id.chars() {
+        let gap = matches!(c, '_' | '-' | ' ' | '.');
+        if gap {
+            if last.is_some_and(|l| l != ' ') {
+                words.push(' ');
+                last = Some(' ');
+            }
+            continue;
+        }
+        if c.is_uppercase() && last.is_some_and(|l| l.is_lowercase() || l.is_ascii_digit()) {
+            words.push(' ');
+        }
+        if words.is_empty() {
+            words.extend(c.to_uppercase());
+        } else {
+            words.extend(c.to_lowercase());
+        }
+        last = Some(c);
+    }
+    let words = words.trim_end().to_owned();
+    if words.is_empty() { id.to_owned() } else { words }
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_proto::thread::{AskId, Clipped, ToolCall, ToolState, kind};
 
-    use super::{Look, host, sources_words, tidy};
+    use super::{host, humane, sources_words, standing, tidy};
+
+    /// An MCP tool reads by what it does, whatever spelling its server gave its id.
+    #[test]
+    fn a_tool_id_reads_as_words() {
+        assert_eq!(humane("app_click"), "App click");
+        assert_eq!(humane("appClick"), "App click");
+        assert_eq!(humane("app-click"), "App click");
+        assert_eq!(humane("create_issue_v2"), "Create issue v2");
+        assert_eq!(humane("__x__"), "X");
+        assert_eq!(humane("___"), "___", "an id with no words stays as it is");
+    }
 
     /// A search's links read as how many and the first two sites, each once.
     #[test]
@@ -570,15 +567,18 @@ mod tests {
         assert_eq!(tidy("ls /w2/src", "/w"), "ls /w2/src", "a sibling is not under it");
     }
 
-    /// A call that only looks is a quiet line; one that changes or runs something, or waits
-    /// on the person, is a card.
+    /// A call's line says how it stands in a word once that is more than done or under way:
+    /// waiting and failed in their tones, the rest muted. No state draws an edge.
     #[test]
-    fn a_call_that_acts_is_a_card() {
-        assert_eq!(Look::of(&call(kind::READ, ToolState::Completed)), Look::Line);
-        assert_eq!(Look::of(&call(kind::SEARCH, ToolState::Running)), Look::Line);
-        assert_eq!(Look::of(&call(kind::EDIT, ToolState::Completed)), Look::Card);
-        assert_eq!(Look::of(&call(kind::EXEC, ToolState::Failed)), Look::Card);
+    fn a_call_says_how_it_stands_in_a_word() {
+        let s = slopty_theme::Theme::default().surfaces;
         let asks = ToolState::Pending { ask: AskId("a".to_owned()) };
-        assert_eq!(Look::of(&call(kind::FETCH, asks)), Look::Card);
+        assert_eq!(standing(&asks, &s), Some(("Waiting for you", s.warn)));
+        assert_eq!(standing(&ToolState::Failed, &s), Some(("Failed", s.error)));
+        assert_eq!(standing(&ToolState::Rejected, &s), Some(("Not allowed", s.text_muted)));
+        assert_eq!(standing(&ToolState::Cancelled, &s), Some(("Stopped", s.text_muted)));
+        assert_eq!(standing(&ToolState::Completed, &s), None);
+        assert_eq!(standing(&ToolState::Running, &s), None);
+        let _quiet = call(kind::READ, ToolState::Completed);
     }
 }

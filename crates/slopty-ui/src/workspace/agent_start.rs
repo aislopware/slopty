@@ -111,9 +111,7 @@ impl WorkspaceView {
             .into_iter()
             .map(|agent| {
                 let label = format!("New {} agent", agent_label(&agent));
-                let glyph = Glyph::agent(&agent.0);
-                PaletteItem::new(&label, IconName::Sparkles, Box::new(NewAgentOf { agent }), &[])
-                    .with_icon(glyph)
+                PaletteItem::new(&label, Box::new(NewAgentOf { agent }), &[])
             })
             .collect()
     }
@@ -141,12 +139,11 @@ impl WorkspaceView {
                     .into_iter()
                     .map(|agent| {
                         let label = agent_label(&agent);
-                        let glyph = Glyph::agent(&agent.0);
                         let action: Box<dyn gpui::Action> = match chosen {
                             Some(worker) => Box::new(NewAgentOn { agent, worker }),
                             None => Box::new(NewAgentOf { agent }),
                         };
-                        PaletteItem::new(&label, IconName::Sparkles, action, &[]).with_icon(glyph)
+                        PaletteItem::new(&label, action, &[]).with_icon(Glyph::AGENT)
                     })
                     .collect();
                 self.open_step(lines, PICK_AGENT, window, cx);
@@ -203,7 +200,8 @@ impl WorkspaceView {
                     .map(|worker| {
                         let name = self.worker_name(worker);
                         let action = Box::new(NewAgentOn { agent: agent.clone(), worker });
-                        PaletteItem::new(&name, IconName::Server, action, &[])
+                        PaletteItem::new(&name, action, &[])
+                            .with_icon(Glyph::Icon(IconName::Server))
                     })
                     .collect();
                 self.open_step(lines, PICK_MACHINE, window, cx);
@@ -253,7 +251,10 @@ impl WorkspaceView {
             let action =
                 StartThread { worker, agent: agent.clone(), cwd: cwd.clone(), worktree: true };
             let shown = format!("{NEW_WORKTREE} {name}");
-            worktrees.push(PaletteItem::new(&shown, IconName::GitBranch, Box::new(action), &[]));
+            worktrees.push(
+                PaletteItem::new(&shown, Box::new(action), &[])
+                    .with_icon(Glyph::Icon(IconName::GitBranch)),
+            );
             repos.push(repo);
         }
         let mut lines: Vec<PaletteItem> = folders
@@ -261,12 +262,13 @@ impl WorkspaceView {
             .map(|cwd| {
                 let shown = super::tile::cwd_tail(&cwd, home);
                 let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
-                PaletteItem::new(&shown, IconName::Folder, Box::new(action), &[])
+                PaletteItem::new(&shown, Box::new(action), &[])
+                    .with_icon(Glyph::Icon(IconName::Folder))
             })
             .collect();
         lines.extend(worktrees);
         let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
-        lines.push(PaletteItem::new(RESUME_PAST, IconName::RotateCcwClock, past, &[]));
+        lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
         self.open_step(lines, PICK_FOLDER, window, cx);
     }
 
@@ -392,10 +394,9 @@ fn session_line(
     let age =
         session.updated_ms.map(|at| Duration::from_millis(now.saturating_sub(at.as_millis())));
     let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
-    let glyph = Glyph::agent(&session.agent.0);
     let action = Box::new(ResumeSession { worker, session: Box::new(session) });
-    PaletteItem::new(&label, IconName::RotateCcwClock, action, &[])
-        .with_icon(glyph)
+    PaletteItem::new(&label, action, &[])
+        .with_icon(Glyph::AGENT)
         .in_dir(cwd)
         .aged(age)
         .about((!about.is_empty()).then_some(about))

@@ -661,7 +661,6 @@ impl FolderView {
                 .border_b(crate::kit::hair(theme))
                 .border_color(hsla(theme.surfaces.border_subtle))
                 .child(crate::icons::glyph(
-                    theme,
                     Glyph::Icon(IconName::FolderPlus),
                     px(theme.typography.icon() * k),
                     hsla(theme.surfaces.text_secondary),
@@ -689,7 +688,6 @@ impl FolderView {
             .px(px(theme.spacing.inset() * k))
             .opacity(ASKED)
             .child(crate::icons::glyph(
-                theme,
                 Glyph::Icon(IconName::Folder),
                 px(theme.typography.icon() * k),
                 hsla(theme.surfaces.text_secondary),
@@ -1043,12 +1041,7 @@ impl FolderView {
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
                 this.clicked(ix, ev.click_count(), cx);
             }))
-            .child(crate::icons::glyph(
-                theme,
-                icon,
-                px(theme.typography.icon() * k),
-                hsla(ink.icon),
-            ))
+            .child(crate::icons::glyph(icon, px(theme.typography.icon() * k), hsla(ink.icon)))
             .child(self.renaming(&entry.name).unwrap_or_else(|| {
                 div()
                     .flex_1()
@@ -1286,18 +1279,8 @@ pub fn files_palette_items(
     let (upload, download) =
         if ios { (UPLOAD_FROM_FILES, SAVE_TO_FILES) } else { (UPLOAD, DOWNLOAD) };
     vec![
-        crate::palette::PaletteItem::new(
-            upload,
-            IconName::Upload,
-            Box::new(UploadFromFiles),
-            bindings,
-        ),
-        crate::palette::PaletteItem::new(
-            download,
-            IconName::Download,
-            Box::new(SaveToFiles),
-            bindings,
-        ),
+        crate::palette::PaletteItem::new(upload, Box::new(UploadFromFiles), bindings),
+        crate::palette::PaletteItem::new(download, Box::new(SaveToFiles), bindings),
     ]
 }
 
@@ -1305,13 +1288,13 @@ pub fn files_palette_items(
 /// trash.
 #[must_use]
 pub fn folder_palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
-    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
-        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    let line = |label: &str, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, action, bindings)
     };
     vec![
-        line(NEW_FOLDER, IconName::FolderPlus, Box::new(NewFolder)),
-        line(RENAME_OR_MOVE, IconName::Pencil, Box::new(RenameSelected)),
-        line(MOVE_TO_TRASH, IconName::Trash, Box::new(TrashSelected)),
+        line(NEW_FOLDER, Box::new(NewFolder)),
+        line(RENAME_OR_MOVE, Box::new(RenameSelected)),
+        line(MOVE_TO_TRASH, Box::new(TrashSelected)),
     ]
 }
 

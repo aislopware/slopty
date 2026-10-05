@@ -80,8 +80,9 @@ fn a_refused_intent_says_why_until_dismissed(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(moded).is_some(), "the other stays");
 }
 
-/// "Deny…" turns the request's answers into a field: what is written goes with the plain deny
-/// as the answer's message, and Cancel brings the answers back.
+/// "Deny with a reason…", behind the deny's chevron, turns the request's answers into a field:
+/// what is written goes with the plain deny as the answer's message, and Cancel brings the
+/// answers back.
 #[gpui::test]
 fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -93,14 +94,16 @@ fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
     cx.run_until_parked();
 
-    click(cx, "deny-why-a");
+    click(cx, "denials-a");
+    click(cx, "denials-menu-a-why");
     assert!(cx.debug_bounds("deny-reason-a").is_some(), "the field is up");
     assert!(cx.debug_bounds("answer-a-allow").is_none(), "in the answers' place");
     click(cx, "deny-why-cancel");
     assert!(cx.debug_bounds("answer-a-allow").is_some(), "the answers are back");
     assert!(intents(&sent).is_empty(), "nothing went");
 
-    click(cx, "deny-why-a");
+    click(cx, "denials-a");
+    click(cx, "denials-menu-a-why");
     cx.simulate_input("Not on main, use a branch");
     cx.simulate_keystrokes("enter");
     assert_eq!(
@@ -110,6 +113,59 @@ fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
             choice: "deny".to_owned(),
             message: Some("Not on main, use a branch".to_owned()),
         }]
+    );
+}
+
+/// An approval is one decision: Deny and Allow side by side a base unit apart, the solid last;
+/// "Deny and stop" waits behind the deny's chevron and answers from there; the standing grant
+/// stands under the row with its reach written out whole, never in the row.
+#[gpui::test]
+fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Choice, Effect};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let mut asks = approval("a");
+    let choice = |id: &str, label: &str, effect, scope: Option<&str>, stops| Choice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        effect,
+        scope: scope.map(str::to_owned),
+        stops,
+    };
+    asks.options = vec![
+        choice("always", "Always allow", Effect::Allow, Some("/work; accept edits mode"), false),
+        choice("deny", "Deny", Effect::Deny, None, false),
+        choice("stop", "Deny and stop", Effect::Deny, None, true),
+        choice("allow", "Allow", Effect::Allow, None, false),
+    ];
+    state.requests = vec![asks];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let bounds = |cx: &mut gpui::VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is on show"))
+    };
+    let (deny, chevron, allow) =
+        (bounds(cx, "answer-a-deny"), bounds(cx, "denials-a"), bounds(cx, "answer-a-allow"));
+    assert!(deny.right() <= chevron.left() && chevron.right() < allow.left(), "deny, then allow");
+    let gap = f32::from(allow.left() - chevron.right());
+    assert!((gap - 8.0).abs() < 0.5, "a base unit apart: {gap}");
+    assert!(cx.debug_bounds("answer-a-stop").is_none(), "the other denial waits in its menu");
+    let standing = bounds(cx, "standing-a");
+    assert!(standing.top() >= allow.bottom(), "the standing grant under the row");
+    assert!(standing.contains(&bounds(cx, "answer-a-always").center()), "and only there");
+
+    click(cx, "denials-a");
+    cx.run_until_parked();
+    click(cx, "denials-menu-a-stop");
+    cx.run_until_parked();
+    assert_eq!(
+        intents(&sent),
+        [Intent::Answer { ask: AskId("a".to_owned()), choice: "stop".to_owned(), message: None }]
     );
 }
 

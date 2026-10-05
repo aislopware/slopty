@@ -26,6 +26,7 @@ mod disclosure;
 pub mod find;
 mod fit;
 pub mod menu;
+pub mod progress;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
 pub use disclosure::Disclosure;
@@ -603,11 +604,59 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.band))
 }
 
-/// `el` drawn as a field's ground: the raised tone (white in light, as Radix's and shadcn's
-/// fields are), sunk ([`sunk`]) so it reads as somewhere to type rather than something to press.
+/// `el` drawn as a field's ground: the raised tone, sunk ([`sunk`]) so it reads as somewhere to
+/// type rather than something to press.
+///
+/// In light the raised tone is white on a content a hair off white, so a field with no edge
+/// vanished into the page (the first run's address field read as a placeholder floating
+/// beside its button): there it wears the quieter hairline, as Radix's and shadcn's light
+/// fields do. In dark the wash already stands off the plane, and the field is a well with no
+/// edge. Under Increase Contrast the hairline is drawn in both.
 #[must_use]
 pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
-    sunk(el.bg(raised_fill(theme)), theme, 0.0)
+    let ringed =
+        theme.variant() == Variant::Light || theme.contrast == slopty_theme::Contrast::Increased;
+    let el = el.bg(raised_fill(theme));
+    if ringed {
+        let ring = if theme.variant() == Variant::Light {
+            theme.surfaces.border_subtle
+        } else {
+            theme.surfaces.border
+        };
+        sunk(el.border(hair(theme)).border_color(hsla(ring)), theme, theme.hair())
+    } else {
+        sunk(el, theme, 0.0)
+    }
+}
+
+/// A search field in chrome: a capsule a row tall in the panel's own wash.
+///
+/// The magnifier leads at the icon size in the muted ink, then whatever the caller puts in it (a
+/// scope's token, the input, a way to clear it).
+///
+/// It is chrome, not a document's field: no white ground, no ring and no sunk shade, which made
+/// the navigator's filter the brightest, hardest-edged thing beside the traffic lights. While it
+/// holds the keyboard (`focused`) it takes the selected fill and the hairline ring inside its
+/// edge ([`selected`]); under Increase Contrast it wears the hairline at rest too. As Apple's
+/// sidebar search, `MonoCode`'s and Zed's are.
+#[must_use]
+pub fn search_field(theme: &Theme, focused: bool) -> Div {
+    let (s, spacing) = (theme.surfaces, theme.spacing);
+    let increased = theme.contrast == slopty_theme::Contrast::Increased;
+    selected(div(), theme, focused)
+        .h(px(theme.density.row))
+        .px(px(spacing.sm))
+        .flex()
+        .items_center()
+        .gap(px(spacing.xs + spacing.xxs))
+        .rounded_full()
+        .when(increased, |el| el.border(hair(theme)).border_color(hsla(s.border)))
+        .child(crate::icons::icon(
+            theme,
+            crate::icons::IconName::Search,
+            crate::icons::IconSize::Inline,
+            hsla(s.text_muted),
+        ))
 }
 
 /// A card: [`raised`] at `radii.md`, the caller adding the identity and the padding.
@@ -1210,6 +1259,57 @@ pub fn icon_toggle(
         .bg(hsla(s.selected))
 }
 
+/// A toggle that is its own short words, `face` ("Aa", "W", ".*"), in an icon button's square:
+/// a find's match case, whole word and pattern, the way Xcode and the terminals label them.
+///
+/// A glyph for "case sensitive" or "regex" has to be learnt; the letters say it. The face is at
+/// the caption size and the medium weight, in the secondary ink until on, when it takes the text
+/// and the selected wash as [`icon_toggle`] does. Its name, said to a screen reader and in its
+/// hint, is `label`.
+#[must_use]
+pub fn text_toggle(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    face: &'static str,
+    label: &'static str,
+    on: bool,
+    k: f32,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let ink = if on { s.text } else { s.text_secondary };
+    let el = div()
+        .id(gpui::ElementId::Name(id))
+        .debug_selector(move || selector)
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(label)
+        .aria_toggled(if on {
+            gpui::accesskit::Toggled::True
+        } else {
+            gpui::accesskit::Toggled::False
+        })
+        .flex_none()
+        .size(px(icon_button_side(theme) * k))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.radii.sm * k))
+        .cursor_pointer()
+        .font_family(theme.typography.ui_family.clone())
+        .text_size(px(theme.typography.caption() * k))
+        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+        .text_color(hsla(ink))
+        .active(move |el| el.bg(hsla(s.pressed)))
+        .child(face);
+    let el = crate::a11y::tab_stop(el, s.accent);
+    if on {
+        el.bg(hsla(s.selected))
+    } else {
+        eased(el).hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+    }
+}
+
 /// A tick box at the chrome's zoom `k`, the size of an inline icon.
 ///
 /// A sunk hairline square while off, the neutral [`solid`] with its tick while on, as macOS
@@ -1647,6 +1747,7 @@ mod tests {
             crate::folder::ENCLOSING_FOLDER,
             crate::settings_form::PRESS_KEYS,
             crate::settings_form::NO_KEYS,
+            crate::settings_form::ADD_KEYS,
             crate::settings_form::RESET_KEYS,
             crate::workspace::COPY_COMMAND,
             crate::palette::NO_COMMAND_MATCHES,
@@ -2297,6 +2398,115 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The thread's stream is type on one plane: no call and no plan in it is a card or rests
+    /// raised. A card there boxed the calls that changed something while their neighbours that
+    /// only looked were lines, and a stream of type then wore four kinds of edge; how a call
+    /// stands is its mark and a word. An opened call's body is a well ([`super::inset`]).
+    #[test]
+    fn the_stream_wears_no_card() {
+        const STREAM: [&str; 2] =
+            ["conversation/thread/view/tools.rs", "conversation/thread/view/plan.rs"];
+        const RAISED: [&str; 4] = ["kit::card(", "kit::card_part(", "kit::raised(", "raised_part("];
+        let mut wrong = Vec::new();
+        for (file, no, line) in chrome_lines("slopty-ui/src") {
+            let code = !line.trim_start().starts_with("//");
+            if !code || !STREAM.iter().any(|s| file.ends_with(s)) {
+                continue;
+            }
+            if let Some(raised) = RAISED.iter().find(|r| line.contains(*r)) {
+                wrong.push(format!("{file}:{no}: `{raised}` in the stream: {}", line.trim()));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A command in the palette is its words: no line an action runs leads with an icon. Only a
+    /// step that lists things (an agent, a machine, a folder, a checkout, a past session) marks
+    /// its lines with what they are, and only there may `with_icon` follow a command's line.
+    #[test]
+    fn a_command_is_its_words() {
+        const THINGS: &str = "workspace/agent_start.rs";
+        let bindings: Vec<gpui::KeyBinding> = Vec::new();
+        let lines = crate::workspace::palette_items()
+            .into_iter()
+            .chain(crate::conversation::palette_items(&bindings))
+            .chain(crate::project::palette_items(&bindings))
+            .chain(crate::folder::folder_palette_items(&bindings))
+            .chain(crate::file::editor_palette_items(&bindings));
+        let marked: Vec<String> =
+            lines.filter(|line| line.icon.is_some()).map(|line| line.label).collect();
+        assert!(marked.is_empty(), "commands with an icon: {marked:?}");
+
+        let mut wrong = Vec::new();
+        let source = chrome_lines("slopty-ui/src");
+        for (ix, (file, no, line)) in source.iter().enumerate() {
+            if !line.contains(".with_icon(")
+                || file.ends_with(THINGS)
+                || file.ends_with("palette.rs")
+            {
+                continue;
+            }
+            let chain = source[ix.saturating_sub(4)..=ix].iter().filter(|(f, ..)| f == file);
+            if chain.clone().any(|(.., l)| l.contains("PaletteItem::new(")) {
+                wrong.push(format!("{file}:{no}: a command given an icon: {}", line.trim()));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A width set to a share of its parent (`.w(relative(…))`) next to a share, a fraction, a
+    /// progress or the accent's fill: a progress bar drawn by hand.
+    fn hand_drawn_progress(lines: &[(String, usize, String)], ix: usize) -> bool {
+        const NEAR: [&str; 4] = ["accent_fill", "progress", "fraction", "share"];
+        let (file, _, line) = &lines[ix];
+        let squeezed: String = line.split_whitespace().collect();
+        let code = !line.trim_start().starts_with("//");
+        if !code || !(squeezed.contains(".w(relative(") || squeezed.contains(".w(gpui::relative("))
+        {
+            return false;
+        }
+        lines[ix.saturating_sub(6)..lines.len().min(ix.saturating_add(7))]
+            .iter()
+            .filter(|(f, ..)| f == file)
+            .any(|(.., l)| NEAR.iter().any(|n| l.contains(n)))
+    }
+
+    /// Progress is drawn one way, by [`super::progress`]: a capsule on a quiet track that glides,
+    /// breathes when its length is unknown, waits before it shows and carries its value. Five
+    /// had been drawn by hand, three of them square lines along an edge that read as stray rules.
+    /// The files below draw theirs by hand until lane D's patches move them; each goes from the
+    /// list as its patch lands.
+    #[test]
+    fn a_progress_is_kit_progress() {
+        const UNTIL_MOVED: [&str; 4] = [
+            "workspace/tile.rs",
+            "workspace/navigator.rs",
+            "workspace/statusbar.rs",
+            "project/view.rs",
+        ];
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            let lines = chrome_lines(dir);
+            for (ix, (file, no, line)) in lines.iter().enumerate() {
+                let own = file.ends_with("kit/progress.rs")
+                    || UNTIL_MOVED.iter().any(|f| file.ends_with(f));
+                if !own && hand_drawn_progress(&lines, ix) {
+                    wrong.push(format!("{file}:{no}: progress by hand: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn the_progress_check_knows_a_bar_from_a_column() {
+        let line = |l: &str| ("f.rs".to_owned(), 1, l.to_owned());
+        let bar = [line("let share = done / total;"), line("div().w(relative(share))")];
+        assert!(hand_drawn_progress(&bar, 1));
+        let column = [line("let wide = true;"), line("div().w(relative(0.5))")];
+        assert!(!hand_drawn_progress(&column, 1), "a half-width column is no progress");
+    }
+
     /// A text size, a radius or a control's height written as a literal: a type size off the
     /// scale, a corner off the radii, a row off the density.
     fn raw_size(line: &str) -> Option<&'static str> {
@@ -2545,6 +2755,26 @@ mod tests {
             assert_eq!(lip.len(), usize::from(dark), "{variant:?}: the lip is dark's");
             let tracked = track(&theme).style().box_shadow.clone().unwrap_or_default();
             assert_eq!(tracked.len(), 1 + usize::from(dark), "{variant:?}: the track is sunk");
+        }
+    }
+
+    /// A field stands off the page in both modes: in light by the quieter hairline round its
+    /// white, in dark by its wash alone.
+    #[test]
+    fn a_field_is_seen_on_its_page() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let style = field(div(), &theme).style().clone();
+            let edged = style.border_widths.top.is_some_and(|w| w != px(0.0).into());
+            assert_eq!(edged, variant == Variant::Light, "{variant:?}: the hairline is light's");
+            if variant == Variant::Light {
+                assert_eq!(
+                    style.border_color,
+                    Some(hsla(theme.surfaces.border_subtle)),
+                    "the quieter hairline"
+                );
+            }
+            assert!(style.box_shadow.is_some_and(|l| l.iter().all(|l| l.inset)), "{variant:?}");
         }
     }
 

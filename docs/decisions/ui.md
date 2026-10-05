@@ -4907,7 +4907,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     it shows at, and drawn on the first frame: `img()` from an asset path rasterises an SVG
     at its intrinsic size and loads it asynchronously, which blurs a 32-unit drawing at 14 pt
     on Retina and leaves the slot blank for a frame.
-  - **An agent shows its own mark only where its licence allows one.** pi's mark is drawn
+  - **An agent shows its own mark only where its licence allows one** (superseded 2026-10-05
+    by "No agent wears a mark of its own" below: no agent has a mark). pi's mark is drawn
     from the four-by-four layout its MIT source spells out, in its own colours; OpenCode's
     comes from its MIT repository, without the tile behind it, in the ink beside it as its
     light and dark variants are. Anthropic allows its marks only in materials it approves
@@ -4977,7 +4978,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `figures::tests::a_model_is_one_name_with_its_provider_beside_it`,
     `markdown::tests::a_line_says_where_its_code_is`,
     `thread::tests::questions::a_request_stands_whole_and_the_rest_of_the_tray_gives_way`,
-    `thread::tests::face::a_call_that_asks_as_it_arrives_is_answered_on_its_card_at_once`,
+    `thread::tests::face::a_call_that_asks_as_it_arrives_is_answered_under_it_at_once`,
     `workspace::tests::thread_start` (the folder said short),
     `workspace::tests::tiles::a_command_is_named_without_the_cd_before_it`,
     `workspace::tests::projects::a_project_s_agents_are_named_by_their_part_in_it`,
@@ -5905,7 +5906,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     from the composer or anywhere else in the thread, and the Esc that closes it never also
     stops the turn under way. A press anywhere closes it.
   - Tests: `conversation::thread::tests::composing::up_recalls_the_messages_sent_and_down_comes_back`,
-    `conversation::thread::tests::face::a_plan_is_a_card_that_takes_its_answer`,
+    `conversation::thread::tests::face::a_plan_in_the_thread_takes_its_answer`,
     `conversation::thread::tests::face::a_picture_opens_large_and_esc_closes_it`,
     `conversation::thread::rows::tests::a_plan_stands_outside_the_fold_and_out_of_a_group`,
     `conversation::thread::view::plan::tests::{a_plan_says_how_it_stands_only_where_it_was_asked,
@@ -5990,7 +5991,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     mostly white. It is now a 600 × 200 crop of the header it shows, as a person pastes one.
   - Tests: `conversation::thread::tests::face::background_work_opens_from_a_chip`,
     `conversation::thread::view::tray::tests::background_work_says_what_is_true`,
-    `conversation::thread::tests::face::a_plan_is_a_card_that_takes_its_answer`; goldens
+    `conversation::thread::tests::face::a_plan_in_the_thread_takes_its_answer`; goldens
     `thread-work`, `thread-work-open`.
 
 - ✅ **Review comments carry the code, as a range, and can go into the draft** (2026-10-04,
@@ -6767,3 +6768,221 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     two tiles in view, both headers sit on the content with nothing drawn along their tops.
     The focused title is in the primary tone and the other is muted, and the tone follows the
     focus.
+
+- ✅ **The thread is type on one plane** (2026-10-05, the premium pass;
+  `.research/premium-pass-2026-10-05.md` T1–T4). The person found the UI still read as
+  generated. In the thread the cause was composition: a call that failed or waited was a card
+  with a coloured edge while its neighbours were lines, the plan was a card of its own, and a
+  request's answers each wore a glyph. Zed's and Codex's threads, and MonoCode's, put every
+  step on one plane and say how it stands in words.
+  - **Every call is a line**, whatever it did or how it stands (`view/tools.rs`). How it stands
+    is its mark and a word after its name: "Waiting for you" in the warn tone, "Failed" in the
+    error tone, "Not allowed", "Stopped". Its body (a diff, a command's output, sources) sits
+    in a quiet well (`kit::inset`, `radii.md`) indented to the line's words. Deleted: the card
+    look (`Look`), the edges in the warn and error tones and their `alpha::FAILED_EDGE` and
+    `alpha::ASKING_EDGE`.
+  - **The plan is type** (`view/plan.rs`): a small muted eyebrow ("Plan", and "· Awaiting
+    approval" in the warn tone while it waits), its heading at the prose size in the medium
+    weight, then its Markdown. The copy shows under the pointer. This supersedes "A plan is a
+    card" in "The thread view recalls what was sent, reads a plan as a card…".
+  - **Rhythm parts the kinds.** Where the thread goes from prose to the lines of calls, or
+    back, and round a plan, the gap grows to `spacing.md`; lines of a kind keep the tight one.
+  - **Answers are words.** A request's buttons carry no glyphs, and the solid one comes last,
+    where macOS puts the default. A group's rule gave way to space. A waiting request, its
+    call and its plan lead with the one *needs you* mark (`ThreadView::needs_you`).
+  - Lint: `kit::tests::the_stream_wears_no_card` (no `kit::card`, `card_part`, `raised` or
+    `raised_part` in the call or plan views).
+  - Tests: `conversation::thread::view::tools::tests::a_call_says_how_it_stands_in_a_word`,
+    `conversation::thread::tests::face::{a_call_that_asks_as_it_arrives_is_answered_under_it_at_once,
+    a_plan_in_the_thread_takes_its_answer}`.
+
+- ✅ **One progress language: `kit::progress`** (2026-10-05, the person's review;
+  `.research/ux-audit-2026-10-05.md` items 1 and 8). Progress was drawn five ways, three of
+  them a hard square line along an edge (the terminal's `OSC 9;4` report, a tile header's
+  upload, a navigator row), and the project board's was a flat double line. macOS, Linear and
+  Zed draw one: a rounded, capped stroke on a soft track that eases to each value.
+  - **`Bar`** is a capsule on the quiet track (`border_subtle`, `border` under Increase
+    Contrast), `spacing.xs` tall. `Progress` says what it shows: a known share glides to it
+    (`Motion::settle`, ease-out); `Busy`, with no share known, breathes its opacity on the spin
+    clock (12 Hz, no frames of its own); `Paused` is muted and `Failed` is the error tone. It
+    shows only after 400 ms (`SHOW_AFTER`), laid out but unseen until then, so a quick task
+    never flashes and nothing jumps; `at_once` skips the wait where the bar is the thing
+    looked at. Under Reduce Motion a share lands at once and `Busy` stands at
+    `alpha::STRONG`. It is a `ProgressIndicator` with its value ("42%") and its name.
+  - **`Segments`** is the board's: one capsule per part (merged, live, up next), each with its
+    own round ends and proportional to its share of the room the gaps leave, the rest the
+    track. It holds still.
+  - **`ring`** is the same in a round slot: an arc with round caps on a `border` track. The
+    composer's context, an attachment's upload and the upload pill in a tile header use it.
+  - **Where each went.** The terminal draws nothing for a report: `TerminalView::progress`
+    says it, `TerminalViewEvent::Progress` tells the workspace, and the tile's header shows a
+    48 pt bar with its figure beside the title (`report-{session}`). The upload line under a
+    tile's header became the pill's ring and figure. A navigator row says the figure, then a
+    still 24 pt bar after it. A picture's upload, a goal's budget and a worker's install use
+    `Bar`. The project board takes `Segments` (lane D's `project/view.rs`).
+  - Deleted: the terminal's sweep and its edge line, `tile::PROGRESS`, the navigator's
+    `progress_line`, `add_worker`'s `SWEEP` and `SEGMENT`, the composer's own ring.
+  - Lint: `kit::tests::a_progress_is_kit_progress` rejects a hand-drawn fraction width beside a
+    progress tone outside the kit; its check of itself is
+    `the_progress_check_knows_a_bar_from_a_column`. The status bar's transfers and the board
+    are waived until they move.
+  - Tests: `kit::progress::tests::{a_share_is_its_figure_in_its_state_s_tone,
+    a_part_of_nothing_is_left_out_and_parts_never_pass_the_whole, an_unknown_share_breathes}`,
+    `terminal::progress::tests::a_report_shows_as_the_kits_progress`,
+    `terminal::view::tests::a_progress_report_is_told_not_drawn_on_the_edge`,
+    `add_worker::tests::a_busy_bar_breathes_on_the_spin_clock_unless_motion_is_reduced`,
+    `workspace::tests::nav_rows::a_progress_report_is_a_figure` and the remote upload tests.
+
+- ✅ **The navigator's top is the lights, and the filter is the first row under them**
+  (2026-10-05, the person's review; UX audit item 3). In light the filter was a white,
+  hard-edged field crammed beside the traffic lights: the brightest thing in the corner.
+  Apple's sidebars, Things and zeron keep that row to the window's controls and put search
+  under it.
+  - The top row is the title bar's height and holds the traffic lights and, past them, the
+    navigator's toggle, at the same place the title bar keeps it while the navigator is
+    hidden, so it never moves.
+  - The filter is `kit::search_field`: a capsule a row tall on the selection's wash, the
+    search glyph leading, `spacing.sm` in from the panel's sides. Holding the keyboard it
+    takes the selected fill and its ring; at rest it has a hairline only under Increase
+    Contrast. No rule under the top: the panel is one surface from top to bottom.
+    This supersedes the navigator parts of "The field is a well" and of "The frame recedes"
+    ("The navigator's filter is a well on the selection's fill").
+  - Test: `workspace::tests::tab_strip::the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`.
+
+- ✅ **The title bar takes the content's tone** (2026-10-05, UX audit item 5). "The frame
+  recedes" put the title bar in the navigator's tone, one frame round the strip. Beside the
+  terminal's ground it read as a band of its own over every tile. The bar now sits on
+  `theme.content()`, so the tiles' headers, the bar and the content are one plane and only the
+  navigator steps off it, as Zed's and Ghostty's do. The bell's badge cuts out of the same tone.
+  This reverses the title bar part of "The frame recedes".
+
+- ✅ **A field is seen on its page in light** (2026-10-05, the premium pass T5). `kit::field`
+  in light was the sunk shade on white, which a hundredth of tone could not part from the
+  page: a field with no edge. It now wears the `border_subtle` hairline in light (`border`
+  under Increase Contrast) with the shade; dark keeps the shade alone. This amends "The field
+  is a well" ("no hairline") for light. Test: `kit::tests::a_field_is_seen_on_its_page`.
+
+- ✅ **A palette on its way out never takes a press, and the navigator keeps its place**
+  (2026-10-05, found by the navigator's new top moving the rows down).
+  - A dismissed palette fades for `Pace::Exit` while it is drawn. It was still lifted over
+    everything at the dialog's priority, so a machine's menu opened in that time lost the press
+    on any row the fading sheet covered. Leaving, it is drawn in its place under a menu
+    (`CommandPalette::render`, `WorkspaceView::render`); live, it is lifted as before. Test:
+    `workspace::tests::bars::the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row`.
+  - The navigator splices its list from the first changed row to the last. When *Needs you*
+    opened at the top in the same frame a row at the foot grew a line, the splice spanned the
+    list and GPUI put the view back at its top. The row at the view's top is now found again
+    by what it shows (a tile, a worker, a group, a thread, a board; `NavRow::anchor`) and the
+    view starts from it as before. Test:
+    `workspace::tests::nav_list::needs_you_lists_a_waiting_tile_scrolled_out_of_view`.
+  - A waiting row in *Needs you* says the agent's words and its place as one line, as a
+    tile's second line does, so the place gives way at the end. It had been pressed to a lone
+    "…" between the words and the answers. Test:
+    `workspace::tests::nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`.
+
+- ✅ **No agent wears a mark of its own: status first, the agent in words** (2026-10-05,
+  `.research/icons-2026-10-05.md` §4.1, with the companions' deletion in `brand.md`). The
+  person saw a tiny orange figure in rows and headers and orange sparkles in the composer:
+  one agent in two marks, neither readable at 1×.
+  - **A row and a header lead with how they stand.** That is the status mark from
+    `icons::Status` whenever there is one. At rest, every agent's tile, thread and palette line
+    shows the same neutral kind glyph (`Glyph::AGENT`) in the row's ink. A row under *Needs
+    you* or *To review* leads with its status mark, where it showed the agent's mark before.
+  - **The agent is named in words.** A tile's place (its header, its navigator row and its
+    palette line) starts with the agent's name ("Claude Code · ~") unless the title already
+    is it. The composer's model chip says the model with no mark. The thread's header and
+    empty state, the branch's agent choices, the screen's driver pill and a file's author tag
+    carry none. A review's comment by an agent and its review button keep the neutral glyph.
+  - **No colour for agents.** Colour stays for meaning: green, amber, red.
+  - The thread's working line shows the spinner, or the *needs you* mark while it waits on
+    the person, in the slot the companion took.
+  - Deleted: `icons::AgentMark`, `Glyph::agent`, the `agents/` assets (pi, `OpenCode`,
+    `code-circle` and their licences), `Surfaces::agent` and its OKLCH with its tests,
+    `slopty_theme::PI`, and the spin clock's `steps_now` and `steps_wake`. `icons::glyph` no
+    longer takes the theme.
+  - Test: `workspace::tests::agent_tile::an_agents_tile_names_it_in_words_beside_the_one_agent_glyph`.
+
+- ✅ **A request is one decision: Allow and Deny, the rest set apart** (2026-10-05, the
+  second critique, finding 03, as ruled). An approval laid five like buttons in a row
+  ("Always allow /work; accept edits mode", "Deny", "Deny…", "Deny and stop", "Allow"), tucked
+  into the composer's head. The person had to read every one to find the two that matter, a
+  standing grant sat at the weight of this once, and the decision read as another way to send
+  the message under it.
+  - **The row is Deny, then Allow**, a base unit apart, the solid last as a dialog's default
+    is (`view/decision.rs`, `arrange`). The solid is the neutral one, never green. A
+    question's answers keep their order in the row, all quiet.
+  - **Other ways to deny are behind the deny's chevron**, in a menu named "Other ways to deny":
+    "Deny with a reason…" first, then every other deny the agent offers ("Deny and stop", a
+    deny that reaches further) with its reach in its words. Deleted: the "Deny…" button.
+  - **A standing grant never sits in the row.** It stands under it, headed "From now on", its
+    words on a quiet button and its reach written out whole at the chrome's size, never cut,
+    since that reach is what the person grants.
+  - **What is asked reads first.** The title is at the task-title size (base + 1,
+    `Typography::task_title`) at the medium weight, the command or words under it at the
+    chrome's size, and a full step of space before the answers.
+  - **It is its own card**, a full step above the composer. The rest of the tray (the plan,
+    the queue, the work in the background) stays the composer's head. Under a call, the same
+    decision answers it, the way back to the agent's own prompt leading the row.
+  - Tests: `conversation::thread::view::decision::tests::{allow_and_deny_lead_and_the_rest_go_where_they_belong,
+    a_standing_grant_never_leads_or_sits_in_the_row, a_questions_answers_keep_their_order_and_none_leads,
+    a_scoped_answer_says_how_far_it_reaches}`,
+    `conversation::thread::tests::doors::{an_approval_is_allow_and_deny_with_the_rest_set_apart,
+    deny_with_a_reason_sends_the_reason_with_the_deny}`.
+
+- ✅ **A command is its words** (2026-10-05, `.research/icons-2026-10-05.md` §4.5, step 2;
+  premium pass T10). Every palette command led with an icon picked to decorate it (a sticky
+  note for "New note", a brain for effort), so the palette read as a grid of clip art and no
+  icon said anything the words did not.
+  - **The palette.** `PaletteItem::new` takes no icon, and its `icon` is optional. Only a line
+    that is a thing leads with what it is: a tile, a machine, a project, a file, a folder, and
+    the agent picker's agents, machines, folders, checkouts and past sessions
+    (`with_icon`). A command keeps an empty slot while other lines show a mark, so every title
+    starts on one edge. Unmute keeps its words.
+  - **The thread.** No brain on the effort chip or on a thought's row, and no glyph on the
+    background work's chip once it has finished or on its tray head; a running spinner and a
+    failure's mark stay, since they say something.
+  - **The find bars** (`kit::FindBar`, the search tile): match case, whole word and pattern
+    are the typographic toggles `Aa`, `W` and `.*` (`kit::text_toggle`), and Replace and Replace
+    all are words.
+  - **Away** is said by its word: the server and the display are their plain glyphs in the
+    muted tone, not a struck-through one.
+  - Lint: `kit::tests::a_command_is_its_words` (no command line from any palette source has
+    an icon, and no `with_icon` follows a `PaletteItem::new` outside the agent picker).
+
+- ✅ **The UX audit's small items** (2026-10-05, `.research/ux-audit-2026-10-05.md` items 7,
+  9, 10, 13, 14, 17 and 18, with the coordinator's amendments; item 19, a shimmer on the
+  working line, was dropped).
+  - **A request answers by key only where it has the keyboard.** ⌘↵ gives its plain allow and
+    ⌘⌫ its plain deny, bound in the `Request` key context alone: the request's card (a press on
+    it, or Tab to one of its answers) and a focused *Needs you* row. They are never bound
+    because the composer is empty, so a request that arrives while the person types never
+    changes what a habitual key does. Both are in the palette and in Settings → Keyboard.
+  - **An empty thread says one thing.** A new one is a `kit::notice`: "New Claude Code
+    thread", then where it works, the machine and the model. A thread whose only row is a
+    request says nothing in the list (its card says it), and one out of reach leaves it to its
+    tile. Reading one says so after the loading grace.
+  - **Away is one word with a clock.** "Reconnecting…" everywhere, from the first dial; past
+    ten seconds the tile says for how long in ten-second steps. A body with nothing to show
+    (a tile kept from the last run, a shell never attached) says it in its middle as a notice
+    with its actions, not in a pill at its foot.
+  - **Touch.** A request's answers are at least a control's height (44 points on touch). The
+    navigator's "+", "…" and chevrons stand at rest on touch, after the readouts, since a
+    finger has no hover.
+  - **Settings → Keyboard** rows are one line: the command's words, what it was when the file
+    changed it, and the caps with no well at rest. The command's name in the file is the row's
+    hint. A command with no keys offers a quiet "Add shortcut" under the pointer, on the
+    keyboard's focus and on touch.
+  - **Words.** The composer invites ("Ask Claude Code…"); "/" and "@" are taught by the "+"
+    menu (Attach files, Commands, Files and symbols). An MCP tool reads by what it does, its
+    server after it ("App click · computer-use").
+  - Tests: `conversation::thread::tests::{a_request_is_answered_by_its_key_only_where_it_has_the_keyboard,
+    an_empty_thread_says_it_is_new_and_a_request_alone_speaks_for_itself,
+    a_requests_answers_are_a_fingers_target_on_touch}`,
+    `workspace::tests::tiles::{reconnecting_says_for_how_long,
+    a_tile_says_how_long_its_worker_has_been_away}`,
+    `workspace::tests::relaunch::a_tile_kept_nowhere_says_where_its_worker_is`,
+    `workspace::tests::frame::a_finger_finds_the_navigators_actions_at_rest`,
+    `workspace::attention::tests::a_focused_needs_you_row_answers_by_its_keys`,
+    `settings_editor::tests::a_chord_is_recorded_into_the_file`,
+    `conversation::thread::view::tools::tests::a_tool_id_reads_as_words`,
+    `conversation::thread::view::composer::tests::the_add_menu_begins_a_command_or_a_mention`.

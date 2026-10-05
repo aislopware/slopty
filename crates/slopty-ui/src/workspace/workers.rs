@@ -1,6 +1,8 @@
 //! Workers coming and going, and what they say: the registry sync that places tiles, the
 //! sessions, the streams and the files behind the tiles.
 
+use std::time::Duration;
+
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
@@ -24,7 +26,7 @@ use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 
 /// How long a quote waits for the composer it is for to be made, its face brought up or its
 /// tile opened for it (an opened tile comes back from the worker first).
-const QUOTE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const QUOTE_WAIT: Duration = Duration::from_secs(5);
 
 impl WorkspaceView {
     /// "Stop sharing the clipboard with …" or "Share the clipboard with …": applied at once
@@ -67,12 +69,7 @@ impl WorkspaceView {
                     format!("Share the clipboard with {}", w.name)
                 };
                 let action = super::actions::ShareClipboard { worker: *key, share: !shared };
-                crate::palette::PaletteItem::new(
-                    &label,
-                    crate::icons::IconName::Clipboard,
-                    Box::new(action),
-                    &[],
-                )
+                crate::palette::PaletteItem::new(&label, Box::new(action), &[])
             })
             .collect()
     }
@@ -195,6 +192,33 @@ impl WorkspaceView {
         (quote.done)(false, cx);
     }
 
+    /// The clock a worker's time out of reach is told by, with the tick that keeps its tiles'
+    /// "Reconnecting for …" current started, once, while any worker is away.
+    fn away_clock(&mut self, cx: &Context<Self>) -> Duration {
+        if !self.away_ticking {
+            self.away_ticking = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(super::tile::AWAY_STEP).await;
+                    let away = this.update(cx, |this, cx| {
+                        let away = this.workers.values().any(|w| w.away_since.is_some());
+                        if away {
+                            cx.notify();
+                        } else {
+                            this.away_ticking = false;
+                        }
+                        away
+                    });
+                    if !matches!(away, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        self.now()
+    }
+
     /// A worker this client has added, before its first connection: its tiles (from the
     /// saved layout) stay where they were, drawn from its items as this device last saw them
     /// until its first snapshot.
@@ -203,6 +227,7 @@ impl WorkspaceView {
             w.name = name;
         } else {
             let mut w = Worker::new(name);
+            w.away_since = Some(self.away_clock(cx));
             if let Some(doc) = self.kept_doc(key) {
                 w.doc = doc;
                 self.items_dirty = true;
@@ -233,6 +258,7 @@ impl WorkspaceView {
         let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
         w.name = name;
         w.status = WorkerStatus::Connected;
+        w.away_since = None;
         self.clip_sharing_changed();
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.link = Some(link);
@@ -287,11 +313,13 @@ impl WorkspaceView {
         status: WorkerStatus,
         cx: &mut Context<Self>,
     ) {
+        let now = self.away_clock(cx);
         let Some(w) = self.workers.get_mut(&key) else { return };
         let unanswered = w.fs_ops.lost();
         let said: Vec<String> =
             unanswered.iter().map(|op| slopty_client::folders::unanswered(&w.name, op)).collect();
         w.status = status;
+        w.away_since.get_or_insert(now);
         w.link = None;
         w.rtt = None;
         w.relay.reset();
@@ -450,7 +478,7 @@ impl WorkspaceView {
     /// Show `rtt` in the readouts for every worker with a round trip, in place of its link's
     /// (`None` shows the link's again). The e2e harness pins it, so what a golden shows never
     /// depends on how busy the machine was; the predictors and the dump keep the live figure.
-    pub fn pin_rtt_readout(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+    pub fn pin_rtt_readout(&mut self, rtt: Option<Duration>, cx: &mut Context<Self>) {
         self.pinned_rtt = rtt;
         let keys: Vec<WorkerKey> = self.workers.keys().copied().collect();
         for key in keys {
@@ -460,7 +488,7 @@ impl WorkspaceView {
     }
 
     /// The round trip the readouts show for `w`: its link's, or the pinned one once it has one.
-    pub(super) fn shown_rtt(&self, w: &Worker) -> Option<std::time::Duration> {
+    pub(super) fn shown_rtt(&self, w: &Worker) -> Option<Duration> {
         shown_rtt(self.pinned_rtt, w.rtt)
     }
 
@@ -477,12 +505,7 @@ impl WorkspaceView {
     }
 
     /// Link RTT of `key`, fanned out to its terminals' predictors and its windows' overlays.
-    pub fn set_rtt(
-        &mut self,
-        key: WorkerKey,
-        rtt: Option<std::time::Duration>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_rtt(&mut self, key: WorkerKey, rtt: Option<Duration>, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&key) else { return };
         let label = super::navigator::rtt_label;
         let changed = w.rtt.map(label) != rtt.map(label);
@@ -883,6 +906,8 @@ impl WorkspaceView {
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => this.terminal_changed(sid, cx),
+            // The header draws the report: the strip's tiles draw again.
+            TerminalViewEvent::Progress => App::notify(cx, this.strip_host.entity_id()),
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();
@@ -1534,10 +1559,7 @@ impl WorkspaceView {
 }
 
 /// The round trip a readout shows for a link measured at `live`: `pinned` once there is one.
-fn shown_rtt(
-    pinned: Option<std::time::Duration>,
-    live: Option<std::time::Duration>,
-) -> Option<std::time::Duration> {
+fn shown_rtt(pinned: Option<Duration>, live: Option<Duration>) -> Option<Duration> {
     live.map(|live| pinned.unwrap_or(live))
 }
 

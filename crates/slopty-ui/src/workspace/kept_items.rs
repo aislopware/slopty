@@ -119,7 +119,7 @@ impl WorkspaceView {
                 el.child(crate::palette::status_slot(theme, IconName::Server, None, ink, k))
                     .child(name.clone())
             });
-        let pill = (!shapes).then(|| self.render_state_pill(tile, None, &state, chrome, cx));
+        let pill = (!shapes).then(|| self.render_state_pill(tile, &state, true, chrome, cx));
         let rect = placed.rect;
         let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
         let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);

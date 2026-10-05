@@ -8,9 +8,12 @@
 //! the bar's. Nothing else: every other action is a key, the palette, or a tile's own header, and
 //! the readouts (the server's state among them) live in the status bar.
 //!
-//! It takes the navigator's tone with no rule under it, so the two read as one frame round the
-//! content, as `MonoCode`'s and Zed's do. A menu fades in as it drops 4 pt from its button, at
-//! once under Reduce Motion.
+//! It takes the content's tone ([`slopty_theme::Theme::content`]) with no rule under it, so the
+//! content runs up to the window's top edge and the navigator is the one panel beside it, as
+//! macOS 26 draws a sidebar beside edge-to-edge content and Linear and the Codex app draw a grey
+//! sidebar beside a white main area. It used to take the navigator's tone, and with the status
+//! bar the chrome read as a grey frame round the content, an older Electron window's look. A
+//! menu fades in as it drops 4 pt from its button, at once under Reduce Motion.
 //!
 //! On a phone the bar is a navigation bar: the workspace's name alone, as the breadcrumb's
 //! first segment says it (the body's size, the medium weight), and what "+" opens folded into
@@ -255,6 +258,24 @@ impl WorkspaceView {
         self.close_menu(window, cx);
     }
 
+    /// The navigator's toggle, at the far leading edge past the traffic lights wherever it
+    /// shows: in the bar while the navigator is hidden, in the navigator's top row while it is
+    /// docked, so it never moves as the navigator opens or closes.
+    pub(super) fn navigator_toggle(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let hint_theme = Rc::new(theme.clone());
+        kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
+            .when(SHORTCUT_HINTS, |el| {
+                kit::hint_timing(el).tooltip(move |_window, cx| {
+                    let keys = crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
+                    cx.new(|_| kit::Hint::new("Navigator", keys, Rc::clone(&hint_theme))).into()
+                })
+            })
+            .on_click(cx.listener(|this, _ev, window, cx| {
+                this.toggle_navigator(&ToggleNavigator, window, cx);
+            }))
+    }
+
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
     pub(super) fn render_titlebar(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let spacing = self.theme.spacing;
@@ -273,21 +294,9 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
 
-        // Left: the navigator's toggle, then where the focused work is.
-        let toggle = has_workers.then(|| {
-            let hint_theme = Rc::new(theme.clone());
-            kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
-                .when(SHORTCUT_HINTS, |el| {
-                    kit::hint_timing(el).tooltip(move |_window, cx| {
-                        let keys =
-                            crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
-                        cx.new(|_| kit::Hint::new("Navigator", keys, Rc::clone(&hint_theme))).into()
-                    })
-                })
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.toggle_navigator(&ToggleNavigator, window, cx);
-                }))
-        });
+        // Left: the navigator's toggle (a docked navigator holds it in its own top row, at the
+        // same place beside the lights), then where the focused work is.
+        let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
         // A phone's "+" is a row of "…": the bar keeps the name, the bell and the menu.
         let new = (has_workers && !phone).then(|| {
             let at = Rc::clone(&self.anchors.at);
@@ -319,7 +328,7 @@ impl WorkspaceView {
             let badge = (unread > 0).then(|| {
                 let count = SharedString::from(unread.to_string());
                 let side = theme.typography.caption() + spacing.xs + spacing.xxs;
-                let hovered = hsla(s.hover.over(s.canvas));
+                let hovered = hsla(s.hover.over(theme.content()));
                 // A ring of the bar's colour cuts the disc out of the bell's stroke, as a
                 // badge on a Mac's dock is cut out of its icon; under the pointer it takes
                 // the button's hover fill.
@@ -339,7 +348,7 @@ impl WorkspaceView {
                     .justify_center()
                     .rounded_full()
                     .border(px(slopty_theme::stroke::EDGE))
-                    .border_color(hsla(s.canvas))
+                    .border_color(hsla(theme.content()))
                     .group_hover(BELL, move |el| el.border_color(hovered))
                     .bg(hsla(fill))
                     .text_color(hsla(ink))
@@ -395,7 +404,7 @@ impl WorkspaceView {
             .gap(px(spacing.md))
             .pl(px(leading))
             .pr(px(trailing))
-            .bg(hsla(s.canvas))
+            .bg(hsla(theme.content()))
             .font_family(theme.typography.ui_family.clone())
             .child(
                 div()

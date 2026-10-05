@@ -7,7 +7,7 @@ Status │ 1 new
 Button │ More
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ terminal Do these steps in order with the named tools, then reply "done". 1) Read…
-Label │ ~
+Label │ Claude Code · ~
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
@@ -17,18 +17,18 @@ Button │ Copy message
 Button │ Worked 23 s: Edited notes.txt · Read 3 files
 Article │ done
 Button │ Copy message
-Group │ Activity
 Dialog │ Allow Bash?
 Button │ Answer in the terminal
-Button │ Allow
-Button │ Always allow · /work; accept edits mode
 Button │ Deny
-Button │ Deny…
-Button │ Deny and stop
+Button │ Other ways to deny
+Button │ Allow
+Group │ From now on
+Button │ Always allow · /work; accept edits mode
+Group │ Activity
 Group │ Edits · notes.txt
 Button │ Review
 MultilineTextInput │ Message (focused)
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Opus 5.5
 Label │ Mode, Default
 Button │ Commit

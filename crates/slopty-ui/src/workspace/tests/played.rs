@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use gpui::Context;
 use slopty_agent::observed::{ASK_GRACE, Observed, Out, terminal_thread};
+use slopty_agent::status::AgentEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::AgentEvent;
 use slopty_proto::thread::attention::{Ladder, Ranked, Rung, ThreadAt};
 use slopty_proto::thread::wire::TableFrame;
 use slopty_proto::thread::{Cursor, ThreadState};
@@ -101,7 +101,7 @@ impl Agents for WorkspaceView {
         let Some(mut played) = played else { return };
         // What the agent said of a turn it ended is its transcript's last line, read by the
         // worker beside the hooks.
-        if event.status == slopty_proto::agent::AgentStatus::Done
+        if event.status == slopty_agent::status::AgentStatus::Done
             && let Some(said) = event.detail
         {
             played.last_line = Some(said);
@@ -133,7 +133,7 @@ impl Agents for WorkspaceView {
         event: AgentEvent,
         cx: &mut Context<WorkspaceView>,
     ) {
-        use slopty_proto::agent::{AgentStatus, BlockReason};
+        use slopty_agent::status::{AgentStatus, BlockReason};
         let session = event.session;
         let rung = match &event.status {
             AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt => Some(Rung::NeedsYou),

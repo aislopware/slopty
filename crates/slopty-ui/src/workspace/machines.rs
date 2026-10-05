@@ -224,7 +224,6 @@ impl WorkspaceView {
             .map(|(key, w)| {
                 crate::palette::PaletteItem::new(
                     &format!("Edit {}'s settings", w.name),
-                    crate::icons::IconName::Settings,
                     Box::new(super::actions::EditMachineSettings { worker: *key }),
                     &[],
                 )

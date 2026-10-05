@@ -955,7 +955,7 @@ impl Workspace {
         if sheet.running() {
             let install = sheet.progress().map(Progress::view);
             let steps = install.as_ref().map(|i| add_worker::steps(theme, i));
-            let bar = install.and_then(|i| add_worker::bar(theme, i.bar, "install-bar", cx));
+            let bar = install.and_then(|i| add_worker::bar(theme, i.bar, "install-bar"));
             let stop = kit::button(theme, "ssh-cancel", "Cancel", ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_ssh(cx)));
             return div()

@@ -46,7 +46,7 @@ pub use tiles::{SearchScope, TileHit, TileOpen};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize};
-use crate::kit::find::{MATCH_CASE, REGEX, WHOLE_WORD};
+use crate::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
 use crate::palette::{Layer, Plate};
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -710,8 +710,8 @@ impl ProjectSearch {
     fn fields(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let toggle = |id: &'static str, icon, label, on, act: fn(&mut Self) -> &mut bool| {
-            crate::kit::icon_toggle(theme, id, icon, label, on, 1.0)
+        let toggle = |id: &'static str, face, label, on, act: fn(&mut Self) -> &mut bool| {
+            crate::kit::text_toggle(theme, id, face, label, on, 1.0)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(act, cx)))
         };
@@ -730,25 +730,28 @@ impl ProjectSearch {
                         .aria_label(QUERY_PLACEHOLDER),
                 ),
             )
-            .child(toggle(
-                "search-case",
-                IconName::CaseSensitive,
-                MATCH_CASE,
-                self.match_case,
-                |t| &mut t.match_case,
-            ))
-            .child(toggle("search-word", IconName::WholeWord, WHOLE_WORD, self.whole_word, |t| {
+            .child(toggle("search-case", CASE_FACE, MATCH_CASE, self.match_case, |t| {
+                &mut t.match_case
+            }))
+            .child(toggle("search-word", WORD_FACE, WHOLE_WORD, self.whole_word, |t| {
                 &mut t.whole_word
             }))
-            .child(toggle("search-regex", IconName::Regex, REGEX, self.regex, |t| &mut t.regex))
+            .child(toggle("search-regex", REGEX_FACE, REGEX, self.regex, |t| &mut t.regex))
             .when(self.within == SearchScope::Files, |row| {
-                row.child(toggle(
-                    "search-context",
-                    IconName::UnfoldVertical,
-                    CONTEXT_LINES,
-                    self.context,
-                    |t| &mut t.context,
-                ))
+                row.child(
+                    crate::kit::icon_toggle(
+                        theme,
+                        "search-context",
+                        IconName::UnfoldVertical,
+                        CONTEXT_LINES,
+                        self.context,
+                        1.0,
+                    )
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.toggle(|t| &mut t.context, cx);
+                    })),
+                )
             });
         let files = self.within == SearchScope::Files;
         let files_row = crate::kit::inset_x(div(), theme)

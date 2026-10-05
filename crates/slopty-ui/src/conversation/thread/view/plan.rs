@@ -1,9 +1,10 @@
-//! A plan the agent proposes, as a document in the thread rather than a call: a card headed by
-//! the map mark and its title alone at the base size (the mark says it is a plan, so no
-//! label runs into the title), how it stands in the quiet tone and a copy, then its Markdown at
-//! the prose size. A long plan shows its head until opened. While the agent waits on the
-//! person's word, the card is edged in the warn tone and takes the answers, as a call's card
-//! does.
+//! A plan the agent proposes, as a document in the thread rather than a call, set in type on
+//! the thread's plane as the agent's prose is: a small muted "Plan" over its title (how it
+//! stands after the word, in the warn tone while it waits on the person), the title in the
+//! medium weight at the prose size, then its Markdown at the prose size. No card, no mark: the
+//! word and the title's weight say what it is. Its copy shows under the pointer. A long plan
+//! shows its head until opened. While the agent waits on the person's word, its answers sit
+//! under it, as a call's do.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -12,10 +13,10 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, relative,
 };
 use slopty_proto::thread::{Clipped, ItemId, ToolCall, ToolState};
-use slopty_theme::{Typography, alpha};
+use slopty_theme::{Rgb, Surfaces, Typography};
 
 use super::ThreadView;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::IconName;
 use crate::kit;
 
@@ -35,6 +36,12 @@ const fn standing(state: &ToolState) -> Option<&'static str> {
         ToolState::Cancelled => Some("Stopped"),
         ToolState::Running | ToolState::Completed => None,
     }
+}
+
+/// The tone a plan's standing is said in: the warn tone while it waits on the person, else
+/// the quiet one.
+const fn standing_tone(state: &ToolState, s: &Surfaces) -> Rgb {
+    if matches!(state, ToolState::Pending { .. }) { s.warn } else { s.text_muted }
 }
 
 /// The lines of `body` shown: its head while it is long and closed. Whether more waits.
@@ -77,34 +84,36 @@ impl ThreadView {
                 this.copy(item.clone(), words.clone(), cx);
             }))
         };
-        let head = div()
+        let group: SharedString = format!("plan-{}", id.0).into();
+        let eyebrow = div()
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.xs))
             .min_h(self.z(theme.density.row))
-            .pl(self.z(theme.spacing.xs))
-            .pr(self.z(theme.spacing.xxs))
-            .child(self.slot().child(self.icon(IconName::Map, s.text_muted)))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.ui_size))
-                    .text_color(hsla(s.text))
-                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                    .child(SharedString::from(title.clone())),
-            )
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .child(div().flex_none().child("Plan"))
             .children(word.map(|w| {
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(w)
+                    .text_color(hsla(standing_tone(&call.state, &s)))
+                    .child(format!("\u{b7} {w}"))
             }))
-            .child(copy);
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .when(!copied, |el| {
+                        el.invisible().group_hover(group.clone(), gpui::StyleRefinement::visible)
+                    })
+                    .child(copy),
+            );
+        let heading = div()
+            .text_size(self.z(theme.typography.prose()))
+            .line_height(relative(theme.typography.prose_line_height))
+            .text_color(hsla(s.text))
+            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .child(SharedString::from(title.clone()));
         let open_more = more.then(|| {
             let item = id.clone();
             let label = SharedString::from(format!(
@@ -133,27 +142,23 @@ impl ThreadView {
             Some(word) => format!("Plan: {title}, {word}"),
             None => format!("Plan: {title}"),
         };
-        kit::card(theme)
+        div()
             .id(ElementId::Name(SharedString::from(selector.clone())))
             .debug_selector(move || selector)
+            .group(group)
             .role(Role::Article)
             .aria_label(SharedString::from(label))
             .w_full()
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .rounded(self.z(theme.radii.md))
-            .when(matches!(call.state, ToolState::Pending { .. }), |el| {
-                el.border(kit::hair(theme)).border_color(hsla_alpha(s.warn, alpha::ASKING_EDGE))
-            })
-            .child(head)
+            .child(eyebrow)
+            .child(heading)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(self.z(theme.spacing.xs))
-                    .px(self.z(theme.spacing.md))
-                    .pb(self.z(theme.spacing.sm))
+                    .pt(self.z(theme.spacing.xs))
                     .text_size(self.z(theme.typography.prose()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))

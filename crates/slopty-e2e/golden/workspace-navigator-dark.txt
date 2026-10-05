@@ -1,6 +1,7 @@
 Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
+Button │ Navigator
 TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
@@ -11,7 +12,6 @@ Button │ RELEASE.md
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
-Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New

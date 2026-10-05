@@ -19,9 +19,9 @@ pub mod menu;
 pub mod thread;
 
 pub use actions::{
-    AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort, EditLastQueued, Interrupt,
-    OpenCommit, QueueMessage, RefreshPullRequest, ResumeAgent, ReviewChanges, ReviewWithAgent,
-    ShowAgentTerminal, TakeBack, WatchAgentScreen,
+    AllowRequest, AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort, DenyRequest,
+    EditLastQueued, Interrupt, OpenCommit, QueueMessage, RefreshPullRequest, ResumeAgent,
+    ReviewChanges, ReviewWithAgent, ShowAgentTerminal, TakeBack, WatchAgentScreen,
 };
 pub use attach::Attach;
 
@@ -32,25 +32,30 @@ pub use attach::Attach;
 /// the focused thread or review answers it.
 #[must_use]
 pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
-    use crate::icons::IconName;
-    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
-        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    let line = |label: &str, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, action, bindings)
     };
     vec![
-        line("Review changes", IconName::FilePen, Box::new(ReviewChanges)),
-        line("Show the agent's terminal", IconName::SquareTerminal, Box::new(ShowAgentTerminal)),
-        line("Take back from the terminal", IconName::Undo2, Box::new(TakeBack)),
-        line("Compact context", IconName::Shrink, Box::new(CompactContext)),
-        line("Branch from here\u{2026}", IconName::GitBranch, Box::new(BranchFromHere)),
-        line("Resume the agent", IconName::Play, Box::new(ResumeAgent)),
-        line("Commit\u{2026}", IconName::GitBranch, Box::new(OpenCommit)),
-        line("Review with the agent", IconName::ListChecks, Box::new(ReviewWithAgent)),
-        line("Watch the agent's screen", IconName::Monitor, Box::new(WatchAgentScreen)),
-        line("Refresh pull request", IconName::GitPullRequest, Box::new(RefreshPullRequest)),
-        line("Ask aside", IconName::MessageCircleQuestionMark, Box::new(AskAside)),
-        line("Next effort level", IconName::Brain, Box::new(CycleEffort)),
+        line("Review changes", Box::new(ReviewChanges)),
+        line("Show the agent's terminal", Box::new(ShowAgentTerminal)),
+        line("Take back from the terminal", Box::new(TakeBack)),
+        line("Compact context", Box::new(CompactContext)),
+        line("Branch from here\u{2026}", Box::new(BranchFromHere)),
+        line("Resume the agent", Box::new(ResumeAgent)),
+        line("Commit\u{2026}", Box::new(OpenCommit)),
+        line("Review with the agent", Box::new(ReviewWithAgent)),
+        line("Watch the agent's screen", Box::new(WatchAgentScreen)),
+        line("Refresh pull request", Box::new(RefreshPullRequest)),
+        line("Ask aside", Box::new(AskAside)),
+        line("Next effort level", Box::new(CycleEffort)),
+        line("Allow the request", Box::new(AllowRequest)),
+        line("Deny the request", Box::new(DenyRequest)),
     ]
 }
 
 /// The key context the face binds in.
 pub const CTX: &str = "Conversation";
+
+/// The key context of a request that has the keyboard: its answers in a thread, a *Needs you*
+/// row in the navigator. ⌘↵ and ⌘⌫ answer it there and nowhere else.
+pub const REQUEST_CTX: &str = "Request";

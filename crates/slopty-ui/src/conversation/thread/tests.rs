@@ -45,9 +45,19 @@ fn view<'a>(
     hub: &Entity<ThreadHub>,
     thread: ThreadId,
 ) -> (Entity<ThreadView>, &'a mut VisualTestContext) {
+    view_in(cx, hub, thread, Theme::default())
+}
+
+/// [`view`] in `theme`.
+fn view_in<'a>(
+    cx: &'a mut TestAppContext,
+    hub: &Entity<ThreadHub>,
+    thread: ThreadId,
+    theme: Theme,
+) -> (Entity<ThreadView>, &'a mut VisualTestContext) {
     let hub = hub.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        let view = ThreadView::new(hub, thread, Theme::default(), window, cx);
+        let view = ThreadView::new(hub, thread, theme, window, cx);
         view.focus(window, cx);
         view
     });
@@ -137,6 +147,93 @@ fn an_answer_flips_its_card_in_the_frame_it_is_pressed(cx: &mut TestAppContext) 
     assert_eq!(
         intents(&sent),
         [Intent::Answer { ask: AskId("a".to_owned()), choice: "allow".to_owned(), message: None }]
+    );
+}
+
+/// A new thread says it is new, in the middle of where its rows will be; a thread whose only
+/// row is a request says nothing there, since the request's card says it all.
+#[gpui::test]
+fn an_empty_thread_says_it_is_new_and_a_request_alone_speaks_for_itself(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.rows().is_empty()));
+    assert!(cx.debug_bounds("thread-empty").is_some(), "a new thread says so");
+
+    let mut asking = state;
+    asking.requests = vec![approval("a")];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asking, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("request-a").is_some(), "the request is on show");
+    assert!(cx.debug_bounds("thread-empty").is_none(), "and nothing contradicts it");
+}
+
+/// On touch a request's answers are a finger's target, 44 points tall, as the theme's touch
+/// density asks; with a pointer they are a control's height.
+#[gpui::test]
+fn a_requests_answers_are_a_fingers_target_on_touch(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.requests = vec![approval("a")];
+    hub.update(cx, ThreadHub::connected);
+    let theme = Theme { density: slopty_theme::Density::TOUCH, ..Theme::default() };
+    let (_view, cx) = view_in(cx, &hub, thread, theme);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    for answer in ["answer-a-allow", "answer-a-deny"] {
+        let bounds = cx.debug_bounds(answer).expect("the answer");
+        assert!(bounds.size.height >= px(44.0), "{answer}: {bounds:?}");
+    }
+}
+
+/// ⌘↵ and ⌘⌫ answer a request only once the person has put the keyboard on it: in the
+/// composer, empty or not, ⌘↵ is never an answer, so a request that arrives while the person
+/// types changes nothing a habitual key does. A press on the card gives it the keyboard; then
+/// ⌘↵ allows it, and on the next, ⌘⌫ denies it.
+#[gpui::test]
+fn a_request_is_answered_by_its_key_only_where_it_has_the_keyboard(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.requests = vec![approval("a"), approval("b")];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let answers = |sent: &Sent| {
+        intents(sent).into_iter().filter(|i| matches!(i, Intent::Answer { .. })).collect::<Vec<_>>()
+    };
+
+    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes("cmd-backspace");
+    assert!(answers(&sent).is_empty(), "the composer has the keyboard: no answer");
+
+    let press_card = |cx: &mut VisualTestContext| {
+        let card = cx.debug_bounds("thread-decision").expect("the request's card");
+        let corner = card.origin + gpui::point(px(4.0), px(4.0));
+        cx.simulate_click(corner, Modifiers::none());
+    };
+    press_card(cx);
+    cx.simulate_keystrokes("cmd-enter");
+    assert_eq!(
+        answers(&sent),
+        [Intent::Answer { ask: AskId("a".to_owned()), choice: "allow".to_owned(), message: None }]
+    );
+    cx.run_until_parked();
+    press_card(cx);
+    cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(
+        answers(&sent).last(),
+        Some(&Intent::Answer {
+            ask: AskId("b".to_owned()),
+            choice: "deny".to_owned(),
+            message: None
+        })
     );
 }
 

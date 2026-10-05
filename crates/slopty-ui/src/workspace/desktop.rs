@@ -15,7 +15,6 @@ use slopty_proto::screen::{DisplayKey, DisplayShape, NoVirtualDisplay, Quality, 
 
 use super::WorkspaceView;
 use super::actions::{ToggleSizedDisplay, ToggleSystemKeys, TypeClipboard};
-use crate::icons::IconName;
 use crate::palette::PaletteItem;
 use crate::screen::TYPE_MAX;
 
@@ -240,14 +239,13 @@ impl WorkspaceView {
         let Some(tile) = self.focused() else { return Vec::new() };
         let Some(item) = self.item(tile) else { return Vec::new() };
         let bindings = super::actions::key_bindings();
-        let line = |label: &str, icon, action: Box<dyn gpui::Action>| {
-            PaletteItem::new(label, icon, action, &bindings)
-        };
+        let line =
+            |label: &str, action: Box<dyn gpui::Action>| PaletteItem::new(label, action, &bindings);
         let mut lines = Vec::new();
         if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
             && self.screens.contains_key(&item.id)
         {
-            lines.push(line(TYPE_CLIPBOARD, IconName::Clipboard, Box::new(TypeClipboard)));
+            lines.push(line(TYPE_CLIPBOARD, Box::new(TypeClipboard)));
         }
         lines.extend(self.own_window_line(item, &bindings));
         if let Some(view) = self.screens.get(&item.id)
@@ -256,7 +254,7 @@ impl WorkspaceView {
         {
             let on = view.read(cx).system_keys();
             let label = if on { KEEP_SYSTEM_KEYS } else { SEND_SYSTEM_KEYS };
-            lines.push(line(label, IconName::Command, Box::new(ToggleSystemKeys)));
+            lines.push(line(label, Box::new(ToggleSystemKeys)));
         }
         if matches!(item.kind, ItemKind::Display { .. }) && self.offers_displays(tile.worker) {
             let sized = self
@@ -265,7 +263,7 @@ impl WorkspaceView {
                 .and_then(|w| w.sized.as_ref())
                 .is_some_and(|s| s.item == item.id);
             let label = if sized { BACK_TO_PHYSICAL } else { OPEN_SIZED };
-            lines.push(line(label, IconName::Monitor, Box::new(ToggleSizedDisplay)));
+            lines.push(line(label, Box::new(ToggleSizedDisplay)));
         }
         lines
     }

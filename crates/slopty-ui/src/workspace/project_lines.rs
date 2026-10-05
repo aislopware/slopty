@@ -20,7 +20,7 @@ use super::actions::{NameProject, PinToProject, ScopeTo};
 use super::grouping::group_glyph;
 use super::rollup::Rollup;
 use super::{Field, WorkspaceView};
-use crate::icons::{IconName, Status};
+use crate::icons::Status;
 use crate::palette::PaletteItem;
 
 /// What the palette calls letting go of a scope.
@@ -116,12 +116,12 @@ impl WorkspaceView {
             .map(|group| {
                 let label = format!("Scope to {}", self.group_name(group));
                 let action = ScopeTo { project: Some(group.key.clone()) };
-                PaletteItem::new(&label, IconName::ListFilter, Box::new(action), &[])
+                PaletteItem::new(&label, Box::new(action), &[])
             })
             .collect();
         if self.nav.scope.is_some() {
             let action = ScopeTo { project: None };
-            lines.push(PaletteItem::new(CLEAR_SCOPE, IconName::X, Box::new(action), &[]));
+            lines.push(PaletteItem::new(CLEAR_SCOPE, Box::new(action), &[]));
         }
         lines
     }
@@ -142,20 +142,10 @@ impl WorkspaceView {
                 .or(own)
                 .map_or_else(|| pinned.value().to_owned(), |g| self.group_name(g));
             let action = PinToProject { project: None };
-            lines.push(PaletteItem::new(
-                &format!("Take out of {name}"),
-                IconName::X,
-                Box::new(action),
-                &[],
-            ));
+            lines.push(PaletteItem::new(&format!("Take out of {name}"), Box::new(action), &[]));
         }
         if own.is_some_and(|g| g.key.worker().is_none() && g.fact != fact::PROJECT) {
-            lines.push(PaletteItem::new(
-                NAME_PROJECT,
-                IconName::Pencil,
-                Box::new(NameProject),
-                &[],
-            ));
+            lines.push(PaletteItem::new(NAME_PROJECT, Box::new(NameProject), &[]));
         }
         lines.extend(
             grouping
@@ -166,7 +156,7 @@ impl WorkspaceView {
                 .map(|group| {
                     let label = format!("Add to {}", self.group_name(group));
                     let action = PinToProject { project: Some(group.key.clone()) };
-                    PaletteItem::new(&label, group_glyph(&group.fact), Box::new(action), &[])
+                    PaletteItem::new(&label, Box::new(action), &[])
                 }),
         );
         lines

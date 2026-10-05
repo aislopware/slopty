@@ -139,14 +139,6 @@ pub fn tag(
         div().min_w_0().max_w(px(TITLE_MAX)).child(fit)
     });
     let rest = if who.is_some() { format!("\u{b7} {rest}") } else { rest };
-    let glyph = writer.map(|w| {
-        crate::icons::glyph(
-            theme,
-            crate::icons::Glyph::agent(&w.agent.0),
-            px(theme.typography.small()),
-            hsla(s.text_muted),
-        )
-    });
     let tag = div()
         .id(id)
         .debug_selector(move || selector)
@@ -161,7 +153,6 @@ pub fn tag(
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_muted))
         .whitespace_nowrap()
-        .children(glyph)
         .children(who)
         .child(SharedString::from(rest));
     if writer.is_some() || own == Some(run.thread) {

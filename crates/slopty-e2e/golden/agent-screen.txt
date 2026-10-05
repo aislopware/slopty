@@ -1,6 +1,7 @@
 Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
+Button │ Navigator
 TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
@@ -10,7 +11,6 @@ Image │ Working
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
-Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
@@ -26,6 +26,7 @@ Terminal │ shell │ ~ %
 Group │ Check the editor
 Heading │ terminal Check the editor
 Image │ Working
+Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -35,15 +36,13 @@ Button │ Branch from here
 Button │ Copy message
 Article │ I'll look at the editor and scroll its page.
 Button │ Copy message
-Button │ computer-use: app_click
+Button │ App click · computer-use
 Status │ Working
 MultilineTextInput │ Message (focused)
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Watch Synthetic editor
 Button │ Stop
 Group │ Status
 Status │ e2e-worker
-Group │ Agents
-Button │ Claude Code · Check the editor's page scrolls

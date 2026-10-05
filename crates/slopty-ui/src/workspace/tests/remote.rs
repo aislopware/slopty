@@ -690,7 +690,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
             f.attachments().iter().map(Attachment::progress).collect::<Vec<_>>()
         })
     };
-    assert_eq!(chips(cx), ["\u{2191} 0%"], "a chip while it uploads");
+    assert_eq!(chips(cx), ["0%"], "a chip while it uploads");
     assert!(cx.debug_bounds("composer-attachment").is_some(), "drawn in the composer");
     assert_eq!(
         face.read_with(cx, crate::conversation::thread::ThreadView::draft),
@@ -702,7 +702,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
         v.xfer_message(XferMsg::Progress { xfer, done: png.len() as u64 / 2 }, cx);
     });
     cx.run_until_parked();
-    assert_eq!(chips(cx), ["\u{2191} 50%"]);
+    assert_eq!(chips(cx), ["50%"]);
     let landed = "/Users/me/.slopty/drop/x/pasted-image.png".to_owned();
     view.update_in(cx, |v, _window, cx| {
         v.xfer_message(XferMsg::Finished { xfer, paths: vec![landed.clone()] }, cx);
@@ -743,7 +743,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     let nodes = tree(cx);
     assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
 
-    // The attach button asks for the system's picker, for this tile.
+    // The "+" menu's first row asks for the system's picker, for this tile.
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = std::rc::Rc::clone(&asked);
     cx.update(|_, cx| {
@@ -753,6 +753,10 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     });
     let clip = cx.debug_bounds("thread-attach").expect("the attach button");
     cx.simulate_click(clip.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(asked.borrow().is_empty(), "the \"+\" opens its menu first");
+    let files = cx.debug_bounds("thread-add-menu-files").expect("its first row");
+    cx.simulate_click(files.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
 }
@@ -775,7 +779,7 @@ fn sent(studio: &mut Fake) -> Vec<(String, Vec<String>)> {
 
 /// A thread tile with no terminal (a Codex, pi or ACP thread) takes files as a face does: one
 /// dropped on the tile goes up to the worker's attachment directory with a chip in its
-/// composer, and the attach button asks the picker for that tile.
+/// composer, and the "+" menu's first row asks the picker for that tile.
 #[gpui::test]
 fn a_thread_tile_takes_a_drop_as_an_attachment(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -815,6 +819,10 @@ fn a_thread_tile_takes_a_drop_as_an_attachment(cx: &mut TestAppContext) {
     let clip = cx.debug_bounds("thread-attach").expect("the attach button");
     cx.simulate_click(clip.center(), Modifiers::none());
     cx.run_until_parked();
+    assert!(asked.borrow().is_empty(), "the \"+\" opens its menu first");
+    let files = cx.debug_bounds("thread-add-menu-files").expect("its first row");
+    cx.simulate_click(files.center(), Modifiers::none());
+    cx.run_until_parked();
     assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
 }
 
@@ -850,13 +858,10 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     cx.run_until_parked();
     let label = view.read_with(cx, |v, _| v.upload_on(tile).map(|(_, u)| u.label()));
     assert_eq!(label.as_deref(), Some("\u{2191} 42%"));
-    assert!(cx.debug_bounds(selector("upload", tile.item)).is_some(), "the tile shows it");
+    let pill = cx.debug_bounds(selector("upload", tile.item)).expect("the tile shows it");
     let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
-    let line = cx.debug_bounds(selector("upload-progress", tile.item)).expect("a progress line");
-    assert!((f32::from(line.size.height) - 2.0).abs() < 0.01, "2 pt: {line:?}");
-    assert!(line.bottom() <= header.bottom() && line.bottom() >= header.bottom() - px(1.5));
-    let share = f32::from(line.size.width) / f32::from(header.size.width);
-    assert!((share - 0.42).abs() < 0.02, "along the header as far as it got: {share}");
+    assert!(header.contains(&pill.center()), "in the header, as a pill with its ring: {pill:?}");
+    assert!(pill.bottom() < header.bottom(), "no line along the header's foot");
 
     let paths = vec!["/Users/me/work/my notes.txt".to_owned(), "/tmp/b".to_owned()];
     view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
@@ -875,7 +880,6 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
         .collect();
     assert_eq!(pasted, ["'/Users/me/work/my notes.txt' /tmp/b "], "one bracketable paste");
     assert!(cx.debug_bounds(selector("upload", tile.item)).is_none(), "done: the progress goes");
-    assert!(cx.debug_bounds(selector("upload-progress", tile.item)).is_none(), "and its line");
 
     // A second drop is cancelled from its progress pill.
     let other = dir.path().join("b.bin");

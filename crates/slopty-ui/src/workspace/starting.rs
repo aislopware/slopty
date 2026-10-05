@@ -413,14 +413,8 @@ impl WorkspaceView {
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
             .when(!shapes, |el| {
-                el.child(crate::palette::status_slot(
-                    theme,
-                    Glyph::agent(&starting.agent.0),
-                    status,
-                    ink,
-                    k,
-                ))
-                .child(title.clone())
+                el.child(crate::palette::status_slot(theme, Glyph::AGENT, status, ink, k))
+                    .child(title.clone())
             });
         let body = (!shapes).then(|| {
             if let Some(asked) = self.first_message(id, starting, &place, k, cx) {

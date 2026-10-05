@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 use slopty_core::{ClientId, WallMs};
 use slopty_platform::notify::Memory;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemOp, ItemSync};
 use slopty_proto::server::{Os, WorkerCaps};
@@ -360,7 +361,6 @@ fn summary(id: SessionId) -> SessionSummary {
         state: SessionState::Running,
         viewers: 1,
         command: Vec::new(),
-        agent: None,
         progress: None,
         restored: None,
         repo_id: None,
@@ -686,6 +686,59 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
         cx.debug_bounds(leak(format!("nav-allow-{thread}"))).is_none(),
         "answered, the row has no buttons"
     );
+}
+
+/// A *Needs you* row that has the keyboard answers as its buttons do: ⌘⌫ denies and ⌘↵
+/// allows. With the keyboard anywhere else the two keys answer nothing.
+#[gpui::test]
+fn a_focused_needs_you_row_answers_by_its_keys(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.bind_keys(crate::workspace::key_bindings()));
+    let (session, other) = (SessionId::new(), SessionId::new());
+    let key = WorkerKey::new(7);
+    let (tiles, mut link) = worker(&view, cx, key, "mini", &[session, other]);
+    view.update_in(cx, |v, _window, cx| {
+        v.focus_tile(tiles[1], cx);
+        v.agent_event(blocked_on(session), cx);
+        v.threads_linked(key, cx);
+    });
+    let state = thread_on(session);
+    table(&view, cx, key, asking_row(&state, Some(("ask-1", Request::APPROVAL))));
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    cx.run_until_parked();
+    drop(thread_sent(&mut link));
+    cx.simulate_keystrokes("cmd-enter");
+    cx.simulate_keystrokes("cmd-backspace");
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "the row does not have the keyboard");
+
+    let row = leak(format!("nav-waiting-{session}"));
+    let on_row = |cx: &mut VisualTestContext| {
+        let row = cx.debug_bounds(row).expect("the row");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let nodes = cx.update(|window, _cx| crate::a11y::tree(window));
+        let focused = nodes.into_iter().find(|n| n.focused);
+        focused.is_some_and(|n| {
+            let [x, y, ..] = n.bounds;
+            (x - f32::from(row.origin.x)).abs() < 1.0 && (y - f32::from(row.origin.y)).abs() < 1.0
+        })
+    };
+    for _ in 0..80 {
+        if on_row(cx) {
+            break;
+        }
+        cx.update(|window, cx| crate::a11y::step(true, window, cx));
+        cx.run_until_parked();
+    }
+    assert!(on_row(cx), "the keyboard's ring reaches the row");
+    cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(intents(&thread_sent(&mut link)), [denied("ask-1")], "denied by its key");
+
+    table(&view, cx, key, asking_row(&state, Some(("ask-2", Request::APPROVAL))));
+    cx.run_until_parked();
+    assert!(on_row(cx), "the row keeps the keyboard");
+    cx.simulate_keystrokes("cmd-enter");
+    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-2")], "allowed by its key");
 }
 
 /// The person looking at the agent's terminal, its TUI shown, with the app in front gets the

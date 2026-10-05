@@ -1,6 +1,7 @@
 Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
+Button │ Navigator
 TextInput │ Filter
 Heading │ Projects
 Button │ src
@@ -16,7 +17,6 @@ Image │ Done
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
-Button │ Navigator
 Group │ Where
 Button │ src
 Button │ New
@@ -32,6 +32,7 @@ Terminal │ shell │ ~ %
 Group │ Retry the refresh
 Heading │ terminal Retry the refresh
 Image │ Done
+Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -46,7 +47,7 @@ Group │ Activity
 Group │ Edits · refresh.rs
 Button │ Review
 MultilineTextInput │ Message
-Button │ Attach files
+Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Review the changes
@@ -63,5 +64,3 @@ Link │ Written in Retry the refresh · turn 1 · 2h
 Group │ Status
 Status │ e2e-worker
 Status │ Rust · Spaces: 4 · Ln 3, Col 1
-Group │ Agents
-Button │ Claude Code · Turn finished

@@ -340,3 +340,37 @@ fn an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again(cx: &mut Tes
         assert_eq!(v.tile_of_thread(thread), Some(tile));
     });
 }
+
+/// No agent wears a mark of its own: an agent's tile leads with the one neutral agent glyph,
+/// whichever agent it is, and its header and navigator row name the agent in words before
+/// where it runs. A plain shell keeps its own glyph and says only where it is.
+#[gpui::test]
+fn an_agents_tile_names_it_in_words_beside_the_one_agent_glyph(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    agent_runs_in(&view, cx, key, session);
+    let mut claude = crate::conversation::thread::fixtures::thread("edit");
+    claude.meta.terminal = Some(session);
+    claude.meta.agent = AgentId::named(AgentId::CLAUDE_CODE);
+    table(&view, cx, key, 1, &[&claude]);
+
+    let read = |cx: &mut VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, _| {
+            let item = v.item(tile).expect("the tile");
+            (v.kind_glyph(item), v.tile_title(item), v.tile_place(item))
+        })
+    };
+    let (glyph, title, place) = read(cx, tile);
+    assert_eq!(glyph, crate::icons::Glyph::AGENT, "the one agent glyph");
+    let place = place.expect("a place");
+    assert!(place.starts_with("Claude Code \u{b7} "), "the agent named first: {place}");
+    assert_ne!(title, "Claude Code", "named once: {title}");
+
+    let (glyph, _, place) = read(cx, shell);
+    assert_eq!(glyph, crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal));
+    assert!(!place.unwrap_or_default().contains("Claude Code"), "a shell names no agent");
+}

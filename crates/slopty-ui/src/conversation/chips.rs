@@ -118,15 +118,23 @@ fn picture_chip(
         .overflow_hidden()
         .hover(move |el| el.bg(hsla(s.hover)))
         .child(remove_button(theme, chip, z(theme.typography.icon_large()), zoom, remove));
+    // How far it got, as the kit's capsule along the picture's foot, held in from its edges.
     let progress = (!chip.landed()).then(|| {
         div()
             .debug_selector(|| "composer-attachment-progress".to_owned())
             .absolute()
-            .left_0()
-            .bottom_0()
-            .h(z(theme.spacing.xxs))
-            .w(z(THUMBNAIL * chip.fraction.clamp(0.0, 1.0)))
-            .bg(hsla(s.accent_fill))
+            .left(z(theme.spacing.xs))
+            .right(z(theme.spacing.xs))
+            .bottom(z(theme.spacing.xs))
+            .child(
+                kit::progress::Bar::new(
+                    theme,
+                    format!("attachment-bar-{}", chip.id),
+                    kit::progress::Progress::Share(chip.fraction),
+                )
+                .height(z(theme.spacing.xs))
+                .label(format!("Uploading {}", chip.name)),
+            )
     });
     div()
         .id(SharedString::from(format!("attachment-{}", chip.id)))
@@ -147,17 +155,29 @@ fn picture_chip(
         .into_any_element()
 }
 
-/// A file's chip: its name on the pill, how far it got while it uploads, and its ✕.
+/// A file's chip: how far it got as a ring while it uploads (the file's glyph once it landed),
+/// its name on the pill, and its ✕.
 fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> AnyElement {
     let s = theme.surfaces;
     let z = |v: f32| px(v * zoom);
     let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
-    let progress = (!chip.landed()).then(|| {
-        kit::tabular(div())
-            .flex_none()
-            .text_color(hsla(s.text_muted))
-            .child(SharedString::from(chip.progress()))
-    });
+    // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
+    let mark = if chip.landed() {
+        crate::icons::icon(theme, IconName::File, IconSize::Inline, hsla(s.text_muted))
+            .size(z(theme.typography.icon()))
+            .into_any_element()
+    } else {
+        div()
+            .debug_selector(|| "composer-attachment-progress".to_owned())
+            .child(kit::progress::ring(
+                theme,
+                SharedString::from(format!("attachment-ring-{}", chip.id)),
+                chip.fraction,
+                s.accent_fill,
+                z(theme.typography.icon()),
+            ))
+            .into_any_element()
+    };
     kit::pill_frame(theme, zoom)
         .id(SharedString::from(format!("attachment-{}", chip.id)))
         .debug_selector(|| "composer-attachment".to_owned())
@@ -168,10 +188,7 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
         .pr(z(theme.spacing.xxs))
         .map(|el| kit::inset(el, theme))
         .text_color(hsla(s.text_secondary))
-        .child(
-            crate::icons::icon(theme, IconName::File, IconSize::Inline, hsla(s.text_muted))
-                .size(z(theme.typography.icon())),
-        )
+        .child(mark)
         .child(
             div()
                 .min_w_0()
@@ -179,7 +196,6 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
                 .text_ellipsis()
                 .child(SharedString::from(chip.name.clone())),
         )
-        .children(progress)
         .child(
             div()
                 .rounded(z(theme.radii.xs))

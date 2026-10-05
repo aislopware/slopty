@@ -499,12 +499,7 @@ impl WorkspaceView {
         } else {
             return None;
         };
-        Some(crate::palette::PaletteItem::new(
-            label,
-            crate::icons::IconName::AppWindow,
-            Box::new(ToggleOwnWindow),
-            bindings,
-        ))
+        Some(crate::palette::PaletteItem::new(label, Box::new(ToggleOwnWindow), bindings))
     }
 }
 

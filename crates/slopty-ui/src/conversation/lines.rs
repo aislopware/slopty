@@ -136,6 +136,33 @@ impl Ink<'_> {
             .child(self.text(line))
     }
 
+    /// One row of a unified diff with both gutters, the old file's number then the new
+    /// file's, so a removed line keeps its place in the old file and an added one in the new.
+    #[must_use]
+    pub fn unified_numbered(&self, line: &Line) -> Div {
+        let (wash, sign, sign_tone) = self.tone(line.kind);
+        let spacing = self.theme.spacing;
+        let old = line.old.filter(|_| line.kind != Kind::Added);
+        let new = line.new.filter(|_| line.kind != Kind::Removed);
+        div()
+            .w_full()
+            .flex()
+            .items_start()
+            .gap(self.z(spacing.sm))
+            .px(self.z(spacing.sm))
+            .when_some(wash, gpui::Styled::bg)
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(self.z(spacing.xs))
+                    .child(self.number(old))
+                    .child(self.number(new)),
+            )
+            .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
+            .child(self.text(line))
+    }
+
     /// One row side by side: the old line on the left, the new on the right.
     #[must_use]
     pub fn split(&self, (old, new): Pair<'_>) -> Div {

@@ -3437,14 +3437,12 @@ fn apply_link_event(
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`). The thread table says what an agent does: its row is
-        // what the workspace reads.
+        // read (`LinkEvent::Handoff`).
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_)
-            | WorkerMsg::Agent(_),
+            | WorkerMsg::Handoff(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
@@ -3661,25 +3659,23 @@ fn app_palette(cx: &App) -> Vec<slopty_ui::palette::PaletteItem> {
 
 /// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
-    use slopty_ui::icons::IconName;
-
     let bindings = app_key_bindings();
-    let item = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
-        slopty_ui::palette::PaletteItem::new(label, icon, action, &bindings)
+    let item = |label: &str, action: Box<dyn gpui::Action>| {
+        slopty_ui::palette::PaletteItem::new(label, action, &bindings)
     };
     let mut items = vec![
-        item("Open settings", IconName::Settings, Box::new(OpenSettings)),
-        item(KEYBOARD_SHORTCUTS, IconName::Keyboard, Box::new(OpenKeyboardShortcuts)),
-        item(ABOUT, IconName::Info, Box::new(OpenAbout)),
-        item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
-        item(invite::TITLE, IconName::Smartphone, Box::new(ConnectDevice)),
-        item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
-        item("Add a machine\u{2026}", IconName::Plus, Box::new(AddWorker)),
-        item(ssh::UPDATE_ALL, IconName::Download, Box::new(UpdateAllWorkers)),
-        item(server::UPDATE_SERVER, IconName::Download, Box::new(UpdateServer)),
+        item("Open settings", Box::new(OpenSettings)),
+        item(KEYBOARD_SHORTCUTS, Box::new(OpenKeyboardShortcuts)),
+        item(ABOUT, Box::new(OpenAbout)),
+        item("Connect to a server", Box::new(ConnectServer)),
+        item(invite::TITLE, Box::new(ConnectDevice)),
+        item(server::COPY_GRANT, Box::new(CopyTailnetGrant)),
+        item("Add a machine\u{2026}", Box::new(AddWorker)),
+        item(ssh::UPDATE_ALL, Box::new(UpdateAllWorkers)),
+        item(server::UPDATE_SERVER, Box::new(UpdateServer)),
     ];
     if finder::OFFERED {
-        items.push(item(finder::TITLE, IconName::FolderOpen, Box::new(ShowWorkersInFinder)));
+        items.push(item(finder::TITLE, Box::new(ShowWorkersInFinder)));
     }
     items
 }

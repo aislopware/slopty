@@ -22,8 +22,6 @@ mod view;
 
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
-use crate::icons::IconName;
-
 gpui::actions!(
     project,
     [
@@ -100,33 +98,25 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
 /// The palette's lines for a project's board and for starting one, with their keys.
 #[must_use]
 pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
-    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
-        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    let line = |label: &str, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, action, bindings)
     };
     vec![
-        line("Start a project here", IconName::Workflow, Box::new(StartProject)),
-        line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
-        line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
-        line("Tell the task's agent to fix CI", IconName::Wrench, Box::new(FixCi)),
-        line(
-            "Tell the task's agent to address the comments",
-            IconName::MessageSquare,
-            Box::new(AddressComments),
-        ),
-        line(
-            "Tell the task's agent to resolve the conflicts",
-            IconName::GitBranch,
-            Box::new(ResolveConflicts),
-        ),
-        line("Push the task's merge again", IconName::Upload, Box::new(PushTask)),
-        line("Cancel the task", IconName::X, Box::new(CancelTask)),
-        line("Stop the task's agent", IconName::Square, Box::new(StopTaskAgent)),
-        line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
-        line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
-        line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
-        line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
-        line("Verifier\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
-        line("Delete the project", IconName::X, Box::new(DeleteProject)),
+        line("Start a project here", Box::new(StartProject)),
+        line("Merge the task", Box::new(MergeTask)),
+        line("Retry the task", Box::new(RetryTask)),
+        line("Tell the task's agent to fix CI", Box::new(FixCi)),
+        line("Tell the task's agent to address the comments", Box::new(AddressComments)),
+        line("Tell the task's agent to resolve the conflicts", Box::new(ResolveConflicts)),
+        line("Push the task's merge again", Box::new(PushTask)),
+        line("Cancel the task", Box::new(CancelTask)),
+        line("Stop the task's agent", Box::new(StopTaskAgent)),
+        line("Run the task on\u{2026}", Box::new(RunTaskOn)),
+        line("Push after each merge", Box::new(TogglePush)),
+        line("Show the orchestrator's terminal", Box::new(ShowTerminal)),
+        line("Tell the orchestrator\u{2026}", Box::new(TellOrchestrator)),
+        line("Verifier\u{2026}", Box::new(EditChecks)),
+        line("Delete the project", Box::new(DeleteProject)),
     ]
 }
 

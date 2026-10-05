@@ -404,12 +404,7 @@ impl WorkspaceView {
             .map(|board| {
                 let label = format!("Make this agent {}'s orchestrator", board.project.title);
                 let action = MakeOrchestrator { project: board.project.id.clone() };
-                crate::palette::PaletteItem::new(
-                    &label,
-                    crate::icons::IconName::Workflow,
-                    Box::new(action),
-                    &[],
-                )
+                crate::palette::PaletteItem::new(&label, Box::new(action), &[])
             })
             .collect()
     }

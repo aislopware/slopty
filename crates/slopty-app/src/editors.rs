@@ -18,8 +18,7 @@ pub(crate) fn palette_line(cx: &App) -> Option<PaletteItem> {
         Some(editors) => editors.label()?,
         None => open_with::Editors::default().label()?,
     };
-    let icon = slopty_ui::icons::IconName::ExternalLink;
-    Some(PaletteItem::new(&label, icon, Box::new(OpenInEditor), &[]))
+    Some(PaletteItem::new(&label, Box::new(OpenInEditor), &[]))
 }
 
 /// How SSH reaches `to`, as an editor's remote link names it: `[user@]host[:port]`.
