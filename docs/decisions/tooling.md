@@ -1024,11 +1024,15 @@ more full-window layer.
     typos, `committed`, and both lockfiles `--locked` (`gate::locked`, the check host clippy's
     `--locked` made). It compiles nothing and takes seconds.
   - `land` pushes at once. `land --check` keeps the old checks for a change likely to go red.
-  - CI already ran host clippy. It now also runs the app's e2e (`e2e (app)` in `ci.yml`,
-    `cargo xtask e2e app --review`, a changed frame's render and diff in the `e2e-app`
-    artifact). It is not a gate lane until its renders on a hosted Mac's virtual GPU are shown
-    to match the goldens, which a Mac with its own GPU draws. It is a sixth macOS job beside
-    five, so it starts as soon as a lane ends.
+  - CI already ran host clippy. It now also runs the app's e2e (`e2e.yml`, `cargo xtask e2e
+    app --review`, a changed frame's render and diff in the `e2e-app` artifact). It is not a
+    gate lane until its renders on a hosted Mac's virtual GPU are shown to match the goldens,
+    which a Mac with its own GPU draws. It is a sixth macOS job beside five, so it starts as
+    soon as a lane ends.
+  - It is a workflow of its own, with its own concurrency group. In `ci.yml` its cold build
+    (over 30 minutes on its first run, 37341280953) kept the run going after every gate lane
+    had passed. That held the next push's run in the queue, and `xtask promote`, which waited
+    for the whole run. `promote` now asks only that every gate lane passed.
   - The cost is a red run found later: about 5.7 minutes per land on CI's wall clock (the entry
     above), while the agents keep working, against minutes of every core here per land. Agents
     still run clippy and their own crate's tests as they code.

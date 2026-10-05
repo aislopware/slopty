@@ -205,7 +205,7 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
   as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
   `xtask/src/gate.rs`), rustdoc runs after iOS clippy on its runner, and the tools lane and Linux
   clippy (`clippy-linux`, with `CC=clang` for the build scripts' C) run on Linux, which keeps the
-  run within five Macs. The app's e2e (`e2e (app)`) runs on a sixth, not yet a gate lane. Nothing
+  run within five Macs. The app's e2e runs on a sixth, in `e2e.yml`, not yet a gate lane. Nothing
   compiles here before the push; `land --check` runs the tests, rustdoc and the iOS and Linux
   clippy of the packages the commits change and of their dependents, side by side at a low
   priority (`gate::land_checks`). Runs on that branch

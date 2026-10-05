@@ -1543,15 +1543,18 @@ mod tests {
     }
 
     /// Nothing that compiles runs here before a land: the quick gate is the tools lane, and
-    /// CI carries host clippy and the app's live tests, which ran on this Mac before.
+    /// CI carries host clippy and the app's live tests, which ran on this Mac before; the
+    /// latter in a workflow of their own, which holds no gate run back.
     #[test]
     fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
         assert!(workflow.contains("{ lane: clippy-host, os: macos-26 }"), "host clippy on CI");
-        assert!(workflow.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
-        assert!(workflow.contains("name: e2e-app\n          path: target/e2e/artifacts"));
+        let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
+        assert!(e2e.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
+        assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));
+        assert!(!workflow.contains("e2e app"), "in a workflow of its own, off the gate's queue");
     }
 
     /// A shard builds the spawned binaries beside its own packages without the others' tests,

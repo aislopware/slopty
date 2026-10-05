@@ -1,0 +1,85 @@
+name: E2E
+
+# The app's live tests (`cargo xtask e2e app`): the real app with ptyd and the worker, driven
+# through its test socket, its frames compared with the goldens. They used to run only on a
+# developer's Mac before each land, minutes of every core there; here they take a runner instead
+# (docs/decisions/tooling.md, "Nothing heavy runs here before a land"). A workflow of its own, so
+# its build never holds the gate's concurrency group, and `promote` waits for none of it: it is
+# not a gate lane until its renders are shown to match the goldens drawn on a Mac with a GPU of
+# its own. A changed frame leaves its render and diff in the `e2e-app` artifact, which
+# `cargo xtask e2e app --accept` reproduces locally. Only the newest push matters, so a newer one
+# cancels the run in progress.
+on:
+  push:
+    branches: [ gate ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  e2e-app:
+    name: e2e (app)
+    runs-on: macos-26
+    # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: false
+      - uses: cargo-bins/cargo-binstall@main
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
+      - uses: actions/cache@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: cargo xtask setup --lane tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: cargo xtask e2e app --review
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-app
+          path: target/e2e/artifacts
+          if-no-files-found: ignore
+      - if: always()
+        run: $SCCACHE_PATH --show-stats
+

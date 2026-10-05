@@ -62,8 +62,8 @@ pub struct PromoteOpts {
 /// Move main to a commit every gate lane passed on, from this checkout. CI's `promote` job does
 /// this with the run's own token, which GitHub never lets update a workflow file: a commit that
 /// changes `.github/workflows/` is refused there however green (runs 37254289819, 37255378937).
-/// The same checks as that job: the run on the commit is complete, every `gate` job in it
-/// passed, and main fast-forwards to the commit.
+/// The same checks as that job: every `gate` job in the run on the commit passed, and main
+/// fast-forwards to the commit.
 pub fn promote(sh: &Shell, opts: &PromoteOpts) -> Result<()> {
     cmd!(sh, "git fetch --quiet origin main").run()?;
     cmd!(sh, "git fetch --quiet origin +refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}").run()?;
@@ -86,8 +86,13 @@ pub fn promote(sh: &Shell, opts: &PromoteOpts) -> Result<()> {
     let Some(run) = runs.into_iter().next() else {
         bail!("no {WORKFLOW} run on {BRANCH} for {head}: land it first");
     };
-    ensure!(run.status == "completed", "the gate on {head} is still {}: {}", run.status, run.url);
-    ensure!(gate_passed(sh, run.id)?, "not every gate lane passed on {head}: {}", run.url);
+    // The gate lanes decide, not the run: a job that is not one (`release`) may still be going.
+    ensure!(
+        gate_passed(sh, run.id)?,
+        "not every gate lane has passed on {head} (the run is {}): {}",
+        run.status,
+        run.url
+    );
     let on_main = cmd!(sh, "git merge-base --is-ancestor {main} {head}").quiet().run().is_ok();
     ensure!(on_main, "{head} is not on top of origin/main ({main}); main only fast-forwards");
     cmd!(sh, "git push --quiet origin {head}:refs/heads/main").run()?;
