@@ -477,7 +477,8 @@ pub fn first_line(text: &str) -> &str {
 pub enum Overlay {
     /// A list typed at: the command palette, the pickers.
     List,
-    /// A document edited: the settings file.
+    /// A document edited: the settings (about 800 × 600 where the window has room), the
+    /// project search.
     Editor,
 }
 
@@ -487,7 +488,7 @@ impl Overlay {
     pub const fn bounds(self) -> (f32, f32) {
         match self {
             Self::List => (560.0, 520.0),
-            Self::Editor => (640.0, 720.0),
+            Self::Editor => (800.0, 720.0),
         }
     }
 }

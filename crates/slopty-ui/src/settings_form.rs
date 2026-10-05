@@ -96,6 +96,27 @@ pub const SETTLE: Duration = Duration::from_millis(300);
 /// The sidebar's width: the longest section name and the search field's word at the UI size.
 const NAV_WIDTH: f32 = 168.0;
 
+/// The least the page beside the sidebar is given: a row's words and its widest control side
+/// by side. A window with less room stacks the form in one column.
+const CONTENT_MIN: f32 = 480.0;
+
+/// The way to the file's own text, an advanced path kept apart from the task's Done.
+pub const EDIT_FILE: &str = "Edit as TOML";
+
+/// The narrowest window that has the sidebar beside a page of at least 480 pt, with the
+/// dialog's margins either side.
+#[must_use]
+pub fn sidebar_from(theme: &Theme) -> f32 {
+    2.0_f32.mul_add(theme.spacing.md, NAV_WIDTH + CONTENT_MIN)
+}
+
+/// Whether `window` is narrower than [`sidebar_from`]: the form stacks in one column, and the
+/// dialog's foot offers the file instead.
+#[must_use]
+pub fn narrow(window: &Window, theme: &Theme) -> bool {
+    window.viewport_size().width < px(sidebar_from(theme))
+}
+
 /// A field's width: a colour's hex beside its swatch. A longer host scrolls in its field, and
 /// the row's words keep one line beside it.
 const FIELD_WIDTH: f32 = 140.0;
@@ -103,8 +124,9 @@ const FIELD_WIDTH: f32 = 140.0;
 /// The font picker's width: a family's name, drawn in itself.
 const FONT_WIDTH: f32 = 184.0;
 
-/// The page's height before the window takes some back, in two-line rows.
-const PAGE_ROWS: f32 = 11.0;
+/// The page's height before the window takes some back, in two-line rows: with the title and
+/// the foot, a dialog about 600 pt tall.
+const PAGE_ROWS: f32 = 13.0;
 
 /// How many families the font list shows before it scrolls.
 const FONT_ROWS: f32 = 6.0;
@@ -116,6 +138,8 @@ pub enum SettingsFormEvent {
     Apply(String),
     /// ⌘↩ on a control that is not a text field (a field's Return is the dialog's own): done.
     Done,
+    /// The sidebar's way to the file itself: show its text.
+    EditFile,
 }
 
 /// The form over one `settings.toml` text.
@@ -814,6 +838,42 @@ impl SettingsForm {
                     .pt(px(spacing.sm))
                     .children(tabs),
             )
+            .child(div().flex_1())
+            .child(self.edit_file(cx))
+    }
+
+    /// The way to the file's own text, at the sidebar's foot: an advanced path, quiet and
+    /// apart from the sections and from the dialog's Done, as Zed keeps its settings file
+    /// under its sections.
+    fn edit_file(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let (s, spacing) = (theme.surfaces, theme.spacing);
+        let el = div()
+            .id("settings-edit-toml")
+            .debug_selector(|| "settings-edit-toml".to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(EDIT_FILE)
+            .flex_none()
+            .h(px(theme.density.row))
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs))
+            .px(px(spacing.sm))
+            .rounded(px(theme.radii.sm))
+            .cursor_pointer()
+            .text_color(hsla(s.text_secondary))
+            .map(crate::kit::eased)
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+            .active(move |el| el.bg(hsla(s.pressed)))
+            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)))
+            .child(crate::icons::icon(
+                theme,
+                Symbol::Curlybraces,
+                IconSize::Inline,
+                hsla(s.text_muted),
+            ))
+            .child(EDIT_FILE);
+        crate::a11y::tab_stop(el, s.focus)
     }
 
     /// A quiet label over the rows it names: a group on a section's page, a section's name
@@ -831,7 +891,7 @@ impl SettingsForm {
         if first {
             label.mt(px(theme.spacing.sm)).h(px(theme.density.row)).flex().items_center()
         } else {
-            label.pt(px(theme.spacing.lg)).pb(px(theme.spacing.xxs))
+            label.pt(px(theme.spacing.xl)).pb(px(theme.spacing.xxs))
         }
         .into_any_element()
     }
@@ -1263,6 +1323,7 @@ impl SettingsForm {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let under = crate::kit::meta(div(), theme)
+            .line_height(px(theme.roles().metadata.line))
             .w_full()
             .min_w_0()
             .when(!self.narrow, |el| el.max_w(gpui::relative(DESCRIPTION_SHARE)));
@@ -1293,11 +1354,9 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.md))
                     .child(
-                        div()
+                        crate::kit::typed(div(), theme.roles().action, 1.0)
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(theme.typography.ui_size))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(s.text))
                             .child(row.label()),
                     )
@@ -1880,7 +1939,7 @@ impl Focusable for SettingsForm {
 
 impl Render for SettingsForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.narrow = window.viewport_size().width < px(crate::kit::Overlay::List.bounds().0);
+        self.narrow = narrow(window, &self.theme);
         let shown = self.visible();
         let page = self.page(&shown, cx);
         let root = div()

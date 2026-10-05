@@ -23,6 +23,7 @@ Tab │ Streams
 Tab │ Network
 Tab │ Keyboard
 Tab │ About
+Button │ Edit as TOML
 TabPanel │ Keyboard
 Heading │ General
 ListItem │ New terminal │ ⌘T, ⌘N
@@ -419,5 +420,4 @@ ListItem │ Cut │ ⌘X
 Button │ Keys for Cut │ ⌘X
 ListItem │ Select all │ ⌘A
 Button │ Keys for Select all │ ⌘A
-Button │ Edit as TOML
 Button │ Done

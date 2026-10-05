@@ -350,3 +350,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the label, and the offer agreeing with the open) and `file::tests::open_with` (each
     tile opening through the action, and a tile offering nothing before its machine is
     known); `slopty-app` `editors::tests`.
+- ✅ **The settings get room, and the file is an advanced path** (2026-10-06,
+  `.research/design-critique-astra-2026-10-05.md` findings 21 and 22). The dialog spent much of
+  a small panel on navigation and framing, so several controls sat below the fold. "Edit as
+  TOML" also stood in the foot as prominently as Done, the one way out.
+  - **Size.** The settings and the project search share the larger overlay, now 800 × 720 at
+    most. The settings' page asks for 13 two-line rows, so with its title and foot the dialog
+    is about 800 × 600 where the window has room and smaller where it has not. The sidebar
+    stays 168 pt. The page beside it is never under 480 pt: a window narrower than
+    `settings_form::sidebar_from` (168 + 480 + the margins) stacks the form in one column.
+  - **Type and rhythm.** A row's label is the action role (13/19, medium), its description
+    the metadata role (12/18). A group's rows sit 12 pt in from their card. A group's label
+    stands 24 pt from the group above it.
+  - **The file.** "Edit as TOML" moves to the sidebar's foot, a quiet row with its braces
+    symbol, as Zed keeps its settings file under its sections. The dialog's foot holds Done
+    alone. Stacked in one column there is no sidebar, so the foot offers the file again. The
+    form still applies each change as it is made, and Done stays honest.
+  - **Keyboard rows** already read as the critique asked: the palette's words in the action
+    role with the keycaps at the row's end, the action's id in the row's hint and its
+    accessible description and still found by a search, and a second word only where a
+    default was changed. Clashes are not marked on the rows, because the keymap already
+    takes a chord from a default the file gives elsewhere and says so above the page
+    ("One chord runs one command in a context", `keymap.rs`).
+  - Tests: `settings_editor::tests::the_file_is_the_sidebars_advanced_path`,
+    `settings_editor::tests::a_description_wraps_and_never_cuts` (at the new narrowest width
+    with the sidebar), `settings_editor::tests::every_description_fits_two_lines_at_the_narrowest_sheet`.
+    Goldens: `settings`, `settings-dark`, `settings-form`, `settings-keyboard`,
+    `settings-about`.

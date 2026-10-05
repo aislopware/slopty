@@ -4,8 +4,9 @@
 //! The phone has no editor to hand the file to, and on the Mac a small change should not
 //! need one either. The dialog opens on the form ([`crate::settings_form`]): a sidebar of
 //! sections and a page of rows, each a label, a line on what it does and its control. "Edit as
-//! TOML" swaps the page for the file's text (the commented defaults when there is none) in a
-//! monospace field, and "Edit with controls" swaps it back. Both edit one text: a row writes its
+//! TOML", at the sidebar's foot (in the dialog's foot when the form is one column), swaps the
+//! page for the file's text (the commented defaults when there is none) in a monospace field,
+//! and "Edit with controls" swaps it back. Both edit one text: a row writes its
 //! key into it a line at a time, and the form reads the field's text when it comes back, so
 //! neither can hold a value the other does not.
 //!
@@ -143,6 +144,7 @@ impl SettingsEditor {
         let set = cx.subscribe_in(&form, window, |this, _form, event, window, cx| match event {
             SettingsFormEvent::Apply(text) => this.apply(text, window, cx),
             SettingsFormEvent::Done => this.close(cx),
+            SettingsFormEvent::EditFile => this.show_toml(window, cx),
         });
         Self {
             text: state,
@@ -408,11 +410,17 @@ impl Render for SettingsEditor {
                     )
             }
         };
+        // Beside the sidebar the file is the sidebar's advanced path, and the foot holds only
+        // the task's exit; stacked in one column, with no sidebar, the foot offers it.
         let swap = match self.mode {
-            Mode::Form => button("settings-edit-toml", "Edit as TOML", ButtonKind::Link)
-                .on_click(cx.listener(|this, _ev, window, cx| this.show_toml(window, cx))),
-            Mode::Toml => button("settings-edit-form", "Edit with controls", ButtonKind::Link)
-                .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx))),
+            Mode::Form => crate::settings_form::narrow(window, &theme).then(|| {
+                button("settings-edit-toml", crate::settings_form::EDIT_FILE, ButtonKind::Link)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.show_toml(window, cx)))
+            }),
+            Mode::Toml => Some(
+                button("settings-edit-form", "Edit with controls", ButtonKind::Link)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx))),
+            ),
         };
         // The form has nothing to save, since each change is applied as it is made; the file's
         // face has, and Cancel drops it.
@@ -468,7 +476,7 @@ impl Render for SettingsEditor {
                     .py(px(spacing.sm))
                     .border_t(crate::kit::hair(&theme))
                     .border_color(hsla(s.border))
-                    .child(swap)
+                    .children(swap)
                     .child(div().flex_1())
                     .child(actions),
             );
@@ -624,6 +632,36 @@ mod tests {
         assert_eq!(label.as_deref(), Some(crate::settings_form::SEARCH_PLACEHOLDER));
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("System"));
         assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("13 pt"));
+    }
+
+    /// Where the window has room the dialog is about 800 pt wide, its sidebar beside a page of
+    /// at least 480 pt, and the file is the sidebar's advanced path at its foot, apart from
+    /// Done; it opens the file's face. Stacked in one column, with no sidebar, the dialog's foot
+    /// offers the file instead.
+    #[gpui::test]
+    fn the_file_is_the_sidebars_advanced_path(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, "", Mode::Form);
+        cx.simulate_resize(gpui::size(px(1280.0), px(800.0)));
+        cx.run_until_parked();
+        let dialog = cx.debug_bounds("settings-editor").expect("the dialog");
+        let (w, h) = crate::kit::Overlay::Editor.bounds();
+        assert!((f32::from(dialog.size.width) - w).abs() < 0.5, "{dialog:?}");
+        assert!(f32::from(dialog.size.height) <= h, "{dialog:?}");
+        let page = cx.debug_bounds("settings-page").expect("the page");
+        assert!(f32::from(page.size.width) >= 480.0, "{page:?}");
+        let file = cx.debug_bounds("settings-edit-toml").expect("the file's way");
+        let done = cx.debug_bounds("settings-done").expect("Done");
+        assert!(file.right() <= page.left(), "in the sidebar: {file:?} {page:?}");
+        assert!(file.bottom() <= done.top(), "over the foot, apart from Done");
+        click(cx, "settings-edit-toml");
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Toml, "the file's face");
+        click(cx, "settings-edit-form");
+        let narrow = crate::settings_form::sidebar_from(&Theme::default()) - 1.0;
+        cx.simulate_resize(gpui::size(px(narrow), px(800.0)));
+        cx.run_until_parked();
+        let file = cx.debug_bounds("settings-edit-toml").expect("the foot's link");
+        let done = cx.debug_bounds("settings-done").expect("Done");
+        assert!((f32::from(file.center().y - done.center().y)).abs() < 1.0, "on Done's line");
     }
 
     /// A change applies as it is made, and the dialog stays open: a switch hands the app the
@@ -819,8 +857,10 @@ mod tests {
     }
 
     /// The widths a sheet is written for: a phone's, or an iPad's in Slide Over, and the
-    /// narrowest that still has the sidebar.
-    const NARROWEST: [f32; 2] = [320.0, crate::kit::Overlay::List.bounds().0];
+    /// narrowest that still has the sidebar ([`crate::settings_form::sidebar_from`]).
+    fn narrowest() -> [f32; 2] {
+        [320.0, crate::settings_form::sidebar_from(&Theme::default())]
+    }
 
     /// Each row's description, at `width`, by section: its row, its words and the height they
     /// take. A sheet as wide as a phone's lists every section in one column.
@@ -854,7 +894,7 @@ mod tests {
     fn a_description_wraps_and_never_cuts() {
         let mut cx = real_text();
         let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
-        let all = descriptions(cx, NARROWEST[1]);
+        let all = descriptions(cx, narrowest()[1]);
         let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
         let &(ix, words, height) =
             all.iter().max_by_key(|&&(_, words, _)| words.len()).expect("a description");
@@ -880,7 +920,7 @@ mod tests {
     fn every_description_fits_two_lines_at_the_narrowest_sheet() {
         let mut cx = real_text();
         let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
-        for width in NARROWEST {
+        for width in narrowest() {
             let all = descriptions(cx, width);
             assert!(all.len() > 20, "{width}: {} rows", all.len());
             let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);

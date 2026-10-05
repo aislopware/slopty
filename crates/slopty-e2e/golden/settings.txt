@@ -41,6 +41,7 @@ Tab │ Streams
 Tab │ Network
 Tab │ Keyboard
 Tab │ About
+Button │ Edit as TOML
 TabPanel │ Appearance
 Heading │ Interface
 RadioGroup │ Theme │ Light
@@ -67,5 +68,4 @@ TextInput │ Cursor
 TextInput │ Text under the cursor
 TextInput │ Selection
 TextInput │ ANSI colours
-Button │ Edit as TOML
 Button │ Done
