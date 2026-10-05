@@ -23,5 +23,3 @@ Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ Commit
 Button │ Send
-Group │ Status
-Status │ e2e-worker

@@ -191,7 +191,7 @@ fn header_status(dump: &Dump, heading: &str) -> PixelRect {
     [px(left), px(hy - 6.0), px((right - left).max(0.0)), px(hh + 12.0)]
 }
 
-/// The readouts a stream keeps live, its rate in the status bar and the stats overlay's
+/// The readouts a stream keeps live, the title bar's frame time and the stats overlay's
 /// figures: what they say follows the load on this Mac (59 fps one run, 60 the next), so a
 /// golden masks them, in pixels and in words.
 fn live_readouts(dump: &Dump) -> Vec<PixelRect> {

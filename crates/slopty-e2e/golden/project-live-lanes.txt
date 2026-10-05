@@ -71,5 +71,3 @@ MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude
 Button │ Send
-Group │ Status
-Status │ studio

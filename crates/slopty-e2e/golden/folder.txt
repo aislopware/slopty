@@ -28,5 +28,3 @@ ListBox │ Entries
 ListBoxOption │ src
 ListBoxOption │ .env
 ListBoxOption │ README.md
-Group │ Status
-Status │ e2e-folder

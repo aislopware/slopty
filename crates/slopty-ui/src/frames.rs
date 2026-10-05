@@ -13,8 +13,8 @@
 //! terminal leaves the root as it was. [`Framed`] reads a marker global that its probe element
 //! writes in every paint: whatever else a frame draws, it builds [`Framed`] again, and only
 //! [`Framed`], whose render is a few elements. The numbers themselves live in a global the
-//! probe mutates through a cell, never written as a global, so reading them (the status bar,
-//! the stream's overlay) is no reason to draw anything again.
+//! probe mutates through a cell, never written as a global, so reading them (the title bar's
+//! frame time, the stream's overlay) is no reason to draw anything again.
 //!
 //! The probe lives on the [`App`] as a global (one window per app), so the stats overlay and
 //! the self-test `dump` read the same numbers.

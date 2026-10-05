@@ -23,5 +23,3 @@ Document │ File $SCRATCH/project/screenshot │ image/png, 1600 × 900, 23 KB 
 Image │ image/png, 1600 × 900, 23 KB
 Label │ PNG · 1600 × 900 · 23 KB
 Button │ Actual size
-Group │ Status
-Status │ e2e-worker

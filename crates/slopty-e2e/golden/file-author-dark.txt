@@ -60,7 +60,5 @@ Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/repo/src/refresh.rs │ 6 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/repo/src/refresh.rs │ pub fn refresh(client: &Client, token: &Token) -> Result<Token> {⏎    let key = IdempotencyKey::new();⏎    let fresh = retry(3, || client.post_with("/refresh", token, &key))?;⏎    store.save(&fresh)?;⏎    Ok(fresh)⏎} (focused)
+Status │ Rust, Spaces: 4, Ln 3, Col 1
 Link │ Written in Retry the refresh · turn 1 · 2h
-Group │ Status
-Status │ e2e-worker
-Status │ Rust · Spaces: 4 · Ln 3, Col 1

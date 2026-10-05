@@ -477,10 +477,6 @@ const TAILNET_NOTE: &str =
 pub struct Workspace {
     /// Every worker, each with its own link.
     workers: Vec<WorkerSlot>,
-    /// What the view was last told: whether the key bar shows. Kept here so the build compares
-    /// without reading the view, which would build the app's root again with every change the
-    /// view hears of.
-    told: bool,
     /// Where the key bar sends its keys, while it can show: followed from the view's changes
     /// so the build reads no view.
     key_target: Option<KeyTarget>,
@@ -667,7 +663,6 @@ impl Workspace {
         let deployer = ssh::native(&runtime);
         let this = Self {
             workers: Vec::new(),
-            told: false,
             key_target: None,
             #[cfg(test)]
             renders: 0,
@@ -1247,7 +1242,7 @@ impl Workspace {
         self.refresh_hosts(cx);
     }
 
-    /// What the status bar's hosts popover can do to each worker: dial it now, wake one the
+    /// What a machine's menu in the navigator can do to each worker: dial it now, wake one the
     /// server can send a magic packet to (the palette offers that too), and forget one the
     /// server lists as not online; and its way to add a worker.
     fn refresh_hosts(&self, cx: &mut Context<Self>) {
@@ -3262,13 +3257,6 @@ impl Render for Workspace {
         let settings_editor =
             self.settings_editor.clone().or_else(|| self.settings_leaving.clone());
         let welcome = self.welcome();
-        // The key bar takes the status bar's row above the keyboard. Told only a change: an
-        // update while the window draws would build everything that read the workspace again.
-        let shown = key_bar.is_some();
-        if self.told != shown {
-            self.told = shown;
-            self.view.update(cx, |v, cx| v.set_key_bar_shown(shown, cx));
-        }
         if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
             sheet.follow_secure(window, cx);
         }
@@ -3315,8 +3303,8 @@ impl Render for Workspace {
                     .when_some(key_bar, |el, bar| {
                         el.child(div().w_full().pl(insets.left).pr(insets.right).child(bar))
                     })
-                    // The home indicator's band continues the bar above it: the key bar on the
-                    // body's surface, else the status bar on `canvas`.
+                    // The home indicator's band continues what is above it: the key bar on the
+                    // body's surface, else the strip's ground, `canvas`.
                     .child(div().w_full().h(insets.bottom).bg(hsla(band)))
             })
             .when_some(adding, gpui::ParentElement::child)

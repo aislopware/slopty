@@ -2,7 +2,7 @@
 //!
 //! The files dropped on tiles going up ([`super::Upload`]) and the worker files coming down here
 //! (`Download`), each with its machine, how far it got, how fast it goes and when it should be
-//! done, and its cancel. The status bar's transfers popover shows the list
+//! done, and its cancel. The title bar's transfers popover shows the list
 //! ([`WorkspaceView::transfer_rows`]).
 //!
 //! The transfers that still mean something to a new run of the app are kept in the client's

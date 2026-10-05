@@ -26,6 +26,4 @@ Button │ Compare
 Button │ Reload
 Button │ Overwrite
 MultilineTextInput │ Text of $SCRATCH/project/main.rs │ // edited⏎xfn main() {⏎    println!("hello");⏎} (focused)
-Group │ Status
-Status │ e2e-worker
-Status │ Rust · Spaces: 4 · Ln 2, Col 2
+Status │ Rust, Spaces: 4, Ln 2, Col 2

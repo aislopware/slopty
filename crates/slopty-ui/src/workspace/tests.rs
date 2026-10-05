@@ -1481,9 +1481,9 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
 }
 
 /// A worker the server says is away reads so in the navigator, and the server's own word leads
-/// the status bar, in sentence case, only while it does not answer.
+/// the title bar's readouts, in sentence case, only while it does not answer.
 #[gpui::test]
-fn the_servers_word_leads_the_status_bar(cx: &mut TestAppContext) {
+fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -1494,24 +1494,22 @@ fn the_servers_word_leads_the_status_bar(cx: &mut TestAppContext) {
         v.set_server_status(Some("server unreachable".into()), cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("server-status").is_some());
+    assert!(cx.debug_bounds("readout-server").is_some());
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let labels: Vec<&str> = tree.iter().filter_map(|n| n.label.as_deref()).collect();
     assert!(labels.contains(&"studio, unreachable"), "{labels:#?}");
     assert!(labels.contains(&"Server unreachable"), "{labels:#?}");
     let (server, bar) = (
-        cx.debug_bounds("server-status").expect("drawn"),
-        cx.debug_bounds("statusbar").expect("drawn"),
+        cx.debug_bounds("readout-server").expect("drawn"),
+        cx.debug_bounds("titlebar").expect("drawn"),
     );
-    assert!(bar.contains(&server.center()), "in the status bar: {server:?} {bar:?}");
-    let worker = cx.debug_bounds("status-worker").expect("drawn");
-    assert!(server.right() <= worker.left(), "first, on the left: {server:?} {worker:?}");
-    let away = cx.debug_bounds("status-worker-away").expect("a dot says the worker is away");
-    assert!(worker.contains(&away.center()) && away.size.width < px(8.0), "a dot: {away:?}");
+    assert!(bar.contains(&server.center()), "in the title bar: {server:?} {bar:?}");
+    let readouts = cx.debug_bounds("readouts").expect("drawn");
+    assert!(server.left() - readouts.left() < px(1.0), "first among them: {server:?}");
 
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("server-status").is_none(), "gone once the server answers");
+    assert!(cx.debug_bounds("readout-server").is_none(), "gone once the server answers");
 }
 
 /// The palette's line for each worker says its state, and going to one without a tile asks
@@ -1640,10 +1638,10 @@ fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppCon
 mod chrome;
 
 /// The empty workspace sits where this frame's layout puts it, never where the strip's size as
-/// the last frame measured it would. When chrome comes or goes (the status bar, with the first
-/// worker) the strip changes size, and a page placed from the old size stayed there until
-/// something else drew the strip again: the app self-test's stale frame at launch, its text
-/// 5 px low, a fifth of the 25 px bar.
+/// the last frame measured it would. When chrome comes or goes (the title bar's
+/// buttons, with the first worker) the strip changes size, and a page placed from the old size
+/// stayed there until something else drew the strip again: the app self-test's stale frame at
+/// launch, its text 5 px low, a fifth of the 25 px bar.
 #[gpui::test]
 fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

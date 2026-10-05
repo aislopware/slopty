@@ -1,10 +1,13 @@
 //! The notices: another client's pointing, a closed tile to take back, a word to this client.
-//! They sit in the status bar, between where the focused tile runs and the bar's readouts: a
-//! lane no tile draws in, so a notice never lies over a composer's send button or a shell's
-//! last rows, as one floating in the strip's corner did. Each is one line, marked with what it
-//! is about when it is about something, with at most its actions; they stay [`SAY_FOR`] and no
-//! more than [`SHOWN`] are up at once, side by side, the newest nearest the readouts. One whose
-//! time comes while the pointer is over them stays until the pointer leaves, then
+//! A notice about a tile's own work (a drop that did not land, a window that did not open)
+//! sits beside that work, under its tile's header at its trailing edge, and moves with the
+//! tile. Every other notice sits in the title bar, between where the focused work is and the
+//! readouts: a lane no tile draws in, so it never lies over a composer's send button or a
+//! shell's last rows, as one floating in the strip's corner did. On a phone, whose bar has no
+//! such lane, they hang under the bar's middle. Each is one line, marked with what it is about
+//! when it is about something, with at most its actions; they stay [`SAY_FOR`] and no more
+//! than [`SHOWN`] are up at once in one place, side by side, the newest nearest the readouts. One
+//! whose time comes while the pointer is over them stays until the pointer leaves, then
 //! [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away; one whose time comes
 //! while the app is not in front waits the same way for it to come back, so nothing lapses
 //! unseen. A failure stays until it is dismissed, offering its words to copy. A notice rises a
@@ -33,7 +36,7 @@ pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
 /// How long a notice whose time came under the pointer stays once the pointer leaves.
 pub(super) const SAY_AFTER_HOVER: Duration = Duration::from_secs(2);
 
-/// How many notices are up at once: a third pushes the oldest out.
+/// How many notices are up at once in one place: a third pushes the oldest out.
 pub(super) const SHOWN: usize = 2;
 
 /// The widest a notice gets, in points: past it the line ends in an ellipsis.
@@ -53,6 +56,9 @@ pub(super) struct Toast {
 struct Shown {
     seq: u64,
     what: ToastKind,
+    /// The tile whose work it is about, beside which it shows while the tile is in the
+    /// layout; `None` for the title bar's.
+    at: Option<TileRef>,
     /// Its time is up and it is fading out: no longer counted as up.
     leaving: bool,
     /// Its time came while the pointer was over the stack: it goes once the pointer leaves.
@@ -112,24 +118,41 @@ impl WorkspaceView {
         during: Duration,
         cx: &mut Context<Self>,
     ) {
+        self.show_toast_at(what, None, during, cx);
+    }
+
+    /// Show `what` for `during` beside `at`'s work, or in the title bar for `None`; the
+    /// oldest in the same place goes when there would be more than [`SHOWN`] there.
+    fn show_toast_at(
+        &mut self,
+        what: ToastKind,
+        at: Option<TileRef>,
+        during: Duration,
+        cx: &mut Context<Self>,
+    ) {
         let toast = self.toast.get_or_insert_with(Toast::default);
         toast.seq = toast.seq.wrapping_add(1);
         let seq = toast.seq;
         // One on its way out gives its place at once to the one coming in.
         toast.shown.retain(|shown| !shown.leaving);
         let sticky = matches!(what, ToastKind::Failed(_) | ToastKind::OldUnsaved(_));
-        toast.shown.push(Shown { seq, what, leaving: false, held: false });
-        // Past the most shown, the oldest goes, one that waits for an answer only when nothing
-        // else is left to go.
-        while toast.shown.len() > SHOWN {
-            let at = toast
+        toast.shown.push(Shown { seq, what, at, leaving: false, held: false });
+        // Past the most shown in its place, the oldest there goes, one that waits for an
+        // answer only when nothing else is left to go.
+        while toast.shown.iter().filter(|shown| shown.at == at).count() > SHOWN {
+            let here = |shown: &&Shown| shown.at == at;
+            let gone = toast
                 .shown
                 .iter()
-                .position(|shown| {
+                .enumerate()
+                .filter(|(_, shown)| here(shown))
+                .find(|(_, shown)| {
                     !matches!(shown.what, ToastKind::Failed(_) | ToastKind::OldUnsaved(_))
                 })
-                .unwrap_or(0);
-            toast.shown.remove(at);
+                .or_else(|| toast.shown.iter().enumerate().find(|(_, shown)| here(shown)))
+                .map(|(ix, _)| ix);
+            let Some(gone) = gone else { break };
+            toast.shown.remove(gone);
         }
         cx.notify();
         if !sticky {
@@ -241,6 +264,17 @@ impl WorkspaceView {
     /// until dismissed and offers its words to copy.
     pub fn show_failure(&mut self, text: String, cx: &mut Context<Self>) {
         self.show_toast(ToastKind::Failed(text), cx);
+    }
+
+    /// A word about `tile`'s own work, said beside it.
+    pub fn show_notice_at(&mut self, tile: TileRef, text: String, cx: &mut Context<Self>) {
+        self.show_toast_at(ToastKind::Said(text), Some(tile), SAY_FOR, cx);
+    }
+
+    /// Something in `tile`'s own work that failed (a drop that did not land, a window that
+    /// did not open), said beside it until dismissed.
+    pub fn show_failure_at(&mut self, tile: TileRef, text: String, cx: &mut Context<Self>) {
+        self.show_toast_at(ToastKind::Failed(text), Some(tile), SAY_FOR, cx);
     }
 
     /// Say an entry went to `worker`'s trash, with "Put back", which asks for `back`.
@@ -397,14 +431,14 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
-            .h(px(theme.spacing.xxs.mul_add(-2.0, super::statusbar::STATUSBAR_H)))
+            .h(px(theme.density.hit))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
             .pl(px(theme.spacing.sm))
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
-            // Raised off the bar in both variants: a notice is a thing on the bar, not one
-            // more of its readouts.
+            // Raised in both variants: a notice is a thing on the bar or the tile, not one
+            // more of its words.
             .map(|el| crate::kit::raised(el, theme))
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
@@ -495,31 +529,62 @@ impl WorkspaceView {
         )
     }
 
-    /// Whether a notice is up, which keeps the status bar up to hold it.
-    pub(super) fn notices_up(&self) -> bool {
-        self.toast.as_ref().is_some_and(|t| !t.shown.is_empty())
+    /// Whether `shown` is said beside its tile: one about a tile still in the layout. One
+    /// whose tile has gone is said in the title bar.
+    fn beside_tile(&self, shown: &Shown) -> Option<TileRef> {
+        shown.at.filter(|tile| self.layout.contains(*tile))
     }
 
-    /// The notices up now, side by side for the status bar, the newest nearest its readouts.
+    /// The title bar's notices up now, side by side, the newest nearest the readouts.
     pub(super) fn render_notices(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
-        let theme = &self.theme;
         let toast = self.toast.as_ref()?;
-        let notices: Vec<gpui::AnyElement> =
-            toast.shown.iter().map(|shown| self.render_one(shown, cx)).collect();
+        let notices: Vec<gpui::AnyElement> = toast
+            .shown
+            .iter()
+            .filter(|shown| self.beside_tile(shown).is_none())
+            .map(|shown| self.render_one(shown, cx))
+            .collect();
+        self.notice_row("notices", notices)
+    }
+
+    /// The notices about `tile`'s own work, side by side for its trailing edge under its
+    /// header, the newest nearest the edge.
+    pub(super) fn render_tile_notices(
+        &self,
+        tile: TileRef,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
+        let toast = self.toast.as_ref()?;
+        let notices: Vec<gpui::AnyElement> = toast
+            .shown
+            .iter()
+            .filter(|shown| self.beside_tile(shown) == Some(tile))
+            .map(|shown| self.render_one(shown, cx))
+            .collect();
+        self.notice_row("tile-notices", notices)
+    }
+
+    /// `notices` in a row named `selector`, painted over whatever is up there, a popover's
+    /// click-away included; nothing when there are none.
+    fn notice_row(
+        &self,
+        selector: &'static str,
+        notices: Vec<gpui::AnyElement>,
+    ) -> Option<gpui::AnyElement> {
         if notices.is_empty() {
             return None;
         }
         let row = div()
-            .debug_selector(|| "notices".to_owned())
+            .debug_selector(move || selector.to_owned())
             .flex_initial()
             .min_w_0()
             .overflow_hidden()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
+            .gap(px(self.theme.spacing.xs))
+            .font_family(self.theme.typography.ui_family.clone())
+            .text_size(px(self.theme.typography.small()))
             .children(notices);
-        // Laid out in the bar, painted over whatever is up there, a popover's click-away
-        // included.
         Some(
             gpui::deferred(row)
                 .with_priority(crate::palette::Layer::Toast.priority())

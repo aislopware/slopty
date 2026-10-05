@@ -83,7 +83,7 @@ pub const SERVE_BLURB: &str =
 const THIS_MAC: &str = "this Mac";
 /// The palette's line that updates every worker on a different build.
 pub const UPDATE_ALL: &str = "Update all machines";
-/// The status bar's word while the server is being brought to this build.
+/// The title bar's word while the server is being brought to this build.
 pub const UPDATING_SERVER: &str = "Updating the server\u{2026}";
 
 /// What the person said to one deploy, after a run stopped to ask.
@@ -1207,7 +1207,7 @@ impl Workspace {
     /// through the target it was set up with or the host it is dialled at, then link to it
     /// again at once, at the address in use first.
     ///
-    /// The status bar says it runs; a notice says how it ended. A machine whose host key this
+    /// The title bar says it runs; a notice says how it ended. A machine whose host key this
     /// Mac's `ssh` does not know yet is sent to the server's SSH sheet, which shows the key.
     pub(crate) fn update_server(&mut self, cx: &mut Context<Self>) {
         let Some(address) = self.server_address().cloned() else {
@@ -1301,7 +1301,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The server's update stopped for `failure`: said in a notice, the status bar back to
+    /// The server's update stopped for `failure`: said in a notice, the title bar back to
     /// what the server is.
     fn server_update_failed(&mut self, failure: Failure, cx: &mut Context<Self>) {
         self.server_update = None;

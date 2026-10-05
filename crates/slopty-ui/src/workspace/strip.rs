@@ -123,7 +123,8 @@ pub(super) struct Drawn {
     pub placed: RefCell<Vec<(TileRef, Bounds<Pixels>)>>,
     /// The tile focused when the tiles were last drawn.
     pub focus: Cell<Option<TileRef>>,
-    /// Tiles on screen in the frame last drawn: what the status bar need not count again.
+    /// Tiles on screen in the frame last drawn: what a notice about one of them need not say
+    /// again.
     pub on_screen: RefCell<HashSet<ItemId>>,
     /// Bumped every time the strip builds.
     pub builds: Cell<u64>,
@@ -765,6 +766,7 @@ impl WorkspaceView {
         let mut placed = Vec::new();
         let mut tiles = Vec::new();
         let mut dividers = Vec::new();
+        let mut notices = Vec::new();
         for p in &frame.tiles {
             if p.hidden || !(p.near || p.focused || dragged == Some(p.tile)) {
                 continue;
@@ -772,6 +774,7 @@ impl WorkspaceView {
             if let Some(el) = self.render_tile(p, chrome, window, cx) {
                 tiles.push(el);
                 dividers.extend(self.render_dividers(p));
+                notices.extend(self.tile_notices(p, chrome, cx));
                 let r = p.rect;
                 placed.push((
                     p.tile,
@@ -829,11 +832,40 @@ impl WorkspaceView {
             .children(closing)
             .children(tiles)
             .children(dividers)
+            .children(notices)
             .children(handles)
             .children(hint)
             .children(empty)
             .children(self.render_marks());
         strip.into_any_element()
+    }
+
+    /// The notices about `p`'s own work, under its header at its trailing edge, moving with it.
+    fn tile_notices(
+        &self,
+        p: &slopty_client::layout::Placed,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
+        let notices = self.render_tile_notices(p.tile, cx)?;
+        let item = p.tile.item;
+        let spacing = self.theme.spacing;
+        let r = p.rect;
+        let header = self.theme.density.header * chrome.k;
+        Some(
+            div()
+                .debug_selector(move || format!("tile-notices-{}", item.as_uuid()))
+                .absolute()
+                .left(px(r.x))
+                .top(px(r.y + header))
+                .w(px(r.w))
+                .flex()
+                .justify_end()
+                .px(px(spacing.sm))
+                .pt(px(spacing.xs))
+                .child(notices)
+                .into_any_element(),
+        )
     }
 
     /// The strip laid out at `bounds`: kept for the handlers, and a new size is the layout's,

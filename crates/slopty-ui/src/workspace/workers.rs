@@ -512,7 +512,7 @@ impl WorkspaceView {
         }
         self.tell_screens_rtt(key, cx);
         // The bars and the navigator show it: repaint only when what they print moved.
-        if changed && self.rtt_shown(key, was, rtt) {
+        if changed && self.rtt_shown(was, rtt) {
             cx.notify();
         }
     }
@@ -1260,7 +1260,8 @@ impl WorkspaceView {
         let item = w.doc.get(id).cloned();
         let title = item
             .map_or_else(String::new, |i| i.name.clone().unwrap_or_else(|| self.derived_title(&i)));
-        self.show_failure(format!("{title} did not open. {text}"), cx);
+        let tile = TileRef { worker: key, item: id };
+        self.show_failure_at(tile, format!("{title} did not open. {text}"), cx);
     }
 
     /// The views of `key`'s items that show `stream` on its current link, each with its item:
@@ -1452,15 +1453,10 @@ impl WorkspaceView {
             cx.notify();
         })
         .detach();
-        // The status bar says where the focused file's caret is: it draws again as it moves,
-        // and only for the focused file.
         // Most of the tile's redraws are its caret blinking: its backup is looked at only when
         // where its edit stands has moved.
         let mut marked = None;
         cx.observe(&view, move |this, view, cx| {
-            if this.focused().is_some_and(|t| t.item == id) {
-                App::notify(cx, this.chrome.statusbar.entity_id());
-            }
             this.file_changed(id, cx);
             let mark = view.read(cx).backup_mark();
             if mark != marked {
@@ -1541,7 +1537,6 @@ impl WorkspaceView {
     }
 }
 
-#[cfg(test)]
 impl WorkspaceView {
     /// What to say of `key`'s link having stayed on a DERP relay, once it has held.
     #[must_use]

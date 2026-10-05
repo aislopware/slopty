@@ -100,7 +100,7 @@ impl FileView {
         self.base.as_ref().and_then(|b| b.format.label())
     }
 
-    /// What the status line says of the file's layout: its indentation ("Spaces: 4", "Tabs"),
+    /// What the foot line says of the file's layout: its indentation ("Spaces: 4", "Tabs"),
     /// then its line ends and BOM when they are not the usual.
     #[must_use]
     pub fn layout_facts(&self) -> Vec<String> {

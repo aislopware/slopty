@@ -472,7 +472,7 @@ impl WorkspaceView {
     /// on it, and the landing goes when the upload ends. A file that did not come is named.
     pub fn files_picked(&mut self, tile: TileRef, dropped: Dropped, cx: &mut Context<Self>) {
         if !dropped.failed.is_empty() {
-            self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+            self.show_failure_at(tile, format!("Not sent: {}", dropped.failed.join("; ")), cx);
         }
         if dropped.paths.is_empty() {
             return;

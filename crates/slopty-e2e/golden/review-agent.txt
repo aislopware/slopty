@@ -67,5 +67,3 @@ Button │ Remove comment
 Button │ Add to message
 Button │ Send 2 comments
 Button │ Mark reviewed
-Group │ Status
-Status │ e2e-worker

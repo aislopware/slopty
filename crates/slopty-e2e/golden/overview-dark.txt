@@ -22,5 +22,3 @@ Group │ Terminal 2
 Heading │ terminal Terminal 2
 Group
 Terminal │ shell
-Group │ Status
-Status │ e2e-worker

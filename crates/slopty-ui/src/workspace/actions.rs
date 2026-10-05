@@ -248,7 +248,7 @@ pub struct GroupNavigatorBy {
 }
 
 /// "Scope to `project`": narrow the navigator, the attention sections, the inbox and the
-/// status bar's counts to one project; `None` lets go of the scope.
+/// bell's counts to one project; `None` lets go of the scope.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
 pub struct ScopeTo {

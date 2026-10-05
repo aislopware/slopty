@@ -11,5 +11,3 @@ Button │ New terminal
 Button │ Add a window or display
 Button │ New terminal in ~
 Button │ New terminal on e2e-worker
-Group │ Status
-Status │ e2e-worker

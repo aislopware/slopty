@@ -23,13 +23,14 @@ use crate::icons::{IconSize, Symbol};
 ///
 /// `capped`: something stands on it as its head (a thread's tray), so only its foot's corners
 /// round and it casts the stack's contact alone. `focused`: the keyboard is in it, and its
-/// hairline takes the focus ring every field wears while it has the keyboard.
+/// hairline takes the quiet focus tone of a field that has the keyboard
+/// ([`slopty_theme::Theme::field_focus`]).
 pub fn shell<E: Styled>(el: E, theme: &Theme, zoom: f32, capped: bool, focused: bool) -> E {
     let s = theme.surfaces;
     let r = px(theme.radii.lg * zoom);
     let el =
         if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(px(theme.radii.lg * zoom)) };
-    let edge = if focused { hsla(s.focus) } else { hsla(s.border) };
+    let edge = if focused { hsla(theme.field_focus()) } else { hsla(s.border) };
     let el = el.border(super::hair(theme)).border_color(edge).bg(hsla(s.elevated));
     super::rests(el, theme, !capped, true)
 }

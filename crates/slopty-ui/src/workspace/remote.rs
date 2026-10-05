@@ -460,7 +460,8 @@ impl WorkspaceView {
                     }
                     Ok(_) => Self::upload_ended(Upload { scratch: Some(scratch), ..upload }, cx),
                     Err(e) => {
-                        this.show_failure(format!("Cannot bring the files over: {e}"), cx);
+                        let said = format!("Cannot bring the files over: {e}");
+                        this.show_failure_at(tile, said, cx);
                         Self::upload_ended(Upload { scratch: Some(scratch), ..upload }, cx);
                     }
                 }
@@ -607,7 +608,8 @@ impl WorkspaceView {
                             let _started = this.upload(tile, &[file], upload, cx);
                         }
                         Err(e) => {
-                            this.show_failure(format!("Cannot attach the picture: {e}"), cx);
+                            let said = format!("Cannot attach the picture: {e}");
+                            this.show_failure_at(tile, said, cx);
                             Self::upload_ended(upload, cx);
                         }
                     });
@@ -713,14 +715,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(remote) = self.remote(tile.worker) else {
-            self.show_notice("The machine is away; nothing was sent".to_owned(), cx);
+            self.show_notice_at(tile, "The machine is away; nothing was sent".to_owned(), cx);
             Self::upload_ended(upload, cx);
             return false;
         };
         upload.total = match slopty_client::xfer::entries(paths) {
             Ok(entries) => entries.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size)),
             Err(e) => {
-                self.show_failure(format!("Cannot send that: {e}"), cx);
+                self.show_failure_at(tile, format!("Cannot send that: {e}"), cx);
                 Self::upload_ended(upload, cx);
                 return false;
             }
@@ -895,10 +897,8 @@ impl WorkspaceView {
                 .workers
                 .get(&upload.tile.worker)
                 .map_or_else(|| "the machine".to_owned(), |w| w.name.clone());
-            self.show_failure(
-                format!("{} did not reach {machine}: {error}", sent(&upload.names)),
-                cx,
-            );
+            let said = format!("{} did not reach {machine}: {error}", sent(&upload.names));
+            self.show_failure_at(upload.tile, said, cx);
             Self::upload_ended(upload, cx);
             cx.notify();
         }

@@ -19,5 +19,3 @@ Button │ Fullscreen tile
 Button │ Close tile
 Button │ Show its window
 Status │ In its own window
-Group │ Status
-Status │ e2e-worker

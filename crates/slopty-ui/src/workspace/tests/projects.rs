@@ -1092,7 +1092,7 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
 
 /// The board says what the project spent: its time at work in the header, with the
 /// orchestrator's share apart on hover. No context meter, plan window or dollar figure: the
-/// status bar has the plan's windows.
+/// title bar says a plan's windows once one is far used.
 #[gpui::test]
 fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     use slopty_proto::project::Spent;

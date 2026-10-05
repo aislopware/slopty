@@ -67,7 +67,7 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
 }
 
 /// A header is its title, then its context, muted with no separator: a file's directory, a
-/// shell's (none when the title already names it: the status bar has the path). (That the
+/// shell's (none when the title already names it: the breadcrumb has the path). (That the
 /// context is in the UI
 /// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
 /// shapes every family alike.)
@@ -663,10 +663,10 @@ fn the_exited_pill_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("lines-below").is_none(), "in the count's place");
 }
 
-/// Notices stack in the strip's bottom-right corner, no wider than 400 pt, two at most (a
+/// Notices stack in the title bar's lane on its right, no wider than 400 pt, two at most (a
 /// third pushes the oldest out), and each goes after six seconds.
 #[gpui::test]
-fn notices_stack_two_in_the_corner_and_go(cx: &mut TestAppContext) {
+fn notices_stack_two_in_the_title_bar_and_go(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _fake = connect(&view, cx, 1, "studio");
     let long = "a word that goes on ".repeat(10);
@@ -685,9 +685,10 @@ fn notices_stack_two_in_the_corner_and_go(cx: &mut TestAppContext) {
         .find(|n| n.is("Status", Some(long.as_str())))
         .map_or_else(|| panic!("the long notice is drawn: {nodes:#?}"), |n| n.bounds);
     let strip = cx.debug_bounds("workspace").expect("drawn");
+    let titlebar = cx.debug_bounds("titlebar").expect("drawn");
     assert!(w <= 400.0, "capped at 400 pt: {w}");
     assert!(x > f32::from(strip.center().x), "on the right: {x}");
-    assert!(y > f32::from(strip.center().y), "at the foot: {y}");
+    assert!(y < f32::from(titlebar.bottom()), "in the title bar: {y}");
 
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
@@ -855,7 +856,7 @@ fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
 }
 
 /// A shell titled by the directory it stands in shows no place: the directory above it read as
-/// the cwd, and the status bar has the whole path.
+/// the cwd, and the breadcrumb has the whole path.
 #[test]
 fn a_place_does_not_repeat_the_title() {
     use crate::workspace::tile::place_beside;
@@ -1030,8 +1031,7 @@ fn the_overview_words_wait_for_the_zoom() {
     assert!(overview_words(gpui::div(), "w", false, true).is_none(), "closing: gone");
 }
 
-/// The server's word leads the status bar's one path, parted from the worker by the faint dot
-/// the path's steps are, and says what it costs.
+/// The server's word says what it costs, to a screen reader and under the pointer.
 #[gpui::test]
 fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1042,10 +1042,21 @@ fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let server = tree(cx).into_iter().find(|n| n.is("Status", Some("Server unreachable")));
     let server = server.expect("the server's word");
-    assert_eq!(server.description.as_deref(), Some("direct links only"));
-    let place = cx.debug_bounds("status-place").expect("the left");
-    let word = cx.debug_bounds("server-status").expect("drawn");
-    assert!(place.contains(&word.center()), "one line with the worker: {place:?} {word:?}");
+    assert_eq!(server.description.as_deref(), Some("Machines you reach directly still work"));
+    assert!(cx.debug_bounds("readout-server").is_some(), "drawn");
+}
+
+/// Inside a repository a place is named by it and the path within; elsewhere, the tail.
+#[test]
+fn a_place_in_a_repository_is_named_by_it() {
+    use crate::workspace::tile::repo_place;
+    assert_eq!(repo_place("/w/oss/slopty", Some("/w/oss/slopty"), None), "slopty");
+    assert_eq!(
+        repo_place("/w/oss/slopty/crates/ui/", Some("/w/oss/slopty"), None),
+        "slopty/crates/ui"
+    );
+    assert_eq!(repo_place("/w/oss/slopty-two", Some("/w/oss/slopty"), None), "oss/slopty-two");
+    assert_eq!(repo_place("/Users/me/src", None, None), "~/src");
 }
 
 /// The empty workspace's quieter ways to begin say where they open.

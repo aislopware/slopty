@@ -46,5 +46,3 @@ MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
 Button │ Send
-Group │ Status
-Status │ e2e-worker

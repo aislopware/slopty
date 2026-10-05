@@ -20,5 +20,3 @@ Button │ Reload
 Button │ Fullscreen tile
 Button │ Close tile
 Document │ Page http://127.0.0.1:$PORT/ │ Slopty test page
-Group │ Status
-Status │ e2e-worker

@@ -5,19 +5,23 @@
 //! open: a terminal, an agent, a window, a note, or a workspace); the bell and "…" on the
 //! right. The bell counts what needs the person and the agents' turns left to review, and opens
 //! the navigator at them. Where the view is along the strip is the strip's own thumb (`marks`), not
-//! the bar's. Nothing else: every other action is a key, the palette, or a tile's own header, and
-//! the readouts (the server's state among them) live in the status bar.
+//! the bar's. Between them, only while there is something to say: the notices that are about no
+//! one tile's work (`toast`), and before the bell the readouts (`readouts`): the server while
+//! it does not answer, a plan far used, the ports forwarded, the transfers, a newer Slopty, the
+//! frame time with the stats. Every other action is a key, the palette, or a tile's own
+//! header. There is no bar along the bottom.
 //!
 //! It takes the content's tone ([`slopty_theme::Theme::content`]) with no rule under it, so the
 //! content runs up to the window's top edge and the navigator is the one panel beside it, as
 //! macOS 26 draws a sidebar beside edge-to-edge content and Linear and the Codex app draw a grey
-//! sidebar beside a white main area. It used to take the navigator's tone, and with the status
-//! bar the chrome read as a grey frame round the content, an older Electron window's look. A
+//! sidebar beside a white main area. It used to take the navigator's tone, and with the bar
+//! along the bottom the chrome read as a grey frame round the content, an older Electron
+//! window's look. A
 //! menu fades in as it drops 4 pt from its button, at once under Reduce Motion.
 //!
 //! On a phone the bar is a navigation bar: the workspace's name alone, as the breadcrumb's
 //! first segment says it (the body's size, the medium weight), and what "+" opens folded into
-//! "…".
+//! "…". It has no room for the readouts, and its notices hang under its middle.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
@@ -148,20 +152,12 @@ impl WorkspaceView {
         self.width(window) < self.layout.config().phone_below
     }
 
-    /// Whether `key`'s round trip, going from `was` to `now`, is on screen: the status bar
-    /// prints the focused tile's worker's while it is slow or under the pointer, and the
-    /// navigator those slow enough to name. A quick link's
-    /// samples then draw nothing.
-    pub(super) fn rtt_shown(
-        &self,
-        key: WorkerKey,
-        was: Option<Duration>,
-        now: Option<Duration>,
-    ) -> bool {
+    /// Whether a round trip going from `was` to `now` is on screen: the navigator prints those
+    /// slow enough to name. A quick link's samples then draw nothing.
+    pub(super) fn rtt_shown(&self, was: Option<Duration>, now: Option<Duration>) -> bool {
         let slow =
             |rtt: Option<Duration>| rtt.is_some_and(|rtt| rtt >= super::navigator::RTT_SHOWN_FROM);
-        self.status_prints_rtt(key, was, now)
-            || (self.nav.drawn.is_some() && (slow(was) || slow(now)))
+        self.nav.drawn.is_some() && (slow(was) || slow(now))
     }
 
     /// The active workspace's name: the one given, else its place.
@@ -368,6 +364,22 @@ impl WorkspaceView {
             );
         let buttons =
             div().flex_none().flex().items_center().gap(px(spacing.xxs)).children(bell).child(more);
+        let readouts = self.render_readouts(phone, window, cx);
+        // The notices about no one tile's work: in the lane before the readouts, or hanging
+        // under a phone's bar, whose middle is its title.
+        let notices = self.render_notices(cx);
+        let (lane, hanging) = if phone { (None, notices) } else { (notices, None) };
+        let hanging = hanging.map(|notices| {
+            div()
+                .absolute()
+                .top(px(titlebar_height(theme)) + safe.top + px(spacing.xs))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .px(px(spacing.sm))
+                .child(notices)
+        });
         // Its empty span is a native title bar: pressed and moved it drags the window, and a
         // double-click is the system's zoom. A button's press stops before it gets here.
         div()
@@ -418,7 +430,10 @@ impl WorkspaceView {
                     .children(place)
                     .children(new),
             )
+            .children(lane)
+            .children(readouts)
             .child(buttons)
+            .children(hanging)
             .into_any_element()
     }
 

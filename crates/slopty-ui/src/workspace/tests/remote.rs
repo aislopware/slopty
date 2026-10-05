@@ -995,7 +995,7 @@ fn a_drop_goes_where_the_tile_can_take_it(cx: &mut TestAppContext) {
     assert!(calls.try_recv().is_err(), "the note took nothing");
 }
 
-/// A shell's listening ports are counted in the status bar, not on its tile's header; one
+/// A shell's listening ports are counted in the title bar, not on its tile's header; one
 /// served on another port here says so in a notice; the count lists them to open.
 #[gpui::test]
 fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) {
@@ -1016,7 +1016,7 @@ fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) 
     // each client serves it where it can.
     let mut studio = studio;
     studio.drain();
-    let count = cx.debug_bounds("status-ports").expect("the status bar counts them");
+    let count = cx.debug_bounds("readout-ports").expect("the title bar counts them");
     cx.simulate_click(count.center(), Modifiers::none());
     cx.run_until_parked();
     cx.simulate_input("8080 in a tile");
@@ -1035,7 +1035,7 @@ fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) 
     assert_eq!(opened, ["http://localhost:8080/"]);
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, Vec::new(), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-ports").is_none(), "gone with the server");
+    assert!(cx.debug_bounds("readout-ports").is_none(), "gone with the server");
 }
 
 /// Two clients of one worker show one browser item, the worker's address; each loads it from
@@ -1487,7 +1487,7 @@ fn a_drag_out_back_over_its_worker_names_its_files_there(cx: &mut TestAppContext
     assert!(matches!(calls.try_recv(), Ok(Call::Upload(..))), "and it goes up");
 }
 
-/// Every transfer in flight is on the status bar's list, both ways: an upload with how far it
+/// Every transfer in flight is on the title bar's list, both ways: an upload with how far it
 /// got, its rate and its time left, a download as it begins; the bar counts them together, and
 /// a transfer's stop on the list stops it. The list closes once nothing is left in it.
 #[cfg(target_os = "macos")]
@@ -1513,7 +1513,7 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
         v.xfer_message(XferMsg::Progress { xfer: up, done: 820 }, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-transfers").is_none(), "the focused tile's own says it");
+    assert!(cx.debug_bounds("readout-transfers").is_none(), "the focused tile's own says it");
 
     let down = XferId::new();
     let dest = dir.path().join("out.txt");
@@ -1541,11 +1541,11 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
     let notice = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
     assert!(notice.starts_with("Downloaded ") && notice.ends_with("out.txt"), "{notice}");
 
-    // Another tile focused: the bar counts the upload, and its list stops it.
+    // Another tile focused: the title bar counts the upload, and its list stops it.
     let other = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
     view.update_in(cx, |v, _window, cx| v.focus_tile(other, cx));
     cx.run_until_parked();
-    let button = cx.debug_bounds("status-transfers").expect("the bar counts it");
+    let button = cx.debug_bounds("readout-transfers").expect("the title bar counts it");
     let listed = view.read_with(cx, |v, cx| v.transfer_rows(cx.background_executor().now()).len());
     assert_eq!(listed, 1, "the download landed: only the upload is left");
     cx.simulate_click(button.center(), Modifiers::none());
@@ -1558,7 +1558,7 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == up), "the upload stops");
     assert!(cx.debug_bounds("transfers").is_none(), "nothing left: the list closes");
-    assert!(cx.debug_bounds("status-transfers").is_none());
+    assert!(cx.debug_bounds("readout-transfers").is_none());
 }
 
 /// Transfers in flight are kept in the ledger and taken up at the next launch: listed as

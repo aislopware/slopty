@@ -4,6 +4,8 @@ Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
+Group │ Status
+Status │ Server unreachable
 Button │ Needs you
 Button │ More
 Group │ Terminal
@@ -13,6 +15,3 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
-Group │ Status
-Status │ Server unreachable
-Status │ e2e-worker

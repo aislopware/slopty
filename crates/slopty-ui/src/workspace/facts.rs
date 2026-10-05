@@ -254,7 +254,7 @@ impl WorkspaceView {
     }
 
     /// Keep the readouts' clock moving, once a second, while a command runs, each tick news for
-    /// the views that count: the strip's headers, the navigator's rows and the status bar.
+    /// the views that count: the strip's headers and the navigator's rows.
     pub(super) fn keep_time(&mut self, cx: &Context<Self>) {
         if self.facts.ticking || !self.readouts_run() {
             return;
@@ -281,20 +281,13 @@ impl WorkspaceView {
     }
 
     /// Move the readouts' clock to now, and tell the views that show a count: the navigator for
-    /// a command's time, the strip for a header's, the status bar for the focused shell's.
+    /// a command's time, the strip for a header's.
     pub(super) fn tick_readouts(&mut self, cx: &mut Context<Self>) {
         self.facts.ticked = Some(Self::readout_now());
         let counting = |session: &SessionId| self.running_for(*session).is_some();
-        let shells = self.facts.shells.keys().any(counting);
-        let focused = self.focused().and_then(|tile| self.item(tile)).is_some_and(|item| {
-            matches!(&item.kind, slopty_proto::items::ItemKind::Terminal { session } if counting(session))
-        });
-        if shells {
+        if self.facts.shells.keys().any(counting) {
             App::notify(cx, self.chrome.nav_rows.entity_id());
             App::notify(cx, self.strip_host.entity_id());
-        }
-        if focused {
-            App::notify(cx, self.chrome.statusbar.entity_id());
         }
     }
 

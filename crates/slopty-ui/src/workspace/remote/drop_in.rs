@@ -416,7 +416,8 @@ impl WorkspaceView {
         #[cfg(target_os = "macos")]
         if let Some(session) = waiting.term {
             if !dropped.failed.is_empty() {
-                self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+                let failed = format!("Not sent: {}", dropped.failed.join("; "));
+                self.show_failure_at(waiting.tile, failed, cx);
             }
             let mut files = self
                 .terminals
@@ -438,7 +439,7 @@ impl WorkspaceView {
             })
             .collect();
         if !dropped.failed.is_empty() {
-            self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+            self.show_failure_at(tile, format!("Not sent: {}", dropped.failed.join("; ")), cx);
         }
         let Some(screen) = self.screen(tile.item).cloned() else {
             Self::discard_landing(dropped.landing.clone(), cx);
@@ -467,11 +468,11 @@ impl WorkspaceView {
             Outcome::Landed(_) => {}
             Outcome::Refused => {
                 self.stop_drag_uploads(drag, cx);
-                self.show_notice("Nothing there took the drop".to_owned(), cx);
+                self.show_notice_at(tile, "Nothing there took the drop".to_owned(), cx);
             }
             Outcome::Failed(why) => {
                 self.stop_drag_uploads(drag, cx);
-                self.show_failure(format!("The drop did not land: {why}"), cx);
+                self.show_failure_at(tile, format!("The drop did not land: {why}"), cx);
             }
         }
     }

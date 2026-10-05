@@ -31,5 +31,3 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell
-Group │ Status
-Status │ e2e-worker

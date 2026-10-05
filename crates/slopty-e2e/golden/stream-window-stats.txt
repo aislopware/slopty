@@ -17,5 +17,3 @@ Heading │ window Synthetic editor
 Button │ Fullscreen tile
 Button │ Close tile
 Button │ Details
-Group │ Status
-Status │ e2e-worker

@@ -1,4 +1,4 @@
-//! The status bar's facts, a machine's menu, a finish's badge, and the palette's rows with
+//! The title bar's readouts, a machine's menu, a finish's badge, and the palette's rows with
 //! their context, in the headless workspace.
 
 use std::cell::Cell;
@@ -102,12 +102,11 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
 }
 
-/// The left of the status bar says which machine the focused shell is on (with one worker
-/// too) and nothing more: the checkout and branch are the breadcrumb's. The right counts the
-/// ports forwarded here, which list them; the workers go uncounted while every one is up, and
+/// The title bar's readouts count the ports forwarded here, which list them, before the bell;
+/// the machine a shell runs on is the navigator's and the breadcrumb's to say, not theirs, and
 /// the frame time waits for the stream stats.
 #[gpui::test]
-fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut TestAppContext) {
+fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (shell, _tile) =
@@ -120,17 +119,15 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["studio", "2 ports"] {
-        assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
-    }
-    let place = cx.debug_bounds("status-place").expect("the left");
-    assert!(cx.debug_bounds("status-worker").is_some_and(|w| place.contains(&w.center())));
-    assert!(cx.debug_bounds("status-cwd").is_none(), "the directory is the header's");
-    assert!(cx.debug_bounds("status-branch").is_none(), "the branch is the breadcrumb's");
-    assert!(cx.debug_bounds("status-frame").is_none(), "no frame time without the stats");
-    assert!(cx.debug_bounds("status-workers").is_none(), "a worker that is up says nothing");
+    assert!(names.iter().any(|l| l == "2 ports"), "{names:#?}");
+    let titlebar = cx.debug_bounds("titlebar").expect("the title bar");
+    let ports = cx.debug_bounds("readout-ports").expect("the ports");
+    let bell = cx.debug_bounds("bell").expect("the bell");
+    assert!(titlebar.contains(&ports.center()) && ports.right() <= bell.left(), "{ports:?}");
+    assert!(cx.debug_bounds("status-worker").is_none(), "the machine is the navigator's");
+    assert!(cx.debug_bounds("readout-frame").is_none(), "no frame time without the stats");
 
-    click(cx, "status-ports");
+    click(cx, "readout-ports");
     let lines = view.read_with(cx, |v, cx| {
         let palette = v.palette.clone().expect("the ports are listed");
         palette.read(cx).matches().len()
@@ -138,70 +135,46 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     assert_eq!(lines, 4, "a tile and a browser line for each port");
 }
 
-/// A newer Slopty is said quietly on the bar's right until this build is the latest, and the
-/// line opens its release page.
+/// A newer Slopty is said quietly at the title bar's end until this build is the latest, and
+/// the line opens its release page.
 #[gpui::test]
 fn a_newer_release_is_said_in_the_bar_and_opens_its_page(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
-    assert!(cx.debug_bounds("status-release").is_none(), "nothing while this is the latest");
+    assert!(cx.debug_bounds("readout-release").is_none(), "nothing while this is the latest");
     let page = "https://github.com/aislopware/slopty/releases/tag/v0.2.0";
     let release =
         slopty_client::update::Release { version: "0.2.0".to_owned(), page: page.to_owned() };
     view.update(cx, |v, cx| v.set_release(Some(release), cx));
     cx.run_until_parked();
     assert!(labels(&view, cx).iter().any(|l| l == "Slopty 0.2.0 is out"));
-    let right = cx.debug_bounds("status-right").expect("the right");
-    assert!(cx.debug_bounds("status-release").is_some_and(|r| right.contains(&r.center())));
-    click(cx, "status-release");
+    let readouts = cx.debug_bounds("readouts").expect("the readouts");
+    assert!(cx.debug_bounds("readout-release").is_some_and(|r| readouts.contains(&r.center())));
+    click(cx, "readout-release");
     assert_eq!(cx.opened_url().as_deref(), Some(page));
     view.update(cx, |v, cx| v.set_release(None, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-release").is_none(), "gone once this build is the latest");
+    assert!(cx.debug_bounds("readout-release").is_none(), "gone once this build is the latest");
 }
 
-/// A quick round trip is said only under the pointer, and its samples draw nothing; a slow
-/// one stands on its own. Either lands at the start of the bar's right, so nothing else there
-/// moves, and the figure says its unit, not "RTT".
+/// A round trip's samples draw no chrome while nothing shows them: the navigator names only a
+/// slow link, and no readout repeats it.
 #[gpui::test]
-fn a_quick_round_trip_waits_for_the_pointer_and_a_slow_one_stands(cx: &mut TestAppContext) {
+fn a_quick_round_trip_draws_no_chrome(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let (shell, _tile) =
+    let (_shell, _tile) =
         shell_in_repo(&view, cx, &studio, "/w/oss/slopty", "/w/oss/slopty", "main");
-    let forward = Forward {
-        port: Port { number: 5173, pid: 2, process: "vite".to_owned(), session: Some(shell) },
-        local: Some(5173),
-    };
-    view.update_in(cx, |v, _window, cx| v.ports_changed(shell, vec![forward], cx));
-    cx.run_until_parked();
     let key = studio.key;
     let sample = |cx: &mut VisualTestContext, micros: u64| {
         view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_micros(micros)), cx));
         cx.run_until_parked();
     };
-    let ports = |cx: &mut VisualTestContext| cx.debug_bounds("status-ports").expect("the ports");
-    let before = ports(cx);
-
     sample(cx, 4_240);
-    assert!(cx.debug_bounds("status-rtt").is_none(), "a quick link says nothing");
     let drawn = view.read_with(cx, WorkspaceView::chrome_renders);
     sample(cx, 4_870);
-    assert_eq!(view.read_with(cx, WorkspaceView::chrome_renders), drawn, "nor draws the bar");
-
-    hover(cx, "statusbar");
-    assert!(cx.debug_bounds("status-rtt").is_some(), "under the pointer it shows");
-    assert!(labels(&view, cx).iter().any(|l| l == "Round trip 4.9 ms"), "the latest sample");
-    assert_eq!(ports(cx), before, "the round trip moved the ports");
-    let away = cx.debug_bounds("navigator").expect("the navigator").center();
-    cx.simulate_mouse_move(away, None, Modifiers::default());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("status-rtt").is_none(), "and goes with it");
-
-    sample(cx, 123_000);
-    assert!(cx.debug_bounds("status-rtt").is_some(), "a slow link says so unasked");
-    assert!(labels(&view, cx).iter().any(|l| l == "Round trip 123 ms"));
-    assert_eq!(ports(cx), before, "{before:?}");
+    assert_eq!(view.read_with(cx, WorkspaceView::chrome_renders), drawn, "a quick link is no news");
+    assert!(cx.debug_bounds("readouts").is_none(), "and no readout says it");
 }
 
 /// The breadcrumb says where the focused shell is, `workspace / checkout / branch`, in that
@@ -374,8 +347,8 @@ fn machine_menu(cx: &mut VisualTestContext, key: WorkerKey) {
 
 /// A machine's "…" in the navigator says what it runs and does what the app lets it: its
 /// system, then each agent installed there with its version, then Connect only while its link
-/// is down, and Forget. Each runs the app's own and closes the menu. The status bar no longer
-/// counts machines.
+/// is down, and Forget. Each runs the app's own and closes the menu. No readout counts
+/// machines.
 #[gpui::test]
 fn a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it(cx: &mut TestAppContext) {
     use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
@@ -442,9 +415,9 @@ fn a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it(cx: &mut Test
     assert!(forgot.get());
 }
 
-/// How the tailnet carries a link shows beside its round trip: in the status bar for the
-/// focused worker, and in the navigator only for a DERP relay, the slow path. It goes with the
-/// link, and a link the worker has said nothing of shows none.
+/// How the tailnet carries a link is said only for a DERP relay, the slow path, in the
+/// navigator: a direct or peer-relayed link is quiet everywhere. It goes with the link, and a
+/// link the worker has said nothing of shows none.
 #[gpui::test]
 fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -466,9 +439,7 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
         !names.iter().any(|l| l == "laptop, DERP · fra"),
         "a relay that has not held is not news yet: {names:#?}"
     );
-    hover(cx, "statusbar");
-    let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
+    assert!(cx.debug_bounds("readouts").is_none(), "no readout says a path");
     assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
     assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_none());
 
@@ -497,8 +468,9 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
 
 /// A link on a DERP relay is said only once the relay has held for
 /// [`slopty_proto::tailnet::DERP_NOTICE_AFTER`], since a path starts there while a direct one is
-/// found. Then the status bar says it in words, in the muted tone, with the fix under the
-/// pointer, and the navigator names the relay. A direct path takes both away.
+/// found. Then the title bar's readouts say it in words for the focused machine, in the muted
+/// tone, with the fix under the pointer, and the navigator names the relay. A direct path takes
+/// both away.
 #[gpui::test]
 fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -509,7 +481,7 @@ fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
     let derp = || LinkPath::Derp { region: "fra".to_owned() };
     view.update_in(cx, |v, _w, cx| v.set_link_path(key, derp(), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-relay").is_none(), "a path still settling says nothing");
+    assert!(cx.debug_bounds("readout-relay").is_none(), "a path still settling says nothing");
     assert!(cx.debug_bounds(nav).is_none());
 
     let almost = slopty_proto::tailnet::DERP_NOTICE_AFTER.saturating_sub(Duration::from_secs(1));
@@ -517,7 +489,7 @@ fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
     // The worker says the path again: the relay's clock is not restarted by it.
     view.update_in(cx, |v, _w, cx| v.set_link_path(key, derp(), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-relay").is_none(), "nine seconds are not enough");
+    assert!(cx.debug_bounds("readout-relay").is_none(), "nine seconds are not enough");
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
     let names = labels(&view, cx);
@@ -529,7 +501,7 @@ fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
 
     view.update_in(cx, |v, _w, cx| v.set_link_path(key, LinkPath::Direct, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-relay").is_none(), "a direct path takes it away");
+    assert!(cx.debug_bounds("readout-relay").is_none(), "a direct path takes it away");
     assert!(cx.debug_bounds(nav).is_none());
 }
 
@@ -693,7 +665,6 @@ fn a_worker_the_tailnet_policy_closes_says_not_granted(cx: &mut TestAppContext) 
     view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NotGranted, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "Not granted"), "the status bar: {names:#?}");
     assert!(names.iter().any(|l| l == "studio, not granted"), "the navigator: {names:#?}");
     assert_eq!(WorkerStatus::NotGranted.text(), "closed to this device by the tailnet policy");
 }
@@ -775,38 +746,45 @@ fn window(name: &str, used_bp: u32) -> slopty_proto::thread::Limit {
     slopty_proto::thread::Limit { name: name.to_owned(), used_bp, resets_ms: None }
 }
 
-/// The bar says the focused tile's machine's plan windows as its agents published them, and a
-/// click lists every machine's readings. A machine whose
-/// agents published none shows no meter.
+/// The title bar says the focused tile's machine's plan windows as its agents published them
+/// once one is 80 % used, and a click lists every machine's readings. Under that it says
+/// nothing, and a machine whose agents published none shows no meter.
 #[gpui::test]
-fn the_status_bar_shows_the_focused_machines_plan_windows(cx: &mut TestAppContext) {
+fn a_far_used_plan_is_said_in_the_title_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
     let here = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let there = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
-    let row = plan_row(vec![window("five-hour", 2_300), window("seven-day", 4_100)]);
-    let table = slopty_proto::thread::wire::TableFrame::Snapshot {
-        cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
-        rows: vec![row],
-    };
     let key = studio.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.threads_linked(key, cx);
-        v.thread_table(key, &table, cx);
-        v.focus_tile(here, cx);
-    });
-    cx.run_until_parked();
-    assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 41%"));
+    let publish = |cx: &mut VisualTestContext, seq, seven_day| {
+        let row = plan_row(vec![window("five-hour", 2_300), window("seven-day", seven_day)]);
+        let table = slopty_proto::thread::wire::TableFrame::Snapshot {
+            cursor: slopty_proto::thread::Cursor { epoch: 1, seq },
+            rows: vec![row],
+        };
+        view.update_in(cx, |v, _w, cx| {
+            v.threads_linked(key, cx);
+            v.thread_table(key, &table, cx);
+            v.focus_tile(here, cx);
+        });
+        cx.run_until_parked();
+    };
+    publish(cx, 1, 4_100);
+    assert!(cx.debug_bounds("readout-plan").is_none(), "41 % is no news");
+    publish(cx, 2, 8_200);
+    assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 82%"));
 
-    click(cx, "status-plan");
+    click(cx, "readout-plan");
     assert!(cx.debug_bounds("plans").is_some(), "every reading, listed");
-    let row = "studio · Claude Code, 5h 23% · 7d 41% · now".to_owned();
+    let row = "studio · Claude Code, 5h 23% · 7d 82% · now".to_owned();
     assert!(labels(&view, cx).contains(&row), "{:?}", labels(&view, cx));
+    let (bar, plans) = (cx.debug_bounds("titlebar"), cx.debug_bounds("plans"));
+    assert!(bar.zip(plans).is_some_and(|(b, p)| p.top() >= b.bottom()), "under the title bar");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(there, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-plan").is_none(), "the laptop's agents said nothing");
+    assert!(cx.debug_bounds("readout-plan").is_none(), "the laptop's agents said nothing");
 }
 
 /// A worker on another build shows Update where it is named, not only on its tiles: on its

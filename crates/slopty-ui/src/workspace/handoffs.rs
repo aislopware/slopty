@@ -395,7 +395,7 @@ impl WorkspaceView {
         };
         let url = SharedString::from(offer.url.clone());
         let hint_theme = Rc::new(theme.clone());
-        // One line, as the status bar holds it: who asks, the host whole, then why it was held
+        // One line, as the title bar holds it: who asks, the host whole, then why it was held
         // back, which gives way first. The whole address is the tooltip's.
         div()
             .id("offer-body")

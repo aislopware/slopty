@@ -62,8 +62,8 @@ pub enum Layer {
     Submenu,
     /// Modal over the window and its scrim: the palette, the picker, the settings.
     Dialog,
-    /// A notice in the status bar: laid out in the bar, painted over whatever else is up, so
-    /// the inbox's "Undo" is pressed through an open popover's click-away.
+    /// A notice in the title bar or by its tile: laid out in place, painted over whatever else is
+    /// up, so the inbox's "Undo" is pressed through an open popover's click-away.
     Toast,
 }
 

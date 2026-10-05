@@ -23,8 +23,7 @@ pub const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
 /// Where the pointer rests before a golden: the title bar's top-left corner, left of the window
-/// buttons, over nothing that answers a hover. The bottom-left corner is the status bar, which
-/// shows the round trip under the pointer.
+/// buttons, over nothing that answers a hover.
 const PARK: (f32, f32) = (1.0, 1.0);
 /// Where a golden that shows a time pins the readouts ([`Command::PinClock`]): 2026-10-04 at
 /// 09:00 UTC, in Unix milliseconds.
@@ -32,7 +31,7 @@ const PINNED_AT: u64 = 1_791_104_400_000;
 
 /// Wait until nothing moves, every link has its round trip and every shell at a prompt has its
 /// caret there: two dumps a frame apart place every tile alike, so a spring still running
-/// cannot end up in a golden, nor a status bar whose readout is yet to land, nor the block a
+/// cannot end up in a golden, nor a readout yet to land, nor the block a
 /// command ran under.
 pub async fn settled(drv: &mut Driver) -> Dump {
     drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
@@ -698,7 +697,7 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
     stack.shutdown().await;
 }
 
-/// A port a shell listens on, and a file on its way up: the port counted in the status bar,
+/// A port a shell listens on, and a file on its way up: the port counted in the title bar,
 /// the upload on the tile it belongs to.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]

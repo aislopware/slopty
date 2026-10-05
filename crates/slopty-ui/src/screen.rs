@@ -1356,7 +1356,7 @@ impl ScreenView {
 
     /// The stream's frames a second: pictures painted on this client over the last second,
     /// and apart from them the frames that missed the display. The one rate every readout says,
-    /// the overlay's and the status bar's alike. A still window paints nothing, and says so.
+    /// the overlay's and any other. A still window paints nothing, and says so.
     #[must_use]
     pub fn paint_rate(&self) -> PaintRate {
         self.glass.rate()

@@ -22,6 +22,4 @@ Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited
 MultilineTextInput │ Text of $SCRATCH/project/main.rs │ // edited⏎fn main() {⏎    println!("hello");⏎} (focused)
-Group │ Status
-Status │ e2e-worker
-Status │ Rust · Spaces: 4 · Ln 2, Col 1
+Status │ Rust, Spaces: 4, Ln 2, Col 1

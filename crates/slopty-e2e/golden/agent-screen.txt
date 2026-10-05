@@ -44,5 +44,3 @@ Button │ Model, Claude
 Button │ Commit
 Button │ Watch Synthetic editor
 Button │ Stop
-Group │ Status
-Status │ e2e-worker

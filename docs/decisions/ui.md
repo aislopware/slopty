@@ -1718,7 +1718,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `line_number_gap_widens_the_gutter_by_its_difference`; goldens `editor*`.
 
 - ✅ **The status bar states facts, the inbox is a mailbox, and palette rows say where**
-  (2026-09-26). The reference study found the status bar showing a debug readout and the inbox
+  (2026-09-26; its status bar half superseded 2026-10-05 by "No bar along the bottom" below). The reference study found the status bar showing a debug readout and the inbox
   and palette rows with too little to tell one from another. This ruling amends the status
   bar and inbox of "The chrome gets a frame" (2026-09-25).
   - **Status bar** (`statusbar.rs`). It sits on the canvas step, like the title bar. The left
@@ -2231,8 +2231,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_closing_tab_folds_away_unless_motion_is_reduced`,
   `the_column_dots_show_only_what_is_out_of_view`, `the_workspaces_are_tabs_in_the_title_bar`.
 
-- ✅ **The status bar's left slot says where the human is** (2026-09-27, UI wave 2 frame
-  chrome). The server's state left the title bar, where "• server unreachable" read as a tab.
+- ❌ **The status bar's left slot says where the human is** (superseded 2026-10-05 by "No bar
+  along the bottom" below; 2026-09-27, UI wave 2 frame chrome). The server's state left the title bar, where "• server unreachable" read as a tab.
   The left slot now reads the server's state first while it does not answer (the crossed-out
   server in `warn_fill`, "Server unreachable"), then worker › directory › branch of the
   focused tile, its steps a quiet chevron apart, with no icon but a down worker's. Readouts
@@ -2823,7 +2823,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `add-worker`, `ios-phone-*`, `ios-pad-*`, to be taken again.
 
 - ✅ **Design wave 3, the frame: a status bar that says where you are, tabs on the midline**
-  (2026-09-27, `.research/design-direction-2026-09-27.md` §5.1 and §5.4). The user asked for
+  (its status bar superseded 2026-10-05 by "No bar along the bottom" below; 2026-09-27, `.research/design-direction-2026-09-27.md` §5.1 and §5.4). The user asked for
   a frame that stays minimal yet reads as finished, held to Warp, T3 Code, Linear and Geist.
   Most goldens showed a status bar holding "~" and a sub-millisecond round trip, and a title
   bar whose one workspace carried a "3 tiles" count.
@@ -4834,7 +4834,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `atlas`, `atlas 2`, `atlas 3`. Before a number, each is named by the command it last ran
     (`cargo test`, `docker compose logs`), and its second line no longer says it again. A
     number tells apart only those still alike.
-  - **Notices live in the status bar.** A notice floating in the strip's corner lay over a
+  - **Notices live in the status bar** (superseded 2026-10-05 by "No bar along the bottom"
+    below). A notice floating in the strip's corner lay over a
     composer's send button and a shell's last rows. They sit in the bar between where the
     focused tile runs and its readouts, on the selection's fill, one line each (a held-back
     page's why and age follow its host on the line, the address in its hint), two at most,
@@ -7141,3 +7142,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     many_findings_fold_to_one_line_that_opens_them}`,
     `workspace::tests::bodies::a_window_that_did_not_open_says_so_in_its_pane_and_gives_way_to_another`.
     Goldens to retake: `review-agent*`, `remote-window`.
+
+- ✅ **No bar along the bottom: notices go beside their work, readouts to the title bar's end
+  only while they have something to say** (2026-10-05, UX audit item 4 (C3), read with the
+  design critique's dissent; supersedes "The status bar's left slot says where the human is",
+  "Design wave 3, the frame"'s status bar, the status bar half of "The status bar states
+  facts", and "Notices live in the status bar"). The 24 pt band along the window's foot held
+  the focused tile's worker in most goldens, which the navigator and the breadcrumb already
+  name. The rest of it was a mix: a file's caret, a stream's rate that its overlay also said
+  with another number, the plan, ports, transfers, a release, and the notices. Apple's guidance
+  keeps critical items out of a bottom bar, since a window is often moved until its foot is
+  hidden. The audit moved everything into the title bar. The critique objected that a global
+  top bar should not own every state either: a pane's facts stay in the pane, and a failure
+  stays beside the work it concerns. Both halves are taken.
+  - **Deleted:** the bar, its region view and the key bar's hand-off (`set_key_bar_shown`:
+    with nothing at the foot, the iOS key bar has nothing to displace). The strip runs to the
+    window's bottom edge.
+  - **Said once, where it belongs:**
+    - the focused tile's worker, its health and a quick link's round trip go; the navigator's
+      machine rows and the breadcrumb say them;
+    - a command's running time is its header's;
+    - a stream's size and rate are its stats overlay's;
+    - a file's language, indent, line endings and caret are a quiet foot line inside the file
+      tile (`FileView::render_foot`, `Rust · Spaces: 4 · Ln 12, Col 5`, line endings only
+      when not LF), as an editor's own status line says them.
+  - **Notices beside their work.** A notice about a tile's own work (a drop that did not
+    land, files not sent, an upload that did not reach its machine, a window that did not
+    open) is said under that tile's header at its trailing edge and moves with it
+    (`show_failure_at`, `show_notice_at`). Any other notice (a copy, a closed tile to take
+    back, an agent off screen that needs the person) sits in the title bar's lane between the
+    breadcrumb and the readouts: Xcode's activity area, a place no tile draws in. A tile's
+    notice whose tile has closed moves to the lane. Two at most in each place; the hold,
+    hover and stickiness rules are unchanged.
+  - **Readouts at the title bar's end, before the bell, only while they have something to
+    say** (`workspace/readouts.rs`):
+    - the server while it does not answer, with what that costs under the pointer;
+    - the focused machine's link once it has held on a DERP relay, with its fix;
+    - the plan's windows once one is 80 % used (under that the composer's meter is enough);
+    - the ports forwarded here and the transfers in flight, each opening its list;
+    - a newer Slopty;
+    - the frame time while the stats show.
+    Nothing shows there by default. The popovers drop from under the title bar.
+  - **macOS:** traffic lights, then the navigator toggle, breadcrumb and "+", then the notice
+    lane, then the readouts, then the bell and "…". The content runs from the title bar to
+    the window's foot.
+  - **iOS:** iPad matches macOS, with the safe area. A phone's bar is its navigation bar (the
+    workspace's name, the bell, "…"), with no room for readouts. Its notices hang centred just
+    under the bar. The home indicator's band continues the strip's ground or the key bar.
+  - Tests: `workspace::tests::chrome::no_bar_runs_along_the_bottom_and_a_notice_sits_by_its_work`,
+    `file::tests::a_file_says_its_facts_at_its_foot`,
+    `workspace::tests::bars::{a_far_used_plan_is_said_in_the_title_bar,
+    the_readouts_count_what_is_shared_and_say_no_machine, a_quick_round_trip_draws_no_chrome}`,
+    `workspace::tests::toasts::a_notice_sits_in_the_title_bar_over_no_tile`.
+
+- ✅ **A focused text field says so quietly** (2026-10-05, design review of
+  `agent-needs-you-navigator`). The composer that had the keyboard wore the focus tone, which
+  is the chrome's text colour, as its whole hairline. A near-black ring round the card was the
+  loudest thing on the screen. A field's edge now takes `Theme::field_focus`: the focus tone
+  mixed 45 % into the card's ground, raised in 5 % steps until it clears 3:1 against the card
+  (WCAG 1.4.11). It is the focus tone whole under Increase Contrast. Measured across the
+  fifteen test backgrounds: 3.2 to 4.0:1, against 8.8 to 17.1:1 for the full ring. The keyboard
+  ring on buttons and rows is unchanged. Test:
+  `slopty_theme::tests::a_focused_field_says_so_quietly_and_still_clears_three_to_one`.

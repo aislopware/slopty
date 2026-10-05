@@ -31,8 +31,6 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell
-Group │ Status
-Status │ e2e-worker
 Menu │ More (focused)
 MenuItem │ Command palette
 MenuItem │ Overview

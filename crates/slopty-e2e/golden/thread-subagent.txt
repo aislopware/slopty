@@ -27,5 +27,3 @@ Button │ Copy message
 Button │ Read /work/main.rs
 Article │ 4
 Button │ Copy message
-Group │ Status
-Status │ e2e-worker

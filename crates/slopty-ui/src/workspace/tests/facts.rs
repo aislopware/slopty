@@ -1,6 +1,6 @@
 //! What the chrome says of a tile and of a worker: a shell's title and its place, a command
-//! running, a repository's changes, a worker's health and its machine, the status bar's facts,
-//! and where a new tile goes.
+//! running, a repository's changes, a worker's health and its machine, and where a new tile
+//! goes.
 
 use std::time::Duration;
 
@@ -135,8 +135,8 @@ fn a_shell_is_titled_by_what_it_runs_then_its_own_title_then_where_it_is(cx: &mu
 }
 
 /// A command past the threshold is Running: the calm mark in the header with how long it has
-/// run, the time at the end of its navigator row, the status bar's fact, and the least of what
-/// a worker's rollup counts.
+/// run, the time at the end of its navigator row, and the least of what a worker's rollup
+/// counts. Nothing else says it: the tile's header is its place.
 #[gpui::test]
 fn a_long_command_shows_running_and_its_time_everywhere(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -155,7 +155,7 @@ fn a_long_command_shows_running_and_its_time_everywhere(cx: &mut TestAppContext)
     let id = tile.item.as_uuid();
     assert!(cx.debug_bounds(leak(format!("running-{id}"))).is_some(), "the header's time");
     assert!(cx.debug_bounds(leak(format!("nav-running-{id}"))).is_some(), "the row's time");
-    assert!(cx.debug_bounds("status-facts").is_some(), "the status bar's");
+    assert!(cx.debug_bounds("readouts").is_none(), "said by its tile, not the title bar");
     let rollup = view.read_with(cx, |v, _| v.worker_rollup(fake.key));
     assert_eq!(rollup.shown(), Some(rollup::Shown::Running));
 
@@ -169,7 +169,7 @@ fn a_long_command_shows_running_and_its_time_everywhere(cx: &mut TestAppContext)
 }
 
 /// What a repository's working tree changed shows at the end of the shell's navigator row and
-/// after the branch in the status bar, as `kit::changes` draws a diff's size.
+/// after the branch in the breadcrumb, as `kit::changes` draws a diff's size.
 #[gpui::test]
 fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -256,28 +256,6 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     assert!(said.is_some_and(|l| l.starts_with("It stops when you log out: run")), "{facts:?}");
     assert_eq!(navigator::host_line(&healthy(), Some(2.1)), "macOS 26.5 \u{b7} load 2.1");
     assert_eq!(navigator::host_line(&healthy(), None), "macOS 26.5", "no load heard yet");
-}
-
-/// The status bar is never empty: with one worker and nothing that says where, it names the
-/// worker; a focused page leaves its host to its header, so the bar names the worker there too.
-#[gpui::test]
-fn the_status_bar_always_says_something(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("status-worker").is_some(), "a window says nowhere: the worker");
-    let page =
-        arrives(&view, cx, &fake, ItemKind::Browser { url: "http://localhost:5173/app".into() }, 2);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(page, cx));
-    cx.run_until_parked();
-    let facts = view.read_with(cx, |v, cx| {
-        let item = v.item(page).cloned();
-        item.and_then(|item| v.focus_facts(&item, cx))
-    });
-    assert_eq!(facts, None, "the host is the header's place, said once");
-    assert!(cx.debug_bounds("status-worker").is_some(), "a page says nowhere else: the worker");
 }
 
 /// With several workers the empty workspace's rows each open a shell on theirs, here; and "+"
@@ -424,14 +402,11 @@ fn a_workers_tiles_share_its_one_sound_and_say_its_mute_together(cx: &mut TestAp
     assert_eq!(pills(cx), [false, false]);
 }
 
-/// A stream's rate is one number wherever it shows: the pictures painted on this client in the
-/// last second. The status bar first reads it at the first picture, and then, drawn again more
-/// often than its clock ticks, once a second as its clock says, the same figure the stats
-/// overlay says. Before, the bar counted the layer's pictures on a clock that every draw set
-/// going again, and the overlay counted the frames that came off the link: "0 fps" beside
-/// "59 fps".
+/// A stream's rate is the pictures painted on this client in the last second, and its stats
+/// overlay is the one place it is said. A bar along the bottom said it too, from a clock of its
+/// own, and the two disagreed ("56 fps" over "55 fps").
 #[gpui::test]
-fn a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar(cx: &mut TestAppContext) {
+fn a_streams_rate_is_said_by_its_overlay(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let window = slopty_core::WindowId(7);
@@ -461,29 +436,10 @@ fn a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar(cx: &mut TestA
         )
         .expect("pixel buffer")
     };
-    let bar = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.item(tile).cloned().and_then(|item| v.focus_facts(&item, cx)))
-    };
-    // A picture off the stream goes up on the layer, and the view's next notify has the
-    // workspace copy it as drawn.
-    screen.update(cx, |s, cx| s.show_picture(picture(), cx));
-    cx.run_until_parked();
-    screen.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert_eq!(bar(&view, cx).as_deref(), Some("1280\u{d7}800 \u{b7} 1 fps"), "the first picture");
-
-    // Pictures keep coming, and the bar is drawn again every 400 ms: its clock still reads.
-    for _ in 0..29 {
+    for _ in 0..30 {
         screen.update(cx, |s, cx| s.show_picture(picture(), cx));
     }
-    for _ in 0..8 {
-        view.update(cx, |v, cx| App::notify(cx, v.chrome.statusbar.entity_id()));
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_millis(400));
-        cx.run_until_parked();
-    }
-    let drawn_often = bar(&view, cx);
-    assert_eq!(drawn_often.as_deref(), Some("1280\u{d7}800 \u{b7} 30 fps"), "read on its clock");
+    cx.run_until_parked();
     screen.update(cx, |s, cx| s.set_hud(true, cx));
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
@@ -492,5 +448,5 @@ fn a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar(cx: &mut TestA
     let overlay =
         screen.read_with(cx, |s, _| s.hud_text().and_then(|(line, _)| line.first().cloned()));
     assert_eq!(overlay.map(|figure| figure.text).as_deref(), Some("30 fps"));
-    assert_eq!(bar(&view, cx).as_deref(), Some("1280\u{d7}800 \u{b7} 30 fps"), "the same rate");
+    assert!(cx.debug_bounds("readouts").is_none(), "said once, by the overlay");
 }

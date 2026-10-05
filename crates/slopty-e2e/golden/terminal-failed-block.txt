@@ -14,5 +14,3 @@ Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
 Button │ Block actions
-Group │ Status
-Status │ e2e-worker

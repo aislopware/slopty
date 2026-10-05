@@ -216,7 +216,7 @@ pub enum TerminalViewEvent {
     },
     /// The working directory changed (OSC 7), or the branch checked out there did, with the
     /// repository the worker resolved it to. What arrange-by-repo groups on and the navigator
-    /// and status bar print, so it has to follow a `cd` or a checkout and not stay at whatever
+    /// and breadcrumb print, so it has to follow a `cd` or a checkout and not stay at whatever
     /// the session opened in.
     Cwd {
         /// The new directory.
@@ -2510,7 +2510,7 @@ impl TerminalView {
     }
 
     /// The branch checked out where the shell stands, as the worker resolved it: what the
-    /// navigator and the status bar print beside the repository.
+    /// navigator and the breadcrumb print beside the repository.
     #[must_use]
     pub fn branch(&self) -> Option<&str> {
         self.state.branch()

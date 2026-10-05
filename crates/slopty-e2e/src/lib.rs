@@ -81,7 +81,7 @@ pub const HOLD_UPLOADS_ENV: &str = "SLOPTY_HOLD_UPLOADS";
 
 /// The round trip the app under test shows in its readouts, whatever its link measures.
 ///
-/// A local link's, under the figure a readout names (the navigator, the status bar, the
+/// A local link's, under the figure a readout names (the navigator, the overlay, the
 /// palette), so a golden never depends on how busy the machine was. The dump's `rtt_us` stays
 /// the live one.
 pub const SHOWN_RTT: std::time::Duration = std::time::Duration::from_millis(1);
@@ -1129,7 +1129,7 @@ pub struct RecoveryInfo {
 }
 
 impl Dump {
-    /// Every connected worker has had its round trip sampled, so the status bar's readout has
+    /// Every connected worker has had its round trip sampled, so the navigator's readout has
     /// landed: a golden taken before it holds a frame the next run may not.
     #[must_use]
     pub fn rtt_sampled(&self) -> bool {

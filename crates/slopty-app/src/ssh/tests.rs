@@ -682,7 +682,7 @@ fn the_server_panel_sets_up_the_server(cx: &mut TestAppContext) {
 
 /// A server on another build is brought to this one from the palette with no sheet: through the
 /// SSH target it was set up with, then linked again at the address in use first and then where
-/// the deploy reached it. The status bar says it runs, and a failure says why in a notice and
+/// the deploy reached it. The title bar says it runs, and a failure says why in a notice and
 /// puts the status back.
 #[gpui::test]
 fn the_palette_updates_a_server_on_another_build(cx: &mut TestAppContext) {

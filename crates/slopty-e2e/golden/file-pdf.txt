@@ -23,5 +23,3 @@ Document │ File $SCRATCH/project/report.pdf │ PDF, 2 pages, 6 KB (focused)
 Document │ PDF, 2 pages, 6 KB
 Image │ Page 1 of 2
 Label │ PDF · 2 pages · 6 KB
-Group │ Status
-Status │ e2e-worker

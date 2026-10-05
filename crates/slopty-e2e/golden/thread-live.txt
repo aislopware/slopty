@@ -31,5 +31,3 @@ Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Send
-Group │ Status
-Status │ e2e-worker

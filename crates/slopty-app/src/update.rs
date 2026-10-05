@@ -1,5 +1,5 @@
 //! Whether a newer Slopty is out: the repository's latest release, read at launch and every
-//! [`CHECK_EVERY`] after, said quietly in the status bar until this build is the latest.
+//! [`CHECK_EVERY`] after, said quietly at the title bar's end until this build is the latest.
 //!
 //! Only the Mac asks: an iPhone or iPad takes its builds from the App Store, not from a release
 //! page. Nothing is downloaded or installed here; the bar's line opens the release page.

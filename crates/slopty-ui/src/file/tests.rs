@@ -127,6 +127,40 @@ fn cmd_s_sends_the_edit_based_on_the_version_it_started_from(cx: &mut TestAppCon
     assert_eq!(events.borrow().len(), 1);
 }
 
+/// A file says its own facts at its foot, as an editor's status line does: what it is
+/// coloured as, its indent and line endings, and where the caret is, following the caret. A
+/// notice in its body (a file too large) has no caret, and says none.
+#[gpui::test]
+fn a_file_says_its_facts_at_its_foot(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/main.rs");
+    arrives(&view, cx, text_read("fn main() {\n    run();\n}", true, 1));
+    let foot = cx.debug_bounds("file-foot").expect("the foot line");
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!((f32::from(foot.bottom()) - f32::from(window.height)).abs() < 0.5, "at the bottom");
+    let said = view.read_with(cx, |v, cx| {
+        let (line, col) = v.caret(cx);
+        (v.coloured_as(), v.layout_facts(), line, col)
+    });
+    assert_eq!(said.0, Some("Rust"));
+    assert_eq!((said.2, said.3), (1, 1), "at the start");
+    view.update_in(cx, |v, window, cx| {
+        v.focus(window, cx);
+        v.editor().update(cx, |e, cx| e.set_selected_range(16..16, cx));
+    });
+    cx.run_until_parked();
+    let caret = view.read_with(cx, FileView::caret);
+    assert_eq!(caret, (2, 5), "it follows the caret");
+    view.update(cx, |_, cx| cx.notify());
+    let said = labels(cx, "Status");
+    assert!(
+        said.iter().any(|l| l.starts_with("Rust, ") && l.ends_with("Ln 2, Col 5")),
+        "a screen reader hears it: {said:?}"
+    );
+
+    arrives(&view, cx, FileRead::TooLarge { size: FILE_BYTES.saturating_add(1) });
+    assert!(cx.debug_bounds("file-foot").is_none(), "no caret in a notice");
+}
+
 #[gpui::test]
 fn a_file_without_a_final_newline_is_saved_without_one(cx: &mut TestAppContext) {
     let (view, events, cx) = tile(cx, "/w/notes.txt");

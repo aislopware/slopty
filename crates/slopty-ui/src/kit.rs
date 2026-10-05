@@ -330,7 +330,7 @@ pub fn changes_text(added: u32, removed: u32) -> Option<String> {
 /// apart. `None` for no change.
 ///
 /// The one way a count of changed lines is drawn: in a tile's header, a diff's head, a fold, a
-/// navigator row and the status bar. A figure all in red read as an error, and a red "‒0" as
+/// navigator row and the breadcrumb. A figure all in red read as an error, and a red "‒0" as
 /// an error about nothing. The caller sets the size and adds an identity and a spoken label.
 ///
 /// Its parts are text, the thin space between the sides included, so they take the chrome's
@@ -1145,7 +1145,7 @@ pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
 }
 
 /// `el` padded in to the one edge grid on both sides: [`slopty_theme::Spacing::inset`]. A
-/// panel's rows, a header, the palette, the inbox and the status bar all start there.
+/// panel's rows, a header, the palette, the inbox and the foot lines all start there.
 #[must_use]
 pub fn inset_x<E: Styled>(el: E, theme: &Theme) -> E {
     el.px(px(theme.spacing.inset()))
@@ -2494,12 +2494,8 @@ mod tests {
     /// list as its patch lands.
     #[test]
     fn a_progress_is_kit_progress() {
-        const UNTIL_MOVED: [&str; 4] = [
-            "workspace/tile.rs",
-            "workspace/navigator.rs",
-            "workspace/statusbar.rs",
-            "project/view.rs",
-        ];
+        const UNTIL_MOVED: [&str; 3] =
+            ["workspace/tile.rs", "workspace/navigator.rs", "project/view.rs"];
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             let lines = chrome_lines(dir);
@@ -2629,7 +2625,7 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// Chrome context (a header's directory, the status bar's path, the palette's column, a
+    /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a
     /// row's second line) is in the UI face. The mono face is for the settings file and an
     /// address read to judge it (a held-back page's hint), and nothing else calls for it.
     #[test]

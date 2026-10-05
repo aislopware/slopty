@@ -46,7 +46,7 @@ pub const TRANSCRIPT_DONE: &str = concat!(
 
 /// A stack's temporary root, named for the test that made it.
 ///
-/// Goldens show paths under it (a shell's prompt, a tile's title, the status bar), so a random
+/// Goldens show paths under it (a shell's prompt, a tile's title, the breadcrumb), so a random
 /// name made each run's frame differ from its golden wherever a path is drawn. The name is a
 /// hash of the test's name instead: the same on every run, different between tests. A lock
 /// beside it keeps a second run of the same test, another session's, off it; that run takes a

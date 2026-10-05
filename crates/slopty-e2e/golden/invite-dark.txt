@@ -9,8 +9,6 @@ Heading │ terminal Terminal
 Label │ ~
 Button │ Fullscreen tile
 Button │ Close tile
-Group │ Status
-Status │ e2e-worker
 Heading │ Connect a phone or iPad
 Button │ Copy link
 Button │ Done

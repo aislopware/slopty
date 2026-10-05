@@ -129,7 +129,7 @@ pub(super) struct ThreadFaces {
     /// Where each thread stands as the server's ladder last said: what speaks for the threads
     /// of a worker this client has no link to.
     server: HashMap<ThreadId, ThreadStand>,
-    /// Each machine's plan windows as its agents' rows last said them, for the status bar.
+    /// Each machine's plan windows as its agents' rows last said them, for the title bar.
     meters: slopty_client::meters::PlanMeters,
     /// Starts sent and not yet answered: the worker each went to, its agent, and the tile it
     /// fills.
@@ -150,7 +150,7 @@ pub(super) struct ThreadFaces {
 }
 
 impl ThreadFaces {
-    /// Each machine's plan windows, for the status bar.
+    /// Each machine's plan windows, for the title bar.
     pub(super) const fn meters(&self) -> &slopty_client::meters::PlanMeters {
         &self.meters
     }
@@ -931,7 +931,7 @@ impl WorkspaceView {
             self.settle_taps(cx);
         }
         if self.faces.threads.meters != meters_before {
-            App::notify(cx, self.chrome.statusbar.entity_id());
+            App::notify(cx, self.chrome.titlebar.entity_id());
         }
         self.settle_thread_tiles(cx);
         cx.notify();
@@ -1478,7 +1478,7 @@ impl WorkspaceView {
 }
 
 /// Where a thread stands as its worker's table row says it, for the navigator's glyph, the
-/// header's pill, the bell and the status bar: a thread driven over a protocol has no
+/// header's pill, and the bell: a thread driven over a protocol has no
 /// terminal whose agent status could say it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct ThreadStand {

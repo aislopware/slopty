@@ -16,16 +16,16 @@
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
 //! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
 //! * `tile` — one tile's chrome and body.
-//! * `titlebar` — the bar across the top, with the workspaces as tabs.
+//! * `titlebar` — the bar across the top: where the focused work is, the notices, the bell.
 //! * `navigator` — the workers and their tiles, down the left, and the filter over them.
 //! * `machines` — what each machine says of itself and what can be done to it, from its row.
 //! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
-//! * `statusbar` — the bar along the bottom: where the focused tile runs, the link.
+//! * `readouts` — what the app says of itself at the title bar's end, while it has something.
 //! * `approvals` — "Allow" and "Deny" for an agent that waits, from its row or its note.
 //! * `turns` — agents' turns that ended unread, which the bell counts.
 //! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
-//! The navigator, the title bar and the status bar are views of their own (`ChromeView`),
+//! The navigator and the title bar are views of their own (`ChromeView`),
 //! drawn cached: a terminal's echo draws the terminal and the strip around it, never the
 //! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
@@ -57,13 +57,13 @@ mod presence;
 mod project_lines;
 mod project_search;
 mod projects;
+mod readouts;
 pub mod remote;
 mod restore;
 mod reviews;
 mod rollup;
 mod secure;
 mod starting;
-mod statusbar;
 mod strip;
 mod tile;
 mod titlebar;
@@ -158,7 +158,6 @@ enum Region {
     /// not the panel with its filter field.
     NavigatorRows,
     Titlebar,
-    Statusbar,
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
@@ -224,7 +223,6 @@ struct Chrome {
     navigator: Entity<ChromeView>,
     nav_rows: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
-    statusbar: Entity<ChromeView>,
 }
 
 impl Chrome {
@@ -244,7 +242,6 @@ impl Chrome {
             navigator: view(Region::Navigator),
             nav_rows: view(Region::NavigatorRows),
             titlebar: view(Region::Titlebar),
-            statusbar: view(Region::Statusbar),
         }
     }
 
@@ -256,8 +253,8 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 4] {
-        [&self.navigator, &self.nav_rows, &self.titlebar, &self.statusbar].map(Entity::entity_id)
+    fn ids(&self) -> [gpui::EntityId; 3] {
+        [&self.navigator, &self.nav_rows, &self.titlebar].map(Entity::entity_id)
     }
 }
 
@@ -737,7 +734,7 @@ pub struct WorkspaceView {
     titles_dirty: bool,
     /// What the strip drew, for the handlers to read ([`strip::Drawn`]).
     drawn: Rc<strip::Drawn>,
-    /// The navigator, the title bar and the status bar, each a view of its own.
+    /// The navigator and the title bar, each a view of its own.
     chrome: Chrome,
     /// The strip, a view of its own so its motion is not news.
     strip_host: Entity<StripHost>,
@@ -807,8 +804,6 @@ pub struct WorkspaceView {
     /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
     /// a phone or tablet.
     hardware_keyboard: bool,
-    /// The phone's key bar shows under the workspace: the status bar gives it its row.
-    key_bar_shown: bool,
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
@@ -823,8 +818,8 @@ pub struct WorkspaceView {
     anchors: titlebar::Anchors,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
     nav: navigator::NavState,
-    /// The status bar's own state: its readouts and the hosts popover.
-    bar: statusbar::Bar,
+    /// The title bar's readouts' own state: the frame time's clock, the popovers, a release.
+    readouts: readouts::Readouts,
     /// What the app lets the person do to each machine, and how one is added.
     machines: machines::Machines,
     /// The permission prompts this client may answer from a row or a note.
@@ -1062,7 +1057,6 @@ impl WorkspaceView {
             tailnet_grant: None,
             palette_extra: Vec::new(),
             hardware_keyboard: true,
-            key_bar_shown: false,
             pending_focus_palette: false,
             menu: None,
             menu_keyed: false,
@@ -1070,7 +1064,7 @@ impl WorkspaceView {
             new_on: None,
             anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),
-            bar: statusbar::Bar::default(),
+            readouts: readouts::Readouts::default(),
             machines: machines::Machines::default(),
             approvals: approvals::Approvals::default(),
             turns: turns::Turns::default(),
@@ -1300,27 +1294,12 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Whether the app shows its key bar under the workspace. While it does, the status bar
-    /// steps aside, so the keys sit on the content rather than a row of readouts above them.
-    pub fn set_key_bar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
-        if self.key_bar_shown != shown {
-            self.key_bar_shown = shown;
-            cx.notify();
-        }
-    }
-
     /// Whether a keyboard is attached, so the palette prints chords that can be pressed.
     pub fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
             self.hardware_keyboard = attached;
             cx.notify();
         }
-    }
-
-    /// Whether the app shows its key bar under the workspace ([`Self::set_key_bar_shown`]).
-    #[must_use]
-    pub const fn key_bar_shown(&self) -> bool {
-        self.key_bar_shown
     }
 
     /// Lines the app adds to the palette after the workspace's own (settings, workers).
@@ -1524,7 +1503,6 @@ impl WorkspaceView {
             Region::Navigator => self.render_navigator_region(window, cx),
             Region::NavigatorRows => self.render_navigator_rows(window, cx),
             Region::Titlebar => self.render_titlebar(window, cx),
-            Region::Statusbar => self.render_statusbar(window, cx),
         }
     }
 
@@ -1551,15 +1529,14 @@ impl WorkspaceView {
     }
 
     /// How many times each region of the chrome has drawn: the navigator (its panel and its
-    /// rows together), the title bar, the status bar.
+    /// rows together), the title bar.
     #[cfg(test)]
-    fn chrome_renders(&self, cx: &App) -> [usize; 3] {
+    fn chrome_renders(&self, cx: &App) -> [usize; 2] {
         let chrome = &self.chrome;
         let renders = |view: &Entity<ChromeView>| view.read(cx).renders;
         [
             renders(&chrome.navigator).saturating_add(renders(&chrome.nav_rows)),
             renders(&chrome.titlebar),
-            renders(&chrome.statusbar),
         ]
     }
 
@@ -2049,9 +2026,9 @@ impl WorkspaceView {
     }
 
     /// The frame: the navigator the window's full height on the left, docked beside the rest
-    /// or laid over it (or the rail in its place), and the title bar, the strip and the status
-    /// bar stacked to its right. The chrome's regions are their own views, drawn cached at the
-    /// sizes laid out here.
+    /// or laid over it (or the rail in its place), and the title bar over the strip to its
+    /// right, the strip running to the window's bottom edge. The chrome's regions are their own
+    /// views, drawn cached at the sizes laid out here.
     fn render_frame(
         &self,
         strip: gpui::AnyElement,
@@ -2066,13 +2043,6 @@ impl WorkspaceView {
                 .flex_none()
                 .h(px(titlebar_height(&self.theme)) + safe.top),
         );
-        // A notice is the bar's to show, so the bar is up while one is, the keys' bar or no.
-        let bar_up = self.notices_up() || (!self.workers.is_empty() && !self.key_bar_shown);
-        let statusbar = bar_up.then(|| {
-            self.chrome.statusbar.clone().cached(
-                StyleRefinement::default().w_full().flex_none().h(px(statusbar::STATUSBAR_H)),
-            )
-        });
         let navigator = self.chrome.navigator.clone();
         let column = |width: Pixels| StyleRefinement::default().flex_none().h_full().w(width);
         let (docked, rail, over, handle) = match self.nav.drawn {
@@ -2111,8 +2081,7 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .child(titlebar)
-                    .child(middle)
-                    .children(statusbar),
+                    .child(middle),
             )
             .children(handle)
             .children(over)

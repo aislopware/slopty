@@ -148,19 +148,19 @@ fn dense_screen(rows: usize) -> Vec<String> {
         .collect()
 }
 
-/// How many times each region has drawn: the navigator, the title bar, the status bar.
-fn renders(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> [usize; 3] {
+/// How many times each region has drawn: the navigator, the title bar.
+fn renders(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> [usize; 2] {
     view.read_with(cx, WorkspaceView::chrome_renders)
 }
 
-/// An echo draws its terminal and leaves the navigator and both bars as they were drawn; a
+/// An echo draws its terminal and leaves the navigator and the title bar as they were drawn; a
 /// change to the workspace draws them all again.
 #[gpui::test]
 fn an_echo_leaves_the_chrome_as_it_was_drawn(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [_, _, (session, _)] = three_shells(&view, cx, &studio);
-    assert!(cx.debug_bounds("navigator").is_some() && cx.debug_bounds("statusbar").is_some());
+    assert!(cx.debug_bounds("navigator").is_some() && cx.debug_bounds("titlebar").is_some());
     let before = renders(&view, cx);
     for (seq, typed) in (1..).zip(["$ l", "$ ls", "$ ls -"]) {
         let rows = [(typed, SemanticMark::Prompt { exit: None, input: Some(2) })];
@@ -186,10 +186,10 @@ struct Move {
     frames: u32,
     /// How many of them changed which tiles are on screen.
     screens: u32,
-    /// How many times the navigator, the title bar and the status bar drew for the change.
-    change: [usize; 3],
+    /// How many times the navigator and the title bar drew for the change.
+    change: [usize; 2],
     /// How many times they drew in the frames of motion after it.
-    motion: [usize; 3],
+    motion: [usize; 2],
     /// How many changes the workspace took and how many times it worked out the titles.
     counts: (usize, usize),
 }
@@ -237,8 +237,8 @@ fn overview_move(
     Move {
         frames,
         screens,
-        change: [0, 1, 2].map(|i| changed[i].saturating_sub(chrome[i])),
-        motion: [0, 1, 2].map(|i| after[i].saturating_sub(changed[i])),
+        change: [0, 1].map(|i| changed[i].saturating_sub(chrome[i])),
+        motion: [0, 1].map(|i| after[i].saturating_sub(changed[i])),
         counts: (took.0.saturating_sub(counts.0), took.1.saturating_sub(counts.1)),
     }
 }
@@ -262,7 +262,7 @@ fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
         assert!(opening.frames > 1 && opening.screens > 0, "it moved the tiles: {opening:?}");
         assert_eq!(opening.counts, (1, 1), "one change, one working out of the titles");
         assert!(opening.change.iter().all(|n| *n > 0), "the change drew it: {opening:?}");
-        assert_eq!(opening.motion, [0; 3], "no frame of motion drew it: {opening:?}");
+        assert_eq!(opening.motion, [0; 2], "no frame of motion drew it: {opening:?}");
     }
     assert!(fast.frames > slow.frames, "{slow:?} {fast:?}");
     assert_eq!(fast.change, slow.change, "the frames' pace is no news: {slow:?} {fast:?}");
@@ -590,24 +590,70 @@ fn the_workspace_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     assert!((0.0..=Theme::default().spacing.md).contains(&gap), "+ follows it: {gap}");
 }
 
-/// While the phone's key bar shows, the status bar gives it its row, and takes it back after.
+/// No bar runs along the bottom: the strip reaches the window's bottom edge, and the title
+/// bar says nothing of itself while nothing needs saying. The server out of reach is said at
+/// its trailing end until it answers; a word about no one tile sits in its lane; a failure in
+/// a tile's own work sits beside that tile, under its header at its trailing edge, and moves to
+/// the title bar once the tile is gone.
 #[gpui::test]
-fn the_status_bar_steps_aside_for_the_key_bar(cx: &mut TestAppContext) {
+fn no_bar_runs_along_the_bottom_and_a_notice_sits_by_its_work(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let strip_h = |cx: &mut VisualTestContext| {
-        f32::from(cx.debug_bounds("strip").expect("the strip is drawn").size.height)
-    };
-    let with_bar = strip_h(cx);
-    assert!(cx.debug_bounds("statusbar").is_some());
-    view.update(cx, |v, cx| v.set_key_bar_shown(true, cx));
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let bounds = |cx: &mut VisualTestContext, selector: &'static str| cx.debug_bounds(selector);
+    let strip = bounds(cx, "strip").expect("the strip is drawn");
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(bounds(cx, "statusbar").is_none(), "no bar along the bottom");
+    assert!(
+        (f32::from(strip.bottom()) - f32::from(window.height)).abs() < 0.5,
+        "the strip runs to the bottom edge: {strip:?} in {window:?}"
+    );
+    assert!(bounds(cx, "readouts").is_none(), "nothing to say, nothing said");
+    assert!(bounds(cx, "status-worker").is_none(), "the worker is the navigator's to name");
+
+    let titlebar = bounds(cx, "titlebar").expect("the title bar");
+    view.update_in(cx, |v, _w, cx| v.set_server_status(Some("server unreachable".into()), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("statusbar").is_none(), "out of the key bar's way");
-    assert!(strip_h(cx) > with_bar, "the strip takes its row");
-    view.update(cx, |v, cx| v.set_key_bar_shown(false, cx));
+    let server = bounds(cx, "readout-server").expect("the server's word");
+    assert!(titlebar.contains(&server.center()), "at the title bar's end: {server:?}");
+    let bell = bounds(cx, "bell").expect("the bell");
+    assert!(server.right() <= bell.left(), "before the bell: {server:?} {bell:?}");
+    view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("statusbar").is_some(), "back once the keys go");
+    assert!(bounds(cx, "readouts").is_none(), "gone once it answers");
+
+    view.update(cx, |v, cx| v.show_notice("Copied".to_owned(), cx));
+    cx.run_until_parked();
+    let lane = bounds(cx, "notices").expect("a word about no one tile");
+    assert!(titlebar.contains(&lane.center()), "in the title bar's lane: {lane:?}");
+
+    view.update(cx, |v, cx| v.show_failure_at(shell, "The drop did not land".to_owned(), cx));
+    cx.run_until_parked();
+    let tile = view.read_with(cx, |v, _| v.tile_bounds(shell)).expect("the shell is drawn");
+    let beside = bounds(cx, leak(format!("tile-notices-{}", shell.item.as_uuid())))
+        .expect("the failure beside its tile");
+    assert!(tile.contains(&beside.center()), "within its tile: {beside:?} in {tile:?}");
+    let header = Theme::default().density.header;
+    assert!(
+        f32::from(beside.top()) >= f32::from(tile.top()) + header - 0.5,
+        "under its header: {beside:?} in {tile:?}"
+    );
+    assert!(
+        (f32::from(tile.right() - beside.right())).abs() <= Theme::default().spacing.md,
+        "at its trailing edge"
+    );
+    let texts = view.read_with(cx, |v, _| v.toast_texts());
+    assert_eq!(texts, ["Copied", "The drop did not land"], "both up, each in its place");
+
+    view.update_in(cx, |v, window, cx| v.close_tile(shell, window, cx));
+    cx.run_until_parked();
+    assert!(bounds(cx, leak(format!("tile-notices-{}", shell.item.as_uuid()))).is_none());
+    let texts = view.read_with(cx, |v, _| v.toast_texts());
+    assert!(
+        texts.iter().any(|t| t == "The drop did not land"),
+        "a failure outlives its tile: {texts:?}"
+    );
+    assert!(bounds(cx, "notices").is_some(), "and moves to the title bar");
 }
 
 /// On a phone under the touch density every button is a finger's 44 pt, and the title bar

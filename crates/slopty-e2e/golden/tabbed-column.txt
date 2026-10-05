@@ -16,5 +16,3 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell
-Group │ Status
-Status │ e2e-worker

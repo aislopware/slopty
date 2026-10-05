@@ -25,13 +25,13 @@ use crate::net::DialFailed;
 use crate::workers::{WorkerSlot, worker_key};
 use crate::{Workspace, net};
 
-/// The status bar's word while the server does not answer.
+/// The title bar's word while the server does not answer.
 pub(crate) const UNREACHABLE: &str = "Server unreachable";
-/// The status bar's word while the server answers on a different build.
+/// The title bar's word while the server answers on a different build.
 pub(crate) const OTHER_BUILD: &str = "Server runs a different build";
 /// The palette's line that brings the server to this build.
 pub(crate) const UPDATE_SERVER: &str = "Update the server";
-/// The status bar's line while the server turns this app away: the tailnet policy grants this
+/// The title bar's line while the server turns this app away: the tailnet policy grants this
 /// device no client role there.
 pub(crate) const NOT_GRANTED: &str = "Server needs a tailnet grant for this device";
 /// Said once as the server starts turning this app away: where a grant is added, and where it
@@ -341,7 +341,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The server answers on a different build: the status bar says so (not that it is
+    /// The server answers on a different build: the title bar says so (not that it is
     /// unreachable, which sends the person looking for a machine that is up), and a notice says
     /// once how to bring it to this build. A server on this Mac is brought to it at once where
     /// this app is an installed build ([`Self::update_server`]).

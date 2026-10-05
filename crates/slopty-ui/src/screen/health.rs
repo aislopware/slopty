@@ -15,7 +15,7 @@ use slopty_proto::screen::RateVerdict;
 
 use super::HudInput;
 
-/// A round trip slow enough to wear the warning tone, in the overlay and the status bar: typing
+/// A round trip slow enough to wear the warning tone, in the overlay and the navigator: typing
 /// lags behind the fingers.
 pub const RTT_WARN_FROM: Duration = Duration::from_millis(150);
 

@@ -43,5 +43,3 @@ Button │ 1 finished
 Button │ Commit
 Button │ Context 34% of 200k
 Button │ Send
-Group │ Status
-Status │ e2e-worker

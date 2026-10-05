@@ -4,6 +4,8 @@ Button │ Navigator
 Group │ Where
 Button │ drop-here
 Button │ New
+Group │ Status
+Button │ 1 port
 Button │ Needs you
 Button │ More
 Group │ drop-here
@@ -20,7 +22,4 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell
-Group │ Status
-Status │ e2e-worker
-Button │ 1 port
 Status │ Port 47310 is taken here; forwarded on 47311

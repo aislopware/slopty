@@ -23,5 +23,3 @@ Document │ File $SCRATCH/project/capture.log │ too large, 40.0 MB (focused)
 Status │ Too large to open here: 40.0 MB, over the 16.0 MB a tile opens
 Button │ Open in editor
 Button │ Open in pager
-Group │ Status
-Status │ e2e-worker

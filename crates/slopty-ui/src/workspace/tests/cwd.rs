@@ -1,5 +1,5 @@
 //! Where a shell stands: the directory, repository and branch the worker reports follow a `cd`
-//! or a checkout into the session's summary, which the navigator and the status bar read.
+//! or a checkout into the session's summary, which the navigator and the breadcrumb read.
 
 use super::*;
 

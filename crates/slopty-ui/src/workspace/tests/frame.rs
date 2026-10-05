@@ -1,5 +1,5 @@
-//! The frame around the strip in the headless workspace: the navigator, the status bar, the
-//! title bar's items and the bell.
+//! The frame around the strip in the headless workspace: the navigator, the title bar's
+//! items and the bell.
 
 use gpui::{AppContext as _, Modifiers, MouseButton};
 use slopty_client::layout::Navigator;
@@ -224,11 +224,11 @@ fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(first));
 }
 
-/// The status bar names the focused tile's worker, the round trip there, and how every
-/// worker's agents stand; the breadcrumb names the directory. The bell counts the one blocked
-/// too, as its way there.
+/// The navigator names the workers and the breadcrumb the directory; a slow link's round trip
+/// is the navigator's, and no readout repeats any of it. The bell counts the one blocked, as
+/// its way there.
 #[gpui::test]
-fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
+fn the_frame_says_where_the_focused_tile_is_once(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -246,9 +246,11 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let names = labels(&view, cx);
     // Outside a repository the checkout is the directory's own name.
-    for readout in ["studio", "slopty", "Round trip 42 ms"] {
+    for readout in ["studio", "slopty"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
+    assert!(!names.iter().any(|l| l.starts_with("Round trip")), "no readout: {names:#?}");
+    assert!(cx.debug_bounds("readouts").is_none(), "the title bar says none of it again");
     assert!(!names.iter().any(|l| l.contains("1 working")), "no agent counts: {names:#?}");
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
@@ -411,7 +413,7 @@ fn the_strip_thumb_goes_at_once_under_reduce_motion(cx: &mut TestAppContext) {
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
 /// palette or the empty workspace, and a round trip under `RTT_SHOWN_FROM` is not named. Once the
-/// link drops, each says what is wrong with the warn mark and a word, and so does the status bar.
+/// link drops, each says what is wrong with the warn mark and a word.
 #[gpui::test]
 fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -443,7 +445,6 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     cx.run_until_parked();
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio, reconnecting"), "{names:#?}");
-    assert!(names.iter().any(|l| l == "Reconnecting"), "the status bar says so: {names:#?}");
     assert!(marks(cx).iter().any(|m| m == "Away"), "{:?}", marks(cx));
     let studio_line = view.read_with(cx, |v, _| {
         v.worker_lines().find(|l| l.label == "studio").map(|l| (l.keys, l.status))

@@ -1,4 +1,4 @@
-//! The notices in the status bar: over no tile, one being read is never taken away under the
+//! The notices in the title bar: over no tile, one being read is never taken away under the
 //! pointer, none lapses while the app is not in front, and a failure stays until dismissed.
 
 use super::*;
@@ -51,15 +51,15 @@ fn typing_under_a_resting_pointer_keeps_the_hold(cx: &mut TestAppContext) {
     assert_eq!(up, ["Copied the address"], "a key leaves the pointer where it is");
 }
 
-/// A notice sits in the status bar, over no tile: with a shell open it lies inside the bar,
-/// clear of the strip; with no worker yet the bar comes up to hold it.
+/// A notice about no one tile sits in the title bar, over no tile: with a shell open it lies
+/// inside the bar, above the strip; with no worker yet the bar holds it all the same.
 #[gpui::test]
-fn a_notice_sits_in_the_status_bar_over_no_tile(cx: &mut TestAppContext) {
+fn a_notice_sits_in_the_title_bar_over_no_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     view.update_in(cx, |v, _w, cx| v.show_notice("Settings did not parse".to_owned(), cx));
     cx.run_until_parked();
     let (bar, notice) = (
-        cx.debug_bounds("statusbar").expect("up for the notice"),
+        cx.debug_bounds("titlebar").expect("the title bar"),
         cx.debug_bounds("said").expect("the notice"),
     );
     assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
@@ -69,12 +69,12 @@ fn a_notice_sits_in_the_status_bar_over_no_tile(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.show_notice("Copied the address".to_owned(), cx));
     cx.run_until_parked();
     let (bar, tile) = (
-        cx.debug_bounds("statusbar").expect("the bar"),
+        cx.debug_bounds("titlebar").expect("the bar"),
         cx.debug_bounds(selector("item", shell.item)).expect("the tile"),
     );
     let notice = cx.debug_bounds("said").expect("the notice");
     assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
-    assert!(notice.top() >= tile.bottom(), "under the tile, not over it: {notice:?} {tile:?}");
+    assert!(notice.bottom() <= tile.top(), "above the tile, not over it: {notice:?} {tile:?}");
 }
 
 /// A notice whose time comes while the app is not in front waits for it: it outlives its time

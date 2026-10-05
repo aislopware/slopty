@@ -18,8 +18,7 @@ Button │ Close tile
 Document │ File $SCRATCH/home/note-$MOMENT.md │ 1 line, Markdown, not on disk
 Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md (focused)
-Group │ Status
-Status │ e2e-ios-worker
+Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Navigation │ Navigator
 TextInput │ Filter
 Heading │ Workspaces

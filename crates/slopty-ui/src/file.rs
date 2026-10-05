@@ -583,14 +583,76 @@ impl FileView {
             .debug_selector(|| "file-author".to_owned())
             .px(px(theme.spacing.xxs))
             .child(tag);
+        // Over the foot line, which holds the bottom edge.
+        let foot = if self.shows_foot() { self.foot_height() } else { 0.0 };
         Some(
             div()
                 .absolute()
-                .bottom(px(theme.spacing.md))
+                .bottom(px(foot + theme.spacing.md))
                 .right(px(theme.spacing.lg))
                 .child(pill)
                 .into_any_element(),
         )
+    }
+
+    /// Whether the foot line shows: while the editor holds the text, not a preview, a
+    /// comparison or a notice in its place.
+    fn shows_foot(&self) -> bool {
+        self.shows_text() && !self.previewing() && self.comparing.is_none()
+    }
+
+    /// The foot line's height at the tile's zoom: the meta text's size with a base unit over
+    /// and under it.
+    fn foot_height(&self) -> f32 {
+        let theme = &self.theme;
+        theme.spacing.xs.mul_add(2.0, theme.typography.small()) * self.zoom
+    }
+
+    /// The foot line: what the file is coloured as, its indent and line endings, and where the
+    /// caret is (`Rust · Spaces: 4 · Ln 12, Col 5`), quiet at the tile's bottom edge, as an
+    /// editor's own status line says them. They are this tile's facts, so they are said in it
+    /// rather than in a bar the whole window shares.
+    fn render_foot(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.shows_foot() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (line, col) = self.caret(cx);
+        let caret = format!("Ln {line}, Col {col}");
+        let parts: Vec<String> = self
+            .coloured_as()
+            .map(str::to_owned)
+            .into_iter()
+            .chain(self.layout_facts())
+            .chain(std::iter::once(caret))
+            .collect();
+        let label = SharedString::from(parts.join(", "));
+        let mut row = div()
+            .id(SharedString::from(format!("file-foot-{}", self.id.as_uuid())))
+            .debug_selector(|| "file-foot".to_owned())
+            .role(Role::Status)
+            .aria_label(label)
+            .flex_none()
+            .h(px(self.foot_height()))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(theme.spacing.xs * self.zoom))
+            .px(px(theme.spacing.inset() * self.zoom))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(px(theme.typography.small() * self.zoom))
+            .text_color(hsla(s.text_muted));
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 {
+                row = row.child(crate::kit::separator(theme));
+            }
+            row = row.child(crate::kit::tabular(div()).child(SharedString::from(part)));
+        }
+        Some(row.into_any_element())
     }
 
     /// Item this tile belongs to.
@@ -675,7 +737,7 @@ impl FileView {
         self.base.is_some() || matches!(self.read, Some(FileRead::Text { .. }))
     }
 
-    /// The caret's line and column, 1-based: what the status bar says of a focused file.
+    /// The caret's line and column, 1-based: what the tile's foot line says.
     #[must_use]
     pub fn caret(&self, cx: &gpui::App) -> (u32, u32) {
         let at = self.editor.read(cx).cursor_position();
@@ -1648,6 +1710,7 @@ impl Render for FileView {
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
         let author = self.render_author(cx);
+        let foot = self.render_foot(cx);
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
@@ -1726,6 +1789,7 @@ impl Render for FileView {
             .children(bar)
             .children(waiting)
             .child(body)
+            .children(foot)
             .children(author)
             .children(search)
             .children(goto)
