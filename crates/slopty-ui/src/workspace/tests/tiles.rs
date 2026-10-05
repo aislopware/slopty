@@ -729,7 +729,7 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
     let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    // The thread's toggle is one of the controls; its tile shows the TUI, where the pill is.
+    // The face switch is one of the controls; its tile shows the TUI, where the pill is.
     agent_thread(&view, cx, fake.key, agent);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
@@ -756,7 +756,8 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let (strip, name, pill) = (bounds(cx, "strip"), bounds(cx, "name"), bounds(cx, "agent"));
     assert!(strip.contains(&pill.center()), "the pill is in the strip");
     let side = crate::kit::icon_button_side(&Theme::default());
-    assert!(f32::from(strip.size.width) >= 3.0_f32.mul_add(side, -0.5), "room for the buttons");
+    // Thread and terminal on the switch, fullscreen and close.
+    assert!(f32::from(strip.size.width) >= 4.0_f32.mul_add(side, -0.5), "room for the buttons");
     assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
 
     let header = bounds(cx, "title").center();
@@ -767,8 +768,8 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     assert_eq!(bounds(cx, "name"), name, "and so does the title");
     let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
     assert!(strip.contains(&close.center()), "close sits in the same strip");
-    let face = cx.debug_bounds(selector("face", waiting.item)).expect("the face toggle");
-    assert!(strip.contains(&face.center()), "the toggle is one of the controls");
+    let face = cx.debug_bounds(selector("faces", waiting.item)).expect("the face switch");
+    assert!(strip.contains(&face.center()), "the switch is one of the controls");
     assert!(face.right() <= close.left(), "before close: {face:?} {close:?}");
 }
 

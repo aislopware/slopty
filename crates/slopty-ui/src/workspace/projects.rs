@@ -2,8 +2,8 @@
 //! orchestrator's tile.
 //!
 //! The app hands over the server's snapshot and its changes ([`WorkspaceView::projects_part`],
-//! [`WorkspaceView::project_update`]). An orchestrator's tile turns between its TUI and its
-//! board (⇧⌘J, the header's button, the palette's line for the project); a board's rows open
+//! [`WorkspaceView::project_update`]). The board is one of an orchestrator's faces, beside its
+//! thread and its TUI (the header's switch, ⌘J, the palette's line for the project); its rows open
 //! the tiles of the agents they name. Everything a board draws is handed to it in the frame
 //! after it changed, compared first, so a board is drawn again only when what it shows moved.
 
@@ -21,7 +21,7 @@ use slopty_proto::project::{
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
-use super::actions::{MakeOrchestrator, ToggleProjectBoard};
+use super::actions::MakeOrchestrator;
 use super::agents::{agent_ask_text, agent_mark_of};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
@@ -29,10 +29,6 @@ use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
-/// What the palette and the header call turning a tile to its board.
-pub(crate) const SHOW_BOARD: &str = "Show project board";
-/// What a terminal says when asked for a board it has none of.
-pub(crate) const NO_PROJECT: &str = "No project runs in this terminal";
 /// What "Start a project here" says away from a terminal.
 pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project there";
 /// How many pages of the timeline a recap reads back from the server, past what the board
@@ -258,29 +254,6 @@ impl WorkspaceView {
         self.projects.dirty = true;
         self.changed(cx);
         cx.notify();
-    }
-
-    /// ⇧⌘J: the focused orchestrator between its terminal and its board. From an agent working
-    /// on a task, its project's board, in its orchestrator's tile.
-    pub(super) fn toggle_project_board(
-        &mut self,
-        _: &ToggleProjectBoard,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.focused_session() else {
-            self.show_notice(NO_PROJECT.to_owned(), cx);
-            return;
-        };
-        if self.projects.mirror.of_orchestrator(session).is_some() {
-            let shown = self.board_shown(session);
-            self.show_board(session, !shown, cx);
-            return;
-        }
-        match self.projects.mirror.of_agent(session).map(|(b, _)| b.project.id.clone()) {
-            Some(project) => self.open_project(&project, cx),
-            None => self.show_notice(NO_PROJECT.to_owned(), cx),
-        }
     }
 
     /// Show `project`'s board in its orchestrator's tile, and go there. Where its orchestrator

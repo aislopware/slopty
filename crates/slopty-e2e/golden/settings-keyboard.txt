@@ -106,10 +106,8 @@ ListItem │ Smaller text │ ⌘-
 Button │ Keys for Smaller text │ ⌘-
 ListItem │ Default text size │ ⌘0
 Button │ Keys for Default text size │ ⌘0
-ListItem │ Show thread or terminal │ ⌘J
-Button │ Keys for Show thread or terminal │ ⌘J
-ListItem │ Show project board or terminal │ ⇧⌘J
-Button │ Keys for Show project board or terminal │ ⇧⌘J
+ListItem │ Switch thread, terminal or board │ ⌘J
+Button │ Keys for Switch thread, terminal or board │ ⌘J
 ListItem │ Edit page address │ ⌘L
 Button │ Keys for Edit page address │ ⌘L
 ListItem │ Trackpad mode

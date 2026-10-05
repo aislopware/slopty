@@ -9,16 +9,31 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use slopty_e2e::harness::{ProjectStack, artifacts_dir};
 use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
-use slopty_e2e::{Command, Dump, ProjectInfo};
+use slopty_e2e::{Command, Driver, Dump, ProjectInfo};
 
 /// A server round trip, an agent starting, the app hearing of it.
 const STEP: Duration = Duration::from_secs(30);
 /// The renders' window: the board and the agent's tile beside it.
 const WINDOW: (f32, f32) = (1280.0, 800.0);
 const PROJECT: &str = "board";
+/// How long a face takes to turn after ⌘J: a frame, given a slow machine's slack.
+const FACE_TURN: Duration = Duration::from_secs(2);
 
 fn project(d: &Dump) -> Option<&ProjectInfo> {
     d.projects.iter().find(|p| p.id == PROJECT)
+}
+
+/// ⌘J round the focused orchestrator's faces (its thread, its terminal, its board) until its
+/// tile shows `project`'s board, as the person presses it.
+pub async fn to_board(driver: &mut Driver, project: &str) {
+    for _ in 0..3 {
+        driver.keys("cmd-j").await.unwrap();
+        let shown = |d: &Dump| d.projects.iter().any(|p| p.id == project && p.shown);
+        if driver.wait_for("the board", FACE_TURN, shown).await.is_ok() {
+            return;
+        }
+    }
+    panic!("⌘J never reached the board");
 }
 
 fn term(opened: &Value) -> String {
@@ -83,7 +98,7 @@ async fn golden(stack: &mut ProjectStack, name: &str) {
 
 /// The server's project, with an orchestrator and six tasks one level under it in five states,
 /// one of them run by an agent the server started, one whose verifier broke and one waiting to
-/// merge, reaches the app; ⇧⌘J turns the orchestrator's tile to its board of lanes, ↓ walks its
+/// merge, reaches the app; ⌘J turns the orchestrator's tile to its board of lanes, ↓ walks its
 /// cards and ↩ opens a task's agent, and a change on the server moves the board while it shows.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -206,7 +221,7 @@ async fn a_project_board_follows_its_orchestration() {
     assert!(!info.shown, "the terminal is the default");
 
     stack.driver.reveal(&orchestrator_session).await.unwrap();
-    stack.driver.keys("cmd-shift-j").await.unwrap();
+    to_board(&mut stack.driver, PROJECT).await;
     let project_focus = format!("project:{PROJECT}");
     stack
         .driver
@@ -369,12 +384,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     assert!(project(&d).is_some_and(|p| p.tasks.len() == 2));
 
     stack.driver.reveal(&orchestrator_session).await.unwrap();
-    stack.driver.keys("cmd-shift-j").await.unwrap();
-    stack
-        .driver
-        .wait_for("the board", STEP, |d| project(d).is_some_and(|p| p.shown))
-        .await
-        .unwrap();
+    to_board(&mut stack.driver, PROJECT).await;
     // Time shows from a minute at work, and says "1m" until the second.
     tokio::time::sleep(AT_WORK.saturating_sub(at_work())).await;
     // The board's tile takes the keys again, whatever the agent's own tile did meanwhile.

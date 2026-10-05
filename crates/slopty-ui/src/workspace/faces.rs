@@ -36,11 +36,11 @@ use slopty_proto::thread::wire::{
 use slopty_proto::thread::{self, AgentId, IntentId, ThreadId, TurnId};
 use slopty_proto::{ClientMsg, RequestId};
 
-use super::actions::ToggleConversation;
+use super::actions::SwitchFace;
 use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, hub};
-use crate::icons::Status;
+use crate::icons::{Status, Symbol};
 use crate::review::ReviewView;
 
 /// What the workspace keeps about faces.
@@ -161,7 +161,101 @@ impl ThreadFaces {
     }
 }
 
+/// What ⌘J says on an agent's tile with its terminal alone: its worker has not named its
+/// thread yet.
+pub(crate) const NO_THREAD_YET: &str = "This agent has no thread yet";
+
+/// What an agent's tile shows: its thread, its agent's own terminal, or, for a project's
+/// orchestrator, the project's board. One switch in the tile's header picks it, and ⌘J goes to
+/// the next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Face {
+    /// The agent's thread, in place of its TUI.
+    Thread,
+    /// The agent's own terminal.
+    Terminal,
+    /// The board of the project the agent orchestrates.
+    Board,
+}
+
+impl Face {
+    /// Its name, on the switch and after the tile's name to a screen reader.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Thread => "Thread",
+            Self::Terminal => "Terminal",
+            Self::Board => "Board",
+        }
+    }
+
+    /// Its icon on the switch.
+    #[must_use]
+    pub(crate) const fn symbol(self) -> Symbol {
+        match self {
+            Self::Thread => Symbol::TextBubble,
+            Self::Terminal => Symbol::Terminal,
+            Self::Board => Symbol::RectangleSplit3x1,
+        }
+    }
+
+    /// A word for it in an element's id.
+    #[must_use]
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Terminal => "terminal",
+            Self::Board => "board",
+        }
+    }
+}
+
 impl WorkspaceView {
+    /// The faces `session`'s tile can show, in the switch's order: the thread while an agent
+    /// runs in it and its worker's table names its thread, the terminal always, the board
+    /// while it orchestrates a project.
+    #[must_use]
+    pub(crate) fn faces_of(&self, session: SessionId) -> Vec<Face> {
+        let mut faces = Vec::with_capacity(3);
+        if self.agent_state(session).is_some() && self.session_thread(session).is_some() {
+            faces.push(Face::Thread);
+        }
+        faces.push(Face::Terminal);
+        if self.projects().of_orchestrator(session).is_some() {
+            faces.push(Face::Board);
+        }
+        faces
+    }
+
+    /// The face `session`'s tile shows.
+    #[must_use]
+    pub(crate) fn tile_face(&self, session: SessionId) -> Face {
+        if self.board_shown(session) {
+            Face::Board
+        } else if self.face_shown(session) {
+            Face::Thread
+        } else {
+            Face::Terminal
+        }
+    }
+
+    /// Turn `session`'s tile to `face`.
+    pub(crate) fn set_face(&mut self, session: SessionId, face: Face, cx: &mut Context<Self>) {
+        if face == Face::Board {
+            self.show_board(session, true, cx);
+            return;
+        }
+        // Off the board, the face shown takes the keyboard back even where it was the pick.
+        let from_board = self.board_shown(session);
+        if from_board {
+            self.show_board(session, false, cx);
+        }
+        let thread = face == Face::Thread;
+        if from_board || self.face_shown(session) != thread {
+            self.show_face(session, thread, cx);
+        }
+    }
+
     /// Whether `session`'s tile shows its agent's thread: the person's pick, else the thread.
     /// Only while an agent runs in it and its worker's table names its thread.
     #[must_use]
@@ -1247,24 +1341,25 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// ⌘J: the focused agent terminal between its TUI and its thread.
-    pub(super) fn toggle_conversation(
+    /// ⌘J: the focused agent's tile to its next face, in the switch's order, round to the
+    /// first.
+    pub(super) fn switch_face(
         &mut self,
-        _: &ToggleConversation,
+        _: &SwitchFace,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Bound only while an agent runs in the focused terminal ([`Applies::agent`]).
         let Some(session) = self.focused_session() else { return };
-        if self.agent_state(session).is_none() {
-            self.show_notice("No agent runs in this terminal".to_owned(), cx);
+        let faces = self.faces_of(session);
+        if faces.len() < 2 {
+            self.show_notice(NO_THREAD_YET.to_owned(), cx);
             return;
         }
-        if self.session_thread(session).is_none() {
-            self.show_notice("This agent has no thread yet".to_owned(), cx);
-            return;
-        }
-        let face = !self.face_shown(session);
-        self.show_face(session, face, cx);
+        let shown = self.tile_face(session);
+        let at = faces.iter().position(|f| *f == shown).map_or(0, |at| at.saturating_add(1));
+        let next = faces.get(at).or_else(|| faces.first()).copied().unwrap_or(Face::Terminal);
+        self.set_face(session, next, cx);
     }
 
     /// The session of the focused tile, if it is a terminal.

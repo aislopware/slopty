@@ -25,7 +25,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::actions::{AddWindow, CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
-use super::faces::ThreadStand;
+use super::faces::{Face, ThreadStand};
 use super::strip::Handed;
 use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -112,18 +112,8 @@ pub const CLOSE_TILE: &str = "Close tile";
 /// The accessible name of a tile's fullscreen button.
 pub const FULLSCREEN_TILE: &str = "Fullscreen tile";
 
-/// The header button that shows an agent terminal's thread.
-pub const SHOW_CONVERSATION: &str = "Show thread";
-
-/// The same button while the thread shows.
-pub const SHOW_TERMINAL: &str = "Show terminal";
-
-/// What an agent's tile shows, as a screen reader hears it after the tile's name: its thread
-/// (a thread tile, or a terminal on its thread face)...
-pub const SHOWS_CONVERSATION: &str = "Thread";
-
-/// ...or its agent's own terminal.
-pub const SHOWS_TERMINAL: &str = "Terminal";
+/// The accessible name of an agent tile's switch between its faces ([`Face`]).
+pub const FACE_SWITCH: &str = "Face";
 
 /// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
@@ -1116,8 +1106,8 @@ impl WorkspaceView {
         let actions = self.header_actions(tile, item, chrome, cx);
         let silenced = self.silenced(tile, item, chrome, cx);
         let face = match agent {
-            Some((session, _)) => self.face_toggles(tile, session, chrome, cx),
-            None => self.preview_toggle(tile, chrome, cx).into_iter().collect(),
+            Some((session, _)) => self.face_switch(tile, session, chrome, cx),
+            None => self.preview_toggle(tile, chrome, cx).map(|toggle| (toggle, 1)),
         };
         // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
         // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
@@ -1935,83 +1925,97 @@ impl WorkspaceView {
         actions
     }
 
-    /// What an agent's tile shows, for a screen reader: its conversation or its terminal, as
-    /// its face and the header's toggle say. `None` for any other tile.
+    /// What an agent's tile shows, for a screen reader: its face, as its header's switch says
+    /// ([`Face::label`]). `None` for any other tile.
     fn tile_shows(&self, item: &Item) -> Option<&'static str> {
         match item.kind {
-            ItemKind::Thread { .. } => Some(SHOWS_CONVERSATION),
-            ItemKind::Terminal { session }
-                if self.agent_state(session).is_some()
-                    && self.session_thread(session).is_some() =>
-            {
-                Some(if self.face_shown(session) { SHOWS_CONVERSATION } else { SHOWS_TERMINAL })
+            ItemKind::Thread { .. } => Some(Face::Thread.label()),
+            ItemKind::Terminal { session } if self.faces_of(session).len() > 1 => {
+                Some(self.tile_face(session).label())
             }
             _ => None,
         }
     }
 
-    /// The buttons that turn an agent's tile between its TUI and its faces: controls, so they
-    /// sit with fullscreen and close in the trailing strip. An orchestrator's tile has one for
-    /// its project's board; while the board shows, that one goes back to the terminal alone.
-    fn face_toggles(
+    /// The switch between an agent tile's faces ([`Face`]): one icon a face, Thread ·
+    /// Terminal, and Board for an orchestrator, the one on show on the selected wash. A control,
+    /// so it sits with fullscreen and close in the trailing strip. Quiet at rest, since every
+    /// agent's tile carries it and the person mostly watches: the icons in the muted ink, no
+    /// outline round them. Each is an icon button's square, a finger's 44 pt under touch.
+    /// With its width in icon buttons; `None` while the tile has one face, a shell no agent
+    /// runs in.
+    fn face_switch(
         &self,
         tile: TileRef,
         session: SessionId,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let mut out = Vec::new();
-        let board = self.board_shown(session);
-        if self.projects().of_orchestrator(session).is_some() {
-            let (icon, label) = if board {
-                (Symbol::Terminal, SHOW_TERMINAL)
-            } else {
-                (Symbol::RectangleSplit3x1, super::projects::SHOW_BOARD)
-            };
-            let id = format!("board-{}", tile.item.as_uuid());
-            out.push(
-                kit::icon_button_at(&self.theme, id, icon, label, chrome.k)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.focus_tile(tile, cx);
-                        this.show_board(session, !board, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if !board {
-            out.extend(self.face_toggle(tile, session, chrome, cx));
-        }
-        out
-    }
-
-    /// The button that turns an agent's tile between its TUI and its thread: never among the
-    /// readouts it once split. `None` while no agent runs in the shell, or no thread stands for
-    /// it yet.
-    fn face_toggle(
-        &self,
-        tile: TileRef,
-        session: SessionId,
-        chrome: Chrome,
-        cx: &Draw<'_, Self>,
-    ) -> Option<gpui::AnyElement> {
-        if self.agent_state(session).is_none() || self.session_thread(session).is_none() {
+    ) -> Option<(gpui::AnyElement, usize)> {
+        let faces = self.faces_of(session);
+        if faces.len() < 2 {
             return None;
         }
-        let face = self.face_shown(session);
-        let (icon, label) = if face {
-            (Symbol::Terminal, SHOW_TERMINAL)
-        } else {
-            (Symbol::TextBubble, SHOW_CONVERSATION)
-        };
-        let id = format!("face-{}", tile.item.as_uuid());
-        Some(
-            kit::icon_button_at(&self.theme, id, icon, label, chrome.k)
+        let shown = self.tile_face(session);
+        let width = faces.len();
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let k = chrome.k;
+        let side = px(kit::icon_button_side(theme) * k);
+        let segments = faces.into_iter().map(|face| {
+            let on = face == shown;
+            let ink = if on { s.text } else { s.text_muted };
+            let id = format!("face-{}-{}", face.key(), tile.item.as_uuid());
+            let selector = id.clone();
+            let segment = div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::RadioButton)
+                .aria_label(face.label())
+                .aria_toggled(if on {
+                    gpui::accesskit::Toggled::True
+                } else {
+                    gpui::accesskit::Toggled::False
+                })
+                .flex_none()
+                .size(side)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.sm * k))
+                .cursor_pointer()
+                .map(|el| {
+                    if on {
+                        el.bg(hsla(s.selected))
+                    } else {
+                        el.hover(move |el| el.bg(hsla(s.hover)))
+                    }
+                })
+                .active(move |el| el.bg(hsla(s.pressed)))
+                .child(
+                    crate::icons::icon(theme, face.symbol(), IconSize::Inline, hsla(ink))
+                        .size(px(theme.typography.icon() * k)),
+                )
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.focus_tile(tile, cx);
-                    this.show_face(session, !face, cx);
-                }))
+                    this.set_face(session, face, cx);
+                }));
+            tab_stop(kit::eased(segment), s.focus).into_any_element()
+        });
+        let id = format!("faces-{}", tile.item.as_uuid());
+        let selector = id.clone();
+        Some((
+            div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::RadioGroup)
+                .aria_label(FACE_SWITCH)
+                .flex_none()
+                .flex()
+                .items_center()
+                .children(segments)
                 .into_any_element(),
-        )
+            width,
+        ))
     }
 
     /// The button that turns a Markdown file's tile between its preview and its source, as ⌘⇧V
@@ -2079,7 +2083,7 @@ impl WorkspaceView {
     }
 
     /// The header's right end: one fixed strip where the tile's readouts (the agent's pill, a
-    /// finished command's time) sit at rest and the controls (an agent's face toggle,
+    /// finished command's time) sit at rest and the controls (an agent's face switch,
     /// fullscreen, close) take their place while the pointer is on the header. It is never
     /// narrower than the buttons, so the swap moves nothing beside it. The focused tile with
     /// nothing to say shows its buttons at rest (touch has no hover). Each button focuses its
@@ -2088,7 +2092,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         readouts: Vec<gpui::AnyElement>,
-        face: Vec<gpui::AnyElement>,
+        face: Option<(gpui::AnyElement, usize)>,
         k: f32,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
@@ -2122,10 +2126,10 @@ impl WorkspaceView {
                 this.close_tile(tile, window, cx);
             }));
         let quiet = readouts.is_empty();
-        let buttons = f32::from(
-            1_u8.saturating_add(u8::from(offer_fullscreen))
-                .saturating_add(u8::try_from(face.len()).unwrap_or(u8::MAX)),
-        );
+        let buttons =
+            f32::from(1_u8.saturating_add(u8::from(offer_fullscreen)).saturating_add(
+                face.as_ref().map_or(0, |(_, n)| u8::try_from(*n).unwrap_or(u8::MAX)),
+            ));
         let controls = div()
             .absolute()
             .top_0()
@@ -2136,7 +2140,7 @@ impl WorkspaceView {
             .when(!(focused && quiet), |el| {
                 el.invisible().group_hover(HEADER_GROUP, gpui::Styled::visible)
             })
-            .children(face)
+            .children(face.map(|(face, _)| face))
             .children(fullscreen)
             .child(close);
         let readouts = div()

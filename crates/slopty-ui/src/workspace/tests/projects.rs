@@ -1,5 +1,5 @@
-//! A project's board in its orchestrator's tile: turned to and from with ⇧⌘J, kept in step
-//! with the server's changes, and every row a way to its agent's tile.
+//! A project's board in its orchestrator's tile: turned to with ⌘J and from with the switch, kept
+//! in step with the server's changes, and every row a way to its agent's tile.
 
 use slopty_core::WorkerId;
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
@@ -83,21 +83,22 @@ fn shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext, session: SessionI
     view.read_with(cx, |v, _| v.board_shown(session))
 }
 
-/// ⇧⌘J turns the orchestrator's tile to its board, which takes the keyboard: the header and
-/// the lanes, what waits on the person first. ↓ and ↩ open a task's agent in its own tile; back
-/// on the orchestrator the board has the keyboard again, and ⇧⌘J gives the terminal back.
+/// ⌘J turns the orchestrator's tile from its terminal to its board, which takes the keyboard:
+/// the header and the lanes, what waits on the person first. ↓ and ↩ open a task's agent in its
+/// own tile; back on the orchestrator the board has the keyboard again, and the switch's
+/// terminal gives the terminal back.
 #[gpui::test]
 fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
     let (agent_tile, agent) = setup.agent;
-    // The orchestrator on its TUI, where ⇧⌘J gives the keyboard back to.
+    // The orchestrator on its TUI, where the switch gives the keyboard back to.
     view.update_in(cx, |v, _w, cx| v.show_face(orchestrator, false, cx));
     cx.run_until_parked();
     assert!(!shown(&view, cx, orchestrator), "the terminal is the default");
 
-    cx.simulate_keystrokes("cmd-shift-j");
+    cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
     assert!(shown(&view, cx, orchestrator));
     assert!(cx.debug_bounds("project").is_some(), "the board is drawn in the tile");
@@ -140,7 +141,9 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(3))), "the board's keys");
 
-    cx.simulate_keystrokes("cmd-shift-j");
+    let terminal = selector("face-terminal", orchestrator_tile.item);
+    let at = cx.debug_bounds(terminal).expect("the switch's terminal").center();
+    cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
     assert!(!shown(&view, cx, orchestrator));
     assert!(cx.debug_bounds("project").is_none());
@@ -500,9 +503,9 @@ fn forgetting_the_server_keeps_nothing_of_its_projects(cx: &mut TestAppContext) 
 }
 
 /// The palette lists each project; ↩ on it shows its board in the orchestrator's tile and
-/// goes there. From an agent on a task, ⇧⌘J goes to its project's board.
+/// goes there.
 #[gpui::test]
-fn the_palette_and_an_agent_reach_the_board(cx: &mut TestAppContext) {
+fn the_palette_reaches_the_board(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
@@ -514,16 +517,7 @@ fn the_palette_and_an_agent_reach_the_board(cx: &mut TestAppContext) {
     assert_eq!(lines[0].label, "Ship the project board");
     assert_eq!(lines[0].status, Some(crate::icons::Status::NeedsYou), "its most urgent lane");
 
-    cx.simulate_keystrokes("cmd-shift-j");
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(orchestrator_tile));
-    assert!(shown(&view, cx, orchestrator));
-
-    view.update_in(cx, |v, _w, cx| {
-        v.show_board(orchestrator, false, cx);
-        v.focus_tile(agent_tile, cx);
-        v.open_project(&fixtures::id("board"), cx);
-    });
+    view.update_in(cx, |v, _w, cx| v.open_project(&fixtures::id("board"), cx));
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(orchestrator_tile));
     assert!(shown(&view, cx, orchestrator));

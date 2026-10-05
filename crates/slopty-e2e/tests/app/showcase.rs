@@ -2396,8 +2396,7 @@ async fn showcase_a_project_board_in_every_state() {
     let drv = &mut stack.driver;
     drv.reveal(&session_of(&orchestrator)).await.unwrap();
     drv.keys("cmd-shift-enter").await.unwrap();
-    drv.keys("cmd-shift-j").await.unwrap();
-    wait(drv, "the board", |d| d.projects.iter().any(|p| p.id == PROJECT && p.shown)).await;
+    crate::projects::to_board(drv, PROJECT).await;
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     board_both(&mut stack, "project-lanes").await;
     let drv = &mut stack.driver;

@@ -135,11 +135,9 @@ actions!(
         FontSmaller,
         /// Terminal text back to the settings' size.
         FontReset,
-        /// The focused agent terminal between its TUI and its conversation.
-        ToggleConversation,
-        /// The focused orchestrator's tile between its terminal and its project's board; from
-        /// an agent on a task, its project's board.
-        ToggleProjectBoard,
+        /// The focused agent's tile to its next face: thread, terminal, and an orchestrator's
+        /// board.
+        SwitchFace,
         /// The focused page's address as a field in its header, all of it selected: ↩ goes
         /// there, Esc leaves it as it was. With no page focused, "Open URL…".
         EditAddress,
@@ -382,8 +380,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Center column", Box::new(CenterColumn)),
         w("Tabbed column", Box::new(ToggleTabbed)),
         w("Overview", Box::new(ToggleOverview)),
-        w("Show thread or terminal", Box::new(ToggleConversation)),
-        w("Show project board or terminal", Box::new(ToggleProjectBoard)),
+        w("Switch thread, terminal or board", Box::new(SwitchFace)),
         w("Thread density", Box::new(CycleDensity)),
         w("Stop the agent", Box::new(Interrupt)),
         w("Queue message", Box::new(QueueMessage)),
@@ -453,8 +450,6 @@ pub(super) struct Applies {
     pub terminal: bool,
     /// A terminal an agent runs in.
     pub agent: bool,
-    /// A terminal that is a project's orchestrator or one of its agents.
-    pub project: bool,
     /// A tile that takes files from this device: a shell, a folder or a remote picture.
     pub upload: bool,
     /// A remote tile with a window of its own on this Mac, or one that can have one.
@@ -481,7 +476,6 @@ impl super::WorkspaceView {
         let kind = focused.and_then(|t| self.item(t)).map(|i| &i.kind);
         let session = self.focused_session();
         let agent = session.and_then(|s| self.agent_state(s));
-        let mirror = &self.projects.mirror;
         Applies {
             tile: focused.is_some(),
             page: self.focused_page().is_some(),
@@ -490,9 +484,6 @@ impl super::WorkspaceView {
             file: matches!(kind, Some(ItemKind::File { .. })),
             terminal: self.active_terminal().is_some(),
             agent: agent.is_some(),
-            project: session.is_some_and(|s| {
-                mirror.of_orchestrator(s).is_some() || mirror.of_agent(s).is_some()
-            }),
             upload: matches!(
                 kind,
                 Some(

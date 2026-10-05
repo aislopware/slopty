@@ -7290,3 +7290,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `gallery::the_first_run_offers_one_way_in` (its headings),
     `through_server` (the first run's heading). Goldens: `first-run`, `first-run-dark`,
     `this-mac`, `add-worker` (the blurb's 13/19 line).
+- ✅ **One face switch on an agent's tile** (2026-10-06, `.research/readiness-2026-10-06.md` §4
+  #12). An orchestrator's tile had two toggles that each flipped a different pair: ⌘J and a
+  header button between the thread and the TUI, and ⇧⌘J and a second button between the TUI and
+  the board. The person had to remember which chord left which face. This entry replaces the
+  toggle in "The conversation face" and the ⇧⌘J of "A project's board is a face of its
+  orchestrator's tile".
+  - **The switch.** An agent's faces are one list (`workspace::faces::Face`): Thread when its
+    worker names its thread, Terminal always, Board while it orchestrates a project. The header
+    shows one radio group, "Face", with an icon for each face, and the one on show sits on the
+    selected wash. It is quiet at rest: the icons are in the muted ink, with no outline round
+    the group, since every agent's tile carries it. Each icon is an icon button's square, 44 pt
+    under touch. The trailing strip reserves room for every icon, so the hover swap still moves
+    nothing. A shell no agent runs in has no switch. Neither does an agent with one face.
+  - **The key.** ⌘J (`SwitchFace`) goes to the next face in the switch's order and round to
+    the first. The palette lists it as "Switch thread, terminal or board". ⇧⌘J and the task
+    agent's jump to its project's board are deleted. The palette's line for the project still
+    goes there.
+  - **The keyboard.** It goes with the face: the composer, the TUI or the board. Leaving the
+    board gives it back to the face shown, even where that face was already the pick.
+  - **For a screen reader.** The tile says the face it shows by the switch's own word
+    (`Face::label`).
+  - Tests: `workspace::tests::faces::the_switch_picks_the_face_and_a_plain_shell_has_none`,
+    `workspace::tests::projects::the_orchestrators_tile_turns_to_its_board_and_opens_its_agents`
+    (⌘J to the board, the switch back to the terminal),
+    `workspace::tests::agent_tile` (the radio group and its words),
+    `workspace::tests::tiles::the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves`.
+    The e2e project tests reach the board by ⌘J (`projects::to_board`). Golden: the
+    `settings-keyboard` words.

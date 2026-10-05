@@ -1933,10 +1933,9 @@ impl gpui::Render for WorkspaceView {
             })
             .when(applies.terminal, |el| el.on_action(cx.listener(Self::start_project)))
             .when(applies.agent, |el| {
-                el.on_action(cx.listener(Self::toggle_conversation))
+                el.on_action(cx.listener(Self::switch_face))
                     .on_action(cx.listener(Self::make_orchestrator))
             })
-            .when(applies.project, |el| el.on_action(cx.listener(Self::toggle_project_board)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.plan, |el| el.on_action(cx.listener(Self::toggle_plan_first)))
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))

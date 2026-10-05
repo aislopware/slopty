@@ -9,6 +9,7 @@ use slopty_proto::thread::{AskId, Cursor, Phase, Request, ThreadMeta, ThreadStat
 
 use super::*;
 use crate::icons::Status;
+use crate::workspace::faces::Face;
 
 /// A shell of this client's on `fake`'s worker with Claude Code working in it, focused.
 fn agent_tile(
@@ -103,6 +104,35 @@ fn the_face_toggles_over_the_same_session_and_keeps_its_draft(cx: &mut TestAppCo
     cx.run_until_parked();
     let draft = view.read_with(cx, |v, cx| v.thread_face(session).map(|t| t.read(cx).draft(cx)));
     assert_eq!(draft.as_deref(), Some("half a thought, whole"), "the keyboard is the thread's");
+}
+
+/// The header's switch shows a face per click and says which one shows; a shell no agent runs
+/// in has no switch.
+#[gpui::test]
+fn the_switch_picks_the_face_and_a_plain_shell_has_none(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let plain = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let (tile, session) = agent_tile(&view, cx, &mut studio);
+    table(&view, cx, studio.key, vec![thread_on(session).row(WallMs::ZERO)]);
+    let shows = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.tile_face(session));
+    assert_eq!(shows(cx), Face::Thread);
+    assert!(cx.debug_bounds(selector("faces", plain.item)).is_none(), "a shell has one face");
+
+    let click = |cx: &mut VisualTestContext, face: Face| {
+        let part = selector(&format!("face-{}", face.key()), tile.item);
+        let at = cx.debug_bounds(part).unwrap_or_else(|| panic!("{face:?} on the switch"));
+        cx.simulate_click(at.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    click(cx, Face::Terminal);
+    assert_eq!(shows(cx), Face::Terminal);
+    assert!(terminal_focused(&view, cx, session), "the TUI takes the keyboard");
+    click(cx, Face::Thread);
+    assert_eq!(shows(cx), Face::Thread);
+    assert!(cx.debug_bounds("thread-composer").is_some());
 }
 
 /// The agent leaving the terminal lets its thread go and gives the TUI the keyboard; back, the
