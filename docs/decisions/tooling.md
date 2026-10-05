@@ -1172,3 +1172,9 @@ more full-window layer.
     lets the questionnaire check, the input's chevrons and its clear button draw as the
     chrome's SF Symbols. Upstream has no open PR doing this. #3360 touches `icon.rs`, but not
     rendering.
+
+- ✅ **gpui-fast `20538a6`: a frame holds the views it may rebuild weakly** (2026-10-05, fork PR
+  #29). A frame's rebuild records held each view strongly (`fast/splice.rs`), so a dropped tile,
+  its native host and its WKWebView lived until the window drew again, and WebKit refused to
+  delete a forgotten worker's page store as in use. The records hold `AnyWeakView` now, and a
+  gap that cannot upgrade builds the view around it. Upstream has nothing open on it.
