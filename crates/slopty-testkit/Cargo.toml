@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 libc.workspace = true
+# A test's daemons ended as a process group and waited for (`group`).
+rustix.workspace = true
 # The stand-in `claude` (`slopty-stub-claude`) reads its settings and speaks MCP in JSON.
 serde_json.workspace = true
 

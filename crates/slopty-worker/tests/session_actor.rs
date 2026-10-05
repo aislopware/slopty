@@ -171,6 +171,7 @@ mod actor {
         let (_, screen) = wait_for(&mut rx_a, |_, s| text(s).contains("^[[I^[[O^[[I")).await;
         assert_eq!(text(&screen).lines().nth(1).map(str::trim_end), Some("^[[I^[[O^[[I"));
         let _killed = child.start_kill();
+        let _exited = child.wait().await;
         session.close();
     }
 

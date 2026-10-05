@@ -51,9 +51,12 @@ mod codex {
 
     impl Drop for Daemons {
         fn drop(&mut self) {
-            for child in &mut self.children {
-                let _killed = child.start_kill();
-            }
+            // Each daemon leads a process group of its own: ended whole and waited for, nothing
+            // it started outlives the test holding its output (`slopty_testkit::group`).
+            let ended = slopty_testkit::group::end(&mut self.children, Child::id, |child| {
+                child.try_wait().is_ok_and(|status| status.is_some())
+            });
+            debug_assert!(ended, "a daemon's group outlived the test");
             slopty_input::MacBoard::named(&self.pasteboard).release();
         }
     }
@@ -72,6 +75,7 @@ mod codex {
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
@@ -96,6 +100,7 @@ mod codex {
             .env("CODEX_HOME", codex_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();

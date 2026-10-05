@@ -2,6 +2,8 @@
 //!
 //! - [`bins`]: the daemons and doubles a test spawns, from the test's own build.
 //! - [`env`](mod@env): the clean environment each of them starts from, never the person's.
+//! - [`group`]: a test's daemons in a process group of their own, ended whole and waited for, so
+//!   nothing a test started outlives it.
 //! - [`alloc`]: a counting global allocator, so a test can hold a hot path to a number of
 //!   allocations and bytes. The counts are per thread and deterministic, so they gate.
 //! - [`stats`]: the percentiles every measurement prints.
@@ -32,6 +34,7 @@ pub mod alloc;
 pub mod bench;
 pub mod bins;
 pub mod env;
+pub mod group;
 pub mod live;
 pub mod process;
 pub mod soc;
