@@ -12,8 +12,11 @@
 //! ([`Answer::choice`]). A multi-choice answer joins its picks ([`Answer::JOIN`]) and puts the
 //! words of one's own last, as Claude Code's own dialog does.
 
+use std::cell::Cell;
+
 use gpui::{
-    AnyElement, App, AppContext as _, Entity, IntoElement as _, ParentElement as _, SharedString,
+    AnyElement, App, AppContext as _, Entity, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div,
 };
 use gpui_kit::component::input::InputState;
@@ -68,15 +71,19 @@ pub fn answers(questions: &[Question], submission: &QuestionnaireSubmission) -> 
 /// Questions being answered: their questionnaire, one item per question named by its place,
 /// one choice per answer named by its place, so two that read the same stay two.
 pub struct Questions {
-    questions: Vec<Question>,
+    asked: Vec<Question>,
     state: Entity<QuestionnaireState>,
+    /// The scroll of the question on show, above the answers' row: where the room is short,
+    /// it scrolls and the row stays.
+    body: ScrollHandle,
+    /// Whether the field had the keyboard, and the window's height, as last drawn: the field
+    /// is brought into view when either changes while it has the keyboard.
+    field: Cell<(bool, Pixels)>,
 }
 
 impl std::fmt::Debug for Questions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Questions")
-            .field("questions", &self.questions.len())
-            .finish_non_exhaustive()
+        f.debug_struct("Questions").field("questions", &self.asked.len()).finish_non_exhaustive()
     }
 }
 
@@ -119,13 +126,13 @@ impl Questions {
                 }
             }
         });
-        Self { questions, state }
+        Self { asked: questions, state, body: ScrollHandle::new(), field: Cell::default() }
     }
 
     /// The questions.
     #[must_use]
     pub fn questions(&self) -> &[Question] {
-        &self.questions
+        &self.asked
     }
 
     /// Their questionnaire.
@@ -138,13 +145,26 @@ impl Questions {
     #[must_use]
     pub fn current<'a>(&'a self, cx: &App) -> Option<&'a Question> {
         let name = self.state.read(cx).current_item()?;
-        self.questions.get(name.parse::<usize>().ok()?)
+        self.asked.get(name.parse::<usize>().ok()?)
     }
 
     /// Whether the keyboard is somewhere in the questionnaire.
     #[must_use]
     pub fn focused(&self, window: &Window, cx: &App) -> bool {
         self.state.read(cx).focus_handle().contains_focused(window, cx)
+    }
+
+    /// Before a frame: the field for an answer of one's own, once it takes the keyboard, or
+    /// once the window's height changes while it has it (the soft keyboard rising), shows
+    /// above the answers' row. The field ends the question, so the question's scroll goes to
+    /// its end; any other time, the scroll is the person's.
+    pub fn keep_field_in_view(&self, window: &Window, cx: &App) {
+        let typing = self.state.read(cx).is_current_input_focused(window);
+        let now = (typing, window.viewport_size().height);
+        if typing && self.field.get() != now {
+            self.body.scroll_to_bottom();
+        }
+        self.field.set(now);
     }
 
     /// Give the question on show the keyboard: its first answer, or its field when it offers
@@ -171,7 +191,7 @@ impl Questions {
         // The field stands as tall as an answer's card at this size (the kit's own measure:
         // 32 + 4), so one's own answer reads as one more answer, not a footnote.
         let field = gpui::px(spacing.xxl + spacing.xs);
-        let items = self.questions.iter().enumerate().map(|(ix, question)| {
+        let items = self.asked.iter().enumerate().map(|(ix, question)| {
             let name = SharedString::from(ix.to_string());
             let answers = (!question.options.is_empty()).then(|| {
                 QuestionnaireChoices::new(state, name.clone()).children(
@@ -188,11 +208,26 @@ impl Questions {
                 ))
                 .child(QuestionnaireError::new(state, name))
         });
+        // The question scrolls where the room is short; the row of answers under it is where
+        // the person commits, so it never scrolls out of view (`docs/decisions/ui.md`).
         Questionnaire::new(state)
             .with_size(Size::Small)
-            .children(items)
+            .min_h_0()
+            .child(
+                div()
+                    .id("thread-question")
+                    .debug_selector(|| "thread-question".to_owned())
+                    .track_scroll(&self.body)
+                    .w_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .children(items),
+            )
             .child(
                 QuestionnaireActions::new(state)
+                    .flex_none()
                     .flex_wrap()
                     .pt(gpui::px(spacing.xs))
                     // The ways out of the form stand apart at the left, quiet; the way through

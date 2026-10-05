@@ -337,6 +337,7 @@ impl ThreadView {
                     }),
                 )
                 .w_full()
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .rounded(radius)
@@ -360,6 +361,7 @@ impl ThreadView {
                 .debug_selector(|| "thread-activity".to_owned())
                 .role(Role::Group)
                 .aria_label("Activity")
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .rounded_tl(radius)
@@ -381,7 +383,14 @@ impl ThreadView {
         });
         let tucked = tucked && rest.is_some();
         Some((
-            div().w_full().flex().flex_col().children(request).children(rest).into_any_element(),
+            div()
+                .w_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(request)
+                .children(rest)
+                .into_any_element(),
             tucked,
         ))
     }
@@ -703,6 +712,9 @@ impl ThreadView {
             );
             answers.extend(release);
             let body = div()
+                .min_h_0()
+                .flex()
+                .flex_col()
                 .px(self.z(theme.spacing.md))
                 .pb(self.z(theme.spacing.md))
                 .child(asking.questions().element(theme, answers))
@@ -711,6 +723,7 @@ impl ThreadView {
         } else {
             let body = self.decision(request, None, cx).map(|decision| {
                 div()
+                    .flex_none()
                     .px(self.z(theme.spacing.md))
                     .pb(self.z(theme.spacing.md))
                     .child(decision)
@@ -728,10 +741,12 @@ impl ThreadView {
                 request.title.clone()
             }))
             .w_full()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(
                 self.section()
+                    .flex_none()
                     .min_h(self.z(theme.density.header))
                     .px(self.z(theme.spacing.md))
                     .child(self.needs_you())
@@ -760,7 +775,11 @@ impl ThreadView {
             .children(text.map(|t| {
                 // What it asks is read before it is answered: at the chrome's size, a full
                 // step of space above the answers.
+                // Where the room is short it scrolls, and the answers under it stay.
                 let el = div()
+                    .id("request-text")
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .mx(self.z(theme.spacing.md))
                     .mb(self.z(theme.spacing.md))
                     .whitespace_normal()

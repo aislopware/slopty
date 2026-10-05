@@ -2078,6 +2078,9 @@ impl Render for ThreadView {
         self.renders = self.renders.saturating_add(1);
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
+        if let Some(asking) = &self.asking {
+            asking.questions().keep_field_in_view(window, cx);
+        }
         self.settle_placeholder(window, cx);
         self.marks.set(self.read_marks(cx));
         self.count_unseen(cx);
@@ -2212,6 +2215,10 @@ impl ThreadView {
                 .debug_selector(|| "thread-tray".to_owned())
                 .w_full()
                 .min_h_0()
+                // A column, so a card in it gives up the height of what scrolls inside it
+                // before the tray itself scrolls: a request's answers stay in view.
+                .flex()
+                .flex_col()
                 .overflow_y_scroll()
                 .child(bar)
         });

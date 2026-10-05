@@ -4953,6 +4953,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     questionnaire's own buttons off instead. A call that asks as it arrives at the foot of
     the thread is answered on its card in the first frame that shows it, not in the tray for
     one frame first.
+  - **A request's row of answers never scrolls out of view** (2026-10-06). Where the room
+    is short for a whole request (a phone with its keyboard up, a small window, a large
+    text size, a split iPad), the request's words and its questions scroll inside the card,
+    and the row under them (Deny, Answer in the terminal, Submit, or an approval's answers)
+    stays put, as a sheet or an alert keeps its buttons. The field for one's own answer
+    scrolls into view above the row as it takes the keyboard. The composer stays where it
+    is: hiding it while the person answers would move the layout under their thumb. With
+    room to spare nothing changes. On the iPhone the clipped Submit used to send a tap to the
+    composer under it, so a question could not be answered.
   - **Names read as a person says them.** The palette's "New … thread" lines show a folder as
     the navigator does (`src/app`, under the worker's home), not as an absolute path. A
     terminal named after its command drops the `cd <dir> &&` before it, in the tile title, the

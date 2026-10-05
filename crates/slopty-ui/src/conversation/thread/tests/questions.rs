@@ -229,3 +229,103 @@ fn a_request_stands_whole_and_the_rest_of_the_tray_gives_way(cx: &mut TestAppCon
     assert!(intents(&sent).is_empty(), "the rows' click: {:?}", intents(&sent));
     assert!(cx.debug_bounds("request-q").is_some(), "the request still waits");
 }
+
+/// One question with two answers that say what they mean, the agent's own "Deny", and a
+/// terminal to answer in: as tall as Claude Code's `AskUserQuestion` gets with one question.
+fn one_question() -> (slopty_proto::thread::ThreadState, slopty_proto::thread::ThreadId) {
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.terminal = Some(SessionId::new());
+    state.meta.caps = vec![Cap::named(Cap::APPROVALS)];
+    let deny = Choice {
+        id: "deny".to_owned(),
+        label: "Deny".to_owned(),
+        effect: Effect::Deny,
+        scope: None,
+        stops: false,
+    };
+    let options =
+        [("Split", "Old and new side by side"), ("Unified", "One column, changes inline")];
+    state.requests = vec![asking(
+        "q",
+        vec![deny],
+        vec![question("Which layout should the review use?", Some("Layout"), &options, false)],
+    )];
+    (state, thread)
+}
+
+/// Where the room is short (a phone with its keyboard up, a small window, a large text size),
+/// the question scrolls and its row of answers stays in view, under the person's thumb: the
+/// field for one's own answer shows above the row once it has the keyboard, and a press on
+/// "Submit" is the questionnaire's, not the composer's under it.
+#[gpui::test]
+fn a_short_room_keeps_the_answers_row_in_view(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let (state, thread) = one_question();
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(px(402.0), px(330.0)));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.set_a11y_active(true));
+    let form = view.read_with(cx, |v, _| v.questionnaire()).expect("a questionnaire");
+    let submit: &'static str =
+        Box::leak(format!("questionnaire-{}-Submit", form.entity_id()).into_boxed_str());
+    cx.simulate_keystrokes("down down");
+    cx.simulate_input("Unified, split for renames");
+    cx.run_until_parked();
+
+    let bounds = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn"))
+    };
+    let (tray, composer) = (bounds(cx, "thread-tray"), bounds(cx, "thread-composer"));
+    let (question, at) = (bounds(cx, "thread-question"), bounds(cx, submit));
+    assert!(
+        tray.top() <= at.top() && at.bottom() <= tray.bottom() + px(0.5),
+        "Submit shows: {at:?} in {tray:?}"
+    );
+    assert!(at.bottom() <= composer.top() + px(0.5), "over the composer, not under it");
+    let field = cx.update(|window, _| {
+        crate::a11y::tree(window)
+            .into_iter()
+            .find(|n| n.role == "TextInput" && n.label.as_deref() == Some("Other"))
+            .map(|n| n.bounds)
+            .expect("the field")
+    });
+    let [_, top, _, height] = field;
+    assert!(
+        f32::from(question.top()) <= top + 0.5
+            && top + height <= f32::from(question.bottom()) + 0.5,
+        "the field shows above the row: {field:?} in {question:?}"
+    );
+
+    cx.simulate_click(at.center(), Modifiers::none());
+    let sent = intents(&sent);
+    assert!(
+        matches!(sent.as_slice(), [Intent::Answer { choice, .. }] if choice.contains("Unified, split for renames")),
+        "Submit answered: {sent:?}"
+    );
+}
+
+/// With room to spare, the question stands whole as it always did: the card is as tall in a
+/// window of 600 points as in one of 900, its row of answers under the question.
+#[gpui::test]
+fn with_room_the_question_stands_whole(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let (state, thread) = one_question();
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let card = cx.debug_bounds("request-q").expect("the card");
+    let question = cx.debug_bounds("thread-question").expect("the question");
+    cx.simulate_resize(gpui::size(px(800.0), px(900.0)));
+    cx.run_until_parked();
+    let tall = cx.debug_bounds("request-q").expect("the card");
+    let tall_question = cx.debug_bounds("thread-question").expect("the question");
+    assert!(
+        (card.size.height - tall.size.height).abs() < px(0.5)
+            && (question.size.height - tall_question.size.height).abs() < px(0.5),
+        "as tall at 600 as at 900: {card:?} against {tall:?}"
+    );
+}

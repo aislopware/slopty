@@ -401,4 +401,186 @@ mod tests {
             .unwrap();
         stack.shutdown().await;
     }
+
+    /// A made-up Claude Code session of `turns` turns, each the person's prompt and a long
+    /// answer, as its transcript keeps them: long enough that the first prompt is far above
+    /// the tail on a phone.
+    fn long_session(turns: usize) -> String {
+        use serde_json::json;
+        let mut out = String::new();
+        let mut parent: Option<String> = None;
+        let mut n = 0_u64;
+        let mut push = |mut record: serde_json::Value| {
+            n = n.saturating_add(1);
+            let uuid = format!("00000000-0000-4000-9000-{n:012}");
+            record["uuid"] = json!(uuid);
+            record["parentUuid"] = parent.clone().map_or(serde_json::Value::Null, |p| json!(p));
+            record["timestamp"] = json!(format!("2026-10-05T09:{:02}:{:02}.000Z", n / 60, n % 60));
+            record["sessionId"] = json!("s1");
+            record["isSidechain"] = json!(false);
+            out.push_str(&record.to_string());
+            out.push('\n');
+            parent = Some(uuid);
+        };
+        for turn in 0..turns {
+            push(json!({ "type": "user", "message": { "role": "user",
+                "content": format!("Step {turn}: tighten the parser's error path") } }));
+            let answer = (0..6)
+                .map(|p| {
+                    format!("Paragraph {p} of turn {turn}: the span is kept and the cursor reset.")
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            push(json!({ "type": "assistant", "message": {
+                "id": format!("msg_{turn}"), "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{ "type": "text", "text": answer }], "stop_reason": "end_turn",
+                "usage": { "input_tokens": 12, "output_tokens": 420 } } }));
+        }
+        out
+    }
+
+    /// Whether the thread shows the person's first prompt.
+    fn first_prompt_shows(d: &Dump) -> bool {
+        d.a11y.iter().any(|n| {
+            n.role == "Article" && n.label.as_deref().is_some_and(|l| l.starts_with("You: Step 0:"))
+        })
+    }
+
+    /// One finger dragged from `from` to `to` in `steps` moves (iOS), as a reader's swipe.
+    async fn swipe(drv: &mut Driver, from: (f32, f32), to: (f32, f32), steps: u16) {
+        use slopty_e2e::{UiTouchPhase, UiTouchPoint};
+        let at = |x: f32, y: f32| [UiTouchPoint { id: 1, x, y }];
+        drv.ui_touch(&at(from.0, from.1), UiTouchPhase::Began).await.unwrap();
+        for step in 1..=steps {
+            let t = f32::from(step) / f32::from(steps);
+            let (x, y) = ((to.0 - from.0).mul_add(t, from.0), (to.1 - from.1).mul_add(t, from.1));
+            drv.ui_touch(&at(x, y), UiTouchPhase::Moved).await.unwrap();
+        }
+        drv.ui_touch(&at(to.0, to.1), UiTouchPhase::Ended).await.unwrap();
+    }
+
+    /// An agent's day on a phone, played by a hook stand-in as the Mac's tests are: no agent
+    /// runs and nothing is typed into a shell.
+    ///
+    /// The agent's session starts in a shell through the real relay (`slopty hook`), and its
+    /// tile opens on its thread at the tail. Reading by touch: swipes down the thread bring its
+    /// first prompt into view. The agent asks a question (`AskUserQuestion`, held by the
+    /// relay): it stacks over the composer, a tap on "Other" gives it the keyboard, the soft
+    /// keyboard's text goes in (`insertText:`), and "Submit" hands Claude Code the answer in its
+    /// own form. With the person elsewhere, on a shell of their own, the agent's banner tapped
+    /// brings its tile back on its thread.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
+    async fn an_agent_is_answered_from_the_phone_on_the_simulator() {
+        use serde_json::{Value, json};
+
+        let mut stack = Stack::launch_on_simulator("e2e-ios-agent", simulator()).await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the first shell with a prompt", STEP, |d| {
+                d.status == "connected"
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await
+            .unwrap();
+        let session = dump.terminals[0].session.clone();
+        let transcript = stack.path("projects").join("s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, long_session(12)).unwrap();
+        let transcript = transcript.to_string_lossy().into_owned();
+        let start = json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": stack.path("home"),
+        });
+        let started = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
+        assert!(started.success(), "the relay ran");
+        let drv = &mut stack.driver;
+        let thread = |d: &Dump| d.a11y_node("Group", Some("Thread")).is_some();
+        let dump = drv
+            .wait_for("the thread at its tail", STEP, |d| {
+                thread(d)
+                    && d.a11y.iter().any(|n| {
+                        n.role == "Article"
+                            && n.label
+                                .as_deref()
+                                .is_some_and(|l| l.starts_with("Paragraph 0 of turn 11"))
+                    })
+            })
+            .await
+            .unwrap();
+        assert!(!first_prompt_shows(&dump), "the first prompt starts out of view");
+
+        // Reading: a finger drags the thread down, a few times, as a reader looks back.
+        let mut read = false;
+        for _ in 0..40 {
+            let now = drv.dump().await.unwrap();
+            if first_prompt_shows(&now) {
+                read = true;
+                break;
+            }
+            let [left, top, width, height] = now.a11y_node("Group", Some("Thread")).unwrap().bounds;
+            let mid = width.mul_add(0.5, left);
+            let (from, to) = (height.mul_add(0.25, top), height.mul_add(0.85, top));
+            swipe(drv, (mid, from), (mid, to), 8).await;
+        }
+        assert!(read, "touch brought the first prompt into view");
+
+        // A question, answered with the soft keyboard.
+        let question = "Which layout should the review use?";
+        let ask = json!({
+            "hook_event_name": "PermissionRequest", "session_id": "s1",
+            "transcript_path": transcript, "cwd": stack.path("home"),
+            "tool_name": "AskUserQuestion", "tool_input": { "questions": [{
+                "question": question, "header": "Layout", "multiSelect": false,
+                "options": [
+                    { "label": "Split", "description": "Old and new side by side" },
+                    { "label": "Unified", "description": "One column, changes inline" }
+                ]
+            }] },
+        });
+        let held = stack.relay_hook(&session, &[], &ask).unwrap();
+        let drv = &mut stack.driver;
+        drv.wait_for("the question over the composer", STEP, |d| {
+            d.a11y_node("RadioButton", Some("Unified")).is_some()
+                && d.a11y_node("TextInput", Some("Other")).is_some()
+        })
+        .await
+        .unwrap();
+        // The tap gives the field the keyboard: what the soft keyboard sends lands in it.
+        tap(drv, "TextInput", "Other").await;
+        let other = |d: &Dump| d.a11y_node("TextInput", Some("Other")).is_some_and(|n| n.focused);
+        let after_tap = drv.wait_for("the field with the keyboard", STEP, other).await;
+        assert!(after_tap.is_ok(), "a tap on the field gave it no keyboard: {after_tap:?}");
+        drv.ui_insert_text("Unified, split for renames").await.unwrap();
+        drv.wait_for("the words in the field", STEP, |d| {
+            d.a11y_node("TextInput", Some("Other"))
+                .is_some_and(|n| n.value.as_deref() == Some("Unified, split for renames"))
+        })
+        .await
+        .unwrap();
+        tap(drv, "Button", "Submit").await;
+        let answered = tokio::time::timeout(STEP, held.wait_with_output()).await.unwrap().unwrap();
+        let decision: Value = serde_json::from_slice(&answered.stdout).unwrap();
+        assert_eq!(
+            decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"],
+            json!({ question: "Unified, split for renames" }),
+            "{decision:#}"
+        );
+
+        // Elsewhere, then the agent's banner tapped: its tile, on its thread.
+        drv.open(&[], 1).await.unwrap();
+        drv.wait_for("a shell of the person's own in front", STEP, |d| {
+            d.items.iter().any(|i| i.active && i.session.as_deref() != Some(session.as_str()))
+        })
+        .await
+        .unwrap();
+        drv.notification_response(&session).await.unwrap();
+        drv.wait_for("the agent's tile back, on its thread", STEP, |d| {
+            d.items.iter().any(|i| i.active && i.session.as_deref() == Some(session.as_str()))
+                && thread(d)
+        })
+        .await
+        .unwrap();
+        stack.shutdown().await;
+    }
 }
