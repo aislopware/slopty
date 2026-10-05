@@ -4195,7 +4195,9 @@ mod tests {
         };
         assert_eq!(figures(cx), Some(0), "a render a period on samples nothing");
         view.update(cx, ScreenView::read_health);
-        assert_eq!(figures(cx), Some(4), "the reading samples: rate, glass, bitrate, round trip");
+        // No frame is presented and no round trip measured here, so the figures it knows are
+        // the rate and the bitrate.
+        assert_eq!(figures(cx), Some(2), "the reading samples the figures it knows");
     }
 
     /// Each reading adds to the overlay's half-minute trends, the oldest going past thirty;

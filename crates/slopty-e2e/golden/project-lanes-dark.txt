@@ -46,8 +46,8 @@ List │ Working
 ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts · slopty/board/1
 Label │ Runs on studio, macOS. Branch slopty/board/1
 List │ Up next
-ListItem │ Hold it to goldens, Planned, after #1 · reads only
-ListItem │ Check the wire goldens, Planned
+ListItem │ Hold it to goldens, Up next, after #1 · reads only
+ListItem │ Check the wire goldens, Up next
 Log
 List │ Ready to merge
 ListItem │ Mirror the merge queue, Ready to merge

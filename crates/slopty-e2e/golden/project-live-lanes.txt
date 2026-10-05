@@ -52,7 +52,7 @@ Label │ Changes requested
 Button │ Fix CI #1
 Button │ Address comments #1
 List │ Up next
-ListItem │ Draw the pipeline row, Planned
+ListItem │ Draw the pipeline row, Up next
 TextInput │ Tell the orchestrator
 Group │ #1 Read a pull request's checks
 Heading │ terminal #1 Read a pull request's checks

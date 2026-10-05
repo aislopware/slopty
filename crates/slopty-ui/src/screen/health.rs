@@ -37,8 +37,10 @@ pub struct Figure {
 
 /// The overlay's plain line: the painted rate, how long a frame takes to reach the glass
 /// (p50), the bitrate received and the round trip, which is flagged from [`RTT_WARN_FROM`].
-/// Frames that missed the display in the last second follow the rate as a figure of their own,
-/// in the warning tone, and only while there are any: they are never in the rate.
+/// A figure not yet known, before the first frame is presented or the first round trip is
+/// measured, is left out rather than drawn as a dash. Frames that missed the display in the last
+/// second follow the rate as a figure of their own, in the warning tone, and only while there are
+/// any: they are never in the rate.
 ///
 /// "To glass" is from the capture on the worker once the stream's clock probes have placed the
 /// worker's clock, the number a remote desktop is judged on, and flagged when its p95 passes
@@ -58,28 +60,23 @@ pub fn summary(input: &HudInput<'_>) -> Vec<Figure> {
         let limit = period.map(|p| p.saturating_mul(2));
         (input.pacing.latency_p50, limit.is_some_and(|limit| input.pacing.latency_p95 > limit))
     };
-    let presented = input.pacing.presented > 0;
-    let glass = if presented {
-        format!("{:.0} ms to glass", ms(p50))
-    } else {
-        "\u{2013} to glass".to_owned()
-    };
+    let glass = (input.pacing.presented > 0)
+        .then(|| Figure { text: format!("{:.0} ms to glass", ms(p50)), warn: slow });
     let rate = if input.mbps < 10.0 {
         format!("{:.1} Mb/s", input.mbps)
     } else {
         format!("{:.0} Mb/s", input.mbps)
     };
-    let rtt =
-        input.rtt.map_or_else(|| "RTT \u{2013}".to_owned(), |d| format!("RTT {:.1} ms", ms(d)));
+    let rtt = input
+        .rtt
+        .map(|d| Figure { text: format!("RTT {:.1} ms", ms(d)), warn: d >= RTT_WARN_FROM });
     let missed = input.paint.missed;
     let late = (missed > 0).then(|| Figure { text: format!("{missed} late"), warn: true });
     std::iter::once(Figure { text: fps_label(input.paint), warn: false })
         .chain(late)
-        .chain([
-            Figure { text: glass, warn: presented && slow },
-            Figure { text: rate, warn: false },
-            Figure { text: rtt, warn: input.rtt.is_some_and(|d| d >= RTT_WARN_FROM) },
-        ])
+        .chain(glass)
+        .chain([Figure { text: rate, warn: false }])
+        .chain(rtt)
         .collect()
 }
 
@@ -238,8 +235,11 @@ mod tests {
         );
         let none = PacingStats::default();
         let blank = summary(&HudInput { rtt: None, ..input(&stats, &none) });
-        assert_eq!(blank[1].text, "\u{2013} to glass");
-        assert_eq!(blank[3].text, "RTT \u{2013}");
+        assert_eq!(
+            said(&blank),
+            [("60 fps".to_owned(), false), ("18 Mb/s".to_owned(), false)],
+            "a figure not yet known is left out, never drawn as a dash"
+        );
     }
 
     /// Once the worker's clock is placed, "to glass" is from the capture, and it is flagged

@@ -243,6 +243,25 @@ fn every_board_word_is_sentence_case() {
     }
 }
 
+/// A row names a task's state as the board's lane heading does: a planned task is "Up next" in
+/// both, and only a waiting task says more than its lane.
+#[test]
+fn a_row_names_a_state_as_its_lane_does() {
+    assert_eq!(state_word(TaskState::Planned), "Up next");
+    for state in [
+        TaskState::Planned,
+        TaskState::Running,
+        TaskState::Blocked,
+        TaskState::Verifying,
+        TaskState::Done,
+        TaskState::Merged,
+        TaskState::Failed,
+    ] {
+        assert_eq!(state_word(state), Lane::of(state).title(), "{state:?}");
+    }
+    assert_eq!(state_word(TaskState::Waiting), "Waiting");
+}
+
 /// As many lanes stand side by side as fit at the zoom they are drawn at, one at the least and
 /// never more than there are lanes.
 #[test]

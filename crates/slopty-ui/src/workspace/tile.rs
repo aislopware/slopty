@@ -40,6 +40,9 @@ use crate::{add_worker, kit};
 /// tile (`miniature.rs`).
 pub(super) const SHAPES_BELOW: f32 = 0.5;
 
+/// A page's way back or forward.
+type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
+
 /// The widest a page's address gets beside its title, in points at zoom 1: the title is what
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
@@ -1791,24 +1794,29 @@ impl WorkspaceView {
                     actions.extend(self.mute_toggle(tile, id, false, chrome, cx));
                 }
             }
-            // A page's way back and its reload are the header's bare icon buttons, as
-            // fullscreen and close are: nothing in the bar has a fill until the pointer is on it.
+            // A page's ways back and forward and its reload are the header's bare icon
+            // buttons, as fullscreen and close are: nothing in the bar has a fill until the
+            // pointer is on it. Back and forward show only while there is history that way.
             ItemKind::Browser { .. } => {
                 if let Some(view) = self.browsers.get(&id).cloned() {
                     let uuid = id.as_uuid();
                     let k = chrome.k;
-                    if self.page_facts(id).is_some_and(|p| p.can_go_back) {
+                    let (back, forward) = self
+                        .page_facts(id)
+                        .map_or((false, false), |p| (p.can_go_back, p.can_go_forward));
+                    let ways: [(bool, &str, IconName, &str, Go); 2] = [
+                        (back, "back", IconName::ArrowLeft, "Back", BrowserView::back),
+                        (forward, "forward", IconName::ArrowRight, "Forward", BrowserView::forward),
+                    ];
+                    for (shown, key, icon, label, go) in ways {
+                        if !shown {
+                            continue;
+                        }
                         let target = view.clone();
                         actions.push(
-                            kit::icon_button_at(
-                                theme,
-                                format!("back-{uuid}"),
-                                IconName::ArrowLeft,
-                                "Back",
-                                k,
-                            )
-                            .on_click(move |_ev, _w, cx| target.update(cx, BrowserView::back))
-                            .into_any_element(),
+                            kit::icon_button_at(theme, format!("{key}-{uuid}"), icon, label, k)
+                                .on_click(move |_ev, _w, cx| target.update(cx, go))
+                                .into_any_element(),
                         );
                     }
                     actions.push(

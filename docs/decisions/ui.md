@@ -3202,8 +3202,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     page"). ⌘[, ⌘] and ⌘R belong to the layout, so back and forward are ⌘← and ⌘→ (Chrome's
     other pair). They are bound in a `Page` key context that the workspace adds only while
     the focused tile is a page that does not hold the keyboard, so a text field in the page
-    keeps them. Reload has no key. The header keeps its bare "←" (while there is history)
-    and "↻". `slopty_platform::web::WebView` gained `forward` and `Page::can_go_forward`.
+    keeps them. Reload has no key. The header keeps its bare "←" and "→" (each while there is
+    history that way) and "↻". `slopty_platform::web::WebView` gained `forward` and `Page::can_go_forward`.
   - Tests: workspace `command_l_opens_the_address_and_return_goes_there`,
     `escape_leaves_the_address_as_it_was`, `a_bad_address_keeps_the_field`,
     `the_address_is_a_button_at_rest_and_a_field_when_clicked`,
@@ -6640,3 +6640,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     what picking it does.
   - Tests: `conversation::thread::tests::doors::every_button_of_the_thread_is_an_action_while_it_shows`,
     `workspace::tests::facts::a_workers_tiles_share_its_one_sound_and_say_its_mute_together`.
+
+- ✅ **One word for each state, and nothing drawn before it is known** (2026-10-05, readiness
+  10-05 item 16). Four small places said a thing two ways or showed a blank as a value.
+  - *A page's header goes forward too.* The page's history going forward was read back from
+    the web view and offered only in the palette, so after a back the header had no way to
+    return. "→" now sits beside "←" and shows, as it does, only while there is a page that way.
+  - *A task row says its lane's word.* The board's lane is "Up next" and a planned task's row
+    said "Planned". A row now says its lane's heading, and only a waiting task says more
+    ("Waiting", inside "Working"), as the status mark does elsewhere.
+  - *The stream's plain line leaves out what it does not know yet.* Before the first frame is
+    presented it said "– to glass", and before a round trip was measured "RTT –". Both
+    figures are now left out until there is a number, which is what the readiness 10-01
+    ruling asked. The details readout keeps its dashes, since it is a fixed table where a
+    blank cell has to hold its place.
+  - *An empty review names its span.* "Nothing changed" read like a pane that had not loaded.
+    Now each span says what it found: "The last turn changed no files", "Nothing new since
+    you last reviewed", "No turn has changed a file yet".
+  - Tests: `workspace::tests::page_chrome::back_and_forward_show_only_with_history_that_way`,
+    `project::tests::a_row_names_a_state_as_its_lane_does`,
+    `review::tests::an_empty_review_names_its_span`,
+    `screen::health::tests::the_plain_line_leads_with_the_human_numbers_and_flags_trouble`
+    (updated).

@@ -571,3 +571,21 @@ fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext
     assert!(cx.debug_bounds("review-draft").is_none(), "no comment started");
     assert!(intents(&sent).is_empty(), "nothing sent");
 }
+
+/// A span that changed nothing says so by name, as a finding and not as an empty pane, and
+/// every span's words are sentence case.
+#[gpui::test]
+fn an_empty_review_names_its_span(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = tile(cx, 1200.0);
+    let thread = view.read_with(cx, |view, _cx| view.thread());
+    let nothing = Review { files: Vec::new(), ..review() };
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(nothing)), cx));
+    cx.run_until_parked();
+    let words = said(cx);
+    assert!(words.iter().any(|w| w == "The last turn changed no files"), "{words:?}");
+    for scope in super::model::Scope::ALL {
+        let text = scope.nothing();
+        let rest: String = text.chars().skip(1).collect();
+        assert!(!rest.chars().any(char::is_uppercase), "sentence case: {text:?}");
+    }
+}

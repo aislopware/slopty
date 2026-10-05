@@ -36,6 +36,17 @@ impl Scope {
         }
     }
 
+    /// What the body says when the span holds no change: the span by name, so an empty review
+    /// reads as a finding and not as a pane that failed to load.
+    #[must_use]
+    pub const fn nothing(self) -> &'static str {
+        match self {
+            Self::LastTurn => "The last turn changed no files",
+            Self::SinceReviewed => "Nothing new since you last reviewed",
+            Self::AllTurns => "No turn has changed a file yet",
+        }
+    }
+
     /// What to ask the worker for, over `state`; `None` before the thread has a turn.
     #[must_use]
     pub fn wire(self, state: &ThreadState) -> Option<ReviewScope> {

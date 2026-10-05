@@ -212,8 +212,9 @@ fn live_readouts(dump: &Dump) -> Vec<PixelRect> {
 /// The stats overlay's band across the body, when it shows: its pixels are masked and its
 /// words ("Details") held.
 ///
-/// The overlay keeps to the body's right edge and widens with its figures ("– to glass", then
-/// "21 ms to glass"), so its left edge falls anywhere along the band from one run to the next.
+/// The overlay keeps to the body's right edge and widens with its figures (none for the glass
+/// until a frame is shown, then "21 ms to glass"), so its left edge falls anywhere along the
+/// band from one run to the next.
 fn overlay_band(dump: &Dump, body: PixelRect) -> Option<PixelRect> {
     let [x, y, w, h] = dump.a11y_node("Status", Some("Stream stats"))?.bounds;
     let scale = dump.window.scale;

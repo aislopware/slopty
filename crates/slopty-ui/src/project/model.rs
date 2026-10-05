@@ -1098,18 +1098,13 @@ fn push_bounded<T>(list: &mut Vec<T>, item: T) {
     }
 }
 
-/// A task state as a row says it.
+/// A task state as a row says it: its lane's heading, so a row and the board never name one
+/// state two ways. Waiting is the one finer word, a task at its prompt in "Working".
 #[must_use]
 pub const fn state_word(state: TaskState) -> &'static str {
     match state {
-        TaskState::Planned => "Planned",
-        TaskState::Running => "Working",
         TaskState::Waiting => "Waiting",
-        TaskState::Blocked => "Needs you",
-        TaskState::Verifying => "Verifying",
-        TaskState::Done => "Ready to merge",
-        TaskState::Merged => "Merged",
-        TaskState::Failed => "Failed",
+        _ => Lane::of(state).title(),
     }
 }
 

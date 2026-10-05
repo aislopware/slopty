@@ -1704,7 +1704,7 @@ impl ReviewView {
             return empty(why.clone());
         }
         if review.files.is_empty() {
-            return empty("Nothing changed".to_owned());
+            return empty(self.scope.nothing().to_owned());
         }
         div()
             .flex_1()

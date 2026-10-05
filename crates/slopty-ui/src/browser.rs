@@ -393,6 +393,14 @@ impl BrowserView {
         self.native.window_number()
     }
 
+    /// A test's page with history `back` and `forward` of it, as a load would read back.
+    #[cfg(test)]
+    pub(crate) fn set_history(&mut self, back: bool, forward: bool, cx: &mut Context<Self>) {
+        self.page.can_go_back = back;
+        self.page.can_go_forward = forward;
+        cx.notify();
+    }
+
     /// The edits done in a test's page, oldest first.
     #[cfg(test)]
     pub(crate) fn performed(&self) -> Vec<Edit> {

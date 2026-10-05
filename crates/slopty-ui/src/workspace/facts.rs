@@ -130,6 +130,8 @@ pub(super) struct PageFacts {
     pub titled: bool,
     /// It has a page to go back to.
     pub can_go_back: bool,
+    /// It has a page to go forward to.
+    pub can_go_forward: bool,
 }
 
 impl PageFacts {
@@ -141,6 +143,7 @@ impl PageFacts {
             short_url: view.short_url().to_owned(),
             titled: !page.title.trim().is_empty(),
             can_go_back: page.can_go_back,
+            can_go_forward: page.can_go_forward,
         }
     }
 }

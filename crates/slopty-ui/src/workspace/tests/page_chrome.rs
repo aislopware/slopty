@@ -255,3 +255,30 @@ fn a_page_that_closes_its_window_closes_its_tile(cx: &mut TestAppContext) {
     assert_eq!(removed, [tile.item], "the page's own tile, and no other");
     assert!(view.read_with(cx, |v, _| v.closed.iter().any(|c| c.tile == tile)), "undoable");
 }
+
+/// The header's back and forward buttons show only while the page has history that way, so a
+/// fresh page's header holds reload alone.
+#[gpui::test]
+fn back_and_forward_show_only_with_history_that_way(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = page(&view, cx, &fake);
+    let shown = |cx: &mut VisualTestContext| {
+        ["back", "forward", "reload"]
+            .map(|part| cx.debug_bounds(selector(part, tile.item)).is_some())
+    };
+    assert_eq!(shown(cx), [false, false, true], "a fresh page: reload alone");
+    let history = |cx: &mut VisualTestContext, back: bool, forward: bool| {
+        view.update_in(cx, |v, _w, cx| {
+            let page = v.browser(tile.item).cloned().expect("a page view");
+            page.update(cx, |page, cx| page.set_history(back, forward, cx));
+        });
+        cx.run_until_parked();
+    };
+    history(cx, true, false);
+    assert_eq!(shown(cx), [true, false, true], "a page to go back to");
+    history(cx, true, true);
+    assert_eq!(shown(cx), [true, true, true], "and one to go forward to, after back");
+    history(cx, false, true);
+    assert_eq!(shown(cx), [false, true, true], "at the first page, forward alone");
+}
