@@ -44,6 +44,15 @@ macro_rules! symbols {
                     $(Self::$variant => $name,)+
                 }
             }
+
+            /// The symbol named `name` in the SF Symbols catalogue, if the list has it.
+            #[must_use]
+            pub fn named(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
         }
     };
 }
@@ -160,6 +169,19 @@ pub enum Weight {
     Semibold,
 }
 
+impl Weight {
+    const ALL: [Self; 4] = [Self::Light, Self::Regular, Self::Medium, Self::Semibold];
+
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Regular => "regular",
+            Self::Medium => "medium",
+            Self::Semibold => "semibold",
+        }
+    }
+}
+
 /// A symbol's size relative to its point size, as SF Symbols defines it: the same stroke at
 /// a smaller or larger drawing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -170,6 +192,18 @@ pub enum Scale {
     Medium,
     /// Icon-only buttons and empty states.
     Large,
+}
+
+impl Scale {
+    const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
 }
 
 /// How a symbol is drawn: the point size and weight of the text beside it, and its scale.
@@ -258,28 +292,47 @@ pub fn rasterize(symbol: Symbol, size: SymbolSize, device_scale: f32) -> Option<
     {
         return None;
     }
-    raster::draw(symbol.name(), size, f64::from(device_scale))
+    // The image, its configured copy and the graphics context are autoreleased. A pool around
+    // each raster frees them as it ends; without one they pile up until the thread ends, and a
+    // prewarm left its peak in the footprint for the life of the app (`docs/MEASUREMENTS.md`,
+    // "the footprint at rest").
+    objc2::rc::autoreleasepool(|_| raster::draw(symbol.name(), size, f64::from(device_scale)))
 }
 
 /// Whether the running OS has `symbol`.
 #[must_use]
 pub fn exists(symbol: Symbol) -> bool {
-    raster::exists(symbol.name())
+    objc2::rc::autoreleasepool(|_| raster::exists(symbol.name()))
 }
 
 /// The masks drawn so far, shared by every view of one app and the prewarm thread.
 ///
 /// A symbol the OS lacks is kept as a miss, so it is not asked for again on every frame.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Masks {
     drawn: Arc<RwLock<HashMap<Key, Option<Arc<SymbolMask>>>>>,
+    /// What painters asked for, each once, until [`Masks::remember`] writes it down: what a
+    /// launch draws, for the next launch's prewarm.
+    asked: Arc<RwLock<Option<Vec<Key>>>>,
+}
+
+impl Default for Masks {
+    fn default() -> Self {
+        Self { drawn: Arc::default(), asked: Arc::new(RwLock::new(Some(Vec::new()))) }
+    }
 }
 
 type Key = (Symbol, SymbolSize, u32);
 
+/// One mask a prewarm draws: a symbol, its size, and the display scale.
+pub type Wanted = (Symbol, SymbolSize, f32);
+
 impl std::fmt::Debug for Masks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Masks").field("drawn", &self.drawn.read().len()).finish()
+        f.debug_struct("Masks")
+            .field("drawn", &self.drawn.read().len())
+            .field("asked", &self.asked.read().as_ref().map(Vec::len))
+            .finish()
     }
 }
 
@@ -299,9 +352,23 @@ impl Masks {
         device_scale: f32,
     ) -> Option<Arc<SymbolMask>> {
         let key = (symbol, size, device_scale.to_bits());
+        let new = self.asked.read().as_ref().is_some_and(|asked| !asked.contains(&key));
+        if new
+            && let Some(asked) = self.asked.write().as_mut()
+            && !asked.contains(&key)
+            && asked.len() < REMEMBERED
+        {
+            asked.push(key);
+        }
+        self.draw(key)
+    }
+
+    /// The mask for `key`, drawn now unless it already was.
+    fn draw(&self, key: Key) -> Option<Arc<SymbolMask>> {
         if let Some(kept) = self.drawn.read().get(&key) {
             return kept.clone();
         }
+        let (symbol, size, device_scale) = (key.0, key.1, f32::from_bits(key.2));
         let drawn = rasterize(symbol, size, device_scale).map(Arc::new);
         // Two threads may draw the same mask at once; both draws are the same bytes, and the
         // first kept is the one every later caller shares.
@@ -331,26 +398,143 @@ impl Masks {
         self.drawn.read().is_empty()
     }
 
-    /// Draws every `(symbol, size)` at `device_scale` on a background thread at utility `QoS`,
-    /// so the first frame finds them drawn. A mask asked for before the thread reaches it is
-    /// drawn by the asker, and the thread then finds it kept.
+    /// Draws every mask `wanted` returns on a background thread at utility `QoS`, so the first
+    /// frame finds them drawn. `wanted` runs on that thread too, so a list read from a file is
+    /// read off the caller's. A mask asked for before the thread reaches it is drawn by the
+    /// asker, and the thread then finds it kept. A prewarm's own drawings are not what
+    /// painters asked for, so [`Masks::remember`] leaves them out.
     ///
     /// # Errors
     ///
     /// When the thread cannot be started.
     pub fn prewarm(
         &self,
-        wanted: Vec<(Symbol, SymbolSize)>,
-        device_scale: f32,
+        wanted: impl FnOnce() -> Vec<Wanted> + Send + 'static,
     ) -> std::io::Result<JoinHandle<()>> {
         let masks = self.clone();
         std::thread::Builder::new().name("slopty-symbols".into()).spawn(move || {
             utility_thread();
-            for (symbol, size) in wanted {
-                drop(masks.get(symbol, size, device_scale));
+            for (symbol, size, device_scale) in wanted() {
+                drop(masks.draw((symbol, size, device_scale.to_bits())));
             }
         })
     }
+
+    /// Writes what painters have asked for so far to `path` and stops noting it: what a
+    /// launch's first frames drew, for the next launch's prewarm ([`remembered`]).
+    ///
+    /// The list is kept by display scale. The masks of a scale drawn this launch replace that
+    /// scale's lines, and another scale's lines stay, so a window back on another display
+    /// warms as it last drew there. At most [`REMEMBERED`] lines are kept. The file is written
+    /// beside `path` and renamed over it, so a reader never finds half of one.
+    ///
+    /// Each SF Symbol drawn holds its share of the OS's symbol data for the life of the
+    /// process, so a prewarm of only these keeps the rest out of the footprint
+    /// (`docs/MEASUREMENTS.md`, "the footprint at rest").
+    ///
+    /// # Errors
+    ///
+    /// When `path` cannot be written.
+    pub fn remember(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let asked = self.asked.write().take().unwrap_or_default();
+        let scales: Vec<u32> = asked.iter().map(|&(_, _, scale)| scale).collect();
+        let kept =
+            read(path).into_iter().filter(|(_, _, scale)| !scales.contains(&scale.to_bits()));
+        let lines: Vec<Wanted> = asked
+            .into_iter()
+            .map(|(symbol, size, scale)| (symbol, size, f32::from_bits(scale)))
+            .chain(kept)
+            .take(REMEMBERED)
+            .collect();
+        let mut text = String::new();
+        for (symbol, size, scale) in lines {
+            text.push_str(symbol.name());
+            for word in
+                [&size.point.to_string(), size.weight.word(), size.scale.word(), &scale.to_string()]
+            {
+                text.push(' ');
+                text.push_str(word);
+            }
+            text.push('\n');
+        }
+        let mut written = path.as_os_str().to_owned();
+        written.push(".new");
+        std::fs::write(&written, text)?;
+        std::fs::rename(&written, path)
+    }
+}
+
+/// The most masks [`Masks::remember`] keeps: the chrome at a handful of sizes on two
+/// displays, with room to spare.
+pub const REMEMBERED: usize = 512;
+
+/// The masks to prewarm for a window on a display of `scale`, from what [`Masks::remember`]
+/// wrote to `path`.
+///
+/// That scale's lines, or, when it has none, the symbols another scale drew, at this one.
+/// With `None` for a scale not known yet, every line as written. Empty when there is no such
+/// file or nothing in it reads.
+#[must_use]
+pub fn remembered(path: &std::path::Path, scale: Option<f32>) -> Vec<Wanted> {
+    let lines = read(path);
+    let Some(scale) = scale else {
+        return lines;
+    };
+    let mut here: Vec<Wanted> =
+        lines.iter().copied().filter(|&(_, _, at)| at.to_bits() == scale.to_bits()).collect();
+    if here.is_empty() {
+        for (symbol, size, _) in lines {
+            if !here.iter().any(|&(s, z, _)| s == symbol && z == size) {
+                here.push((symbol, size, scale));
+            }
+        }
+    }
+    here
+}
+
+/// The lines of a list [`Masks::remember`] wrote, at most [`REMEMBERED`] of them. A line that
+/// does not read (a symbol since renamed, a file cut short) is passed over.
+fn read(path: &std::path::Path) -> Vec<Wanted> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split(' ');
+            let symbol = Symbol::named(words.next()?)?;
+            let point = words.next()?.parse::<f32>().ok()?;
+            let weight = words.next()?;
+            let weight = Weight::ALL.into_iter().find(|w| w.word() == weight)?;
+            let scale = words.next()?;
+            let scale = Scale::ALL.into_iter().find(|s| s.word() == scale)?;
+            let device = words.next()?.parse::<f32>().ok()?;
+            let fine = point.is_finite() && point > 0.0 && device.is_finite() && device > 0.0;
+            (fine && words.next().is_none()).then_some((
+                symbol,
+                SymbolSize { point, weight, scale },
+                device,
+            ))
+        })
+        .take(REMEMBERED)
+        .collect()
+}
+
+/// The display scale of the screen a new window opens on: the main screen on macOS, the
+/// first window scene's screen on iOS. Main thread only; `None` off it, and before a screen
+/// or scene exists.
+#[must_use]
+pub fn main_display_scale() -> Option<f32> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    #[cfg(target_os = "macos")]
+    let scale = objc2_app_kit::NSScreen::mainScreen(mtm)?.backingScaleFactor();
+    #[cfg(target_os = "ios")]
+    let scale = {
+        let scenes = objc2_ui_kit::UIApplication::sharedApplication(mtm).connectedScenes();
+        let scene = scenes.iter().find_map(|s| s.downcast::<objc2_ui_kit::UIWindowScene>().ok())?;
+        scene.screen().scale()
+    };
+    #[expect(clippy::cast_possible_truncation, reason = "a display's scale is 1, 2 or 3")]
+    Some(scale as f32)
 }
 
 /// Puts the calling thread at utility `QoS`: the prewarm yields to the frame and to input.

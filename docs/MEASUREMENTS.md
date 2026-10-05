@@ -15133,3 +15133,79 @@ every card's text anew. Same probe, (m) only:
 cargo xtask e2e smooth --filter 'test(twenty_mixed) | test(six_streaming)'
 # the A arm was the same with SLOPTY_MEASURE_OLD_MINIATURES=1 before the switch was deleted
 ```
+
+## 2026-10-06 — the footprint at rest
+
+The daily budgets found the app's footprint at rest had grown from 55 MB at 980b7662 to about
+96 MB by 6352e94b. The display link's park did not change it.
+
+**Where it went.** These were read from the app at rest during the daily-budget test, release,
+on 07fd4672:
+- `footprint` puts 57 MB of the 92 in Malloc Small, 17 MB of it reclaimable.
+- `heap` finds only 31 MB live, and the process's peak footprint was 119 MB.
+- So most of the growth was pages a launch-time peak left dirty.
+- The live heap was full of CoreSVG and CoreUI objects: 11k `SVGAttribute`, 9k
+  `SVGPathCommand`, and the symbol renditions. Those are the chrome's SF Symbols (b07b2ca5).
+
+**Why.** `symbols::rasterize` drew with AppKit on the prewarm's threads with no autorelease
+pool. Each drawing's configured `NSImage` and graphics context were autoreleased and stayed
+until the thread ended, about 58 KB a drawing. The launch prewarm drew every symbol of the list
+(87) at four sizes and two scales on two threads, 696 masks, so it piled up 40 MB or more
+before its threads ended.
+
+Every SF Symbol drawn also keeps its share of the OS's symbol data for the life of the process.
+The catalogue costs about 4 MB, and each symbol about 130 KB more.
+
+| one process, `measure_prewarm_footprint` | footprint after | peak |
+| --- | --- | --- |
+| 696 masks, no pool (before) | 46 MB | 52 MB |
+| 696 masks, a pool per raster | 23 MB | 23 MB |
+| the catalogue alone (1 mask) | 6 MB | 7 MB |
+| 30 symbols at 4 sizes, one scale | 12 MB | 12 MB |
+
+All four start from 2 MB. The same mask drawn 2000 times on one thread grows the footprint by
+116 MB with no pool and by 0.6 MB with one (`a_raster_leaves_nothing_behind_on_its_thread`).
+
+**The fix.**
+- Every raster runs in its own autorelease pool (`symbols::rasterize`, `symbols::exists`).
+- The prewarm draws only what the last launch's first frames drew.
+  - Painters' first asks are noted (`Masks::get`).
+  - Three seconds after the window opens, the list is written to `data_dir/symbols`
+    (`Masks::remember`): kept by display scale, at most 512 lines, written beside the file
+    and renamed over it.
+  - The next launch reads it on the prewarm's thread, for the main display's scale.
+  - A display it never drew on gets the same symbols at its own scale.
+  - A missing or damaged list warms the catalogue alone.
+- The 20-tile layout's first frames draw 23 masks of 11 symbols. The old prewarm drew 696.
+
+**The app at rest, before and after.** Daily-budget test, release, on 07fd4672 (`/tmp/h11`):
+
+| run | relaunch, median (slowest) | footprint at rest | peak footprint |
+| --- | --- | --- | --- |
+| before 1 | 296 ms (335) | 97 MB | 129 MB |
+| before 2 | 311 ms (333) | 96 MB | 126 MB |
+| before 3 | 312 ms (335) | 96 MB | 126 MB |
+| after 1 | 313 ms (332) | 66 MB | 71 MB |
+| after 2 | 378 ms (379) | 62 MB | 72 MB |
+| after 3 | 313 ms (328) | 64 MB | 69 MB |
+| after 4 | 314 ms (346) | 65 MB | 71 MB |
+| after 5 | 314 ms (332) | 71 MB | 78 MB |
+
+- **The footprint at rest falls by about 31 MB**, to 62–71 MB, and the peak falls by about 55 MB.
+- **The relaunch is unchanged**, about 313 ms. One run was 65 ms slower on all five relaunches,
+  and the two runs after it were not, so it was load.
+- **The test's relaunches are the worst case for the first frame.** The test kills the app
+  under a second after each start, so no list is ever written and every launch warms the
+  catalogue alone. Its first frames then draw their 23 masks at 0.2–0.45 ms each, about 5 to
+  10 ms spread over the first frames. A person's launch reads the list, so its first frame
+  finds them drawn, as it did when the prewarm drew everything.
+- **Budget** (`crates/slopty-e2e/tests/app/start.rs`): under 85 MB of footprint at rest, release
+  only. The test's line now prints the peak too.
+
+```sh
+cargo test --release -p slopty-platform --test symbols measure_prewarm_footprint -- \
+  --ignored --nocapture --exact tests::measure_prewarm_footprint
+cargo test --release -p slopty-platform --test symbols a_raster_leaves_nothing_behind_on_its_thread
+# the app at rest: as for the daily budgets; while it rests, on the app's pid:
+footprint -p <pid>; heap -s <pid>; vmmap -summary <pid>
+```

@@ -3725,6 +3725,10 @@ pub const fn self_test() -> bool {
     false
 }
 
+/// How long after the window opens the symbols drawn so far are written down for the next
+/// launch's prewarm: the first frames, and the tiles that draw once their workers link.
+const SYMBOLS_DRAWN_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
 /// Call once from inside the GPUI application callback, after `gpui_kit::init`.
 ///
@@ -3739,8 +3743,10 @@ pub fn open_workspace(
     let options: window::MakeOptions = Rc::new(options);
     // The chrome's symbols, drawn on background threads while the window is made: the first
     // symbol of a process loads the system's catalogue, 40–70 ms the first frame must not wait
-    // for (docs/MEASUREMENTS.md, "SF Symbols as masks").
-    slopty_ui::icons::prewarm(&Theme::default());
+    // for (docs/MEASUREMENTS.md, "SF Symbols as masks"). Those the last launch's first frames
+    // drew, and no more, written down a few seconds after its window opened (below).
+    let symbols = slopty_platform::dirs::data_dir().join("symbols");
+    slopty_ui::icons::prewarm(&Theme::default(), symbols.clone());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
@@ -3832,6 +3838,12 @@ pub fn open_workspace(
     .detach();
     let window = window::open(&workspace, options(cx), Some(loaded), cx)?;
     window::install(&workspace, options, cx);
+    let drawn = cx.background_executor().timer(SYMBOLS_DRAWN_WITHIN);
+    cx.background_spawn(async move {
+        drawn.await;
+        slopty_ui::icons::remember(&symbols);
+    })
+    .detach();
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());

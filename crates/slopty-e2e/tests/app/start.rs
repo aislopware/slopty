@@ -84,6 +84,9 @@ const WAKEUPS_BUDGET: f64 = 30.0;
 /// CPU power of the release app at rest, in milliwatts: about three times the 0.6 to 1.7
 /// measured.
 const IDLE_MW_BUDGET: f64 = 5.0;
+/// The release app's footprint at rest, in megabytes: 62 to 71 measured, so a launch's
+/// leftovers growing back toward the 96 the symbols' prewarm once left fail it.
+const FOOTPRINT_BUDGET_MB: u64 = 85;
 
 /// Terminal tiles drawing a frame their worker sent, with both workers' links up: a tile
 /// showing only what this device kept of it is not live yet.
@@ -182,14 +185,17 @@ async fn a_relaunch_onto_twenty_tiles_and_the_app_at_rest_are_within_budget() {
         .is_some_and(|dir| std::path::Path::new(&dir).ends_with("release"));
     println!(
         "MEASURE idle ({} build, {tiles} tiles, {over:.0} s): {milliwatts:.2} mW of CPU, \
-         {wakeups:.1} wakeups/s, {megacycles:.2} M cycles/s, footprint {} MB",
+         {wakeups:.1} wakeups/s, {megacycles:.2} M cycles/s, footprint {} MB (peak {} MB)",
         if release { "release" } else { "debug" },
-        after.footprint / 1_000_000
+        after.footprint / 1_000_000,
+        after.peak_footprint / 1_000_000
     );
     assert!(relaunch <= RELAUNCH_BUDGET.as_secs_f64() * 1e3, "relaunch {relaunch:.0} ms");
     if release {
         assert!(wakeups <= WAKEUPS_BUDGET, "{wakeups:.1} wakeups/s at rest");
         assert!(milliwatts <= IDLE_MW_BUDGET, "{milliwatts:.2} mW at rest");
+        let footprint = after.footprint / 1_000_000;
+        assert!(footprint <= FOOTPRINT_BUDGET_MB, "{footprint} MB of footprint at rest");
     }
     drop(second);
     stack.shutdown().await;

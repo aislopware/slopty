@@ -388,43 +388,62 @@ const FIT_STEPS: usize = 4;
 /// The display scales a window of this platform is likely shown at, the likeliest first.
 const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 2.0] };
 
-/// Draws every symbol at the chrome's sizes on background threads.
+/// The scale the catalogue's first mask is drawn at when the display's is not known yet: any
+/// scale loads the catalogue.
+const CATALOGUE_SCALE: f32 = 2.0;
+
+/// Draws, on background threads, the masks the last launch's first frames drew, as
+/// [`remember`] wrote them to `remembered`, at the scale of the display the window opens on.
 ///
 /// The first frame then finds them drawn. Start it before the first window: the first symbol
 /// of a process loads the system's catalogue, 40 to 70 ms (`docs/MEASUREMENTS.md`, "SF
-/// Symbols as masks").
-pub fn prewarm(theme: &Theme) {
-    let inline = IconSize::Inline.slot(theme);
-    let sizes = [
-        Drawn::new(theme, AGENT, IconSize::Large).size(IconSize::Large.slot(theme)),
-        Drawn::new(theme, AGENT, IconSize::Inline).size(inline),
-        Drawn::disclosure(theme, Symbol::ChevronRight).size(inline),
-        Drawn::notice(theme, AGENT).size(crate::kit::NOTICE_MARK),
-    ];
-    let wanted: Vec<(Symbol, SymbolSize)> = sizes
-        .into_iter()
-        .flat_map(|size| Symbol::ALL.iter().map(move |&symbol| (symbol, size)))
-        .collect();
-    for &scale in SCALES {
-        if let Err(error) = SYMBOLS.masks.prewarm(wanted.clone(), scale) {
-            tracing::warn!(%error, "the symbols' prewarm did not start");
-        }
+/// Symbols as masks"). The list is read on the prewarm's thread. With no list (a first launch,
+/// or one that does not read), only the catalogue is loaded, by drawing the navigator's
+/// disclosure, and the first frame draws the rest, a quarter to half a millisecond each.
+///
+/// Only what is drawn is warmed: each SF Symbol drawn holds its share of the OS's symbol data
+/// for the life of the process (`docs/MEASUREMENTS.md`, "the footprint at rest").
+pub fn prewarm(theme: &Theme, remembered: std::path::PathBuf) {
+    let scale = slopty_platform::symbols::main_display_scale();
+    let catalogue = (
+        Symbol::ChevronRight,
+        Drawn::disclosure(theme, Symbol::ChevronRight).size(IconSize::Inline.slot(theme)),
+        scale.unwrap_or(CATALOGUE_SCALE),
+    );
+    let wanted = move || {
+        let list = slopty_platform::symbols::remembered(&remembered, scale);
+        if list.is_empty() { vec![catalogue] } else { list }
+    };
+    if let Err(error) = SYMBOLS.masks.prewarm(wanted) {
+        tracing::warn!(%error, "the symbols' prewarm did not start");
     }
-    // The agents' marks at the row's, the chip's and the empty state's ink.
+    // The agents' marks at the row's, the chip's and the empty state's ink: a dozen masks
+    // Core Graphics fills from their outlines, with nothing of the OS's held after.
+    let inline = IconSize::Inline.slot(theme);
     let inks = [
         Drawn::new(theme, AGENT, IconSize::Large).ink(IconSize::Large.slot(theme)),
         Drawn::new(theme, AGENT, IconSize::Inline).ink(inline),
         Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
     ];
+    let scales: Vec<f32> = scale.map_or_else(|| SCALES.to_vec(), |scale| vec![scale]);
     let marks = std::thread::Builder::new().name("agent-marks".into()).spawn(move || {
         for mark in AgentMark::OWNED {
-            for (&ink, &scale) in inks.iter().flat_map(|ink| SCALES.iter().map(move |s| (ink, s))) {
+            for (&ink, &scale) in inks.iter().flat_map(|ink| scales.iter().map(move |s| (ink, s))) {
                 marks::mask(mark, ink, scale);
             }
         }
     });
     if let Err(error) = marks {
         tracing::warn!(%error, "the agents' marks' prewarm did not start");
+    }
+}
+
+/// Writes to `path` the masks painters asked for since launch, for the next launch's
+/// [`prewarm`], and stops noting them. Call it once, a few seconds after the first window
+/// opens, off the main thread.
+pub fn remember(path: &std::path::Path) {
+    if let Err(error) = SYMBOLS.masks.remember(path) {
+        tracing::warn!(%error, path = %path.display(), "the drawn symbols were not written down");
     }
 }
 

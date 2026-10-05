@@ -8,7 +8,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use slopty_platform::symbols::{
-        Masks, Scale, Symbol, SymbolMask, SymbolSize, Weight, exists, rasterize,
+        Masks, REMEMBERED, Scale, Symbol, SymbolMask, SymbolSize, Weight, exists, rasterize,
+        remembered,
     };
 
     /// The chrome's body size: a navigator row's text.
@@ -177,12 +178,62 @@ mod tests {
     #[test]
     fn a_prewarm_draws_every_mask_asked_for() {
         let masks = Masks::new();
-        let wanted: Vec<_> = Symbol::ALL.iter().map(|&symbol| (symbol, BODY)).collect();
-        masks.prewarm(wanted, 2.0).expect("the thread starts").join().expect("it finishes");
+        let wanted: Vec<_> = Symbol::ALL.iter().map(|&symbol| (symbol, BODY, 2.0)).collect();
+        masks.prewarm(move || wanted).expect("the thread starts").join().expect("it finishes");
         assert_eq!(masks.len(), Symbol::ALL.len());
         for &symbol in Symbol::ALL {
             assert!(masks.kept(symbol, BODY, 2.0).is_some(), "{}", symbol.name());
         }
+    }
+
+    /// What painters asked for is written down, by display scale, and read back as the next
+    /// prewarm. A prewarm's own drawings are not in it.
+    #[test]
+    fn what_painters_asked_for_is_the_next_prewarm() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("symbols");
+        let small = SymbolSize::new(11.0, Weight::Semibold).scaled(Scale::Small);
+        let masks = Masks::new();
+        let warmed = vec![(Symbol::Trash, BODY, 2.0)];
+        masks.prewarm(move || warmed).expect("starts").join().expect("finishes");
+        drop(masks.get(Symbol::Checkmark, BODY, 2.0));
+        drop(masks.get(Symbol::ChevronRight, small, 2.0));
+        drop(masks.get(Symbol::Checkmark, BODY, 2.0));
+        masks.remember(&path).expect("written");
+        // Asked for after: not noted.
+        drop(masks.get(Symbol::Xmark, BODY, 2.0));
+        let at_two = vec![(Symbol::Checkmark, BODY, 2.0), (Symbol::ChevronRight, small, 2.0)];
+        assert_eq!(remembered(&path, Some(2.0)), at_two);
+        assert_eq!(remembered(&path, None), at_two);
+        // A display of another scale warms the same symbols at its own.
+        let at_one = vec![(Symbol::Checkmark, BODY, 1.0), (Symbol::ChevronRight, small, 1.0)];
+        assert_eq!(remembered(&path, Some(1.0)), at_one);
+
+        // A launch on the other display keeps the first display's lines.
+        let other = Masks::new();
+        drop(other.get(Symbol::Plus, BODY, 1.0));
+        other.remember(&path).expect("written");
+        assert_eq!(remembered(&path, Some(1.0)), vec![(Symbol::Plus, BODY, 1.0)]);
+        assert_eq!(remembered(&path, Some(2.0)), at_two);
+        assert!(!dir.path().join("symbols.new").exists(), "renamed into place");
+    }
+
+    /// A missing file, or lines that do not read, warm nothing rather than fail; a list is
+    /// read no further than its bound.
+    #[test]
+    fn a_missing_or_damaged_list_warms_nothing() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("symbols");
+        assert_eq!(remembered(&path, Some(2.0)), Vec::new());
+        let damaged = "checkmark 13 regular medium 2\nno.such.symbol 13 regular medium 2\n\
+                       checkmark NaN regular medium 2\ncheckmark 13 bold medium 2\n\
+                       checkmark 13 regular medium\nchevron.right 13 regular medium 2 extra\n\
+                       xmark 13 regu";
+        std::fs::write(&path, damaged).expect("written");
+        assert_eq!(remembered(&path, Some(2.0)), vec![(Symbol::Checkmark, BODY, 2.0)]);
+        std::fs::write(&path, "checkmark 13 regular medium 2\n".repeat(REMEMBERED + 50))
+            .expect("written");
+        assert_eq!(remembered(&path, None).len(), REMEMBERED);
     }
 
     fn median(mut times: Vec<Duration>) -> Duration {
@@ -223,11 +274,11 @@ mod tests {
             ];
             let wanted: Vec<_> = sizes
                 .iter()
-                .flat_map(|&size| Symbol::ALL.iter().map(move |&symbol| (symbol, size)))
+                .flat_map(|&size| Symbol::ALL.iter().map(move |&symbol| (symbol, size, scale)))
                 .collect();
             let count = wanted.len();
             let start = Instant::now();
-            masks.prewarm(wanted, scale).expect("starts").join().expect("finishes");
+            masks.prewarm(move || wanted).expect("starts").join().expect("finishes");
             println!("prewarm @{scale}x: {count} masks in {:?}", start.elapsed());
             let start = Instant::now();
             for &size in &sizes {
@@ -237,5 +288,69 @@ mod tests {
             }
             println!("kept @{scale}x: {count} lookups in {:?}", start.elapsed());
         }
+    }
+
+    /// Drawing one mask again and again on a thread of its own, as the prewarm does, leaves the
+    /// footprint where the first drawing put it: nothing a raster makes outlives it. Without a
+    /// pool around each raster, each one's autoreleased image and context stayed until the
+    /// thread ended, about 58 KB a drawing (`docs/MEASUREMENTS.md`, "the footprint at rest").
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_raster_leaves_nothing_behind_on_its_thread() {
+        const DRAWS: u64 = 2000;
+        let footprint = || slopty_testkit::process::own().expect("this process's usage").footprint;
+        let grown = std::thread::spawn(move || {
+            drop(draw(Symbol::Checkmark, BODY, 2.0));
+            let first = footprint();
+            for _ in 0..DRAWS {
+                drop(draw(Symbol::Checkmark, BODY, 2.0));
+            }
+            footprint().saturating_sub(first)
+        })
+        .join()
+        .expect("the thread draws");
+        // 0.6 MB measured with the pool, 116 MB without; the rest is other tests drawing at
+        // the same time in this process.
+        assert!(grown < 20_000_000, "{} KB kept by {DRAWS} drawings", grown / 1000);
+    }
+
+    /// What a prewarm of every symbol at the chrome's four sizes on two scales, as the launch
+    /// prewarm drew before it read what the last launch drew, leaves in the footprint. Prints;
+    /// run alone, it reads this process's footprint.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "measurement: run alone, it reads this process's footprint"]
+    fn measure_prewarm_footprint() {
+        let usage = || slopty_testkit::process::own().expect("this process's usage");
+        let before = usage();
+        let masks = Masks::new();
+        let sizes = [
+            SymbolSize::new(15.0, Weight::Regular),
+            SymbolSize::new(13.0, Weight::Regular),
+            SymbolSize::new(11.0, Weight::Semibold),
+            SymbolSize::new(10.0, Weight::Medium),
+        ];
+        let threads: Vec<_> = [1.0, 2.0]
+            .into_iter()
+            .map(|scale| {
+                let wanted: Vec<_> = sizes
+                    .iter()
+                    .flat_map(|&size| Symbol::ALL.iter().map(move |&s| (s, size, scale)))
+                    .collect();
+                masks.prewarm(move || wanted).expect("starts")
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("finishes");
+        }
+        let after = usage();
+        let mb = |bytes: u64| bytes / 1_000_000;
+        println!(
+            "MEASURE prewarm: {} masks; footprint {} MB before, {} MB after, peak {} MB",
+            masks.len(),
+            mb(before.footprint),
+            mb(after.footprint),
+            mb(after.peak_footprint)
+        );
     }
 }

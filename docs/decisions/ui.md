@@ -6966,6 +6966,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     bytes as one. `Masks` keeps every mask drawn, and keeps a miss as a miss. Its `prewarm`
     draws a list on a utility-QoS thread, because the first symbol of a process loads the
     catalogue (40–70 ms; `docs/MEASUREMENTS.md`, "SF Symbols as masks").
+  - **Each raster in its own autorelease pool, and only what is drawn warmed** (2026-10-06).
+    Without a pool, every drawing's image and context stayed until its thread ended. The old
+    prewarm of every symbol at four sizes and two scales then left about 31 MB in the
+    footprint at rest. Every symbol drawn also keeps its share of the OS's symbol data for
+    good. So the prewarm draws what the last launch's first frames drew, written down three
+    seconds after the window opened (`data_dir/symbols`, by display scale). A first launch
+    warms the catalogue alone and draws its first frame's few masks itself. A list of symbols
+    kept by hand would drift from what the chrome draws; the written one cannot
+    (`docs/MEASUREMENTS.md`, "the footprint at rest").
   - **Painted unscaled** by gpui-fast's `Window::paint_mask` (`fast/mask.rs` in the fork).
     `paint_svg` draws at twice the size and halves it, which cost the symbols crispness at
     1x.
