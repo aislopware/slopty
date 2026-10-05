@@ -6,7 +6,11 @@
 //! authorisation prompt or a banner. [`System`] is `UNUserNotificationCenter`, the same on macOS
 //! and iOS. It asks for authorisation once, lazily: on the first note it posts, never before.
 //! Making one only installs the delegate taps arrive through and reads the settings, and neither
-//! prompts.
+//! prompts. A note posted while notes are off reads the settings again, so notes turned on in
+//! System Settings go out from the next one; [`Notifier::alerts`] says how they stand, so the
+//! app can say they are off rather than drop them unseen. [`settings`], [`ask`] and
+//! [`open_settings`] are This Mac's checklist's: its Notifications line, its "Allow", and the
+//! place to turn them on.
 //!
 //! The delegate is the process's, installed once by [`install`] while the app finishes launching:
 //! the system hands a delegate installed any later no tap that launched the app. Taps wait in a
@@ -157,6 +161,19 @@ pub fn tap_of(
     Some(Tap { id, info, action })
 }
 
+/// Whether notes reach the person.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Alerts {
+    /// Not asked yet: the first note asks.
+    Unasked,
+    /// Allowed: notes show.
+    Allowed,
+    /// Turned off in the system's settings: notes are dropped.
+    Denied,
+    /// This process posts none: it is not an app bundle.
+    Unavailable,
+}
+
 /// Where notifications go.
 pub trait Notifier {
     /// Show `note`, replacing any up with its identifier.
@@ -165,18 +182,38 @@ pub trait Notifier {
     fn withdraw(&self, id: &str);
     /// Put `count` on the app's icon; zero clears it.
     fn set_badge(&self, count: usize);
+    /// Whether a note posted now would reach the person, as last read.
+    fn alerts(&self) -> Alerts;
 }
 
 /// A notifier that shows nothing and remembers what it was told: tests, and the self-test,
 /// whose window is never in front and must not put banners on the person's screen.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Memory {
     posted: RefCell<Vec<Note>>,
     withdrawn: RefCell<Vec<String>>,
     badge: Cell<Option<usize>>,
+    alerts: Cell<Alerts>,
+}
+
+impl Default for Memory {
+    /// Notes allowed, nothing posted yet.
+    fn default() -> Self {
+        Self {
+            posted: RefCell::default(),
+            withdrawn: RefCell::default(),
+            badge: Cell::default(),
+            alerts: Cell::new(Alerts::Allowed),
+        }
+    }
 }
 
 impl Memory {
+    /// Say notes are `alerts` from now on, as the person's settings would.
+    pub fn set_alerts(&self, alerts: Alerts) {
+        self.alerts.set(alerts);
+    }
+
     /// Every note posted, oldest first.
     #[must_use]
     pub fn posted(&self) -> Vec<Note> {
@@ -214,10 +251,14 @@ impl Notifier for Memory {
     fn set_badge(&self, count: usize) {
         self.badge.set(Some(count));
     }
+
+    fn alerts(&self) -> Alerts {
+        self.alerts.get()
+    }
 }
 
 #[cfg(target_vendor = "apple")]
-pub use apple::{System, install, taps, taps_finished};
+pub use apple::{System, ask, install, open_settings, settings, taps, taps_finished};
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
 
@@ -245,7 +286,7 @@ mod apple {
     use tokio::sync::mpsc::error::SendError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use super::{ActionKind, CATEGORIES, Category, Note, Notifier, Tap};
+    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, Notifier, Tap};
 
     /// Where the person's answer stands. Completion handlers write it from the framework's
     /// queues, so it sits behind a lock.
@@ -434,48 +475,37 @@ mod apple {
             center.setNotificationCategories(&NSSet::from_retained_slice(&categories));
             let state = Arc::new(Mutex::new(State { auth: Auth::Unasked, badge: None }));
             let read = Arc::clone(&state);
-            let settings =
-                RcBlock::new(move |settings: std::ptr::NonNull<UNNotificationSettings>| {
-                    // SAFETY: UserNotifications rule: the settings handed to the completion handler
-                    // are a valid object for the duration of the call.
-                    let status = unsafe { settings.as_ref() }.authorizationStatus();
-                    let allowed = [
-                        UNAuthorizationStatus::Authorized,
-                        UNAuthorizationStatus::Provisional,
-                        UNAuthorizationStatus::Ephemeral,
-                    ]
-                    .contains(&status);
-                    if !allowed {
+            read_settings(move |alerts| {
+                let badge = {
+                    let mut state = read.lock();
+                    if !matches!(state.auth, Auth::Unasked) {
                         return;
                     }
-                    let badge = {
-                        let mut state = read.lock();
-                        if !matches!(state.auth, Auth::Unasked) {
+                    match alerts {
+                        Alerts::Allowed => state.auth = Auth::Granted,
+                        Alerts::Denied => {
+                            state.auth = Auth::Denied;
                             return;
                         }
-                        state.auth = Auth::Granted;
-                        state.badge
-                    };
-                    if let Some(count) = badge {
-                        icon_badge(count);
+                        Alerts::Unasked | Alerts::Unavailable => return,
                     }
-                });
-            center.getNotificationSettingsWithCompletionHandler(&settings);
+                    state.badge
+                };
+                if let Some(count) = badge {
+                    icon_badge(count);
+                }
+            });
             Self { center: Some(center), state }
         }
 
         /// Ask for alerts, sounds and the badge, then send what waited if allowed.
         fn ask(&self) {
-            let Some(center) = &self.center else { return };
+            if self.center.is_none() {
+                return;
+            }
             let state = Arc::clone(&self.state);
-            let answered = RcBlock::new(move |granted: Bool, error: *mut NSError| {
-                // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
-                // duration of the completion handler.
-                if let Some(error) = unsafe { error.as_ref() } {
-                    tracing::warn!(error = %error.localizedDescription(), "notification authorisation");
-                }
-                let granted = granted.as_bool();
-                tracing::info!(granted, "notification authorisation");
+            request(move |alerts| {
+                let granted = alerts == Alerts::Allowed;
                 let (waiting, badge) = {
                     let mut state = state.lock();
                     let before = std::mem::replace(
@@ -499,12 +529,133 @@ mod apple {
                     icon_badge(count);
                 }
             });
-            center.requestAuthorizationWithOptions_completionHandler(
+        }
+
+        /// Notes were turned off when last read: read again, since the person may have turned
+        /// them on in System Settings since, and send `note` if they did.
+        fn reread(&self, note: Note) {
+            let state = Arc::clone(&self.state);
+            read_settings(move |alerts| {
+                if alerts != Alerts::Allowed {
+                    tracing::debug!(id = note.id, "note dropped: notifications are off");
+                    return;
+                }
+                let badge = {
+                    let mut state = state.lock();
+                    state.auth = Auth::Granted;
+                    state.badge
+                };
+                add(&UNUserNotificationCenter::currentNotificationCenter(), &note);
+                if let Some(count) = badge {
+                    icon_badge(count);
+                }
+            });
+        }
+    }
+
+    /// Read the centre's settings and hand what they say to `then`, on the framework's queue.
+    /// Nothing prompts.
+    fn read_settings(then: impl Fn(Alerts) + 'static) {
+        let read = RcBlock::new(move |settings: std::ptr::NonNull<UNNotificationSettings>| {
+            // SAFETY: UserNotifications rule: the settings handed to the completion handler are
+            // a valid object for the duration of the call.
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            then(alerts_of(status));
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&read);
+    }
+
+    /// Ask for alerts, sounds and the badge (the system's prompt, which shows once ever) and
+    /// hand the answer to `then`, on the framework's queue.
+    fn request(then: impl Fn(Alerts) + 'static) {
+        let answered = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+            // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
+            // duration of the completion handler.
+            if let Some(error) = unsafe { error.as_ref() } {
+                tracing::warn!(error = %error.localizedDescription(), "notification authorisation");
+            }
+            let granted = granted.as_bool();
+            tracing::info!(granted, "notification authorisation");
+            then(if granted { Alerts::Allowed } else { Alerts::Denied });
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
                 UNAuthorizationOptions::Alert
                     | UNAuthorizationOptions::Sound
                     | UNAuthorizationOptions::Badge,
                 &answered,
             );
+    }
+
+    /// What an authorisation status means for a note.
+    fn alerts_of(status: UNAuthorizationStatus) -> Alerts {
+        if status == UNAuthorizationStatus::NotDetermined {
+            Alerts::Unasked
+        } else if [
+            UNAuthorizationStatus::Authorized,
+            UNAuthorizationStatus::Provisional,
+            UNAuthorizationStatus::Ephemeral,
+        ]
+        .contains(&status)
+        {
+            Alerts::Allowed
+        } else {
+            Alerts::Denied
+        }
+    }
+
+    /// The first answer a framework's queue hands on, as a future: a completion handler may be
+    /// called from any thread, and is called once.
+    fn answer() -> (impl Fn(Alerts) + 'static, tokio::sync::oneshot::Receiver<Alerts>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Mutex::new(Some(tx));
+        let send = move |alerts| {
+            let tx = tx.lock().take();
+            if let Some(tx) = tx {
+                let _unheard = tx.send(alerts);
+            }
+        };
+        (send, rx)
+    }
+
+    /// Whether notes reach the person, as the system's settings say now: what This Mac's
+    /// checklist shows. Nothing prompts.
+    pub async fn settings() -> Alerts {
+        if !in_bundle() {
+            return Alerts::Unavailable;
+        }
+        let (send, answered) = answer();
+        read_settings(send);
+        answered.await.unwrap_or(Alerts::Unasked)
+    }
+
+    /// Ask the person for notes now (the system's prompt, which shows once ever), and say how
+    /// they stand after: the checklist's "Allow".
+    pub async fn ask() -> Alerts {
+        if !in_bundle() {
+            return Alerts::Unavailable;
+        }
+        let (send, answered) = answer();
+        request(send);
+        answered.await.unwrap_or(Alerts::Unasked)
+    }
+
+    /// Open the system's settings at Slopty's notifications, where the person turns them on.
+    pub fn open_settings() {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(id) = NSBundle::mainBundle().bundleIdentifier() else { return };
+            crate::open_url(&format!(
+                "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}"
+            ));
+        }
+        #[cfg(target_os = "ios")]
+        {
+            // SAFETY: UIKit rule: the constant is a string UIKit exports, valid once it is
+            // loaded, which linking it guarantees.
+            let url = unsafe { objc2_ui_kit::UIApplicationOpenNotificationSettingsURLString };
+            crate::open_url(&url.to_string());
         }
     }
 
@@ -516,6 +667,7 @@ mod apple {
 
     impl Notifier for System {
         fn post(&self, note: Note) {
+            let mut reread = None;
             let ask = {
                 let mut state = self.state.lock();
                 match &mut state.auth {
@@ -525,8 +677,12 @@ mod apple {
                         }
                         false
                     }
-                    Auth::Denied | Auth::Off => {
-                        tracing::debug!(id = note.id, "note dropped: notifications are off");
+                    Auth::Denied => {
+                        reread = Some(note);
+                        false
+                    }
+                    Auth::Off => {
+                        tracing::debug!(id = note.id, "note dropped: not an app bundle");
                         false
                     }
                     Auth::Asking(waiting) => {
@@ -542,6 +698,9 @@ mod apple {
             };
             if ask {
                 self.ask();
+            }
+            if let Some(note) = reread {
+                self.reread(note);
             }
         }
 
@@ -564,6 +723,15 @@ mod apple {
             // The Dock's badge needs no authorisation.
             if allowed || cfg!(target_os = "macos") {
                 icon_badge(count);
+            }
+        }
+
+        fn alerts(&self) -> Alerts {
+            match self.state.lock().auth {
+                Auth::Unasked | Auth::Asking(_) => Alerts::Unasked,
+                Auth::Granted => Alerts::Allowed,
+                Auth::Denied => Alerts::Denied,
+                Auth::Off => Alerts::Unavailable,
             }
         }
     }

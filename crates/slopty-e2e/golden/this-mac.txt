@@ -13,4 +13,8 @@ ListItem │ Accessibility
 Image │ Done
 ListItem │ Reachable on your tailnet
 Image │ Done
+ListItem │ Notifications
+Image │ Done
+ListItem │ Finder
+Image │ Idle
 Button │ Connect to a server instead

@@ -29,6 +29,10 @@
 //! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
 //! A shell's moments are this client's own and post as before.
 //!
+//! With notifications turned off in the system's settings, a note is dropped where nobody sees
+//! it. So the first time one goes unsaid in a run, coming back to the app says notifications
+//! are off ([`Attention::unsaid_while_off`], [`NOTES_OFF`]), once.
+//!
 //! [`Attention`] decides and hands what it decided to a [`Notifier`]; the app owns one and
 //! feeds it a [`Look`] after every change of the workspace, and each finished command.
 
@@ -39,7 +43,7 @@ use std::time::Duration;
 use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
-use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
+use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, Tap};
 use slopty_proto::items::ItemKind;
 use slopty_proto::thread::attention::{Notice, NoticeKind};
 use slopty_proto::thread::{AskId, ThreadId};
@@ -239,6 +243,14 @@ enum Why {
     Unanswered,
 }
 
+/// What the app says, once a run, on coming back after a note went unsaid because
+/// notifications are off.
+pub const NOTES_OFF: &str = if cfg!(target_os = "ios") {
+    "Notifications are off. Turn them on in Settings."
+} else {
+    "Notifications are off. Turn them on in System Settings."
+};
+
 /// Decides which moments notify and hands them to a [`Notifier`].
 pub struct Attention {
     notifier: Rc<dyn Notifier>,
@@ -262,6 +274,10 @@ pub struct Attention {
     projects: HashMap<About, String>,
     /// The projects' notes up, by identifier.
     project_notes: HashSet<String>,
+    /// A note went out while notifications were off, since the app last came back.
+    unsaid: bool,
+    /// The app has said this run that notifications are off.
+    said_off: bool,
 }
 
 impl std::fmt::Debug for Attention {
@@ -291,7 +307,26 @@ impl Attention {
             badge: None,
             projects: HashMap::new(),
             project_notes: HashSet::new(),
+            unsaid: false,
+            said_off: false,
         }
+    }
+
+    /// Whether the app, just back in front, should say [`NOTES_OFF`]: a note went unsaid
+    /// while it was away because notifications are off, and it has not said so this run.
+    /// `true` once.
+    pub fn unsaid_while_off(&mut self) -> bool {
+        let say = std::mem::take(&mut self.unsaid)
+            && !self.said_off
+            && self.notifier.alerts() == Alerts::Denied;
+        self.said_off |= say;
+        say
+    }
+
+    /// Hand `note` to the notifier, noting when notifications are off that it goes unsaid.
+    fn send(&mut self, note: Note) {
+        self.unsaid |= self.notifier.alerts() == Alerts::Denied;
+        self.notifier.post(note);
     }
 
     /// Whether the app is in front now.
@@ -469,7 +504,7 @@ impl Attention {
         }
         tracing::debug!(id = news.id, "project note");
         self.project_notes.insert(news.id.clone());
-        self.notifier.post(Note {
+        self.send(Note {
             id: news.id.clone(),
             title: news.title.clone(),
             body: news.body.clone(),
@@ -502,7 +537,7 @@ impl Attention {
             self.answers.remove(&about);
         }
         self.posted.insert(about, why);
-        self.notifier.post(note);
+        self.send(note);
     }
 }
 

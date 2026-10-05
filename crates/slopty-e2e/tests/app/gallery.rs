@@ -184,8 +184,9 @@ fn this_mac_report(
 
 /// "Use this Mac" on the first run, with no server answering on the tailnet, starts one here
 /// and turns the page into the worker's own checklist: running, the server linked, one grant
-/// missing with the button to its pane, the other granted, the tailnet reached. The stand-in
-/// behind it installs nothing: the server "started here" is the run's own.
+/// missing with the button to its pane, the other granted, the tailnet reached; then the app's
+/// own lines, notifications allowed and a build with no Finder extension. The stand-in behind
+/// it installs nothing: the server "started here" is the run's own.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn this_mac_walks_its_checklist() {
@@ -216,7 +217,15 @@ async fn this_mac_walks_its_checklist() {
     let items = labels(&dump, "ListItem");
     assert_eq!(
         items,
-        ["Running", "Server", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
+        [
+            "Running",
+            "Server",
+            "Screen Recording",
+            "Accessibility",
+            "Reachable on your tailnet",
+            "Notifications",
+            "Finder",
+        ],
         "{:#?}",
         dump.a11y
     );

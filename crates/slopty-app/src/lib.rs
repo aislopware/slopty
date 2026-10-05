@@ -801,9 +801,14 @@ impl Workspace {
         self.attention.command_finished(route, title, done, slow);
     }
 
-    /// The app came to the front or left it. On iOS, leaving holds the background grace.
-    fn set_active(&mut self, active: bool) {
+    /// The app came to the front or left it: back in front, it says once a run that
+    /// notifications are off when a note went unsaid meanwhile. On iOS, leaving holds the
+    /// background grace.
+    fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.attention.set_active(active);
+        if active && self.attention.unsaid_while_off() {
+            self.show_notice(slopty_ui::workspace::attention::NOTES_OFF.to_owned(), cx);
+        }
         #[cfg(target_os = "ios")]
         {
             self.grace = if active {
@@ -1932,6 +1937,35 @@ impl Workspace {
                 .update_in(cx, |ws, window, cx| ws.this_mac_installed(run, outcome, window, cx));
         })
         .detach();
+        self.read_this_app(run, window, cx);
+        cx.notify();
+    }
+
+    /// Read the app's own lines of run `run`'s checklist: its notifications and its place in
+    /// Finder.
+    fn read_this_app(&self, run: u64, window: &Window, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let (notes, finder) = (host.notes(), host.finder());
+        cx.spawn_in(window, async move |this, cx| {
+            let (notes, finder) = (notes.await, finder.await);
+            let _gone = this.update_in(cx, |ws, window, cx| {
+                if let Some(flow) = ws.this_mac_flow(run) {
+                    flow.notes = Some(notes);
+                    flow.finder = Some(finder);
+                }
+                ws.this_app_read(run, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The app's own lines of run `run` changed: a flow that stayed open on them closes once
+    /// none has anything left for the person.
+    fn this_app_read(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        if flow.listed && !flow.advice_left() {
+            self.close_this_mac(run, window, cx);
+        }
         cx.notify();
     }
 
@@ -2074,8 +2108,25 @@ impl Workspace {
     }
 
     /// The server lists this Mac: the panel closes onto its workspace, with a word when the
-    /// tailnet does not reach it yet.
+    /// tailnet does not reach it yet; or, while the app's own lines still have something for
+    /// the person, it stays open on them, ready, until they are done.
     fn this_mac_listed(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        if flow.advice_left() {
+            flow.listing = false;
+            flow.listed = true;
+            if let this_mac::Worker::Up(d) = &flow.worker {
+                self.this_mac_worker = Some(d.worker);
+            }
+            cx.notify();
+            return;
+        }
+        self.close_this_mac(run, window, cx);
+    }
+
+    /// The flow is over: the panel gives way to the workspace, with a word when the tailnet
+    /// does not reach this Mac yet.
+    fn close_this_mac(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(flow) = self.this_mac_flow(run) else { return };
         let (reached, worker) = match &flow.worker {
             this_mac::Worker::Up(d) => {
@@ -2100,15 +2151,37 @@ impl Workspace {
     /// A missing line's button: its pane of System Settings, or the install again.
     fn this_mac_fix(&mut self, fix: this_mac::Fix, window: &mut Window, cx: &mut Context<Self>) {
         match fix {
-            this_mac::Fix::Open(pane) => {
+            this_mac::Fix::Open(place) => {
                 if let Some(host) = &self.this_mac {
-                    host.open(pane);
+                    host.open(place);
                 }
             }
+            this_mac::Fix::AllowNotes => self.allow_notes(window, cx),
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
         }
+    }
+
+    /// The Notifications line's "Allow": the system asks the person, and the line says how they
+    /// answered.
+    fn allow_notes(&self, window: &Window, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let Some(run) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.run)
+        else {
+            return;
+        };
+        let asked = host.ask_notes();
+        cx.spawn_in(window, async move |this, cx| {
+            let notes = asked.await;
+            let _gone = this.update_in(cx, |ws, window, cx| {
+                if let Some(flow) = ws.this_mac_flow(run) {
+                    flow.notes = Some(notes);
+                }
+                ws.this_app_read(run, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// Copy Slopty into Applications and open it from there, this copy quitting: the checklist
@@ -2160,10 +2233,12 @@ impl Workspace {
         .detach();
     }
 
-    /// The app is in front again, perhaps from System Settings: a worker short of ready is
-    /// asked again, and started again first when Screen Recording was what it lacked.
+    /// The app is in front again, perhaps from System Settings: the app's own lines are read
+    /// again, and a worker short of ready is asked again, started again first when Screen
+    /// Recording was what it lacked.
     fn this_mac_activated(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some(flow) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()) else { return };
+        self.read_this_app(flow.run, window, cx);
         if !flow.rereads() {
             return;
         }
@@ -2602,6 +2677,7 @@ impl Workspace {
         let server_logs = session.logs(slopty_platform::service::SERVER);
         let lines = this_mac::checklist(flow, &logs, &server_logs)
             .into_iter()
+            .chain(this_mac::app_lines(flow))
             .map(|line| self.this_mac_line(line, cx));
         let frame = kit::card(theme)
             .id("this-mac-checklist")
@@ -2617,15 +2693,23 @@ impl Workspace {
             (None, true) => {
                 Some(("Waiting for the server to list this Mac\u{2026}".to_owned(), s.text_muted))
             }
+            (None, false) if flow.listed => Some((this_mac::READY.to_owned(), s.text_muted)),
             (None, false) => None,
         };
+        let run = flow.run;
         let again = flow.error.is_some().then(|| {
-            let run = flow.run;
             kit::button(theme, "this-mac-list-again", "Try again", ButtonKind::Link).on_click(
                 cx.listener(move |this, _ev, window, cx| {
                     this.wait_this_mac_listed(run, window, cx);
                 }),
             )
+        });
+        let done = flow.listed.then(|| {
+            kit::button(theme, "this-mac-done", "Done", ButtonKind::Link).on_click(cx.listener(
+                move |this, _ev, window, cx| {
+                    this.close_this_mac(run, window, cx);
+                },
+            ))
         });
         div()
             .flex()
@@ -2643,7 +2727,8 @@ impl Workspace {
                         .items_center()
                         .gap(px(spacing.sm))
                         .child(div().text_color(hsla(tone)).child(SharedString::from(text)))
-                        .children(again),
+                        .children(again)
+                        .children(done),
                 )
             })
             .into_any_element()
@@ -4827,6 +4912,10 @@ mod tests {
         doctor: std::cell::RefCell<Option<this_mac::Doctor>>,
         /// What the next installs stop on, first first; an install with none left is done.
         stops: std::cell::RefCell<std::collections::VecDeque<this_mac::Stopped>>,
+        /// How notifications stand; allowed when unset.
+        notes: std::cell::Cell<Option<this_mac::Alerts>>,
+        /// Slopty's place in Finder; a build with no extension when unset.
+        finder: std::cell::RefCell<Option<finder::Step>>,
     }
 
     impl StandIn {
@@ -4869,8 +4958,24 @@ mod tests {
             Box::pin(async {})
         }
 
-        fn open(&self, pane: this_mac::Pane) {
-            self.ask(format!("open {pane:?}"));
+        fn open(&self, place: this_mac::Place) {
+            self.ask(format!("open {place:?}"));
+        }
+
+        fn notes(&self) -> this_mac::Pending<this_mac::Alerts> {
+            let notes = self.notes.get().unwrap_or(this_mac::Alerts::Allowed);
+            Box::pin(async move { notes })
+        }
+
+        fn ask_notes(&self) -> this_mac::Pending<this_mac::Alerts> {
+            self.ask("ask notes".to_owned());
+            self.notes.set(Some(this_mac::Alerts::Allowed));
+            Box::pin(async { this_mac::Alerts::Allowed })
+        }
+
+        fn finder(&self) -> this_mac::Pending<finder::Step> {
+            let step = self.finder.borrow().clone().unwrap_or(finder::Step::Unsigned);
+            Box::pin(async move { step })
         }
 
         fn move_to_applications(&self) -> this_mac::Pending<Result<std::path::PathBuf, String>> {
@@ -4944,7 +5049,7 @@ mod tests {
         assert!(cx.debug_bounds("this-mac-fix-accessibility").is_none(), "granted: no button");
         let open = cx.debug_bounds("this-mac-fix-screen").expect("Screen Recording's button");
         cx.simulate_click(open.center(), gpui::Modifiers::none());
-        assert_eq!(host.asked(), ["open ScreenRecording"], "its own pane");
+        assert_eq!(host.asked(), ["open Privacy(ScreenRecording)"], "its own pane");
 
         // Granted in System Settings; the app comes back to the front.
         let worker = lacking.worker;
@@ -4964,6 +5069,64 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("install-over-ssh").is_some(), "a machine's panel");
         assert!(cx.debug_bounds("use-this-mac").is_none(), "this Mac is listed already");
+    }
+
+    /// The app's own lines: with notifications off and Slopty's place in Finder switched off,
+    /// the flow stays open once the server lists this Mac, ready, each line's button opening
+    /// its place in System Settings. Back from there with both turned on, it closes onto the
+    /// workspace. Notifications never asked for are asked for from the line's "Allow".
+    #[gpui::test]
+    fn this_mac_stays_open_on_what_the_app_lacks_until_it_is_turned_on(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.simulate_resize(size(px(900.0), px(800.0)));
+        let ready = green();
+        let host = StandIn::answering(Some(ready.clone()));
+        host.notes.set(Some(this_mac::Alerts::Denied));
+        *host.finder.borrow_mut() = Some(finder::Step::SwitchOn);
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, cx| {
+            ws.this_mac = Some(shared);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let entry = cx.debug_bounds("use-this-mac").expect("the entry");
+        cx.simulate_click(entry.center(), gpui::Modifiers::none());
+        let none = net::Tailnet { running: true, ..net::Tailnet::default() };
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(none, window, cx)));
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install here", "doctor"]);
+        list(&ws, cx, ready.worker, "mac-studio");
+        cx.executor().advance_clock(this_mac::RETRY);
+        cx.run_until_parked();
+        assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, and open still");
+        assert!(cx.debug_bounds("this-mac-done").is_some(), "the person says when they are done");
+        let _listing = host.asked();
+
+        let notes = cx.debug_bounds("this-mac-fix-notifications").expect("notifications' button");
+        cx.simulate_click(notes.center(), gpui::Modifiers::none());
+        let switch = cx.debug_bounds("this-mac-fix-finder").expect("Finder's button");
+        cx.simulate_click(switch.center(), gpui::Modifiers::none());
+        assert_eq!(host.asked(), ["open Notifications", "open FileProviders"], "their places");
+
+        // Turned on in System Settings; the app comes back to the front.
+        host.notes.set(Some(this_mac::Alerts::Allowed));
+        *host.finder.borrow_mut() = Some(finder::Step::Open(dir.path().to_path_buf()));
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "nothing left: it closes");
+
+        // Never asked: "Allow" asks, and the answer is the line's.
+        host.notes.set(Some(this_mac::Alerts::Unasked));
+        cx.dispatch_action(UseThisMac);
+        cx.run_until_parked();
+        assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, open on the question");
+        let allow = cx.debug_bounds("this-mac-fix-notifications").expect("Allow");
+        cx.simulate_click(allow.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(host.asked().contains(&"ask notes".to_owned()), "the system asks the person");
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "allowed: nothing left, it closes");
     }
 
     /// With several servers answering, or none to look on, "Use this Mac" asks for the server

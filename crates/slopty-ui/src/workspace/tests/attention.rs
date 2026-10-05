@@ -239,6 +239,32 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
     );
 }
 
+/// With notifications off, a note that goes out while the app is away reaches nobody: back in
+/// front, the app says so, once a run. Nothing is said while they are on, nor when nothing went
+/// unsaid, nor a second time.
+#[test]
+fn notes_turned_off_are_said_once_on_coming_back() {
+    let (mut attention, memory) = attention();
+    let a = route(1);
+    let long =
+        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(12) };
+    let slow = Duration::from_secs(5);
+    let away_and_back = |attention: &mut Attention| {
+        attention.set_active(false);
+        attention.command_finished(a, "api".into(), &long, slow);
+        attention.set_active(true);
+        attention.unsaid_while_off()
+    };
+    assert!(!away_and_back(&mut attention), "allowed: the note reached the person");
+
+    memory.set_alerts(Alerts::Denied);
+    attention.set_active(false);
+    attention.set_active(true);
+    assert!(!attention.unsaid_while_off(), "off, but nothing went unsaid");
+    assert!(away_and_back(&mut attention), "off, and a note went unsaid");
+    assert!(!away_and_back(&mut attention), "said once a run");
+}
+
 #[test]
 fn the_badge_is_the_bells_count() {
     let (mut attention, memory) = attention();

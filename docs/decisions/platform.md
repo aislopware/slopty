@@ -754,3 +754,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A launch with no link.** `-[UISceneConnectionOptions URLContexts]` is marked nonnull but
     returns nil on a launch without a link, and objc2's generated getter panics on that. The
     delegate reads it as optional through `msg_send!`.
+
+- ✅ **Notifications turned off are said, not dropped unseen** (2026-10-05, readiness G1). With
+  notifications denied, every note was dropped at debug level, "needs you" included, and nothing
+  on screen said so. Slopty's place in Finder had the same blind spot: it shows only once the
+  person switches its File Provider on.
+  - **This Mac's checklist carries the app's own two lines** under the worker's (`this_mac::app_lines`):
+    Notifications and Finder. Notifications never asked for offer "Allow", which raises the
+    system's prompt from the person's own press. Turned off, they open the app's page of
+    Notifications settings. Finder switched off opens the File Provider list. A dev build with
+    no app bundle or no extension says so with nothing to press. Neither line is in the way of
+    adding this Mac, so the flow does not wait on them. But once the server lists this Mac, a
+    line with a button left keeps the panel open, ready, with "Done", and closes it by itself
+    when the person comes back with both on. Both lines are read again whenever the app
+    comes back to the front.
+  - **Once, on coming back.** `Notifier::alerts` says how notes stand. When a note went out
+    while notifications were off, the app says so the first time it comes back to the front
+    in a run, as a notice ("Notifications are off. Turn them on in System Settings."). It is
+    said then because that is when the person can see it, and a note dropped while away is
+    what it is about.
+  - **Turned on again, they go out.** `notify::System` read the settings once and stayed
+    denied for the rest of the run. Now a note posted while denied reads the settings again,
+    so notes turned on in System Settings go out from the next one.
+  - Tests: `slopty-app` `this_mac::tests::the_apps_own_lines_say_what_it_lacks`,
+    `this_mac_stays_open_on_what_the_app_lacks_until_it_is_turned_on`; `slopty-ui`
+    `notes_turned_off_are_said_once_on_coming_back`; the `this-mac` golden's two new lines.

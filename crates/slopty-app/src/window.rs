@@ -141,7 +141,7 @@ pub(crate) fn open(
             let activation = cx.observe_window_activation(window, |ws, window, cx| {
                 let active = window.is_window_active();
                 ws.view.update(cx, |v, cx| v.set_app_active(active, cx));
-                ws.set_active(active);
+                ws.set_active(active, cx);
                 ws.tell_presence_in(window, cx);
                 if active {
                     ws.this_mac_activated(window, cx);
