@@ -7233,6 +7233,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     accessibility label, the agent picker's lines (mark and name, the name being the choice),
     the composer's model chip (the mark before the model) and the empty thread's notice
     ("New Codex thread" under the agent's mark at the notice's size).
+  - **A thread is called by its work, whichever agent runs it** (2026-10-06). Every adapter
+    fills the thread model's one title alike: the agent's own name for the session where it
+    publishes one (Claude Code's summary, a Codex thread's name, a pi session's name, an ACP
+    session's title), else its first prompt, trimmed. Before either, a thread is called by its
+    agent ("Codex", "pi", "opencode"), as a Claude Code terminal is before its summary, never
+    a bare "Thread N". So the mark and the title read as one identity. Test:
+    `workspace::tests::agent_tile::a_thread_is_titled_by_its_work_else_by_its_agent`; the
+    adapters' own in `slopty-agent/tests/{codex,pi,acp}.rs`.
   - Tests: `workspace::tests::agent_tile::an_agents_tile_leads_with_its_mark_and_ends_with_its_state`,
     `workspace::tests::tiles::the_header_leads_with_its_kind_and_ends_with_its_state`,
     `workspace::tests::nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`,

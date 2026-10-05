@@ -421,3 +421,28 @@ fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppCo
         "named in words: {title} / {place}"
     );
 }
+
+/// A thread is called by its work, whichever agent runs it: the title its worker's table gives
+/// (the agent's own name for the session, else its first prompt, as every adapter fills it),
+/// and before there is one its agent's name, never a bare "Thread". With its mark leading,
+/// mark and title read as one identity.
+#[gpui::test]
+fn a_thread_is_titled_by_its_work_else_by_its_agent(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut codex = crate::conversation::thread::fixtures::thread("edit");
+    codex.meta.agent = AgentId::named(AgentId::CODEX);
+    codex.meta.terminal = None;
+    codex.meta.title = String::new();
+    let thread = codex.meta.id;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    let title = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.tile_title(v.item(tile).expect("the tile")))
+    };
+    table(&view, cx, key, 1, &[&codex]);
+    assert_eq!(title(cx), "Codex", "named by its agent before its work");
+    codex.meta.title = "Fix the parser's error spans".to_owned();
+    table(&view, cx, key, 2, &[&codex]);
+    assert_eq!(title(cx), "Fix the parser's error spans", "then by its work");
+}

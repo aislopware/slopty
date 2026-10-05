@@ -299,7 +299,9 @@ impl WorkspaceView {
     /// A thread's name, the one every surface calls it by: a thread tile's header, the
     /// navigator, the inbox, and who wrote a line. Where its agent runs in a tile here, the
     /// tile's title (the name the person gave it, its project role, or what the agent titled
-    /// itself); else its title as its worker's table says it.
+    /// itself); else its title as its worker's table says it, which every agent's adapter
+    /// fills alike (the agent's own name for the session, else its first prompt); else, before
+    /// either, its agent's name, as a Claude Code terminal is called before its summary.
     #[must_use]
     pub fn thread_title(&self, thread: ThreadId) -> String {
         let tile = self.thread_terminal(thread).and_then(|session| {
@@ -308,7 +310,12 @@ impl WorkspaceView {
                 _ => None,
             })
         });
-        tile.or_else(|| self.thread_named(thread)).unwrap_or_else(|| THREAD.to_owned())
+        tile.or_else(|| self.thread_named(thread))
+            .or_else(|| {
+                let agent = AgentId::named(self.thread_agent(thread)?);
+                Some(super::projects::agent_label(&agent))
+            })
+            .unwrap_or_else(|| THREAD.to_owned())
     }
 
     /// The agent `item` shows, by its [`AgentId`] name: a thread's, or the one at work in a
@@ -1542,7 +1549,7 @@ pub(super) struct ThreadWait {
     pub tile: Option<TileRef>,
 }
 
-/// What a thread tile's header says before its worker's table names the thread.
+/// What a thread tile's header says before its worker's table names the thread or its agent.
 const THREAD: &str = "Thread";
 
 /// Where each of `key`'s threads stands, from its table: a subagent's rung folded into the

@@ -12,12 +12,12 @@ Button │ Claude Code, Needs approval
 Image │ Claude Code
 Image │ Needs you
 Button │ Close tile
-Button │ Thread 3
+Button │ opencode
 Button │ Close tile
-Button │ Thread 2
+Button │ pi
 Image │ pi
 Button │ Close tile
-Button │ Thread
+Button │ Codex
 Image │ Codex
 Button │ Close tile
 Heading │ Machines
@@ -49,9 +49,8 @@ Button │ Add to the message
 Button │ Model, Claude
 Button │ Commit
 Button │ Send
-Group │ Thread 3
-Heading │ thread Thread 3
-Label │ opencode
+Group │ opencode
+Heading │ thread opencode
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
@@ -75,8 +74,8 @@ MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
 Button │ Send
-Group │ Thread 2
-Heading │ thread Thread 2
+Group │ pi
+Heading │ thread pi
 Image │ pi
 Button │ Fullscreen tile
 Button │ Close tile
