@@ -77,12 +77,13 @@ fn rest() -> Duration {
 /// The relaunch budget: about three times the median measured on the Mac Studio, release
 /// (312 ms; `docs/MEASUREMENTS.md`, "the daily budgets"). A debug build is held to it too.
 const RELAUNCH_BUDGET: Duration = Duration::from_secs(1);
-/// Wakeups a second of the release app at rest: 71 measured, about 60 of them the display
-/// link, which runs while the window is on screen whether or not anything draws. The budget
-/// holds that from growing; it comes down when the link pauses at rest.
-const WAKEUPS_BUDGET: f64 = 100.0;
-/// CPU power of the release app at rest, in milliwatts: about three times the 4 to 6 measured.
-const IDLE_MW_BUDGET: f64 = 20.0;
+/// Wakeups a second of the release app at rest: 11.4 to 11.8 measured, now that the display
+/// link stops while the window wants no frames (it was 72 while the link ran at rest), so the
+/// budget is about two and a half times that.
+const WAKEUPS_BUDGET: f64 = 30.0;
+/// CPU power of the release app at rest, in milliwatts: about three times the 0.6 to 1.7
+/// measured.
+const IDLE_MW_BUDGET: f64 = 5.0;
 
 /// Terminal tiles drawing a frame their worker sent, with both workers' links up: a tile
 /// showing only what this device kept of it is not live yet.

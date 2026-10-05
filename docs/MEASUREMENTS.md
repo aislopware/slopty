@@ -14958,6 +14958,7 @@ The test (`a_relaunch_onto_twenty_tiles_and_the_app_at_rest_are_within_budget`,
   - under 20 mW of CPU at rest;
   - under 100 wakeups a second at rest. This holds the display link's 60 from growing, and
     comes down once the link pauses at rest.
+  - Both idle budgets were tightened on 2026-10-06, once the link stopped at rest (below).
 
 ```sh
 git archive HEAD | tar -x -C /tmp/h11   # vendor/ghostty linked in; the test's files copied over
@@ -15008,4 +15009,72 @@ the first window.
 ```sh
 cargo test --release -p slopty-ui --lib the_marks_are_crisp_at_1x -- --nocapture
 cargo test --release -p slopty-ui --lib measure_mark_rasters -- --ignored --nocapture
+```
+
+## 2026-10-06 — the display link stops at rest
+
+gpui-fast ran a window's `CVDisplayLink` for as long as the window was on screen, and every
+tick woke the app, whether or not anything drew. That was about 60 of the 72 wakeups a second
+the daily budgets found at rest. The fork now stops a window's link once its ticks have drawn
+nothing and nothing has asked for a frame for 100 ms (`gpui_macos/src/fast/frame_park.rs`,
+aislopware/gpui-fast #30). The window's next frame is the immediate frame GPUI already posts
+when the window becomes dirty, and the link starts again only after that frame is drawn. That
+keeps the restart off the path to the glass. Neither gpui-fast nor Zed had a pull request
+pausing the link on macOS. Zed's Wayland backend parks its frame callbacks in the same way
+(#60308, #60690).
+
+Mac Studio M1 Max, 60 Hz display, macOS 27.0.1.
+
+**The app at rest.** This is the daily-budget test on a plain copy of HEAD 6352e94b (`git
+archive`, its own target in `/tmp/h11`), release, run three times on each side. "Before" pins
+gpui-fast at 20538a6; "after" pins it at e825e6b, the park.
+
+| run | relaunch, median (slowest) | CPU at rest | wakeups/s | Mcycles/s | footprint |
+| --- | --- | --- | --- | --- | --- |
+| before 1 | 313 ms (313) | 3.57 mW | 72.8 | 13.9 | 95 MB |
+| before 2 | 311 ms (333) | 1.11 mW | 71.7 | 17.4 | 95 MB |
+| before 3 | 312 ms (335) | 3.95 mW | 72.0 | 14.5 | 98 MB |
+| after 1 | 310 ms (349) | 1.69 mW | 11.5 | 5.5 | 96 MB |
+| after 2 | 313 ms (332) | 0.63 mW | 11.4 | 6.1 | 100 MB |
+| after 3 | 311 ms (334) | 0.69 mW | 11.8 | 6.2 | 96 MB |
+
+- **Wakeups at rest fall from 72 a second to 11.5**, and cycles fall to under half. The
+  relaunch does not change.
+- **The footprint did not move with the park.** Both sides are about 96 MB, up from the 55 MB
+  measured at 980b7662, so the growth came from what landed between the two.
+- **Budgets tightened** (`crates/slopty-e2e/tests/app/start.rs`): under 30 wakeups a second
+  and under 5 mW at rest, release only.
+
+**One window, with no app around it.** These are the fork's `frame_latency` example builds
+with `test-support`, which keeps the link running for a hidden window, so the measurement
+needs nothing on screen. Each was run three times.
+
+| measure | before | after |
+| --- | --- | --- |
+| `rest`: wakeups/s | 60.4–68.9 | 0.5–0.6 |
+| `rest`: CPU | 1.7–2.3 mW | 0.01–0.36 mW |
+| `wake`: wake → render, p50 | 85–163 µs | 81–120 µs |
+| `wake`: wake → render, p90 | 200–243 µs | 123–278 µs |
+| `animate`: renders/s, render gap p99 | 60.1, 18.5–18.7 ms | the same |
+
+- **Waking a parked window costs nothing measurable.** Its first frame comes from the
+  immediate frame, as it does for a window whose link is running.
+- **An animation keeps its vsync pacing.**
+
+```sh
+# the app at rest: as for the daily budgets, once with each pin in Cargo.lock
+cd /tmp/h11 && nice cargo build --locked --release -p slopty-ptyd -p slopty-workerd \
+  -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins \
+  --features slopty/e2e --features slopty-e2e/live
+nice cargo test --locked --release -p slopty-e2e --test app --features slopty-e2e/live --no-run
+SLOPTY_E2E_BIN_DIR=/tmp/h11/target/release SLOPTY_BINS_FRESH=1 SLOPTY_DATA_DIR=… \
+  target/release/deps/app-<hash> --ignored --nocapture --exact \
+  start::a_relaunch_onto_twenty_tiles_and_the_app_at_rest_are_within_budget
+# one window, in .research/gpui-fast at 20538a6 and at e825e6b
+MACOSX_DEPLOYMENT_TARGET=26.5 IPHONEOS_DEPLOYMENT_TARGET= cargo build -p gpui \
+  --example frame_latency --profile release-fast --features test-support
+target/release-fast/examples/frame_latency wake      # wake_to_render_us over 120 wakes
+target/release-fast/examples/frame_latency animate   # renders/s and render gaps
+FRAME_LATENCY_REST_SECS=12 target/release-fast/examples/frame_latency rest
+# while `rest` runs: the process's wakeups and energy from proc_pid_rusage (RUSAGE_INFO_V6)
 ```
