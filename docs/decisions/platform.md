@@ -793,3 +793,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     names the team. Screen Recording and Accessibility are asked again once for the re-signed
     worker. Notarising still needs the App Store Connect key, and CI's release job the
     certificate, both as secrets.
+  - Another team builds signed with its own Developer ID by setting `SLOPTY_TEAM`
+    (2026-10-05, the person's ask). The team is a build input: `.cargo/config.toml` sets
+    JMango's, an environment value stands over it, and `files::TEAM`, `files::GROUP`, xtask's
+    `sign::TEAM` and the bundle's group are all read from it at compile time (`env!`).
+    `sign`'s tests are written against whatever team was built in, and they pass under another.

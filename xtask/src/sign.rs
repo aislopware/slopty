@@ -42,9 +42,9 @@ pub fn identifier(suffix: &str) -> String {
     format!("{IDENTIFIER_PREFIX}.{suffix}")
 }
 
-/// The team that signs Slopty (`slopty_platform::files::TEAM`), whose identifier prefixes the
-/// app group the app and its extension share.
-pub const TEAM: &str = "UK58J62H8L";
+/// The team that signs Slopty, whose identifier prefixes the app group the app and its extension
+/// share: `$SLOPTY_TEAM` when xtask was built, as for `slopty_platform::files::TEAM`.
+pub const TEAM: &str = env!("SLOPTY_TEAM");
 
 /// The [`TEAM`]'s `Developer ID Application` certificate in `security find-identity` output.
 ///
@@ -131,31 +131,17 @@ mod tests {
 
     #[test]
     fn the_teams_developer_id_certificate_is_taken_whatever_comes_first() {
-        let listing = concat!(
-            "  1) 0C4A \"Apple Development: Someone (VGK9Q8GX84)\"\n",
-            "  2) BE54 \"Developer ID Application: Another Company (AJ4R8GWM7A)\"\n",
-            "  3) FE38 \"Developer ID Application: The Company (UK58J62H8L)\"\n",
-            "     3 valid identities found\n",
+        let other = if TEAM == "AJ4R8GWM7A" { "UK58J62H8L" } else { "AJ4R8GWM7A" };
+        let ours = format!("Developer ID Application: The Company ({TEAM})");
+        let listing = format!(
+            "  1) 0C4A \"Apple Development: Someone (VGK9Q8GX84)\"\n  \
+             2) BE54 \"Developer ID Application: Another Company ({other})\"\n  \
+             3) FE38 \"{ours}\"\n     3 valid identities found\n"
         );
-        assert_eq!(
-            pick_identity(listing),
-            Some("Developer ID Application: The Company (UK58J62H8L)")
-        );
-        let others = "  1) BE54 \"Developer ID Application: Another (AJ4R8GWM7A)\"\n  1 found\n";
-        assert_eq!(pick_identity(others), None, "another team's has no right to the app group");
-    }
-
-    /// xtask signs for the team the platform crate names, whose app group both spell out.
-    #[test]
-    fn the_signing_team_is_the_platforms() {
-        let root = crate::tools::repo_root().expect("repo root");
-        let files = std::fs::read_to_string(root.join("crates/slopty-platform/src/files.rs"))
-            .expect("files.rs");
-        assert!(files.contains(&format!("pub const TEAM: &str = \"{TEAM}\";")), "TEAM");
-        let group = format!("\"{TEAM}.dev.aislopware.slopty\"");
-        assert!(files.contains(&group), "the platform's group");
-        let bundle = std::fs::read_to_string(root.join("xtask/src/bundle.rs")).expect("bundle.rs");
-        assert!(bundle.contains(&group), "the bundle's group");
+        assert_eq!(pick_identity(&listing), Some(ours.as_str()));
+        let others =
+            format!("  1) BE54 \"Developer ID Application: Another ({other})\"\n  1 found\n");
+        assert_eq!(pick_identity(&others), None, "another team's has no right to the app group");
     }
 
     #[test]

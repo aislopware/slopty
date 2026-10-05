@@ -59,8 +59,9 @@ const FILES_APPEX: &str = "SloptyFiles.appex";
 const FILES_BIN: &str = "slopty-files";
 const FILES_ID: &str = "files";
 /// The app group the app and the extension share, prefixed with the signing team, which needs
-/// no provisioning profile under a Developer ID (`slopty_platform::files::GROUP`).
-const GROUP: &str = "UK58J62H8L.dev.aislopware.slopty";
+/// no provisioning profile under a Developer ID (`slopty_platform::files::GROUP`, from the same
+/// `$SLOPTY_TEAM`).
+const GROUP: &str = concat!(env!("SLOPTY_TEAM"), ".dev.aislopware.slopty");
 
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone, Default)]

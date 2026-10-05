@@ -140,9 +140,14 @@ What a person installs, and how this tree makes it.
   A worker or server must be this very build to let the app in, so the app carries every build it
   installs. `--no-linux` leaves the Linux builds out (no zig needed, and no Linux installs);
   `--debug` builds a dev bundle.
+- **Signing team.** `SLOPTY_TEAM` in `.cargo/config.toml` names the Apple team that signs Slopty
+  (UK58J62H8L, JMango's). It prefixes the app group the app and its File Provider share, and
+  picks the Developer ID certificate. To build signed with your own Developer ID, export your
+  team's ID before building, `export SLOPTY_TEAM=<your team ID>` (cargo keeps an environment
+  value over the config's), and everything follows from that one value.
 - **Signing.** The bundle is signed with `--sign <identity>`, else `$SLOPTY_SIGN_IDENTITY`, else
-  the keychain's Developer ID Application certificate of team UK58J62H8L (`security find-identity -v -p
-  codesigning`; another team's is never taken), with a secure timestamp and the hardened runtime. Each
+  the keychain's Developer ID Application certificate of `$SLOPTY_TEAM` (`security find-identity
+  -v -p codesigning`; another team's is never taken), with a secure timestamp and the hardened runtime. Each
   daemon is signed under its `LaunchAgent` label (`dev.aislopware.slopty.worker`, `.ptyd`,
   `.server`, `.cli`), so a Screen Recording or Accessibility grant made once survives every
   update, on this Mac and on each Mac a worker is deployed to. The bundle step checks that the

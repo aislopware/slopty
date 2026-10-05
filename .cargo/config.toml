@@ -20,6 +20,10 @@ LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
 # inputs"). The gate's lanes build in a snapshot of the tree, so xtask points them at this
 # checkout's directory; `xtask prune` drops entries unused for two weeks.
 LIBGHOSTTY_VT_SYS_PREBUILT_DIR = { value = "target/ghostty-prebuilt", relative = true }
+# The Apple team whose Developer ID signs Slopty, and whose identifier prefixes the app group the
+# app and its File Provider share (`slopty_platform::files::TEAM`). A build signed by another
+# team sets its own in the environment, which cargo leaves standing over this one.
+SLOPTY_TEAM = "UK58J62H8L"
 MACOSX_DEPLOYMENT_TARGET = "26.5"
 IPHONEOS_DEPLOYMENT_TARGET = "26.5"
 

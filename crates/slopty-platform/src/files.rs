@@ -35,12 +35,13 @@ use serde::{Deserialize, Serialize};
 use slopty_core::WorkerId;
 use tokio::sync::oneshot;
 
-/// The team that signs Slopty, whose identifier prefixes [`GROUP`].
-pub const TEAM: &str = "UK58J62H8L";
+/// The team that signs Slopty, whose identifier prefixes [`GROUP`]: `$SLOPTY_TEAM` when the
+/// build ran, which `.cargo/config.toml` sets and a build for another team overrides.
+pub const TEAM: &str = env!("SLOPTY_TEAM");
 
 /// The app group the app and the extension share, prefixed with the signing team, which
 /// needs no provisioning profile under a Developer ID.
-pub const GROUP: &str = "UK58J62H8L.dev.aislopware.slopty";
+pub const GROUP: &str = concat!(env!("SLOPTY_TEAM"), ".dev.aislopware.slopty");
 
 /// The directory's file in the shared container.
 pub const DIRECTORY: &str = "workers.json";
