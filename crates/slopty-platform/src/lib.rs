@@ -59,6 +59,8 @@ pub mod resume;
 #[cfg(target_vendor = "apple")]
 pub mod secure_input;
 pub mod service;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod symbols;
 #[cfg(target_vendor = "apple")]
 pub mod system_keys;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

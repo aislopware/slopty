@@ -6928,6 +6928,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::doors::{an_approval_is_allow_and_deny_with_the_rest_set_apart,
     deny_with_a_reason_sends_the_reason_with_the_deny}`.
 
+- 🚧 **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
+  `.research/icons-2026-10-05.md` §4.3–4.4, steps 3 and 4 of its plan; the chrome's switch is
+  step 5).
+  - **The platform draws them** (`slopty_platform::symbols`). A `Symbol` is one of a closed
+    list of SF Symbols names. `rasterize` draws one at a `SymbolSize` (the point size and
+    weight of the text beside it, and the symbol scale) and a display's scale. The result is
+    one alpha byte per device pixel, with the symbol's alignment rectangle and baseline. The
+    OS draws it, so an icon sharpens and greys with the system font beside it.
+  - **Placed by its alignment rectangle, not its box.** Measured on macOS 27, AppKit's
+    rectangle for a symbol is the box's width and runs from the baseline to the cap height of
+    the text it is sized to. The box adds a point or two of uneven padding. A slot centres on
+    the rectangle, and an inline symbol puts its bottom edge on the text's baseline. iOS
+    reports the baseline itself (`baselineOffsetFromBottom`).
+  - **Any thread, and prewarmed.** Each raster makes its own image and bitmap context and
+    makes the context current on its own thread alone. Eight threads at once draw the same
+    bytes as one. `Masks` keeps every mask drawn, and keeps a miss as a miss. Its `prewarm`
+    draws a list on a utility-QoS thread, because the first symbol of a process loads the
+    catalogue (40–70 ms; `docs/MEASUREMENTS.md`, "SF Symbols as masks").
+  - **Painted unscaled** by gpui-fast's `Window::paint_mask` (`fast/mask.rs` in the fork).
+    `paint_svg` draws at twice the size and halves it, which cost the symbols crispness at
+    1x.
+  - Tests: `slopty-platform/tests/symbols.rs`, including
+    `every_symbol_the_chrome_draws_is_on_this_os`, which the macos-26 lane runs too.
+
 - ✅ **A command is its words** (2026-10-05, `.research/icons-2026-10-05.md` §4.5, step 2;
   premium pass T10). Every palette command led with an icon picked to decorate it (a sticky
   note for "New note", a brain for effort), so the palette read as a grid of clip art and no

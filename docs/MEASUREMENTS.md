@@ -14878,3 +14878,34 @@ is two million cells, and that is now the whole cost.
 cargo nextest run --release -p slopty-ui --run-ignored only --no-capture \
   -E 'test(/measure_copy_mode_keys|measure_a_word_motion_over_blank/)'
 ```
+
+## 2026-10-05 — SF Symbols as masks
+
+`slopty_platform::symbols` draws a chrome icon through the OS (`NSImage` with a symbol
+configuration on macOS, `UIImage` on iOS) into a bitmap at exact device pixels, and
+`Masks::prewarm` draws a list of them on a utility-QoS thread at launch. Measured over the 86
+symbols of the closed list, each drawn once a pass, release build, mac-studio M1 Max, three
+runs, load average about 6 from other lanes:
+
+| pass | median | max | 86 symbols |
+| --- | --- | --- | --- |
+| first in the process, 13 pt @2x | 0.43–0.46 ms | 41–69 ms (the first symbol) | 81–113 ms |
+| the same symbols at 1x | 0.20–0.22 ms | 0.53–0.63 ms | 19–21 ms |
+| the same masks again, @2x | 0.24–0.28 ms | 0.63–0.68 ms | 23–27 ms |
+
+- **The first symbol of a process costs 40–70 ms**: the symbol catalogue loading. Every one
+  after costs a quarter to half a millisecond, which matches the study's 0.48 ms
+  (`.research/icons-2026-10-05.md` §4.4). The OS keeps no drawing to reuse: drawing a mask
+  again costs as much as drawing it at another scale.
+- **A prewarm of 258 masks** (the list at three sizes) takes 78–84 ms at 1x and 83–84 ms at
+  2x on its one thread. Looking all 258 up afterwards takes 13–20 µs, about 70 ns a mask.
+- So the prewarm has to start before the first window. A frame that asks for a symbol before
+  the catalogue has loaded waits for it whoever draws it. The first frame's cold and warm
+  costs belong to the chrome's switch to symbols (step 5), which paints through these masks.
+- The bitmap is premultiplied RGBA and the alpha is taken out after. AppKit draws nothing
+  into an alpha-only bitmap (`symbols.rs`, `raster::bitmap`). The copy is 4 bytes read per
+  pixel of a mask under 40 × 40, too small to show against the drawing.
+
+```sh
+cargo test --release -p slopty-platform --test symbols measure_symbol_rasters -- --ignored --nocapture
+```
