@@ -2224,3 +2224,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_hooks_pill_installs_the_relay_in_the_harness_home`. The header test
   `a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it` now asserts that a guessed
   agent's header offers nothing.
+- ✅ **One writer, wherever the other `claude` runs** (2026-10-05, readiness 10-06 N3). A resume
+  of a past session was refused only while a Claude Code that this worker observes ran it. The
+  person's own `claude` in another terminal app, or through the managed launcher, was never seen,
+  so "Resume a past session…" could start a second writer beside it. Claude Code refuses that
+  itself only for a background (`--bg`) session.
+  - *Refused in words at the resume.* The worker reads Claude Code's own registry of its live
+    sessions (`~/.claude/sessions/<pid>.json`, `slopty_agent::roster`) again at each resume, not
+    once at start-up. A session whose live pid holds it is refused with "Claude Code runs this
+    session in another terminal" (`start::HELD_ELSEWHERE`), and nothing opens. Only the
+    `<pid>.json` files are read, as before. The registry's directory is a parameter of
+    `claude::start::spawn`, so a test lists a session in a registry of its own.
+  - *Marked before it is picked.* A listed Claude Code session that the registry says is held
+    carries the open fact `running` (`wire::PAST_RUNNING`), valued with how it runs
+    (`interactive` or a background kind). The session step marks it with the running mark. A
+    fact was chosen over a new field, because `PastSession::facts` is the open place for what
+    the agent's own records say. No golden moves.
+  - Tests: `claude_start::a_resume_of_a_session_a_claude_elsewhere_holds_is_refused`,
+    `workspace::agent_start::tests::a_session_a_live_agent_holds_is_marked_running`.

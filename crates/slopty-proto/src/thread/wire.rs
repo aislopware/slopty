@@ -723,6 +723,13 @@ pub struct PastSession {
     pub prompts: Vec<PromptHit>,
 }
 
+/// The [`PastSession::facts`] key of a session a live process of its agent holds.
+///
+/// Its value is how that process runs on the worker's machine: `interactive`, or how it runs in
+/// the background. A start that takes the session up would make a second writer, and is
+/// refused.
+pub const PAST_RUNNING: &str = "running";
+
 /// How much of a prompt a [`PromptHit`] carries, in bytes: the part round its first match.
 pub const PROMPT_HIT_BYTES: usize = 600;
 

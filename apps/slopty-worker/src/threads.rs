@@ -309,6 +309,7 @@ pub fn start(daemon: &Daemon, asks: Observing) {
         threads.claude.clone(),
         Arc::clone(&terminals),
         None,
+        slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home()),
         asks.claude_start,
     ));
     if let Some(home) = codex::codex_home() {
@@ -822,6 +823,7 @@ async fn sessions(
         }
     };
     let mut sessions = sessions;
+    mark_running(&mut sessions).await;
     for past in &mut sessions {
         if let Some((thread, title)) = threads.host.session(&past.agent, &past.native) {
             past.thread = Some(thread);
@@ -831,6 +833,27 @@ async fn sessions(
         }
     }
     PastSessions { agent, cwd, query, sessions, absent, cut }
+}
+
+/// Mark each Claude Code session a live Claude Code holds, as Claude Code's own registry of its
+/// live sessions says it now ([`slopty_proto::thread::wire::PAST_RUNNING`]): the person sees it
+/// runs before they pick it, and a pick of it is refused.
+async fn mark_running(sessions: &mut [slopty_proto::thread::wire::PastSession]) {
+    if !sessions.iter().any(|p| p.agent.is(AgentId::CLAUDE_CODE)) {
+        return;
+    }
+    let listed = tokio::task::spawn_blocking(|| {
+        let registry = slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home());
+        slopty_agent::roster::registered(&registry, slopty_worker::ports::alive)
+    })
+    .await
+    .unwrap_or_default();
+    for past in sessions.iter_mut().filter(|p| p.agent.is(AgentId::CLAUDE_CODE)) {
+        if let Some(live) = slopty_agent::roster::holder(&listed, &past.native) {
+            let how = live.kind.clone().unwrap_or_else(|| "interactive".to_owned());
+            past.facts.insert(slopty_proto::thread::wire::PAST_RUNNING.to_owned(), how);
+        }
+    }
 }
 
 /// Agent `agent`'s past sessions in folder `cwd`, at most `limit`, the last first, as the agent

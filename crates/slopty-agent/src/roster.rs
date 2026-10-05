@@ -116,6 +116,13 @@ pub fn background(listed: &[Listed]) -> impl Iterator<Item = &str> {
         .filter_map(|l| l.session_id.as_deref())
 }
 
+/// The live session in `listed` that holds conversation `session`, if one does: taking it up
+/// again elsewhere would make a second writer.
+#[must_use]
+pub fn holder<'a>(listed: &'a [Listed], session: &str) -> Option<&'a Listed> {
+    listed.iter().find(|l| l.pid.is_some() && l.session_id.as_deref() == Some(session))
+}
+
 /// The subcommand that opens a background session in this terminal (`claude attach <id>`).
 pub const ATTACH: &str = "attach";
 

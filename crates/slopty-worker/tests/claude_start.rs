@@ -133,7 +133,8 @@ mod claude_start {
             let (starter, asks) = claude::start::Starter::channel();
             let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(&terminals);
             let path = Some(programs.clone().into_os_string());
-            drop(claude::start::spawn(host.clone(), driver, opened, path, asks));
+            let registry = root.join("registry");
+            drop(claude::start::spawn(host.clone(), driver, opened, path, registry, asks));
             Self { dir, work, programs, host, terminals, sources, starter, events }
         }
 
@@ -465,5 +466,29 @@ mod claude_start {
         let (forked, _) = rig.host.state(branch).unwrap();
         assert_eq!(forked.meta.forked_from, Some(Fork { thread, turn: last }));
         assert_eq!(forked.meta.origin, ThreadMeta::FORK);
+    }
+
+    /// A session the person's `claude` holds in another terminal app, which this worker never
+    /// saw, is listed live in Claude Code's own registry: a resume of it is refused in words and
+    /// opens nothing. The registry is read at the resume, not at start-up.
+    #[tokio::test]
+    async fn a_resume_of_a_session_a_claude_elsewhere_holds_is_refused() {
+        let rig = Rig::new();
+        let native = "0b6f6c55-6a41-4f4e-9e0c-3a8f3a1f2b7d";
+        let mut resume = rig.start(None);
+        resume.args = vec!["--resume".to_owned(), native.to_owned()];
+        let registry = std::fs::canonicalize(rig.dir.path()).unwrap().join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        // This test's own process stands in for the live `claude`: its pid is alive.
+        let pid = std::process::id();
+        let listed = format!(
+            r#"{{"pid":{pid},"sessionId":"{native}","cwd":"/elsewhere","kind":"interactive","status":"idle"}}"#
+        );
+        std::fs::write(registry.join(format!("{pid}.json")), listed).unwrap();
+
+        let outcome = rig.starter.start(IntentId::new(), resume).await;
+        let want = Outcome::Refused { reason: claude::start::HELD_ELSEWHERE.to_owned() };
+        assert_eq!(outcome, want, "one writer, wherever it runs");
+        assert!(rig.opened().is_empty(), "nothing opened");
     }
 }

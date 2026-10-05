@@ -27,7 +27,7 @@ use super::actions::{
     NewAgent, NewAgentOf, NewAgentOn, ResumePastSession, ResumeSession, StartThread,
 };
 use super::projects::agent_label;
-use crate::icons::{Glyph, IconName};
+use crate::icons::{Glyph, IconName, Status};
 use crate::palette::{CommandPalette, PaletteItem};
 
 /// What is said when no machine can start an agent.
@@ -374,7 +374,7 @@ impl WorkspaceView {
 
 /// The session step's line for `session` on `worker`: what it is about (its title, else the
 /// last prompt that matched, else its id), where it ran and how long ago, found as well by its
-/// prompts.
+/// prompts; marked running while a live agent holds it.
 fn session_line(
     worker: WorkerKey,
     session: PastSession,
@@ -394,10 +394,44 @@ fn session_line(
     let age =
         session.updated_ms.map(|at| Duration::from_millis(now.saturating_sub(at.as_millis())));
     let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
+    // A session a live agent holds elsewhere is marked running: taking it up is refused.
+    let running = session.facts.contains_key(slopty_proto::thread::wire::PAST_RUNNING);
     let action = Box::new(ResumeSession { worker, session: Box::new(session) });
     PaletteItem::new(&label, action, &[])
         .with_icon(Glyph::AGENT)
+        .with_status(running.then_some(Status::Running))
         .in_dir(cwd)
         .aged(age)
         .about((!about.is_empty()).then_some(about))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use slopty_proto::thread::AgentId;
+    use slopty_proto::thread::wire::{PAST_RUNNING, PastSession};
+
+    use super::*;
+
+    /// A session the worker says a live agent holds is marked running in the session step,
+    /// before the person picks it; one nothing holds is not.
+    #[test]
+    fn a_session_a_live_agent_holds_is_marked_running() {
+        let session = |facts: BTreeMap<String, String>| PastSession {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            native: "0b6f6c55-6a41-4f4e-9e0c-3a8f3a1f2b7d".to_owned(),
+            cwd: Some("/src/app".to_owned()),
+            title: Some("Fix the parser".to_owned()),
+            updated_ms: None,
+            thread: None,
+            resume: Vec::new(),
+            facts,
+            prompts: Vec::new(),
+        };
+        let worker = WorkerKey::new(1);
+        let held = [(PAST_RUNNING.to_owned(), "interactive".to_owned())].into();
+        assert_eq!(session_line(worker, session(held), None, 0).status, Some(Status::Running));
+        assert_eq!(session_line(worker, session(BTreeMap::new()), None, 0).status, None);
+    }
 }

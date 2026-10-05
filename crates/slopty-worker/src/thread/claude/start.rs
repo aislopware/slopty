@@ -20,11 +20,13 @@
 //! - **Resumed.** A start whose arguments are `--resume <id>` takes an exited thread's session up
 //!   again ([`slopty_agent::resume::resumed`]): Claude Code goes on under the same id, so the
 //!   observer begins the same thread in the new terminal and reads it again from the transcript. It
-//!   is refused while a Claude Code runs that session already: a session has one writer. No other
-//!   argument is taken from a client.
+//!   is refused while a Claude Code runs that session already: one this worker observes, or one
+//!   Claude Code's own registry of its live sessions lists at that moment
+//!   ([`slopty_agent::roster`]), as the person's `claude` in another terminal app is. A session has
+//!   one writer. No other argument is taken from a client.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use slopty_core::SessionId;
@@ -109,13 +111,17 @@ impl Starter {
     }
 }
 
-/// Take the asks of a [`Starter`]: each opens the person's `claude` in one of `terminals` and has
-/// `driver` observe it into `host`. `claude` is looked for on `path` alone when it is given.
+/// Take the asks of a [`Starter`]: each opens the person's `claude` in one of `terminals`.
+///
+/// `driver` observes it into `host`. `claude` is looked for on `path` alone when it is given.
+/// `registry` is Claude Code's registry of its live sessions
+/// ([`slopty_agent::roster::sessions_dir`]), read again before each resume.
 pub fn spawn(
     host: Host,
     driver: Driver,
     terminals: Arc<dyn Terminals>,
     path: Option<OsString>,
+    registry: PathBuf,
     Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -123,7 +129,12 @@ pub fn spawn(
             let outcome = if let Some(first) = host.started(id) {
                 first
             } else {
-                let claude = Claude { driver: &driver, terminals: terminals.as_ref(), path: &path };
+                let claude = Claude {
+                    driver: &driver,
+                    terminals: terminals.as_ref(),
+                    path: &path,
+                    registry: &registry,
+                };
                 let outcome = match &what {
                     What::Start(start, seated) => {
                         begin(&host, &claude, id, start, seated.as_deref()).await
@@ -143,6 +154,8 @@ struct Claude<'a> {
     driver: &'a Driver,
     terminals: &'a dyn Terminals,
     path: &'a Option<OsString>,
+    /// Claude Code's registry of its live sessions.
+    registry: &'a Path,
 }
 
 async fn begin(
@@ -171,6 +184,9 @@ async fn begin(
             };
             if runs(host, session) {
                 return refused("Claude Code runs this session already");
+            }
+            if held(claude.registry, session).await {
+                return refused(HELD_ELSEWHERE);
             }
             (args, session.to_owned())
         }
@@ -264,7 +280,7 @@ async fn fork(host: &Host, claude: &Claude<'_>, from: ThreadId, after: Option<Tu
 /// the thread of its conversation `native`; why not, in words. `at` a server task's seat, the
 /// terminal opens under the seat's id with every variable of the seat.
 async fn open(
-    Claude { driver, terminals, path }: &Claude<'_>,
+    Claude { driver, terminals, path, .. }: &Claude<'_>,
     args: Vec<String>,
     native: String,
     cwd: &str,
@@ -296,6 +312,20 @@ fn runs(host: &Host, native: &str) -> bool {
     let thread = slopty_agent::observed::thread_of(native);
     host.state(thread)
         .is_some_and(|(state, _)| state.status.liveness == slopty_proto::thread::Liveness::Live)
+}
+
+/// Why a resume of a session a Claude Code this worker does not observe holds is refused.
+pub const HELD_ELSEWHERE: &str = "Claude Code runs this session in another terminal";
+
+/// Whether a live Claude Code holds session `native`, as `registry` says it now.
+async fn held(registry: &Path, native: &str) -> bool {
+    let (registry, native) = (registry.to_owned(), native.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let listed = slopty_agent::roster::registered(&registry, crate::ports::alive);
+        slopty_agent::roster::holder(&listed, &native).is_some()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn refused(reason: &str) -> Outcome {
