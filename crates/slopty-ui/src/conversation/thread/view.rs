@@ -24,7 +24,6 @@ use gpui::{
     Styled as _, Subscription, Task, Window, div, list, px, relative,
 };
 use gpui_kit::component::input::{self, InputEvent, TextareaState};
-use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
@@ -119,6 +118,7 @@ mod keyed;
 pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
 pub mod exited;
 mod later;
+mod message_menu;
 mod notes;
 mod pictures;
 mod plan;
@@ -256,6 +256,8 @@ pub struct ThreadView {
     commit: Option<(Entity<CommitSheet>, Subscription)>,
     /// The "Branch from here" panel open under a message, and its settings.
     branching: Option<branch::Branching>,
+    /// A message's own menu, open where it was pressed.
+    message_menu: Option<message_menu::MessageMenu>,
     /// The find bar, while it is open.
     finder: Option<finding::Finder>,
     /// The turn being gone to ([`Self::go_to_turn`]), and the first turn held when a page
@@ -397,6 +399,7 @@ impl ThreadView {
             copied_clear: None,
             commit: None,
             branching: None,
+            message_menu: None,
             finder: None,
             going: None,
             aside: None,
@@ -1328,9 +1331,9 @@ impl ThreadView {
             .children(more)
             .child(actions)
             .children(choices);
+        let row = Self::message_menu_press(div(), id, &words, Some(turn), cx);
         let shown = cut.unwrap_or(words);
-        div()
-            .group(message_group(id))
+        row.group(message_group(id))
             .w_full()
             .child(self.bubble(
                 format!("item-{}", id.0),
@@ -1475,8 +1478,8 @@ impl ThreadView {
         let theme = &self.theme;
         let label = SharedString::from(kit::first_line(&text).to_owned());
         let selector = format!("item-{}", id.0);
-        div()
-            .id(ElementId::Name(selector.clone().into()))
+        let row = div().id(ElementId::Name(selector.clone().into()));
+        Self::message_menu_press(row, id, &text, None, cx)
             .debug_selector(move || selector)
             .role(Role::Article)
             .aria_label(label)
@@ -1505,9 +1508,7 @@ impl ThreadView {
         let (thinking, took) = self.thinking(ix, id, cx);
         let said = if thinking { "Thinking".to_owned() } else { thought_for(took) };
         let head = if thinking {
-            ShimmerText::new("Thinking")
-                .id(ElementId::Name(format!("thinking-{}", id.0).into()))
-                .into_any_element()
+            kit::shimmer("Thinking", s.text_muted, s.text).into_any_element()
         } else {
             SharedString::from(said.clone()).into_any_element()
         };
@@ -1818,10 +1819,22 @@ impl ThreadView {
             } else {
                 self.spinner(stopping)
             }))
+            // Work under way shimmers as "Thinking" does, and stands still under Reduce
+            // Motion; waiting on the person is a state, not work, so it never does.
             .child(
-                div()
-                    .when(retrying, |el| el.debug_selector(|| "thread-retrying".to_owned()))
-                    .child(SharedString::from(words)),
+                div().when(retrying, |el| el.debug_selector(|| "thread-retrying".to_owned())).map(
+                    |el| {
+                        if asks && !stopping {
+                            el.child(SharedString::from(words))
+                        } else {
+                            el.child(
+                                div()
+                                    .debug_selector(|| "thread-working-shimmer".to_owned())
+                                    .child(kit::shimmer(words, s.text_muted, s.text)),
+                            )
+                        }
+                    },
+                ),
             )
             .child(div().flex_1())
             .children(elapsed.map(|e| {
@@ -2125,10 +2138,14 @@ impl Render for ThreadView {
                     cx.listener(|this, _: &DenyRequest, _w, cx| this.answer_by_key(false, cx)),
                 )
             })
-            // Esc outside the composer: a picture open large closes first, so the key that
-            // closes it never also stops the turn.
+            // Esc outside the composer: a message's menu (inside the thread, so its Esc comes
+            // here) or a picture open large closes first, so the key that closes it never also
+            // stops the turn.
             .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
-                if !this.close_picture(cx) && !this.leave_subagent(window, cx) {
+                if !this.close_message_menu(window, cx)
+                    && !this.close_picture(cx)
+                    && !this.leave_subagent(window, cx)
+                {
                     this.interrupt(cx);
                 }
             }))
@@ -2198,6 +2215,7 @@ impl Render for ThreadView {
             .child(self.foot(bar, composer))
             .children(viewer)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
+            .children(self.message_menu_panel(cx))
     }
 }
 

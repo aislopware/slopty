@@ -7290,6 +7290,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `gallery::the_first_run_offers_one_way_in` (its headings),
     `through_server` (the first run's heading). Goldens: `first-run`, `first-run-dark`,
     `this-mac`, `add-worker` (the blurb's 13/19 line).
+- ✅ **Work under way shimmers on the step clock** (2026-10-06, `.research/ux-audit-2026-10-05.md`
+  §11 #19). A thread's working line said "Working" in still, muted text, while "Thinking"
+  shimmered, so the two looked like different kinds of thing.
+  - **The line.** The working line's words ("Working", "Stopping", a retry's words) now
+    shimmer as "Thinking" does. "Waiting for you" stays still, since it describes a state
+    rather than work.
+  - **The element.** Both use `kit::shimmer`, a band of `text` sweeping across `text_muted`
+    words. It moves one step at a time on the working mark's spin clock rather than gpui-kit's
+    `ShimmerText`, which asks for a frame on every refresh. A thread at work draws 12 frames a
+    second, not the display's 120 (`docs/MEASUREMENTS.md`, "words at work shimmer on the step
+    clock"). Under Reduce Motion the words are plain.
+  - Tests: `kit::shimmer::tests::the_band_crosses_the_words_once_a_sweep_and_rests_between`,
+    `conversation::thread::tests::composing::the_working_line_shimmers_and_waiting_does_not`,
+    `...::the_working_line_shimmers_on_the_marks_twelve_frames`.
+- ✅ **The window is titled by its workspace** (2026-10-06, `.research/ux-audit-2026-10-05.md`
+  §11 #20). Every window was called "Slopty", so the Window menu, Mission Control and cycling
+  the windows by key could not tell two workspaces apart. The window's title is now the
+  workspace's name, the same one the title bar shows. It is set again only when the name
+  changes (`WorkspaceView::retitle_window`). The screen reader names the window by it too, so
+  every e2e golden's first line changed.
+  - Test: `workspace::tests::bars::a_workspace_is_named_by_where_its_first_shell_is` (the
+    window's accessible name).
+- ✅ **"Server offline" is a menu** (2026-10-06, `.research/ux-audit-2026-10-05.md` §11 #22). The
+  title bar's server readout said "Server unreachable" and did nothing when pressed, so the
+  person had to find the setup to act on it.
+  - **The words.** It now says "Server offline", the shorter, plainer word.
+  - **The menu.** Pressed, it opens a menu under itself (`MenuKind::Server`) with "Retry now"
+    (redial at once) and "Connect to another server" (the add panel on its server page). The
+    app fills the menu (`WorkspaceView::set_server_menu`).
+  - **The dot.** It stays muted, since `warn` is kept for what needs the person.
+  - Tests: `workspace::tests::the_servers_word_is_said_at_the_title_bars_end` (opens the menu
+    and retries), `workspace::tests::tiles::the_servers_word_says_what_it_costs`; e2e
+    `server_unreachable`. Golden: `server-unreachable`.
+- ✅ **The tailnet scan is a section with its own retry** (2026-10-06,
+  `.research/ux-audit-2026-10-05.md` §11 #21). With nothing found, the add panel said
+  "Nothing answered" in a loose line, and the only way to look again was to reopen the panel.
+  - **The section.** It now always has its "On your tailnet" label over a card.
+  - **With nothing to offer.** The card holds one status row. The row has a mark (turning
+    while it looks, a crossed-out signal when Tailscale is off, a magnifier otherwise), words
+    that say what was not found ("No Slopty server found yet", "No machine found yet"), and
+    "Scan again", which is hidden while a scan runs.
+  - **What to do next.** One line under the card says what to start there and to scan again.
+  - Tests: `slopty-app` `tests::the_panel_names_its_host_and_the_server_the_tailnet_found`
+    (the label, the row, the button, scanning again); e2e `gallery` (the first run and "Add a
+    machine"). Goldens: `add-worker`, `first-run`, `first-run-dark`.
 - ✅ **One face switch on an agent's tile** (2026-10-06, `.research/readiness-2026-10-06.md` §4
   #12). An orchestrator's tile had two toggles that each flipped a different pair: ⌘J and a
   header button between the thread and the TUI, and ⇧⌘J and a second button between the TUI and
@@ -7318,3 +7363,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::tiles::the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves`.
     The e2e project tests reach the board by ⌘J (`projects::to_board`). Golden: the
     `settings-keyboard` words.
+- ⏳ **A thing's own menu opens by a right click or a long press** (2026-10-06,
+  `.research/ux-audit-2026-10-05.md` §11 #6, I1). Only the terminal and the remote screen
+  answered a right click. A Mac person right-clicks first, as in Finder, Linear and Things,
+  and an iPad person holds.
+  - **One press.** `kit::menu_press` opens a menu where the press landed, on a right click or
+    a long press. The innermost thing pressed has it, so a message in a tile opens the
+    message's menu, not the tile's. The menu is `kit::MenuPanel`, with its keyboard and
+    typeahead.
+  - **A thread's messages, first.** A message's menu holds Copy (which says "Copied" under it,
+    as its copy does) and Quote in reply (its lines behind "> " in the draft, composer
+    focused). A subagent's thread takes no messages, so it has no Quote in reply. Branch from
+    here appears under the person's own messages where the thread can branch. Esc closes it,
+    and the keyboard goes back where it was.
+  - **Still to come.** Navigator rows, tile headers, tabs, folder rows and review files
+    follow.
+  - Tests: `conversation::thread::tests::composing::a_right_click_on_a_message_quotes_or_copies_it`,
+    `conversation::thread::view::message_menu::tests::a_quote_marks_every_line_and_keeps_the_blank_ones`.

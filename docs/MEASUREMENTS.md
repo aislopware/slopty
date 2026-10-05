@@ -15209,3 +15209,30 @@ cargo test --release -p slopty-platform --test symbols a_raster_leaves_nothing_b
 # the app at rest: as for the daily budgets; while it rests, on the app's pid:
 footprint -p <pid>; heap -s <pid>; vmmap -summary <pid>
 ```
+
+## 2026-10-06 — words at work shimmer on the step clock
+
+A thread view in a headless window (`slopty-ui` tests, the GPUI test platform), its agent at
+work, so its working line shows. The test counts the view's wakes over one simulated second of
+120 ticks (8.3 ms each, a 120 Hz display), as the working mark's frame test does. The counts
+are exact on the test platform and do not wander between runs.
+
+```sh
+cargo nextest run --locked -p slopty-ui --lib -E 'test(the_working_line_shimmers_on)'
+```
+
+| the working line's words | frames a second |
+| --- | --- |
+| gpui-kit's `ShimmerText`, which glides on every refresh | 132 |
+| `kit::shimmer`, a band stepped on the spin clock | 12 |
+
+- `ShimmerText` asks for a frame on every display refresh. Beside a working mark that steps 12
+  times a second, it raised a thread at work to the display's rate (the 132 counts both). The
+  "Thinking" head of a reasoning row used it too, so a thinking agent drew at 120 Hz before
+  this change.
+- `kit::shimmer` lays its band out as per-character colours at each step of the spin clock
+  and wakes on the clock's next step (`icons::wake_at_next_step`), so it rides the mark's
+  frames and adds none. One sweep is two turns of the mark (2 s). Under Reduce Motion it is
+  plain text and asks for nothing.
+- The test, `conversation::thread::tests::composing::the_working_line_shimmers_on_the_marks_twelve_frames`,
+  fails at 132 with `ShimmerText` put back.

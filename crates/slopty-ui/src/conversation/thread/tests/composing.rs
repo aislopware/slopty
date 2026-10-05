@@ -369,6 +369,50 @@ fn working(mut state: ThreadState) -> ThreadState {
     state
 }
 
+/// Work under way shimmers on its line, as "Thinking" does; waiting on the person is a state,
+/// so that line stands still.
+#[gpui::test]
+fn the_working_line_shimmers_and_waiting_does_not(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working(state.clone()), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-working").is_some(), "the working line");
+    assert!(cx.debug_bounds("thread-working-shimmer").is_some(), "shimmering");
+    let mut asks = working(state);
+    asks.status.phase = Phase::NeedsYou;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asks, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-working-shimmer").is_none(), "waiting stands still");
+}
+
+/// The shimmer steps with the working mark, so a thread at work draws twelve frames a second,
+/// not one on every display refresh (`docs/MEASUREMENTS.md`, "companions on the step clock").
+#[gpui::test]
+fn the_working_line_shimmers_on_the_marks_twelve_frames(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working(state), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-working-shimmer").is_some(), "shimmering");
+    let woken = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+    let count = std::rc::Rc::clone(&woken);
+    let _counting =
+        cx.update(|_w, cx| cx.observe(&view, move |_, _| count.set(count.get().saturating_add(1))));
+    for _ in 0..120 {
+        cx.executor().advance_clock(std::time::Duration::from_nanos(8_333_333));
+        cx.update(gpui::Window::simulate_next_frame);
+        cx.run_until_parked();
+    }
+    assert!((11..=13).contains(&woken.get()), "{} frames in a second", woken.get());
+}
+
 fn waiting(text: &str) -> Pending {
     Pending {
         intent: IntentId::new(),
@@ -618,4 +662,55 @@ fn a_stop_pauses_the_queue_until_the_next_message(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-queue-paused").is_none(), "let go");
+}
+
+/// A right click on a message opens its own menu where it landed: the person's quotes into the
+/// draft, the agent's copies, and a thread that cannot branch offers no branch. Esc closes it.
+#[gpui::test]
+fn a_right_click_on_a_message_quotes_or_copies_it(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = state();
+    let thread = state.meta.id;
+    let answer = Item {
+        id: ItemId("a1".to_owned()),
+        turn: TurnId(1),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::Text(Clipped::whole("Done, all green.")),
+    };
+    state.items = vec![sent_message("u1", "Read it\n\nthen fix it"), answer];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let right_click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center();
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    };
+    let pick = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("message-menu").is_none(), "{selector} closes the menu");
+    };
+
+    right_click(cx, "item-u1");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Menu", Some("Message"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("MenuItem", Some("Quote in reply"))), "{tree:#?}");
+    assert!(cx.debug_bounds("message-menu-branch").is_none(), "no door to branch by");
+    pick(cx, "message-menu-quote");
+    assert_eq!(view.read_with(cx, ThreadView::draft), "> Read it\n>\n> then fix it");
+
+    right_click(cx, "item-a1");
+    pick(cx, "message-menu-copy");
+    let copied = cx.update(|_w, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(copied.as_deref(), Some("Done, all green."));
+
+    right_click(cx, "item-a1");
+    assert!(cx.debug_bounds("message-menu").is_some(), "open again");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("message-menu").is_none(), "Esc closes it");
 }
