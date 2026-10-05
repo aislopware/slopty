@@ -112,6 +112,25 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          # Its cache holds zig's own caches, which libghostty-vt-sys never reads (it passes its
+          # own --cache-dir), and took 2.3 GB of the 10 GB quota sccache lives in.
+          use-cache: false
+      # libghostty-vt built once per set of inputs (`LIBGHOSTTY_VT_SYS_PREBUILT_DIR`), the head
+      # of the build in most lanes: kept per lane, since each builds its own triples, and keyed
+      # by the ghostty revision and the binding's, which a new entry needs. The build checks
+      # every other input itself, so an entry for another zig or SDK is never used.
+      - if: matrix.lane != 'tools'
+        id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - if: matrix.lane != 'tools'
+        uses: actions/cache@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: >-
+            ghostty-prebuilt-${{ runner.os }}-${{ matrix.lane }}${{ matrix.shard }}-${{
+            steps.ghostty.outputs.key }}
       # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
       # by the root manifest's hash (which pins every package's), and fetched again with
       # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
@@ -211,6 +230,15 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: false
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-linux-${{ steps.ghostty.outputs.key }}
       # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
       # by the root manifest's hash (which pins every package's), and fetched again with
       # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub

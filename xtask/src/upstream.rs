@@ -503,6 +503,22 @@ fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken
     let packages: Vec<&str> = pinned.iter().flat_map(|(package, _)| ["-p", package]).collect();
     let _dir = sh.push_dir(root);
     step("cargo update", &cmd!(sh, "cargo update {packages...}"))?;
+    // The fuzz crate is a workspace of its own with its own lock: left behind, it built the
+    // engine against an older binding of the same vendored ghostty, and its own zig build too.
+    let fuzz_lock = root.join("fuzz").join("Cargo.lock");
+    if let Ok(lock) = std::fs::read_to_string(&fuzz_lock) {
+        let ours: Vec<&str> = pinned
+            .iter()
+            .filter(|(package, _)| lock.contains(&format!("name = \"{package}\"\n")))
+            .flat_map(|(package, _)| ["-p", package])
+            .collect();
+        if !ours.is_empty() {
+            step(
+                "cargo update (fuzz)",
+                &cmd!(sh, "cargo update --manifest-path fuzz/Cargo.toml {ours...}"),
+            )?;
+        }
+    }
     for (name, done) in taken {
         if lock_package(name).is_none() {
             continue;

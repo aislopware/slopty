@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use super::{GB, Limits, Options, Report, check_room, gigabytes, prune, size, tally};
+use super::{GB, Limits, Options, Report, check_room, gigabytes, prebuilt, prune, size, tally};
 
 const HOUR: u64 = 3600;
 const MIB: usize = 1 << 20;
@@ -649,4 +649,34 @@ fn a_limit_reads_its_variable_and_an_empty_one_is_unset() {
     assert_eq!(read(Some(" 5 ")).ok(), Some(5 * GB));
     let error = read(Some("five")).map_err(|e| e.to_string()).err().unwrap_or_default();
     assert!(error.contains("is not a number"), "{error}");
+}
+
+/// A prebuilt library goes once nothing took it for two weeks, and a dead build's staging
+/// directory once a day; one a build took yesterday stays, and a missing directory holds none.
+#[test]
+fn prebuilt_libraries_go_once_unused() {
+    let f = Fixture::new("prebuilt");
+    let dir = f.root.join("ghostty-prebuilt");
+    let entry = |name: &str, used: SystemTime| {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.join("lib")).unwrap();
+        let key = File::create(path.join(".libghostty-vt-sys-key")).unwrap();
+        key.set_times(FileTimes::new().set_modified(used)).unwrap();
+        path
+    };
+    let used = entry("aarch64-apple-darwin-ReleaseFast-1", f.ago(24 * HOUR));
+    let stale = entry("aarch64-apple-darwin-ReleaseFast-2", f.ago(15 * 24 * HOUR));
+    let staging = dir.join(".aarch64-apple-darwin-ReleaseFast-1.tmp-42");
+    std::fs::create_dir_all(&staging).unwrap();
+    File::open(&staging)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(f.ago(2 * 24 * HOUR)))
+        .unwrap();
+
+    assert_eq!(prebuilt(&dir, f.now, true).unwrap(), 2, "a dry run counts both");
+    assert!(stale.exists() && staging.exists(), "and deletes neither");
+    assert_eq!(prebuilt(&dir, f.now, false).unwrap(), 2);
+    assert!(used.exists(), "used yesterday");
+    assert!(!stale.exists() && !staging.exists());
+    assert_eq!(prebuilt(&f.root.join("missing"), f.now, false).unwrap(), 0);
 }

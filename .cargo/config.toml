@@ -15,6 +15,11 @@ GHOSTTY_SOURCE_DIR = { value = "vendor/ghostty", relative = true }
 # Debug mode": 50 KB/s of VT parsing in release (MEASUREMENTS 2026-09-06, checkpoint cost). Pin
 # the optimised library for every profile; the Rust side keeps its own debug info.
 LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
+# One zig build of libghostty-vt for each set of inputs, shared by every target dir instead of
+# a minute in each fresh one (docs/decisions/tooling.md, "libghostty-vt is built once per set of
+# inputs"). The gate's lanes build in a snapshot of the tree, so xtask points them at this
+# checkout's directory; `xtask prune` drops entries unused for two weeks.
+LIBGHOSTTY_VT_SYS_PREBUILT_DIR = { value = "target/ghostty-prebuilt", relative = true }
 MACOSX_DEPLOYMENT_TARGET = "26.5"
 IPHONEOS_DEPLOYMENT_TARGET = "26.5"
 

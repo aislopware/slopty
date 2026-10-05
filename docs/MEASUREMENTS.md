@@ -14726,3 +14726,27 @@ cargo nextest run -p slopty-worker -E 'binary(fswatch) | test(/^fsevents::tests:
 
 All 20 iterations passed, 15 tests each (394 s). Under that load one start's p90 was already
 3.6 s, so the old 10 s bound left room for two starts queued ahead of a test's own.
+
+## 2026-10-05 — libghostty-vt built once per set of inputs
+
+Every Cargo target dir ran its own zig build of the vendored ghostty: the gate's lanes, each
+agent's, `target/xtask` and the fuzz crate here, and each CI job's (the head of the build's
+critical path in the rest, linux and worker jobs at 256, 186 and 121 s;
+`.research/dev-speed-2026-10-05.md`). With `LIBGHOSTTY_VT_SYS_PREBUILT_DIR`, our libghostty-rs
+fork (5ad52ee) keys the install prefix on every input the build reads and copies it into a fresh
+target dir. Building `libghostty-vt-sys` alone in a fresh target dir on this Mac, beside two
+agents' builds, for `aarch64-apple-darwin`, ReleaseFast:
+
+| | wall |
+|---|---|
+| no entry: the zig build, then publish | 55–86 s |
+| entry for the key: copy | 0.86–1.4 s |
+
+An entry is 17 MB. Changing `build.rs` changed the key (a new entry), and an entry whose stored
+key was overwritten was rebuilt and replaced.
+
+```sh
+cd .research/libghostty-rs
+GHOSTTY_SOURCE_DIR=$PWD/../../vendor/ghostty LIBGHOSTTY_VT_SYS_PREBUILT_DIR=/tmp/gp \
+  cargo build -q -p libghostty-vt-sys --target-dir /tmp/lgt1   # then again with /tmp/lgt2
+```

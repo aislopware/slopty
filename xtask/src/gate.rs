@@ -233,6 +233,11 @@ fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str, share: bool) -> 
     let sh = Shell::new()?;
     sh.change_dir(tree);
     sh.set_var("CARGO_TARGET_DIR", gate_dir.join(name.replace(' ', "-")));
+    // `.cargo/config.toml` names it relative to the tree, which here is the snapshot, whose
+    // sync deletes what the index does not hold; the checkout's is the one every build shares.
+    if let Some(target) = gate_dir.parent() {
+        sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", target.join(crate::prune::PREBUILT));
+    }
     if share {
         let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
         sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());

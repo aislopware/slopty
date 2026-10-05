@@ -1046,3 +1046,23 @@ more full-window layer.
   summary named only failed encoder tests, and CI's timings for the rest and ui shards held no
   test at all. The main run's report is now renamed to `junit-main.xml` before the second run.
   The summary reads both, and CI uploads both.
+
+- ✅ **libghostty-vt is built once per set of inputs** (2026-10-05,
+  `.research/dev-speed-2026-10-05.md` item 4; numbers in MEASUREMENTS, same day). Every target
+  dir ran its own minute-long zig build of the same source: every gate lane and agent here, and
+  most CI jobs, where it headed the build's critical path.
+  - Our libghostty-rs fork (5ad52ee) takes `LIBGHOSTTY_VT_SYS_PREBUILT_DIR`. It keys the install
+    prefix on everything the build reads: the source's commit, the zig version, target and host,
+    optimize mode, CPU, link mode, the Apple SDKs, the deployment targets, and the build script.
+    It copies a matching entry instead of building, and publishes a new one by a rename. A
+    vendored tree with uncommitted edits to tracked files is always built. An entry holds its
+    whole key, so a collision is a miss.
+  - `.cargo/config.toml` sets it to `target/ghostty-prebuilt`. The gate's lanes build in the
+    index snapshot, whose sync deletes what the index lacks, so `lane_shell` points them at the
+    checkout's. `xtask prune` drops entries unused for 14 days (a use touches the key file) and
+    staging directories a dead build left.
+  - CI caches the directory per lane, keyed by the ghostty and binding revisions, and setup-zig
+    no longer caches zig's own directories, which this build never read: 2.3 GB of the
+    10 GB quota went back to sccache.
+  - `fuzz/Cargo.lock` was one binding revision behind main against the same vendored ghostty.
+    `upstream sync` now moves it with the root lock.

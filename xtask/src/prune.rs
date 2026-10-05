@@ -224,7 +224,44 @@ pub fn run(opts: Options) -> Result<()> {
     let report = prune(&target, opts, SystemTime::now(), &free_space)?;
     println!("▶ {target}");
     print(&target, &report, opts.dry_run);
+    let gone = prebuilt(&target.join(PREBUILT), SystemTime::now(), opts.dry_run)?;
+    if gone > 0 {
+        println!("  {gone} prebuilt libghostty-vt unused for {PREBUILT_IDLE_DAYS} days");
+    }
     Ok(())
+}
+
+/// Where libghostty-vt-sys keeps a library built for each set of inputs, under `target/`
+/// (`LIBGHOSTTY_VT_SYS_PREBUILT_DIR`, `docs/decisions/tooling.md`, "libghostty-vt is built once
+/// per set of inputs").
+pub const PREBUILT: &str = "ghostty-prebuilt";
+
+/// How long a prebuilt library may go unused. A ghostty bump leaves every entry of the old
+/// revision behind; one in use is touched on every build that takes it.
+const PREBUILT_IDLE_DAYS: u64 = 14;
+
+/// Deletes the prebuilt libraries in `dir` whose key file was last touched over
+/// [`PREBUILT_IDLE_DAYS`] ago, and a publish's staging directory left over a day by a build that
+/// died; returns how many went. A missing `dir` holds none.
+fn prebuilt(dir: &Utf8Path, now: SystemTime, dry_run: bool) -> Result<usize> {
+    let Ok(entries) = dir.read_dir_utf8() else { return Ok(0) };
+    let mut gone = 0_usize;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let staging = entry.file_name().starts_with('.');
+        let stamp = if staging { path.to_owned() } else { path.join(".libghostty-vt-sys-key") };
+        let used = std::fs::metadata(&stamp).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+        let idle = if staging { 1 } else { PREBUILT_IDLE_DAYS };
+        let limit = Duration::from_secs(idle.saturating_mul(24 * 3600));
+        if now.duration_since(used).unwrap_or_default() > limit {
+            if !dry_run {
+                std::fs::remove_dir_all(path).with_context(|| format!("remove {path}"))?;
+            }
+            gone = gone.saturating_add(1);
+        }
+    }
+    Ok(gone)
 }
 
 /// `SLOPTY_FORK_BUDGET_GB`, else [`DEFAULT_FORK_BUDGET_GB`], in bytes.
@@ -323,6 +360,11 @@ pub fn auto() {
             }
         }
         Err(e) => eprintln!("  prune target/ skipped: {e:#}"),
+    }
+    if let Ok(root) = repo_root()
+        && let Err(e) = prebuilt(&root.join("target").join(PREBUILT), SystemTime::now(), false)
+    {
+        eprintln!("  prune {PREBUILT} skipped: {e:#}");
     }
 }
 
