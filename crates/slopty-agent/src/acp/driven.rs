@@ -21,7 +21,7 @@
 //!   open as cancelled, as the protocol asks; a request that cannot be read is refused, so the call
 //!   does not run.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use agent_client_protocol_schema::v1::{self as acp, ContentBlock, SessionUpdate};
 use agent_client_protocol_schema::{MaybeUndefined, ProtocolVersion};
@@ -33,15 +33,16 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
-    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Delivery, Drive, Effect, Effort,
-    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
-    PendingState, Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState,
-    ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
+    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Drive, Effect, Effort, IntentId,
+    Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending, Phase, Plan,
+    RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
+    Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
 use super::rpc;
 use crate::attach::Attached;
 use crate::driven::{OUTPUT, PROSE, caps, choice, title_of, tool};
+use crate::queue::Queue;
 
 /// What every ACP agent can do through Slopty.
 ///
@@ -254,7 +255,7 @@ pub struct Session {
     asked: BTreeMap<AskId, Asked>,
     /// Calls the person refused, which end rejected rather than failed.
     denied: Vec<String>,
-    queued: VecDeque<Pending>,
+    queued: Queue,
     modes: Vec<acp::SessionMode>,
     current_mode: Option<String>,
     options: Vec<acp::SessionConfigOption>,
@@ -318,7 +319,7 @@ impl Session {
             .filter_map(|i| i.id.0.strip_prefix("item-").and_then(|n| n.parse().ok()))
             .max()
             .unwrap_or(0);
-        session.queued = state.pending.iter().cloned().collect();
+        session.queued = Queue::of(&state.pending);
         session.meters = state.meters.clone();
         session.last_end = state.last_turn().map(|t| t.state.clone());
         session.phase = (state.status.phase, state.status.since_ms);
@@ -338,7 +339,7 @@ impl Session {
             calls: HashMap::new(),
             asked: BTreeMap::new(),
             denied: Vec::new(),
-            queued: VecDeque::new(),
+            queued: Queue::default(),
             modes: Vec::new(),
             current_mode: None,
             options: Vec::new(),
@@ -796,73 +797,19 @@ impl Session {
         Some(Cancelled { notification, answers, actions })
     }
 
-    /// Hold `text` and the files at `attachments`, sent as intent `intent`, until the turn ends:
-    /// last, or `first`, before everything held, for a message sent by interrupt
-    /// ([`Delivery::Interrupt`]).
-    pub fn queue(
-        &mut self,
-        intent: IntentId,
-        text: &str,
-        attachments: Vec<String>,
-        first: bool,
-    ) -> Vec<Action> {
-        let held = Pending {
-            intent,
-            text: text.to_owned(),
-            attachments,
-            delivery: Delivery::Queue,
-            state: PendingState::Waiting,
-        };
-        if first {
-            self.queued.push_front(held);
-        } else {
-            self.queued.push_back(held);
-        }
-        vec![self.pending()]
-    }
-
-    /// Take back the message held for `intent`; `None` when none is.
-    pub fn withdraw(&mut self, intent: IntentId) -> Option<Vec<Action>> {
-        let at = self.queued.iter().position(|p| p.intent == intent)?;
-        self.queued.remove(at);
-        Some(vec![self.pending()])
-    }
-
-    /// Make the message held for `intent` say `text`; `None` when none is.
-    pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Vec<Action>> {
-        let held = self.queued.iter_mut().find(|p| p.intent == intent)?;
-        text.clone_into(&mut held.text);
-        Some(vec![self.pending()])
-    }
-
-    /// Hold every message queued for the person's stop ([`Pending::STOPPED`]): none goes until
-    /// they send again. The actions that show it, when anything was queued.
-    pub fn hold_queue(&mut self) -> Vec<Action> {
-        let mut held = false;
-        for pending in &mut self.queued {
-            held |= pending.hold_for_stop();
-        }
-        if held { vec![self.pending()] } else { Vec::new() }
-    }
-
-    /// Let what the person's stop held wait for its turn again, as they speak; whether
-    /// anything was held.
-    pub fn release_queue(&mut self) -> bool {
-        let mut released = false;
-        for pending in &mut self.queued {
-            released |= pending.release_stop();
-        }
-        released
+    /// The messages held until the turn under way ends ([`Cap::QUEUE`]).
+    pub const fn queue(&mut self) -> &mut Queue {
+        &mut self.queued
     }
 
     /// The next message held, taken off the queue, once no turn is under way and the person's
     /// stop holds nothing: its intent, its words and its files.
     pub fn next_queued(&mut self) -> Option<(Pending, Vec<Action>)> {
-        if self.running || self.queued.front().is_some_and(Pending::stopped) {
+        if self.running {
             return None;
         }
-        let next = self.queued.pop_front()?;
-        Some((next, vec![self.pending()]))
+        let (next, ()) = self.queued.next_up()?;
+        Some((next, vec![self.queued.shown()]))
     }
 
     /// What switches the session to mode `mode` (an id it offers), when it can be.
@@ -1414,12 +1361,6 @@ impl Session {
         }
         self.meters = meters;
         vec![Action::MetersSet(self.meters.clone())]
-    }
-
-    /// The messages held, as they stand.
-    #[must_use]
-    pub fn pending(&self) -> Action {
-        Action::PendingSet(self.queued.iter().cloned().collect())
     }
 
     /// The status as it stands, since the time its phase last moved.

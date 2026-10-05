@@ -396,6 +396,126 @@ mod pi {
         assert_eq!(answers, ["allow", "deny\nKeep the file."]);
     }
 
+    /// A message queued while pi works waits on the worker, not in pi: it shows as waiting, can
+    /// be changed, and sent now goes into the run as the person's message under its own intent.
+    /// One taken back never reaches pi. The person's stop holds what is queued, and it stays
+    /// held once the run has stopped, until they speak again.
+    #[tokio::test]
+    async fn a_message_queued_while_pi_works_waits_on_the_worker() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::QUEUE), "{:?}", state.meta.caps);
+        let queue = |text: &str| Intent::Send {
+            text: text.to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![],
+        };
+        let heard = |rig: &Rig, text: &str| {
+            rig.record()["heard"].as_array().unwrap().iter().any(|c| c["message"] == text)
+        };
+
+        rig.send(&pi, thread, "Make a file called made-by-pi.");
+        let state = rig.until(thread, "the first ask", asking(1)).await;
+        let ask = state.requests[0].id.clone();
+        let (held, queued) = rig.intent(&pi, thread, &queue("Also say it is finished."));
+        assert_eq!(queued, Outcome::Done);
+        let state = rig.until(thread, "held on the worker", |s| s.pending.len() == 1).await;
+        assert_eq!(state.pending[0].intent, held);
+        let edit = Intent::Edit { pending: held, text: "Also say done.".to_owned() };
+        assert_eq!(rig.intent(&pi, thread, &edit).1, Outcome::Done);
+        rig.until(thread, "changed", |s| {
+            s.pending.first().is_some_and(|p| p.text == "Also say done.")
+        })
+        .await;
+        assert!(!heard(&rig, "Also say done."), "nothing went to pi while it was held");
+        assert_eq!(rig.intent(&pi, thread, &Intent::Promote { pending: held }).1, Outcome::Done);
+        rig.until(thread, "sent now", |s| s.pending.is_empty()).await;
+        let allow = Intent::Answer { ask, choice: "allow".to_owned(), message: None };
+        assert_eq!(rig.intent(&pi, thread, &allow).1, Outcome::Done);
+        let state = rig.until(thread, "the allowed turn", turn_ended(2, TurnState::Complete)).await;
+        assert!(
+            users(&state).contains(&("Also say done.".to_owned(), Some(held))),
+            "the person's message, under the intent that queued it: {:?}",
+            users(&state)
+        );
+
+        rig.send(&pi, thread, "Remove it.");
+        let state = rig.until(thread, "the second ask", asking(2)).await;
+        let (dropped, _) = rig.intent(&pi, thread, &queue("Never mind."));
+        rig.until(thread, "held", |s| s.pending.len() == 1).await;
+        assert_eq!(
+            rig.intent(&pi, thread, &Intent::Withdraw { pending: dropped }).1,
+            Outcome::Done
+        );
+        rig.until(thread, "taken back", |s| s.pending.is_empty()).await;
+        let (_, late) = rig.intent(&pi, thread, &Intent::Withdraw { pending: dropped });
+        assert!(matches!(late, Outcome::Refused { .. }), "taken back once: {late:?}");
+        let deny = Intent::Answer {
+            ask: state.requests[1].id.clone(),
+            choice: "deny".to_owned(),
+            message: Some("Keep the file.".into()),
+        };
+        assert_eq!(rig.intent(&pi, thread, &deny).1, Outcome::Done);
+        rig.until(thread, "the denied turn", turn_ended(3, TurnState::Complete)).await;
+
+        rig.send(&pi, thread, "Remove it again.");
+        rig.until(thread, "the third ask", asking(3)).await;
+        let (after, _) = rig.intent(&pi, thread, &queue("Then tidy up."));
+        rig.until(thread, "held", |s| s.pending.len() == 1).await;
+        assert_eq!(rig.intent(&pi, thread, &Intent::Interrupt).1, Outcome::Done);
+        let state =
+            rig.until(thread, "the stopped turn", turn_ended(4, TurnState::Interrupted)).await;
+        let [waiting] = state.pending.as_slice() else { panic!("{:?}", state.pending) };
+        assert_eq!(waiting.intent, after);
+        assert!(waiting.stopped(), "held since the person stopped: {waiting:?}");
+        let record = rig.record();
+        assert_eq!(record["unexpected"], serde_json::json!([]), "pi was sent what it was sent");
+        assert!(!heard(&rig, "Never mind.") && !heard(&rig, "Then tidy up."));
+    }
+
+    /// A message an extension's command takes never comes back from pi and starts no run, so
+    /// nothing waits on it: a message queued behind it goes.
+    #[tokio::test]
+    async fn a_message_queued_behind_an_extensions_command_goes() {
+        // Taken by an extension's command before the gate's second prompt.
+        let handled = |gate: &str| {
+            const MAKE: &str = r#"{"dir":"in","msg":{"id":"make""#;
+            let command = concat!(
+                r#"{"dir":"in","msg":{"id":"tidy","message":"/tidy","type":"prompt"}}"#,
+                "\n",
+                r#"{"dir":"out","msg":{"command":"prompt","data":{"disposition":"handled"},"#,
+                r#""id":"tidy","success":true,"type":"response"}}"#,
+                "\n",
+            );
+            gate.replacen(MAKE, &format!("{command}{MAKE}"), 1)
+        };
+        let rig = Rig::replaying(false, handled);
+        let (pi, _served) = rig.serve();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        rig.send(&pi, thread, "/tidy");
+        let queued = Intent::Send {
+            text: "Make a file called made-by-pi.".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![],
+        };
+        let (held, outcome) = rig.intent(&pi, thread, &queued);
+        assert_eq!(outcome, Outcome::Done);
+        let state = rig.until(thread, "the queued message's ask", asking(1)).await;
+        assert!(state.pending.is_empty(), "{:?}", state.pending);
+        let mine = ("Make a file called made-by-pi.".to_owned(), Some(held));
+        assert!(users(&state).contains(&mine), "{:?}", users(&state));
+        assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
+    }
+
     /// A server task's thread runs pi with its role added to the system prompt, kept with the
     /// thread's own flags so a pi started again for it has it too; the first message goes as
     /// written. Its row names the seat, kept whatever pi says of the thread, and a start repeated

@@ -786,5 +786,45 @@ mod tests {
             });
             assert_eq!(intent, Some(second));
         }
+
+        /// A message held on the worker waits while pi has anything to do: from the moment a
+        /// message is sent until pi echoes it, and through the run. Once pi settles it goes
+        /// next, unless the person's stop holds it, until they speak again.
+        #[test]
+        fn a_queued_message_goes_once_pi_has_nothing_else_to_do() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            assert!(driven.meta().can(Cap::QUEUE));
+            let later = IntentId::new();
+            let mut held = false;
+            for line in gate() {
+                if line.sent {
+                    let request: Request = serde_json::from_value(line.msg.clone()).unwrap();
+                    if let Command::Prompt { message, .. } = &request.command {
+                        let _command = driven.send(message, &[], IntentId::new());
+                        if !held {
+                            let _shown =
+                                driven.queue().hold(later, "Then tidy up.", Vec::new(), (), false);
+                            held = true;
+                            assert!(driven.busy(), "sent and not yet heard back");
+                            assert!(driven.next_queued().is_none(), "not before pi takes it");
+                        }
+                    }
+                    continue;
+                }
+                let record = rpc::record(line.msg.to_string().as_bytes()).unwrap();
+                let _actions = driven.incoming(&record, WallMs::ZERO);
+                if matches!(record, Incoming::AgentSettled) {
+                    break;
+                }
+                assert!(driven.next_queued().is_none(), "not while pi works: {record:?}");
+            }
+            assert!(!driven.busy(), "settled, with every message heard back");
+            let _held = driven.queue().stop();
+            assert!(driven.next_queued().is_none(), "the person's stop holds it");
+            assert!(driven.queue().release());
+            let (next, shown) = driven.next_queued().expect("it goes next");
+            assert_eq!((next.intent, next.text.as_str()), (later, "Then tidy up."));
+            assert!(matches!(shown.as_slice(), [Action::PendingSet(p)] if p.is_empty()));
+        }
     }
 }

@@ -1169,12 +1169,8 @@ mod tests {
             }
         }
         assert_eq!(state.pending.len(), 2, "both show waiting");
-        for action in &shared.edit(kept, "Then the docs, briefly").unwrap() {
-            state.apply(action);
-        }
-        for action in &shared.withdraw(dropped).unwrap() {
-            state.apply(action);
-        }
+        state.apply(&shared.queue().edit(kept, "Then the docs, briefly").unwrap());
+        state.apply(&shared.queue().withdraw(dropped).unwrap());
         assert_eq!(
             state.pending.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
             ["Then the docs, briefly"]
@@ -1184,7 +1180,7 @@ mod tests {
             ["/drop/x/shot.png", "/drop/x/my notes.md"],
             "the change kept its files"
         );
-        assert!(shared.withdraw(dropped).is_none(), "taken back once");
+        assert!(shared.queue().withdraw(dropped).is_none(), "taken back once");
         assert!(shared.next_queued().is_none(), "not while the turn runs");
 
         hear(

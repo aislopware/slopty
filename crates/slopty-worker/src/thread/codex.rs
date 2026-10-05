@@ -45,7 +45,7 @@
 //! thread names that terminal while it runs, so a client shows it. With no daemon running it is
 //! refused: only a start brings the daemon up.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,11 +58,12 @@ use slopty_agent::codex::daemon::{self, Daemon};
 use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotification};
 use slopty_agent::codex::rpc::{self, Incoming};
 use slopty_agent::codex::shared::{Send, Setting, Settings, Shared};
+use slopty_agent::queue::Queue;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
-    Pending, Phase, Status, ThreadId, ThreadState, TurnId,
+    Phase, Status, ThreadId, ThreadState, TurnId,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -824,7 +825,7 @@ struct Session {
     /// The models Codex offers, once it said, for each thread followed from now on.
     models: Option<Vec<p::Model>>,
     /// The messages each thread being read again held, held again once it is followed.
-    requeue: HashMap<String, VecDeque<(Pending, Vec<Attached>)>>,
+    requeue: HashMap<String, Queue<Vec<Attached>>>,
 }
 
 /// What a server task's thread is loaded with: the seat's variables and Slopty's tools.
@@ -1348,7 +1349,7 @@ impl Session {
                 late.extend(followed.shared.models(models));
             }
             if let Some(queued) = self.requeue.remove(&thread.id) {
-                late.extend(followed.shared.requeue(queued));
+                late.extend(followed.shared.queue().requeue(queued));
             }
             if let Some(link) = self.parents.get(&id) {
                 late.extend(followed.shared.adopted(link.clone()));
@@ -1432,7 +1433,7 @@ impl Session {
         if matches!(note, ServerNotification::ThreadReverted(_))
             && let Some(mut followed) = self.threads.remove(&native)
         {
-            self.requeue.insert(native.clone(), followed.shared.take_queued());
+            self.requeue.insert(native.clone(), followed.shared.queue().take_all());
             return self.resume(native).await;
         }
         match self.threads.get_mut(&native) {
@@ -1634,16 +1635,17 @@ impl Session {
                 }
             }
             Ask::Withdraw { thread, intent } => {
-                let taken = self.followed(thread).and_then(|f| f.shared.withdraw(intent));
-                if let Some(actions) = taken {
-                    self.host.apply(thread, actions);
+                let taken = self.followed(thread).and_then(|f| f.shared.queue().withdraw(intent));
+                if let Some(shown) = taken {
+                    self.host.apply(thread, vec![shown]);
                 }
                 Ok(())
             }
             Ask::Edit { thread, intent, text } => {
-                let changed = self.followed(thread).and_then(|f| f.shared.edit(intent, &text));
-                if let Some(actions) = changed {
-                    self.host.apply(thread, actions);
+                let changed =
+                    self.followed(thread).and_then(|f| f.shared.queue().edit(intent, &text));
+                if let Some(shown) = changed {
+                    self.host.apply(thread, vec![shown]);
                 }
                 Ok(())
             }

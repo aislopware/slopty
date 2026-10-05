@@ -4,7 +4,7 @@
 //! Sans-IO. The worker runs pi and carries its records; this turns what pi says into
 //! [`Action`]s, and what a client asks of the thread into the [`Command`]s that go to pi. It
 //! keeps only what the mapping needs: the turn under way, the message streaming, each call's
-//! state, the gate's asks open, and the messages sent and not yet heard back.
+//! state, the gate's asks open, the messages sent and not yet heard back, and those held.
 //!
 //! - **The thread.** A pi session is one thread, its id derived from the session's id
 //!   ([`thread_of`]), which the worker gives pi (`--session-id`), so the same session is the same
@@ -24,6 +24,10 @@
 //!   no, or a text. Each is a question with the answers the extension offers, and stays open until
 //!   it is answered or pi gives up on it at its timeout, since pi waits on it whatever the turn
 //!   does. A notice an extension shows is a notice in the thread.
+//! - **The queue.** A message the person queues waits here ([`crate::queue`]), where it can be
+//!   taken back, changed or sent at once, and goes as a prompt of its own once pi has nothing else
+//!   to do ([`Driven::next_queued`]). pi's own `follow_up` is not used: what it holds can only be
+//!   cleared whole (`clear_queue`), not taken back or changed one message at a time.
 //! - **Who holds it.** Slopty drives the session (drive `driven`, no terminal), or pi's own TUI
 //!   holds it in a terminal (drive `observed`, the terminal named), when the thread follows the
 //!   entries the TUI appends to the session's file ([`Driven::appended`]) and can only be taken
@@ -36,9 +40,9 @@ use slopty_core::WallMs;
 use slopty_proto::thread::detail::{ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail};
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
-    Effort, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
-    Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState, ToolCall,
-    ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
+    Effort, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Pending,
+    Phase, Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState,
+    ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
 use super::rpc::{
@@ -47,9 +51,10 @@ use super::rpc::{
 };
 use crate::attach::Attached;
 use crate::driven::{OUTPUT, PROSE, caps, choice, title_of, tool};
+use crate::queue::Queue;
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 12] = [
+pub const CAPS: [&str; 13] = [
     Cap::APPROVALS,
     Cap::COMPACT,
     Cap::CONTINUE,
@@ -60,6 +65,7 @@ pub const CAPS: [&str; 12] = [
     Cap::SET_EFFORT,
     Cap::SET_MODEL,
     Cap::SCHEDULE,
+    Cap::QUEUE,
     Cap::SNAPSHOTS,
     Cap::STEER,
 ];
@@ -179,6 +185,8 @@ pub struct Driven {
     denied: Vec<String>,
     /// Messages sent and not yet heard back, with the intent that sent each.
     sends: VecDeque<(IntentId, String)>,
+    /// Messages held until pi has nothing else to do ([`Cap::QUEUE`]).
+    queued: Queue,
     meters: Meters,
     /// What the turn under way has taken so far.
     usage: thread::Usage,
@@ -240,6 +248,7 @@ impl Driven {
             open: BTreeMap::new(),
             denied: Vec::new(),
             sends: VecDeque::new(),
+            queued: Queue::default(),
             meters: Meters::default(),
             usage: thread::Usage::default(),
             running: false,
@@ -313,6 +322,28 @@ impl Driven {
     #[must_use]
     pub const fn running(&self) -> bool {
         self.running
+    }
+
+    /// Whether pi has anything to do: a run works, or a message sent has not come back yet,
+    /// so a run is about to.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.running || !self.sends.is_empty()
+    }
+
+    /// The messages held until pi has nothing else to do.
+    pub const fn queue(&mut self) -> &mut Queue {
+        &mut self.queued
+    }
+
+    /// The next message held, taken off the queue, once pi has nothing else to do and the
+    /// person's stop holds nothing: it goes as a prompt of its own.
+    pub fn next_queued(&mut self) -> Option<(Pending, Vec<Action>)> {
+        if self.busy() {
+            return None;
+        }
+        let (next, ()) = self.queued.next_up()?;
+        Some((next, vec![self.queued.shown()]))
     }
 
     /// A record pi wrote, heard at `now`.
@@ -605,7 +636,8 @@ impl Driven {
         Command::Prompt { message, images, streaming_behavior: Some(StreamingBehavior::Steer) }
     }
 
-    /// The message sent as `intent` did not go: pi refused it.
+    /// The message sent as `intent` will not come back: pi refused it, or an extension's
+    /// command took it.
     pub fn unsent(&mut self, intent: IntentId) {
         self.sends.retain(|(sent, _)| *sent != intent);
     }

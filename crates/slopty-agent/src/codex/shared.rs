@@ -33,9 +33,10 @@
 //!   back or sent at once as a steer. Otherwise it goes as the next turn once Codex says the turn
 //!   under way ended ([`Shared::next_queued`]): Codex's own TUI queues in itself, and the
 //!   app-server has no queue of its own. The person's stop holds it ([`Shared::stop`],
-//!   [`Pending::STOPPED`]) until they send again, which lets it go after what they sent.
+//!   [`Pending::STOPPED`](slopty_proto::thread::Pending::STOPPED)) until they send again, which
+//!   lets it go after what they sent.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 use slopty_core::{SessionId, WallMs};
@@ -47,9 +48,9 @@ use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
     Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
-    Mode, Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry,
-    Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState,
-    Usage, UserMessage, Wait, kind,
+    Mode, Notice, PartKey, Patch, Phase, Plan, Request, RequestState, Retry, Status, Step,
+    ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
+    UserMessage, Wait, kind,
 };
 
 use super::form::Form;
@@ -59,6 +60,7 @@ use super::protocol::{
     ThreadActiveFlag, ThreadItem, ThreadStatus, TurnStatus, UserInput,
 };
 use crate::attach::Attached;
+use crate::queue::Queue;
 
 /// What a Codex thread can do through Slopty.
 pub const CAPS: [&str; 15] = [
@@ -299,7 +301,7 @@ pub struct Shared {
     /// it completed, and the item keeps when it began.
     began: HashMap<ItemId, WallMs>,
     /// Messages held until the turn under way ends, in their order.
-    queued: VecDeque<(Pending, Vec<Attached>)>,
+    queued: Queue<Vec<Attached>>,
     /// The models Codex offers (`model/list`), hidden ones left out.
     catalog: Vec<p::Model>,
 }
@@ -385,7 +387,7 @@ impl Shared {
             begun: HashMap::new(),
             calls: HashMap::new(),
             began: HashMap::new(),
-            queued: VecDeque::new(),
+            queued: Queue::default(),
             catalog: Vec::new(),
         };
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
@@ -997,20 +999,10 @@ impl Shared {
         intent: IntentId,
     ) -> Send {
         // The person speaking again lets what their stop held go, before a message they queue.
-        let mut released = false;
-        for (pending, _) in &mut self.queued {
-            released |= pending.release_stop();
-        }
+        let released = self.queued.release();
         if delivery == Delivery::Queue && (self.current.is_some() || released) {
-            let pending = Pending {
-                intent,
-                text: text.to_owned(),
-                attachments: attached.iter().map(|a| a.path().to_owned()).collect(),
-                delivery,
-                state: PendingState::Waiting,
-            };
-            self.queued.push_back((pending, attached));
-            return Send::Held(vec![self.pending_now()]);
+            let paths = attached.iter().map(|a| a.path().to_owned()).collect();
+            return Send::Held(vec![self.queued.hold(intent, text, paths, attached, false)]);
         }
         let input = input(text, &attached);
         let client = Some(intent.to_string());
@@ -1032,31 +1024,19 @@ impl Shared {
         }
     }
 
-    /// Take back the message held for `intent`; `None` when none is.
-    pub fn withdraw(&mut self, intent: IntentId) -> Option<Vec<Action>> {
-        let at = self.queued.iter().position(|(p, _)| p.intent == intent)?;
-        self.queued.remove(at);
-        Some(vec![self.pending_now()])
-    }
-
-    /// Make the message held for `intent` say `text`, its files kept; `None` when none is.
-    pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Vec<Action>> {
-        let (held, _) = self.queued.iter_mut().find(|(p, _)| p.intent == intent)?;
-        text.clone_into(&mut held.text);
-        Some(vec![self.pending_now()])
+    /// The messages held until the turn under way ends ([`Cap::QUEUE`]).
+    pub const fn queue(&mut self) -> &mut Queue<Vec<Attached>> {
+        &mut self.queued
     }
 
     /// The message held for `intent`, sent now: into the turn under way as a steer, or as a
     /// turn of its own when none is, and what a stop held let go behind it. What goes to the
     /// app-server and the actions that take it off the queue; `None` when none is held.
     pub fn promote(&mut self, intent: IntentId) -> Option<(Send, Vec<Action>)> {
-        let at = self.queued.iter().position(|(p, _)| p.intent == intent)?;
-        let (held, attached) = self.queued.remove(at)?;
-        for (p, _) in &mut self.queued {
-            p.release_stop();
-        }
+        let (held, attached) = self.queued.take(intent)?;
+        self.queued.release();
         let send = self.send(&held.text, attached, Delivery::Steer, intent);
-        Some((send, vec![self.pending_now()]))
+        Some((send, vec![self.queued.shown()]))
     }
 
     /// Whether the thread rests: no turn under way, nothing asked of the person, no message
@@ -1072,36 +1052,15 @@ impl Shared {
     /// The next message held, as the turn that sends it and the actions that take it off the
     /// queue, once no turn is under way and the person's stop holds nothing.
     pub fn next_queued(&mut self) -> Option<(Box<p::TurnStartParams>, Vec<Action>)> {
-        if self.current.is_some() || self.queued.front().is_some_and(|(p, _)| p.stopped()) {
+        if self.current.is_some() {
             return None;
         }
-        let (next, attached) = self.queued.pop_front()?;
+        let (next, attached) = self.queued.next_up()?;
         let Send::Start(params) = self.send(&next.text, attached, Delivery::Steer, next.intent)
         else {
             return None;
         };
-        Some((params, vec![self.pending_now()]))
-    }
-
-    /// The messages held, taken out in their order: the thread is about to be read again
-    /// ([`Self::requeue`] puts them back).
-    pub fn take_queued(&mut self) -> VecDeque<(Pending, Vec<Attached>)> {
-        std::mem::take(&mut self.queued)
-    }
-
-    /// `queued`, taken from the thread as it was read before, held again ahead of anything
-    /// held since.
-    pub fn requeue(&mut self, mut queued: VecDeque<(Pending, Vec<Attached>)>) -> Vec<Action> {
-        if queued.is_empty() {
-            return Vec::new();
-        }
-        queued.append(&mut self.queued);
-        self.queued = queued;
-        vec![self.pending_now()]
-    }
-
-    fn pending_now(&self) -> Action {
-        Action::PendingSet(self.queued.iter().map(|(p, _)| p.clone()).collect())
+        Some((params, vec![self.queued.shown()]))
     }
 
     /// What branches a new thread off this one, sharing its turns through `after`, or all of
@@ -1182,14 +1141,11 @@ impl Shared {
     }
 
     /// The person's stop: what stops the turn under way, when one is, and the actions that
-    /// hold every message queued until they send again ([`Pending::STOPPED`]).
+    /// hold every message queued until they send again
+    /// ([`Pending::STOPPED`](slopty_proto::thread::Pending::STOPPED)).
     pub fn stop(&mut self) -> Option<(p::TurnInterruptParams, Vec<Action>)> {
         let params = self.interrupt()?;
-        let mut held = false;
-        for (pending, _) in &mut self.queued {
-            held |= pending.hold_for_stop();
-        }
-        Some((params, if held { vec![self.pending_now()] } else { Vec::new() }))
+        Some((params, self.queued.stop().into_iter().collect()))
     }
 
     /// The thread's latest turn, or [`TurnId::BEFORE`] before its first: where what Codex says

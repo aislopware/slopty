@@ -7,7 +7,7 @@ use std::process::Stdio;
 use slopty_agent::pi::driven::{Answered, Driven};
 use slopty_agent::pi::rpc::{self, Command, Entries, Incoming, Request, State, Stats};
 use slopty_core::WallMs;
-use slopty_proto::thread::{Action, IntentId, ThreadId, ThreadState};
+use slopty_proto::thread::{Action, Delivery, IntentId, ThreadId, ThreadState};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
@@ -257,12 +257,52 @@ impl Task {
 
     async fn ask(&mut self, ask: ThreadAsk) {
         match ask {
-            ThreadAsk::Send { text, attachments, intent } => {
-                let attached = crate::thread::attach::read(&attachments).await;
-                let command = self.driven.send(&text, &attached, intent);
-                self.ask_for(command, Some(Expect::Prompt(intent))).await;
+            ThreadAsk::Send { text, attachments, intent, delivery } => {
+                // The person speaking again lets what their stop held go, after this.
+                let released = self.driven.queue().release();
+                match delivery {
+                    Delivery::Queue if self.driven.busy() || released => {
+                        let shown = self.driven.queue().hold(intent, &text, attachments, (), false);
+                        self.apply(vec![shown]);
+                    }
+                    // Put first and the run stopped, so it goes as the run ends.
+                    Delivery::Interrupt if self.driven.running() => {
+                        let shown = self.driven.queue().hold(intent, &text, attachments, (), true);
+                        self.apply(vec![shown]);
+                        if let Some(command) = self.driven.interrupt() {
+                            self.ask_for(command, None).await;
+                        }
+                    }
+                    _ => {
+                        if released {
+                            let shown = self.driven.queue().shown();
+                            self.apply(vec![shown]);
+                        }
+                        self.send(&text, &attachments, intent).await;
+                    }
+                }
+                self.next().await;
             }
+            ThreadAsk::Withdraw { intent } => {
+                let shown = self.driven.queue().withdraw(intent);
+                self.apply(shown.into_iter().collect());
+            }
+            ThreadAsk::Edit { intent, text } => {
+                let shown = self.driven.queue().edit(intent, &text);
+                self.apply(shown.into_iter().collect());
+            }
+            // Into the run under way, or a run of its own; what a stop held goes after it.
+            ThreadAsk::Promote { intent } => {
+                let Some((held, ())) = self.driven.queue().take(intent) else { return };
+                self.driven.queue().release();
+                let shown = self.driven.queue().shown();
+                self.apply(vec![shown]);
+                self.send(&held.text, &held.attachments, intent).await;
+            }
+            // The person's stop: nothing queued goes on its own until they speak again.
             ThreadAsk::Interrupt => {
+                let held = self.driven.queue().stop();
+                self.apply(held.into_iter().collect());
                 if let Some(command) = self.driven.interrupt() {
                     self.ask_for(command, None).await;
                 }
@@ -300,6 +340,22 @@ impl Task {
             ThreadAsk::Handoff => self.handoff = true,
             // Slopty holds the session already.
             ThreadAsk::TakeBack => {}
+        }
+    }
+
+    /// Send `text` and the files at `attachments` as intent `intent`: into the run under way
+    /// as a steer, or as a run of its own.
+    async fn send(&mut self, text: &str, attachments: &[String], intent: IntentId) {
+        let attached = crate::thread::attach::read(attachments).await;
+        let command = self.driven.send(text, &attached, intent);
+        self.ask_for(command, Some(Expect::Prompt(intent))).await;
+    }
+
+    /// The next message held goes, once pi has nothing else to do.
+    async fn next(&mut self) {
+        if let Some((next, shown)) = self.driven.next_queued() {
+            self.apply(shown);
+            self.send(&next.text, &next.attachments, next.intent).await;
         }
     }
 
@@ -345,12 +401,23 @@ impl Task {
                         }
                     }
                     Expect::Entries => self.read_again(data, now).await,
+                    // An extension's command took it: no run follows and pi never echoes it,
+                    // so it is not waited on, and what is queued may go.
+                    Expect::Prompt(intent)
+                        if response.disposition() == Some(rpc::Disposition::Handled) =>
+                    {
+                        self.driven.unsent(intent);
+                        self.next().await;
+                    }
                     Expect::Prompt(_) => {}
                 }
                 return;
             }
             match expect {
-                Expect::Prompt(intent) => self.driven.unsent(intent),
+                Expect::Prompt(intent) => {
+                    self.driven.unsent(intent);
+                    self.next().await;
+                }
                 // Without the session's record the thread cannot go on where it was.
                 Expect::Entries => {
                     let why = response.error.as_deref().unwrap_or("no reason given");
@@ -365,6 +432,7 @@ impl Task {
         self.apply(actions);
         if settled {
             self.ask_for(Command::GetSessionStats, Some(Expect::Stats)).await;
+            self.next().await;
         }
     }
 
@@ -382,6 +450,10 @@ impl Task {
             if let Err(e) = self.host.reset(self.thread, empty) {
                 tracing::warn!(thread = %self.thread, "a pi thread could not be read again: {e}");
             }
+            // What was held is held still: the reset showed none of it.
+            if !driven.queue().is_empty() {
+                actions.push(driven.queue().shown());
+            }
             self.apply(actions);
             self.driven = driven;
         }
@@ -391,5 +463,6 @@ impl Task {
         for ask in self.held.take().unwrap_or_default() {
             self.ask(ask).await;
         }
+        self.next().await;
     }
 }

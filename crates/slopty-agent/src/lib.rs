@@ -58,6 +58,7 @@ pub mod managed;
 pub mod observed;
 pub mod permission;
 pub mod pi;
+pub mod queue;
 pub mod reports;
 pub mod resume;
 pub mod roster;

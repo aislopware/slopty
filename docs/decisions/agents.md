@@ -781,8 +781,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `pi-args` fact and re-checked against the safe list each time pi starts again on the session,
     so a resumed or taken-back pi keeps its tool list. The model is left to the session, which
     keeps its own.
-  - **Not carried yet:** queueing a message (pi's follow-up queue has no way to take one message
-    back), and a picture in a message.
+  - **Not carried yet:** a picture in a message. (Queueing came on 2026-10-06: see "One queue
+    on the worker for ACP, Codex and pi".)
 
 - ✅ **pi's TUI takes a resting session on the person's word, and gives it back the same way;
   one writer holds it throughout** (2026-10-02; `Intent::Handoff`, `Intent::TakeBack`,
@@ -2094,3 +2094,37 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `listed_terminals_carry_the_agent_as_its_row_says` and its rung event tests; the link's
       `a_client_gets_the_agents_on_connect_and_again_after_it_lagged`, over the ladder; the
       worker's relay, managed-launcher, hook and interrupt tests, which now wait on the row.
+
+- ✅ **One queue on the worker for ACP, Codex and pi, and pi queues there** (2026-10-06;
+  `crates/slopty-agent/src/queue.rs`, `crates/slopty-worker/src/thread/pi/driven.rs`).
+  - **One queue.** ACP and Codex each held the person's queued messages in a copy of the same
+    code: hold, take back, change, send now, the stop that holds them all, and the release when
+    the person speaks again. Both now use `slopty_agent::queue::Queue`, unchanged in behaviour,
+    with their existing tests as the proof. Neither copy survives. Codex keeps the files it
+    already read beside each message, which the queue carries as the adapter's own value.
+  - **A restored queue leaves out what the worker schedules.** A queue rebuilt from the thread's
+    pending list (`Queue::of`, when an agent is taken up again) once took in the messages kept
+    for a time as well. Those belong to the worker's schedule, which sends them when their time
+    comes, so ACP could have sent one early. `Queue::of` now skips them (`Delivery::is_kept`).
+  - **pi queues on the worker, not in pi.** pi offers `queue` now. A message the person queues
+    while pi works waits in the codec's queue, where it can be taken back, changed or sent now.
+    It goes as a prompt of its own once pi has nothing else to do: no run works, and every
+    message sent has come back. The codec checks this after `agent_settled`, after a prompt
+    pi refused, and after the session is read again.
+    - pi's `follow_up` is not used. pi documents two ways to deliver at a stop: `follow_up`
+      during a run, or a `prompt` once `agent_settled` says pi will not go on by itself. pi's own
+      queue can only be emptied whole (`clear_queue`), not one message taken back or changed.
+      Its `abort` also sends what remains queued, which the person's stop must not do. So the
+      worker's queue is the one record, and the prompt at rest is the way it goes. The cost is
+      one round trip between runs, against a follow-up's going on in the same run.
+    - A prompt an extension's command takes (`disposition: handled`) starts no run and never
+      comes back, so it is no longer waited on. Before this, a message queued behind it would
+      have waited for ever.
+    - With no pi running, taking back and changing act on the thread's record. Sending one now
+      makes it a message that takes the thread up again. A scheduled message whose time comes
+      goes through the queue as well, so it waits for a run under way.
+  - Tests: `queue::tests::*`; the ACP and Codex worker and codec tests, unchanged;
+    `a_queued_message_goes_once_pi_has_nothing_else_to_do` (the codec, over the gate's
+    recording); `a_message_queued_while_pi_works_waits_on_the_worker` (hold, change, send now,
+    take back, and the stop's hold) and `a_message_queued_behind_an_extensions_command_goes` in
+    `crates/slopty-worker/tests/pi.rs`.

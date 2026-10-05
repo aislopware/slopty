@@ -252,38 +252,39 @@ impl Task {
         match ask {
             ThreadAsk::Send { text, attachments, intent } => {
                 // The person speaking again lets what their stop held go, ahead of this.
-                let released = self.session.release_queue();
+                let released = self.session.queue().release();
                 if self.session.running() || released {
-                    let actions = self.session.queue(intent, &text, attachments, false);
-                    self.apply(actions);
+                    let shown = self.session.queue().hold(intent, &text, attachments, (), false);
+                    self.apply(vec![shown]);
                     self.next().await;
                 } else {
                     self.prompt(&text, &attachments, intent).await;
                 }
             }
             ThreadAsk::Interrupting { text, attachments, intent } => {
-                if self.session.release_queue() {
-                    self.apply(vec![self.session.pending()]);
+                if self.session.queue().release() {
+                    let shown = self.session.queue().shown();
+                    self.apply(vec![shown]);
                 }
                 if self.session.running() {
-                    let actions = self.session.queue(intent, &text, attachments, true);
-                    self.apply(actions);
+                    let shown = self.session.queue().hold(intent, &text, attachments, (), true);
+                    self.apply(vec![shown]);
                     self.cancel(now).await;
                 } else {
                     self.prompt(&text, &attachments, intent).await;
                 }
             }
             ThreadAsk::Withdraw { intent } => {
-                let actions = self.session.withdraw(intent).unwrap_or_default();
-                self.apply(actions);
+                let shown = self.session.queue().withdraw(intent);
+                self.apply(shown.into_iter().collect());
             }
             ThreadAsk::Edit { intent, text } => {
-                let actions = self.session.edit(intent, &text).unwrap_or_default();
-                self.apply(actions);
+                let shown = self.session.queue().edit(intent, &text);
+                self.apply(shown.into_iter().collect());
             }
             ThreadAsk::Interrupt => {
-                let held = self.session.hold_queue();
-                self.apply(held);
+                let held = self.session.queue().stop();
+                self.apply(held.into_iter().collect());
                 self.cancel(now).await;
             }
             ThreadAsk::Answer { ask, choice, by } => {

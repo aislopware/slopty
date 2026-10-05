@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use slopty_agent::pi::driven::Driven;
 use slopty_agent::pi::sessions;
+use slopty_agent::queue::Queue;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, Outcome, PastSession, Start};
 use slopty_proto::thread::{
@@ -102,11 +103,38 @@ enum Ask {
 /// What a client asks of one thread.
 #[derive(Debug)]
 enum ThreadAsk {
-    Send { text: String, attachments: Vec<String>, intent: IntentId },
+    Send {
+        text: String,
+        attachments: Vec<String>,
+        intent: IntentId,
+        delivery: Delivery,
+    },
+    /// Take back the message held for `intent`.
+    Withdraw {
+        intent: IntentId,
+    },
+    /// Make the message held for `intent` say `text`.
+    Edit {
+        intent: IntentId,
+        text: String,
+    },
+    /// Send the message held for `intent` now.
+    Promote {
+        intent: IntentId,
+    },
     Interrupt,
-    Answer { ask: AskId, choice: String, message: Option<String>, by: Answerer },
-    SetModel { model: String },
-    SetEffort { effort: String },
+    Answer {
+        ask: AskId,
+        choice: String,
+        message: Option<String>,
+        by: Answerer,
+    },
+    SetModel {
+        model: String,
+    },
+    SetEffort {
+        effort: String,
+    },
     Compact,
     Handoff,
     TakeBack,
@@ -191,20 +219,30 @@ impl Pi {
             Intent::Handoff => ThreadAsk::Handoff,
             Intent::TakeBack if !tui => return refused("Slopty holds the session already"),
             Intent::TakeBack => ThreadAsk::TakeBack,
-            Intent::Send { delivery: Delivery::Queue, .. } => {
-                return Outcome::Unsupported { cap: Cap::named(Cap::QUEUE) };
-            }
             Intent::Send { text, attachments, .. }
                 if text.trim().is_empty() && attachments.is_empty() =>
             {
                 return refused("There is nothing to send");
             }
-            Intent::Send { text, attachments, .. } => {
+            Intent::Send { text, attachments, delivery } => {
                 if let Err(why) = super::attach::check(attachments) {
                     return refused(&why);
                 }
-                ThreadAsk::Send { text: text.clone(), attachments: attachments.clone(), intent }
+                let (text, attachments, delivery) = (text.clone(), attachments.clone(), *delivery);
+                ThreadAsk::Send { text, attachments, intent, delivery }
             }
+            Intent::Withdraw { pending }
+            | Intent::Edit { pending, .. }
+            | Intent::Promote { pending }
+                if !state.pending.iter().any(|p| p.intent == *pending) =>
+            {
+                return refused("That message is not waiting");
+            }
+            Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
+            Intent::Edit { pending, text } => {
+                ThreadAsk::Edit { intent: *pending, text: text.clone() }
+            }
+            Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
             Intent::Interrupt => {
                 if !live || !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
                     return refused("pi is not working");
@@ -254,7 +292,15 @@ impl Pi {
             other => return Outcome::Unsupported { cap: Cap::named(other.needs()) },
         };
         let waits = matches!(asked, ThreadAsk::Handoff | ThreadAsk::TakeBack);
-        if !live && !waits && !matches!(asked, ThreadAsk::Send { .. }) {
+        // What is held is the thread's record, answered whether pi runs or not.
+        let held = matches!(
+            asked,
+            ThreadAsk::Send { .. }
+                | ThreadAsk::Withdraw { .. }
+                | ThreadAsk::Edit { .. }
+                | ThreadAsk::Promote { .. }
+        );
+        if !live && !waits && !held {
             return refused("pi is not running");
         }
         if self.0.send(Ask::Thread { thread, ask: asked }).is_err() {
@@ -385,7 +431,12 @@ impl Served {
             .prompt
             .clone()
             .filter(|p| !p.trim().is_empty())
-            .map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id })
+            .map(|text| ThreadAsk::Send {
+                text,
+                attachments: Vec::new(),
+                intent: id,
+                delivery: Delivery::Steer,
+            })
             .into_iter()
             .collect();
         let resumed = sessions::resumed(&start.args);
@@ -515,6 +566,7 @@ impl Served {
             let (mut driven, _) = driven_of(&state);
             self.host.apply(thread, driven.held_by_slopty());
         }
+        let left = self.held_at_rest(thread, &state, left);
         let (sends, dropped): (Vec<_>, Vec<_>) =
             left.into_iter().partition(|ask| matches!(ask, ThreadAsk::Send { .. }));
         let back = dropped.iter().any(|ask| matches!(ask, ThreadAsk::TakeBack));
@@ -525,6 +577,42 @@ impl Served {
             return;
         }
         self.drive(thread, sends).await;
+    }
+
+    /// `asks` of `thread`'s queue while no pi runs: a message taken back or changed in the
+    /// record, and one sent now made a message that takes the thread up again. The other asks.
+    fn held_at_rest(
+        &self,
+        thread: ThreadId,
+        state: &ThreadState,
+        asks: Vec<ThreadAsk>,
+    ) -> Vec<ThreadAsk> {
+        let mut queue = Queue::of(&state.pending);
+        let mut shown = None;
+        let mut left = Vec::new();
+        for ask in asks {
+            match ask {
+                ThreadAsk::Withdraw { intent } => shown = queue.withdraw(intent).or(shown),
+                ThreadAsk::Edit { intent, text } => shown = queue.edit(intent, &text).or(shown),
+                ThreadAsk::Promote { intent } => {
+                    if let Some((held, ())) = queue.take(intent) {
+                        queue.release();
+                        shown = Some(queue.shown());
+                        left.push(ThreadAsk::Send {
+                            text: held.text,
+                            attachments: held.attachments,
+                            intent,
+                            delivery: Delivery::Steer,
+                        });
+                    }
+                }
+                ask => left.push(ask),
+            }
+        }
+        if let Some(shown) = shown {
+            self.host.apply(thread, vec![shown]);
+        }
+        left
     }
 
     /// What follows `thread`'s pi or TUI ending: what it did not take, and `next`.
@@ -539,6 +627,10 @@ impl Served {
                 }
             }
             Next::Driven => {
+                let left = match self.host.state(thread) {
+                    Some((state, _)) => self.held_at_rest(thread, &state, left),
+                    None => left,
+                };
                 let sends = left.into_iter().filter(|a| matches!(a, ThreadAsk::Send { .. }));
                 self.drive(thread, sends.collect()).await;
             }
@@ -643,9 +735,12 @@ fn kept_args(meta: &slopty_proto::thread::ThreadMeta) -> Vec<String> {
     }
 }
 
-/// The codec of the thread `state`, as it stands, read again from nothing.
+/// The codec of the thread `state`, as it stands, read again from nothing but for the
+/// messages it holds.
 fn driven_of(state: &ThreadState) -> (Driven, Vec<Action>) {
-    Driven::of(&state.meta, WallMs::now())
+    let (mut driven, actions) = Driven::of(&state.meta, WallMs::now());
+    *driven.queue() = Queue::of(&state.pending);
+    (driven, actions)
 }
 
 fn refused(reason: &str) -> Outcome {
