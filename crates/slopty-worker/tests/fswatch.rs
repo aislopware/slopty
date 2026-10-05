@@ -58,6 +58,38 @@ mod follow {
         next(changes, window).await.is_none()
     }
 
+    /// Every report of `path` from a change made at `started` until none comes for two holds:
+    /// when each was received, since `started`.
+    async fn reports(changes: &mut Changes, path: &Path, started: Instant) -> Vec<Duration> {
+        let mut received = Vec::new();
+        let mut wait = WITHIN;
+        while let Some(paths) = next(changes, wait).await {
+            assert_eq!(paths, vec![key(path)]);
+            received.push(started.elapsed());
+            wait = HOLD * 2;
+        }
+        received
+    }
+
+    /// `received` is the one report a change makes, as far as the follower can tell.
+    ///
+    /// A look comes once a file's events have been quiet for `QUIET` (2 ms), and the syscalls
+    /// of one change land microseconds apart, so a quiet machine sends one report. A loaded
+    /// one can stall the writer between them for longer; the follower then reports what it saw
+    /// and again once the rest is written, which is right. What it promises is that a file's
+    /// reports are at least a `HOLD` apart, so reports received over `span` since the change
+    /// began number at most `span / HOLD + 1`: one, unless load stretched the change past a
+    /// hold.
+    fn one_report(what: &str, received: &[Duration]) {
+        let span = *received.last().unwrap_or_else(|| panic!("{what}: not reported"));
+        let most = usize::try_from(span.as_millis() / HOLD.as_millis()).unwrap() + 1;
+        assert!(
+            received.len() <= most,
+            "{what}: {} reports, received at {received:?}: more than one a hold",
+            received.len()
+        );
+    }
+
     fn write_in_place(path: &Path, text: &str) {
         let mut file =
             std::fs::OpenOptions::new().write(true).truncate(true).create(true).open(path).unwrap();
@@ -100,10 +132,9 @@ mod follow {
             for (kind, samples) in &mut taken {
                 let at = Instant::now();
                 change(kind, &path, round);
-                let got = next(&mut changes, WITHIN).await;
-                samples.push(at.elapsed());
-                assert_eq!(got, Some(vec![key(&path)]), "{kind} in round {round}");
-                assert!(quiet(&mut changes, HOLD * 2).await, "{kind} reported twice");
+                let received = reports(&mut changes, &path, at).await;
+                one_report(&format!("{kind} in round {round}"), &received);
+                samples.extend(received.first());
             }
         }
         taken
@@ -126,13 +157,16 @@ mod follow {
         std::fs::write(&path, "old\n").unwrap();
         let (_lists, mut changes) = following(&[&path], Limits::default()).await;
 
+        // Two hundred writes as fast as a loop makes them: one report ([`one_report`]).
+        let started = Instant::now();
         let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&path).unwrap();
         for line in 0..200 {
             writeln!(file, "line {line}").unwrap();
         }
         drop(file);
-        assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&path)]));
-        assert!(quiet(&mut changes, HOLD * 2).await, "a burst reported twice");
+        let received = reports(&mut changes, &path, started).await;
+        println!("a burst of 200 writes: reports received at {received:?}");
+        one_report("a burst", &received);
 
         // A writer that keeps at it, a line a millisecond or so: reported at its first write,
         // then at most once a hold, and once more after its last write.
