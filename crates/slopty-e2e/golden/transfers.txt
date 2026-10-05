@@ -10,7 +10,7 @@ Button │ Needs you
 Button │ More
 Group │ drop-here
 Heading │ terminal drop-here
-Button │ Cancel upload │ ↑ 0%
+Button │ Stop upload │ ↑ 0%
 Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)

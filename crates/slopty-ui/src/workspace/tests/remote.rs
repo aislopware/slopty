@@ -741,7 +741,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     assert!(chips(cx).is_empty(), "the chip goes at once");
     assert!(matches!(calls.try_recv(), Ok(Call::Cancel(c)) if c == xfer), "and the upload stops");
     let nodes = tree(cx);
-    assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
+    assert!(!nodes.iter().any(|n| n.is("Button", Some("Stop upload"))), "{nodes:#?}");
 
     // The "+" menu's first row asks for the system's picker, for this tile.
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -842,13 +842,29 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
 
     let bounds = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
     let at = bounds.center();
+    let said = |cx: &mut VisualTestContext| {
+        tree(cx).into_iter().find(|n| {
+            n.role == "Status" && n.label.as_deref().is_some_and(|l| l.starts_with("Upload to"))
+        })
+    };
+    assert!(said(cx).is_none(), "nothing yet");
     cx.simulate_event(FileDropEvent::Entered {
         position: at,
         paths: ExternalPaths(std::iter::once(file.clone()).collect()),
     });
     cx.simulate_event(FileDropEvent::Pending { position: at });
+    cx.run_until_parked();
+    // While the file is over the tile, a wash over the body says where it will land.
+    let overlay = said(cx).expect("the overlay says where the file lands");
+    assert!(
+        overlay.label.as_deref().is_some_and(|w| w.starts_with("Upload to studio")),
+        "{overlay:?}"
+    );
+    let shown = cx.debug_bounds(selector("drop-overlay", tile.item)).expect("the overlay");
+    assert!(bounds.contains(&shown.center()), "over the tile: {shown:?}");
     cx.simulate_event(FileDropEvent::Submit { position: at });
     cx.run_until_parked();
+    assert!(said(cx).is_none(), "gone on the drop");
     let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
         panic!("an upload");
     };
@@ -888,6 +904,9 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     let Call::Upload(second, ..) = calls.try_recv().unwrap() else { panic!("an upload") };
     cx.run_until_parked();
     let pill = cx.debug_bounds(selector("upload", tile.item)).expect("the pill");
+    cx.simulate_mouse_move(pill.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(tree(cx).iter().any(|n| n.is("Button", Some("Stop upload"))), "says what it does");
     cx.simulate_click(pill.center(), Modifiers::none());
     cx.run_until_parked();
     assert!(matches!(calls.try_recv().unwrap(), Call::Cancel(x) if x == second));

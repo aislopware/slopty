@@ -761,7 +761,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
         .unwrap();
     let dump = drv
         .wait_for("the upload under way", STEP, |d| {
-            d.a11y_node("Button", Some("Cancel upload")).is_some()
+            d.a11y_node("Button", Some("Stop upload")).is_some()
         })
         .await
         .unwrap();
@@ -769,7 +769,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
     assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();
     let cancel = drv.dump().await.unwrap();
-    if let Some(node) = cancel.a11y_node("Button", Some("Cancel upload")) {
+    if let Some(node) = cancel.a11y_node("Button", Some("Stop upload")) {
         let [x, y, w, h] = node.bounds;
         drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     }

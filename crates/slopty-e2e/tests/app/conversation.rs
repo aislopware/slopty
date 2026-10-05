@@ -319,7 +319,7 @@ async fn a_file_dropped_on_the_thread_waits_in_the_composer() {
         .await
         .unwrap();
     assert!(
-        !has(&dump, "Button", "Cancel upload"),
+        !has(&dump, "Button", "Stop upload"),
         "the header says nothing the chip says: {:#?}",
         dump.a11y
     );

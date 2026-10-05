@@ -7397,3 +7397,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::context_menus::a_right_click_or_a_long_press_opens_a_things_own_menu`,
     `workspace::tests::context_menus::a_tabs_menu_moves_its_tile_out_of_the_column`,
     `workspace::tests::folders::a_right_click_on_a_row_offers_what_its_keys_do`.
+- ✅ **An upload says how to stop it; a drop says where it lands** (2026-10-06,
+  `.research/ux-audit-2026-10-05.md` §11 #15, I4).
+  - **The pill.** An upload's pill in a tile's header stopped the upload when pressed, but
+    looked like a readout. Under the pointer its ring now turns into "×", as Safari's download
+    button does, and its tooltip and its name say "Stop upload". On touch, which has no hover,
+    the "×" shows at rest.
+  - **The drop.** A file dragged over a tile drew a 1 pt accent edge and nothing else, so the
+    person could not tell where the file would go. While a drag of files is over a tile that
+    takes them, a wash in `accent_fill` at `alpha::FAINT` sits over its body, inset by
+    `spacing.sm` with `radii.md`. One centred line in it says where the files land, the way
+    `drop_files` takes them:
+    - "Upload to studio · ~/work" for a shell's directory or a folder;
+    - "Attach to the message" for an agent's composer;
+    - "Drop on <title>" for a remote window.
+  - **Read by a screen reader.** The line is a status, so a screen reader says it as the drag
+    arrives. The overlay is drawn only while the drag is over the tile (`files_over`), not
+    hidden the rest of the time: a hidden element would still be in the accessibility tree.
+  - Tests: `workspace::tests::remote::a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths`;
+    e2e `gallery::a_forwarded_port_and_an_upload_show_where_they_belong`. Golden:
+    `transfers.txt`, where the pill's name changed.

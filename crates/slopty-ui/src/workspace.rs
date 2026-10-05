@@ -932,6 +932,8 @@ pub struct WorkspaceView {
     /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
     /// from and delete once the upload ends.
     drop_landing: Option<std::path::PathBuf>,
+    /// The tile a drag of files from elsewhere is over, which says where they would land.
+    files_over: Option<TileRef>,
     /// Where a drag of worker files out of the app goes: a system drag, unless the self-test
     /// keeps the promises itself.
     #[cfg(target_os = "macos")]
@@ -1138,6 +1140,7 @@ impl WorkspaceView {
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
+            files_over: None,
             #[cfg(target_os = "macos")]
             drag_sink: None,
             #[cfg(target_os = "macos")]

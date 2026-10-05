@@ -72,6 +72,15 @@ const TAB_MIN: f32 = 120.0;
 /// pointer is on the header itself, not anywhere over the body.
 const HEADER_GROUP: &str = "tile-header";
 
+/// The upload pill's hover group, which turns its ring into "×".
+const UPLOAD_GROUP: &str = "upload";
+
+/// Where files dropped on an agent's tile go.
+pub(super) const ATTACH_TO_MESSAGE: &str = "Attach to the message";
+
+/// What the upload pill does when pressed, as it says.
+pub(super) const STOP_UPLOAD: &str = "Stop upload";
+
 /// How much faster a header's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
 /// How much faster than the title a header's readouts give way: an agent's pill shortens to
@@ -799,7 +808,6 @@ impl WorkspaceView {
                 ItemKind::Window { .. } | ItemKind::Display { .. } => !cfg!(target_os = "macos"),
                 _ => false,
             };
-        let accent = theme.surfaces.accent;
 
         // The open animation grows the tile about its centre.
         let rect = placed.rect;
@@ -828,19 +836,92 @@ impl WorkspaceView {
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
                 )
                 .when(takes_files, |el| {
-                    el.drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.border(px(slopty_theme::stroke::EDGE)).border_color(hsla(accent))
-                    })
+                    el.on_drag_move(cx.listener(
+                        move |this, ev: &gpui::DragMoveEvent<ExternalPaths>, _w, cx| {
+                            // Over it, it is this tile; leaving it, none, unless another
+                            // tile already took the drag.
+                            let over = ev.bounds.contains(&ev.event.position);
+                            let was = this.files_over == Some(tile);
+                            if over != was {
+                                this.files_over = over.then_some(tile);
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .on_drop(cx.listener(
                         move |this, paths: &ExternalPaths, _w, cx| {
+                            this.files_over = None;
                             this.drop_files(tile, paths.paths(), cx);
                         },
                     ))
                 })
                 .child(header)
                 .child(body)
+                .children(
+                    (takes_files && self.files_over == Some(tile) && cx.has_active_drag())
+                        .then(|| self.drop_overlay(tile, item, chrome)),
+                )
                 .into_any_element(),
         )
+    }
+
+    /// What a file dragged over the tile shows while it is over it: a wash inset from the body
+    /// and one centred line saying where the file will land, as [`Self::drop_files`] takes it,
+    /// which a screen reader hears as it arrives.
+    fn drop_overlay(&self, tile: TileRef, item: &Item, chrome: Chrome) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = chrome.k;
+        let id = item.id;
+        let words = self.drop_words(tile, item);
+        let inset = theme.spacing.sm * k;
+        div()
+            .id(SharedString::from(format!("drop-overlay-{}", id.as_uuid())))
+            .debug_selector(move || format!("drop-overlay-{}", id.as_uuid()))
+            .role(Role::Status)
+            .aria_label(SharedString::from(words.clone()))
+            .absolute()
+            .left(px(inset))
+            .right(px(inset))
+            .bottom(px(inset))
+            .top(px(theme.density.header.mul_add(k, inset)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(theme.spacing.md * k))
+            .rounded(px(theme.radii.md * k))
+            .bg(crate::colors::hsla_alpha(s.accent_fill, slopty_theme::alpha::FAINT))
+            .text_size(px(theme.typography.small() * k))
+            .text_color(hsla(s.text))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(words)),
+            )
+            .into_any_element()
+    }
+
+    /// Where files dropped on `item` go, in a line: a shell's directory on its machine, a
+    /// folder, the message an agent's composer is writing, or a remote window.
+    pub(super) fn drop_words(&self, tile: TileRef, item: &Item) -> String {
+        let machine = self.worker_name(tile.worker);
+        let home = self.home_of(tile.worker);
+        let to =
+            |place: String| format!("Upload to {machine}{}{place}", super::rollup::META_SEPARATOR);
+        match &item.kind {
+            ItemKind::Terminal { session } if self.shown_composer(*session).is_some() => {
+                ATTACH_TO_MESSAGE.to_owned()
+            }
+            ItemKind::Thread { .. } => ATTACH_TO_MESSAGE.to_owned(),
+            ItemKind::Terminal { session } => {
+                self.session_tail(*session).map_or_else(|| format!("Upload to {machine}"), to)
+            }
+            ItemKind::Folder { path } => to(cwd_tail(path, home)),
+            _ => format!("Drop on {}", self.tile_title(item)),
+        }
     }
 
     /// The hairlines a tile owes its neighbours: on its right edge where a column follows, on
@@ -1081,23 +1162,62 @@ impl WorkspaceView {
             }
         });
         // An upload in flight says how far it got, as the kit's ring and its figure in a pill;
-        // a click stops it. An attachment's is said by its chip over the composer, and said
-        // once. No line along the header's foot: a line on an edge read as a stray rule.
+        // a click stops it, which the ring says by turning into "×" under the pointer, as
+        // Safari's download button does (at rest on touch, which has no hover). An
+        // attachment's is said by its chip over the composer, and said once. No line along the
+        // header's foot: a line on an edge read as a stray rule.
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
             let figure =
                 kit::progress::Progress::Share(upload.fraction()).figure().unwrap_or_default();
+            let side = px(theme.typography.small() * k);
             let ring = kit::progress::ring(
                 theme,
                 SharedString::from(format!("upload-ring-{}", id.as_uuid())),
                 upload.fraction(),
                 s.accent_fill,
-                px(theme.typography.small() * k),
+                side,
             );
-            let pill = pill("upload", id, (Some(ring), figure), s.text_secondary, theme, chrome)
+            let touch = theme.density == slopty_theme::Density::TOUCH;
+            let stop =
+                crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_secondary))
+                    .size(side);
+            let mark = div()
+                .relative()
+                .flex_none()
+                .size(side)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .when(touch, gpui::Styled::invisible)
+                        .group_hover(UPLOAD_GROUP, gpui::Styled::invisible)
+                        .child(ring),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("upload-stop-{}", id.as_uuid()))
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(!touch, |el| {
+                            el.invisible().group_hover(UPLOAD_GROUP, gpui::Styled::visible)
+                        })
+                        .child(stop),
+                )
+                .into_any_element();
+            let hint_theme = std::rc::Rc::new(theme.clone());
+            let pill = pill("upload", id, (Some(mark), figure), s.text_secondary, theme, chrome)
+                .group(UPLOAD_GROUP)
                 .role(Role::Button)
-                .aria_label("Cancel upload")
+                .aria_label(STOP_UPLOAD)
                 .aria_value(SharedString::from(upload.label()));
-            tab_stop(kit::tabular(pill), s.focus)
+            kit::hint_timing(tab_stop(kit::tabular(pill), s.focus))
+                .tooltip(move |_window, cx| {
+                    let theme = std::rc::Rc::clone(&hint_theme);
+                    cx.new(|_| kit::Hint::new(STOP_UPLOAD, "", theme)).into()
+                })
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element()
         });
