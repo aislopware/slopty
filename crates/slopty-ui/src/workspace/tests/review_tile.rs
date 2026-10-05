@@ -318,6 +318,32 @@ fn added_comments_reach_a_thread_tile_and_go_only_then(cx: &mut TestAppContext) 
     }
 }
 
+/// Comments sent bring the thread's own tile to the front, an agent with no terminal as well
+/// as one in a terminal: its answer shows there.
+#[gpui::test]
+fn sent_comments_bring_a_thread_tile_forward(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX);
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let review = review_from(&view, cx, &own, thread);
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 9);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    frames(cx);
+    assert_eq!(focused(&view, cx), Some(shell), "away from the thread");
+
+    review.update(cx, |_, cx| cx.emit(crate::review::ReviewEvent::CommentsSent { thread }));
+    frames(cx);
+    assert_eq!(focused(&view, cx), Some(tile), "the thread's tile, where its answer shows");
+}
+
 /// A thread whose machine is not connected here takes nothing: the comments stay in the review,
 /// free to go again, and the person is told why.
 #[gpui::test]
