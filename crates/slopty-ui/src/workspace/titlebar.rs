@@ -40,7 +40,6 @@ use gpui::{
 use slopty_client::groups::Group;
 use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
-use slopty_theme::Typography;
 
 use super::actions::{
     AddWindow, NewAgent, NewNote, NewTerminal, OpenPalette, ToggleNavigator, ToggleStats,
@@ -466,10 +465,10 @@ impl WorkspaceView {
     }
 
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
-    /// (or its agent's mark) before its name and how it is doing after, at the size and weight
-    /// the breadcrumb names a workspace in on a wider window: the chrome has no display type.
-    /// The tile has no header of its own on a phone, so its rows are the bar's "…". With no
-    /// tile focused it names the workspace.
+    /// (or its agent's mark) before its name and how it is doing after, in the panel title's
+    /// role, so it stands above the rows a finger's larger type sets, as the drawer's title
+    /// does. The tile has no header of its own on a phone, so its rows are the bar's "…". With
+    /// no tile focused it names the workspace.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
         let theme = &self.theme;
@@ -507,14 +506,13 @@ impl WorkspaceView {
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
         // Renamed, the field takes the title's place, as it does in a header.
         if let Some(field) = self.rename_field(tile, id) {
-            return div()
+            return kit::typed(div(), theme.roles().panel_title, 1.0)
                 .id("phone-renaming")
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xs))
-                .text_size(px(theme.typography.ui_size))
                 .child(lead)
                 .child(field)
                 .into_any_element();
@@ -819,9 +817,9 @@ impl WorkspaceView {
     }
 }
 
-/// A phone bar's heading: one line, the body's size in the medium weight, giving way at its end.
+/// A phone bar's heading: one line in the panel title's role, giving way at its end.
 fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stateful<gpui::Div> {
-    div()
+    kit::typed(div(), theme.roles().panel_title, 1.0)
         .id("phone-title")
         .debug_selector(|| "phone-title".to_owned())
         .role(Role::Heading)
@@ -831,8 +829,6 @@ fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stat
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
-        .text_size(px(theme.typography.ui_size))
-        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
         .text_color(hsla(theme.surfaces.text))
 }
 

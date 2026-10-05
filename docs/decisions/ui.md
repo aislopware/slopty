@@ -7544,3 +7544,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   larger. It now takes `TypeRoles::panel_title` (the strong weight, a step above the rows), so
   it stands as the drawer's heading. Test: `a_phone_drawer_names_the_workspace` checks its
   line height. Golden: `ios-phone-navigator`, retaken on the simulator.
+- ✅ **A phone bar's title takes the panel title role too** (2026-10-06, amends "A phone has one
+  bar, the focused tile's"). It had the same flaw as the drawer's title: at 13 pt medium it sat
+  below the 17 pt rows a finger's roles set beside it. It now takes `TypeRoles::panel_title`,
+  as an iOS navigation bar's title stands above its rows, and the rename field that takes its
+  place does too, so renaming moves nothing. Test:
+  `workspace::tests::tiles::a_phone_bar_is_a_navigation_bar` checks its line height. Golden:
+  `thread-phone`; the iOS phone goldens that show the bar are retaken on the simulator.

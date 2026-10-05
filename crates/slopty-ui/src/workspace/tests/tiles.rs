@@ -959,15 +959,14 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
 }
 
 /// On a phone the bar is the focused tile's, as a navigation bar names its screen: its kind and
-/// its title, at the size the breadcrumb names a workspace in on a wider window (no display
-/// type in the chrome), and the tile draws no header of its own, so the screen keeps one bar.
+/// its title, in the panel title's role, a step above the rows as the drawer's title is, and
+/// the tile draws no header of its own, so the screen keeps one bar.
 /// There is no "+": the tile's own rows lead the "…" menu, then what "+" opened.
 #[gpui::test]
 fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    let crumb = cx.debug_bounds("crumb-workspace-name").expect("the breadcrumb's name");
     assert!(cx.debug_bounds(selector("title", shell.item)).is_some(), "a header on a desktop");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
@@ -981,7 +980,8 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("phone-title").expect("the focused tile's title");
     assert!(cx.debug_bounds("breadcrumb").is_none(), "the title alone, no breadcrumb");
-    assert!((name.size.height - crumb.size.height).abs() < px(0.5), "{name:?} {crumb:?}");
+    let role = view.read_with(cx, |v, _| v.theme.roles().panel_title);
+    assert!((name.size.height - px(role.line)).abs() < px(0.5), "a panel's title: {name:?}");
     click(cx, "more");
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
