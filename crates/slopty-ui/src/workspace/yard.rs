@@ -19,7 +19,7 @@ use gpui::{
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
-use super::agents::{Step, Waiting, agent_status_text};
+use super::agents::{Step, Waiting, agent_mark_of, agent_status_text};
 use super::faces::ThreadWait;
 use crate::companions::{self, Kind, Pose, companion};
 use crate::draw::Draw;
@@ -43,22 +43,15 @@ struct Dweller {
 }
 
 impl WorkspaceView {
-    /// Everyone in the yard, needs you first: the agents of the terminals this client
-    /// follows, those only the server reports, and the threads no terminal speaks for.
+    /// Everyone in the yard, needs you first: the agents at work in terminals, on every
+    /// worker, and the threads no terminal speaks for.
     fn dwellers(&self) -> Vec<Dweller> {
         let mut out = Vec::new();
-        let followed = self.agents.iter().map(|(s, a)| (*s, self.worker_of_session(*s), a));
-        let reported = self
-            .server_agents
-            .iter()
-            .filter(|(s, _)| !self.agents.contains_key(s))
-            .map(|(s, (worker, a))| (*s, Some(*worker), a));
-        for (session, worker, event) in followed.chain(reported) {
-            let (Some(worker), Some(agent)) = (worker, self.session_agent(session)) else {
-                continue;
-            };
-            let Some(status) = self.agent_mark(session) else { continue };
-            let what = agent_status_text(event);
+        for (session, stand) in self.agent_sessions() {
+            let worker = stand.worker;
+            let Some(agent) = self.session_agent(session) else { continue };
+            let status = agent_mark_of(stand);
+            let what = agent_status_text(stand);
             out.push(Dweller {
                 agent: agent.to_owned(),
                 pose: Pose::of_status(Some(status)),
@@ -72,9 +65,6 @@ impl WorkspaceView {
             });
         }
         for (thread, stand) in self.thread_stands() {
-            if stand.terminal.is_some_and(|s| self.agents.contains_key(&s)) {
-                continue;
-            }
             let Some(agent) = self.thread_agent(thread) else { continue };
             let status = stand.status();
             out.push(Dweller {

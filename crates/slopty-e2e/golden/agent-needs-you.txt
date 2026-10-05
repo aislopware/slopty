@@ -16,7 +16,7 @@ Button │ Close tile
 Group │ Thread
 Status │ Nothing here yet
 Group │ Activity
-Dialog │ Bash
+Dialog │ Wants to run a command
 Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
@@ -37,5 +37,5 @@ Button │ Send
 Group │ Status
 Status │ e2e-worker
 Group │ Agents
-Button │ Claude Code · Needs approval: Bash
+Button │ Claude Code · Needs approval: Wants to run a command
 Button │ Claude Code · Idle

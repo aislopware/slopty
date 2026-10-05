@@ -148,8 +148,9 @@ fn the_ladder_and_needs_you_list_a_waiting_thread_by_its_rung(cx: &mut TestAppCo
     let mut failed = another(asking(None));
     failed.requests.clear();
     failed.status.phase = slopty_proto::thread::Phase::Failed;
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     table(&view, cx, key, vec![tiled.clone(), untiled.clone(), failed.clone()]);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
 
     let ladder = view.read_with(cx, |v, _| v.attention_ladder());
     let said: Vec<(Option<TileRef>, Option<ThreadId>)> = ladder
@@ -253,10 +254,7 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
         tiles: vec![(TermRef { worker: laptop_id, session: terminal }, tile)],
         ..Ladder::default()
     };
-    view.update_in(cx, |v, _w, cx| {
-        v.server_agent_event(laptop, blocked(terminal), cx);
-        v.server_ladder(&ladder, cx);
-    });
+    view.update_in(cx, |v, _w, cx| v.server_ladder(&ladder, cx));
     cx.run_until_parked();
     view.update(cx, |v, _| {
         assert_eq!(v.needs_you_on(key), 1, "the studio's thread once, though both say it");

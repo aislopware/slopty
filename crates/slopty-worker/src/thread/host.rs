@@ -304,13 +304,21 @@ impl Host {
     ///
     /// # Errors
     ///
-    /// When `dir` cannot be made or read.
+    /// When the OS refuses `dir` (it cannot be made or listed) or the record of starts in it:
+    /// what is in them never fails an open.
     pub fn open(dir: &Path, limits: Limits) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let mut threads = HashMap::new();
         let mut table = Table::new(ThreadId::new().as_uuid().as_u64_pair().1);
         for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
+            // One entry the OS will not list is one thread lost, not every thread.
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), "a thread's entry is unreadable: {e}");
+                    continue;
+                }
+            };
             if !path.is_dir() {
                 continue;
             }

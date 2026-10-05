@@ -860,17 +860,12 @@ pub struct TerminalInfo {
     /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
     /// starts a new one); `None` before the first frame.
     pub epoch: Option<u32>,
-    /// The coding agent's state as the worker reports it: `idle`, `working`, `tool:<name>`,
-    /// `blocked:permission:<tool>`, `blocked:question`, `blocked:elicitation`,
-    /// `blocked:idle`, `done`; `None` without an agent.
+    /// The coding agent's state as its thread's row says it, in the status vocabulary:
+    /// `idle`, `working`, `waiting`, `needs-you`, `done`, `failed`; `None` without an agent.
     pub agent: Option<String>,
-    /// What the worker says the agent is doing ("thinking…", "calling Write…", a prompt's
-    /// first line, a permission's summary); `None` without one.
-    #[serde(default)]
+    /// The agent's state in one short line, as the app says it ("Needs approval: $ ls", the
+    /// call it is on); `None` without an agent.
     pub agent_detail: Option<String>,
-    /// Which signal the worker read the agent's state from: `process`, `title`, `transcript`
-    /// or `hook`; `None` without an agent.
-    pub agent_source: Option<String>,
     /// Keystroke → paint, for keys typed into this terminal.
     pub latency: LatencyInfo,
     /// What the terminal font said about itself, once the grid has been laid out.

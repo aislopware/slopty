@@ -3361,9 +3361,6 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Screen(event)) => {
             view.update(cx, |v, cx| v.screen_event(key, event, cx));
         }
-        LinkEvent::Control(WorkerMsg::Agent(event)) => {
-            view.update(cx, |v, cx| v.agent_event(event, cx));
-        }
         LinkEvent::Control(WorkerMsg::File { path, read }) => {
             view.update(cx, |v, cx| v.file_read(key, &path, &read, cx));
         }
@@ -3440,12 +3437,14 @@ fn apply_link_event(
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`).
+        // read (`LinkEvent::Handoff`). The thread table says what an agent does: its row is
+        // what the workspace reads.
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_),
+            | WorkerMsg::Handoff(_)
+            | WorkerMsg::Agent(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

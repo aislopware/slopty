@@ -18,10 +18,7 @@ fn agent_tile(
 ) -> (TileRef, SessionId) {
     let session = SessionId::new();
     let tile = opens(view, cx, fake, session, fake.me, 1);
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
-        v.focus_tile(tile, cx);
-    });
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
     fake.drain();
     (tile, session)
@@ -160,7 +157,11 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
         detail: Some("$ touch a-file-with-a-rather-long-name-for-a-phone.txt".into()),
         ..blocked(session)
     };
-    view.update_in(cx, |v, _w, cx| v.agent_event(asks, cx));
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(asks, cx);
+        // On its TUI, where the header's pill speaks for it.
+        v.show_face(session, false, cx);
+    });
     cx.run_until_parked();
     let widths = |cx: &mut VisualTestContext| {
         let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
@@ -178,7 +179,7 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
     assert!((phone_title - title).abs() < 0.5, "the whole title: {phone_title} of {title}");
     assert!((word - desk).abs() < 0.5, "the state alone on both: {word} against {desk}");
     let nodes = tree(cx);
-    let full = "Needs approval: $ touch a-file-with-a-rather-long-name-for-a-phone.txt";
+    let full = "Needs approval: Run touch a-file-with-a-rather-long-name-for-a-phone.txt";
     assert!(nodes.iter().any(|n| n.label.as_deref() == Some(full)), "all of it, said");
     let brief = AgentEvent {
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
@@ -264,7 +265,9 @@ fn an_untitled_agent_is_named_by_its_thread(cx: &mut TestAppContext) {
     let two = SessionId::new();
     let second = opens(&view, cx, &studio, two, studio.me, 2);
     view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(two) }, cx);
+        for session in [one, two] {
+            v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        }
     });
     cx.run_until_parked();
     let titles = |cx: &mut VisualTestContext| {
@@ -273,7 +276,8 @@ fn an_untitled_agent_is_named_by_its_thread(cx: &mut TestAppContext) {
     assert_eq!(titles(cx), ["Claude Code", "Claude Code 2"]);
     let mut row = thread_on(one).row(WallMs::ZERO);
     row.title = "Fix the flaky test".to_owned();
-    table(&view, cx, studio.key, vec![row]);
+    let other = view.read_with(cx, |v, cx| v.row_of_terminal(studio.key, two, cx)).expect("two's");
+    table(&view, cx, studio.key, vec![row, other]);
     assert_eq!(titles(cx), ["Fix the flaky test", "Claude Code"]);
 }
 

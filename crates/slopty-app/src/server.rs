@@ -441,33 +441,21 @@ impl Workspace {
                     let seq = event.seq;
                     self.view.update(cx, |v, cx| v.project_update(seq, *update, cx));
                 }
-                Happening::Agent { worker, event } => {
-                    let key = worker_key(worker);
-                    self.view.update(cx, |v, cx| v.server_agent_event(key, event, cx));
-                }
-                Happening::SessionClosed { term } => {
-                    self.view.update(cx, |v, cx| v.server_session_closed(term.session, cx));
-                }
-                // The directory carries liveness, and a worker's own link its terminals.
+                // The directory carries liveness, a worker's own link its terminals, and the
+                // ladder where every agent's thread stands.
                 Happening::Worker { .. }
                 | Happening::WorkerRemoved { .. }
                 | Happening::SessionOpened { .. }
+                | Happening::SessionClosed { .. }
+                | Happening::Agent { .. }
                 | Happening::SessionExited { .. } => {}
             },
             Change::Present(present) => self.heard_present(&present),
             Change::Notice(notice) => self.heard_notice(&notice, cx),
-            // What speaks for the threads of the workers this client reaches only through the
-            // server, as `Terminals` does for their agents.
+            // What speaks for the agents and threads of the workers this client reaches only
+            // through the server.
             Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),
-            Change::Terminals(terminals) => {
-                let agents = terminals
-                    .into_iter()
-                    .filter_map(|(worker, s)| {
-                        Some((worker_key(worker), s.agent.as_ref()?.quiet_event(s.id)))
-                    })
-                    .collect();
-                self.view.update(cx, |v, cx| v.server_agents_replace(agents, cx));
-            }
+            Change::Terminals(_) => {}
         }
     }
 

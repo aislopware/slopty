@@ -78,7 +78,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 pub use actions::*;
-pub use agents::{agent_status_text, banner_title, program_banner};
+pub use agents::{banner_title, program_banner};
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
@@ -90,7 +90,6 @@ use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentEvent;
 use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::WorkerCaps;
@@ -266,9 +265,10 @@ impl Chrome {
 pub enum WorkspaceEvent {
     /// A terminal rang its bell.
     Bell(SessionId),
-    /// A coding agent in this session needs the human (permission, question, finished turn).
-    /// Led by a server, its notices say this instead ([`attention::Attention::server_led`]).
-    Attention(SessionId),
+    /// A coding agent's thread came to need the human (an approval, a question), as its
+    /// worker's table says, or the server's ladder for a worker not linked here. Led by a
+    /// server, its notices say this instead ([`attention::Attention::server_led`]).
+    Attention(slopty_proto::thread::ThreadId),
     /// A program in this session asked for a desktop notification (`OSC 9`, `OSC 777`): this
     /// client's own moment, never the server's.
     Program(SessionId),
@@ -745,11 +745,6 @@ pub struct WorkspaceView {
     _keys: Subscription,
     /// Window titles the picker or a listing gave (the registry stores ids).
     titles: HashMap<ItemId, String>,
-    /// Coding agents the workers observed, by session.
-    agents: HashMap<SessionId, AgentEvent>,
-    /// Coding agents the server reported, by session: they stand in for a worker whose own
-    /// link is down or whose session has no tile here.
-    server_agents: HashMap<SessionId, (WorkerKey, AgentEvent)>,
     /// The quiet line about the server in the titlebar ("server unreachable"), if any.
     server_status: Option<SharedString>,
     /// Long shell commands that finished unwatched, by session.
@@ -1016,8 +1011,6 @@ impl WorkspaceView {
             frame_projects: Rc::default(),
             _keys: keys,
             titles: HashMap::new(),
-            agents: HashMap::new(),
-            server_agents: HashMap::new(),
             server_status: None,
             finished: HashMap::new(),
             slow_command: SLOW_COMMAND,
@@ -1221,10 +1214,12 @@ impl WorkspaceView {
         self.folders.get(&id)
     }
 
-    /// What the worker last said about a session's agent, else what the server relayed.
+    /// The agent at work in `session` as its thread's row says, in the status vocabulary and
+    /// in one short line; `None` with no agent there.
     #[must_use]
-    pub fn agent(&self, session: SessionId) -> Option<&AgentEvent> {
-        self.agent_state(session)
+    pub fn agent(&self, session: SessionId) -> Option<(crate::icons::Status, String)> {
+        let agent = self.agent_state(session)?;
+        Some((agents::agent_mark_of(agent), agents::agent_status_text(agent)))
     }
 
     /// This client's id on `worker`'s wire, while linked.
@@ -1566,8 +1561,6 @@ impl WorkspaceView {
             ("derived", self.derived.len()),
             ("places", self.places.len()),
             ("titles", self.titles.len()),
-            ("agents", self.agents.len()),
-            ("server_agents", self.server_agents.len()),
             ("finished", self.finished.len()),
             ("recency", self.recency.len()),
             ("unseen", self.unseen.len()),

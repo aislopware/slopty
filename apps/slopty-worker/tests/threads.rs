@@ -918,6 +918,97 @@ mod threads {
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
+    /// How soon a hook's status reaches a client, on each of the two paths that carry it: the
+    /// agent's status broadcast (`WorkerMsg::Agent`) and its thread's row in the table. 200
+    /// hooks, a prompt and a stop in turn, each played to the control socket from a task of its
+    /// own while the client reads; each time is from the hook's sending to the client's
+    /// receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test threads \
+                a_hooks_status_reaches_a_client_by_both_paths -- --ignored --nocapture"]
+    async fn a_hooks_status_reaches_a_client_by_both_paths() {
+        use slopty_proto::agent::AgentStatus;
+        use slopty_proto::ctl::CtlRequest;
+        use slopty_proto::thread::Phase;
+
+        const HOOKS: usize = 200;
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let transcript = dir.path().join("projects").join("m1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let sock = dir.path().join("worker.sock");
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "m1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        ctl(&sock, &CtlRequest::Hook { session, payload: start.to_string() }).await;
+        let thread = slopty_agent::observed::thread_of("m1");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+
+        let (mut by_event, mut by_row, mut after) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..HOOKS {
+            let (name, status, phase) = if i % 2 == 0 {
+                ("UserPromptSubmit", AgentStatus::Working, Phase::Working)
+            } else {
+                ("Stop", AgentStatus::Done, Phase::Done)
+            };
+            let payload =
+                serde_json::json!({"hook_event_name": name, "session_id": "m1", "prompt": "go"});
+            let sent = std::time::Instant::now();
+            let sock = sock.clone();
+            let played = tokio::spawn(async move {
+                ctl(&sock, &CtlRequest::Hook { session, payload: payload.to_string() }).await
+            });
+            let (mut event_at, mut row_at) = (None, None);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while event_at.is_none() || row_at.is_none() {
+                let msg = tokio::time::timeout_at(deadline, a.step()).await.unwrap_or_else(|_| {
+                    let row = a.table.rows.get(&thread).map(|r| r.status.phase);
+                    panic!("hook {i} ({name}): event {event_at:?}, row {row_at:?}, row now {row:?}")
+                });
+                let at = sent.elapsed();
+                if let Some(WorkerMsg::Agent(event)) = &msg
+                    && event.session == session
+                    && event.status == status
+                {
+                    event_at.get_or_insert(at);
+                }
+                if a.table.rows.get(&thread).is_some_and(|r| r.status.phase == phase) {
+                    row_at.get_or_insert(at);
+                }
+            }
+            played.await.unwrap();
+            if let (Some(event), Some(row)) = (event_at, row_at) {
+                after.push(row.saturating_sub(event));
+            }
+            by_event.extend(event_at);
+            by_row.extend(row_at);
+        }
+        let line = |label: &str, times: &mut Vec<Duration>| {
+            times.sort_unstable();
+            // The nearest rank: `per_mille` thousandths of the way along the sorted times.
+            let at = |per_mille: usize| {
+                let i = (times.len() - 1).saturating_mul(per_mille).div_ceil(1000);
+                times[i].as_secs_f64() * 1000.0
+            };
+            println!(
+                "{label}: p50 {:.2} / p90 {:.2} / p99 {:.2} / max {:.2} ms over {}",
+                at(500),
+                at(900),
+                at(990),
+                at(1000),
+                times.len()
+            );
+        };
+        line("AgentEvent", &mut by_event);
+        line("thread row", &mut by_row);
+        line("the row after the event", &mut after);
+    }
+
     /// One request to the worker's control socket, as the relay and the CLI write it.
     async fn ctl(
         sock: &Path,

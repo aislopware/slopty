@@ -16,9 +16,10 @@ use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentKind, AgentStatus, Review};
+use slopty_proto::agent::Review;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
+use slopty_proto::thread::AgentId;
 use slopty_theme::{Theme, Typography};
 
 use super::actions::{CloseItem, FullscreenTile};
@@ -280,13 +281,6 @@ fn shell_word(text: &str) -> usize {
 /// What a shell is called with nothing better to say: no command, no title of its program's, no
 /// place but home.
 pub const TERMINAL: &str = "Terminal";
-
-/// An agent's name, what its shell is called before the agent titles it.
-pub(super) const fn agent_name(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::ClaudeCode => "Claude Code",
-    }
-}
 
 /// Whether a title a shell's program set says more than the shell does. Not the program's own
 /// name (the worker's word while nothing set a title) nor a shell's, and not a path or a
@@ -652,12 +646,18 @@ impl WorkspaceView {
         // An agent on a project is named by what it is there: the orchestrator, or its task.
         // Any other that has not titled itself is named by what its thread is about, once its
         // worker's table says: the kind's glyph already says "Claude".
-        if let Some(agent) = self.agent_state(session).filter(|a| a.status != AgentStatus::None) {
-            return self
+        if self.agent_state(session).is_some() {
+            let named = self
                 .project_role(session)
                 .or_else(|| set.map(str::to_owned))
                 .or_else(|| self.session_thread(session).and_then(|t| self.thread_named(t)))
-                .unwrap_or_else(|| agent_name(agent.kind).to_owned());
+                .or_else(|| {
+                    let agent = AgentId::named(self.session_agent(session)?);
+                    Some(super::projects::agent_label(&agent))
+                });
+            if let Some(named) = named {
+                return named;
+            }
         }
         let running =
             shell.and_then(|s| s.running.as_deref()).map(command_words).filter(|c| !c.is_empty());
@@ -1008,11 +1008,11 @@ impl WorkspaceView {
         // say the same thing a few hundred points higher.
         let badge = agent
             .filter(|(session, _)| !self.face_asks(*session))
-            .and_then(|(session, a)| self.agent_badge(tile, session, a, chrome, cx))
+            .and_then(|(session, a)| self.agent_badge(tile, Some(session), a, chrome, cx))
             .or_else(|| match item.kind {
-                ItemKind::Thread { thread } => {
-                    self.thread_stand(thread).and_then(|st| self.thread_badge(tile, st, chrome))
-                }
+                ItemKind::Thread { thread } => self
+                    .thread_stand(thread)
+                    .and_then(|st| self.agent_badge(tile, None, st, chrome, cx)),
                 _ => None,
             });
         let unwatched = match &item.kind {
@@ -1841,7 +1841,7 @@ impl WorkspaceView {
         match item.kind {
             ItemKind::Thread { .. } => Some(SHOWS_CONVERSATION),
             ItemKind::Terminal { session }
-                if self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None)
+                if self.agent_state(session).is_some()
                     && self.session_thread(session).is_some() =>
             {
                 Some(if self.face_shown(session) { SHOWS_CONVERSATION } else { SHOWS_TERMINAL })
@@ -1894,9 +1894,7 @@ impl WorkspaceView {
         chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.agent_state(session).is_none_or(|a| a.status == AgentStatus::None)
-            || self.session_thread(session).is_none()
-        {
+        if self.agent_state(session).is_none() || self.session_thread(session).is_none() {
             return None;
         }
         let face = self.face_shown(session);

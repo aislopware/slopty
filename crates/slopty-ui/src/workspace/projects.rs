@@ -13,7 +13,6 @@ use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::server::ServerCaller;
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
-use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
@@ -23,7 +22,7 @@ use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
 use super::actions::{MakeOrchestrator, ToggleProjectBoard};
-use super::agents::agent_ask_line;
+use super::agents::{agent_ask_text, agent_mark_of};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
 use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
@@ -1013,10 +1012,8 @@ impl WorkspaceView {
         sessions
             .filter_map(|session| {
                 let agent = self.agent_state(session)?;
-                let status = Status::of_agent(agent)?;
-                let asks = matches!(agent.status, AgentStatus::Blocked(_))
-                    .then(|| agent_ask_line(agent))
-                    .flatten();
+                let status = agent_mark_of(agent);
+                let asks = agent_ask_text(agent);
                 Some((session, AgentSeen { status, asks }))
             })
             .collect()

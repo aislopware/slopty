@@ -150,12 +150,15 @@ mod tests {
         }
     }
 
-    /// The centre of the first accessibility button labelled `label` inside `bounds`.
+    /// The centre of the first accessibility button whose label starts with `label` inside
+    /// `bounds`.
     fn button_in(d: &Dump, label: &str, bounds: [f32; 4]) -> Option<(f32, f32)> {
         let [left, top, width, height] = bounds;
         d.a11y
             .iter()
-            .filter(|n| n.role == "Button" && n.label.as_deref() == Some(label))
+            .filter(|n| {
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with(label))
+            })
             .find(|n| {
                 n.bounds[0] >= left
                     && n.bounds[0] <= left + width
@@ -387,8 +390,7 @@ mod tests {
             .unwrap();
         let (a, b) = pair.drivers();
         let blocked = |d: &Dump| {
-            d.terminal(&session)
-                .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
+            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("needs-you"))
                 && needs_you(d).as_deref() == Some("1 new")
         };
         let start = Instant::now();
@@ -400,14 +402,14 @@ mod tests {
         );
         let bounds = da.item_for_session(&session).unwrap().bounds;
         assert!(
-            button_in(&db, "Needs approval: Bash", db.item_for_session(&session).unwrap().bounds)
+            button_in(&db, "Needs approval", db.item_for_session(&session).unwrap().bounds)
                 .is_some()
         );
 
         // The badge on A reveals the agent's thread on A and does no more: the answer belongs to
         // the agent's own prompt, so both clients go on counting one until the worker says
         // otherwise.
-        let (x, y) = button_in(&da, "Needs approval: Bash", bounds).unwrap();
+        let (x, y) = button_in(&da, "Needs approval", bounds).unwrap();
         a.click(x, y).await.unwrap();
         let want = format!("thread:{session}");
         let da = a.wait_for("A's agent revealed", STEP, |d| d.focused == want).await.unwrap();
@@ -419,7 +421,7 @@ mod tests {
         pair.stack.play_hook(&session, "PreToolUse", r#","tool_name":"Bash""#).await.unwrap();
         let (a, b) = pair.drivers();
         let running = |d: &Dump| {
-            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("tool:Bash"))
+            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("working"))
                 && needs_you(d).is_none()
         };
         a.wait_for("the agent running on A", STEP, running).await.unwrap();
@@ -620,8 +622,7 @@ mod tests {
         pair.stack.play_hook(&first, "PermissionRequest", r#","tool_name":"Bash""#).await.unwrap();
         let (a, b) = pair.drivers();
         let blocked = |d: &Dump| {
-            d.terminal(&first)
-                .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
+            d.terminal(&first).is_some_and(|t| t.agent.as_deref() == Some("needs-you"))
                 && needs_you(d).as_deref() == Some("1 new")
         };
         a.wait_for("the badge on the Mac", STEP, blocked).await.unwrap();

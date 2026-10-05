@@ -14778,6 +14778,35 @@ Encode time, submit → callback (p50 / p95 / max, ms):
 - The cost of 4:4:4 is bits, not time: about 1.6× the rate for the same luma (2026-09-28).
   That is why the gate, not the person, decides, from the rate the link allows.
 
+## 2026-10-05 — an agent's status by its thread's row, against the agent event
+
+Before the UI reads an agent's state only from its thread's row (`docs/decisions/agents.md`,
+"One agent status: the thread table's"), the two paths a hook's status takes to a client were
+timed side by side. A test client links to a real worker and ptyd on this Mac, follows the
+thread table, and plays 200 alternating `UserPromptSubmit`/`Stop` hooks for one Claude Code
+session through the worker's control socket. For each hook it times, from the moment it sent
+it, when `WorkerMsg::Agent` carried the new state and when a `TableFrame` row of that thread
+carried the matching phase. Mac Studio M1 Max, load average 14–22, release build:
+
+| path | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| `WorkerMsg::Agent` | 0.30 | 0.48 | 0.76 | 0.87 ms |
+| the thread row | 0.47 | 0.70 | 1.24 | 5.34 ms |
+| the row after the event | 0.18 | 0.33 | 1.03 | 5.05 ms |
+
+- The row comes 0.18 ms after the event at the median and 5 ms at the worst of 200, under one
+  frame at 120 Hz (8.3 ms). The table's batching needs no change, so the UI moves to the row
+  alone.
+- A debug build under heavy load (load average above 100) gave 0.92 / 2.96 / 7.91 / 13.55 ms
+  for the row against 0.60 / 1.89 / 6.16 / 8.11 ms for the event: the same order, slower.
+
+```sh
+cargo build --release --bin slopty-ptyd --bin slopty-worker --bin slopty-server --bin slopty \
+  --bin slopty-stub-claude --bin slopty-stub-managed-claude --bin slopty-stub-pi --bin slopty-stub-acp
+SLOPTY_BINS_FRESH=1 cargo test -p slopty-workerd --release --test threads \
+  a_hooks_status_reaches_a_client_by_both_paths -- --ignored --nocapture
+```
+
 ## 2026-10-05 — a pseudo-terminal with no slave wedged `grantpt`
 
 mac-studio (Darwin 27.0.0), load 17 to 35 from other sessions. The land net's tests lane timed

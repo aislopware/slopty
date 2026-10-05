@@ -6,7 +6,6 @@ use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentStatus;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{ItemKind, ItemSync};
@@ -88,8 +87,7 @@ impl WorkspaceView {
     /// that terminal, else the agent tile last focused on the same worker. `None` hides the
     /// offer to attach.
     pub(super) fn block_target(&self, session: SessionId) -> Option<SessionId> {
-        let is_agent =
-            |s: SessionId| self.agent_state(s).is_some_and(|a| a.status != AgentStatus::None);
+        let is_agent = |s: SessionId| self.agent_state(s).is_some();
         if is_agent(session) {
             return Some(session);
         }
@@ -258,12 +256,9 @@ impl WorkspaceView {
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
         }
-        let agents: Vec<SessionSummary> =
-            sessions.iter().filter(|s| s.agent.is_some()).cloned().collect();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
         self.items_dirty = true;
         self.reset_remote(key, &known, cx);
-        self.seed_agents(&agents, cx);
         self.relink_terminals(key, &known, cx);
         // The disk may have moved on while the worker was away: every file tile of it reads
         // again, and one holding an edit weighs it against what is there now.
@@ -315,9 +310,9 @@ impl WorkspaceView {
         w.stale_screens.extend(items.iter().copied().filter(|id| screens.contains_key(id)));
         self.probes.retain(|(k, ..)| *k != key);
         self.reset_remote(key, &sessions, cx);
+        // The worker's own word on its agents went with the link; the server's ladder stands
+        // in ([`Self::agent_state`]).
         for session in &sessions {
-            // The worker's own word on its agent went with the link; the server's stands in.
-            self.agents.remove(session);
             self.handoff.forget_session(*session);
         }
         for item in &items {
@@ -374,9 +369,6 @@ impl WorkspaceView {
             if let Some(w) = self.workers.get(&key) {
                 w.send(ClientMsg::Term { session, req });
             }
-            let agent = self.agents.get(&session).cloned();
-            let status = agent.as_ref().map(|a| a.status.clone());
-            view.update(cx, |v, cx| v.set_agent_status(status, cx));
         }
     }
 
@@ -716,7 +708,6 @@ impl WorkspaceView {
         summary: SessionSummary,
         cx: &mut Context<Self>,
     ) {
-        self.seed_agents([&summary], cx);
         if let Some(w) = self.workers.get_mut(&key) {
             w.sessions.insert(summary.id, summary);
         }
@@ -731,7 +722,6 @@ impl WorkspaceView {
         for w in self.workers.values_mut() {
             w.sessions.remove(&session);
         }
-        self.agents.remove(&session);
         self.handoff.forget_session(session);
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
         self.finished.remove(&session);
@@ -936,11 +926,6 @@ impl WorkspaceView {
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
         // What this client paints with, so the driver's colours answer colour queries.
         w.send(ClientMsg::Term { session, req: TermRequest::Colors(self.theme.terminal.wire()) });
-        // A view born after the worker reported the agent starts with its state.
-        if let Some(agent) = self.agents.get(&session) {
-            let status = agent.status.clone();
-            view.update(cx, |v, cx| v.set_agent_status(Some(status), cx));
-        }
         if let Some(rtt) = w.rtt {
             view.update(cx, |v, _| v.set_rtt(Some(rtt)));
         }

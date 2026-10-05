@@ -1415,8 +1415,7 @@ async fn studio(stack: &mut Stack, home: &Path, port: Option<u16>) -> Studio {
     }
     let drv = &mut stack.driver;
     wait(drv, "the agent waiting on the person", |d| {
-        d.terminal(&needs)
-            .is_some_and(|t| t.agent.as_deref().is_some_and(|a| a.starts_with("blocked")))
+        d.terminal(&needs).is_some_and(|t| t.agent.as_deref() == Some("needs-you"))
     })
     .await;
 
@@ -1673,8 +1672,7 @@ async fn build_box(stack: &mut Stack, third: &SecondWorker) {
         took(&third.ctl(&agent.hook(event, &more)).await.unwrap());
     }
     wait(&mut stack.driver, "the agent asking", |d| {
-        d.terminal(&terminal)
-            .is_some_and(|t| t.agent.as_deref().is_some_and(|a| a.starts_with("blocked")))
+        d.terminal(&terminal).is_some_and(|t| t.agent.as_deref() == Some("needs-you"))
     })
     .await;
 }

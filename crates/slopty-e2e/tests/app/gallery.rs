@@ -564,11 +564,11 @@ async fn the_empty_workspace_says_how_to_begin() {
     stack.shutdown().await;
 }
 
-/// The blocked agent's thread holds what it asks: the tray naming the tool, with the way to
-/// answer in the terminal. The worker puts it there a grace after the hook, so a golden taken
-/// before it would hold a thread that has not caught up.
+/// The blocked agent's thread holds what it asks: the tray saying what the tool does, with the
+/// way to answer in the terminal. The worker puts it there a grace after the hook, so a golden
+/// taken before it would hold a thread that has not caught up.
 fn asked_in_its_thread(d: &Dump) -> bool {
-    d.a11y_node("Dialog", Some("Bash")).is_some()
+    d.a11y_node("Dialog", Some("Wants to run a command")).is_some()
         && d.a11y_node("Button", Some("Answer in the terminal")).is_some()
 }
 
@@ -611,8 +611,7 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     let drv = &mut stack.driver;
     let dump = drv
         .wait_for("the agent blocked", STEP, |d| {
-            d.terminal(&session)
-                .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
+            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("needs-you"))
                 && d.a11y_node("Status", Some("1 new")).is_some()
                 && asked_in_its_thread(d)
         })
@@ -650,7 +649,7 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
     stack
         .driver
         .wait_for("the agent waiting on its task", STEP, |d| {
-            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("waiting:1:0"))
+            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("waiting"))
                 && d.a11y.iter().any(|n| n.label.as_deref() == Some("Waiting on cargo test"))
         })
         .await

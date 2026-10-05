@@ -2028,3 +2028,43 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Test: `live_blocks_stream_after_their_prompt_then_the_transcript_settles_them`
     (`slopty-agent` observed tests; it fails without the hold, the blocks shown before the
     prompt).
+
+- ✅ **One agent status: the thread table's** (2026-10-05, readiness item 20;
+  step 1, the client). Each client held two accounts of a terminal's agent. One was the worker's
+  `AgentEvent` per session (`WorkerMsg::Agent`, `SessionSummary.agent`, the server's
+  `Happening::Agent`). The other was the row of the agent's thread in the thread table, which
+  the observed adapter already fed from that same event (`Observed::status`). They disagreed
+  whenever one lagged: a hook missing, a transcript ahead. So the tile carried a rule ("never
+  calmer than working while the row says a turn runs") to paper over it.
+  - Now the workspace reads an agent only from its thread's row. The row comes from the
+    worker's own table while that worker is linked, else from the server's ladder.
+    `WorkspaceView::agent_state(session)` is the stand of the thread whose TUI runs in the
+    terminal (`ThreadStand`, which now carries the row's status, its call and a limit's reset).
+    An exited agent has none. The header pill, the mark, the navigator's line, the overview, the
+    yard, the bell, the notices and ⌘⇧A read that one stand. The two badges, the terminal
+    agent's and the thread tile's, are one (`agent_badge`).
+  - The worker's codec carries what the old event said and the row did not. A failure on the
+    plan's usage limit is a wait of its own (`Wait::LIMIT`, "Hit its usage limit"), and its
+    reset comes from the row's spent rate windows. A permission waits on the action it asks,
+    worded by the codec from its tool and call ("Run cargo test", "Edit src/main.rs"), else on
+    what the tool does ("Wants to run a command"). An elicitation says "Needs input". A lone background
+    task is named by the hook's words ("Waiting on cargo test"). Counts read as nouns ("2
+    background tasks"), and commands left running read as the thread's header says them
+    ("Running npm run dev").
+  - Measured first (MEASUREMENTS, "an agent's status by its thread's row"): the row reaches a
+    client 0.18 ms after the event at the median and 5 ms at the worst of 200, under a frame,
+    so no batching changed.
+  - What moved: the turn length and its unseen finish come from the row's phase changes. The
+    corner's toast and the app's alert (`WorkspaceEvent::Attention`, now by thread) fire when a
+    row comes to need the person: from a linked worker's table, or from the ladder for one not
+    linked. The device stays awake while any row works.
+  - Deleted in the client: the session maps of events (`agents`, `server_agents`), seeding from
+    summaries, `Status::of_agent`, the terminal view's copy of the status, and the e2e dump's
+    `agent_source`. The hook-tool phrasing (`tool_action`, `tool_statement`) moved into the
+    codec, so every client reads the same words. The app
+    ignores `WorkerMsg::Agent`, `Happening::Agent` and the server's terminal list until step 2
+    deletes them from the wire.
+  - Tests: the workspace tests play an agent through the worker's own codec into its thread's
+    row (`workspace::tests::played::Agents`), so every agent test now goes the row's way;
+    `workspace::agents::tests` for the words; the `slopty-agent` observed status test for the
+    limit's wait; the e2e dump says the mark (`idle`, `working`, `needs-you`, …).

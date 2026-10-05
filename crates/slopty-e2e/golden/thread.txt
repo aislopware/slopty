@@ -54,4 +54,4 @@ Button │ Send
 Group │ Status
 Status │ e2e-worker
 Group │ Agents
-Button │ Claude Code · Needs approval: $ touch refused.txt
+Button │ Claude Code · Needs approval: Run touch refused.txt

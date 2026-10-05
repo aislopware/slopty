@@ -53,7 +53,7 @@ use slopty_proto::project::ProjectId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_proto::thread::{AskId, ThreadId};
 
-use super::agents::{agent_ask_line, agent_status_word};
+use super::agents::{agent_ask_text, agent_status_word};
 use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
 use crate::terminal::TerminalView;
@@ -157,7 +157,7 @@ pub struct Asking {
     pub route: Route,
     /// The tile's name, else the worker's.
     pub title: String,
-    /// What it asks (`agent_ask_line`), else its state in a word or two.
+    /// What it asks (`agent_ask_text`), else its state in a word or two.
     pub body: String,
     /// The yes or no the note's buttons answer, as the note carries it: the request's id on the
     /// thread the agent runs.
@@ -546,7 +546,7 @@ impl WorkspaceView {
             .into_iter()
             .filter_map(|w| {
                 let agent = self.agent_state(w.session)?;
-                let body = agent_ask_line(agent).unwrap_or_else(|| agent_status_word(agent));
+                let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Session(w.session) };
                 let approval = self

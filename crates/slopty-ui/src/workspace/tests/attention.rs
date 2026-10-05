@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::screen::ScreenFactory;
+use crate::workspace::tests::Agents as _;
 use crate::workspace::{WorkerLink, WorkspaceEvent};
 
 fn route(seed: u128) -> Route {

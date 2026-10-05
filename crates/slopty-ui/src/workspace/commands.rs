@@ -439,7 +439,7 @@ impl WorkspaceView {
     /// `session` is a plain shell: a live session drawn here that no coding agent has been seen in.
     pub(super) fn is_shell(&self, session: SessionId) -> bool {
         self.terminals.contains_key(&session)
-            && !self.agents.contains_key(&session)
+            && self.agent_state(session).is_none()
             && self.summary(session).is_some()
     }
 

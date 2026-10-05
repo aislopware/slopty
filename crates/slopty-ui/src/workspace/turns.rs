@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::Context;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
+use slopty_proto::thread::Phase;
 
 use super::{Finished, WorkspaceView};
 
@@ -48,21 +48,26 @@ impl WorkspaceView {
     /// An agent's state moved: a turn begins when it starts to work, and the turn it ends
     /// with "Turn finished" ran this long. A turn that waits on the person goes on; one that
     /// went idle without finishing, or an agent that is gone, has nothing to say.
-    pub(super) fn agent_turn(&mut self, event: &AgentEvent) -> Option<Duration> {
+    pub(super) fn agent_turn(
+        &mut self,
+        session: SessionId,
+        phase: Phase,
+        since: WallMs,
+    ) -> Option<Duration> {
         let began = &mut self.turns.began;
-        match &event.status {
-            AgentStatus::Working | AgentStatus::Tool { .. } | AgentStatus::Waiting { .. } => {
-                began.entry(event.session).or_insert(event.since_ms);
+        match phase {
+            Phase::Working | Phase::Waiting => {
+                began.entry(session).or_insert(since);
                 None
             }
-            AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt => None,
-            AgentStatus::Done => {
-                let began = began.remove(&event.session)?;
-                let ran = event.since_ms.as_millis().saturating_sub(began.as_millis());
+            Phase::NeedsYou => None,
+            Phase::Done => {
+                let began = began.remove(&session)?;
+                let ran = since.as_millis().saturating_sub(began.as_millis());
                 Some(Duration::from_millis(ran))
             }
-            _ => {
-                began.remove(&event.session);
+            Phase::Idle | Phase::Failed | Phase::Stopped => {
+                began.remove(&session);
                 None
             }
         }
@@ -74,18 +79,18 @@ impl WorkspaceView {
     /// says nothing: it speaks only for what needs the person.
     pub(super) fn agent_finished(
         &mut self,
-        event: &AgentEvent,
+        session: SessionId,
         elapsed: Duration,
         cx: &mut Context<Self>,
     ) {
-        let session = event.session;
         let watched = self.app_active
             && self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
         if watched || elapsed < self.slow_command {
             return;
         }
-        let said = event.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
-        let command = said.unwrap_or(TURN_FINISHED).to_owned();
+        // What the agent last said of the turn, as its thread's row has it.
+        let said = self.face_summary(session).filter(|d| !d.trim().is_empty());
+        let command = said.unwrap_or_else(|| TURN_FINISHED.to_owned());
         self.finished.insert(session, Finished { command, exit: None, elapsed });
         let finished = &self.finished;
         self.turns.ended.retain(|s| finished.contains_key(s));

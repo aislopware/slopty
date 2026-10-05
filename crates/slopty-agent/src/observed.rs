@@ -98,6 +98,88 @@ fn alias_label(alias: &str) -> String {
     format!("{first}{}{wide}", chars.as_str())
 }
 
+/// What a permission waits on, as a row leads with it: the action on its subject ("Run cargo
+/// test", [`tool_action`]) from the hook's line `detail`, or what the tool does when the hook
+/// named only the tool ([`tool_statement`]). A line with no tool is said as it is.
+fn permission_words(tool: &str, detail: Option<&str>) -> String {
+    let line = detail.map(str::trim).filter(|d| !d.is_empty());
+    match (tool, line) {
+        ("", line) => line.unwrap_or_default().to_owned(),
+        (tool, line) => {
+            let subject = line.map(|l| ask_subject(tool, l)).unwrap_or_default();
+            if subject.is_empty() { tool_statement(tool) } else { tool_action(tool, subject) }
+        }
+    }
+}
+
+/// Using `tool` on `subject`, said as the action: "Run cargo test", "Edit src/main.rs", "Use
+/// query from db: users".
+#[must_use]
+fn tool_action(tool: &str, subject: &str) -> String {
+    let verb = match tool {
+        "Bash" => "Run",
+        "Edit" | "MultiEdit" | "NotebookEdit" => "Edit",
+        "Write" => "Write",
+        "Read" => "Read",
+        "WebFetch" => "Fetch",
+        "WebSearch" => "Search",
+        "Task" | "Agent" => "Start a subagent:",
+        "Skill" => "Use",
+        _ => {
+            let mcp = tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"));
+            return match mcp {
+                Some((server, name)) => format!("Use {name} from {server}: {subject}"),
+                None => format!("Use {tool}: {subject}"),
+            };
+        }
+    };
+    format!("{verb} {subject}")
+}
+
+/// What using `tool` asks, as the approval card says it without the subject: "Wants to run a
+/// command", "Wants to edit a file", "Wants to use query from db".
+///
+/// The card names Claude and the file ("Claude wants to edit main.rs"); a row that knows only
+/// the tool says the kind of thing, and its meta says whose agent asks.
+#[must_use]
+fn tool_statement(tool: &str) -> String {
+    let what = match tool {
+        "Bash" => "run a command",
+        "Edit" | "MultiEdit" | "NotebookEdit" => "edit a file",
+        "Write" => "write a file",
+        "Read" => "read a file",
+        "WebFetch" => "fetch a page",
+        "WebSearch" => "search the web",
+        "Task" | "Agent" => "start a subagent",
+        "ExitPlanMode" => "leave plan mode",
+        _ => {
+            let mcp = tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"));
+            return match mcp {
+                Some((server, name)) => format!("Wants to use {name} from {server}"),
+                None => format!("Wants to use {tool}"),
+            };
+        }
+    };
+    format!("Wants to {what}")
+}
+
+/// A tool call's line with the name that leads it dropped: "$ ", or a first word the tool's
+/// name ends with ("Edit" for Edit, "Fetch" for `WebFetch`, "Agent:" for Task).
+fn ask_subject<'a>(tool: &str, line: &'a str) -> &'a str {
+    let line = line.strip_prefix("$ ").unwrap_or(line);
+    if line == tool {
+        return "";
+    }
+    let word_end = line.find([' ', ':']).unwrap_or(line.len());
+    let (word, rest) = line.split_at(word_end);
+    let named = word.starts_with(char::is_uppercase)
+        && (tool.ends_with(word) || (word == "Agent" && tool == "Task"));
+    if named { rest.trim_start_matches(':').trim_start() } else { line }
+}
+
+/// What an agent stopped on its plan's usage limit waits on ([`Wait::LIMIT`]).
+pub const LIMIT_TEXT: &str = "Hit its usage limit";
+
 /// Who answered a request the agent asked in its own terminal ([`Answerer::name`]).
 pub const IN_TERMINAL: &str = "terminal";
 
@@ -263,6 +345,15 @@ struct Deferred {
     text: String,
 }
 
+/// What an agent at rest waits on, as its tracker said: the tasks left running, the scheduled
+/// prompts, and the hook's words for the first task.
+#[derive(Debug)]
+struct Waiting {
+    tasks: u32,
+    crons: u32,
+    named: Option<String>,
+}
+
 /// One observed Claude Code session.
 #[derive(Debug)]
 pub struct Observed {
@@ -289,7 +380,7 @@ pub struct Observed {
     blocked_kind: Option<&'static str>,
     /// What the agent waits on at rest, as the tracker counts it (background tasks, scheduled
     /// prompts), while it waits: the wait is worded again as the transcript names those tasks.
-    waiting_on: Option<(u32, u32)>,
+    waiting_on: Option<Waiting>,
     out: Vec<Out>,
     /// The title is the session's own name, which its first prompt replaces.
     named: bool,
@@ -508,26 +599,39 @@ impl Observed {
             AgentStatus::Done | AgentStatus::Blocked(BlockReason::IdlePrompt) => {
                 (Phase::Done, None, Liveness::Live)
             }
+            // The plan's limit is a wait of its own: the row's meters say when it lifts.
+            AgentStatus::Failed { error, .. } if error == AgentStatus::RATE_LIMIT => {
+                let wait = Wait { kind: Wait::LIMIT.to_owned(), text: LIMIT_TEXT.to_owned() };
+                (Phase::Failed, Some(wait), Liveness::Live)
+            }
             AgentStatus::Failed { .. } => (Phase::Failed, None, Liveness::Live),
             AgentStatus::Blocked(reason) => {
                 let (kind, text) = match reason {
                     BlockReason::Permission { tool } => {
-                        ("permission", format!("Wants to use {tool}"))
+                        ("permission", permission_words(tool, event.detail.as_deref()))
                     }
                     BlockReason::Question => ("question", "Has a question".to_owned()),
                     BlockReason::Elicitation | BlockReason::IdlePrompt => {
-                        ("input", "Asks for input".to_owned())
+                        ("input", "Needs input".to_owned())
                     }
                 };
-                let text = event.detail.clone().unwrap_or(text);
+                // A permission is worded from the call; a question or an input is the agent's
+                // own words where it gave any.
+                let text = match reason {
+                    BlockReason::Permission { .. } => text,
+                    _ => event.detail.clone().unwrap_or(text),
+                };
                 (Phase::NeedsYou, Some(Wait { kind: kind.to_owned(), text }), Liveness::Live)
             }
             AgentStatus::Waiting { tasks, crons } => {
-                (Phase::Waiting, Some(self.wait_on(*tasks, *crons)), Liveness::Live)
+                let waiting = Waiting { tasks: *tasks, crons: *crons, named: event.detail.clone() };
+                (Phase::Waiting, Some(self.wait_on(&waiting)), Liveness::Live)
             }
         };
         self.waiting_on = match event.status {
-            AgentStatus::Waiting { tasks, crons } => Some((tasks, crons)),
+            AgentStatus::Waiting { tasks, crons } => {
+                Some(Waiting { tasks, crons, named: event.detail.clone() })
+            }
             _ => None,
         };
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
@@ -543,11 +647,13 @@ impl Observed {
         self.drain()
     }
 
-    /// What an agent at rest waits on: `tasks` left running and `crons` scheduled prompts, as
+    /// What an agent at rest waits on: the tasks left running and the scheduled prompts, as
     /// the tracker counts them. When every one is a command the session's own transcript shows
     /// running in the background (a dev server, say), it waits on [`Wait::COMMAND`], named by
-    /// those commands; a subagent, a monitor or a scheduled prompt among them is a task.
-    fn wait_on(&self, tasks: u32, crons: u32) -> Wait {
+    /// those commands; a subagent, a monitor or a scheduled prompt among them is a task, named
+    /// by the hook's words for a lone one, else counted.
+    fn wait_on(&self, waiting: &Waiting) -> Wait {
+        let (tasks, crons) = (waiting.tasks, waiting.crons);
         let running: Vec<&BackgroundTask> = self
             .threads
             .get(&conv::ThreadId::Main)
@@ -561,9 +667,13 @@ impl Observed {
             let named: Vec<&str> = running.iter().map(|t| t.title.as_str()).collect();
             return Wait { kind: Wait::COMMAND.to_owned(), text: named.join(", ") };
         }
-        let text = match (tasks, crons) {
-            (0, n) => format!("{n} scheduled"),
-            (n, _) => format!("{n} in the background"),
+        let named = waiting.named.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let text = match (tasks, crons, named) {
+            (1, 0, Some(named)) => named.to_owned(),
+            (0, 1, _) => "1 scheduled prompt".to_owned(),
+            (0, n, _) => format!("{n} scheduled prompts"),
+            (1, ..) => "1 background task".to_owned(),
+            (n, ..) => format!("{n} background tasks"),
         };
         Wait { kind: Wait::TASK.to_owned(), text }
     }
@@ -571,8 +681,8 @@ impl Observed {
     /// Word the wait again once the transcript changed what runs in the background, while the
     /// agent waits at rest.
     fn rewait(&mut self) {
-        let Some((tasks, crons)) = self.waiting_on else { return };
-        let wait = self.wait_on(tasks, crons);
+        let Some(waiting) = self.waiting_on.as_ref() else { return };
+        let wait = self.wait_on(waiting);
         let Some(status) = self.status.as_mut().filter(|s| s.wait.as_ref() != Some(&wait)) else {
             return;
         };

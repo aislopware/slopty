@@ -22,7 +22,6 @@ use gpui::{
     radians, svg,
 };
 pub use gpui_kit::assets::IconName;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::thread::AgentId;
 use slopty_theme::{Rgb, Theme};
 
@@ -504,21 +503,6 @@ pub enum Status {
 }
 
 impl Status {
-    /// What an agent's report shows as; `None` when there is no agent to speak of.
-    #[must_use]
-    pub const fn of_agent(agent: &AgentEvent) -> Option<Self> {
-        Some(match &agent.status {
-            AgentStatus::None => return None,
-            AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => Self::Idle,
-            // Work runs in the background and nothing is asked: busy, calmly.
-            AgentStatus::Waiting { .. } => Self::Running,
-            AgentStatus::Working | AgentStatus::Tool { .. } => Self::Working,
-            AgentStatus::Blocked(_) => Self::NeedsYou,
-            AgentStatus::Done => Self::Done,
-            AgentStatus::Failed { .. } => Self::Failed,
-        })
-    }
-
     /// The icon that marks it.
     #[must_use]
     pub const fn icon(self) -> IconName {

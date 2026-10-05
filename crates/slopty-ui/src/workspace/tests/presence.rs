@@ -56,9 +56,14 @@ fn a_program_s_notification_is_its_own_event_apart_from_an_agent_s(cx: &mut Test
     cx.run_until_parked();
     assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::Program(session)]);
 
+    // The agent at work, then asking: its thread's row comes to need the person.
+    let working = AgentEvent { status: AgentStatus::Working, ..blocked(session) };
+    view.update_in(cx, |v, _w, cx| v.agent_event(working, cx));
+    cx.run_until_parked();
     events.borrow_mut().clear();
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     cx.run_until_parked();
-    assert!(events.borrow().contains(&WorkspaceEvent::Attention(session)), "{:?}", events.borrow());
+    let thread = view.read_with(cx, |v, _| v.session_thread(session)).expect("its thread");
+    assert!(events.borrow().contains(&WorkspaceEvent::Attention(thread)), "{:?}", events.borrow());
     assert!(!events.borrow().contains(&WorkspaceEvent::Program(session)));
 }

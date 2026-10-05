@@ -23,7 +23,6 @@ use slopty_core::SessionId;
 use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentStatus;
 use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{
     PasteChord, Placement, PointerShape, ProgressState, SearchMatch, TermEvent, TermRequest,
@@ -479,8 +478,6 @@ pub struct TerminalView {
     touch_selecting: bool,
     /// The search bar, while open.
     search: Option<Search>,
-    /// The agent's state in this session, as the worker last reported it.
-    agent: Option<AgentStatus>,
     /// The toggles the next find bar opens with: the last bar's.
     find_toggles: Query,
     /// What waits on a confirmation at the tile's foot: a paste held back by paste
@@ -631,7 +628,6 @@ impl TerminalView {
             wheel_remainder: 0.0,
             wheel_gesture: None,
             search: None,
-            agent: None,
             find_toggles: Query::default(),
             pending: None,
             covered: false,
@@ -660,18 +656,6 @@ impl TerminalView {
     )]
     pub fn paste(&mut self, text: String, cx: &Context<Self>) {
         self.send(TermRequest::Paste { text, confirmed: true }, cx);
-    }
-
-    /// The worker's word on the agent in this session (`None`: no agent).
-    pub fn set_agent_status(&mut self, status: Option<AgentStatus>, cx: &mut Context<Self>) {
-        self.agent = status;
-        cx.notify();
-    }
-
-    /// The agent's state as last reported.
-    #[must_use]
-    pub const fn agent_status(&self) -> Option<&AgentStatus> {
-        self.agent.as_ref()
     }
 
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.

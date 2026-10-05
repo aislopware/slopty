@@ -299,6 +299,7 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
             },
             cx,
         );
+        v.show_face(agent, false, cx);
     });
     cx.run_until_parked();
     let pill = cx.debug_bounds(selector("agent", waiting.item)).expect("the pill");
@@ -308,7 +309,7 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     let nodes = tree(cx);
     let badge = nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("Needs approval: Bash"))
+        .find(|n| n.label.as_deref() == Some("Needs approval: Wants to run a command"))
         .expect("the pill says what the agent waits for");
     assert_eq!(badge.role, "Button");
     assert_eq!(badge.description.as_deref(), Some(CHROME_WORDS[0]));
@@ -342,6 +343,7 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
             },
             cx,
         );
+        v.show_face(agent, false, cx);
     });
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
@@ -408,6 +410,8 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
             },
             cx,
         );
+        // On its TUI, where the header's chip speaks for it.
+        v.show_face(agent, false, cx);
         // The failed command's own rows are off screen: only the header can say it.
         let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
@@ -680,6 +684,8 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
     let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    // The thread's toggle is one of the controls; its tile shows the TUI, where the pill is.
+    agent_thread(&view, cx, fake.key, agent);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
             AgentEvent {
@@ -696,8 +702,6 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
             cx,
         );
     });
-    // The thread's toggle is one of the controls; its tile shows the TUI, where the pill is.
-    agent_thread(&view, cx, fake.key, agent);
     view.update_in(cx, |v, _w, cx| v.show_face(agent, false, cx));
     cx.simulate_mouse_move(point(px(1.0), px(799.0)), None, Modifiers::none());
     cx.run_until_parked();

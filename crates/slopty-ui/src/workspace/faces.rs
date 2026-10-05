@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
-use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
@@ -34,11 +33,11 @@ use slopty_proto::thread::wire::{
     Authors, IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits,
     ThreadRequest, ThreadRow,
 };
-use slopty_proto::thread::{AgentId, IntentId, ThreadId, TurnId};
+use slopty_proto::thread::{self, AgentId, IntentId, ThreadId, TurnId};
 use slopty_proto::{ClientMsg, RequestId};
 
-use super::WorkspaceView;
 use super::actions::ToggleConversation;
+use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, hub};
 use crate::icons::Status;
@@ -89,6 +88,9 @@ pub(super) struct ThreadFaces {
     /// Each worker's threads, made the first time its link comes up.
     hubs: HashMap<WorkerKey, Entity<ThreadHub>>,
     hearing: HashMap<WorkerKey, gpui::Subscription>,
+    /// The workers whose table was heard before: a thread new to one of them that already
+    /// needs the person comes to need them now, where a first table only says how things are.
+    heard: HashSet<WorkerKey>,
     /// The thread each agent terminal runs, as its worker's table says.
     of_session: HashMap<SessionId, ThreadId>,
     /// The thread view of each tile that shows one, kept while it shows.
@@ -164,8 +166,7 @@ impl WorkspaceView {
     /// Only while an agent runs in it and its worker's table names its thread.
     #[must_use]
     pub fn face_shown(&self, session: SessionId) -> bool {
-        let agent = self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None);
-        agent
+        self.agent_state(session).is_some()
             && self.faces.threads.of_session.contains_key(&session)
             && self.faces.chosen.get(&session).copied().unwrap_or(true)
     }
@@ -320,18 +321,11 @@ impl WorkspaceView {
         }
     }
 
-    /// The agent at work in `session`, by its [`AgentId`] name: as its thread's row names it,
-    /// or else by the kind the terminal reports.
+    /// The agent at work in `session`, by its [`AgentId`] name, as its thread's row names it.
     pub(super) fn session_agent(&self, session: SessionId) -> Option<&str> {
+        self.agent_state(session)?;
         let threads = &self.faces.threads;
-        let at_work = self.agent_state(session).filter(|a| a.status != AgentStatus::None)?;
-        let named = threads.of_session.get(&session).and_then(|t| threads.agents.get(t));
-        Some(named.map_or_else(
-            || match at_work.kind {
-                AgentKind::ClaudeCode => AgentId::CLAUDE_CODE,
-            },
-            |a| a.0.as_str(),
-        ))
+        threads.of_session.get(&session).and_then(|t| threads.agents.get(t)).map(|a| a.0.as_str())
     }
 
     /// `thread`'s open facts, as its worker's table last said.
@@ -501,6 +495,20 @@ impl WorkspaceView {
             let agents = self.startable_on(key);
             hub.update(cx, |hub, cx| hub.set_agents(agents, cx));
         }
+    }
+
+    /// The row of `key`'s thread table that names `session` as its terminal: the agent a test
+    /// plays there moves that row, as the worker's codec does.
+    #[cfg(test)]
+    pub(super) fn row_of_terminal(
+        &self,
+        key: WorkerKey,
+        session: SessionId,
+        cx: &App,
+    ) -> Option<ThreadRow> {
+        let hub = self.faces.threads.hubs.get(&key)?.read(cx);
+        let rows = &hub.threads().rows().rows;
+        rows.values().find(|r| r.terminal == Some(session) && r.parent.is_none()).cloned()
     }
 
     /// What `key`'s thread hub was told it can start.
@@ -801,7 +809,7 @@ impl WorkspaceView {
 
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
     /// its parent's business, not a tile's, and an aside its asker's.
-    fn threads_of_sessions(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+    pub(super) fn threads_of_sessions(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let Some(hub) = self.faces.threads.hubs.get(&key) else { return };
         let rows: Vec<&ThreadRow> =
             hub.read(cx).threads().rows().rows.values().filter(|r| !hub::is_aside(r)).collect();
@@ -829,17 +837,29 @@ impl WorkspaceView {
         let old = &self.faces.threads.stands;
         let moved = old.values().filter(|s| s.worker == key).count() != stands.len()
             || stands.iter().any(|(id, stand)| old.get(id) != Some(stand));
-        // A thread heard before that comes to need the person: the corner may point at it.
+        // A thread that comes to need the person, since the worker's table was first heard:
+        // the corner may point at it.
+        let heard = self.faces.threads.heard.contains(&key);
         let came_to_need: Vec<ThreadId> = stands
             .iter()
             .filter(|(id, stand)| {
                 stand.rung == Rung::NeedsYou
-                    && old.get(*id).is_some_and(|was| was.rung != Rung::NeedsYou)
+                    && old.get(*id).map_or(heard, |was| was.rung != Rung::NeedsYou)
             })
             .map(|(id, _)| *id)
             .collect();
+        // Where each terminal's agent moved, for its turn's length.
+        let turned: Vec<(SessionId, thread::Phase, slopty_core::WallMs)> = stands
+            .iter()
+            .filter_map(|(id, stand)| {
+                let (session, now) = (stand.terminal?, stand.status.as_ref()?);
+                let was = old.get(id).and_then(|w| w.status.as_ref()).map(|s| s.phase);
+                (was != Some(now.phase)).then_some((session, now.phase, now.since_ms))
+            })
+            .collect();
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
         self.faces.threads.stands.extend(stands);
+        self.faces.threads.heard.insert(key);
         let meters_before = self.faces.threads.meters.clone();
         for row in &rows {
             self.faces.threads.titles.insert(row.id, row.title.clone());
@@ -861,16 +881,24 @@ impl WorkspaceView {
                 None => self.faces.threads.terminals.remove(&row.id),
             };
         }
-        for thread in came_to_need {
-            let Some(word) = self.thread_stand(thread).and_then(ThreadStand::word) else {
-                continue;
-            };
+        for (session, phase, since) in turned {
+            if let Some(elapsed) = self.agent_turn(session, phase, since) {
+                self.agent_finished(session, elapsed, cx);
+            }
+        }
+        let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
+        for thread in came_to_need.into_iter().filter(|_| linked) {
+            cx.emit(WorkspaceEvent::Attention(thread));
+            let Some(stand) = self.faces.threads.stands.get(&thread) else { continue };
+            let word = super::agents::agent_status_word(stand).to_lowercase();
             if let Some(tile) = self.tile_of_thread(thread) {
-                self.attention_toast(tile, Status::NeedsYou, &word.to_lowercase(), cx);
+                self.attention_toast(tile, Status::NeedsYou, &word, cx);
             }
         }
         if moved {
+            self.update_awake(cx);
             self.agents_moved(cx);
+            self.update_run_targets(cx);
         }
         // A note's verdict that waited for its request answers it as the table brings it.
         if self.approvals.taps_waiting() {
@@ -1192,7 +1220,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.focused_session() else { return };
-        if self.agent_state(session).is_none_or(|a| a.status == AgentStatus::None) {
+        if self.agent_state(session).is_none() {
             self.show_notice("No agent runs in this terminal".to_owned(), cx);
             return;
         }
@@ -1251,21 +1279,45 @@ impl WorkspaceView {
         }
     }
 
-    /// `session`'s agent in the status vocabulary, as a tile marks it: the worker's word, but
-    /// never calmer than working while its thread's row says a turn runs. A hook can lag or be
-    /// missing; the transcript the thread folds in then knows more, and saying "Idle" over a
-    /// spinning row reads as a broken status. Only the mark follows: nothing is driven.
-    pub(super) fn agent_mark(&self, session: SessionId) -> Option<Status> {
-        let status = self.agent_state(session).and_then(Status::of_agent)?;
-        let calm = matches!(status, Status::Idle | Status::Done);
-        let working = self.session_stand(session).is_some_and(|st| st.rung == Rung::Working);
-        Some(if calm && working { Status::Working } else { status })
+    /// The agent at work in `session`, as the row of the thread whose TUI runs there says: its
+    /// worker's own table while that worker's link is up, else the server's ladder. `None`
+    /// with no thread naming the terminal, or once its agent exited.
+    pub(super) fn agent_state(&self, session: SessionId) -> Option<&ThreadStand> {
+        let threads = &self.faces.threads;
+        let linked = |key: WorkerKey| self.workers.get(&key).is_some_and(|w| w.link.is_some());
+        let own = self
+            .session_thread(session)
+            .and_then(|t| threads.stands.get(&t))
+            .filter(|s| linked(s.worker));
+        let stand = own.or_else(|| {
+            threads.server.values().find(|s| s.terminal == Some(session) && !linked(s.worker))
+        })?;
+        (!stand.exited).then_some(stand)
     }
 
-    /// Where `session`'s own thread stands as its worker's table says, though its terminal's
-    /// agent status speaks for it in the chrome ([`Self::thread_stand`]).
-    fn session_stand(&self, session: SessionId) -> Option<&ThreadStand> {
-        self.faces.threads.stands.get(&self.session_thread(session)?)
+    /// Every terminal with an agent at work in it, on every worker, each once: its worker's
+    /// own table while linked, else the server's ladder.
+    pub(super) fn agent_sessions(&self) -> impl Iterator<Item = (SessionId, &ThreadStand)> {
+        let threads = &self.faces.threads;
+        let own = threads.of_session.keys().copied();
+        // Two threads in one terminal (a session taken up again) are its one agent.
+        let only_server: HashSet<SessionId> = threads
+            .server
+            .values()
+            .filter_map(|s| s.terminal)
+            .filter(|s| !threads.of_session.contains_key(s))
+            .collect();
+        own.chain(only_server).filter_map(|s| Some((s, self.agent_state(s)?)))
+    }
+
+    /// Whether any agent works, by its worker's own table.
+    pub(super) fn any_working(&self) -> bool {
+        self.faces.threads.stands.values().any(|s| s.rung == Rung::Working)
+    }
+
+    /// `session`'s agent in the status vocabulary, as a tile marks it: its thread's row.
+    pub(super) fn agent_mark(&self, session: SessionId) -> Option<Status> {
+        self.agent_state(session).map(super::agents::agent_mark_of)
     }
 
     /// The request `thread` waits on as its worker's table says, while that worker is linked:
@@ -1282,9 +1334,9 @@ impl WorkspaceView {
     }
 
     /// The server's ladder: where the threads of every worker stand, for those whose own link
-    /// is down or was never up, as [`Self::server_agents_replace`] is for their terminals. A
-    /// thread names the terminal its TUI runs in, so one whose terminal's agent already speaks
-    /// for it is counted once, by the terminal.
+    /// is down or was never up; it speaks for their terminals' agents too
+    /// (`agent_state`). A thread names the terminal its TUI runs in, so one whose
+    /// terminal's agent already speaks for it is counted once, by the terminal.
     pub fn server_ladder(&mut self, ladder: &Ladder, cx: &mut Context<Self>) {
         let stands: HashMap<ThreadId, ThreadStand> = ladder
             .threads
@@ -1299,12 +1351,28 @@ impl WorkspaceView {
                     asks: None,
                     terminal: r.terminal,
                     since: r.since_ms,
+                    status: None,
+                    doing: None,
+                    resets: None,
                 };
                 (r.at.thread, stand)
             })
             .collect();
         if stands != self.faces.threads.server {
+            // One that comes to need the person, on a worker no link of this client's would
+            // say it from, sounds here.
+            let linked = |key: WorkerKey| self.workers.get(&key).is_some_and(|w| w.link.is_some());
+            let old = &self.faces.threads.server;
+            let came: Vec<ThreadId> = stands
+                .iter()
+                .filter(|(_, st)| st.rung == Rung::NeedsYou && !linked(st.worker))
+                .filter(|(id, _)| old.get(*id).is_some_and(|was| was.rung != Rung::NeedsYou))
+                .map(|(id, _)| *id)
+                .collect();
             self.faces.threads.server = stands;
+            for thread in came {
+                cx.emit(WorkspaceEvent::Attention(thread));
+            }
             self.agents_moved(cx);
             cx.notify();
         }
@@ -1332,10 +1400,7 @@ impl WorkspaceView {
             Some(own) if linked(own.worker) => own,
             _ => threads.server.get(&thread).filter(|s| !linked(s.worker))?,
         };
-        let spoken = stand
-            .terminal
-            .and_then(|s| self.agent_state(s))
-            .is_some_and(|a| a.status != AgentStatus::None);
+        let spoken = stand.terminal.and_then(|s| self.agent_state(s)).is_some();
         (!spoken).then_some(stand)
     }
 
@@ -1403,6 +1468,13 @@ pub(super) struct ThreadStand {
     pub terminal: Option<SessionId>,
     /// When its row last changed, by its worker's clock.
     pub since: slopty_core::WallMs,
+    /// Where its own agent is, as its adapter maps it (its subagents' not folded in), and
+    /// what it waits on: its worker's table says it; the server's ladder ranks only.
+    pub status: Option<thread::Status>,
+    /// What it is doing now: its newest call's title ("Edit src/main.rs").
+    pub doing: Option<String>,
+    /// When the usage limit it stopped on lifts, as its plan's windows say.
+    pub resets: Option<slopty_core::WallMs>,
 }
 
 impl ThreadStand {
@@ -1425,9 +1497,9 @@ impl ThreadStand {
             return self.rung.word();
         }
         Some(match self.asks.as_ref().map(|a| a.kind.as_str()) {
-            Some(slopty_proto::thread::Request::APPROVAL) => "Needs approval",
-            Some(slopty_proto::thread::Request::QUESTION) => "Has a question",
-            Some(slopty_proto::thread::Request::ELICITATION) => "Needs input",
+            Some(thread::Request::APPROVAL) => "Needs approval",
+            Some(thread::Request::QUESTION) => "Has a question",
+            Some(thread::Request::ELICITATION) => "Needs input",
             _ => "Needs you",
         })
     }
@@ -1473,10 +1545,13 @@ fn stands_of<'a>(
             let stand = ThreadStand {
                 worker: key,
                 rung: Rung::of(r),
-                exited: matches!(r.status.liveness, slopty_proto::thread::Liveness::Exited { .. }),
+                exited: matches!(r.status.liveness, thread::Liveness::Exited { .. }),
                 asks: r.requests.first().cloned(),
                 terminal: r.terminal,
                 since: r.updated_ms,
+                status: Some(r.status.clone()),
+                doing: r.doing.clone(),
+                resets: limit_resets(r),
             };
             (r.id, stand)
         })
@@ -1495,3 +1570,16 @@ fn stands_of<'a>(
     }
     out
 }
+
+/// When the usage limit `row`'s agent stopped on lifts: the last reset of its plan's windows
+/// that are spent, while it stands failed on one ([`thread::Wait::LIMIT`]).
+fn limit_resets(row: &ThreadRow) -> Option<slopty_core::WallMs> {
+    let limited = row.status.wait.as_ref().is_some_and(|w| w.kind == thread::Wait::LIMIT);
+    if row.status.phase != thread::Phase::Failed || !limited {
+        return None;
+    }
+    row.meters.limits.iter().filter(|l| l.used_bp >= FULL_BP).filter_map(|l| l.resets_ms).max()
+}
+
+/// A rate window used up, in hundredths of a percent.
+const FULL_BP: u32 = 10_000;

@@ -509,7 +509,7 @@ impl super::WorkspaceView {
             display: matches!(kind, Some(ItemKind::Display { .. })),
             file: matches!(kind, Some(ItemKind::File { .. })),
             terminal: self.active_terminal().is_some(),
-            agent: agent.is_some_and(|a| a.status != slopty_proto::agent::AgentStatus::None),
+            agent: agent.is_some(),
             project: session.is_some_and(|s| {
                 mirror.of_orchestrator(s).is_some() || mirror.of_agent(s).is_some()
             }),

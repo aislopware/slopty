@@ -77,7 +77,6 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown
 use slopty_client::groups::{self, GroupKey, fact};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::project::ProjectId;
 use slopty_proto::server::{Os, WorkerCaps};
@@ -89,9 +88,10 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{
-    Step, Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human,
+    Step, Waiting, agent_ask_text, agent_mark_of, agent_status_text, agent_status_word, needs_human,
 };
 use super::approvals::Answer;
+use super::faces::ThreadStand;
 use super::grouping::{Grouping, group_glyph, parent_of, section_name};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
@@ -505,11 +505,8 @@ pub(super) fn matches(query: &str, hay: &[&str]) -> bool {
 }
 
 /// Whether an agent is at rest: its turn over, or at its prompt with nothing asked.
-const fn at_rest(agent: &AgentEvent) -> bool {
-    matches!(
-        agent.status,
-        AgentStatus::Idle | AgentStatus::Done | AgentStatus::Blocked(BlockReason::IdlePrompt)
-    )
+fn at_rest(agent: &ThreadStand) -> bool {
+    matches!(agent_mark_of(agent), Status::Idle | Status::Done)
 }
 
 /// The readouts' clock in Unix milliseconds, as the workers stamp an agent's change.
@@ -1247,31 +1244,21 @@ impl WorkspaceView {
     /// anything else from its spawn.
     fn shell_doing(&self, session: slopty_core::SessionId) -> (Option<String>, u64) {
         let summary = self.summary(session);
-        let state = self.agent_state(session).filter(|a| a.status != AgentStatus::None);
-        // A followed conversation says more than the hooks: the call the agent is on
-        // where the hooks name none, and the gist of its last answer once it stopped.
+        let state = self.agent_state(session);
+        // The thread says more than a word: the call the agent is on, or the gist of its last
+        // answer once it stopped.
         let face = state.and_then(|_| self.face_summary(session));
-        let marked_working = self.agent_mark(session) == Some(Status::Working);
-        let resting = state.filter(|a| at_rest(a) && !marked_working);
+        let resting = state.filter(|a| at_rest(a));
         let agent = match (state, face) {
-            (Some(a), _) if needs_human(a) => agent_ask_line(a),
-            // The hook lags a face mid-turn: the call, or nothing yet, never "Idle"
-            // under a row that says it works.
-            (Some(a), face) if marked_working && at_rest(a) => face,
-            (Some(a), Some(face))
-                if matches!(a.status, AgentStatus::Working) && a.detail.is_none() =>
-            {
-                Some(face)
-            }
-            (Some(a), face) if at_rest(a) => {
-                face.or_else(|| a.detail.clone()).as_deref().and_then(rest_words)
-            }
+            (Some(a), _) if needs_human(a) => agent_ask_text(a),
+            (Some(a), Some(face)) if agent_mark_of(a) == Status::Working => Some(face),
+            (Some(a), face) if at_rest(a) => face.as_deref().and_then(rest_words),
             (a, _) => a.map(agent_status_text),
         };
         let command = state.is_none().then(|| self.last_command(session)).flatten();
         let since = resting.map_or_else(
             || summary.map_or(0, |s| s.started_ms.as_millis()),
-            |a| a.since_ms.as_millis(),
+            |a| a.status.as_ref().map_or(a.since, |st| st.since_ms).as_millis(),
         );
         (agent.or(command), since)
     }
@@ -1739,7 +1726,7 @@ impl WorkspaceView {
                 _ => {}
             }
         }
-        let mut found: Vec<(ThreadId, &super::faces::ThreadStand)> = self
+        let mut found: Vec<(ThreadId, &ThreadStand)> = self
             .thread_stands()
             .filter(|(thread, stand)| {
                 stand.rung > Rung::Idle
@@ -1801,7 +1788,7 @@ impl WorkspaceView {
                 _ => None,
             })
             .collect();
-        let mut found: Vec<(ThreadId, &super::faces::ThreadStand)> = self
+        let mut found: Vec<(ThreadId, &ThreadStand)> = self
             .thread_stands()
             .filter(|(thread, stand)| stand.rung == Rung::Idle && !shown.contains(thread))
             .collect();
@@ -1926,7 +1913,7 @@ impl WorkspaceView {
         let words = agent
             .map(|a| {
                 if needs_human(a) {
-                    agent_ask_line(a).unwrap_or_default()
+                    agent_ask_text(a).unwrap_or_default()
                 } else if status == Status::Done {
                     // Under *To review*, which says it ended: what it said it did, else how long
                     // the turn ran.
@@ -1953,7 +1940,8 @@ impl WorkspaceView {
             title,
             words,
             place,
-            since_ms: agent.map_or(0, |a| a.since_ms.as_millis()),
+            since_ms: agent
+                .map_or(0, |a| a.status.as_ref().map_or(a.since, |s| s.since_ms).as_millis()),
             answer: None,
         }
     }

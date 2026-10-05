@@ -92,6 +92,9 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
     let (agent_tile, agent) = setup.agent;
+    // The orchestrator on its TUI, where ⇧⌘J gives the keyboard back to.
+    view.update_in(cx, |v, _w, cx| v.show_face(orchestrator, false, cx));
+    cx.run_until_parked();
     assert!(!shown(&view, cx, orchestrator), "the terminal is the default");
 
     cx.simulate_keystrokes("cmd-shift-j");
@@ -128,7 +131,7 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
     assert_eq!(focused(&view, cx), Some(agent_tile), "↩ went to task 1's agent");
-    assert!(terminal_focused(&view, cx, agent), "with the keyboard in its terminal");
+    assert!(view.read_with(cx, |v, _| v.face_shown(agent)), "on the agent's thread");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();

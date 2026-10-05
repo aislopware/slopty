@@ -9,6 +9,7 @@ use gpui::{
     Entity, Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
     VisualTestContext, point, px, size,
 };
+pub(super) use played::Agents;
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
@@ -1384,70 +1385,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting));
-    assert!(terminal_focused(&view, cx, session));
-}
-
-/// A worker's summaries name the agent in each session and where its status came from: a
-/// connect shows its badge, counts it and knows whether the hooks are worth offering before any
-/// agent event arrives, and a live event is not overwritten by a later summary.
-#[gpui::test]
-fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let (tx, _rx) = mpsc::channel(256);
-    let key = WorkerKey::new(7);
-    let (waiting, working) = (SessionId::new(), SessionId::new());
-    let with = |session, status, source| SessionSummary {
-        agent: Some(SessionAgent {
-            kind: AgentKind::ClaudeCode,
-            status,
-            source,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        }),
-        ..summary(session, None)
-    };
-    let permission = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() });
-    let sessions = vec![
-        with(waiting, permission, AgentSource::Hook),
-        with(working, AgentStatus::Working, AgentSource::Title),
-        summary(SessionId::new(), None),
-    ];
-    let factory: ScreenFactory =
-        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
-    view.update_in(cx, |v, _window, cx| {
-        v.add_worker(key, "studio".to_owned(), cx);
-        let link = WorkerLink { me: ClientId::new(), out: tx, open_screen: factory, remote: None };
-        v.connect_worker(key, link, hello("studio", sessions), cx);
-        let tile = |session| Item {
-            id: ItemId::new(),
-            kind: ItemKind::Terminal { session },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let items = vec![tile(waiting), tile(working)];
-        v.apply_sync(key, ItemSync::Snapshot { version: 1, items }, cx);
-    });
-    cx.run_until_parked();
-    view.read_with(cx, |v, _| {
-        assert_eq!(v.needs_you_count(), 1, "the blocked agent counts at once");
-        let status = |s| v.agent_state(s).map(|a| a.status.clone());
-        assert_eq!(status(working), Some(AgentStatus::Working));
-        let source = |s| v.agent_state(s).map(|a| a.source);
-        assert_eq!(source(waiting), Some(AgentSource::Hook), "no hooks to offer there");
-        assert_eq!(source(working), Some(AgentSource::Title), "the hooks would add to this");
-        assert_eq!(v.agents.len(), 2, "the plain shell has no agent");
-    });
-    // The worker's first event says the agent moved on; a summary after it (the session
-    // reopened in the list) does not take that back.
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(waiting) }, cx);
-        v.session_opened(key, with(waiting, AgentStatus::Working, AgentSource::Hook), cx);
-    });
-    cx.run_until_parked();
-    view.read_with(cx, |v, _| {
-        assert_eq!(v.agent_state(waiting).map(|a| a.status.clone()), Some(AgentStatus::Idle));
-        assert_eq!(v.needs_you_count(), 0);
-    });
+    assert!(view.read_with(cx, |v, _| v.face_shown(session)), "on its thread, where it asks");
 }
 
 fn blocked(session: SessionId) -> AgentEvent {
@@ -1492,8 +1430,8 @@ fn agent_thread(
     thread
 }
 
-/// An agent the server reports on a session with no tile here still counts, and ⌘⇧A gives it
-/// a tile on its worker; on a worker this client cannot reach, ⌘⇧A says so instead.
+/// An agent on a session with no tile here still counts, and ⌘⇧A gives it a tile on its worker;
+/// one the server reports on a worker this client cannot reach counts, and ⌘⇧A says so instead.
 #[gpui::test]
 fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1503,7 +1441,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
     let (untiled, unreachable) = (SessionId::new(), SessionId::new());
     view.update_in(cx, |v, _w, cx| {
         v.add_worker(laptop, "laptop".into(), cx);
-        v.server_agent_event(studio.key, blocked(untiled), cx);
+        v.agent_event_on(studio.key, blocked(untiled), cx);
     });
     cx.run_until_parked();
     assert_eq!(
@@ -1526,7 +1464,11 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
     );
 
     view.update_in(cx, |v, _w, cx| {
-        v.server_session_closed(untiled, cx);
+        v.agent_event_on(
+            studio.key,
+            AgentEvent { status: AgentStatus::None, ..blocked(untiled) },
+            cx,
+        );
         v.server_agent_event(laptop, blocked(unreachable), cx);
     });
     cx.run_until_parked();
@@ -1655,6 +1597,7 @@ mod page_chrome;
 mod page_host;
 mod palette;
 mod pins;
+mod played;
 mod popout;
 mod presence;
 mod projects;

@@ -30,8 +30,8 @@ use slopty_e2e::{
     BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
     LatencyInfo, ProjectInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
-use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::items::ItemKind;
+use slopty_ui::icons::Status;
 use slopty_ui::project::ProjectView;
 use slopty_ui::screen::ScreenView;
 use slopty_ui::workspace::{KeyTarget, WorkerStatus};
@@ -931,22 +931,16 @@ const fn a11y_nodes(_window: &Window) -> Vec<slopty_e2e::A11yNode> {
     Vec::new()
 }
 
-/// The agent's state as one word, as the dump lists it.
-fn agent_line(status: &AgentStatus) -> String {
+/// The agent's state as one word, as the dump lists it: its mark in the status vocabulary.
+const fn agent_line(status: Status) -> &'static str {
     match status {
-        AgentStatus::None => "none".to_owned(),
-        AgentStatus::Idle => "idle".to_owned(),
-        AgentStatus::Working => "working".to_owned(),
-        AgentStatus::Tool { tool } => format!("tool:{tool}"),
-        AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            format!("blocked:permission:{tool}")
-        }
-        AgentStatus::Blocked(BlockReason::Question) => "blocked:question".to_owned(),
-        AgentStatus::Blocked(BlockReason::Elicitation) => "blocked:elicitation".to_owned(),
-        AgentStatus::Blocked(BlockReason::IdlePrompt) => "blocked:idle".to_owned(),
-        AgentStatus::Done => "done".to_owned(),
-        AgentStatus::Failed { error, .. } => format!("failed:{error}"),
-        AgentStatus::Waiting { tasks, crons } => format!("waiting:{tasks}:{crons}"),
+        Status::Idle => "idle",
+        Status::Working => "working",
+        Status::Running => "waiting",
+        Status::NeedsYou => "needs-you",
+        Status::Done => "done",
+        Status::Failed => "failed",
+        Status::Away => "away",
     }
 }
 
@@ -1258,17 +1252,8 @@ impl Workspace {
                             .is_some_and(|line| line.mark.is_prompt()),
                     rows: terminal.rows(),
                     epoch: terminal.state().epoch(),
-                    agent: terminal.agent_status().map(agent_line),
-                    agent_detail: view.agent(session).and_then(|a| a.detail.clone()),
-                    agent_source: view
-                        .agent(session)
-                        .map(|a| match a.source {
-                            AgentSource::Process => "process",
-                            AgentSource::Title => "title",
-                            AgentSource::Transcript => "transcript",
-                            AgentSource::Hook => "hook",
-                        })
-                        .map(str::to_owned),
+                    agent: view.agent(session).map(|(status, _)| agent_line(status).to_owned()),
+                    agent_detail: view.agent(session).map(|(_, said)| said),
                     latency: latency_info(&terminal.latency()),
                     face: terminal.metrics().map(|m| face_info(&m)),
                     driving: terminal.driving(),

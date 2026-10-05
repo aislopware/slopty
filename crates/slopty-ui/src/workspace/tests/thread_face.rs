@@ -124,8 +124,8 @@ fn a_thread_that_moves_away_hands_the_keyboard_back_to_its_tile(cx: &mut TestApp
     assert!(terminal_focused(&view, cx, here), "the keyboard is back in the tile's shell");
 }
 
-/// A tile showing its agent's TUI with the keyboard keeps the keyboard when the agent's thread
-/// becomes known and its view takes the TUI's place.
+/// A tile showing its TUI with the keyboard keeps the keyboard when the thread of the agent
+/// started there becomes known and its view takes the TUI's place.
 #[gpui::test]
 fn the_thread_view_takes_the_keyboard_from_the_tui_it_replaces(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -134,7 +134,6 @@ fn the_thread_view_takes_the_keyboard_from_the_tui_it_replaces(cx: &mut TestAppC
     let tile = opens(&view, cx, &studio, session, studio.me, 1);
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
         v.threads_linked(key, cx);
         v.focus_tile(tile, cx);
     });

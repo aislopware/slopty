@@ -1,5 +1,6 @@
-//! Coding agents in terminals: what the worker says about them, the header badge, the banner
-//! when the human is away, and the count of the ones waiting on the human.
+//! Coding agents in terminals and threads: what their rows in the workers' thread tables say of
+//! them, the header badge, the banner when the human is away, and the count of the ones waiting
+//! on the human.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -9,14 +10,13 @@ use gpui::{
 };
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::ItemKind;
-use slopty_proto::terminal::SessionSummary;
 use slopty_proto::thread::attention::Rung;
+use slopty_proto::thread::{Phase, Request, Wait};
 use slopty_theme::alpha;
 
 use super::actions::NextAttention;
-use super::faces::ThreadWait;
+use super::faces::{ThreadStand, ThreadWait};
 use super::tile::Chrome;
 use super::{Finished, WorkspaceEvent, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -74,78 +74,117 @@ pub fn program_banner(name: Option<&str>, title: &str, body: &str) -> (String, S
     (banner_title(name, title), body.trim().to_owned())
 }
 
-/// Whether the agent is waiting on the human (an idle prompt is not worth an outline).
-pub(super) fn needs_human(agent: &AgentEvent) -> bool {
-    matches!(&agent.status, AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt)
-}
-
 /// What a click on a waiting agent's badge does, as a screen reader says it.
 pub(super) const SHOW_PROMPT: &str = "Shows the prompt";
 
-/// One short line for an agent's state: the badge text, the picker's status column.
+/// Whether the agent is waiting on the human.
+pub(super) fn needs_human(agent: &ThreadStand) -> bool {
+    agent.rung == Rung::NeedsYou
+}
+
+/// The agent's mark in the one vocabulary: its rung, and at rest whether its turn ended
+/// (done) or it never had one (idle).
 #[must_use]
-pub fn agent_status_text(agent: &AgentEvent) -> String {
-    let detail = agent.detail.as_deref().filter(|d| !d.is_empty());
-    match &agent.status {
-        AgentStatus::None => String::new(),
-        AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => "Idle".to_owned(),
-        AgentStatus::Working => detail.unwrap_or("Working").to_owned(),
-        AgentStatus::Tool { tool } => detail.unwrap_or(tool).to_owned(),
-        AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            format!("Needs approval: {}", detail.unwrap_or(tool))
-        }
-        AgentStatus::Blocked(BlockReason::Question) => {
-            detail.map_or_else(|| "Has a question".to_owned(), |d| format!("Asks: {d}"))
-        }
-        AgentStatus::Blocked(BlockReason::Elicitation) => {
-            detail.map_or_else(|| "Needs input".to_owned(), |d| format!("Needs input: {d}"))
-        }
-        AgentStatus::Done => {
-            detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
-        }
-        AgentStatus::Failed { error, until_ms } if error == AgentStatus::RATE_LIMIT => {
-            let resets = until_ms
-                .and_then(|at| crate::conversation::figures::stamp(at, slopty_core::WallMs::now()));
-            resets.map_or_else(
-                || "Hit its usage limit".to_owned(),
-                |at| format!("Hit its usage limit \u{b7} resets {at}"),
-            )
-        }
-        AgentStatus::Failed { .. } => {
-            detail.map_or_else(|| "Turn failed".to_owned(), |d| format!("Failed: {d}"))
-        }
-        // The turn ended with work still out: the first task's or the loop's own words.
-        AgentStatus::Waiting { tasks: 1, .. } if let Some(d) = detail => format!("Waiting on {d}"),
-        AgentStatus::Waiting { tasks: 0, .. } => {
-            detail.map_or_else(|| "Looping".to_owned(), |d| format!("Looping: {d}"))
-        }
-        AgentStatus::Waiting { tasks: 1, .. } => "Waiting on a task".to_owned(),
-        AgentStatus::Waiting { tasks, .. } => format!("Waiting on {tasks} tasks"),
+pub(super) fn agent_mark_of(agent: &ThreadStand) -> Status {
+    match agent.rung {
+        Rung::NeedsYou => Status::NeedsYou,
+        Rung::Failed => Status::Failed,
+        Rung::Working => Status::Working,
+        Rung::Waiting => Status::Running,
+        Rung::ToReview => Status::Done,
+        Rung::Idle if agent.status.as_ref().is_some_and(|s| s.phase == Phase::Done) => Status::Done,
+        Rung::Idle => Status::Idle,
     }
 }
+
+/// What its row says it waits on, in words, when it says any.
+fn wait_text(agent: &ThreadStand) -> Option<&str> {
+    let wait = agent.status.as_ref()?.wait.as_ref()?;
+    Some(wait.text.trim()).filter(|t| !t.is_empty())
+}
+
+/// Its wait's kind, as its row names it.
+fn wait_kind(agent: &ThreadStand) -> Option<&str> {
+    Some(agent.status.as_ref()?.wait.as_ref()?.kind.as_str())
+}
+
+/// What kind of thing a waiting agent asks for: its open request's kind, else its wait's
+/// (`permission` is an approval, `input` an elicitation).
+fn asked_kind(agent: &ThreadStand) -> Option<&str> {
+    agent.asks.as_ref().map(|a| a.kind.as_str()).or_else(|| match wait_kind(agent)? {
+        "permission" => Some(Request::APPROVAL),
+        "question" => Some(Request::QUESTION),
+        "input" => Some(Request::ELICITATION),
+        _ => None,
+    })
+}
+
+/// Whether it stopped on its plan's usage limit.
+fn limited(agent: &ThreadStand) -> bool {
+    agent.rung == Rung::Failed && wait_kind(agent) == Some(Wait::LIMIT)
+}
+
+/// One short line for an agent's state: the badge text, the picker's status column.
+#[must_use]
+pub(super) fn agent_status_text(agent: &ThreadStand) -> String {
+    let word = agent_status_word(agent);
+    match agent_mark_of(agent) {
+        Status::NeedsYou => {
+            // An ask that says no more than the word (an adapter's "Has a question") adds
+            // nothing to it.
+            let ask = agent_ask_text(agent).filter(|ask| *ask != word);
+            match (asked_kind(agent), ask) {
+                (Some(Request::QUESTION), Some(ask)) => format!("Asks: {ask}"),
+                (_, Some(ask)) => format!("{word}: {ask}"),
+                (_, None) => word,
+            }
+        }
+        Status::Working => agent.doing.as_deref().map_or(word, crate::markdown::plain_line),
+        // At rest with work out: the commands it left running, as its thread's header says
+        // them, or the work it waits on.
+        Status::Running => match (wait_kind(agent), wait_text(agent)) {
+            (Some(Wait::COMMAND), Some(text)) => format!("Running {text}"),
+            (_, Some(text)) => format!("Waiting on {text}"),
+            (_, None) => word,
+        },
+        Status::Failed if limited(agent) => {
+            let resets = agent
+                .resets
+                .and_then(|at| crate::conversation::figures::stamp(at, slopty_core::WallMs::now()));
+            let said = wait_text(agent).unwrap_or(LIMIT_TEXT);
+            resets.map_or_else(|| said.to_owned(), |at| format!("{said} \u{b7} resets {at}"))
+        }
+        Status::Failed => "Turn failed".to_owned(),
+        _ => word,
+    }
+}
+
+/// What an agent stopped on its plan's usage limit says, where its row words it not.
+const LIMIT_TEXT: &str = "Hit its usage limit";
 
 /// The agent's state in a word or two, without the detail: the one word for it wherever a
 /// state is said beside something else, a header's pill, a navigator row's trailing word, an
 /// *Needs you* row with nothing asked.
 ///
-/// A tool call is "Working": the word names the state, and which tool is the line's to say.
-/// "Needs you" is not among them; it heads the section that groups the three waiting words.
+/// A tool call is "Working": the word names the state, and which call is the line's to say.
 #[must_use]
-pub(super) fn agent_status_word(agent: &AgentEvent) -> String {
-    match &agent.status {
-        AgentStatus::None => String::new(),
-        AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => "Idle".to_owned(),
-        AgentStatus::Working | AgentStatus::Tool { .. } => "Working".to_owned(),
-        AgentStatus::Blocked(BlockReason::Permission { .. }) => "Needs approval".to_owned(),
-        AgentStatus::Blocked(BlockReason::Question) => "Has a question".to_owned(),
-        AgentStatus::Blocked(BlockReason::Elicitation) => "Needs input".to_owned(),
-        AgentStatus::Done => "Turn finished".to_owned(),
-        AgentStatus::Failed { error, .. } if error == AgentStatus::RATE_LIMIT => {
-            "Limit reached".to_owned()
-        }
-        AgentStatus::Failed { .. } => "Failed".to_owned(),
-        AgentStatus::Waiting { .. } => "Waiting".to_owned(),
+pub(super) fn agent_status_word(agent: &ThreadStand) -> String {
+    match agent_mark_of(agent) {
+        Status::NeedsYou => match asked_kind(agent) {
+            Some(Request::APPROVAL) => "Needs approval",
+            Some(Request::QUESTION) => "Has a question",
+            Some(Request::ELICITATION) => "Needs input",
+            Some(Request::PLAN) => "Plan to approve",
+            _ => "Needs you",
+        },
+        Status::Working => "Working",
+        Status::Running => "Waiting",
+        Status::Done => "Turn finished",
+        Status::Failed if limited(agent) => "Limit reached",
+        Status::Failed => "Failed",
+        _ => "Idle",
     }
+    .to_owned()
 }
 
 /// Whether an agent's state wears a pill in its tile's header: what calls for the person (waiting
@@ -155,202 +194,32 @@ const fn wears_pill(status: Status) -> bool {
     matches!(status, Status::NeedsYou | Status::Running | Status::Failed | Status::Away)
 }
 
-/// What a waiting agent asks, without the state word: "Bash · touch notes.txt", the question
-/// it put, the input it wants. `None` when it waits on nothing, or says nothing more than its
-/// state.
+/// What a waiting agent asks, without the state word: the call it wants to make ("$ cargo
+/// test"), the question it put, the input it wants. `None` when it waits on nothing, or says
+/// nothing more than its state.
 ///
-/// A row whose trailing word already says "Needs you" and a chip that says "Needs approval"
-/// take this as their detail, so the state is not said twice in one place. The worker's line
-/// leads with the tool's own name or a shell's `$` ("Edit src/main.rs", "$ cargo test"), which
-/// the tool before the dot already says.
+/// An approval is said as its adapter words what it waits on ("Run cargo test"), else by the
+/// call that waits on it; a question by its own words. A row whose trailing word already says
+/// "Needs you" and a chip that says "Needs approval" take this as their detail, so the state is
+/// not said twice in one place.
 #[must_use]
-pub(super) fn agent_ask_text(agent: &AgentEvent) -> Option<String> {
-    let detail = agent.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
-    match &agent.status {
-        AgentStatus::Blocked(BlockReason::Permission { tool }) => {
-            let subject = detail.map(|d| ask_subject(tool, d)).filter(|s| !s.is_empty());
-            match (tool.as_str(), subject) {
-                ("", subject) => subject.map(str::to_owned),
-                (tool, None) => Some(tool.to_owned()),
-                (tool, Some(subject)) => Some(format!("{tool} \u{b7} {subject}")),
-            }
-        }
-        AgentStatus::Blocked(BlockReason::Question | BlockReason::Elicitation) => {
-            detail.map(str::to_owned)
-        }
-        _ => None,
+pub(super) fn agent_ask_text(agent: &ThreadStand) -> Option<String> {
+    if !needs_human(agent) {
+        return None;
     }
-}
-
-/// What a waiting agent asks, as a row can lead with it: the action and its subject ("Run
-/// touch notes.txt", [`tool_action`]), or what the tool does when the hook named only the tool
-/// ([`tool_statement`]). A row says what is asked; the tool's own name is left to the tooltip
-/// ([`agent_ask_text`]).
-#[must_use]
-pub(super) fn agent_ask_line(agent: &AgentEvent) -> Option<String> {
-    let ask = agent_ask_text(agent)?;
-    let AgentStatus::Blocked(BlockReason::Permission { tool }) = &agent.status else {
-        return Some(ask);
+    let card = agent.asks.as_ref().map(|a| a.title.trim()).filter(|t| !t.is_empty());
+    let call = agent.doing.as_deref().map(str::trim).filter(|d| !d.is_empty());
+    let said = match asked_kind(agent) {
+        Some(Request::APPROVAL) => wait_text(agent).or(call).or(card),
+        _ => card.or_else(|| wait_text(agent)),
     };
-    if tool.is_empty() {
-        return Some(ask);
-    }
-    let subject = agent.detail.as_deref().map(|d| ask_subject(tool, d.trim())).unwrap_or_default();
-    Some(if subject.is_empty() { tool_statement(tool) } else { tool_action(tool, subject) })
-}
-
-/// Using `tool` on `subject`, said as the action: "Run cargo test", "Edit src/main.rs", "Use
-/// query from db: users".
-#[must_use]
-pub(super) fn tool_action(tool: &str, subject: &str) -> String {
-    let verb = match tool {
-        "Bash" => "Run",
-        "Edit" | "MultiEdit" | "NotebookEdit" => "Edit",
-        "Write" => "Write",
-        "Read" => "Read",
-        "WebFetch" => "Fetch",
-        "WebSearch" => "Search",
-        "Task" | "Agent" => "Start a subagent:",
-        "Skill" => "Use",
-        _ => {
-            let mcp = tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"));
-            return match mcp {
-                Some((server, name)) => format!("Use {name} from {server}: {subject}"),
-                None => format!("Use {tool}: {subject}"),
-            };
-        }
-    };
-    format!("{verb} {subject}")
-}
-
-/// What using `tool` asks, as the approval card says it without the subject: "Wants to run a
-/// command", "Wants to edit a file", "Wants to use query from db".
-///
-/// The card names Claude and the file ("Claude wants to edit main.rs"); a row that knows only
-/// the tool says the kind of thing, and its meta says whose agent asks.
-#[must_use]
-pub(super) fn tool_statement(tool: &str) -> String {
-    let what = match tool {
-        "Bash" => "run a command",
-        "Edit" | "MultiEdit" | "NotebookEdit" => "edit a file",
-        "Write" => "write a file",
-        "Read" => "read a file",
-        "WebFetch" => "fetch a page",
-        "WebSearch" => "search the web",
-        "Task" | "Agent" => "start a subagent",
-        "ExitPlanMode" => "leave plan mode",
-        _ => {
-            let mcp = tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"));
-            return match mcp {
-                Some((server, name)) => format!("Wants to use {name} from {server}"),
-                None => format!("Wants to use {tool}"),
-            };
-        }
-    };
-    format!("Wants to {what}")
-}
-
-/// A tool call's line with the name that leads it dropped: "$ ", or a first word the tool's
-/// name ends with ("Edit" for Edit, "Fetch" for `WebFetch`, "Agent:" for Task).
-fn ask_subject<'a>(tool: &str, line: &'a str) -> &'a str {
-    let line = line.strip_prefix("$ ").unwrap_or(line);
-    if line == tool {
-        return "";
-    }
-    let word_end = line.find([' ', ':']).unwrap_or(line.len());
-    let (word, rest) = line.split_at(word_end);
-    let named = word.starts_with(char::is_uppercase)
-        && (tool.ends_with(word) || (word == "Agent" && tool == "Task"));
-    if named { rest.trim_start_matches(':').trim_start() } else { line }
+    said.map(crate::markdown::plain_line)
 }
 
 impl WorkspaceView {
-    /// A worker observed a coding agent's state in a session.
-    ///
-    /// Its detail is the agent's own words, Markdown as the agent writes it, and every place
-    /// that says it draws one plain line: it is said as plain words here, once.
-    pub fn agent_event(&mut self, mut event: AgentEvent, cx: &mut Context<Self>) {
-        event.detail = event.detail.map(|d| crate::markdown::plain_line(&d));
-        let session = event.session;
-        if let Some(view) = self.terminals.get(&session) {
-            let status = (event.status != AgentStatus::None).then(|| event.status.clone());
-            view.update(cx, |v, cx| v.set_agent_status(status, cx));
-        }
-        if let Some(elapsed) = self.agent_turn(&event) {
-            self.agent_finished(&event, elapsed, cx);
-        }
-        if event.status == AgentStatus::None {
-            self.agents.remove(&session);
-        } else {
-            let attention = event.attention;
-            let asks = Status::of_agent(&event) == Some(Status::NeedsYou)
-                && self.agents.get(&session).and_then(Status::of_agent) != Some(Status::NeedsYou);
-            let word = asks.then(|| agent_status_word(&event).to_lowercase());
-            self.agents.insert(session, event);
-            if attention {
-                cx.emit(WorkspaceEvent::Attention(session));
-            }
-            if let (Some(word), Some(tile)) = (word, self.tile_of_session(session)) {
-                self.attention_toast(tile, Status::NeedsYou, &word, cx);
-            }
-        }
-        self.update_awake(cx);
-        self.agents_moved(cx);
-        self.update_run_targets(cx);
-        cx.notify();
-    }
-
-    /// What the worker's summaries say runs in each session, taken before any `Agent` event
-    /// arrives, so a tile shows its agent's badge, and offers the hooks only when they are not
-    /// what the worker reads it from, from the first frame after a connect. A session that
-    /// already has a live event keeps it: the event is newer than any summary.
-    pub(super) fn seed_agents<'a>(
-        &mut self,
-        sessions: impl IntoIterator<Item = &'a SessionSummary>,
-        cx: &mut Context<Self>,
-    ) {
-        let mut seeded = false;
-        for summary in sessions {
-            let Some(SessionAgent { kind, status, source, since_ms, mode }) = summary.agent.clone()
-            else {
-                continue;
-            };
-            if status == AgentStatus::None || self.agents.contains_key(&summary.id) {
-                continue;
-            }
-            if let Some(view) = self.terminals.get(&summary.id) {
-                let status = status.clone();
-                view.update(cx, |v, cx| v.set_agent_status(Some(status), cx));
-            }
-            self.agents.insert(
-                summary.id,
-                AgentEvent {
-                    session: summary.id,
-                    kind,
-                    status,
-                    agent_session: None,
-                    detail: None,
-                    attention: false,
-                    source,
-                    since_ms,
-                    mode,
-                },
-            );
-            seeded = true;
-        }
-        if seeded {
-            self.update_awake(cx);
-            self.agents_moved(cx);
-            self.update_run_targets(cx);
-        }
-    }
-
     /// Hold the device awake while any agent works; let go when none does.
     pub(super) fn update_awake(&mut self, cx: &Context<Self>) {
-        let working = self
-            .agents
-            .values()
-            .any(|a| matches!(a.status, AgentStatus::Working | AgentStatus::Tool { .. }));
+        let working = self.any_working();
         if !working {
             self.awake = None;
         } else if self.awake.is_none() {
@@ -366,8 +235,8 @@ impl WorkspaceView {
     }
 
     /// Sessions whose agent is waiting on the human: those with a tile in reading order
-    /// (workspace, column, tile) so ⌘⇧A walks the strip predictably, then those the server
-    /// reported on a worker with no tile for them here.
+    /// (workspace, column, tile) so ⌘⇧A walks the strip predictably, then those the server's
+    /// ladder names on a worker with no tile for them here.
     pub(super) fn needs_you(&self) -> Vec<Waiting> {
         let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
             .items()
@@ -384,16 +253,11 @@ impl WorkspaceView {
             (pos.map(|p| (p.workspace, p.column, p.tile)), w.tile.map(|t| t.item))
         });
         let mut unshown: Vec<Waiting> = self
-            .server_agents
-            .iter()
-            .filter(|(session, (_, agent))| {
-                needs_human(agent) && self.tile_of_session(**session).is_none()
+            .agent_sessions()
+            .filter(|(session, stand)| {
+                needs_human(stand) && self.tile_of_session(*session).is_none()
             })
-            .map(|(session, (worker, _))| Waiting {
-                worker: *worker,
-                tile: None,
-                session: *session,
-            })
+            .map(|(session, stand)| Waiting { worker: stand.worker, tile: None, session })
             .collect();
         unshown.sort_by_key(|w| (w.worker, w.session));
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
@@ -414,66 +278,10 @@ impl WorkspaceView {
         ended.into_iter().map(|(_, w)| w).collect()
     }
 
-    /// What is known about a session's agent: the worker's own word while its link is up,
-    /// else the server's.
-    pub(super) fn agent_state(&self, session: SessionId) -> Option<&AgentEvent> {
-        self.agents.get(&session).or_else(|| self.server_agents.get(&session).map(|(_, a)| a))
-    }
-
-    /// The server relayed an agent's change on `worker`. It counts toward the agents that need
-    /// the human whether or not the worker's own link is up or a tile shows the session, and
-    /// raises the banner when no link of this client's would.
-    pub fn server_agent_event(
-        &mut self,
-        worker: WorkerKey,
-        event: AgentEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let session = event.session;
-        let linked = self.workers.get(&worker).is_some_and(|w| w.link.is_some());
-        if event.status == AgentStatus::None {
-            self.server_agents.remove(&session);
-        } else {
-            if event.attention && !linked {
-                cx.emit(WorkspaceEvent::Attention(session));
-            }
-            self.server_agents.insert(session, (worker, event));
-        }
-        self.agents_moved(cx);
-        cx.notify();
-    }
-
-    /// Every agent the server knows, as its state after a connect or a lag gives them: what it
-    /// said before is replaced. None raises attention; a change after it does.
-    pub fn server_agents_replace(
-        &mut self,
-        agents: Vec<(WorkerKey, AgentEvent)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.server_agents = agents
-            .into_iter()
-            .filter(|(_, event)| event.status != AgentStatus::None)
-            .map(|(worker, event)| (event.session, (worker, event)))
-            .collect();
-        self.agents_moved(cx);
-        cx.notify();
-    }
-
-    /// The server says a session ended.
-    pub fn server_session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        if self.server_agents.remove(&session).is_some() {
-            self.agents_moved(cx);
-            cx.notify();
-        }
-    }
-
-    /// Drop what the server said about agents and their threads: on `worker` (gone), or
-    /// everywhere (`None`, the server was disconnected).
+    /// Drop what the server said about threads: on `worker` (gone), or everywhere (`None`,
+    /// the server was disconnected).
     pub fn forget_server_agents(&mut self, worker: Option<WorkerKey>, cx: &mut Context<Self>) {
-        let before = self.server_agents.len();
-        self.server_agents.retain(|_, (w, _)| worker.is_some_and(|gone| *w != gone));
-        let threads = self.forget_server_threads(worker);
-        if self.server_agents.len() != before || threads {
+        if self.forget_server_threads(worker) {
             self.agents_moved(cx);
             cx.notify();
         }
@@ -630,19 +438,19 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The agent pill in a terminal's header: a short line in the tone of its status, which the
-    /// status mark beside it draws as an icon. While the agent waits on the human the pill is a
-    /// button that brings the terminal up so the TUI's own prompt can be answered there. Slopty
-    /// never answers for the human. On a phone, which has no room for the detail, and beside a
-    /// face, which shows it itself, the pill says the state alone; a screen reader still hears
-    /// all of it. An idle or a working agent has no pill ([`wears_pill`]): the slot's mark,
-    /// spinning while it works, says all there is, and a grey "Working" beside the spinner said it
-    /// twice.
+    /// The agent pill in a tile's header, a terminal's agent's or a thread's: a short line in
+    /// the tone of its status, which the status mark beside it draws as an icon. While a
+    /// terminal's agent waits on the human the pill is a button that brings the terminal up so
+    /// the TUI's own prompt can be answered there. Slopty never answers for the human. On a
+    /// phone, which has no room for the detail, and beside a face, which shows it itself, the
+    /// pill says the state alone; a screen reader still hears all of it. An idle or a working
+    /// agent has no pill ([`wears_pill`]): the slot's mark, spinning while it works, says all
+    /// there is, and a grey "Working" beside the spinner said it twice.
     pub(super) fn agent_badge(
         &self,
         tile: TileRef,
-        session: SessionId,
-        agent: &AgentEvent,
+        session: Option<SessionId>,
+        agent: &ThreadStand,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
@@ -650,29 +458,25 @@ impl WorkspaceView {
         let k = chrome.k;
         // The pill's tone is its status mark's. Working, at rest or finished, the slot's mark
         // is the statement.
-        let status = Status::of_agent(agent).filter(|s| wears_pill(*s))?;
+        let status = Some(agent_mark_of(agent)).filter(|s| wears_pill(*s))?;
         let (full, color) = (agent_status_text(agent), status.tone(theme));
         // The word alone: what is asked is the navigator's line and the pointer's, not a
         // second sentence in every header (a screen reader still hears it in full).
         let label = agent_status_word(agent);
         let ask = agent_ask_text(agent);
         let item = tile.item;
-        // An agent waiting on the human is the one state worth a click: the badge itself
-        // goes to it. No second "go" beside it — a click on the tile did the same.
-        let waiting = matches!(
-            agent.status,
-            AgentStatus::Blocked(
-                BlockReason::Permission { .. } | BlockReason::Question | BlockReason::Elicitation,
-            )
-        );
+        // A terminal's agent waiting on the human is the one state worth a click: the badge
+        // itself goes to its prompt. No second "go" beside it — a click on the tile did the
+        // same. A thread tile answers in its own tray.
+        let waiting = session.filter(|_| needs_human(agent));
         let ui_size = theme.typography.small() * k;
         let pill = crate::kit::pill(theme, color, k)
             .id("agent")
             .debug_selector(move || format!("agent-{}", item.as_uuid()))
-            .role(if waiting { Role::Button } else { Role::Status })
+            .role(if waiting.is_some() { Role::Button } else { Role::Status })
             .aria_label(SharedString::from(full))
             // The answer belongs to the agent's own prompt; the click only goes there.
-            .when(waiting, |el| el.aria_description(SHOW_PROMPT))
+            .when(waiting.is_some(), |el| el.aria_description(SHOW_PROMPT))
             .when_some(ask, |el, ask| {
                 let theme = std::rc::Rc::new(theme.clone());
                 crate::kit::hint_timing(el).tooltip(move |_window, cx| {
@@ -689,7 +493,7 @@ impl WorkspaceView {
                         .zooming(chrome.zooming),
                 ),
             );
-        let pill = if waiting {
+        let pill = if let Some(session) = waiting {
             tab_stop(
                 pill.cursor_pointer().hover(move |el| el.bg(hsla_alpha(color, alpha::TINT))),
                 theme.surfaces.accent,
@@ -698,61 +502,6 @@ impl WorkspaceView {
         } else {
             pill
         };
-        Some(
-            div()
-                .id("badge")
-                .debug_selector(move || format!("badge-{}", item.as_uuid()))
-                .flex()
-                .min_w_0()
-                .items_center()
-                .child(pill)
-                .into_any_element(),
-        )
-    }
-
-    /// The pill in a thread tile's header: where its thread stands, in the word and the tone a
-    /// terminal agent's pill would have ("Needs approval", "Has a question"), what it asks in its
-    /// hint. A thread driven over a protocol has no terminal to say it; working, at rest, or once
-    /// done, it wears none, as a terminal agent's tile does.
-    pub(super) fn thread_badge(
-        &self,
-        tile: TileRef,
-        stand: &super::faces::ThreadStand,
-        chrome: Chrome,
-    ) -> Option<gpui::AnyElement> {
-        let theme = &self.theme;
-        let k = chrome.k;
-        let status = stand.status().filter(|s| wears_pill(*s))?;
-        let label = stand.word()?;
-        let item = tile.item;
-        let ask = stand
-            .asks
-            .as_ref()
-            .map(|a| crate::markdown::plain_line(&a.title))
-            .filter(|t| !t.trim().is_empty());
-        let full = ask.as_ref().map_or_else(|| label.to_owned(), |ask| format!("{label}: {ask}"));
-        let ui_size = theme.typography.small() * k;
-        let pill = crate::kit::pill(theme, status.tone(theme), k)
-            .id("agent")
-            .debug_selector(move || format!("agent-{}", item.as_uuid()))
-            .role(Role::Status)
-            .aria_label(SharedString::from(full))
-            .when_some(ask, |el, ask| {
-                let theme = std::rc::Rc::new(theme.clone());
-                crate::kit::hint_timing(el).tooltip(move |_window, cx| {
-                    let (ask, theme) = (ask.clone(), std::rc::Rc::clone(&theme));
-                    cx.new(|_| crate::kit::Hint::new(ask, "", theme)).into()
-                })
-            })
-            .min_w_0()
-            .max_w(px(ui_size * 22.0))
-            .child(
-                div().min_w_0().overflow_hidden().child(
-                    ChromeText::new(label, px(theme.typography.small()), k)
-                        .fill()
-                        .zooming(chrome.zooming),
-                ),
-            );
         Some(
             div()
                 .id("badge")
@@ -805,152 +554,139 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    use slopty_client::layout::WorkerKey;
     use slopty_core::WallMs;
-    use slopty_proto::agent::{AgentKind, AgentSource};
+    use slopty_proto::thread::wire::RequestCard;
+    use slopty_proto::thread::{AskId, Liveness, Status as RowStatus};
 
     use super::*;
 
-    fn asking(status: AgentStatus, detail: Option<&str>) -> AgentEvent {
-        AgentEvent {
-            session: SessionId::new(),
-            kind: AgentKind::ClaudeCode,
-            status,
-            agent_session: None,
-            detail: detail.map(str::to_owned),
-            attention: false,
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
+    /// A terminal's agent whose row stands at `phase`, waiting on `wait` (kind, words).
+    fn at(phase: Phase, wait: Option<(&str, &str)>) -> ThreadStand {
+        let rung = match phase {
+            Phase::NeedsYou => Rung::NeedsYou,
+            Phase::Failed => Rung::Failed,
+            Phase::Working => Rung::Working,
+            Phase::Waiting => Rung::Waiting,
+            Phase::Idle | Phase::Done | Phase::Stopped => Rung::Idle,
+        };
+        let wait = wait.map(|(kind, text)| Wait { kind: kind.to_owned(), text: text.to_owned() });
+        ThreadStand {
+            worker: WorkerKey::new(1),
+            rung,
+            exited: false,
+            asks: None,
+            terminal: None,
+            since: WallMs::ZERO,
+            status: Some(RowStatus {
+                phase,
+                wait,
+                liveness: Liveness::Live,
+                since_ms: WallMs::ZERO,
+            }),
+            doing: None,
+            resets: None,
         }
     }
 
-    fn permission(tool: &str, detail: Option<&str>) -> Option<String> {
-        let tool = tool.to_owned();
-        agent_ask_text(&asking(AgentStatus::Blocked(BlockReason::Permission { tool }), detail))
+    /// The same, with request `kind` open, titled `title`.
+    fn asking(kind: &str, title: &str, wait: Option<(&str, &str)>) -> ThreadStand {
+        let card = RequestCard {
+            id: AskId("a".to_owned()),
+            item: None,
+            kind: kind.to_owned(),
+            title: title.to_owned(),
+            options: Vec::new(),
+            opened_ms: WallMs::ZERO,
+        };
+        ThreadStand { asks: Some(card), ..at(Phase::NeedsYou, wait) }
     }
 
-    /// The ask is the tool and its subject, with no state word and no `$`, and a tool's own
-    /// name is not said twice. A state with nothing asked has no ask.
+    /// An approval is said as the adapter words its wait, else by the call that waits on it;
+    /// a question by its own words. Nothing asked, nothing said.
     #[test]
     fn the_ask_says_what_is_asked_without_the_state() {
-        let cases = [
-            ("Bash", Some("$ touch refused.txt"), Some("Bash \u{b7} touch refused.txt")),
-            ("Edit", Some("Edit src/main.rs"), Some("Edit \u{b7} src/main.rs")),
-            ("WebFetch", Some("Fetch https://a.b"), Some("WebFetch \u{b7} https://a.b")),
-            ("Task", Some("Agent: count lines"), Some("Task \u{b7} count lines")),
-            ("Skill", Some("/commit"), Some("Skill \u{b7} /commit")),
-            ("Bash", None, Some("Bash")),
-            ("mcp__db__query", Some("mcp__db__query"), Some("mcp__db__query")),
-            ("Bash", Some("Editing notes"), Some("Bash \u{b7} Editing notes")),
-            ("", Some("$ ls"), Some("ls")),
-            ("", None, None),
-        ];
-        for (tool, detail, ask) in cases {
-            assert_eq!(permission(tool, detail).as_deref(), ask, "{tool} {detail:?}");
-        }
-        let question = AgentStatus::Blocked(BlockReason::Question);
-        let asked = asking(question.clone(), Some("Which branch?"));
-        assert_eq!(agent_ask_text(&asked).as_deref(), Some("Which branch?"));
-        assert_eq!(agent_ask_text(&asking(question, None)), None);
-        let working = asking(AgentStatus::Working, Some("Editing src/main.rs"));
+        let worded = asking(Request::APPROVAL, "Allow Bash?", Some(("permission", "Run ls")));
+        assert_eq!(agent_ask_text(&worded).as_deref(), Some("Run ls"));
+        assert_eq!(agent_status_text(&worded), "Needs approval: Run ls");
+        let call = ThreadStand {
+            doing: Some("$ touch notes.txt".to_owned()),
+            ..asking(Request::APPROVAL, "Allow Bash?", None)
+        };
+        assert_eq!(agent_ask_text(&call).as_deref(), Some("$ touch notes.txt"), "else the call");
+        let question = asking(Request::QUESTION, "Which branch?", Some(("question", "Which?")));
+        assert_eq!(agent_ask_text(&question).as_deref(), Some("Which branch?"), "its own words");
+        assert_eq!(agent_status_text(&question), "Asks: Which branch?");
+        let bare = asking(Request::QUESTION, "Has a question", None);
+        assert_eq!(agent_status_text(&bare), "Has a question", "said once");
+        let held = at(Phase::NeedsYou, Some(("input", "Pick a port")));
+        assert_eq!(agent_status_word(&held), "Needs input", "a wait alone says what it asks");
+        assert_eq!(agent_status_text(&held), "Needs input: Pick a port");
+        let working =
+            ThreadStand { doing: Some("Edit src/main.rs".to_owned()), ..at(Phase::Working, None) };
         assert_eq!(agent_ask_text(&working), None, "working asks nothing");
+        assert_eq!(agent_status_text(&working), "Edit src/main.rs", "it says the call it is on");
     }
 
-    /// A turn paused on work in the background says what it waits on: the one task's words, a
-    /// count when there are more or no words, and a loop's own prompt. It is busy, calmly: not
-    /// at rest, and nothing asked.
+    /// A turn paused on work in the background says what it waits on: the commands it left
+    /// running as its thread's header says them, or the work by the hook's words or a count.
+    /// It is busy, calmly: not at rest, and nothing asked.
     #[test]
     fn a_paused_turn_says_what_it_waits_on() {
-        let waiting = |tasks, crons, detail| asking(AgentStatus::Waiting { tasks, crons }, detail);
         let cases = [
-            (waiting(1, 0, Some("npm test")), "Waiting on npm test"),
-            (waiting(2, 0, Some("npm test")), "Waiting on 2 tasks"),
-            (waiting(1, 0, None), "Waiting on a task"),
-            (waiting(3, 1, None), "Waiting on 3 tasks"),
-            (waiting(0, 1, Some("check the deploy")), "Looping: check the deploy"),
-            (waiting(0, 2, None), "Looping"),
+            (at(Phase::Waiting, Some((Wait::COMMAND, "npm run dev"))), "Running npm run dev"),
+            (at(Phase::Waiting, Some((Wait::TASK, "cargo test"))), "Waiting on cargo test"),
+            (
+                at(Phase::Waiting, Some((Wait::TASK, "2 background tasks"))),
+                "Waiting on 2 background tasks",
+            ),
+            (at(Phase::Waiting, None), "Waiting"),
         ];
         for (agent, text) in cases {
             assert_eq!(agent_status_text(&agent), text);
             assert_eq!(agent_status_word(&agent), "Waiting");
-            assert_eq!(Status::of_agent(&agent), Some(Status::Running));
+            assert_eq!(agent_mark_of(&agent), Status::Running);
             assert!(!needs_human(&agent) && agent_ask_text(&agent).is_none());
         }
     }
 
-    /// A turn that hit a usage limit says so, and when the limit resets where that is known;
-    /// another failure says what failed. The word stays short either way.
+    /// A turn that hit a usage limit says so, and when the limit resets where the plan's windows
+    /// say; another failure says the turn failed. The word stays short either way.
     #[test]
     fn a_failed_turn_says_why_and_when_a_limit_resets() {
-        let failed = |error: &str, until_ms| {
-            asking(AgentStatus::Failed { error: error.to_owned(), until_ms }, None)
-        };
-        let limited = failed(AgentStatus::RATE_LIMIT, None);
+        let limited = at(Phase::Failed, Some((Wait::LIMIT, "Hit its usage limit")));
         assert_eq!(agent_status_text(&limited), "Hit its usage limit");
         assert_eq!(agent_status_word(&limited), "Limit reached");
-        let at = WallMs::now();
-        let clock = crate::conversation::figures::stamp(at, at).unwrap_or_default();
-        let resets = failed(AgentStatus::RATE_LIMIT, Some(at));
+        let at_ms = WallMs::now();
+        let clock = crate::conversation::figures::stamp(at_ms, at_ms).unwrap_or_default();
+        let resets = ThreadStand { resets: Some(at_ms), ..limited };
         assert_eq!(
             agent_status_text(&resets),
             format!("Hit its usage limit \u{b7} resets {clock}")
         );
-        let other = failed("overloaded", None);
+        let other = at(Phase::Failed, None);
         assert_eq!(agent_status_text(&other), "Turn failed");
         assert_eq!(agent_status_word(&other), "Failed");
     }
 
     /// The word for a state never carries the detail, so a chip, a pill and a row read one
-    /// state the same whatever the agent is doing.
+    /// state the same whatever the agent is doing; a turn over is done, never idle.
     #[test]
     fn a_state_has_one_word_whatever_its_detail() {
-        let tool = "Bash".to_owned();
         let states = [
-            AgentStatus::Idle,
-            AgentStatus::Working,
-            AgentStatus::Tool { tool: "Edit".to_owned() },
-            AgentStatus::Blocked(BlockReason::Permission { tool }),
-            AgentStatus::Blocked(BlockReason::Question),
-            AgentStatus::Blocked(BlockReason::Elicitation),
-            AgentStatus::Done,
+            (at(Phase::Idle, None), "Idle"),
+            (at(Phase::Working, None), "Working"),
+            (asking(Request::APPROVAL, "Bash", None), "Needs approval"),
+            (asking(Request::QUESTION, "Which?", None), "Has a question"),
+            (asking(Request::ELICITATION, "A port", None), "Needs input"),
+            (at(Phase::Done, None), "Turn finished"),
         ];
-        for status in states {
-            let bare = agent_status_word(&asking(status.clone(), None));
-            let detailed = agent_status_word(&asking(status.clone(), Some("$ touch x")));
-            assert_eq!(bare, detailed, "{status:?}");
-            assert!(!bare.contains(':'), "{status:?}: {bare}");
+        for (agent, word) in states {
+            let detailed = ThreadStand { doing: Some("$ touch x".to_owned()), ..agent.clone() };
+            assert_eq!(agent_status_word(&agent), word);
+            assert_eq!(agent_status_word(&detailed), word, "{word}");
         }
-        let tool = asking(AgentStatus::Tool { tool: "Bash".to_owned() }, None);
-        assert_eq!(agent_status_word(&tool), "Working", "a tool call is the working state");
-    }
-
-    /// A row leads with what is asked as an action on its subject; when the hook named only the
-    /// tool, with what the tool does. Never the bare name.
-    #[test]
-    fn a_bare_tool_is_said_as_what_it_asks() {
-        let ask = |tool: &str, detail| {
-            let tool = tool.to_owned();
-            agent_ask_line(&asking(AgentStatus::Blocked(BlockReason::Permission { tool }), detail))
-        };
-        assert_eq!(ask("Bash", None).as_deref(), Some("Wants to run a command"));
-        assert_eq!(ask("mcp__db__query", None).as_deref(), Some("Wants to use query from db"));
-        assert_eq!(ask("Frobnicate", None).as_deref(), Some("Wants to use Frobnicate"));
-        let detailed = [
-            ("Bash", "$ touch x", "Run touch x"),
-            ("Edit", "Edit src/main.rs", "Edit src/main.rs"),
-            ("WebFetch", "Fetch https://a.b", "Fetch https://a.b"),
-            ("Task", "Agent: count lines", "Start a subagent: count lines"),
-            ("Skill", "/commit", "Use /commit"),
-            ("mcp__db__query", "users", "Use query from db: users"),
-        ];
-        for (tool, detail, line) in detailed {
-            assert_eq!(
-                ask(tool, Some(detail)).as_deref(),
-                Some(line),
-                "the action and its subject"
-            );
-        }
-        let question = asking(AgentStatus::Blocked(BlockReason::Question), Some("Which?"));
-        assert_eq!(agent_ask_line(&question).as_deref(), Some("Which?"));
+        assert_eq!(agent_mark_of(&at(Phase::Done, None)), Status::Done);
+        assert_eq!(agent_mark_of(&at(Phase::Idle, None)), Status::Idle);
     }
 }

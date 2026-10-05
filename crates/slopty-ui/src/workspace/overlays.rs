@@ -12,8 +12,7 @@ use slopty_proto::screen::{DisplayInfo, WindowInfo};
 
 use super::WorkspaceView;
 use super::actions::{OpenFile, OpenFolder, OpenPalette, StartThread};
-use super::agents::{agent_status_text, needs_human};
-use crate::icons::Status;
+use super::agents::{agent_mark_of, agent_status_text, needs_human};
 use crate::kit::find::Query;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -569,7 +568,7 @@ impl WorkspaceView {
                     title: self.tile_title(item),
                     status: agent.map(agent_status_text),
                     needs_you,
-                    mark: agent.and_then(Status::of_agent),
+                    mark: agent.map(agent_mark_of),
                     worker: self.worker_label(tile.worker),
                     cwd: self.session_tail(session),
                     age: summary.and_then(|s| session_age(s.started_ms.as_millis())),

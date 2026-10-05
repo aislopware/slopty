@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use slopty_proto::agent::{AgentKind, AgentSource};
-use slopty_proto::thread::ThreadState;
+use slopty_proto::thread::{ThreadState, Wait};
 
 use super::*;
 use crate::Hook;
@@ -427,6 +427,16 @@ fn the_status_maps_to_a_phase() {
     host.take(observed.cwd("/work/next"));
     assert_eq!(host.thread(observed.main()).meta.cwd, "/work/next", "the directory moved");
     assert!(observed.cwd("/work/next").is_empty(), "and only once");
+    let failed = |error: &str| AgentStatus::Failed { error: error.to_owned(), until_ms: None };
+    host.take(observed.status(&event(failed(AgentStatus::RATE_LIMIT))));
+    let limited = host.thread(observed.main()).status.wait.clone().map(|w| w.kind);
+    assert_eq!(limited.as_deref(), Some(Wait::LIMIT), "the plan's limit is a wait of its own");
+    host.take(observed.status(&event(failed("overloaded"))));
+    assert_eq!(
+        host.thread(observed.main()).status.wait,
+        None,
+        "any other failure waits on nothing"
+    );
 }
 
 /// What the agent asks in its own terminal with no prompt held here is still a request on
@@ -948,4 +958,30 @@ fn a_wait_on_commands_left_running_names_them() {
     assert_eq!(wait(&host, &observed).kind, Wait::TASK, "a scheduled prompt holds it");
     host.take(observed.status(&waiting(1, 0)));
     assert_eq!(wait(&host, &observed).kind, Wait::COMMAND);
+}
+
+/// A permission's wait leads with what is asked as an action on its subject; when the hook
+/// named only the tool, with what the tool does. Never the bare name, and no `$`.
+#[test]
+fn a_permission_waits_on_its_action() {
+    let bare = [
+        ("Bash", "Wants to run a command"),
+        ("mcp__db__query", "Wants to use query from db"),
+        ("Frobnicate", "Wants to use Frobnicate"),
+    ];
+    for (tool, words) in bare {
+        assert_eq!(permission_words(tool, None), words, "{tool}");
+    }
+    let detailed = [
+        ("Bash", "$ touch x", "Run touch x"),
+        ("Edit", "Edit src/main.rs", "Edit src/main.rs"),
+        ("WebFetch", "Fetch https://a.b", "Fetch https://a.b"),
+        ("Task", "Agent: count lines", "Start a subagent: count lines"),
+        ("Skill", "/commit", "Use /commit"),
+        ("mcp__db__query", "users", "Use query from db: users"),
+        ("", "$ ls", "$ ls"),
+    ];
+    for (tool, detail, words) in detailed {
+        assert_eq!(permission_words(tool, Some(detail)), words, "{tool} {detail}");
+    }
 }

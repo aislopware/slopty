@@ -363,14 +363,12 @@ mod tests {
             .await
             .unwrap();
 
-        // No hook has fired and no title has been painted: the process is the whole signal.
+        // No hook has fired and no title has been painted: the process is the whole signal,
+        // and its thread's row says it.
         stack
             .driver
             .wait_for("the agent seen from its process alone", STEP, |d| {
-                d.terminals.iter().any(|t| {
-                    t.agent.as_deref() == Some("idle")
-                        && t.agent_source.as_deref() == Some("process")
-                })
+                d.terminals.iter().any(|t| t.agent.as_deref() == Some("idle"))
             })
             .await
             .unwrap();
@@ -380,32 +378,19 @@ mod tests {
         stack
             .driver
             .wait_for("the title to say a turn is running", STEP, |d| {
-                d.terminals.iter().any(|t| {
-                    t.agent.as_deref() == Some("working")
-                        && t.agent_source.as_deref() == Some("title")
-                })
+                d.terminals.iter().any(|t| t.agent.as_deref() == Some("working"))
             })
             .await
             .unwrap();
 
         // It writes its transcript where Claude Code writes one; the worker finds the file
-        // from the session's own working directory and reads the turn out of it.
+        // from the session's own working directory and reads the turn out of it, to its end.
         stack.fake_claude_stage("transcript").unwrap();
-        stack
-            .driver
-            .wait_for("the transcript to take over", STEP, |d| {
-                d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("transcript"))
-            })
-            .await
-            .unwrap();
         stack.fake_claude_stage("done").unwrap();
         stack
             .driver
             .wait_for("the turn to finish", STEP, |d| {
-                d.terminals.iter().any(|t| {
-                    t.agent.as_deref() == Some("done")
-                        && t.agent_source.as_deref() == Some("transcript")
-                })
+                d.terminals.iter().any(|t| t.agent.as_deref() == Some("done"))
             })
             .await
             .unwrap();
