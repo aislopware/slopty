@@ -1792,16 +1792,11 @@ impl CursorBlink {
 pub struct StreamPrefs {
     /// The bitrate ceiling, bits per second.
     pub max_bitrate_bps: u32,
-    /// A stream opens with its audio silenced on this client (the title-bar pill still
-    /// toggles it).
-    pub muted: bool,
-    /// Ask for full-chroma (4:4:4) video, which the worker grants only when the rate carries it.
-    pub sharp_text: bool,
 }
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
+        Self { max_bitrate_bps: 30_000_000 }
     }
 }
 

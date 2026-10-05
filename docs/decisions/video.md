@@ -1502,8 +1502,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
      which reads the gate the rate decision moved. A 4:4:4 session that cannot be built
      (`NoFullChroma`) makes the stream 4:2:0 until the client asks again, at open or on a
      rebuild.
-  6. *The preference is `[remote] sharp_text`, off by default.* It costs about 1.6× the bits
-     at saturation and its gain is coloured detail, so it stays opt-in.
+  6. *Every stream from a Mac asks.* `[remote] sharp_text`, an opt-in, was cut on 2026-10-05:
+     the ask costs the encoder no time, and the gate above already weighs the 1.6× bits against
+     the rate (`docs/decisions/settings.md`, "`[remote]` is the bitrate ceiling alone"). An
+     iPhone or iPad still asks for 4:2:0 until its decoder is proven to take 4:4:4.
   Tests: `the_full_chroma_band_is_measured_at_1080p_and_scales_with_the_picture`,
   `full_chroma_is_asked_for_and_earned`, `full_chroma_has_hysteresis_and_a_hold`,
   `a_swinging_rate_does_not_flap_the_chroma` and

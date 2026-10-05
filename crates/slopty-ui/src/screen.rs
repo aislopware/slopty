@@ -933,8 +933,21 @@ fn screen_refresh_hz(screen: Option<u32>) -> u16 {
     screen.map_or_else(main_refresh_hz, |id| hz_of(slopty_platform::display_refresh_of(id)))
 }
 
-/// The quality a stream is asked for: the refresh of the screen the view is on
-/// ([`stream_fps`]), and the settings' bitrate ceiling at `scale`.
+/// The chroma a stream asks for: 4:4:4, which the Mac's decoder is proven to take.
+///
+/// The worker grants it only while the rate makes it the sharper picture (`ChromaGate`,
+/// `docs/decisions/video.md`).
+#[cfg(target_os = "macos")]
+pub const ASKED_CHROMA: Chroma = Chroma::Full;
+/// The chroma a stream asks for: 4:2:0 until an iPhone's and an iPad's decoder are proven to
+/// take 4:4:4 (`docs/decisions/video.md`, "Full chroma follows the rate").
+#[cfg(not(target_os = "macos"))]
+pub const ASKED_CHROMA: Chroma = Chroma::Subsampled;
+
+/// The quality a stream is asked for: its screen's refresh, the ceiling, and [`ASKED_CHROMA`].
+///
+/// The rate is the refresh of the screen the view is on ([`stream_fps`]), and the ceiling the
+/// settings' at `scale`.
 #[must_use]
 pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz: u16) -> Quality {
     Quality {
@@ -943,7 +956,7 @@ pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz
         scale,
         region: None,
         codec: VideoCodec::Hevc,
-        chroma: if prefs.sharp_text { Chroma::Full } else { Chroma::Subsampled },
+        chroma: ASKED_CHROMA,
     }
 }
 
@@ -962,10 +975,6 @@ impl ScreenView {
         if wanted != self.quality {
             self.quality = wanted;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
-        }
-        // The pill's own toggles stand; only a change of the setting moves the switch.
-        if theme.behaviour.stream.muted != self.theme.behaviour.stream.muted {
-            self.handle.set_muted(theme.behaviour.stream.muted);
         }
         self.theme = theme;
         cx.notify();
@@ -1018,7 +1027,6 @@ impl ScreenView {
             cx.set_cursor_image(view.system_pointer.0, None);
         })
         .detach();
-        handle.mute_by_default(theme.behaviour.stream.muted);
         let glass = glass::Glass::new();
         let presenter = Arc::clone(&glass);
         handle.set_present(Some(Arc::new(move |frame| {
@@ -4024,7 +4032,7 @@ mod tests {
             stream: StreamId(4),
             target: CaptureTarget::Display(DisplayId(2)),
             size: (800, 600),
-            quality: Quality { scale: 1.0, ..Quality::default() },
+            quality: Quality { scale: 1.0, chroma: ASKED_CHROMA, ..Quality::default() },
         };
         let view = cx.new(|cx| {
             ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
@@ -4032,8 +4040,8 @@ mod tests {
         (view, rx)
     }
 
-    /// A settings change to the stream's ceiling or depth reaches a live stream as a
-    /// `SetQuality` at the scale it holds; a chrome-only change asks nothing.
+    /// A settings change to the stream's ceiling reaches a live stream as a `SetQuality` at the
+    /// scale it holds, still asking for the client's chroma; a chrome-only change asks nothing.
     #[gpui::test]
     fn new_stream_settings_are_asked_of_a_live_stream(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
@@ -4049,26 +4057,13 @@ mod tests {
         };
         assert_eq!(quality.bitrate_bps, 8_000_000);
         assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
+        assert_eq!(quality.chroma, ASKED_CHROMA, "the worker's gate decides 4:4:4");
         assert!(
             (quality.scale - 1.0).abs() < f32::EPSILON,
             "the scale follows the tile's width, not the theme"
         );
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");
-
-        // The muted preference moves the switch only when it changes; the pill's own
-        // toggle stands through an unrelated theme change.
-        let muted = |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.muted());
-        assert!(!muted(cx));
-        let mut theme = Theme::default();
-        theme.behaviour.stream.muted = true;
-        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        assert!(muted(cx), "the setting silences a live stream");
-        view.update(cx, |v, _| v.toggle_mute());
-        theme.behaviour.stream.sharp_text = true;
-        view.update(cx, |v, cx| v.set_theme(theme, cx));
-        assert!(!muted(cx), "the pill's toggle stands");
-        assert!(!sent(&mut rx).is_empty(), "the depth asked");
     }
 
     /// The stream asks for the refresh of the screen it is drawn on, up to 120, whenever its

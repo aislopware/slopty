@@ -14750,3 +14750,30 @@ cd .research/libghostty-rs
 GHOSTTY_SOURCE_DIR=$PWD/../../vendor/ghostty LIBGHOSTTY_VT_SYS_PREBUILT_DIR=/tmp/gp \
   cargo build -q -p libghostty-vt-sys --target-dir /tmp/lgt1   # then again with /tmp/lgt2
 ```
+
+## 2026-10-05 — 4:4:4 still costs the encoder nothing, so a Mac always asks for it
+
+Mac Studio M1 Max, macOS 27.0.1 (26A434), load average 7–8. This reruns the 2026-09-28 probe
+(`crates/slopty-codec/tests/chroma444.rs`, synthetic code-editor picture, 180 frames, one in
+flight) before `[remote] sharp_text` is deleted. With the setting gone, every stream from a Mac
+asks for 4:4:4, and `ChromaGate` grants it only above its band (10 Mbit/s in at 1080p).
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run   # target/debug/deps/chroma444-<hash>
+cp target/debug/deps/chroma444-<hash> /tmp/chroma444 && cd /tmp
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 chroma_444_encode_time
+```
+
+Encode time, submit → callback (p50 / p95 / max, ms):
+
+| mode | 1920×1080 at 16 Mbit/s | spent | 5120×2880 at 60 Mbit/s | spent |
+| --- | --- | --- | --- | --- |
+| low-latency Main 4:2:0 | 7.81 / 10.66 / 12.81 | 6.9 | 39.14 / 40.26 / 42.60 | 25.3 |
+| low-latency Main44410, `xf44` (what a full-chroma stream runs) | 8.06 / 11.60 / 12.63 | 10.8 | 39.07 / 41.76 / 49.11 | 36.2 |
+| low-latency Main444, `444f` | 7.76 / 10.95 / 12.53 | 11.4 | 39.00 / 39.68 / 59.44 | 42.6 |
+
+- 4:4:4 at 10 bits is 0.25 ms (3 %) slower at the 1080p p50, and the same at 5K, inside this
+  load's noise. The 5K p50s all moved up about 4 ms from 2026-09-28 together, which is load,
+  not chroma.
+- The cost of 4:4:4 is bits, not time: about 1.6× the rate for the same luma (2026-09-28).
+  That is why the gate, not the person, decides, from the rate the link allows.

@@ -683,12 +683,6 @@ impl ScreenHandle {
         self.sound.muted().set(muted);
     }
 
-    /// Silence or resume the worker's sound as the settings prefer, unless it was already
-    /// chosen on this connection: a new tile of a worker silenced by hand stays silent.
-    pub fn mute_by_default(&self, muted: bool) {
-        self.sound.muted().default_to(muted);
-    }
-
     /// The worker's `ScreenEvent::Source`: whether the capture target is drawing anything. While
     /// it is not, the worker stops asking for refreshes no frame could answer.
     pub fn set_source_live(&self, live: bool) {
@@ -3029,8 +3023,7 @@ mod worker_tests {
 
     /// A worker has one sound: its three tiles' streams share it, so a mute in one is the mute
     /// in all, and a tile opened later reads it. The choice outlives the sound itself: a tile
-    /// opened after the last one closed starts a new one, still silenced, and the settings'
-    /// preference does not undo a choice made by hand.
+    /// opened after the last one closed starts a new one, still silenced.
     #[test]
     fn a_workers_streams_share_one_sound_and_its_mute() {
         let h = Harness::start();
@@ -3043,11 +3036,9 @@ mod worker_tests {
         let (second, third) = (open(StreamId(7)), open(StreamId(9)));
         assert!(Arc::ptr_eq(&h.handle.sound, &second.sound));
         assert!(Arc::ptr_eq(&h.handle.sound, &third.sound));
-        h.handle.mute_by_default(false);
+        assert!(!h.handle.muted(), "sound plays until the pill silences it");
         third.set_muted(true);
         assert!(h.handle.muted() && second.muted(), "one tile silences the worker's sound");
-        second.mute_by_default(false);
-        assert!(third.muted(), "a later tile's preference does not undo the choice");
         let Harness { handle, router, rt, .. } = h;
         drop((handle, second, third));
         assert!(router.sound.lock().upgrade().is_none(), "the last stream ends the sound");
@@ -3055,7 +3046,6 @@ mod worker_tests {
         let (control, _gone) = mpsc::channel(4);
         let uplink = Uplink { control, feedback: Box::new(|_bytes| true), rtt: Box::new(|| None) };
         let again = spawn_screen(rt.handle(), &router, StreamId(11), VideoCodec::Hevc, uplink);
-        again.mute_by_default(false);
         assert!(again.muted(), "a new sound keeps the connection's choice");
         again.set_muted(false);
         assert!(!again.muted());

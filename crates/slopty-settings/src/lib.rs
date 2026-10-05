@@ -526,24 +526,11 @@ pub struct RemoteSettings {
         extend("x-step" = 5, "x-unit" = "Mb/s")
     )]
     pub max_bitrate_mbps: u16,
-    /// A stream opens silent here; its pill still turns the sound on.
-    ///
-    /// A stream opens silenced on this client; the title-bar pill still toggles it.
-    #[schemars(title = "Start muted")]
-    pub muted: bool,
-    /// Full colour at every pixel when the link allows: crisper text.
-    ///
-    /// Asks the worker for 4:4:4 video. It streams 4:4:4 only while its bitrate target is
-    /// high enough for 4:4:4 to be the sharper picture (about 10 Mbit/s at 1080p, more for a
-    /// bigger stream) and 4:2:0 below that, since 4:4:4 needs about 1.6× the bits for the same
-    /// luma (`docs/decisions/video.md`, "Full chroma follows the rate").
-    #[schemars(title = "Sharp text")]
-    pub sharp_text: bool,
 }
 
 impl Default for RemoteSettings {
     fn default() -> Self {
-        Self { max_bitrate_mbps: 30, muted: false, sharp_text: false }
+        Self { max_bitrate_mbps: 30 }
     }
 }
 
@@ -1083,11 +1070,6 @@ natural_editing = {natural_editing}
 # Ceiling for one stream in megabits per second (1 to 200); the machine grows
 # towards it as the link allows.
 max_bitrate_mbps = {max_bitrate_mbps}
-# Open a stream with its audio silenced here; the title-bar pill still toggles it.
-muted = {muted}
-# Ask for colour at every pixel (4:4:4): crisper coloured text for about 1.6x the
-# bits. The machine sends it only while the link carries that rate, 4:2:0 below.
-sharp_text = {sharp_text}
 
 [clipboard]
 # Share the clipboard with the machines: copy on one, paste here or on another.
@@ -1182,8 +1164,6 @@ editor = \"\"
             confirm_close = d.terminal.confirm_close,
             natural_editing = d.terminal.natural_editing,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
-            muted = d.remote.muted,
-            sharp_text = d.remote.sharp_text,
         )
     }
 
@@ -1428,15 +1408,15 @@ mod tests {
 
     #[test]
     fn remote_keys() {
-        let loaded =
-            Settings::parse("[remote]\nmax_bitrate_mbps = 8\nmuted = true\nsharp_text = true\n");
+        let loaded = Settings::parse("[remote]\nmax_bitrate_mbps = 8\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert_eq!(loaded.settings.remote, RemoteSettings { max_bitrate_mbps: 8 });
+        let gone = Settings::parse("[remote]\nmuted = true\nsharp_text = true\n");
         assert_eq!(
-            loaded.settings.remote,
-            RemoteSettings { max_bitrate_mbps: 8, muted: true, sharp_text: true }
+            gone.warnings,
+            ["unknown key `remote.muted`", "unknown key `remote.sharp_text`"],
+            "the pill mutes and the rate picks the chroma"
         );
-        assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
-        assert!(!Settings::default().remote.sharp_text, "4:2:0 unless asked: fewer bits");
     }
 
     /// `[worker]`'s own choices: syncing the input source, what keeps the Mac awake, how long a

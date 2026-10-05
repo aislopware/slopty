@@ -68,7 +68,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   multiplier on `Theme::behaviour`. `[remote] muted` (`StreamPrefs::muted`, off) opens a
   stream silenced on this client; `ScreenView::set_theme` moves the switch only when the
   setting itself changes, so the title-bar pill's own toggle survives an unrelated theme
-  change (test: the tail of `new_stream_settings_are_asked_of_a_live_stream`).
+  change (test: the tail of `new_stream_settings_are_asked_of_a_live_stream`). `[remote]
+  muted` was cut on 2026-10-05 ("`[remote]` is the bitrate ceiling alone", below).
 - ✅ **`[colors]` lays a palette over the theme** (2026-09-15). ghostty ships hundreds of
   schemes and every terminal takes a custom palette; Slopty's two variants were fixed. The
   section has `foreground | background | cursor | cursor_text | selection` and `ansi` (a
@@ -299,3 +300,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The row sits under "This app" on the Network page, beside the server.
   - Tests: `slopty_settings` `the_editor_link_opens_the_file_on_its_machine`,
     `default_file_round_trips`, and `schema::tests::a_value_is_checked_by_its_key`.
+
+- ✅ **`[remote]` is the bitrate ceiling alone** (2026-10-05, readiness deletions, feature
+  audit #13). `muted` and `sharp_text` are gone.
+  - **`muted`.** The stream's pill silences a worker's sound for all its streams, and the
+    choice holds on the connection. A default for new streams was a second way to the same
+    switch, and it needed the client's "not chosen yet" state only to keep a later tile's
+    preference from undoing a choice. The sound now plays until the pill silences it.
+  - **`sharp_text`.** Every HEVC stream from a Mac now asks for 4:4:4, and the worker's
+    `ChromaGate` grants it only while the rate makes it the sharper picture
+    (`docs/decisions/video.md`, "Full chroma follows the rate"). An iPhone or iPad asks for
+    4:2:0 until its decoder is proven to take 4:4:4, as that ruling requires
+    (`slopty_ui::screen::ASKED_CHROMA`). The ask costs the encoder nothing in time: the 10-bit 4:4:4
+    session is 0.25 ms slower at the 1080p p50 and the same at 5K (`docs/MEASUREMENTS.md`,
+    2026-10-05). The cost of 4:4:4 is bits, and the gate, which sees the rate, weighs that
+    better than a switch the person sets once.
+  - A file that still has either key loads, with an unknown-key warning for each.
+  - Tests: `slopty_settings` `remote_keys`; `slopty-ui`
+    `new_stream_settings_are_asked_of_a_live_stream` (full chroma asked);
+    `slopty-client` `a_workers_streams_share_one_sound_and_its_mute`.
+

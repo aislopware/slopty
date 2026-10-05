@@ -123,7 +123,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Pointer",
         &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
     ),
-    (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps", "remote.muted"]),
+    (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps"]),
     (Section::Network, "This app", &["client.server", "client.editor"]),
     (
         Section::Network,
@@ -597,7 +597,8 @@ mod tests {
         );
 
         let mut fields = schema::fields().to_vec();
-        let mut extra = fields.iter().find(|f| f.key == "muted").cloned().expect("a switch");
+        let mut extra =
+            fields.iter().find(|f| f.key == "max_bitrate_mbps").cloned().expect("a [remote] key");
         "sound_on_connect".clone_into(&mut extra.key);
         "Sound on connect".clone_into(&mut extra.title);
         fields.push(extra);

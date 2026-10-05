@@ -8,7 +8,7 @@
 //! ends it. Its mute is the worker's: one switch, which every one of its tiles reads.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -21,33 +21,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Arrival, REPORT_EVERY, ScreenRouter, ScreenStats};
 
-/// Whether a worker's sound is silenced here: not chosen yet, off or on.
-///
-/// A new tile brings the settings' preference, which holds only until somebody has chosen:
-/// opening a second window of a worker silenced by hand must not turn its sound back on.
+/// Whether a worker's sound is silenced here, by the person's pill.
 #[derive(Debug, Default)]
-pub(super) struct Muted(AtomicU8);
+pub(super) struct Muted(AtomicBool);
 
 impl Muted {
-    const OFF: u8 = 1;
-    const ON: u8 = 2;
-    const UNCHOSEN: u8 = 0;
-
     /// Whether playback is silenced.
     pub(super) fn get(&self) -> bool {
-        self.0.load(Ordering::Relaxed) == Self::ON
+        self.0.load(Ordering::Relaxed)
     }
 
     /// Silence or resume playback.
     pub(super) fn set(&self, muted: bool) {
-        self.0.store(if muted { Self::ON } else { Self::OFF }, Ordering::Relaxed);
-    }
-
-    /// Silence or resume playback unless it was already chosen.
-    pub(super) fn default_to(&self, muted: bool) {
-        let to = if muted { Self::ON } else { Self::OFF };
-        let _chosen =
-            self.0.compare_exchange(Self::UNCHOSEN, to, Ordering::Relaxed, Ordering::Relaxed);
+        self.0.store(muted, Ordering::Relaxed);
     }
 }
 
@@ -360,21 +346,6 @@ mod tests {
     use slopty_proto::screen::SoundReport;
 
     use super::*;
-
-    /// The settings' preference holds until a choice is made, and only a choice moves it after.
-    #[test]
-    fn the_preference_holds_only_until_a_choice() {
-        let muted = Muted::default();
-        assert!(!muted.get());
-        muted.default_to(true);
-        assert!(muted.get(), "the preference silences a sound nobody has chosen for");
-        muted.default_to(false);
-        assert!(muted.get(), "a second tile's preference does not undo it");
-        muted.set(false);
-        assert!(!muted.get());
-        muted.default_to(true);
-        assert!(!muted.get(), "a choice stands");
-    }
 
     /// The sound on its own runtime, with what it sent back caught.
     struct Harness {
