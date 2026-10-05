@@ -83,6 +83,9 @@ pub enum LaneId {
     Tools,
     ClippyHost,
     ClippyIos,
+    /// Clippy for Linux on the crates that build there. On CI a free Linux runner takes it;
+    /// here it shares the iOS lane's target dir.
+    ClippyLinux,
     Tests,
     Rustdoc,
     /// The Linux worker built natively and its crates' tests run, on a Linux host only.
@@ -96,6 +99,7 @@ impl LaneId {
             Self::Tools => "tools",
             Self::ClippyHost => "clippy host",
             Self::ClippyIos => "clippy ios",
+            Self::ClippyLinux => "clippy linux",
             Self::Tests => "tests",
             Self::Rustdoc => "rustdoc",
             Self::Linux => "linux",
@@ -115,7 +119,7 @@ impl LaneId {
                 "committed",
             ],
             Self::Tests | Self::Linux => &["cargo-nextest"],
-            Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => &[],
+            Self::ClippyHost | Self::ClippyIos | Self::ClippyLinux | Self::Rustdoc => &[],
         }
     }
 }
@@ -125,11 +129,11 @@ impl LaneId {
 /// its own packages (`docs/decisions/tooling.md`, "The tests lane runs in three shards").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Shard {
-    /// The client: the UI, the apps over it, and what only they use.
+    /// The client: the UI, the apps over it, and what only they use; and xtask.
     Ui,
     /// The worker daemon and what it stands on: sessions, capture, codecs, input, files.
     Worker,
-    /// The rest: the server, the CLI, the wire, the client core, the terminal engine, xtask.
+    /// The rest: the server, the CLI, the wire, the client core, the terminal engine.
     Rest,
 }
 
@@ -159,6 +163,9 @@ impl Shard {
                 "slopty-tools",
                 "slopty-theme",
                 "slopty-ios",
+                // Here, not in the rest: its icon test waits on actool for minutes, and the rest
+                // was the longer shard (.research/dev-speed-2026-10-05.md).
+                "xtask",
             ],
             Self::Worker => &[
                 "slopty-workerd",
@@ -191,7 +198,6 @@ impl Shard {
                 "slopty-core",
                 "slopty-platform",
                 "slopty-testkit",
-                "xtask",
             ],
         }
     }
@@ -346,10 +352,18 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
             handles.push((
                 "clippy ios",
                 scope.spawn(|| {
-                    cached(inputs, &tree, &build("clippy ios"), |_| {
-                        let sh = lane("clippy ios")?;
-                        // Linux runs whatever iOS found, so one gate names every failure.
-                        both(lint_ios(&sh), lint_linux(&sh))
+                    cached(inputs, &tree, &build("clippy ios"), |_| lint_ios(&lane("clippy ios")?))
+                }),
+            ));
+        }
+        if only.wants(LaneId::ClippyLinux) {
+            handles.push((
+                "clippy linux",
+                scope.spawn(|| {
+                    // The iOS lane's target dir: cargo takes turns on it, and a full gate here
+                    // keeps one tree of metadata for both instead of two.
+                    cached(inputs, &tree, &build("clippy linux"), |_| {
+                        lint_linux(&lane("clippy ios")?)
                     })
                 }),
             ));
@@ -420,18 +434,27 @@ fn lock(gate_dir: &Utf8Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
+/// Where the tests lane keeps the main run's test report beside the VideoToolbox run's, which
+/// writes `junit.xml` after it.
+const MAIN_JUNIT: &str = "junit-main.xml";
+
 /// The nextest profile of the tests `land` runs (`.config/nextest.toml`).
 const NEXTEST_LAND_PROFILE: &str = "land";
 
-/// Before `cargo xtask land` pushes: the tests of the packages its commits change since `base`
-/// and of every package that depends on them, on HEAD's tree (`target/gate/tree`, in the tests
-/// lane's target dir), under `nice`. A red CI run costs the better part of an hour and most were
-/// a test a minute here would have failed (`docs/decisions/tooling.md`, "land runs the changed
-/// packages' tests first"). It is a net, not the gate: the tests that time themselves against
-/// the machine's load are CI's alone (nextest's `land` profile), and a change outside every
-/// package (the manifests' root, the lockfile, cargo's config) leaves all of them to CI, since
-/// it reaches every package. Skipped when it last passed on the same inputs.
-pub fn land_tests(base: &str) -> Result<()> {
+/// Before `cargo xtask land` pushes: the checks a red CI run most often names, on the packages
+/// its commits change since `base` and every package that depends on them, on HEAD's tree
+/// (`target/gate/tree`), side by side under `nice`:
+/// - their tests, in the tests lane's target dir;
+/// - rustdoc with warnings denied, in the rustdoc lane's;
+/// - clippy on both iOS triples and on Linux, in the iOS clippy lane's.
+///
+/// A red CI run costs the better part of an hour, and most were a test or a lint a few minutes
+/// here would have failed (`docs/decisions/tooling.md`, "land checks the changed packages
+/// first"). It is a net, not the gate: the tests that time themselves against the machine's load
+/// are CI's alone (nextest's `land` profile), and a change outside every package (the manifests'
+/// root, the lockfile, cargo's config) leaves all of it to CI, since it reaches every package.
+/// Skipped when it last passed on the same inputs.
+pub fn land_checks(base: &str) -> Result<()> {
     let started = Instant::now();
     let root = repo_root()?;
     let sh = Shell::new()?;
@@ -445,7 +468,7 @@ pub fn land_tests(base: &str) -> Result<()> {
         .map(str::to_owned)
         .collect();
     if changed.is_empty() {
-        println!("  tests before the push: nothing a build reads changed since {base}");
+        println!("  checks before the push: nothing a build reads changed since {base}");
         return Ok(());
     }
     let gate_dir = root.join("target").join("gate");
@@ -455,7 +478,7 @@ pub fn land_tests(base: &str) -> Result<()> {
     let Some(packages) = pass::affected(&pass::workspace(&tree)?, &changed) else {
         let outside: Vec<&str> = changed.iter().take(3).map(String::as_str).collect();
         println!(
-            "  tests before the push: left to CI, since a change reaches every package ({}…)",
+            "  checks before the push: left to CI, since a change reaches every package ({}…)",
             outside.join(", ")
         );
         return Ok(());
@@ -467,32 +490,46 @@ pub fn land_tests(base: &str) -> Result<()> {
         extra: pass::tool_id("cargo-nextest"),
         since_pass: false,
     };
+    // Every cargo below inherits it: this Mac keeps working while the net runs.
+    let pid = std::process::id().to_string();
+    cmd!(sh, "renice -n 10 -p {pid}").quiet().ignore_stdout().run()?;
     cached(Some(&inputs), &tree, &lane, |_| {
-        println!("▶ tests before the push: {}", packages.join(" "));
-        affected_lane(&lane_shell(&tree, &gate_dir, "tests", false)?, &packages)
+        println!("▶ checks before the push: {}", packages.join(" "));
+        let names: Vec<&str> = packages.iter().map(String::as_str).collect();
+        let shell = |name| lane_shell(&tree, &gate_dir, name, false);
+        std::thread::scope(|scope| {
+            let tests = scope.spawn(|| affected_lane(&shell("tests")?, &packages));
+            let docs = scope.spawn(|| crate::check::rustdoc(&shell("rustdoc")?, &names));
+            let cross = scope.spawn(|| {
+                let sh = shell("clippy ios")?;
+                let linux = crate::tools::lint_linux(&sh, &names);
+                let xtask = if names.contains(&"xtask") { lint_linux_xtask(&sh) } else { Ok(()) };
+                both(both(crate::check::clippy_ios(&sh, &names), linux), xtask)
+            });
+            both(both(join(tests), join(docs)), join(cross))
+        })
     })?;
-    println!("✔ tests before the push ({:.1?})", started.elapsed());
+    println!("✔ checks before the push ({:.1?})", started.elapsed());
     Ok(())
 }
 
-/// [`land_tests`]'s build and run of `packages`' tests, at a low priority beside whatever else
-/// this Mac is doing.
+/// [`land_checks`]'s build and run of `packages`' tests.
 fn affected_lane(sh: &Shell, packages: &[String]) -> Result<()> {
     let names: Vec<&str> = packages.iter().map(String::as_str).collect();
     let p = &selected(names.iter().copied().chain([WORKSPACE_HACK]));
-    quiet_step("nextest build", cmd!(sh, "nice -n 10 cargo nextest run {p...} --no-run"))?;
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run"))?;
     if let Some(spawned) = spawned_selection(Some(&names)) {
         let bins = spawned_bin_args();
         quiet_step(
             "spawned binaries",
-            cmd!(sh, "nice -n 10 cargo build --profile test {spawned...} {bins...}"),
+            cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
         )?;
     }
     let _fresh = sh.push_env(BINS_FRESH, "1");
     let runner = crate::runner::command()?;
     quiet_step(
         "nextest",
-        cmd!(sh, "nice -n 10 cargo nextest run {p...} --profile {NEXTEST_LAND_PROFILE}")
+        cmd!(sh, "cargo nextest run {p...} --profile {NEXTEST_LAND_PROFILE}")
             .env(crate::runner::RUNNER_VAR, &runner),
     )
 }
@@ -529,7 +566,11 @@ fn report(results: &[(&str, Result<()>)], started: Instant, junit: &Utf8Path) ->
         return Ok(());
     }
     if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
-        let tests = std::fs::read_to_string(junit).map(|x| failed_tests(&x)).unwrap_or_default();
+        let tests: Vec<String> = [junit.to_owned(), junit.with_file_name(MAIN_JUNIT)]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .flat_map(|x| failed_tests(&x))
+            .collect();
         let mut file = std::fs::OpenOptions::new().append(true).create(true).open(summary)?;
         std::io::Write::write_all(&mut file, summary_of(&failed, &tests).as_bytes())?;
     }
@@ -786,6 +827,13 @@ fn test_lane(
         (tests, join(doctests))
     });
     let videotoolbox = if apart {
+        // nextest writes its report to one path a profile, so the second run's would replace the
+        // first's, and the summary and CI's timings would lose every test but the encoder's.
+        let report = tree.join("target").join("nextest").join(profile).join("junit.xml");
+        match std::fs::rename(&report, report.with_file_name(MAIN_JUNIT)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
         let expr = only
             .map_or_else(|| VIDEOTOOLBOX.to_owned(), |only| format!("({only}) & {VIDEOTOOLBOX}"));
         videotoolbox_step(
@@ -1207,16 +1255,20 @@ pub fn lint(sh: &Shell) -> Result<()> {
 /// which the deep checks run on Linux runners.
 pub fn lint_linux(sh: &Shell) -> Result<()> {
     let crates = crate::tools::lint_linux(sh, &LINUX_CRATES);
+    both(crates, lint_linux_xtask(sh))
+}
+
+/// Clippy for Linux on xtask, which the deep checks run on Linux runners.
+fn lint_linux_xtask(sh: &Shell) -> Result<()> {
     let targets: Vec<String> = crate::tools::LINUX_TRIPLES
         .iter()
         .flat_map(|t| ["--target".to_owned(), (*t).to_owned()])
         .collect();
-    let xtask = quiet_step(
+    quiet_step(
         "clippy linux-gnu (x86_64 + aarch64), xtask",
         cmd!(sh, "cargo clippy -p xtask {targets...} --all-targets -- -D warnings")
             .env("CARGO_FEATURE_NO_NEON", "1"),
-    );
-    both(crates, xtask)
+    )
 }
 
 /// Clippy on the host with every target (tests, benches, examples) in one pass, the live
@@ -1446,6 +1498,10 @@ mod tests {
         assert!(workflow.contains("cargo xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("cargo xtask setup --lane linux"), "with its tools");
         assert!(workflow.contains("needs: [gate, linux]"), "and main waits for it");
+        assert!(
+            workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
+            "clippy for Linux takes a Linux runner, not one of the five Macs"
+        );
         let zig = format!("version: {}.", crate::tools::ZIG);
         assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");

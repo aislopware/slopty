@@ -198,8 +198,11 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
   makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs
   as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
-  `xtask/src/gate.rs`), rustdoc runs after host clippy on its runner, and the tools lane runs on
-  Linux, which keeps the run within five Macs. Runs on that branch
+  `xtask/src/gate.rs`), rustdoc runs after iOS clippy on its runner, and the tools lane and Linux
+  clippy (`clippy-linux`, with `CC=clang` for the build scripts' C) run on Linux, which keeps the
+  run within five Macs. Before the push, `land` runs the tests, rustdoc and the iOS and Linux
+  clippy of the packages the commits change and of their dependents, side by side at a low
+  priority (`gate::land_checks`). Runs on that branch
   form one concurrency group. A newer push waits behind the run in progress rather than
   cancelling it, and GitHub keeps only the newest push pending, whose green covers every commit
   under it; a pull request's run is still cancelled by its next push. When every lane passed,
@@ -216,7 +219,8 @@ in parallel lanes on `target/gate/*` target dirs. Several agents edit this one c
 once, so stage exactly the change you mean to land (`git add <paths>`), gate it, and commit it;
 the tree stays free to edit meanwhile. `--fix` runs the fixers on the tree first (stage what
 they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat for several:
-`tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`, `linux`) runs only
+`tools`, which carries fmt, `clippy-host`, `clippy-ios`, `clippy-linux`, `tests`, `rustdoc`,
+`linux`) runs only
 those lanes, and a lane that runs alone takes every core. The `linux` lane (the Linux worker
 built natively and its crates' tests) runs only on a Linux host, CI's Linux runner; here
 `cargo xtask linux e2e` runs that worker in Docker instead. Per-lane times are in the log.

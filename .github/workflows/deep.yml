@@ -101,7 +101,10 @@ jobs:
       - working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # The job's read-only token, so binstall's GitHub API calls are not rate limited (ci.yml).
       - run: cargo xtask setup
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: |
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log

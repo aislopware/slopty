@@ -58,17 +58,7 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
             "cargo clippy --keep-going {b...} --all-targets {live...} --target {host} -- -D warnings"
         ),
     )?;
-    let apple: Vec<&str> = names().filter(|c| !HOST_ONLY_CRATES.contains(c)).collect();
-    if !apple.is_empty() {
-        let a = selected(apple.into_iter().chain([WORKSPACE_HACK]));
-        let ios: Vec<String> =
-            TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
-        let i = &ios;
-        quiet_step(
-            "clippy ios + ios-sim",
-            cmd!(sh, "cargo clippy --keep-going {a...} {i...} -- -D warnings"),
-        )?;
-    }
+    clippy_ios(sh, &names().collect::<Vec<_>>())?;
     lint_linux(sh, &names().collect::<Vec<_>>())?;
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
@@ -81,19 +71,40 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         let l = selected(libs.into_iter().chain([WORKSPACE_HACK]));
         quiet_step("doctests", cmd!(sh, "cargo test {l...} --doc"))?;
     }
-    {
-        let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
-        quiet_step(
-            "rustdoc",
-            cmd!(sh, "cargo doc --keep-going {b...} --no-deps --document-private-items"),
-        )?;
-    }
+    rustdoc(sh, &names().collect::<Vec<_>>())?;
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();
     let d = &dirs;
     quiet_step("typos", cmd!(sh, "typos {d...}"))?;
     println!("✔ checked {} ({:.1?})", crates.join(", "), started.elapsed());
     Ok(())
+}
+
+/// Clippy on both iOS triples for those of `crates` that build there, beside [`WORKSPACE_HACK`].
+pub fn clippy_ios(sh: &Shell, crates: &[&str]) -> Result<()> {
+    let apple: Vec<&str> =
+        crates.iter().copied().filter(|c| !HOST_ONLY_CRATES.contains(c)).collect();
+    if apple.is_empty() {
+        return Ok(());
+    }
+    let a = selected(apple.into_iter().chain([WORKSPACE_HACK]));
+    let ios: Vec<String> =
+        TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
+    let i = &ios;
+    quiet_step(
+        "clippy ios + ios-sim",
+        cmd!(sh, "cargo clippy --keep-going {a...} {i...} -- -D warnings"),
+    )
+}
+
+/// rustdoc on `crates` with warnings denied and the private items in, as CI's rustdoc lane.
+pub fn rustdoc(sh: &Shell, crates: &[&str]) -> Result<()> {
+    let b = selected(crates.iter().copied().chain([WORKSPACE_HACK]));
+    let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
+    quiet_step(
+        "rustdoc",
+        cmd!(sh, "cargo doc --keep-going {b...} --no-deps --document-private-items"),
+    )
 }
 
 /// `-p <name>` for each name.

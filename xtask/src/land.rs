@@ -6,9 +6,9 @@
 //! gate at a time on that branch; a newer push waits behind the run in progress, and only the
 //! newest waits, since its green covers every commit under it.
 //!
-//! Before the push, the tests of the packages the commits change, and of their dependents, run
-//! here ([`crate::gate::land_tests`]): a red run on CI costs the better part of an hour, most of
-//! them a test a minute here fails.
+//! Before the push, the tests, rustdoc and the iOS and Linux clippy of the packages the commits
+//! change, and of their dependents, run here ([`crate::gate::land_checks`]): a red run on CI
+//! costs the better part of an hour, most of them a test or a lint a few minutes here fail.
 
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,8 @@ pub struct LandOpts {
     /// Block until CI promoted the commit to main, or failed, and report which.
     #[arg(long)]
     pub wait: bool,
-    /// Push without first running the tests of the packages the commits change.
+    /// Push without first checking the packages the commits change (tests, rustdoc, iOS and
+    /// Linux clippy).
     #[arg(long)]
     pub no_tests: bool,
 }
@@ -67,8 +68,10 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
     cmd!(sh, "committed origin/main..HEAD --no-merge-commit")
         .run()
         .context("a commit to land breaks Conventional Commits: reword it, then land")?;
-    if !opts.no_tests {
-        crate::gate::land_tests("origin/main")?;
+    if opts.no_tests {
+        println!("! pushed without the checks before the push: CI is the first to build this");
+    } else {
+        crate::gate::land_checks("origin/main")?;
     }
     let leased = cmd!(sh, "git rev-parse --verify --quiet refs/remotes/origin/{BRANCH}")
         .quiet()

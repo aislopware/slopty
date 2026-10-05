@@ -938,7 +938,8 @@ more full-window layer.
   - The crash tests find `main` as `slopty_workerd::main` and `slopty_cli::main`, in each
     `lib.rs`.
 
-- ✅ **`land` runs the changed packages' tests before it pushes** (2026-10-02). 16 of the last
+- ✅ **`land` runs the changed packages' tests before it pushes** (2026-10-02; widened by "land
+  checks the changed packages first", 2026-10-05). 16 of the last
   41 gate runs failed, each after the better part of an hour, and at least 7 failed on a test
   that fails every time: the UI's menus, palette and file tests and the CLI's MCP and projects
   tests. A minute here finds those. `cargo xtask land` now takes the packages its commits change
@@ -995,3 +996,53 @@ more full-window layer.
   the build when the signing is ad hoc, and after it when notarisation was skipped, naming what
   is missing (`dist::publishable`). Any other `dist` builds as before. Test: `xtask`
   `dist::tests::a_tag_is_published_only_signed_and_notarised`.
+
+- ✅ **`land` checks the changed packages first: tests, rustdoc, and iOS and Linux clippy**
+  (2026-10-05, `.research/dev-speed-2026-10-05.md`). Of the last 34 gate runs, 14 were red, and
+  9 of those failed on rustdoc or on the iOS and Linux clippy. Both fail every time, and neither
+  the quick gate nor `land`'s tests ran them, so each cost a ~22-minute run, a fix and another
+  run: about 5.7 minutes per land on average.
+  - `gate::land_checks` runs three steps side by side on the affected packages: their tests (as
+    before), `check::rustdoc` in the rustdoc lane's target dir, and `check::clippy_ios`,
+    `tools::lint_linux` (plus xtask's Linux clippy when xtask changed) in the iOS clippy lane's.
+    `xtask check -p` uses the same two steps.
+  - The whole process is reniced to 10 first, so every cargo under it yields to the work on
+    this Mac. Before, each command carried its own `nice -n 10`. That keeps the hybrid-gate ruling
+    (2026-10-01): no full lane runs locally, only the affected crates, incremental, at a low
+    priority. The first run after a dependency bump compiles the iOS and Linux dependency
+    metadata once.
+  - `--no-tests` now prints that CI is the first to build the push.
+  - Track the share of red runs whose failed step is rustdoc or clippy-ios. The target is near
+    zero.
+
+- ✅ **binstall gets the job's token on CI** (2026-10-05). In 33 of 111 test-lane setups,
+  binstall's unauthenticated GitHub API calls hit the runner's shared rate limit and timed out,
+  so it compiled nextest from source: 5 to 8 minutes against 3 seconds (run 37245352908's
+  worker shard: 312 s). Every `cargo xtask setup` and binstall step now gets
+  `GITHUB_TOKEN: ${{ github.token }}`, the job's read-only token. The compile fallback stays:
+  a lane that fails outright costs a whole rerun, and one that runs slow costs minutes. Verify
+  that no setup step takes more than 150 s over the next 20 runs.
+
+- ✅ **Linux clippy runs on a Linux runner, rustdoc beside iOS clippy, and xtask's tests in the
+  ui shard** (2026-10-05, `.research/dev-speed-2026-10-05.md` item 5). Only five of the twenty
+  jobs a public repository runs at once can be Macs, so a job that needs no Mac shouldn't take
+  one. Linux clippy was 488 s of the clippy-ios job's 720 s, and that job finished last in 7 of
+  18 runs.
+  - `--lane clippy-linux` (`LaneId::ClippyLinux`) is its own job on `ubuntu-24.04` with the three
+    Linux triples. Locally, a full gate runs it in the iOS lane's target dir, so there is one
+    tree of cross metadata.
+  - Clippy never links, but build scripts compile C for every triple. On the Mac, `cc` is clang,
+    which cross-compiles for any target. Ubuntu's `cc` is gcc, which builds only for the host, so
+    the job sets `CC=clang`. Checked in the Ubuntu 24.04 image on arm64, the harder case, where
+    no Linux triple but one is the host: every step passed (369 s on 6 cores).
+  - rustdoc moves from host clippy's runner, which also lints the fuzz crate, to iOS clippy's.
+  - xtask's tests move from the rest shard to the ui shard: its icon test waits on actool for
+    about 148 s, and the rest was the longer of the two.
+  - Verify with the job durations, and with which job finishes last.
+
+- ✅ **The tests lane keeps both runs' JUnit reports** (2026-10-05). On a hosted Mac the
+  VideoToolbox tests run in a second nextest run after the main one, under the same profile, and
+  nextest writes one `junit.xml` per profile. So the second report replaced the first: the run's
+  summary named only failed encoder tests, and CI's timings for the rest and ui shards held no
+  test at all. The main run's report is now renamed to `junit-main.xml` before the second run.
+  The summary reads both, and CI uploads both.
