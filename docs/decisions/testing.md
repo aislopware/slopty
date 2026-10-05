@@ -1151,3 +1151,12 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     palette generated from the dark hues (ANSI 5 kept its hue). They are taken again.
   - A golden within its tolerance now leaves its diff picture in the artifacts, so a drift is
     found by where it differs.
+- ✅ **A passing e2e test takes its root away; a failing one keeps it, capped** (2026-10-06).
+  137 stack roots (`slopty-e2e-*`, 6.9 GB) had piled up in the temporary directory and filled
+  the boot volume. A test that passes takes its root and its lock file with it. A test that
+  fails keeps its root for inspection, marks it (`.kept-for-inspection`) and names it in its
+  stderr. Only the newest eight marked roots stay. As a stack's root is made, roots and unheld
+  locks untouched for two hours (`PIN_KEPT`) are removed, unless they are marked: that is
+  what a run killed outright, or a daemon still writing as its root went, left behind.
+  - Tests: `harness::tests::a_passing_test_takes_its_root_away_and_a_failing_one_keeps_it`,
+    `harness::tests::kept_roots_are_capped_and_stale_ones_swept`.

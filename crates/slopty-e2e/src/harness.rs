@@ -51,21 +51,37 @@ pub const TRANSCRIPT_DONE: &str = concat!(
 /// hash of the test's name instead: the same on every run, different between tests. A lock
 /// beside it keeps a second run of the same test, another session's, off it; that run takes a
 /// random name, which costs it only its goldens.
+///
+/// A test that passes takes its root and its lock away with it. One that fails keeps its root
+/// for inspection, says where on its way out, and marks it (`.kept-for-inspection`); only the
+/// newest eight marked roots stay. What a run killed outright left behind goes once it is two
+/// hours old, as the next root is made.
 #[derive(Debug)]
 pub struct StackDir {
     // Declared first so it is deleted before the lock is released.
     dir: tempfile::TempDir,
-    _lock: Option<std::fs::File>,
+    lock: Option<(std::fs::File, PathBuf)>,
 }
+
+/// How many roots of failed tests stay for inspection: making one more removes the oldest.
+const FAILED_KEPT: usize = 8;
+
+/// The file that marks a root kept because its test failed.
+const KEPT_MARK: &str = ".kept-for-inspection";
+
+/// What every stack's root and lock is named from, in the temporary directory.
+const ROOTS: &str = "slopty-e2e-";
 
 impl StackDir {
     fn new(prefix: &str) -> Result<Self> {
         let parent = std::env::temp_dir();
+        sweep(&parent);
         // libtest runs each test on a thread named for it.
         let test = std::thread::current().name().filter(|name| *name != "main").map(fnv1a);
         if let Some(hash) = test {
             let name = format!("{prefix}{hash:08x}");
-            let lock = std::fs::File::create(parent.join(format!("{name}.lock")))?;
+            let lock_path = parent.join(format!("{name}.lock"));
+            let lock = std::fs::File::create(&lock_path)?;
             if lock.try_lock().is_ok() {
                 match std::fs::remove_dir_all(parent.join(&name)) {
                     Ok(()) => {}
@@ -74,17 +90,85 @@ impl StackDir {
                 }
                 let dir =
                     tempfile::Builder::new().prefix(&name).rand_bytes(0).tempdir_in(&parent)?;
-                return Ok(Self { dir, _lock: Some(lock) });
+                return Ok(Self { dir, lock: Some((lock, lock_path)) });
             }
         }
         let dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
-        Ok(Self { dir, _lock: None })
+        Ok(Self { dir, lock: None })
     }
 
     /// The root.
     #[must_use]
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+}
+
+impl Drop for StackDir {
+    #[expect(clippy::print_stderr, reason = "test helper; stderr is the failed test's log")]
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            // The root goes as the `TempDir` drops; its lock file goes with it.
+            if let Some((_, path)) = &self.lock {
+                let _gone = std::fs::remove_file(path);
+            }
+            return;
+        }
+        self.dir.disable_cleanup(true);
+        let root = self.dir.path();
+        let _marked = std::fs::write(root.join(KEPT_MARK), b"");
+        eprintln!("the failed test's stack root is kept for inspection: {}", root.display());
+        if let Some(parent) = root.parent() {
+            drop_oldest_kept(parent);
+        }
+    }
+}
+
+/// The roots kept for inspection under `parent`, newest first, past the [`FAILED_KEPT`] newest
+/// removed.
+fn drop_oldest_kept(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    let mut kept: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(ROOTS))
+        .filter_map(|entry| {
+            let marked = std::fs::metadata(entry.path().join(KEPT_MARK)).ok()?;
+            Some((marked.modified().ok()?, entry.path()))
+        })
+        .collect();
+    kept.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (_, old) in kept.into_iter().skip(FAILED_KEPT) {
+        let _gone = std::fs::remove_dir_all(old);
+    }
+}
+
+/// Remove what runs killed outright left under `parent`: roots not kept for inspection, and
+/// locks no run holds, untouched for longer than [`PIN_KEPT`]. A test passing removes its own,
+/// so these are only what a killed process could not.
+fn sweep(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(ROOTS) || name.starts_with("slopty-e2e-bin-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age > PIN_KEPT));
+        if !stale {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if !path.join(KEPT_MARK).exists() {
+                let _gone = std::fs::remove_dir_all(&path);
+            }
+        } else if path.extension().is_some_and(|ext| ext == "lock")
+            && std::fs::File::open(&path).is_ok_and(|lock| lock.try_lock().is_ok())
+        {
+            let _gone = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -1544,7 +1628,10 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{loopback_address, pinned};
+    use super::{
+        Duration, FAILED_KEPT, KEPT_MARK, PIN_KEPT, Path, ROOTS, StackDir, drop_oldest_kept,
+        loopback_address, pinned, sweep,
+    };
 
     #[test]
     fn the_app_dials_loopback_on_the_port_the_worker_printed() {
@@ -1573,6 +1660,79 @@ mod tests {
         let next = pinned(&cache, &runs, "run-2").unwrap();
         assert_eq!(std::fs::read_to_string(next.join("slopty-app")).unwrap(), "plain");
         assert_eq!(std::fs::read_dir(&runs).unwrap().count(), 2, "no half-made pin is left");
+    }
+
+    /// A passing test's root and lock go with it; a failing one's root stays, marked.
+    #[test]
+    fn a_passing_test_takes_its_root_away_and_a_failing_one_keeps_it() {
+        let made = || {
+            std::thread::Builder::new()
+                .name("harness::a_root_for_this_test_alone".to_owned())
+                .spawn(|| {
+                    let dir = StackDir::new("slopty-e2e-selftest-").unwrap();
+                    let root = dir.path().to_owned();
+                    let lock = root.with_extension("lock");
+                    (dir, root, lock)
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let (dir, root, lock) = made();
+        assert!(root.is_dir() && lock.is_file(), "{root:?}");
+        drop(dir);
+        assert!(!root.exists() && !lock.exists(), "a pass leaves nothing");
+
+        let (dir, root, _) = made();
+        let failed = std::thread::spawn(move || {
+            let _dir = dir;
+            panic!("the test fails");
+        });
+        assert!(failed.join().is_err());
+        assert!(root.join(KEPT_MARK).is_file(), "a failure keeps its root, marked");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Only the newest roots kept for inspection stay; and what killed runs left goes once
+    /// stale, unless it was kept.
+    #[test]
+    fn kept_roots_are_capped_and_stale_ones_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aged = |path: &Path, secs: u64| {
+            let at = std::time::SystemTime::now() - Duration::from_secs(secs);
+            std::fs::File::open(path).unwrap().set_modified(at).unwrap();
+        };
+        for n in 0..10_u64 {
+            let root = tmp.path().join(format!("{ROOTS}{n:02}"));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(KEPT_MARK), b"").unwrap();
+            aged(&root.join(KEPT_MARK), 100 - n);
+        }
+        drop_oldest_kept(tmp.path());
+        let mut left: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), FAILED_KEPT);
+        assert_eq!(left.first().map(String::as_str), Some("slopty-e2e-02"), "the oldest went");
+
+        let stale = tmp.path().join(format!("{ROOTS}stale"));
+        let fresh = tmp.path().join(format!("{ROOTS}fresh"));
+        let lock = tmp.path().join(format!("{ROOTS}stale.lock"));
+        let other = tmp.path().join("someone-else");
+        for dir in [&stale, &fresh, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(&lock, b"").unwrap();
+        let old = PIN_KEPT.as_secs() + 60;
+        for path in [&stale, &lock, &other, &tmp.path().join(format!("{ROOTS}05"))] {
+            aged(path, old);
+        }
+        sweep(tmp.path());
+        assert!(!stale.exists() && !lock.exists(), "stale leftovers go");
+        assert!(fresh.exists() && other.exists(), "fresh ones and others' stay");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), FAILED_KEPT + 2, "kept stay");
     }
 }
 
