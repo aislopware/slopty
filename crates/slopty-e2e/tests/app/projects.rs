@@ -25,12 +25,19 @@ fn project(d: &Dump) -> Option<&ProjectInfo> {
 
 /// ⌘J round the focused orchestrator's faces (its thread, its terminal, its board) until its
 /// tile shows `project`'s board, as the person presses it.
+///
+/// Each press is read back by plain dumps rather than `wait_for`, whose timeout leaves a dump's
+/// answer on the socket for the next command to trip on.
 pub async fn to_board(driver: &mut Driver, project: &str) {
+    let shown = |d: &Dump| d.projects.iter().any(|p| p.id == project && p.shown);
     for _ in 0..3 {
         driver.keys("cmd-j").await.unwrap();
-        let shown = |d: &Dump| d.projects.iter().any(|p| p.id == project && p.shown);
-        if driver.wait_for("the board", FACE_TURN, shown).await.is_ok() {
-            return;
+        let pressed = std::time::Instant::now();
+        while pressed.elapsed() < FACE_TURN {
+            if shown(&driver.dump().await.unwrap()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
     panic!("⌘J never reached the board");

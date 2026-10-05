@@ -611,6 +611,10 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
     let todo = (StageKind::ToDos, "2 to-dos open".to_owned(), true);
     assert_eq!(said(3), [(StageKind::Branch, "slopty/board/3".to_owned(), false), todo]);
     assert!(said(4).is_empty(), "nothing to say while it is worked on");
+    let failed: Vec<_> =
+        b.pipeline(TaskId(2)).into_iter().filter(|s| s.failed).map(|s| s.kind).collect();
+    assert_eq!(failed, [StageKind::Checks], "only the failing checks say it in the error ink");
+    assert!(b.pipeline(TaskId(3)).iter().all(|s| !s.failed), "to-dos hold, but nothing failed");
 
     assert_eq!(b.actions(TaskId(2)), [TaskAction::FixCi], "failing checks are CI to fix");
     let fix = b.told(TaskId(2), TaskAction::FixCi).expect("words");
@@ -648,6 +652,7 @@ fn a_merge_whose_push_failed_says_so() {
     };
     let failed = "Push failed: ! [rejected] main -> main (fetch first)".to_owned();
     assert_eq!(said(1), [(StageKind::Push, failed, true)]);
+    assert!(b.pipeline(TaskId(1)).iter().all(|s| s.failed), "a failed push is a failure");
     assert!(said(2).is_empty() && said(3).is_empty());
     let merge = |n| b.tasks.get(&TaskId(n)).and_then(|c| c.merge.as_ref());
     let words = |n| merge(n).and_then(|m| merged_words(m, false));

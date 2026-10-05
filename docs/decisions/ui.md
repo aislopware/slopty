@@ -7417,3 +7417,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::remote::a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths`;
     e2e `gallery::a_forwarded_port_and_an_upload_show_where_they_belong`. Golden:
     `transfers.txt`, where the pill's name changed.
+- ✅ **A board card's facts read as facts, its one move as the solid** (2026-10-06,
+  `.research/ux-audit-2026-10-05.md` A3). On a held card the facts ("PR #42", "1 of 4 checks
+  fail", "Changes requested") and the actions under them ("Fix CI", "Address comments") looked
+  alike, so the card did not say what was wrong or what to press.
+  - **The facts.** The way to the target stays plain text parted by the quiet dot. A stage that
+    failed (the verifier, the pull request's checks, the push) is the only one coloured: the
+    error ink with its crossed circle (`Stage::failed`). A stage that holds without failing,
+    such as changes requested or to-dos still open, stays in the text ink.
+  - **The actions.** On a held card (a stage holds, or its verifier failed) the first action is
+    the solid, the move that frees it. The rest stay secondary. A lane of cards ready to merge
+    is not a column of solids, since nothing holds them.
+  - Tests: `project::tests` (the pipeline's failed stages, a failed push). Golden:
+    `project-live-lanes`.

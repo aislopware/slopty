@@ -339,6 +339,9 @@ pub struct Stage {
     pub words: String,
     /// It holds the merge back until someone acts.
     pub holds: bool,
+    /// What it ran failed (the verifier, the pull request's checks, the push), so it says so
+    /// in the error ink with its mark. Such a stage always holds.
+    pub failed: bool,
 }
 
 /// The stages a pipeline row names, in their order.
@@ -842,7 +845,8 @@ impl Board {
             || card.merge.is_some()
             || card.pr.is_some()
             || matches!(card.state, TaskState::Verifying | TaskState::Done);
-        let stage = |kind, words: String, holds| Stage { kind, words, holds };
+        let stage = |kind, words: String, holds| Stage { kind, words, holds, failed: false };
+        let failure = |kind, words: String| Stage { kind, words, holds: true, failed: true };
         if card.state == TaskState::Merged {
             let failed = card.merge.as_ref().and_then(|m| match m {
                 Merge::Merged { push_failed: Some(why), .. } => Some(why),
@@ -851,7 +855,7 @@ impl Board {
             return failed
                 .map(|why| {
                     let words = format!("Push failed: {}", crate::kit::first_line(why));
-                    stage(StageKind::Push, words, true)
+                    failure(StageKind::Push, words)
                 })
                 .into_iter()
                 .collect();
@@ -868,8 +872,11 @@ impl Board {
         if running(StepKind::Verify) {
             out.push(stage(StageKind::Verifier, "Verifying".to_owned(), false));
         } else if let Some(run) = self.verdict(task) {
-            let words = if run.passed { "Verified" } else { "Verifier failed" };
-            out.push(stage(StageKind::Verifier, words.to_owned(), !run.passed));
+            out.push(if run.passed {
+                stage(StageKind::Verifier, "Verified".to_owned(), false)
+            } else {
+                failure(StageKind::Verifier, "Verifier failed".to_owned())
+            });
         }
         if running(StepKind::Merge) {
             out.push(stage(StageKind::Queue, "Merging".to_owned(), false));
@@ -881,7 +888,11 @@ impl Board {
         if let Some(pr) = &card.pr {
             out.push(stage(StageKind::Pull, format!("PR #{}", pr.number), false));
             if let Some((words, failing)) = card.checks.as_ref().and_then(checks_words) {
-                out.push(stage(StageKind::Checks, words, failing));
+                out.push(if failing {
+                    failure(StageKind::Checks, words)
+                } else {
+                    stage(StageKind::Checks, words, false)
+                });
             }
             if pr.review == Some(Review::ChangesRequested) {
                 out.push(stage(StageKind::PullReview, "Changes requested".to_owned(), true));

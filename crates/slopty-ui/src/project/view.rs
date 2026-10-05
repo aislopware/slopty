@@ -891,11 +891,15 @@ impl ProjectView {
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
     /// on the task the board stands on its controls after them, quieter ([`Board::controls`]).
+    /// On a task `held` up (a stage of its way holds, or its verifier failed) the first is the
+    /// solid, the one move that frees it; the rest stay secondary, so a lane of cards ready to
+    /// merge is not a column of solids.
     fn actions(
         &self,
         board: &Board,
         task: TaskId,
         prefix: &str,
+        held: bool,
         cx: &Context<Self>,
     ) -> Option<Div> {
         // Choosing a worker is a control of the card stood on, so a lane of planned tasks is
@@ -919,7 +923,7 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let buttons = actions.into_iter().map(|(action, control)| {
+        let buttons = actions.into_iter().enumerate().map(|(ix, (action, control))| {
             let id = action.selector(prefix, task);
             let selector = id.clone();
             let el = div()
@@ -943,6 +947,8 @@ impl ProjectView {
             let el = if control {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
+            } else if held && ix == 0 {
+                crate::kit::solid_pressable(el, theme)
             } else {
                 crate::kit::secondary(el, theme)
             };
@@ -1508,6 +1514,8 @@ impl ProjectView {
         let status = self.node_status(board, node);
         let key = format!("project-card-{}", card.id);
         let CardFacts { check, stages, meta } = self.card_facts(board, card);
+        let held = stages.iter().any(|stage| stage.holds)
+            || matches!(&check, Some(Check::Verdict { run, .. }) if !run.passed);
         let place = self.where_chip(board, node, "project-card", cx);
         let placed = board.place(node);
         let reason = placed.as_ref().and_then(|p| p.why.clone());
@@ -1593,7 +1601,8 @@ impl ProjectView {
             )
             // Last, on a line of their own: a lane is too narrow for a title and its buttons.
             .chain(
-                self.actions(board, card.id, "project-card", cx).map(IntoElement::into_any_element),
+                self.actions(board, card.id, "project-card", held, cx)
+                    .map(IntoElement::into_any_element),
             )
             .collect();
         let facts = (!facts.is_empty())
@@ -1855,7 +1864,8 @@ impl ProjectView {
 
     /// A task's way to its target as one line of plain words parted by the quiet dot, wrapping
     /// when it must, a stage holding the merge back in the text ink: none of it is a control, so
-    /// none of it wears a button's edge, and none of it is coloured until someone has to act.
+    /// none of it wears a button's edge. Only a stage that failed is coloured, in the error ink
+    /// with its mark, since that is what someone has to act on.
     fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<Div> {
         if stages.is_empty() {
             return None;
@@ -1876,6 +1886,18 @@ impl ProjectView {
             }
             let id = format!("{key}-{}", stage.kind.word());
             let selector = id.clone();
+            let ink = if stage.failed {
+                s.error
+            } else if stage.holds {
+                s.text
+            } else {
+                s.text_secondary
+            };
+            let mark = stage.failed.then(|| {
+                icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(ink))
+                    .flex_none()
+                    .size(self.z(theme.typography.icon()))
+            });
             row = row.child(
                 div()
                     .id(SharedString::from(id))
@@ -1883,11 +1905,19 @@ impl ProjectView {
                     .role(Role::Label)
                     .aria_label(SharedString::from(stage.words.clone()))
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(hsla(if stage.holds { s.text } else { s.text_secondary }))
-                    .child(SharedString::from(stage.words.clone())),
+                    .flex()
+                    .items_center()
+                    .gap(self.z(sp.xxs))
+                    .text_color(hsla(ink))
+                    .children(mark)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(SharedString::from(stage.words.clone())),
+                    ),
             );
         }
         Some(row)
