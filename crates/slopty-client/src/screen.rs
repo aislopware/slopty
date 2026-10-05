@@ -2445,6 +2445,8 @@ mod worker_tests {
 
         static HELD: Mutex<Vec<StreamId>> = Mutex::new(Vec::new());
         static LET_GO: Condvar = Condvar::new();
+        /// The streams whose decode thread waits in [`wait`] now, inside a submission.
+        static WAITING: Mutex<Vec<StreamId>> = Mutex::new(Vec::new());
 
         pub(in super::super) fn close(stream: StreamId) {
             HELD.lock().push(stream);
@@ -2458,9 +2460,20 @@ mod worker_tests {
         /// Called by a decode thread before each submission.
         pub(in super::super) fn wait(stream: StreamId) {
             let mut held = HELD.lock();
+            if !held.contains(&stream) {
+                return;
+            }
+            WAITING.lock().push(stream);
             while held.contains(&stream) {
                 LET_GO.wait(&mut held);
             }
+            WAITING.lock().retain(|waiting| *waiting != stream);
+        }
+
+        /// Whether `stream`'s decode thread has taken a submission off its queue and waits in
+        /// [`wait`] with it.
+        pub(in super::super) fn waiting(stream: StreamId) -> bool {
+            WAITING.lock().contains(&stream)
         }
     }
 
@@ -2664,6 +2677,10 @@ mod worker_tests {
         h.wait_for("the keyframe inside the decoder", FOR_THE_MACHINE, |handle| {
             handle.stats().decoding == 1
         });
+        // Parked is not yet taken: until the thread holds the keyframe, it fills one of the
+        // queue's places, and one frame more than the test means is dropped (CI run
+        // 37351025187, on a busy three-core runner).
+        h.wait_for("the decode thread holding it", FOR_THE_MACHINE, |_| hold::waiting(HELD));
         let held_at = Instant::now();
         let refreshes = h.handle.stats().refreshes;
         let queue = u64::try_from(DECODE_QUEUE).unwrap_or(u64::MAX);
