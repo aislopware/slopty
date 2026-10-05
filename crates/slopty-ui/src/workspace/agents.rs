@@ -9,7 +9,6 @@ use gpui::{
 };
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
-use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::SessionSummary;
@@ -628,23 +627,6 @@ impl WorkspaceView {
         }
         self.turns.command_ended(session);
         self.finished.insert(session, done);
-        cx.notify();
-    }
-
-    /// Ask `worker` to register `slopty hook` for its Claude Code. Offered once per run.
-    pub fn install_hooks(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
-        if let Some(w) = self.workers.get_mut(&worker) {
-            w.hooks_offered = true;
-            w.send(ClientMsg::InstallHooks);
-        }
-        cx.notify();
-    }
-
-    /// The worker could not install the hooks: put the offer back so it can be tried again.
-    pub fn hooks_offer_failed(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
-        if let Some(w) = self.workers.get_mut(&worker) {
-            w.hooks_offered = false;
-        }
         cx.notify();
     }
 

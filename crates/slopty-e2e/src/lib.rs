@@ -592,8 +592,6 @@ pub struct Dump {
     /// trimmed to what a screen reader reads. Empty when the app was built without `e2e`.
     #[serde(default)]
     pub a11y: Vec<A11yNode>,
-    /// `slopty hook install` has already been offered on some worker.
-    pub hooks_offered: bool,
     /// The UI's frame times since the last [`Command::FramesReset`].
     pub frames: FrameInfo,
     /// Where the frame the app drew for this dump differs from the same state drawn from

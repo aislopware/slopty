@@ -1,10 +1,10 @@
 //! Registering the `slopty hook` relay in Claude Code's user settings.
 //!
-//! `slopty hook install` writes an entry per event in `~/.claude/settings.json`; the worker
-//! daemon runs the same code when a client asks (`ClientMsg::InstallHooks`), because the
-//! human whose agent Slopty is guessing at may be sitting in front of a phone. The document
-//! is edited in place — other people's hooks and every other setting are kept — and written
-//! through a sibling temporary file, so a crash never leaves half a settings file behind.
+//! `slopty hook install` writes an entry per event in `~/.claude/settings.json`, when the
+//! person runs it: the app never offers to, since a typed or started `claude` is wired without
+//! it. The document is edited in place — other people's hooks and every other setting are
+//! kept — and written through a sibling temporary file, so a crash never leaves half a
+//! settings file behind.
 //!
 //! Every entry is asynchronous, so the agent never waits on the relay, except
 //! `PermissionRequest`: that one runs synchronously so the relay can answer the prompt with a

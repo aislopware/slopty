@@ -98,9 +98,6 @@ pub enum ClientMsg {
         /// Sender's monotonic clock, echoed back untouched.
         sent_at: slopty_core::MonoTime,
     },
-    /// Register the `slopty hook` relay in the worker's Claude Code settings, so agents there
-    /// report precisely instead of being guessed at; answered with `WorkerMsg::HooksInstalled`.
-    InstallHooks,
     /// Read a file on the worker for a file tile; answered with `WorkerMsg::File`.
     ReadFile {
         /// Absolute path on the worker.
@@ -198,7 +195,6 @@ impl ClientMsg {
             Self::Items(_) => "Items",
             Self::Screen(_) => "Screen",
             Self::Ping { .. } => "Ping",
-            Self::InstallHooks => "InstallHooks",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
             Self::WatchFiles { .. } => "WatchFiles",
@@ -254,13 +250,6 @@ pub enum WorkerMsg {
     Pong {
         /// The client's timestamp from the ping.
         sent_at: slopty_core::MonoTime,
-    },
-    /// Reply to `ClientMsg::InstallHooks`.
-    HooksInstalled {
-        /// The settings file now registers the relay (whether or not this call changed it).
-        ok: bool,
-        /// What happened, for the client's notice.
-        message: String,
     },
     /// The answer to `ClientMsg::ReadFile`.
     File {
@@ -384,7 +373,6 @@ impl WorkerMsg {
             Self::Screen(_) => "Screen",
             Self::Agent(_) => "Agent",
             Self::Pong { .. } => "Pong",
-            Self::HooksInstalled { .. } => "HooksInstalled",
             Self::File { .. } => "File",
             Self::Written { .. } => "Written",
             Self::FoundFiles { .. } => "FoundFiles",

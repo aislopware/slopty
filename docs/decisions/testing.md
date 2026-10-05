@@ -186,7 +186,8 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   run's directory before asserting its content**, so a wiring mistake fails the test instead of
   editing the developer's `~/.claude`. The pill retires after one click, so a second *click* is
   not reachable through the UI; idempotence is asserted against the file the daemon actually
-  wrote (`install_at` → `Unchanged`, bytes identical).
+  wrote (`install_at` → `Unchanged`, bytes identical). Superseded 2026-10-05: the pill and its
+  test are deleted (**No app offer to install the hooks**, claude-code.md).
 
 - ✅ **The two CoreAudio openers run one at a time** (2026-09-13). Gate 341's only failure
   was `a_worker_reassembles_nacks_reports_and_stops_with_the_connection` timing out after 20 s

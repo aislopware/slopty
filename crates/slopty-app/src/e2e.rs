@@ -1112,7 +1112,6 @@ impl Workspace {
             "none"
         }
         .to_owned();
-        dump.hooks_offered = view.workers().any(|(key, ..)| view.hooks_offered(key));
         let context =
             view.focused().map(|t| t.worker).or_else(|| view.workers().next().map(|w| w.0));
         dump.client =

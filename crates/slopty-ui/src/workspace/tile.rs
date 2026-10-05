@@ -16,7 +16,7 @@ use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, Review};
+use slopty_proto::agent::{AgentKind, AgentStatus, Review};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_theme::{Theme, Typography};
@@ -96,20 +96,9 @@ pub const SHOW_CONVERSATION: &str = "Show conversation";
 /// The same button while the conversation shows.
 pub const SHOW_TERMINAL: &str = "Show terminal";
 
-/// The accessible name of the [`HOOKS`] pill: its words, then what they are for.
-pub const INSTALL_HOOKS: &str = "Install hooks for an exact status";
-
-/// What installing the hooks gives: the [`HOOKS`] pill's hint, and what its click does to a
-/// screen reader.
-pub const HOOKS_GIVE: &str =
-    "Then Claude Code tells Slopty exactly when it is working, waiting or blocked";
-
 /// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
 
-/// The pill offering the hooks that make an agent's status precise: what pressing it does,
-/// where "Hooks" alone named a thing and not the act.
-pub const HOOKS: &str = "Install hooks";
 /// The pill that takes a PTY's size from the client driving it.
 pub const TAKE: &str = "Take";
 /// A remote window's audio toggle: one name, pressed while this client has silenced it. Its
@@ -1034,26 +1023,6 @@ impl WorkspaceView {
                 self.finished_took(tile, session, f, chrome, cx)
             }
         });
-        // An agent the worker had to guess at: offer the hooks that would make it precise. An
-        // offer, not a state: `warn` is for what needs the person.
-        let hooks = agent
-            .filter(|(_, a)| a.source != AgentSource::Hook && !self.hooks_offered(tile.worker))
-            .map(|_| {
-                let worker = tile.worker;
-                let hint_theme = std::rc::Rc::new(theme.clone());
-                let pill = pill("hooks", id, HOOKS, s.text_secondary, theme, chrome)
-                    .role(Role::Button)
-                    .aria_label(INSTALL_HOOKS)
-                    .aria_description(HOOKS_GIVE)
-                    .map(kit::hint_timing)
-                    .tooltip(move |_window, cx| {
-                        let theme = std::rc::Rc::clone(&hint_theme);
-                        cx.new(|_| kit::Hint::new(HOOKS_GIVE, "", theme)).into()
-                    });
-                tab_stop(pill, s.accent)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.install_hooks(worker, cx)))
-                    .into_any_element()
-            });
         // An upload in flight says how far it got; a click stops it. An attachment's is said
         // by its chip over the composer, and said once.
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
@@ -1218,7 +1187,6 @@ impl WorkspaceView {
                 .pr(px(theme.spacing.inset() * k))
                 .children(branch)
                 .when_some(upload, gpui::ParentElement::child)
-                .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
@@ -1261,7 +1229,6 @@ impl WorkspaceView {
                 .when_some(worker, gpui::ParentElement::child)
                 .children(branch)
                 .when_some(upload, gpui::ParentElement::child)
-                .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip)

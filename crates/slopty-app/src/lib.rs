@@ -3379,15 +3379,6 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Search(event)) => {
             view.update(cx, |v, cx| v.search_event(key, event, cx));
         }
-        LinkEvent::Control(WorkerMsg::HooksInstalled { ok, message }) => {
-            view.update(cx, |v, cx| {
-                v.show_notice(message, cx);
-                if !ok {
-                    // The offer stays on the header so it can be tried again.
-                    v.hooks_offer_failed(key, cx);
-                }
-            });
-        }
         LinkEvent::Control(WorkerMsg::Clip(msg)) => {
             view.update(cx, |v, cx| v.clip_message(key, msg, cx));
         }

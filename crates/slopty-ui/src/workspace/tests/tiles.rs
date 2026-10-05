@@ -8,8 +8,7 @@ use slopty_theme::alpha;
 
 use super::*;
 use crate::workspace::tile::{
-    CLOSE_TILE, COPY_COMMAND, HOOKS, HOOKS_GIVE, INSTALL_HOOKS, RECONNECTING, command_words,
-    cwd_tail, only_moves,
+    CLOSE_TILE, COPY_COMMAND, RECONNECTING, command_words, cwd_tail, only_moves,
 };
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
@@ -320,9 +319,9 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
 }
 
-/// A header holds one filled chip at most: the state's. An agent the worker guessed at still
-/// offers the hooks, but as words with no fill, and the leading slot keeps the agent's glyph
-/// rather than a warn mark that would say the chip's news again.
+/// A header holds one filled chip at most: the state's. The leading slot keeps the agent's
+/// glyph rather than a warn mark that would say the chip's news again, and an agent the worker
+/// guessed at offers nothing to install.
 #[gpui::test]
 fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -347,7 +346,6 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     });
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
-    let hooks = cx.debug_bounds(selector("hooks", waiting.item)).expect("the hooks offered");
     let chip = cx.debug_bounds(selector("agent", waiting.item)).expect("the state chip");
     let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
@@ -373,14 +371,8 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
         .collect();
     assert_eq!(fills.len(), 1, "one fill in the header: {fills:#?}");
     assert!(inside(fills[0], chip), "and it is the state's chip");
-    assert!(quads.iter().filter(|q| inside(q, hooks)).all(|q| q.background.is_transparent()));
+    assert!(cx.debug_bounds(selector("hooks", waiting.item)).is_none(), "no hooks offered");
     let nodes = tree(cx);
-    let offer = nodes
-        .iter()
-        .find(|n| n.is("Button", Some(INSTALL_HOOKS)))
-        .unwrap_or_else(|| panic!("the hooks, by what pressing them does: {nodes:#?}"));
-    assert!(INSTALL_HOOKS.starts_with(HOOKS), "the name starts with the words shown");
-    assert_eq!(offer.description.as_deref(), Some(HOOKS_GIVE));
     let in_slot = |n: &&crate::a11y::Node| {
         let [x, y, ..] = n.bounds;
         slot.contains(&point(px(x + 1.0), px(y + 1.0)))

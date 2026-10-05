@@ -129,7 +129,8 @@ mod units {
 
     #[test]
     fn messages_name_their_variants_for_logs() {
-        assert_eq!(ClientMsg::InstallHooks.kind(), "InstallHooks");
+        let ping = ClientMsg::Ping { sent_at: slopty_core::MonoTime::from_nanos(1) };
+        assert_eq!(ping.kind(), "Ping");
         let stop = slopty_proto::search::SearchRequest::Stop { id: 3 };
         assert_eq!(ClientMsg::Search(stop).kind(), "Search");
         let failed = slopty_proto::search::SearchEvent::Failed { id: 3, error: String::new() };

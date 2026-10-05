@@ -305,7 +305,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   attribution ruling above: `AgentEvent.source`, `ClientMsg::InstallHooks` and
   `WorkerMsg::HooksInstalled`, goldens `worker_agent_process`, `worker_agent_hook`,
   `client_install_hooks` and `worker_hooks_installed` (all new) with `client_hello` re-accepted,
-  PROTOCOL_VERSION 11 → 12.
+  PROTOCOL_VERSION 11 → 12. Superseded 2026-10-05 by **No app offer to install the hooks**
+  (claude-code.md): the pill, `ClientMsg::InstallHooks` and `WorkerMsg::HooksInstalled` are gone.
 
 - ✅ **A stall is the link's silence, not the source's** (2026-09-06, measured). The receiver
   counted a stall whenever nothing arrived for a stall gap, which read the capture's own quiet

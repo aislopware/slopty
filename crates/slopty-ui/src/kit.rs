@@ -375,9 +375,9 @@ pub const PILL_HEIGHT: f32 = 20.0;
 ///
 /// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end, a
 /// capsule: a pill says a state, and every reference draws a state as a capsule, where a 4 pt
-/// box at this height read as a 2018 tag or a button. A header's words that act (Take, Mute,
-/// the hooks' offer) wear it bare, so they stand as tall as the state's [`pill`] beside them
-/// and their hover takes the same capsule. Key caps keep their 4 pt corners: they are keys.
+/// box at this height read as a 2018 tag or a button. A header's words that act (Take, Mute)
+/// wear it bare, so they stand as tall as the state's [`pill`] beside them and their hover
+/// takes the same capsule. Key caps keep their 4 pt corners: they are keys.
 #[must_use]
 pub fn pill_frame(theme: &Theme, k: f32) -> Div {
     div()
@@ -1624,9 +1624,7 @@ mod tests {
             find::REPLACE_ALL,
             find::NO_MATCHES,
             find::BAD_PATTERN,
-            crate::workspace::INSTALL_HOOKS,
             crate::workspace::TAKE_OVER,
-            crate::workspace::HOOKS,
             crate::workspace::TAKE,
             crate::workspace::MUTE,
             crate::workspace::ATTACHING,

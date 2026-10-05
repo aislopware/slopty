@@ -3,6 +3,6 @@ source: crates/slopty-proto/tests/golden_drag.rs
 assertion_line: 31
 expression: hex(&bytes)
 ---
-2a 00 00 00 0c 00 10 00 00 00 00 00 00 00 00 00
+2a 00 00 00 0b 00 10 00 00 00 00 00 00 00 00 00
 00 00 00 00 00 00 09 01 04 10 00 00 00 00 00 00
 00 00 00 00 00 00 00 00 d7 a6 03 80 80 40

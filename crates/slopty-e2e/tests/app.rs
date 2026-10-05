@@ -65,7 +65,7 @@ mod tests {
     use slopty_e2e::snapshot::{
         MAC_TOLERANCE as TOLERANCE, assert_matches, foreground_fraction, pixels_near,
     };
-    use slopty_e2e::{Button, Command, Stack};
+    use slopty_e2e::{Command, Stack};
 
     /// How long a worker round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
@@ -355,14 +355,13 @@ mod tests {
         // where it runs and waits. (⌘⇧T starts the agent's thread, not a bare terminal.)
         let open = Command::Open { command: vec!["claude".to_owned()], count: 1 };
         stack.driver.ok(&open).await.unwrap();
-        let dump = stack
+        stack
             .driver
             .wait_for("the agent's terminal", STEP, |d| {
                 d.items.len() == 2 && !d.rows_containing("fake claude in ").is_empty()
             })
             .await
             .unwrap();
-        assert!(!dump.hooks_offered, "nothing has been offered yet");
 
         // No hook has fired and no title has been painted: the process is the whole signal.
         stack
@@ -420,115 +419,6 @@ mod tests {
             })
             .await
             .unwrap();
-        stack.shutdown().await;
-    }
-
-    /// The relay command a settings document registers, from the first entry that is ours.
-    fn relay_command(settings: &str) -> String {
-        let doc: serde_json::Value = serde_json::from_str(settings).expect("settings are JSON");
-        doc["hooks"]
-            .as_object()
-            .expect("a hooks map")
-            .values()
-            .filter_map(serde_json::Value::as_array)
-            .flatten()
-            .filter_map(|group| group.get("hooks")?.as_array())
-            .flatten()
-            .find(|entry| slopty_agent::hooks::is_relay(entry))
-            .and_then(|entry| entry.get("command")?.as_str())
-            .expect("a relay entry")
-            .to_owned()
-    }
-
-    /// The "hooks" pill, clicked the way a human clicks it, ends in the worker writing Claude
-    /// Code's settings — in the *harness's* home, which is the only home these daemons have.
-    ///
-    /// The click goes through the accessibility tree: the pill publishes its bounds there
-    /// because it is a button with a label, which is also how a screen reader reaches it.
-    #[tokio::test]
-    #[ignore = "live: cargo xtask e2e app"]
-    async fn the_hooks_pill_installs_the_relay_in_the_harness_home() {
-        /// The pill's accessible name: its words, then what they are for
-        /// (`slopty_ui::workspace::tile::INSTALL_HOOKS`).
-        const HOOKS_PILL: &str = "Install hooks for an exact status";
-        let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
-        // Before anything else: the daemons' home is the run's own directory, so this test
-        // cannot touch the developer's `~/.claude` even if the wiring were wrong.
-        let home = stack.path("home");
-        let settings = home.join(".claude").join("settings.json");
-        assert!(
-            settings.starts_with(stack.dir.path()),
-            "the harness owns HOME: {}",
-            settings.display()
-        );
-        assert!(!settings.exists(), "and starts without settings: {}", settings.display());
-
-        stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        stack
-            .driver
-            .wait_for("the first shell", STEP, |d| {
-                d.status == "connected" && d.item("terminal").is_some()
-            })
-            .await
-            .unwrap();
-
-        // ⌘⇧T would start `claude` with the relay on its command line, so it never needs the
-        // pill. A wrapper is what the relay cannot reach: the worker wires an open whose program
-        // is `claude`, and here `env` starts it, as `npx` or a script would. With no hook firing
-        // the worker has to guess, which is exactly when the pill is offered.
-        stack.driver.open(&["env", "claude"], 1).await.unwrap();
-        let dump = stack
-            .driver
-            .wait_for("the hooks pill on the guessed agent", STEP, |d| {
-                d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("process"))
-                    && d.a11y_node("Button", Some(HOOKS_PILL)).is_some()
-            })
-            .await
-            .unwrap();
-        assert!(!dump.hooks_offered, "not offered until it is clicked");
-
-        let [x, y, w, h] = dump.a11y_node("Button", Some(HOOKS_PILL)).expect("the pill").bounds;
-        stack
-            .driver
-            .ok(&Command::Click { x: x + w / 2.0, y: y + h / 2.0, button: Button::Left, count: 1 })
-            .await
-            .unwrap();
-        stack
-            .driver
-            .wait_for("the offer to retire", STEP, |d| {
-                d.hooks_offered && d.a11y_node("Button", Some(HOOKS_PILL)).is_none()
-            })
-            .await
-            .unwrap();
-
-        // The worker writes the file; give it the same grace the driver gives the app.
-        let deadline = std::time::Instant::now() + STEP;
-        while !settings.exists() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(settings.exists(), "the worker wrote {}", settings.display());
-
-        let registered = slopty_agent::hooks::registered(&settings).unwrap();
-        assert_eq!(
-            registered.len(),
-            slopty_agent::HOOK_EVENTS.len(),
-            "every event relays: {registered:?}"
-        );
-        let written = std::fs::read_to_string(&settings).unwrap();
-        assert!(written.contains("slopty"), "the relay is the slopty beside the worker: {written}");
-        assert!(written.contains("hook"), "and it is the hook subcommand: {written}");
-
-        // Installing the same relay again over what the daemon wrote changes nothing. (The
-        // pill itself retires after one click, so a second *click* is not reachable through
-        // the UI.) The command has to be the daemon's own — `install` repoints a relay that
-        // moved — so read it back out of the file the daemon wrote.
-        let relay = relay_command(&written);
-        assert!(relay.ends_with("slopty"), "the relay beside the worker: {relay}");
-        let outcome = slopty_agent::hooks::install_at(&settings, &relay).unwrap();
-        assert_eq!(outcome, slopty_agent::hooks::Outcome::Unchanged);
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), written, "byte for byte");
-
-        stack.fake_claude_stage("quit").unwrap();
         stack.shutdown().await;
     }
 

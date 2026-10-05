@@ -100,8 +100,8 @@ use slopty_theme::Theme;
 pub(crate) use strip::{ADD_WORKER, NEW_AGENT, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
-    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, OPENING, PAUSED, READING,
-    RECONNECTING, SESSION_ENDED, TAKE, TAKE_OVER,
+    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING,
+    SESSION_ENDED, TAKE, TAKE_OVER,
 };
 pub use tile::{COPY_COMMAND, file_title};
 
@@ -414,8 +414,6 @@ struct Worker {
     caps: Option<WorkerCaps>,
     /// Its one-minute load average, as its link or the server last said.
     load: Option<f32>,
-    /// `slopty hook install` has been offered on this worker once.
-    hooks_offered: bool,
     /// The paths the worker was last asked to watch for its file tiles, sorted.
     watched: Vec<String>,
     /// The directories the worker was last asked to watch for its folder tiles, sorted.
@@ -472,7 +470,6 @@ impl Worker {
             settings: None,
             caps: None,
             load: None,
-            hooks_offered: false,
             watched: Vec::new(),
             watched_folders: Vec::new(),
             titles_requested: false,
@@ -1231,12 +1228,6 @@ impl WorkspaceView {
     #[must_use]
     pub fn me(&self, worker: WorkerKey) -> Option<ClientId> {
         self.workers.get(&worker)?.link.as_ref().map(|l| l.me)
-    }
-
-    /// Whether `slopty hook install` has been offered on `worker`.
-    #[must_use]
-    pub fn hooks_offered(&self, worker: WorkerKey) -> bool {
-        self.workers.get(&worker).is_some_and(|w| w.hooks_offered)
     }
 
     /// The workers, their names and states, in key order.

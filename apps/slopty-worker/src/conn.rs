@@ -405,31 +405,6 @@ async fn fetching_until(held: Option<&Held>) {
     }
 }
 
-/// Register the `slopty hook` shipped beside this daemon in the worker's Claude Code settings,
-/// for a client that saw an agent the hooks are not reporting. Answers with the line the client
-/// shows as a notice.
-async fn install_hooks() -> (bool, String) {
-    let Some(relay) = slopty_agent::hooks::relay_beside_this_binary() else {
-        return (false, "the slopty command is not installed beside the worker".to_owned());
-    };
-    let installed = tokio::task::spawn_blocking(move || {
-        let path = slopty_agent::hooks::settings_path(&slopty_platform::dirs::home());
-        let outcome = slopty_agent::hooks::install_at(&path, &relay.to_string_lossy())?;
-        Ok::<_, std::io::Error>((outcome, path))
-    })
-    .await;
-    match installed {
-        Ok(Ok((slopty_agent::hooks::Outcome::Changed, path))) => {
-            (true, format!("hooks installed in {}", path.display()))
-        }
-        Ok(Ok((slopty_agent::hooks::Outcome::Unchanged, _path))) => {
-            (true, "hooks were already installed".to_owned())
-        }
-        Ok(Err(e)) => (false, format!("could not install hooks: {e}")),
-        Err(e) => (false, format!("could not install hooks: {e}")),
-    }
-}
-
 /// A copy of one input from a datagram.
 #[derive(Debug)]
 enum InputCopy {
@@ -1053,14 +1028,6 @@ impl Peer<'_> {
                     tasks: &mut self.tasks,
                 };
                 self.threads.handle(&mut at, req);
-            }
-            ClientMsg::InstallHooks => {
-                let (client, out) = (self.client, self.out.clone());
-                self.tasks.spawn(async move {
-                    let (ok, message) = install_hooks().await;
-                    tracing::info!(%client, ok, %message, "install hooks");
-                    let _sent = out.send(WorkerMsg::HooksInstalled { ok, message }).await;
-                });
             }
         }
     }

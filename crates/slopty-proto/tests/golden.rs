@@ -270,14 +270,6 @@ mod golden {
                 mode: None,
             }),
         );
-        snap("client_install_hooks", &ClientMsg::InstallHooks);
-        snap(
-            "worker_hooks_installed",
-            &WorkerMsg::HooksInstalled {
-                ok: true,
-                message: "hooks installed in /Users/x/.claude/settings.json".to_owned(),
-            },
-        );
     }
 
     /// A turn paused on background work, one a usage limit stopped, and the pull request and

@@ -2209,3 +2209,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::thread_start::a_claude_code_start_can_plan_first`; worker
     `claude_start::a_start_in_plan_mode_opens_claude_planning` and
     `a_start_claude_code_cannot_take_is_refused_and_opens_nothing`.
+- ✅ **No app offer to install the hooks** (2026-10-05, readiness 10-05 §3). The "Install hooks"
+  pill on an agent the worker guessed at is deleted, with `ClientMsg::InstallHooks` and
+  `WorkerMsg::HooksInstalled`. The pill edited the person's global `~/.claude/settings.json` to
+  reach the one `claude` nothing else wires. Every `claude` typed into a Slopty shell is wired
+  by the shell integration's `claude` function (`slopty hook wire`), and every agent Slopty
+  starts gets the relay on its `--settings`. What is left is a `claude` started by path, through
+  an alias of the person's own, or under a wrapper. For those, the transcript and the title
+  still give a status, and `slopty hook install` stays the person's own act from the CLI: the
+  app no longer offers to change a file of theirs that it does not need.
+  `slopty_agent::hooks::install_at` stays because the CLI runs it. Wire: two variants leave the
+  middle of their enums, so the golden of every variant after them moves (a wire change; nothing
+  is versioned). Test removed: the app self-test
+  `the_hooks_pill_installs_the_relay_in_the_harness_home`. The header test
+  `a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it` now asserts that a guessed
+  agent's header offers nothing.

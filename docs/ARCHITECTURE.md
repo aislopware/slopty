@@ -1247,12 +1247,11 @@ can never report `Blocked`: a permission prompt is only written once it has been
 blocking stays a hook-only signal. Once a hook has spoken for a session, the tick fills gaps
 only (the transcript path) and never changes the status; it ends the
 agent only when a `claude` the worker actually watched in the foreground has been gone for four
-probes, which is how a killed agent loses its pill without a `SessionEnd`. A session
-attributed without hooks shows an
-"install hooks" pill beside its agent pill, once per run: `ClientMsg::InstallHooks` asks the
-worker to register the relay (`slopty_agent::hooks`, the same code `slopty hook install` runs)
-and `WorkerMsg::HooksInstalled` comes back as a notice, because the human reading the pill may
-be on a phone.
+probes, which is how a killed agent loses its pill without a `SessionEnd`. The app offers no
+install for a session attributed without hooks: a `claude` typed into a Slopty shell is wired by
+the shell integration and an agent Slopty starts gets the relay on its command line, so only a
+`claude` reached by path or through a wrapper goes unhooked, and `slopty hook install` (which
+edits the person's own `~/.claude/settings.json`) stays the person's to run.
 
 The worker spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_WORKER_SOCKET=<path>`;
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
@@ -1295,8 +1294,7 @@ recent `.jsonl` in a temp home, and the file moving after a `/clear`),
 (`a_hand_started_claude_is_attributed_from_the_process_and_the_title`,
 `hooks_outrank_everything_and_decide_when_the_agent_ends`,
 `a_transcript_read_for_the_first_time_is_not_an_alert`); `slopty_pty::process` reads its own
-process out of the process table and the foreground process of a PTY it spawned. Headless:
-`an_agent_seen_without_hooks_gets_the_pill_and_offers_the_hooks`. App self-test:
+process out of the process table and the foreground process of a PTY it spawned. App self-test:
 `an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see`, which puts a fake
 `claude` first on ptyd's `PATH` with a `HOME` of its own
 (`Stack::launch_with_fake_claude`), opens it with ⌘⇧T and walks it from stage to stage with

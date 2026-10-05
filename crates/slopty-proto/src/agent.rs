@@ -84,7 +84,7 @@ impl AgentStatus {
 /// the foreground process only says an agent is there, the terminal title tells working from
 /// idle, the JSONL transcript names the turn and the tool, and the hooks say everything
 /// including what the agent is blocked on. A client shows the same pill for all four; the
-/// source is what tells it whether offering "install hooks" would buy the human anything.
+/// source tells it how far the status can be trusted.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub enum AgentSource {
     /// The session's foreground process is the agent's; nothing else is known.
