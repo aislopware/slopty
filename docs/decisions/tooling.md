@@ -1143,3 +1143,13 @@ more full-window layer.
   - **Ours:** `Window::paint_mask` paints a monochrome mask at exact device pixels and
     rasterises it once per key and size (`fast/mask.rs`). The SF Symbols path in
     `slopty-platform::symbols` is built on it.
+
+- ✅ **gpui-fast `28d2801` and gpui-kit `43f20bd2`, for the SF Symbols chrome** (2026-10-05).
+  - gpui-fast: `paint_mask` takes a transform (identity at rest, so a mask stays at exact
+    device pixels while a disclosure chevron turns). The test-support
+    `Window::render_to_image_at` draws the window offscreen at another scale, which makes the
+    `thread@2x` golden possible on CI's 1x runner.
+  - gpui-kit: `IconPainter`, a global that the kit's `Icon` asks before drawing its SVG. This
+    lets the questionnaire check, the input's chevrons and its clear button draw as the
+    chrome's SF Symbols. Upstream has no open PR doing this. #3360 touches `icon.rs`, but not
+    rendering.
