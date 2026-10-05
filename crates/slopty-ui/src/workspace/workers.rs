@@ -16,15 +16,16 @@ use slopty_proto::screen::{
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
+use slopty_proto::thread::ThreadId;
 
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::file::{FileView, FileViewEvent};
 use crate::screen::ScreenView;
 use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 
-/// Frames a block attached to an agent waits for the agent's composer to be made, its face
-/// having been brought up for it.
-const QUOTE_FRAMES: u8 = 4;
+/// How long a quote waits for the composer it is for to be made, its face brought up or its
+/// tile opened for it (an opened tile comes back from the worker first).
+const QUOTE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl WorkspaceView {
     /// "Stop sharing the clipboard with …" or "Share the clipboard with …": applied at once
@@ -121,16 +122,79 @@ impl WorkspaceView {
     ) {
         self.reveal_session(agent, cx);
         self.show_face(agent, true, cx);
-        let workspace = cx.entity().downgrade();
-        // A popped-out tile's own window, else the one the person acted in.
-        let popped = self.tile_of_session(agent).and_then(|t| self.popouts.window(t.item));
-        cx.defer(move |cx| {
-            let window = popped.or_else(|| cx.active_window());
-            let Some(window) = window.or_else(|| cx.windows().first().copied()) else { return };
-            let _closed = window.update(cx, |_, window, cx| {
-                quote_when_shown(workspace, agent, text, QUOTE_FRAMES, window, cx);
+        self.quote_into(QuoteFor::Agent(agent), text, Box::new(|_taken, _cx| {}), cx);
+    }
+
+    /// `text` at the end of `thread`'s draft, whatever its agent and wherever it shows: its
+    /// terminal's tile is turned to its thread, its own tile brought up, or one opened for it;
+    /// the text lands once a composer of the thread is there, with the keyboard. `done` hears
+    /// whether one took it, so what the text came from goes only then.
+    pub(super) fn quote_to_thread(
+        &mut self,
+        thread: ThreadId,
+        text: String,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(bool, &mut App) + 'static,
+    ) {
+        if let Some((_, session)) = self.live_terminal(thread) {
+            self.show_face(session, true, cx);
+        }
+        if let Some(tile) = self.tile_of_thread(thread) {
+            self.go_to(tile.item, cx);
+        } else if let Some(key) = self.worker_of_thread(thread, cx) {
+            self.open_thread(key, thread, cx);
+        } else {
+            self.show_notice("That thread is on a machine not connected here".to_owned(), cx);
+            done(false, cx);
+            return;
+        }
+        self.quote_into(QuoteFor::Thread(thread), text, Box::new(done), cx);
+    }
+
+    /// Put `text` in the composer it is for once that is made: the next frames look for it
+    /// ([`Self::settle_quotes`]), and after [`QUOTE_WAIT`] it is given up, the person told.
+    fn quote_into(&mut self, to: QuoteFor, text: String, done: Done, cx: &mut Context<Self>) {
+        let id = self.quotes.next;
+        self.quotes.next = id.wrapping_add(1);
+        self.quotes.waiting.push(Quote { id, to, text, done });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(QUOTE_WAIT).await;
+            let _gone = this.update(cx, |w, cx| w.quote_lapsed(id, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Each frame, after the views are made: every waiting quote whose composer is there goes
+    /// into its draft, with the keyboard, in the window its tile is in (a popped-out tile's own).
+    pub(super) fn settle_quotes(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.quotes.waiting.is_empty() {
+            return;
+        }
+        let here = window.window_handle();
+        for quote in std::mem::take(&mut self.quotes.waiting) {
+            let Some(composer) = quote.to.composer(self, cx) else {
+                self.quotes.waiting.push(quote);
+                continue;
+            };
+            let popped = quote.to.tile(self).and_then(|t| self.popouts.window(t.item));
+            let into = popped.unwrap_or(here);
+            let Quote { text, done, .. } = quote;
+            // Outside this draw, so the composer redraws with the words in it.
+            cx.defer(move |cx| {
+                let landed = into.update(cx, |_, window, cx| composer.quote(&text, window, cx));
+                done(landed.is_ok(), cx);
             });
-        });
+        }
+    }
+
+    /// Quote `id` found no composer in time: what it came from keeps it, and the person is told.
+    fn quote_lapsed(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(at) = self.quotes.waiting.iter().position(|q| q.id == id) else { return };
+        let quote = self.quotes.waiting.remove(at);
+        tracing::warn!("no composer showed; the text was not added");
+        self.show_failure("The agent's composer did not open".to_owned(), cx);
+        (quote.done)(false, cx);
     }
 
     /// A worker this client has added, before its first connection: its tiles (from the
@@ -1492,30 +1556,48 @@ fn shown_rtt(
     live.map(|live| pinned.unwrap_or(live))
 }
 
-/// Put `text` in the draft of `agent`'s composer once its tile shows it, waiting up to `frames`
-/// frames for the face brought up for it to be made.
-fn quote_when_shown(
-    workspace: gpui::WeakEntity<WorkspaceView>,
-    agent: SessionId,
-    text: String,
-    frames: u8,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Ok(composer) = workspace.read_with(cx, |w, _| w.shown_composer(agent)) else { return };
-    match composer {
-        Some(composer) => composer.quote(&text, window, cx),
-        None if frames > 0 => {
-            window.on_next_frame(move |window, cx| {
-                quote_when_shown(workspace, agent, text, frames.saturating_sub(1), window, cx);
-            });
-            window.refresh();
-        }
-        None => {
-            tracing::warn!(session = %agent, "no composer showed; the block was not attached");
-            let _gone = workspace.update(cx, |w, cx| {
-                w.show_failure("The agent's composer did not open".to_owned(), cx);
-            });
+/// Whether a composer took a quote.
+type Done = Box<dyn FnOnce(bool, &mut App)>;
+
+/// What a quote is for.
+#[derive(Clone, Copy)]
+enum QuoteFor {
+    /// The agent in a terminal, on its tile's face.
+    Agent(SessionId),
+    /// A thread, in a composer of it wherever that shows.
+    Thread(ThreadId),
+}
+
+impl QuoteFor {
+    /// The composer it goes into, once on show.
+    fn composer(self, w: &WorkspaceView, cx: &App) -> Option<crate::conversation::attach::Target> {
+        match self {
+            Self::Agent(session) => w.shown_composer(session),
+            Self::Thread(thread) => w.composer_of_thread(thread, cx),
         }
     }
+
+    /// The tile that composer is on.
+    fn tile(self, w: &WorkspaceView) -> Option<TileRef> {
+        match self {
+            Self::Agent(session) => w.tile_of_session(session),
+            Self::Thread(thread) => w.tile_of_thread(thread),
+        }
+    }
+}
+
+/// A quote on its way to a composer that may not be made yet.
+struct Quote {
+    /// Which, to find it again when its time is up.
+    id: u64,
+    to: QuoteFor,
+    text: String,
+    done: Done,
+}
+
+/// The quotes waiting for their composer.
+#[derive(Default)]
+pub(super) struct Quotes {
+    waiting: Vec<Quote>,
+    next: u64,
 }

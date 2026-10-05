@@ -83,7 +83,7 @@ fn a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it(cx: &mut TestAp
     let words = "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\nWhy new?";
     let shown = view.read_with(cx, |v, _| v.review_of(thread).cloned()).expect("the review");
     shown.update(cx, |_, cx| {
-        cx.emit(crate::review::ReviewEvent::AddToMessage { thread, text: words.to_owned() });
+        cx.emit(crate::review::ReviewEvent::AddToMessage { thread, text: words.to_owned(), id: 1 });
     });
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
@@ -248,4 +248,202 @@ fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let again = studio.drain().into_iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(_))));
     assert!(!again, "the tile open already takes the focus");
+}
+
+/// Draw a few frames, as the quote waits for a composer to be made.
+fn frames(cx: &mut VisualTestContext) {
+    for _ in 0..6 {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+    }
+    cx.run_until_parked();
+}
+
+/// The review of `thread`, asked for from `from`'s thread view and heard by the workspace.
+fn review_from(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    from: &Entity<crate::conversation::thread::ThreadView>,
+    thread: slopty_proto::thread::ThreadId,
+) -> Entity<crate::review::ReviewView> {
+    from.update(cx, |_, cx| cx.emit(ThreadViewEvent::Review { thread }));
+    frames(cx);
+    view.read_with(cx, |v, _| v.review_of(thread).cloned()).expect("the review")
+}
+
+/// `thread`'s row as `key`'s whole table, its link up.
+fn table_of(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    key: WorkerKey,
+    seq: u64,
+    state: &slopty_proto::thread::ThreadState,
+) {
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    frames(cx);
+}
+
+/// What the review's "Add to message" carries reaches a thread tile's composer, an agent with
+/// no terminal (Codex over its app-server, pi over RPC, an ACP agent), and only then goes.
+#[gpui::test]
+fn added_comments_reach_a_thread_tile_and_go_only_then(cx: &mut TestAppContext) {
+    use slopty_proto::thread::AgentId;
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let acp = format!("{}gemini", AgentId::ACP_PREFIX);
+    for (agent, seq) in [AgentId::CODEX, AgentId::PI, acp.as_str()].into_iter().zip(1..) {
+        let mut state = crate::conversation::thread::fixtures::thread("edit");
+        state.meta.agent = AgentId::named(agent);
+        let thread = state.meta.id;
+        table_of(&view, cx, key, seq, &state);
+        view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+        frames(cx);
+        let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+        let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+        let review = review_from(&view, cx, &own, thread);
+
+        review.update(cx, |r, cx| r.add_note_to_message("Check the retry", cx));
+        frames(cx);
+        let draft = own.read_with(cx, crate::conversation::thread::ThreadView::draft);
+        assert!(draft.contains("Check the retry"), "in {agent}'s draft: {draft:?}");
+        assert_eq!(review.read_with(cx, |r, _| r.waiting()), 0, "taken by {agent}, so gone");
+    }
+}
+
+/// A thread whose machine is not connected here takes nothing: the comments stay in the review,
+/// free to go again, and the person is told why.
+#[gpui::test]
+fn added_comments_for_a_machine_not_here_stay(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX);
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let review = review_from(&view, cx, &own, thread);
+    let (by, op) = (studio.me, ItemOp::Remove(tile.item));
+    view.update_in(cx, |v, _w, cx| {
+        v.apply_sync(key, ItemSync::Delta { version: 9, by, op }, cx);
+        v.thread_table(
+            key,
+            &TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 2 }, rows: Vec::new() },
+            cx,
+        );
+    });
+    frames(cx);
+
+    review.update(cx, |r, cx| r.add_note_to_message("Check the retry", cx));
+    frames(cx);
+    assert_eq!(review.read_with(cx, |r, _| r.waiting()), 1, "nothing lost");
+    assert!(!review.read_with(cx, |r, _| r.comments_away()), "and free to go again");
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("That thread is on a machine not connected here"));
+}
+
+/// A Claude Code tile left on its TUI turns to its thread for the comments, which land in
+/// the composer there.
+#[gpui::test]
+fn added_comments_turn_a_tui_tile_to_its_thread(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(agent, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("the face");
+    let review = review_from(&view, cx, &face, thread);
+    view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
+    frames(cx);
+    assert!(view.read_with(cx, |v, _| v.thread_face(session).is_none()), "on its TUI");
+
+    review.update(cx, |r, cx| r.add_note_to_message("Check the retry", cx));
+    frames(cx);
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("the face again");
+    let draft = face.read_with(cx, crate::conversation::thread::ThreadView::draft);
+    assert!(draft.contains("Check the retry"), "in the thread's draft: {draft:?}");
+    assert_eq!(review.read_with(cx, |r, _| r.waiting()), 0);
+}
+
+/// A thread shown in no tile gets one for the comments, which land in its composer.
+#[gpui::test]
+fn added_comments_open_a_tile_for_a_thread_shown_nowhere(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::PI);
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let review = review_from(&view, cx, &own, thread);
+    let (by, op) = (studio.me, ItemOp::Remove(tile.item));
+    view.update_in(cx, |v, _w, cx| v.apply_sync(key, ItemSync::Delta { version: 9, by, op }, cx));
+    frames(cx);
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(thread)).is_none(), "shown nowhere");
+
+    review.update(cx, |r, cx| r.add_note_to_message("Check the retry", cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("a tile for it");
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let draft = own.read_with(cx, crate::conversation::thread::ThreadView::draft);
+    assert!(draft.contains("Check the retry"), "in the thread's draft: {draft:?}");
+    assert_eq!(review.read_with(cx, |r, _| r.waiting()), 0);
+}
+
+/// Comments no composer can take (the agent in the terminal has exited, so the tile has no
+/// thread to show) stay in the review, and the person is told.
+#[gpui::test]
+fn added_comments_no_composer_takes_stay(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(agent, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("the face");
+    let review = review_from(&view, cx, &face, thread);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::None, ..blocked(session) }, cx);
+    });
+    frames(cx);
+
+    review.update(cx, |r, cx| r.add_note_to_message("Check the retry", cx));
+    frames(cx);
+    assert!(review.read_with(cx, |r, _| r.comments_away()), "on their way while one may open");
+    cx.executor().advance_clock(Duration::from_secs(5));
+    frames(cx);
+    assert_eq!(review.read_with(cx, |r, _| r.waiting()), 1, "nothing lost");
+    assert!(!review.read_with(cx, |r, _| r.comments_away()), "and free to go again");
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("The agent's composer did not open"));
 }

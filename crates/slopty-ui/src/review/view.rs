@@ -72,6 +72,12 @@ const FINDINGS_HEIGHT: f32 = 240.0;
 /// How far past the viewport the diff lays rows out.
 const OVERDRAW: f32 = 2048.0;
 
+/// The foot's send while the comments are on their way.
+pub const SENDING: &str = "Sending…";
+
+/// Said above the diff when the worker turns the comments' send down; they stay.
+pub const NOT_SENT: &str = "Comments not sent";
+
 /// What the tile tells its host.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ReviewEvent {
@@ -81,12 +87,15 @@ pub enum ReviewEvent {
         thread: ThreadId,
     },
     /// The comments are for the thread's draft, to go with more words: the host puts `text`
-    /// at its end and gives it the keyboard.
+    /// at its end and gives it the keyboard, then says whether a composer took it
+    /// ([`ReviewView::added`]). The comments stay until one did.
     AddToMessage {
         /// The thread.
         thread: ThreadId,
         /// The comments as one message.
         text: String,
+        /// Which hand-over this is, for its answer.
+        id: u64,
     },
     /// The person pressed who wrote a line: open the thread that did, at its turn.
     OpenThread(Opens),
@@ -210,6 +219,12 @@ pub struct ReviewView {
     said: Option<RequestId>,
     /// The commit sheet over the tile, while it is open.
     commit: Option<(Entity<CommitSheet>, Subscription)>,
+    /// The person's comments on their way to the agent, kept until the worker takes the send.
+    sending: Option<(IntentId, model::Batch)>,
+    /// The comments handed to the thread's draft, kept until a composer takes them, and the
+    /// number of the last hand-over.
+    adding: Option<(u64, model::Batch)>,
+    adds: u64,
     /// The agent's own review, while it runs.
     reviewing: Option<Reviewing>,
     /// How the last one came out, until the person lets it go.
@@ -319,6 +334,9 @@ impl ReviewView {
             pull_asked: false,
             said: None,
             commit: None,
+            sending: None,
+            adding: None,
+            adds: 0,
             reviewing: None,
             came: None,
             pinned: None,
@@ -528,6 +546,7 @@ impl ReviewView {
             self.asked = None;
         }
         self.settle_review(cx);
+        self.settle_send(cx);
         self.ask(cx);
         self.ask_pull(cx);
         cx.notify();
@@ -806,28 +825,100 @@ impl ReviewView {
         }
     }
 
-    /// Send the comments as one message.
+    /// Whether comments are on their way, sent or handed to the draft: they wait for that to
+    /// end before going again.
+    #[must_use]
+    pub const fn comments_away(&self) -> bool {
+        self.sending.is_some() || self.adding.is_some()
+    }
+
+    /// Send the comments as one message. They stay until the worker takes it
+    /// ([`Self::settle_send`]): a send turned down loses none.
     fn send_comments(&mut self, cx: &mut Context<Self>) {
-        let Some(thread) = self.own() else { return };
-        let Some(text) = self.model.take_message() else { return };
-        let _id = self
-            .intent(Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() }, cx);
+        if self.comments_away() {
+            return;
+        }
+        let Some((text, batch)) = self.model.message() else { return };
+        let send = Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() };
+        let Some(id) = self.intent(send, cx) else { return };
+        self.sending = Some((id, batch));
         self.came = None;
-        self.release_pin();
-        self.rebuild();
-        cx.emit(ReviewEvent::CommentsSent { thread });
         cx.notify();
     }
 
-    /// Put the comments into the thread's draft rather than send them: the host gives the
-    /// draft the keyboard.
-    fn add_to_message(&mut self, cx: &mut Context<Self>) {
+    /// The worker answered the comments' send: taken, they go; turned down, they stay, and
+    /// why is said above the diff.
+    fn settle_send(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.sending else { return };
         let Some(thread) = self.own() else { return };
-        let Some(text) = self.model.take_message() else { return };
-        self.came = None;
+        let hub = self.hub.read(cx);
+        let sent = hub.threads().outbox().of(thread).find(|s| s.id == *id);
+        if sent.is_some_and(|s| s.outcome.is_none()) {
+            return;
+        }
+        if let Some(why) = sent.filter(|s| s.failed()).map(|s| s.failure().unwrap_or_default()) {
+            let agent = hub
+                .threads()
+                .mirror(thread)
+                .and_then(Mirror::state)
+                .map(|st| crate::conversation::thread::view::agent_label(&st.meta.agent))
+                .unwrap_or_default();
+            let words =
+                if why.is_empty() { NOT_SENT.to_owned() } else { format!("{NOT_SENT}: {why}") };
+            let refused = self.sending.take().map(|(id, _)| id);
+            self.came = Some(Came { agent, words, refused });
+            return;
+        }
+        let Some((_, batch)) = self.sending.take() else { return };
+        self.model.forget(&batch);
         self.release_pin();
         self.rebuild();
-        cx.emit(ReviewEvent::AddToMessage { thread, text });
+        cx.emit(ReviewEvent::CommentsSent { thread });
+    }
+
+    /// Put the comments into the thread's draft rather than send them: the host gives the
+    /// draft the keyboard, and says whether a composer took them ([`Self::added`]).
+    fn add_to_message(&mut self, cx: &mut Context<Self>) {
+        if self.comments_away() {
+            return;
+        }
+        let Some(thread) = self.own() else { return };
+        let Some((text, batch)) = self.model.message() else { return };
+        self.adds = self.adds.wrapping_add(1);
+        let id = self.adds;
+        self.adding = Some((id, batch));
+        cx.emit(ReviewEvent::AddToMessage { thread, text, id });
+        cx.notify();
+    }
+
+    /// Keep a finding as a note beside the comments, as the agent's own review does, and press
+    /// "Add to message": what the host does with comments, with no diff to comment on.
+    #[cfg(test)]
+    pub(crate) fn add_note_to_message(&mut self, words: &str, cx: &mut Context<Self>) {
+        let finding = Finding { title: words.to_owned(), body: String::new(), place: None };
+        self.model.note(Note { by: "Codex".to_owned(), finding });
+        self.add_to_message(cx);
+    }
+
+    /// How many comments and notes wait to be sent.
+    #[must_use]
+    pub const fn waiting(&self) -> usize {
+        self.model.waiting()
+    }
+
+    /// Hand-over `id` of the comments to the thread's draft ended: `taken` by a composer, they
+    /// go; else they stay, to be sent or added again.
+    pub fn added(&mut self, id: u64, taken: bool, cx: &mut Context<Self>) {
+        if self.adding.as_ref().is_none_or(|(at, _)| *at != id) {
+            return;
+        }
+        let Some((_, batch)) = self.adding.take() else { return };
+        if taken {
+            self.model.forget(&batch);
+            self.came = None;
+            self.release_pin();
+            self.rebuild();
+        }
         cx.notify();
     }
 
@@ -1795,7 +1886,9 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let n = self.model.waiting();
+        let away = self.comments_away();
         let send_words = match n {
+            _ if away => SENDING.to_owned(),
             1 => "Send 1 comment".to_owned(),
             n => format!("Send {n} comments"),
         };

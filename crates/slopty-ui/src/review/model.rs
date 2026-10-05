@@ -199,6 +199,13 @@ pub fn anchor(text: &str) -> u64 {
     h.finish()
 }
 
+/// The comments and notes one message was made of, for letting them go once it is taken.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Batch {
+    comments: Vec<Comment>,
+    notes: Vec<Note>,
+}
+
 /// A finding of the agent's own review that has no line in the diff on show: a file or lines
 /// outside it, or no place at all. It is kept beside the comments, never dropped.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -320,15 +327,30 @@ impl Model {
         !self.notes.is_empty() || self.comments.iter().any(|c| c.by.is_some())
     }
 
-    /// The comments and notes as one message, and none waiting after.
-    pub fn take_message(&mut self) -> Option<String> {
+    /// The comments and notes as one message, with what it holds: they stay until the person's
+    /// send of it is taken ([`Self::forget`]), so a send turned down loses nothing.
+    #[must_use]
+    pub fn message(&self) -> Option<(String, Batch)> {
         if self.waiting() == 0 {
             return None;
         }
         let text = message(&self.comments, &self.notes);
-        self.comments.clear();
-        self.notes.clear();
-        Some(text)
+        Some((text, Batch { comments: self.comments.clone(), notes: self.notes.clone() }))
+    }
+
+    /// Let go of what `batch` held, once its message was taken: comments and notes added
+    /// meanwhile stay.
+    pub fn forget(&mut self, batch: &Batch) {
+        for gone in &batch.comments {
+            if let Some(at) = self.comments.iter().position(|c| c == gone) {
+                self.comments.remove(at);
+            }
+        }
+        for gone in &batch.notes {
+            if let Some(at) = self.notes.iter().position(|n| n == gone) {
+                self.notes.remove(at);
+            }
+        }
     }
 
     /// Keep or put back the file at `at`, or some of its hunks.
@@ -473,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_stays_while_its_line_does_and_a_send_empties_them() {
+    fn a_comment_stays_while_its_line_does_and_until_its_send_is_taken() {
         let mut model = Model::default();
         model.set_review(Arc::new(review(vec![file("src/a.rs", 1, 1)])));
         let on = |text: &str, side| Comment {
@@ -496,8 +518,12 @@ mod tests {
         }
         model.set_review(Arc::new(review(vec![moved])));
         assert_eq!(model.comments().len(), 1, "the comment on a line that changed goes");
-        assert!(model.take_message().is_some());
-        assert!(model.comments().is_empty() && model.take_message().is_none());
+        let (_, batch) = model.message().expect("one comment to send");
+        assert_eq!(model.comments().len(), 1, "it waits until the send is taken");
+        model.comment(Comment { body: "Later".to_owned(), ..on("keep", Side::New) });
+        model.forget(&batch);
+        assert_eq!(model.comments().len(), 1, "only what was sent goes");
+        assert_eq!(model.comments()[0].body, "Later");
     }
 
     #[test]

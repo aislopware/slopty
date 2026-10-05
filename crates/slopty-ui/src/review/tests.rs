@@ -108,6 +108,23 @@ fn intents(sent: &Sent) -> Vec<Intent> {
         .collect()
 }
 
+/// The worker's answer to the last message the tile sent.
+fn answer_send(hub: &Entity<ThreadHub>, sent: &Sent, outcome: Outcome, cx: &mut VisualTestContext) {
+    let id = sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                id, intent: Intent::Send { .. }, ..
+            }) => Some(*id),
+            _ => None,
+        })
+        .expect("a message sent");
+    hub.update(cx, |hub, cx| hub.done(&IntentDone { id, outcome }, cx));
+    cx.run_until_parked();
+}
+
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
     let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} drawn")).center();
     cx.simulate_click(at, Modifiers::none());
@@ -172,10 +189,10 @@ fn keeping_a_hunk_sends_its_pick_and_says_so_at_once(cx: &mut TestAppContext) {
 }
 
 /// A click on a line opens a comment there; Return keeps it; the foot sends every comment as
-/// one message, each under the code it is on, and none wait after.
+/// one message, each under the code it is on, and none wait once the worker took it.
 #[gpui::test]
 fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
-    let (_view, _hub, sent, cx) = tile(cx, 800.0);
+    let (_view, hub, sent, cx) = tile(cx, 800.0);
     click(cx, "review-line-1-0-2");
     assert!(cx.debug_bounds("review-draft").is_some(), "the field under the line");
     cx.simulate_input("Why new?");
@@ -191,12 +208,35 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
             attachments: vec![]
         }]
     );
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "kept until the worker takes it");
+    answer_send(&hub, &sent, Outcome::Accepted, cx);
     assert!(cx.debug_bounds("review-comment-0").is_none());
+}
+
+/// A send of the comments the worker turns down loses none of them: they stay on their lines,
+/// the band says why, and the foot sends them again.
+#[gpui::test]
+fn comments_whose_send_is_turned_down_stay(cx: &mut TestAppContext) {
+    let (_view, hub, sent, cx) = tile(cx, 800.0);
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    click(cx, "review-send");
+    let refused = Outcome::Refused { reason: "the agent has exited".to_owned() };
+    answer_send(&hub, &sent, refused, cx);
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "the comment stays");
+    let heard = said(cx);
+    let why = format!("{}: the agent has exited", super::view::NOT_SENT);
+    assert!(heard.contains(&why), "{heard:?}");
+    click(cx, "review-send");
+    let sends = intents(&sent).iter().filter(|i| matches!(i, Intent::Send { .. })).count();
+    assert_eq!(sends, 2, "sent again");
 }
 
 /// A drag over a hunk's lines comments on the run, quoted whole with its numbers; a
 /// shift-press past it reaches further. "Add to message" hands the comments to the thread's
-/// draft and sends nothing.
+/// draft and sends nothing; they go once a composer took them, and stay when none did.
 #[gpui::test]
 fn a_drag_comments_on_a_run_and_add_to_message_sends_nothing(cx: &mut TestAppContext) {
     let (view, _hub, sent, cx) = tile(cx, 800.0);
@@ -232,8 +272,16 @@ fn a_drag_comments_on_a_run_and_add_to_message_sends_nothing(cx: &mut TestAppCon
             text: "In `src/lib.rs` lines 10\u{2013}11:\n```diff\n fn main() {\n-    old();\n+    \
                    new();\n```\nWhy swap these?"
                 .to_owned(),
+            id: 1,
         }]
     );
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "kept until a composer takes them");
+    view.update(cx, |v, cx| v.added(1, false, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "no composer took them: they stay");
+    click(cx, "review-add");
+    view.update(cx, |v, cx| v.added(2, true, cx));
+    cx.run_until_parked();
     assert!(cx.debug_bounds("review-comment-0").is_none(), "none wait after");
 }
 
@@ -450,6 +498,7 @@ fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppCon
              name is still there."
         )
     );
+    answer_send(&hub, &sent, Outcome::Accepted, cx);
     assert!(cx.debug_bounds("review-findings").is_none(), "nothing waits after");
 }
 

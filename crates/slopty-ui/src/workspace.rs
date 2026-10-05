@@ -854,6 +854,8 @@ pub struct WorkspaceView {
     pending_focus_review: Option<slopty_proto::thread::ThreadId>,
     /// The review tiles: which are open, which this client asked for.
     reviews: reviews::Reviews,
+    /// Text on its way to a composer not made yet.
+    quotes: workers::Quotes,
     pending_focus_picker: bool,
     pending_focus_self: bool,
     /// What held the keyboard a moment is gone: it goes back where the focused tile keeps it
@@ -1082,6 +1084,7 @@ impl WorkspaceView {
             pending_focus_folder: None,
             pending_focus_review: None,
             reviews: reviews::Reviews::default(),
+            quotes: workers::Quotes::default(),
             pending_focus_picker: false,
             pending_focus_self: false,
             pending_return: false,
@@ -1829,6 +1832,7 @@ impl gpui::Render for WorkspaceView {
             self.sync_faces(window, cx);
         }
         self.settle_reviews(cx);
+        self.settle_quotes(window, cx);
         self.settle_agent_screens(cx);
         self.settle_going(cx);
         self.settle_review_writers(cx);

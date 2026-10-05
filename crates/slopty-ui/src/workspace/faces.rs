@@ -1144,6 +1144,19 @@ impl WorkspaceView {
         }
     }
 
+    /// A composer of `thread` on show: its own tile's, or its terminal's while that shows the
+    /// thread.
+    pub(super) fn composer_of_thread(&self, thread: ThreadId, cx: &App) -> Option<Target> {
+        let threads = &self.faces.threads;
+        let own = threads.items.values().find(|v| v.read(cx).thread() == thread);
+        let face = || {
+            threads.views.iter().find_map(|(session, v)| {
+                (v.read(cx).thread() == thread && self.face_shown(*session)).then_some(v)
+            })
+        };
+        own.or_else(face).map(|view| Target(view.downgrade()))
+    }
+
     /// The composer files dropped on `session`'s tile are attached to: its thread view's
     /// while that shows.
     pub(super) fn shown_composer(&self, session: SessionId) -> Option<Target> {

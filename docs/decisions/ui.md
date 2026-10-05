@@ -6012,11 +6012,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     end of the agent's draft (`ReviewEvent::AddToMessage`, which the workspace hears). The
     agent's tile comes to the front with the keyboard in its composer, so the person adds
     words and sends once. Nothing is sent. Where no tile shows the thread, a notice says to
-    open it.
+    open it. (Superseded by "A review's comments go only once taken", next.)
   - Tests: `review::tests::{a_drag_comments_on_a_run_and_add_to_message_sends_nothing,
     line_comments_go_as_one_message}`,
     `review::model::tests::comments_go_as_one_message_each_under_its_code`,
     `workspace::tests::review_tile::a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it`.
+
+- ✅ **A review's comments go only once taken** (2026-10-05, the 10-06 re-audit,
+  `.research/readiness-2026-10-06.md`). Amends "Comments on a line run, with their code".
+  - The bug: both "Send N comments" and "Add to message" cleared the comments before anything
+    took them. "Add to message" looked only for a terminal tile showing the thread, so for a
+    Codex, pi or ACP thread, and for a Claude Code tile left on its TUI, it said to open the
+    agent's tile and the person's comments were gone. A send the worker turned down lost them
+    the same way.
+  - Now the model hands out the message with what it holds (`Model::message`, a `Batch`) and
+    forgets that batch only on an answer (`Model::forget`); comments written meanwhile stay.
+    A send waits for its intent's outcome in the thread's outbox: accepted or settled, the
+    comments go and the keyboard goes to the thread's tile; refused, they stay and the review
+    says "Comments not sent" with the worker's reason. While either is away the foot reads
+    "Sending…" and neither button sends twice.
+  - "Add to message" goes to a composer of the thread whatever its agent and wherever it
+    shows (`WorkspaceView::quote_to_thread`): a live terminal's tile is turned to its thread
+    face, a thread's own tile is brought up, and a thread shown nowhere gets a tile opened on
+    its worker. The text lands once that composer is made, and the review hears whether one
+    took it (`ReviewView::added`). A thread on no connected machine is said at once; no
+    composer within 5 s says "The agent's composer did not open". In both the comments stay.
+  - The wait for a composer moved from counting four display frames (`on_next_frame`) to the
+    workspace's own render: each frame, after the views are made, a waiting quote finds its
+    composer (`settle_quotes`), and a timer gives it up. Four frames is about 33 ms, shorter
+    than a tile opened on a remote worker takes to come back, and frame callbacks never run
+    under the test platform, so no test could see the wait.
+  - Tests: `review::tests::{line_comments_go_as_one_message,
+    comments_whose_send_is_turned_down_stay}`,
+    `review::model::tests::a_comment_stays_while_its_line_does_and_until_its_send_is_taken`,
+    `workspace::tests::review_tile::{added_comments_reach_a_thread_tile_and_go_only_then`
+    (Codex, pi and an ACP agent), `added_comments_turn_a_tui_tile_to_its_thread`,
+    `added_comments_open_a_tile_for_a_thread_shown_nowhere`,
+    `added_comments_for_a_machine_not_here_stay`, `added_comments_no_composer_takes_stay}`.
 
 - ✅ **Snooze is the server's, with presets** (2026-10-04, `.research/t3code-ui-2026-10-03.md`
   §3.14). Amends "Snooze, honestly".

@@ -10,7 +10,9 @@
 //! tile gone, closed here or by another client, lets the thread go
 //! ([`WorkspaceView::review_closed`]). Comments sent from it go to the agent, so the keyboard goes
 //! back to the agent's tile, where the answer shows; comments added to the message land at the
-//! end of the agent's draft, with the keyboard, to go with more words.
+//! end of a draft of the thread, with the keyboard, to go with more words: its terminal's tile
+//! turned to its thread, its own tile, or one opened for it. Either way the review lets them go
+//! only once the worker or a composer took them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -116,20 +118,22 @@ impl WorkspaceView {
             .find(|s| self.thread_face(*s).is_some_and(|v| v.read(cx).thread() == thread))
     }
 
-    /// Hear the review of `thread`: comments sent take the keyboard to the agent's tile.
+    /// Hear the review of `thread`: comments sent take the keyboard to the thread's tile, and
+    /// comments added to the message go to a composer of the thread, the review told whether
+    /// one took them.
     fn hear_review(&mut self, thread: ThreadId, view: &Entity<ReviewView>, cx: &mut Context<Self>) {
-        let hearing = cx.subscribe(view, |this, _view, event: &ReviewEvent, cx| match event {
+        let hearing = cx.subscribe(view, |this, view, event: &ReviewEvent, cx| match event {
             ReviewEvent::CommentsSent { thread } => {
-                if let Some(session) = this.thread_session(*thread, cx) {
-                    this.reveal_session(session, cx);
+                if let Some(tile) = this.tile_of_thread(*thread) {
+                    this.go_to(tile.item, cx);
                 }
             }
-            ReviewEvent::AddToMessage { thread, text } => match this.thread_session(*thread, cx) {
-                Some(session) => this.quote_to_agent(session, text.clone(), cx),
-                None => {
-                    this.show_notice("Open the agent's tile to add to its message".to_owned(), cx);
-                }
-            },
+            ReviewEvent::AddToMessage { thread, text, id } => {
+                let (review, id) = (view.downgrade(), *id);
+                this.quote_to_thread(*thread, text.clone(), cx, move |taken, cx| {
+                    let _gone = review.update(cx, |v, cx| v.added(id, taken, cx));
+                });
+            }
             ReviewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
         });
         self.reviews.hearing.insert(thread, hearing);
