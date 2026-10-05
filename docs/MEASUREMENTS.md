@@ -14807,3 +14807,42 @@ cargo test -p slopty-pty --test ptmx_churn --no-run   # target/debug/deps/ptmx_c
 target/debug/deps/ptmx_churn-<hash> --exact churn::opens_beside_closes_in_other_processes_never_wedge --ignored
 log show --last 5m --predicate 'eventMessage CONTAINS "devfs_make_node"'   # the slaveless pairs it met
 ```
+
+## 2026-10-05 — keyboard copy mode's keys
+
+Copy mode (`docs/decisions/terminal.md`, "Keyboard copy mode") handles each key on the UI
+thread, over the client's mirror of the grid, and asks for the next frame. No key goes to the
+worker, so a key costs its handling plus one frame, with no network in between. The handling
+was measured on a 200 × 60 terminal holding 10 000 lines of `ls -l`, from the key to the view's
+frame asked for: the motion, the selection rebuilt and the viewport moved. Each case ran 2 000
+keys. The worst case a word motion meets is `b` and `w` back and forth across 10 000 blank
+lines held here.
+
+Release build, mac-studio M1 Max, two runs, with load averages of 94 and 14 from other lanes
+building:
+
+| keys | p50 | p99 |
+| --- | --- | --- |
+| `j` `k`, a line in sight | 0.17 µs | 0.25–0.54 µs |
+| `k` at the top edge: a line and a scroll | 1.2 µs | 1.5–1.6 µs |
+| `w` `b`, a word | 0.42 µs | 0.58–0.75 µs |
+| `e`, a word's end | 0.50 µs | 1.9–4.1 µs |
+| `$` `0`, a row's ends (200 cells read) | 2.8 µs | 3.0–3.1 µs |
+| `⌃U` `⌃D`, half pages | 1.0 µs | 5.6–10 µs |
+| `g` `G`, 10 060 lines and back | 0.7 µs | 3.8–5.2 µs |
+| `k` with whole lines selected | 1.3 µs | 3.4–4.5 µs |
+| `w` with a run selected | 0.4 µs | 2.3–2.5 µs |
+| `b` `w` across 10 000 blank lines | 4.6–4.8 ms | max 8.6–21 ms |
+
+The one maximum above 1 ms in an ordinary case (16 ms for an `e`, in the run at load 94) was
+the thread being preempted, and it did not repeat.
+
+The blank-line case first took 144 ms (median, max 227 ms). Each blank cell had been read on its
+own, through a lookup of its line. Now a row whose rest is blank is checked in one pass over its
+cells and crossed in one step, which brought it to 4.7 ms. Ten thousand blank rows of 200 cells
+is two million cells, and that is now the whole cost.
+
+```sh
+cargo nextest run --release -p slopty-ui --run-ignored only --no-capture \
+  -E 'test(/measure_copy_mode_keys|measure_a_word_motion_over_blank/)'
+```

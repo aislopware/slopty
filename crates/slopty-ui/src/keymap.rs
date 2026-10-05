@@ -508,6 +508,8 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "scroll_to_bottom", t::ScrollToBottom, &["shift-end", "cmd-end"], &[TERMINAL]),
         c(Terminal, "select_all", t::SelectAll, &["cmd-a"], &[TERMINAL]),
         c(Terminal, "copy_last_output", t::CopyLastOutput, &["cmd-shift-c"], &[TERMINAL]),
+        // WezTerm's copy mode chord (⌃⇧X), with ⌘ for ⌃ as every app chord here.
+        c(Terminal, "copy_mode", t::CopyMode, &["cmd-shift-x"], &[TERMINAL]),
         // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
         c(Terminal, "rerun_last", t::RerunLast, &[], &[TERMINAL]),
         c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),

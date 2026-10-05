@@ -1965,8 +1965,15 @@ impl Element for TerminalElement {
                 rows_after.0.insert(address, (Arc::clone(line), key, parts));
             }
 
+            // Copy mode draws its own cursor, a steady block wherever in the history it stands,
+            // and the shell's none: two cursors would leave the eye asking which the keys move.
+            let copy_at = view.copy_cursor().and_then(|(index, col)| {
+                let row = u16::try_from(index.0.checked_sub(top_line.0)?).ok()?;
+                (usize::from(row) < rows_view.len()).then_some((row, col))
+            });
             let cursor_visible = cursor.visible
                 && view_offset == 0
+                && !view.in_copy_mode()
                 && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
             // A blinking cursor blinks only while focused; unfocused it is a steady hollow
             // block (what ghostty does), so a background terminal never ticks for it. The
@@ -1974,36 +1981,40 @@ impl Element for TerminalElement {
             let cursor_blinks = cursor_visible && cursor_blink.blinks(cursor.blink) && focused;
             blinking |= cursor_blinks;
             let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
+            let (cursor_row, cursor_col) = copy_at.unwrap_or((cursor.row, cursor.col));
             let cursor_line =
-                rows_view.get(usize::from(cursor.row)).and_then(|row| row.line).map(AsRef::as_ref);
-            let span = cursor_span(cursor_line, cursor.col);
+                rows_view.get(usize::from(cursor_row)).and_then(|row| row.line).map(AsRef::as_ref);
+            let span = cursor_span(cursor_line, cursor_col);
             // While an input method composes, its underlined preview stands in for the cursor.
-            let cursor_prepared = (cursor_shown && marked.is_none()).then(|| {
-                let x = origin.x + cell_width * f32::from(cursor.col);
-                let y = origin.y + line_height * f32::from(cursor.row);
-                let shape = if focused {
-                    cursor_shape_for(cursor_style, cursor.shape)
-                } else {
-                    CursorShape::BlockHollow
-                };
-                let width = cell_width * f32::from(span);
-                // An unfocused pane's hollow block is a place marker, not the caret: muted, so
-                // a background terminal does not draw the eye.
-                let color = if focused {
-                    hsla(palette.theme.cursor)
-                } else {
-                    hsla(theme.surfaces.text_muted)
-                };
-                (Bounds::new(point(x, y), size(width, line_height)), shape, color)
-            });
+            let cursor_prepared =
+                (copy_at.is_some() || (cursor_shown && marked.is_none())).then(|| {
+                    let x = origin.x + cell_width * f32::from(cursor_col);
+                    let y = origin.y + line_height * f32::from(cursor_row);
+                    let shape = if !focused {
+                        CursorShape::BlockHollow
+                    } else if copy_at.is_some() {
+                        CursorShape::Block
+                    } else {
+                        cursor_shape_for(cursor_style, cursor.shape)
+                    };
+                    let width = cell_width * f32::from(span);
+                    // An unfocused pane's hollow block is a place marker, not the caret: muted,
+                    // so a background terminal does not draw the eye.
+                    let color = if focused {
+                        hsla(palette.theme.cursor)
+                    } else {
+                        hsla(theme.surfaces.text_muted)
+                    };
+                    (Bounds::new(point(x, y), size(width, line_height)), shape, color)
+                });
             // A block hides its cell's text: that text is drawn over it in the cursor-text
             // colour, as ghostty does.
             let cursor_text = cursor_prepared
                 .filter(|(_, shape, _)| *shape == CursorShape::Block)
                 .map(|_| CursorText {
-                    row: cursor.row,
-                    start: cursor.col,
-                    end: cursor.col.saturating_add(span),
+                    row: cursor_row,
+                    start: cursor_col,
+                    end: cursor_col.saturating_add(span),
                     color: hsla(palette.theme.cursor_text),
                 });
 

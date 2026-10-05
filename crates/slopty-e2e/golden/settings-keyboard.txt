@@ -235,6 +235,8 @@ ListItem │ Select all │ ⌘A
 Button │ Keys for Select all │ ⌘A
 ListItem │ Copy last output │ ⇧⌘C
 Button │ Keys for Copy last output │ ⇧⌘C
+ListItem │ Copy mode │ ⇧⌘X
+Button │ Keys for Copy mode │ ⇧⌘X
 ListItem │ Rerun last command
 Button │ Keys for Rerun last command
 ListItem │ Copy block output

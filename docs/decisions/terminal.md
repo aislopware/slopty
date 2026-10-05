@@ -3644,3 +3644,79 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     six processes opening and closing) wedges a churner with the check turned off, and passes
     with it while the kernel logs 11 slaveless pairs. Eight threads of one process never met
     the race in eighteen runs, so no regular test can see it in reasonable time.
+
+- ✅ **Keyboard copy mode** (2026-10-05, measured). Until now the keyboard could only shape a
+  selection the pointer had already made (⇧-arrows). Keyboard copy mode gives the keyboard the
+  whole job: it walks the history, selects text and copies it.
+  - **Prior art.**
+    - WezTerm's Copy Mode (⌃⇧X) and Alacritty's vi mode (⌃⇧Space) both move a cursor of
+      their own with vi's keys. They select a run, whole lines or a block, `y` copies, and Esc
+      or `q` leaves. The viewport follows the cursor.
+    - iTerm2's Copy Mode has the same keys and can take over a selection the mouse made.
+    - Ghostty 1.3 has no copy mode of its own. Its key tables (`activate_key_table`) with
+      `adjust_selection` let a person build one.
+    - kitty has none either; its pager and the `kitty_grab` kitten fill the gap.
+    - The vi set is the one these terminals share, so it is the set here.
+  - **Entry.** ⌘⇧X: WezTerm's chord, with ⌘ standing in for ⌃ as in every app chord here. The
+    palette line is "Copy mode". The cursor starts at the shell's cursor while the view follows
+    the output, and at the viewport's foot when the view is scrolled back. A selection the
+    pointer made is taken over, its moving end becoming the cursor (iTerm2).
+  - **Motions.**
+    - `h` `j` `k` `l` and the arrows move a cell or a line.
+    - `w` `b` `e` move by words. A word is a run of non-blank cells, as a double-click picks.
+      A soft wrap joins a word across rows; a hard line break parts two words as a blank does.
+    - `0`/Home, `^` and `$`/End go to a row's start, its first non-blank cell and its last.
+    - `g` and `G` go to the oldest line kept and to the screen's foot.
+    - `H` `M` `L` go to the viewport's top, middle and bottom rows.
+    - ⇞ ⇟, `⌃B` `⌃F` move a page and `⌃U` `⌃D` half of one. The viewport moves with them, so
+      the cursor keeps its row.
+    - `{` `}` and ⌘↑ ⌘↓ go to the prompts above and below (the shell integration's marks).
+    - After any other motion the viewport scrolls only as far as brings the cursor into sight.
+    - A wide character is one stop.
+  - **Selecting and copying.**
+    - `v` or Space selects a run, `V` whole lines (soft wraps followed), and `⌃V` a block.
+      The kind already on drops the selection; another kind switches to it with the same
+      ends. `o` swaps the ends.
+    - `y`, ↩ and ⌘C copy through the ordinary copy path, which fetches history that is not
+      held here first. Then they leave copy mode.
+    - Esc drops the selection, and with none selected it leaves. `q`, `⌃C` and `⌃G` leave.
+    - Leaving goes back to the live output, where typing happens.
+    - `/` and `?` open the find bar. `n` and `N`, and the bar's ↩, put the cursor on the next
+      or previous hit.
+  - **The program hears nothing.**
+    - Every key the keymap leaves goes to copy mode. Keys copy mode has no use for are
+      swallowed.
+    - Text a soft keyboard or an input method commits is read as keys, a character at a time.
+      Composing text is not drawn.
+    - The Mac's ⌘ line-editing chords are swallowed. Other ⌘ chords stay the app's.
+    - A paste, ⌘K, a resize or a renumbering of the lines ends copy mode.
+    - The mouse is copy mode's too, even for a program that asked for it. A click puts the
+      cursor on the cell, a drag hands its selection to copy mode, and the wheel scrolls the
+      history. The program hears none of it.
+  - **Drawing.**
+    - Copy mode's cursor is a steady block in the theme's cursor colour. It is hollow and
+      muted when the tile is unfocused, and it is drawn wherever in the history it stands.
+    - The shell's cursor is hidden meanwhile, so there is never a question of which cursor
+      the keys move.
+    - The foot of the grid shows a "Copy mode · Done" pill where the lines-below pill sits. A
+      touch can leave copy mode with it, since an iPhone has no Esc.
+  - **Where it runs.** It runs on the client, over its mirror of the grid. libghostty-vt's
+    selection lives in the worker's engine, so using it would cost a round trip per key. The
+    mirror holds everything a motion reads, and the selection it makes is the view's own
+    `Selection`, which already paints, copies and fetches history.
+  - **Rebinding.** The keys are fixed, as in iTerm2: only the entry chord is in the keymap.
+    Making each of some thirty motions a command of its own would crowd the palette and the
+    Keyboard page for keys every vi user already knows.
+  - **Cost** (`docs/MEASUREMENTS.md`, 2026-10-05). On a 200 × 60 terminal holding 10 000
+    lines, a key is handled in 0.2–3 µs at the median and under 10 µs at p99. Its frame is the
+    next one, and no key waits on the network. The worst case is a word motion across 10 000
+    blank lines, at 4.7 ms. It reaches that because a blank row is crossed in one pass over
+    its cells; read cell by cell it took 144 ms.
+  - Tests:
+    - the model's `keys_mean_vi_s_motions_and_acts`, `words_are_runs_of_non_blank_cells`,
+      `selections_of_each_kind`, `a_wide_character_is_one_stop` and their neighbours
+      (`terminal/copy_mode.rs`);
+    - the view's `keys_select_and_copy_without_reaching_the_program`,
+      `escape_drops_the_selection_then_leaves`, `the_viewport_follows_the_cursor`,
+      `copy_mode_takes_over_a_pointer_selection` and
+      `the_foot_says_copy_mode_and_done_leaves` (`terminal/view/copy.rs`).

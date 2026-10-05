@@ -36,6 +36,7 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::kit::FindBar;
 use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Query, Tally, Toggle};
+use crate::terminal::copy_mode::{self, Command, Motion};
 use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
@@ -113,12 +114,15 @@ mod actions {
             AttachSelection,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
+            /// Keyboard copy mode: a cursor of its own walks the history with vi's keys,
+            /// selects and copies, and the program hears none of it.
+            CopyMode,
         ]
     );
 }
 pub use actions::{
     AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
-    Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
+    CopyMode, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
     ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
 };
 
@@ -404,6 +408,8 @@ pub struct TerminalView {
     attach_probe: Option<AttachProbe>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
+    /// Keyboard copy mode, while it is on (`view/copy.rs`).
+    copy_mode: Option<copy_mode::Mode>,
     /// The buttons whose press went to the program (one bit each, as [`ProtoButton::bit`]): their
     /// release goes there too, and a drag with one of them down.
     program_buttons: u8,
@@ -598,6 +604,7 @@ impl TerminalView {
             clip_hook: None,
             attach_probe: None,
             copying: None,
+            copy_mode: None,
             program_buttons: 0,
             reported_cell: None,
             hover: None,
@@ -847,6 +854,7 @@ impl TerminalView {
         );
         search.current = Some(at);
         self.reveal_current(cx);
+        self.copy_cursor_to_hit(cx);
     }
 
     /// Scroll so the current hit sits in the viewport (centred when it was off screen).
@@ -1392,7 +1400,16 @@ impl TerminalView {
     /// ⌘C: the selection to the clipboard (nothing selected: nothing happens). History the
     /// client has not cached (a ⌘A over 50 000 lines) is fetched first, and the clipboard is
     /// written once all of it is in.
+    /// In copy mode, the copy leaves it.
     pub fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_some() {
+            self.copy_selection(cx);
+            self.leave_copy_mode(cx);
+        }
+    }
+
+    /// The selection to the clipboard, once the history it covers is in.
+    fn copy_selection(&mut self, cx: &Context<Self>) {
         let Some(selection) = self.selection else { return };
         let (start, end) = selection.ordered();
         self.copying = Some(Copying {
@@ -1905,6 +1922,8 @@ impl TerminalView {
 
     /// ⌘K: the worker drops the history and the shell repaints its prompt at the top.
     pub fn clear_screen(&mut self, _: &ClearScreen, _window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_mode = None;
+        self.selection = None;
         self.state.scroll_to_bottom();
         self.send(TermRequest::Clear, cx);
         cx.notify();
@@ -1975,6 +1994,12 @@ impl TerminalView {
 
     /// ⌘↑ (`delta` −1) / ⌘↓ (+1), also the phone's armed ⌘ with the bar's ↑ / ↓.
     fn step_prompt(&mut self, delta: i8, cx: &mut Context<Self>) {
+        // In copy mode the cursor goes, from its own line.
+        if self.copy_mode.is_some() {
+            let motion = if delta < 0 { Motion::PromptBack } else { Motion::PromptNext };
+            self.copy_command(Command::Move(motion), None, cx);
+            return;
+        }
         let top = self.state.index_at_row(0);
         let target =
             if delta < 0 { self.state.prompt_before(top) } else { self.state.prompt_after(top) };
@@ -2078,6 +2103,8 @@ impl TerminalView {
 
     /// Paste what the clipboard holds as `paste` says, `text` being its text.
     fn paste_as(&mut self, paste: ClipPaste, text: Option<String>, cx: &mut Context<Self>) {
+        // A paste is for the program: copy mode is over.
+        self.copy_mode = None;
         match paste {
             ClipPaste::Files(files) => {
                 self.selection = None;
@@ -2378,6 +2405,10 @@ impl TerminalView {
 
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
+        if self.copy_mode.is_some() {
+            self.copy_key(&keystroke, None, cx);
+            return;
+        }
         if self.type_key(keystroke, false, cx) {
             cx.notify();
         }
@@ -2561,6 +2592,7 @@ impl TerminalView {
         if matches!(event, TermEvent::Resized { .. }) {
             self.predictor.flush();
             self.selection = None;
+            self.copy_mode = None;
         }
         #[cfg(target_os = "macos")]
         if matches!(event, TermEvent::DropAccepted { .. } | TermEvent::DropConcluded { .. }) {
@@ -2570,8 +2602,9 @@ impl TerminalView {
         if self.state.epoch() != epoch_before {
             tracing::info!(session = %self.session, epoch = ?self.state.epoch(), "line numbering changed");
             // Line numbering changed (reflow, reset, alt screen): the selection means nothing,
-            // and neither do the search hits.
+            // and neither do the search hits or copy mode's cursor.
             self.selection = None;
+            self.copy_mode = None;
             if let Some(search) = &mut self.search {
                 search.matches.clear();
                 search.current = None;
@@ -2819,21 +2852,48 @@ impl TerminalView {
     /// The pill at the foot of a view scrolled up: how many lines are below and a way back to
     /// them, the whole pill one button (as ⇧⇲ is). It sits where the tile's state pill would,
     /// and gives way to it. It appears and goes with the scroll, with no motion of its own.
+    /// In copy mode the foot says so instead ([`Self::render_copy_mode`]).
     fn render_lines_below(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        if self.copy_mode.is_some() {
+            return self.render_copy_mode(cx);
+        }
         let below = self.lines_below();
-        if below == 0 || self.covered {
+        if below == 0 {
+            return None;
+        }
+        let count: SharedString =
+            if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
+        let pill = FootPill {
+            id: "lines-below",
+            icon: crate::icons::IconName::ArrowDown,
+            words: count,
+            act: BACK_TO_LIVE,
+        };
+        self.render_foot_pill(pill, cx, |this, window, cx| {
+            this.scroll_to_bottom(&ScrollToBottom, window, cx);
+        })
+    }
+
+    /// A pill at the foot of the grid: what is so, then in the accent what a click on it does.
+    /// It gives way to the tile's own pill there.
+    fn render_foot_pill(
+        &self,
+        pill: FootPill,
+        cx: &Context<Self>,
+        click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Option<gpui::Div> {
+        if self.covered {
             return None;
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = self.zoom;
-        let count: SharedString =
-            if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
-        let label = SharedString::from(format!("{count} · {BACK_TO_LIVE}"));
+        let label = SharedString::from(format!("{} · {}", pill.words, pill.act));
         let small = px(theme.typography.small());
-        let pill = div()
-            .id("lines-below")
-            .debug_selector(|| "lines-below".to_owned())
+        let id = pill.id;
+        let element = div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
             .role(gpui::accesskit::Role::Button)
             .aria_label(label)
             .occlude()
@@ -2852,19 +2912,17 @@ impl TerminalView {
             .child(
                 crate::icons::icon(
                     theme,
-                    crate::icons::IconName::ArrowDown,
+                    pill.icon,
                     crate::icons::IconSize::Inline,
                     hsla(s.text_secondary),
                 )
                 .size(px(theme.typography.icon() * k)),
             )
-            .child(crate::chrome_text::ChromeText::new(count, small, k).zooming(self.zooming))
+            .child(crate::chrome_text::ChromeText::new(pill.words, small, k).zooming(self.zooming))
             .child(div().text_color(hsla(s.accent)).child(
-                crate::chrome_text::ChromeText::new(BACK_TO_LIVE, small, k).zooming(self.zooming),
+                crate::chrome_text::ChromeText::new(pill.act, small, k).zooming(self.zooming),
             ))
-            .on_click(cx.listener(|this, _ev, window, cx| {
-                this.scroll_to_bottom(&ScrollToBottom, window, cx);
-            }));
+            .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)));
         Some(
             div()
                 .absolute()
@@ -2873,7 +2931,7 @@ impl TerminalView {
                 .bottom(px(theme.spacing.lg * k))
                 .flex()
                 .justify_center()
-                .child(crate::a11y::tab_stop(pill, s.accent)),
+                .child(crate::a11y::tab_stop(element, s.accent)),
         )
     }
 
@@ -3238,6 +3296,17 @@ impl TerminalView {
         {
             return;
         }
+        // Copy mode takes every key the keymap left: none reaches the program. ⌘ chords stay
+        // the app's, but for the Mac's line-editing ones, which would type into the program.
+        if self.copy_mode.is_some() {
+            if !event.keystroke.modifiers.platform {
+                self.copy_key(&event.keystroke, Some(window), cx);
+                cx.stop_propagation();
+            } else if keys::natural_editing(&event.keystroke).is_some() {
+                cx.stop_propagation();
+            }
+            return;
+        }
         // The Mac's line-editing chords, sent as readline's bytes (ghostty's macOS "natural
         // text editing" keybinds).
         if self.theme.behaviour.natural_editing
@@ -3324,8 +3393,9 @@ impl TerminalView {
         // in every terminal); so does anything on the alternate screen, which has no
         // history here to scroll — the worker turns it into cursor keys (alternate scroll).
         let modes = self.state.modes();
-        let to_program = (modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
-            || modes.contains(TermModes::ALT_SCREEN);
+        let to_program = self.copy_mode.is_none()
+            && ((modes.contains(TermModes::MOUSE_TRACKING) && !event.modifiers.shift)
+                || modes.contains(TermModes::ALT_SCREEN));
         // The grid can take the wheel while it has somewhere to go with it — a program wants
         // it, or there is history that way — and otherwise lets it through, so the strip scrolls
         // under a grid at the end of its history rather than swallowing the gesture.
@@ -3472,8 +3542,10 @@ impl TerminalView {
             return;
         }
         // Left button selects unless the program asked for the mouse (⇧ overrides, as in
-        // every terminal); everything else is reported to the program.
-        let program_wants_mouse = self.state.modes().contains(TermModes::MOUSE_TRACKING);
+        // every terminal); everything else is reported to the program. In copy mode the
+        // program hears nothing.
+        let program_wants_mouse =
+            self.state.modes().contains(TermModes::MOUSE_TRACKING) && self.copy_mode.is_none();
         // Right button opens the menu: the command block's items when the row is in one
         // (shell integration marks them), the terminal's own always.
         if event.button == MouseButton::Right && (!program_wants_mouse || event.modifiers.shift) {
@@ -3554,7 +3626,7 @@ impl TerminalView {
         let wanted = if self.program_buttons != 0 {
             modes.intersects(TermModes::MOUSE_DRAG | TermModes::MOUSE_MOTION)
         } else {
-            modes.contains(TermModes::MOUSE_MOTION)
+            modes.contains(TermModes::MOUSE_MOTION) && self.copy_mode.is_none()
         };
         self.metrics.filter(|_| wanted).map(|m| m.cell_at_clamped(at))
     }
@@ -3850,13 +3922,22 @@ impl TerminalView {
         if !selecting && !by_press {
             return;
         }
-        // A click without a drag selects nothing; a plain one moves the shell's cursor.
+        // A click without a drag selects nothing; a plain one moves the shell's cursor, or in
+        // copy mode its own.
         let click_at = self.click_at.take();
         if self.selection.is_some_and(|s| s.anchor == s.head) {
             self.selection = None;
             if let Some((index, col)) = click_at {
-                self.click_to_move(index, col, cx);
+                if self.copy_mode.is_some() {
+                    self.copy_mode = Some(copy_mode::Mode::at((index, col)));
+                } else {
+                    self.click_to_move(index, col, cx);
+                }
             }
+        } else if self.copy_mode.is_some()
+            && let Some(selection) = self.selection
+        {
+            self.copy_mode = Some(copy_mode::Mode::adopting(selection));
         }
         if by_press {
             self.copy_on_select(cx);
@@ -3939,12 +4020,20 @@ impl EntityInputHandler for TerminalView {
         &mut self,
         _range: Option<std::ops::Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let unmarked = self.marked.take().is_some();
         if text.is_empty() {
             cx.notify();
+            return;
+        }
+        // In copy mode a soft keyboard's or an input method's text is its keys, one a character
+        // (the ⌃ and Alt toggles have theirs read below), never the program's.
+        if self.copy_mode.is_some() && !self.sticky_control && !self.sticky_alt {
+            for c in text.chars() {
+                self.copy_command(copy_mode::typed_command(c), Some(&mut *window), cx);
+            }
             return;
         }
         // ⌃ armed on the key bar: a single typed character becomes a control key.
@@ -3997,6 +4086,10 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Copy mode reads what an input method commits, and draws nothing of its composing.
+        if self.copy_mode.is_some() {
+            return;
+        }
         self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
         cx.notify();
     }
@@ -4128,6 +4221,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_top))
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::copy_mode))
             // The Edit menu names the text fields' actions, which every field answers; the grid
             // answers them as its own.
             .on_action(cx.listener(|this, _: &input::Copy, window, cx| {
@@ -4292,6 +4386,17 @@ impl SelectionText {
     }
 }
 
+/// What a pill at the grid's foot says ([`TerminalView::render_foot_pill`]).
+struct FootPill {
+    /// Its element id and debug selector.
+    id: &'static str,
+    icon: crate::icons::IconName,
+    /// What is so.
+    words: SharedString,
+    /// What a click does, in the accent.
+    act: &'static str,
+}
+
 /// A ⌘C waiting for history to arrive.
 struct Copying {
     /// The numbering its lines are in.
@@ -4432,8 +4537,10 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
     Some(Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])))
 }
 
+mod copy;
 mod file_drag;
 
+pub use copy::{COPY_MODE, COPY_MODE_DONE};
 #[cfg(target_os = "macos")]
 pub use file_drag::{DropHook, DropNews, SinkDropped};
 #[cfg(test)]

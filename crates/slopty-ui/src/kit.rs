@@ -1655,6 +1655,8 @@ mod tests {
             crate::picker::NOTHING_TO_JUMP_TO,
             crate::picker::LOADING_WINDOWS,
             crate::terminal::BACK_TO_LIVE,
+            crate::terminal::COPY_MODE,
+            crate::terminal::COPY_MODE_DONE,
             crate::workspace::RECONNECTING,
             crate::workspace::SESSION_ENDED,
             crate::workspace::CLOSE_TILE,
