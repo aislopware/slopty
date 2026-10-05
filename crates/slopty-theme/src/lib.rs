@@ -869,6 +869,12 @@ pub mod alpha {
     pub const SCRIM_ON_PAPER: f32 = 0.20;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
+    /// The docked navigator's canvas over the system's sidebar material (macOS).
+    ///
+    /// At nine tenths the desktop behind the window shows only as a faint, blurred cast, as in
+    /// Finder's and Mail's sidebars, and the navigator's text keeps its floors over any
+    /// wallpaper, white or black, a shade deeper at most ([`crate::Surfaces::on_glass`]).
+    pub const GLASS: f32 = 0.90;
     /// An unlit dot of the mark on a dark surface (the brand's ink plate).
     pub const UNLIT: f32 = 0.2;
     /// An unlit dot of the mark on a light surface, where 0.2 fades into the paper.
@@ -1378,6 +1384,59 @@ impl Surfaces {
             },
         }
     }
+}
+
+impl Surfaces {
+    /// The chrome as it stands on glass: the docked navigator's, whose ground is the canvas laid
+    /// at [`alpha::GLASS`] over the system's sidebar material (macOS).
+    ///
+    /// The material shows what lies behind the window, so the ground is known only to lie
+    /// between the canvas over black and the canvas over white. Text there keeps the floors it
+    /// keeps on every opaque surface (WCAG AA, APCA's secondary and muted levels, each text
+    /// level a quarter again past the one under it) on both ends and on the hover and selected
+    /// washes over them: each text tone moves toward black or white only as far as that takes,
+    /// as Apple's sidebars set their labels deeper on vibrancy, and no further than black or
+    /// white themselves. Every other colour stays.
+    ///
+    /// Only under the standard contrast: Increase Contrast turns Reduce Transparency on, and the
+    /// navigator is opaque.
+    #[must_use]
+    pub fn on_glass(self) -> Self {
+        let pole = if self.canvas.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
+        let under: Vec<Rgb> = glass_grounds(&self).collect();
+        let text_muted = lift_to(self.text_muted, &under, pole, Floor { ratio: AA, lc: MUTED_LC });
+        let text_secondary = lift_to(
+            self.text_secondary,
+            &under,
+            pole,
+            Floor { ratio: AA.max(worst(text_muted, &under) * LEVEL), lc: SECONDARY_LC },
+        );
+        let text = lift(self.text, &under, pole, AA.max(worst(text_secondary, &under) * LEVEL));
+        let word = Floor { ratio: AA, lc: MUTED_LC };
+        Self {
+            text,
+            text_secondary,
+            text_muted,
+            accent: lift_to(self.accent, &under, pole, word),
+            success: lift_to(self.success, &under, pole, word),
+            warn: lift_to(self.warn, &under, pole, word),
+            error: lift_to(self.error, &under, pole, word),
+            ..self
+        }
+    }
+}
+
+/// The grounds text lands on over glass ([`Surfaces::on_glass`]): the canvas at
+/// [`alpha::GLASS`] over black and over white, the two ends of anything the material can show,
+/// and the hover and selected washes over each. Contrast follows luminance alone, which a
+/// channel's mix moves one way, so every wallpaper's ground lies between these.
+fn glass_grounds(s: &Surfaces) -> impl Iterator<Item = Rgb> {
+    let glass = Tint::of(s.canvas, alpha::GLASS);
+    let (hover, selected) = (s.hover, s.selected);
+    [Rgb::hex(0), Rgb::hex(0x00ff_ffff)].into_iter().flat_map(move |wall| {
+        let ground = glass.over(wall);
+        [ground, hover.over(ground), selected.over(ground)]
+    })
 }
 
 /// One layer of a shadow, in points: the elevation's shade at `alpha`, `y` down, blurred over
@@ -2425,6 +2484,93 @@ mod tests {
                 "{name}: secondary {secondary:.2}, muted {muted:.2}"
             );
             assert!(text >= secondary * LEVEL, "{name}: text {text:.2}, secondary {secondary:.2}");
+        }
+    }
+
+    /// Wallpapers a window's glass can stand over: white and black, the ends, and busy ones
+    /// between, dark and bright and saturated, which their blur leaves as a cast of their colour.
+    const WALLPAPERS: [u32; 8] =
+        [0xff_ffff, 0x00_0000, 0x1b_2a4a, 0x4a_1e2a, 0x2d_3b1f, 0xff_3b30, 0x34_c759, 0x80_8080];
+
+    /// The navigator's text on glass keeps every floor it keeps on an opaque surface, over any
+    /// wallpaper, for every background in the supported range: WCAG AA for every tone, APCA's
+    /// |Lc| 55 for secondary text and 45 for muted text and the status words, and each text
+    /// level a quarter again past the one under it (or as far as black or white go). Decided at
+    /// [`alpha::GLASS`] on the ground the canvas makes over each wallpaper, and on the hover and
+    /// selected rows over that.
+    #[test]
+    fn text_on_glass_keeps_its_floors_over_any_wallpaper() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
+            let s = Surfaces::derive(content, Contrast::Standard).on_glass();
+            let glass = Tint::of(s.canvas, alpha::GLASS);
+            let grounds: Vec<Rgb> = WALLPAPERS
+                .into_iter()
+                .flat_map(|wall| {
+                    let ground = glass.over(Rgb::hex(wall));
+                    [ground, s.hover.over(ground), s.selected.over(ground)]
+                })
+                .collect();
+            for (ink, fg) in inks(&s) {
+                let ratio = worst(fg, &grounds);
+                assert!(ratio >= AA, "{name}: {ink} on glass is {ratio:.2}, under {AA}");
+                let least = if ink == "text_secondary" { SECONDARY_LC } else { MUTED_LC };
+                let lc = worst_lc(fg, &grounds);
+                assert!(lc >= least || fg == pole, "{name}: {ink} on glass is Lc {lc:.1}");
+            }
+            let (muted, secondary, text) = (
+                worst(s.text_muted, &grounds),
+                worst(s.text_secondary, &grounds),
+                worst(s.text, &grounds),
+            );
+            assert!(
+                secondary >= muted * LEVEL,
+                "{name}: secondary {secondary:.2}, muted {muted:.2}"
+            );
+            // At the light end of the range black itself is not a quarter past secondary text
+            // that clears Lc 55 on the darkest ground: text goes as far as black goes.
+            assert!(
+                text >= secondary * LEVEL || s.text == pole,
+                "{name}: text {text:.2}, secondary {secondary:.2}"
+            );
+        }
+    }
+
+    /// Glass reads as the chrome it is, in light as in dark: over the worst wallpaper its ground
+    /// stays within a tenth of OKLCH lightness and a little of the canvas, its text tones go
+    /// at most 0.05 L deeper than they are on the opaque chrome (a muted grey a shade darker,
+    /// never a second hierarchy), and nothing but text moves. Light's lift is the larger, since
+    /// a cast of black on paper takes more from its text than white takes on near-black; both
+    /// stay inside the same bound.
+    #[test]
+    fn glass_reads_as_the_chrome_in_light_and_dark() {
+        let default =
+            |name: &str| BACKGROUNDS.iter().find(|(n, _)| *n == name).map(|&(_, bg)| Rgb::hex(bg));
+        for content in [default("default dark"), default("default light")].into_iter().flatten() {
+            let opaque = Surfaces::derive(content, Contrast::Standard);
+            let glass = opaque.on_glass();
+            let canvas = opaque.canvas.oklch().l;
+            for wall in WALLPAPERS {
+                let ground = Tint::of(opaque.canvas, alpha::GLASS).over(Rgb::hex(wall));
+                let off = (ground.oklch().l - canvas).abs();
+                assert!(off <= 0.11, "{content:?} over {wall:06x}: the ground is {off:.3} L off");
+            }
+            for ((ink, was), (_, now)) in inks(&opaque).into_iter().zip(inks(&glass)) {
+                let deeper = (now.oklch().l - was.oklch().l).abs();
+                assert!(deeper <= 0.05, "{content:?}: {ink} moves {deeper:.3} L on glass");
+            }
+            let text = Surfaces {
+                text: opaque.text,
+                text_secondary: opaque.text_secondary,
+                text_muted: opaque.text_muted,
+                accent: opaque.accent,
+                success: opaque.success,
+                warn: opaque.warn,
+                error: opaque.error,
+                ..glass
+            };
+            assert_eq!(text, opaque, "{content:?}: only text moves");
         }
     }
 

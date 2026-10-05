@@ -84,7 +84,7 @@ use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::Rung;
-use slopty_theme::{Rgb, Theme, Typography, alpha};
+use slopty_theme::{Contrast, Rgb, Theme, Typography, Variant, alpha};
 
 use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{
@@ -97,7 +97,7 @@ use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
 use crate::icons::{IconSize, Mark, Status, Symbol, icon, status_mark};
 use crate::kit::{self, meta, tabular};
@@ -221,6 +221,94 @@ pub(super) struct NavState {
     pub list: NavList,
     /// Draws it again when a label it shows changes with the clock (a turn's time, an age).
     pub tick: RefCell<Option<Task<()>>>,
+    /// The system's sidebar material under it while it docks (macOS).
+    pub glass: OnGlass,
+}
+
+/// The navigator on glass (macOS): the system's sidebar material under the window while the
+/// navigator docks, its own ground the canvas at [`alpha::GLASS`] over it, and its text in the
+/// tones that read there ([`slopty_theme::Surfaces::on_glass`]). Everything right of it paints
+/// the canvas whole, so the material shows only through the navigator.
+///
+/// Never under Increase Contrast, which turns Reduce Transparency on, nor in the self-test
+/// build, whose renders are compared pixel for pixel. Under Reduce Transparency AppKit draws the
+/// material as a solid colour of its own, and the window is opaque again.
+#[derive(Default)]
+pub(super) struct OnGlass {
+    /// The material, and whether it leans dark.
+    #[cfg(all(target_os = "macos", not(feature = "e2e")))]
+    material: Option<(slopty_platform::material::Glass, bool)>,
+    /// The workspace's theme, and the navigator's on glass derived from it, while it shows.
+    theme: Option<(Theme, Theme)>,
+}
+
+impl OnGlass {
+    /// Whether the material shows through the navigator.
+    pub const fn shows(&self) -> bool {
+        self.theme.is_some()
+    }
+
+    /// The theme the navigator draws in: `theme` itself, or its tones for glass.
+    pub fn theme<'a>(&'a self, theme: &'a Theme) -> &'a Theme {
+        self.theme.as_ref().map_or(theme, |(_, on)| on)
+    }
+
+    /// The navigator's ground: the canvas, laid at [`alpha::GLASS`] on glass.
+    pub fn ground(&self, theme: &Theme) -> gpui::Hsla {
+        let canvas = theme.surfaces.canvas;
+        if self.shows() { hsla_alpha(canvas, alpha::GLASS) } else { hsla(canvas) }
+    }
+
+    /// Follow whether the material is under the window (`under`) and the workspace's `theme`:
+    /// the tones on glass are derived once for each theme.
+    pub fn follow(&mut self, under: bool, theme: &Theme) {
+        if !under {
+            self.theme = None;
+        } else if self.theme.as_ref().is_none_or(|(of, _)| of != theme) {
+            let on = Theme { surfaces: theme.surfaces.on_glass(), ..theme.clone() };
+            self.theme = Some((theme.clone(), on));
+        }
+    }
+
+    /// Put the material under `window` or take it away, as `wanted` says, leaning `dark`; the
+    /// window draws on a clear layer only while it is there. Whether it is.
+    #[cfg(all(target_os = "macos", not(feature = "e2e")))]
+    fn place(&mut self, wanted: bool, dark: bool, window: &Window) -> bool {
+        use gpui::WindowBackgroundAppearance;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match (&self.material, wanted) {
+            (Some((glass, leans)), true) => {
+                if *leans != dark {
+                    glass.set_dark(dark);
+                    self.material = self.material.take().map(|(glass, _)| (glass, dark));
+                }
+            }
+            (None, true) => {
+                let made = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::AppKit(handle)) => {
+                        slopty_platform::material::Glass::under(handle.ns_view, dark)
+                    }
+                    _ => None,
+                };
+                if let Some(glass) = made {
+                    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+                    self.material = Some((glass, dark));
+                }
+            }
+            (Some(_), false) => {
+                self.material = None;
+                window.set_background_appearance(WindowBackgroundAppearance::Opaque);
+            }
+            (None, false) => {}
+        }
+        self.material.is_some()
+    }
+
+    #[cfg(not(all(target_os = "macos", not(feature = "e2e"))))]
+    #[expect(clippy::unused_self, reason = "the macOS build's signature")]
+    const fn place(&self, _wanted: bool, _dark: bool, _window: &Window) -> bool {
+        false
+    }
 }
 
 /// The navigator's rows and the virtual list that shows them.
@@ -1152,6 +1240,22 @@ impl WorkspaceView {
     }
 
     /// The panel's width in `mode`: a phone's drawer leaves a margin of the strip showing.
+    /// The material under a docked navigator follows how it sits and the theme: there while
+    /// it docks at the standard contrast, leaning as the theme does.
+    pub(super) fn settle_glass(&mut self, window: &Window) {
+        let wanted =
+            self.nav.drawn == Some(Mode::Docked) && self.theme.contrast == Contrast::Standard;
+        let dark = self.theme.variant() == Variant::Dark;
+        let under = self.nav.glass.place(wanted, dark, window);
+        self.nav.glass.follow(under, &self.theme);
+    }
+
+    /// The theme the navigator draws in: the workspace's, with its text toned for glass while
+    /// the material shows ([`OnGlass`]).
+    pub(super) fn nav_theme(&self) -> &Theme {
+        self.nav.glass.theme(&self.theme)
+    }
+
     pub(super) fn navigator_panel_width(&self, mode: Mode, window: &Window) -> f32 {
         match mode {
             Mode::Drawer => {
@@ -2096,7 +2200,7 @@ impl WorkspaceView {
     /// tall, the base unit in from the panel's sides. No hairline under either: the panel is one
     /// surface from the top to the bottom, as T3 Code's and Linear's sidebars are.
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
@@ -2366,13 +2470,13 @@ impl WorkspaceView {
             .w_full()
             .flex()
             .flex_col()
-            .when(gap, |el| el.pt(px(self.theme.spacing.sm)))
+            .when(gap, |el| el.pt(px(self.nav_theme().spacing.sm)))
             .child(self.nav_row_content(ix, cx))
             .into_any_element()
     }
 
     fn nav_row_content(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let rows = self.nav.list.rows.borrow();
         match rows.get(ix) {
             Some(NavRow::Heading { selector, text }) => {
@@ -2423,7 +2527,7 @@ impl WorkspaceView {
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = theme.surfaces;
         let safe = window.insets().effective();
         let rows = div().flex_1().min_h_0().flex().flex_col().child(self.chrome.nav_rows.clone());
@@ -2450,8 +2554,9 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             // The bars' surface: the navigator is chrome, one surface with them, and the panel
-            // step is left to the unfocused tiles' headers.
-            .bg(hsla(s.canvas))
+            // step is left to the unfocused tiles' headers. Docked on a Mac, it is that surface
+            // laid over the system's glass.
+            .bg(self.nav.glass.ground(theme))
             .border_r(kit::hair(theme))
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
@@ -2490,7 +2595,7 @@ impl WorkspaceView {
         self.nav.list.selected.set(chosen.or_else(|| self.focused()));
         self.nav.list.reveal_selected(window);
         self.schedule_navigator_tick(cx);
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let moves = self.chrome_moves(cx);
         let rows = list(
             self.nav.list.state.clone(),
@@ -2693,7 +2798,7 @@ impl WorkspaceView {
     /// the agent asks or did, its worker and its directory, and for a yes or no held here
     /// "Deny" and "Allow" at the second line's end.
     fn agent_row(&self, agent: &NavAgent, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let (first, second) = line_heights(theme);
         // A terminal's agent by its session, a thread by its own id.
@@ -2800,7 +2905,7 @@ impl WorkspaceView {
     /// active one is said by its name's tone and weight, not a fill: the focused tile's row is
     /// the list's one selection. A press goes there and closes the drawer.
     fn space_row(&self, space: &NavSpace, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let ix = space.ix;
         let count = match space.tiles {
@@ -2833,7 +2938,7 @@ impl WorkspaceView {
     /// "New workspace", the last row of the phone's *Workspaces*: the empty workspace the
     /// layout always keeps last.
     fn new_space_row(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let text = super::strip::NEW_WORKSPACE;
         row(theme, kit::Row::One, "nav-new-space", "nav-new-space".to_owned(), text.into(), false)
@@ -2855,7 +2960,7 @@ impl WorkspaceView {
     /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron
     /// and "+" take the readouts' place; nothing moves when either shows.
     fn worker_header(&self, worker: &NavHeader, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let key = worker.key;
         let folded = worker.folded;
@@ -3100,7 +3205,7 @@ impl WorkspaceView {
     /// its tiles add up to while it is folded. Under the pointer the chevron and "+" (a new shell
     /// in its clone) take the readouts' place; nothing moves when either shows. A click folds it.
     fn group_header(&self, group: &NavGroup, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let touch = theme.density == slopty_theme::Density::TOUCH;
         let key = group.key.clone();
@@ -3232,7 +3337,7 @@ impl WorkspaceView {
     /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand.
     /// ↩ or a click shows the board in its orchestrator's tile.
     fn board_row(&self, board: &NavBoard, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let id = board.project.as_str().to_owned();
         let label = SharedString::from(format!("{BOARD}, {}", board.words));
@@ -3273,7 +3378,7 @@ impl WorkspaceView {
     /// A thread at work with no tile here, set back as a row at work is: its status glyph,
     /// else its agent's, its title and its state in a word. A click opens its tile.
     fn thread_row(&self, t: &NavThread, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let id = t.thread;
         let label = [Some(t.title.as_str()), t.word, Some(NO_TILE_YET)]
@@ -3282,7 +3387,7 @@ impl WorkspaceView {
             .collect::<Vec<_>>()
             .join(", ");
         let strength = row_strength(theme, t.status.or(Some(Status::Working)), false);
-        let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
+        let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         let state = t.status.filter(|m| *m != Status::Idle);
         let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_muted), 1.0)
             .debug_selector(move || format!("nav-thread-kind-{id}"));
@@ -3322,7 +3427,7 @@ impl WorkspaceView {
     /// The fold over the threads at rest with no tile here, a heading the list ends with: its
     /// name, how many, and the chevron. A click opens or folds it.
     fn earlier_heading(&self, count: usize, open: bool, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let label = format!("{EARLIER}, {count}, {}", if open { "open" } else { "folded" });
         heading(theme, "nav-earlier".into(), EARLIER.into())
@@ -3350,7 +3455,7 @@ impl WorkspaceView {
 
     /// The open fold's last line while it lists the newest alone: a click lists the rest.
     fn earlier_more(&self, more: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let words = SharedString::from(format!("Show {more} more"));
         let hover = hsla(theme.surfaces.text_secondary);
         kit::inset_x(div(), theme)
@@ -3383,7 +3488,7 @@ impl WorkspaceView {
         focused: Option<TileRef>,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let selected = focused == Some(t.tile);
         let label = [Some(t.title.as_str()), t.word.as_deref(), t.unseen.then_some("unseen")]
@@ -3398,7 +3503,7 @@ impl WorkspaceView {
         // stays whole and nothing is drawn through a layer.
         let strength = row_strength(theme, t.mark, selected);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
-        let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
+        let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         // What the row is leads it, and never changes while it lives: its kind, or its agent's
         // own mark, so the eye finds the same agent in the same column.
         let lead = crate::palette::lead_slot(theme, t.kind, faded(s.text_muted), 1.0)
@@ -3787,7 +3892,34 @@ mod tests {
         ] {
             assert!((row_strength(&theme, status, selected) - 1.0).abs() < 1e-6, "{status:?}");
         }
-        theme.contrast = slopty_theme::Contrast::Increased;
+        theme.contrast = Contrast::Increased;
         assert!((row_strength(&theme, Some(Status::Working), false) - 1.0).abs() < 1e-6);
+    }
+    /// On glass the navigator's ground is the canvas at [`alpha::GLASS`] and its text the
+    /// theme's tones for glass, derived once for each theme and followed when the theme
+    /// changes; without the material it is the canvas whole and the workspace's own theme.
+    #[test]
+    fn on_glass_the_navigator_takes_the_glass_ground_and_tones() {
+        let dark = Theme::default();
+        let mut glass = OnGlass::default();
+        assert!(!glass.shows(), "opaque until the material is under the window");
+        assert_eq!(glass.ground(&dark), hsla(dark.surfaces.canvas));
+        assert_eq!(glass.theme(&dark), &dark);
+
+        glass.follow(true, &dark);
+        assert!(glass.shows());
+        assert_eq!(glass.ground(&dark), hsla_alpha(dark.surfaces.canvas, alpha::GLASS));
+        assert_eq!(glass.theme(&dark).surfaces, dark.surfaces.on_glass());
+        assert_eq!(glass.theme(&dark).typography, dark.typography, "only the tones move");
+
+        let mut light = dark.clone();
+        light.surfaces = slopty_theme::Surfaces::derive(Rgb::hex(0x00fd_fcfb), Contrast::Standard);
+        glass.follow(true, &light);
+        assert_eq!(glass.theme(&light).surfaces, light.surfaces.on_glass(), "a new theme");
+        assert_ne!(glass.theme(&light).surfaces.text_muted, light.surfaces.text_muted);
+
+        glass.follow(false, &light);
+        assert!(!glass.shows(), "the material gone, the navigator is opaque");
+        assert_eq!(glass.theme(&light), &light);
     }
 }

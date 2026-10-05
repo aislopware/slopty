@@ -15236,3 +15236,43 @@ cargo nextest run --locked -p slopty-ui --lib -E 'test(the_working_line_shimmers
   plain text and asks for nothing.
 - The test, `conversation::thread::tests::composing::the_working_line_shimmers_on_the_marks_twelve_frames`,
   fails at 132 with `ShimmerText` put back.
+
+## 2026-10-06 — what glass under the navigator costs
+
+The navigator on macOS stands on the system's sidebar material (`slopty_platform::material`,
+`docs/decisions/ui.md`). For that, the window draws on a non-opaque layer and WindowServer
+blends the blurred desktop under it. The question was whether that costs frames or compositor
+time.
+
+GPUI's own example `glass_cost` (gpui-fast branch `measure/glass`, commit 04b5e92, never
+merged) opens a 1280×800 window with a 260 pt sidebar and an opaque content area. It runs for
+20 s, opaque or blurred, with a square that moves on every refresh (`animate`) or a redraw
+every 250 ms (`idle`). The window opens unfocused and keeps the display's rate
+(`inactive_frame_interval: None`). Its blurred case uses GPUI's `Blurred` background: an
+`NSVisualEffectView` behind the window on a clear layer. That is the same mechanism as
+Slopty's material, with a colourless material instead of the sidebar's. `top` reads
+WindowServer's CPU over 16 s in the middle of each run. Three runs of each case were
+interleaved, on an M1 Max with macOS 27.0.1 at 60 Hz.
+
+```sh
+git -C .research/gpui-fast switch measure/glass
+cargo build --release --example glass_cost   # in .research/gpui-fast
+# glass_cost opaque|blurred animate|idle 20, with `top -l 2 -s 16 -pid $(pgrep -x WindowServer)`
+# beside it; /usr/bin/time -p for the app's CPU
+```
+
+| case | frames in 20 s | interval p95 | WindowServer CPU |
+| --- | --- | --- | --- |
+| animate, opaque | 1199–1200 | 18.2–18.3 ms | 39.9–42.0 % |
+| animate, blurred | 1199–1200 | 18.2–18.4 ms | 39.8–41.6 % |
+| idle, opaque | 76 | 268.4–268.7 ms | 15.3–17.3 % |
+| idle, blurred | 76 | 268.0–268.6 ms | 14.5–18.3 % |
+
+- Glass costs nothing measurable. No frame was dropped. The intervals and WindowServer's
+  share overlap run for run, and the app's own CPU (0.25–3.4 s per run) stays within the noise
+  between runs.
+- **Not measured:** the time from a key to the glass on screen. gpui-fast has no
+  `on_frame_presented` callback, so a frame's presentation cannot be timed from inside the
+  app. The key-to-photon numbers elsewhere in this file are for opaque windows. Until that
+  callback exists, the evidence for glass is that the frame counts and intervals above do not
+  move.

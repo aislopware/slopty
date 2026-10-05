@@ -1,5 +1,6 @@
 //! What only the main thread can see (macOS): a download's progress as Finder sees it
-//! (`slopty_platform::continued`), and a browser page's Web Inspector (`slopty_platform::web`).
+//! (`slopty_platform::continued`), a browser page's Web Inspector (`slopty_platform::web`), and
+//! the sidebar material under a window (`slopty_platform::material`).
 //!
 //! Finder subscribes to the progress published for a file URL, and Foundation hands the publish
 //! to a subscriber on its main thread; a `WKWebView` is made only there. libtest never gives a
@@ -26,7 +27,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 3] = [
+    pub const TESTS: [(&str, fn()); 4] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -35,6 +36,10 @@ mod mac {
         (
             "a_forgotten_workers_store_goes_once_its_last_page_has",
             a_forgotten_workers_store_goes_once_its_last_page_has,
+        ),
+        (
+            "the_glass_lies_under_the_whole_window_through_any_resize",
+            the_glass_lies_under_the_whole_window_through_any_resize,
         ),
     ];
 
@@ -108,6 +113,58 @@ mod mac {
         // Worker 0: a store that keeps nothing on disk.
         let page = WebView::new(host, 0, "about:blank", std::rc::Rc::new(|_event| {})).unwrap();
         assert!(page.inspectable(), "open to the inspector");
+    }
+
+    /// The material lies below GPUI's view, across the whole of the content view, and follows
+    /// it through a resize as a window's own resize or fullscreen makes one: AppKit sizes it with
+    /// GPUI's view in the same layout pass, so no edge of the window ever shows without it.
+    /// Dropped, it goes. Nothing is shown: the views are in no window.
+    fn the_glass_lies_under_the_whole_window_through_any_resize() {
+        use objc2::MainThreadOnly as _;
+        use objc2_app_kit::{
+            NSAppearanceCustomization as _, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+            NSAutoresizingMaskOptions, NSVisualEffectView,
+        };
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        use slopty_platform::material::Glass;
+
+        let mtm = MainThreadMarker::new().unwrap();
+        let bounds = |w: f64, h: f64| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
+        let content = NSView::initWithFrame(NSView::alloc(mtm), bounds(1280.0, 800.0));
+        let gpui = NSView::initWithFrame(NSView::alloc(mtm), bounds(1280.0, 800.0));
+        content.addSubview(&gpui);
+        let glass = Glass::under(NonNull::from(&*gpui).cast(), true).unwrap();
+
+        let under = || {
+            let views = content.subviews();
+            assert_eq!(views.count(), 2, "the material and GPUI's view");
+            let first = views.objectAtIndex(0);
+            let top = views.objectAtIndex(1);
+            assert_eq!(Retained::as_ptr(&top), Retained::as_ptr(&gpui), "GPUI's view on top");
+            first.downcast::<NSVisualEffectView>().unwrap()
+        };
+        let material = under();
+        assert_eq!(material.frame(), content.bounds(), "the whole window");
+        let mask = NSAutoresizingMaskOptions::ViewWidthSizable
+            | NSAutoresizingMaskOptions::ViewHeightSizable;
+        assert_eq!(material.autoresizingMask(), mask, "it grows and shrinks with the window");
+
+        // It leans as the chrome does, whatever the system's appearance.
+        // SAFETY: immutable `NSString` statics AppKit defines (NSAppearance.h).
+        let (dark, light) = unsafe { (NSAppearanceNameDarkAqua, NSAppearanceNameAqua) };
+        let leans = |m: &NSVisualEffectView| m.appearance().unwrap().name();
+        assert_eq!(&*leans(&material), dark, "dark, as asked");
+        glass.set_dark(false);
+        assert_eq!(&*leans(&material), light, "light, as asked");
+
+        // A resize, as dragging the window's edge or going fullscreen makes, and back.
+        for (w, h) in [(2560.0, 1440.0), (900.0, 600.0), (1280.0, 800.0)] {
+            content.setFrameSize(NSSize::new(w, h));
+            assert_eq!(under().frame(), bounds(w, h), "{w}×{h}: still the whole window");
+        }
+
+        drop(glass);
+        assert_eq!(content.subviews().count(), 1, "dropped, the material goes");
     }
 
     /// A forgotten worker's store goes with its last page: forgotten as the page goes, as the app

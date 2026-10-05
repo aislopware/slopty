@@ -111,6 +111,9 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem",
     "NSDraggingSession",
     "NSView",
+    # The sidebar material under the window, and the appearance it leans to (`material`).
+    "NSVisualEffectView",
+    "NSAppearance",
     # The refresh the terminal's guesses are timed against (`display_refresh`).
     "NSScreen",
     # System shortcuts are taken only while this app is frontmost (`system_keys`).

@@ -7470,3 +7470,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::faces::a_pill_says_the_state_and_a_phone_bar_says_it_all`,
     `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`; e2e
     `conversation::a_phone_opens_on_the_thread`. Golden: `thread-phone`.
+- ✅ **The navigator stands on the system's glass** (2026-10-06, readiness #19). On a Mac the
+  docked navigator lies over the system's sidebar material, as Finder's and Mail's sidebars do.
+  The material blurs the desktop behind the window, takes a cast of its colour, and goes flat
+  while the window is inactive. The rest of the frame stays opaque.
+  - **How.** `slopty_platform::material::Glass` puts one `NSVisualEffectView` (sidebar
+    material, behind the window) across the whole content view, under GPUI's view. It resizes
+    with the window, so it never trails the navigator's width or motion by a frame. While it is
+    there the window draws on a clear layer. The workspace root paints nothing, everything
+    right of the navigator paints the canvas, and the navigator's ground is the canvas at
+    `alpha::GLASS` (0.90).
+  - **Light as dark.** The material leans light or dark as the theme does, not as the system
+    does, so a light theme on a dark Mac stands on light glass.
+  - **Contrast, by the numbers.** The navigator's text is drawn in `Surfaces::on_glass`: each
+    tone moves toward black or white only as far as it takes to keep its opaque floors over the
+    canvas at 0.90 over black and over white. Those floors are WCAG AA, APCA Lc 55 for
+    secondary text and 45 for muted text, and each level a quarter past the one below. Any
+    wallpaper's ground lies between those two. In the default themes dark moves at most 0.01
+    OKLCH L and light about 0.05 (a muted grey a shade deeper), as Apple's sidebar labels go
+    deeper on vibrancy. Only the text moves.
+  - **When not.** There is no glass under Increase Contrast (which turns Reduce Transparency
+    on), on iOS, in the self-test build (whose renders are compared pixel for pixel), or while
+    the navigator floats or is hidden. Under Reduce Transparency AppKit draws the material
+    solid, and the window is opaque again. There is no setting.
+  - **Cost.** No dropped frames and no WindowServer time past the noise
+    (`docs/MEASUREMENTS.md`, "what glass under the navigator costs"). Key-to-glass waits on an
+    `on_frame_presented` in gpui-fast.
+  - Tests: `slopty-theme` `text_on_glass_keeps_its_floors_over_any_wallpaper`,
+    `glass_reads_as_the_chrome_in_light_and_dark`; `slopty-ui`
+    `workspace::navigator::tests::on_glass_the_navigator_takes_the_glass_ground_and_tones`;
+    `slopty-platform` main-thread test
+    `the_glass_lies_under_the_whole_window_through_any_resize` (the view's frame and
+    autoresizing mask through resizes, its order under GPUI's view, its appearance).
