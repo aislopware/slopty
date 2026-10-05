@@ -520,27 +520,25 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// What a worker's person says of it, labels and probe commands in its settings, reaches
-    /// `slopty workers` as facts. A command task made and started in one `slopty task start`
-    /// runs on the worker it names, with its project and task in its environment.
+    /// What a worker has reaches `slopty workers` as facts. A command task made and started in one
+    /// `slopty task start` runs on the worker it names, with its project and task in its
+    /// environment.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_worker_s_own_facts_are_listed_and_a_command_task_runs_where_it_says() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let settings = "[worker.labels]\nrack = \"b2\"\n[worker.probes]\nhello = \"echo hi\"\n";
-        let (server, _daemons, worker) = fleet(&root, settings).await;
+        let (server, _daemons, worker) = fleet(&root, "").await;
         let hub = server.hub().clone();
         let addr = server.quic_addr();
 
-        let listed: Value = until("the labels and probes reach `slopty workers`", async || {
+        let listed: Value = until("the worker's facts reach `slopty workers`", async || {
             let listed: Value =
                 serde_json::from_str(&slopty(&root, addr, &["--json", "workers"]).await).ok()?;
             let facts = &listed.as_array()?.first()?["facts"];
-            (facts["probes"]["hello"] == "hi").then_some(listed)
+            facts["toolchains"].is_object().then_some(listed)
         })
         .await;
         let facts = &listed[0]["facts"];
-        assert_eq!(facts["labels"]["rack"], "b2", "{facts}");
         assert_eq!(facts["os"], std::env::consts::OS, "{facts}");
 
         let repo = root.to_string_lossy().into_owned();

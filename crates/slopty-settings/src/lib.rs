@@ -673,7 +673,7 @@ impl JsonSchema for Chords {
 /// `[worker]`: what `slopty-worker` reads from the same file.
 ///
 /// It follows the file, applying every key as it changes.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Share this Mac's shells and windows")]
 pub struct WorkerSettings {
@@ -694,23 +694,6 @@ pub struct WorkerSettings {
     #[serde(with = "server_address")]
     #[schemars(title = "Register with", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
-    /// What this machine is, in the person's words, for a project's placement to read.
-    ///
-    /// Named values (`fast-disk = true`, `rack = "b2"`, `vram_gb = 24`) the worker reports to
-    /// its server as its `labels` fact, which a project's placement rule reads
-    /// (`labels.rack == "b2"`). Reread every 10 minutes.
-    #[schemars(
-        title = "Labels",
-        example = serde_json::json!({ "fast-disk": true, "rack": "b2", "vram_gb": 24 })
-    )]
-    pub labels: BTreeMap<String, Label>,
-    /// Commands whose answers a project's placement reads.
-    ///
-    /// Named shell commands (`cuda = "nvidia-smi -L"`) the worker runs through `sh -c` every
-    /// 10 minutes and reports as its `probes` fact: what the command printed, trimmed and cut
-    /// at 1 KiB, or `true` when it printed nothing; `false` when it fails or runs past 5 s.
-    #[schemars(title = "Probes", example = serde_json::json!({ "cuda": "nvidia-smi -L" }))]
-    pub probes: BTreeMap<String, String>,
     /// Agents that speak ACP, beside the ones Slopty knows; an empty command line hides one.
     ///
     /// A name and the command line that serves the Agent Client Protocol on stdio
@@ -756,8 +739,6 @@ impl Default for WorkerSettings {
         Self {
             allow: Vec::new(),
             server: None,
-            labels: BTreeMap::new(),
-            probes: BTreeMap::new(),
             acp: BTreeMap::new(),
             input_source_sync: true,
             keep_awake: KeepAwake::Working,
@@ -778,22 +759,6 @@ impl WorkerSettings {
         };
         std::time::Duration::from_secs(u64::from(mins) * 60)
     }
-}
-
-/// One of `[worker.labels]`: a flag, a number, a word or a list of them.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged, expecting = "a label: true or false, a number, a string, or a list of them")]
-pub enum Label {
-    /// `fast-disk = true`.
-    Bool(bool),
-    /// `vram_gb = 24`.
-    Int(i64),
-    /// `tflops = 26.5`.
-    Float(f64),
-    /// `rack = "b2"`.
-    Text(String),
-    /// `zones = ["eu", "us"]`.
-    List(Vec<Self>),
 }
 
 /// `[server]`: what `slopty-server` reads from the file of the data directory its own lives in.
@@ -1178,20 +1143,6 @@ allow = []
 # (port 45560 when absent). Installing the worker sets it. --server and
 # SLOPTY_SERVER override it.
 server = \"\"
-# What this Mac is, for a project's placement rules to read as labels.<name>:
-# flags, numbers, words or lists of them.
-#
-# [worker.labels]
-# fast-disk = true
-# rack = \"b2\"
-#
-# Shell commands run every 10 minutes, read as probes.<name>: what one printed
-# (cut at 1 KiB), true when it printed nothing, false when it failed or ran
-# past 5 seconds.
-#
-# [worker.probes]
-# cuda = \"nvidia-smi -L\"
-#
 # Agents that speak ACP on stdio, by name and command line, beside the ones
 # Slopty knows; a known name is started this way instead, and [] hides it.
 #
@@ -1341,10 +1292,8 @@ impl Loaded {
 }
 
 /// Tables whose keys the person names. `[keys]` names actions the keymap knows, not this
-/// crate, and the keymap says which it does not; a worker's labels, probes and ACP agents are
-/// anything.
-const OPEN_TABLES: [&str; 5] =
-    ["keys", "clipboard.workers", "worker.labels", "worker.probes", "worker.acp"];
+/// crate, and the keymap says which it does not; a worker's ACP agents are anything.
+const OPEN_TABLES: [&str; 3] = ["keys", "clipboard.workers", "worker.acp"];
 
 /// Keys in `given` with no counterpart in `known`, recursively through tables, except the
 /// [`OPEN_TABLES`].
@@ -1859,33 +1808,18 @@ mod tests {
         assert_eq!(Settings::default().worker.server, None, "on its own by default");
     }
 
-    /// A worker's labels take any flag, number, word or list of them, and its probes any
-    /// command; both are the person's own names, so none of them is an unknown key.
+    /// `[worker.labels]` and `[worker.probes]` fed the cut placement rules and are gone: a file
+    /// that still has them loads, warning of each.
     #[test]
-    fn worker_labels_and_probes() {
-        let loaded = Settings::parse(
-            "[worker.labels]\nfast-disk = true\nvram_gb = 24\ntflops = 26.5\nrack = \"b2\"\nzones = [\"eu\", 2]\n[worker.probes]\ncuda = \"nvidia-smi -L\"\n",
-        );
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        let worker = &loaded.settings.worker;
-        let label = |name: &str| worker.labels.get(name).cloned();
-        assert_eq!(label("fast-disk"), Some(Label::Bool(true)));
-        assert_eq!(label("vram_gb"), Some(Label::Int(24)));
-        assert_eq!(label("tflops"), Some(Label::Float(26.5)));
-        assert_eq!(label("rack"), Some(Label::Text("b2".to_owned())));
+    fn worker_labels_and_probes_are_unknown() {
+        let loaded =
+            Settings::parse("[worker.labels]\nrack = \"b2\"\n[worker.probes]\ncuda = \"x\"\n");
+        assert!(loaded.error.is_none(), "{loaded:?}");
         assert_eq!(
-            label("zones"),
-            Some(Label::List(vec![Label::Text("eu".to_owned()), Label::Int(2)]))
+            loaded.warnings,
+            ["unknown key `worker.labels`", "unknown key `worker.probes`"],
+            "{loaded:?}"
         );
-        assert_eq!(worker.probes.get("cuda").map(String::as_str), Some("nvidia-smi -L"));
-        assert!(Settings::default().worker.labels.is_empty() && worker.server.is_none());
-
-        let wrong = Settings::parse("[worker.labels]\ngpu = { vram = 24 }\n");
-        let error = wrong.error.map(|e| e.to_string()).unwrap_or_default();
-        assert!(error.contains("a label"), "{error}");
-        assert!(Settings::parse("[worker.probes]\ncuda = 1\n").error.is_some(), "a command");
-        let back = toml::to_string(&loaded.settings).unwrap_or_default();
-        assert_eq!(Settings::parse(&back).settings.worker, *worker, "written back:\n{back}");
     }
 
     /// A worker's own ACP agents are any name and a command line, and an empty one hides it.

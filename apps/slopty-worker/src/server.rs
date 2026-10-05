@@ -26,7 +26,7 @@ use slopty_proto::agent::SessionAgent;
 use slopty_proto::codec::CodecError;
 use slopty_proto::ctl::{LinkState, ServerHealth};
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
-use slopty_proto::project::{AgentReport, Fact, Facts};
+use slopty_proto::project::{AgentReport, Facts};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -52,30 +52,6 @@ pub fn configured(
     let addr = HostAddr::parse_with_port(text, slopty_net::endpoint::SERVER_PORT)
         .with_context(|| format!("server address {text:?}"))?;
     Ok(Some(addr))
-}
-
-/// What the person says of this machine in `settings`, as [`slopty_worker::facts`] reports it.
-pub fn own_facts(settings: &slopty_settings::WorkerSettings) -> slopty_worker::facts::Own {
-    let labels = settings
-        .labels
-        .iter()
-        .filter_map(|(name, label)| Some((name.clone(), label_fact(label)?)))
-        .collect();
-    slopty_worker::facts::Own { labels, probes: settings.probes.clone(), acp: settings.acp.clone() }
-}
-
-/// A label as a fact. A float that is not a number, or is infinite, is none: no rule can
-/// compare with it, and it would never equal itself, so the facts would never stop changing.
-fn label_fact(label: &slopty_settings::Label) -> Option<Fact> {
-    use slopty_settings::Label;
-    Some(match label {
-        Label::Bool(on) => Fact::Bool(*on),
-        Label::Int(n) => Fact::Int(*n),
-        Label::Float(x) if x.is_finite() => Fact::Float(*x),
-        Label::Float(_) => return None,
-        Label::Text(text) => Fact::Text(text.clone()),
-        Label::List(items) => Fact::List(items.iter().filter_map(label_fact).collect()),
-    })
 }
 
 /// The daemon's agent table, as orchestration reads it.
@@ -544,10 +520,8 @@ async fn post(socket: &Path, text: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use slopty_net::HostAddr;
-    use slopty_proto::project::Fact;
-    use slopty_settings::Label;
 
-    use super::{configured, own_facts};
+    use super::configured;
 
     #[test]
     fn the_flag_wins_over_the_settings_and_the_port_defaults_to_the_servers() {
@@ -560,45 +534,5 @@ mod tests {
         assert_eq!((flag.host(), flag.port()), ("100.64.0.9", 7000));
         assert_eq!(configured(Some(" "), &settings).unwrap(), None, "an empty flag opts out");
         configured(Some("a b"), &settings).unwrap_err();
-    }
-
-    /// Every label becomes the fact of its kind, a list keeps its order, a float no rule can
-    /// compare with is left out, and the probes pass as they are.
-    #[test]
-    fn labels_become_facts_and_probes_pass_through() {
-        let labels = [
-            ("fast-disk", Label::Bool(true)),
-            ("vram_gb", Label::Int(24)),
-            ("tflops", Label::Float(26.5)),
-            ("rack", Label::Text("b2".to_owned())),
-            ("odd", Label::Float(f64::NAN)),
-            (
-                "zones",
-                Label::List(vec![
-                    Label::Text("eu".to_owned()),
-                    Label::Float(f64::INFINITY),
-                    Label::Int(2),
-                ]),
-            ),
-        ]
-        .map(|(name, label)| (name.to_owned(), label))
-        .into();
-        let settings = slopty_settings::WorkerSettings {
-            labels,
-            probes: [("cuda".to_owned(), "nvidia-smi -L".to_owned())].into(),
-            ..slopty_settings::WorkerSettings::default()
-        };
-        let own = own_facts(&settings);
-        let want = [
-            ("fast-disk", Fact::Bool(true)),
-            ("vram_gb", Fact::Int(24)),
-            ("tflops", Fact::Float(26.5)),
-            ("rack", Fact::Text("b2".to_owned())),
-            ("zones", Fact::List(vec![Fact::Text("eu".to_owned()), Fact::Int(2)])),
-        ]
-        .map(|(name, fact)| (name.to_owned(), fact))
-        .into();
-        assert_eq!(own.labels, want);
-        assert_eq!(own.probes, settings.probes);
     }
 }

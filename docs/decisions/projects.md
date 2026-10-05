@@ -202,10 +202,9 @@ merging on the person's word since 2026-10-04
   facts on the server link (`ToServer::Facts`) when they change. They are gathered lazily and
   cached (`slopty-worker::facts`), never on a hot path:
   - installed agent CLIs and toolchains with their versions, Rust targets, GPUs;
-  - AC or battery;
-  - the person's `[worker.labels]` (read as `labels.<name>`);
-  - `[worker.probes]` shell commands, run every 10 minutes at low priority with a time limit,
-    read as `probes.<name>`.
+  - AC or battery.
+  - The person's `[worker.labels]` and `[worker.probes]` were cut on 2026-10-05 ("Labels and
+    probes are gone", below).
 - The server adds what it knows itself, over anything a worker sent under the same name: name,
   worker, os, os_version, arch, cpus, memory_mb, encoders, displays, capture and input, load,
   online, live_agents and repos. Facts travel beside `WorkerInfo`, not in it, so the directory's
@@ -602,8 +601,7 @@ merging on the person's word since 2026-10-04
 - `apps/slopty-cli/tests/projects.rs` runs it under a real server, ptyd and worker. It proves:
   - the env, the MCP config, the hooks, the tool defaulting to the agent's own project, and
     the tree with its natives and branch;
-  - labels and probes from the worker's settings reaching `slopty workers --json`, and a
-    command task made and started in one `slopty task start` on the worker it names, run with
+  - the worker's facts reaching `slopty workers --json`, and a command task made and started in one `slopty task start` on the worker it names, run with
     its project and task in its env;
   - an agent started with a stale `SLOPTY_TASK`, then assigned to another task, updating the
     task the server says it is on.
@@ -1966,3 +1964,15 @@ follow-up)
     `a_project_s_notice_leads_to_its_orchestrator_stacked_by_project`; golden
     `attention_notice_project`.
 
+- ✅ **Labels and probes are gone** (2026-10-05, readiness deletions). `[worker.labels]` and
+  `[worker.probes]` existed for the placement rules, which were cut (`fc98a475`). Since then the
+  labels only showed in the orchestrator's overview, and the probes ran the person's shell
+  commands every 10 minutes for nobody to read.
+  - An orchestrator that needs to know something of a machine runs the command there itself,
+    in a terminal, and reads the answer when it matters rather than up to 10 minutes stale.
+  - A worker's facts are now what it finds: its agents, ACP agents, toolchains, Rust targets,
+    GPUs and power. The `Fact` map stays open, so nothing on the wire changes.
+  - A file that still has either table loads, with an unknown-key warning for each.
+  - Tests: `slopty_settings` `worker_labels_and_probes_are_unknown`, `slopty-worker`
+    `this_mac_reports_its_toolchains`, `server_link` `the_server_hears_the_workers_facts`, and
+    `slopty-cli` `a_worker_s_own_facts_are_listed_and_a_command_task_runs_where_it_says`.

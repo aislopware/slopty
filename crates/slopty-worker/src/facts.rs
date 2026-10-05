@@ -1,7 +1,7 @@
-//! What this worker has, as the [`Facts`] a project's placement reads.
+//! What this worker has, as the [`Facts`] an orchestrator reads to pick a worker.
 //!
-//! The agents and toolchains installed, the GPUs, the power source, and the person's own labels
-//! and probes (`docs/decisions/projects.md`). The agents reached over ACP are under `acp`, named
+//! The agents and toolchains installed, the GPUs and the power source
+//! (`docs/decisions/projects.md`). The agents reached over ACP are under `acp`, named
 //! as the ACP registry names them (`slopty_agent::acp::registry`), which is also how their
 //! threads' agent is named (`acp:<name>`): what a client offers to start is what is there.
 //!
@@ -29,13 +29,8 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-/// How often the facts are gathered again: installs and upgrades are rare, and a new label
-/// waits at most this long.
+/// How often the facts are gathered again: installs and upgrades are rare.
 pub const REFRESH: Duration = Duration::from_mins(10);
-/// How long a person's probe may run.
-pub const PROBE_WAIT: Duration = Duration::from_secs(5);
-/// How much of a probe's output is kept, in bytes.
-pub const PROBE_OUTPUT_MAX: usize = 1024;
 /// How long a `--version` may take: an agent written in Node or Python starts slowly.
 const VERSION_WAIT: Duration = Duration::from_secs(10);
 /// How much of a `--version` is read, in bytes.
@@ -49,17 +44,9 @@ const LISTING_MAX: usize = 64 * 1024;
 /// What brackets the login shell's `PATH` in its output, which an rc file may print into.
 const PATH_MARK: &str = "__SLOPTY_PATH__";
 
-/// What the person says of this machine, from `[worker.labels]`, `[worker.probes]` and
-/// `[worker.acp]`.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Own {
-    /// Their labels, as facts.
-    pub labels: Facts,
-    /// Their probes: a name and the shell command whose answer it reports.
-    pub probes: BTreeMap<String, String>,
-    /// Their own ACP agents: a name and its command line ([`registry::registry`]).
-    pub acp: BTreeMap<String, Vec<String>>,
-}
+/// The person's own ACP agents from `[worker.acp]`: a name and its command line
+/// ([`registry::registry`]).
+pub type OwnAcp = BTreeMap<String, Vec<String>>;
 
 /// A program whose version is a fact.
 struct Tool {
@@ -103,11 +90,11 @@ const TOOLCHAINS: &[Tool] = &[
     Tool::version("git", "git"),
 ];
 
-/// Keep `facts` current until nobody watches it: gathered now and every [`REFRESH`], with what
-/// `own` reads of the person's settings then.
+/// Keep `facts` current until nobody watches it: gathered now and every [`REFRESH`], with the
+/// ACP agents `own` reads of the person's settings then.
 pub async fn watch<F>(facts: watch::Sender<Facts>, own: F)
 where
-    F: Fn() -> Own + Send + Sync + 'static,
+    F: Fn() -> OwnAcp + Send + Sync + 'static,
 {
     let own = Arc::new(own);
     let mut tick = tokio::time::interval(REFRESH);
@@ -136,20 +123,19 @@ pub fn publish(facts: &watch::Sender<Facts>, next: Facts) -> bool {
 
 /// Everything this worker reports of itself now.
 ///
-/// `agents`, `toolchains`, `labels` and `probes` are always there, empty when nothing is, so a
-/// rule can ask what is in them.
-pub async fn gather(own: Own) -> Facts {
+/// `agents`, `acp` and `toolchains` are always there, empty when nothing is, so a reader can
+/// ask what is in them.
+pub async fn gather(own: OwnAcp) -> Facts {
     let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
     let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
-    let acp = registry::registry(&own.acp);
-    let (agents, acp, toolchains, rust_targets, gpus, power, probes) = tokio::join!(
+    let acp = registry::registry(&own);
+    let (agents, acp, toolchains, rust_targets, gpus, power) = tokio::join!(
         versions(&search, &stand_ins, &AGENTS),
         acp_agents(&search, &stand_ins, acp),
         versions(&search, &stand_ins, TOOLCHAINS),
         rust_targets(&search),
         gpus(&search),
         power(),
-        probes(&search, own.probes, PROBE_WAIT),
     );
     let mut toolchains = toolchains;
     if let Some(xcode) = stand_ins.xcode {
@@ -159,8 +145,6 @@ pub async fn gather(own: Own) -> Facts {
     facts.insert("agents".to_owned(), Fact::Map(agents));
     facts.insert("acp".to_owned(), Fact::Map(acp));
     facts.insert("toolchains".to_owned(), Fact::Map(toolchains));
-    facts.insert("labels".to_owned(), Fact::Map(own.labels));
-    facts.insert("probes".to_owned(), Fact::Map(probes));
     let texts = |items: Vec<String>| Fact::List(items.into_iter().map(Fact::Text).collect());
     if let Some(targets) = rust_targets {
         facts.insert("rust_targets".to_owned(), texts(targets));
@@ -341,37 +325,6 @@ async fn power() -> Option<&'static str> {
         Some(true) => Some("ac"),
         Some(false) if battery => Some("battery"),
         _ => None,
-    }
-}
-
-/// Each of the person's probes run, by name.
-async fn probes(
-    search: &Arc<SearchPath>,
-    probes: BTreeMap<String, String>,
-    wait: Duration,
-) -> Facts {
-    let mut running = JoinSet::new();
-    for (name, line) in probes {
-        let search = Arc::clone(search);
-        running.spawn(async move { (name, probe(&search, &line, wait).await) });
-    }
-    let mut answers = Facts::new();
-    while let Some(done) = running.join_next().await {
-        if let Ok((name, answer)) = done {
-            answers.insert(name, answer);
-        }
-    }
-    answers
-}
-
-/// What `line` answers through `sh -c` within `wait`: what it printed, trimmed and cut at
-/// [`PROBE_OUTPUT_MAX`]; `true` when it succeeded silently; `false` when it failed or ran over.
-async fn probe(search: &SearchPath, line: &str, wait: Duration) -> Fact {
-    let shell = search.command(Path::new("/bin/sh"), &["-c", line]);
-    match run(shell, wait, PROBE_OUTPUT_MAX).await {
-        Some(Ran { ok: true, out }) if out.is_empty() => Fact::Bool(true),
-        Some(Ran { ok: true, out }) => Fact::Text(out),
-        Some(Ran { ok: false, .. }) | None => Fact::Bool(false),
     }
 }
 
@@ -604,8 +557,8 @@ pub(crate) struct Ran {
 /// Run `command` for at most `wait`, keeping the first `cap` bytes it prints.
 ///
 /// It runs in a process group of its own, which is killed whole when it runs over or when the
-/// caller stops waiting (a worker shutting down drops it): a probe's shell dies with whatever
-/// it started. Past the cap its output is read and dropped, so it finishes rather than
+/// caller stops waiting (a worker shutting down drops it): a tool's wrapper script dies with
+/// whatever it started. Past the cap its output is read and dropped, so it finishes rather than
 /// blocking on a full pipe.
 pub(crate) async fn run(
     mut command: tokio::process::Command,
@@ -669,27 +622,31 @@ mod tests {
         SearchPath::of(std::env::var_os("PATH"))
     }
 
-    /// A probe says what it printed, `true` for silence, `false` for failure.
-    #[tokio::test]
-    async fn a_probe_answers_with_its_output_or_whether_it_succeeded() {
-        let search = here();
-        let answer = async |line: &str| probe(&search, line, PROBE_WAIT).await;
-        assert_eq!(answer("printf '  ok\\n\\n'").await, Fact::Text("ok".to_owned()), "trimmed");
-        assert_eq!(answer("true").await, Fact::Bool(true));
-        assert_eq!(answer("printf said; exit 3").await, Fact::Bool(false), "it failed");
-        assert_eq!(answer("no-such-program-anywhere").await, Fact::Bool(false));
-        assert_eq!(answer("echo \"$PATH\" | grep -q /").await, Fact::Bool(true), "PATH is set");
+    /// `line` through `sh -c`, as a tool's wrapper script runs.
+    async fn sh(line: &str, wait: Duration, cap: usize) -> Option<Ran> {
+        run(here().command(Path::new("/bin/sh"), &["-c", line]), wait, cap).await
     }
 
-    /// A probe that runs over is `false` at its time, and what it started dies with it.
+    /// A command says what it printed, trimmed, and whether it succeeded.
     #[tokio::test]
-    async fn a_probe_past_its_time_is_false_and_leaves_nothing_running() {
+    async fn a_command_says_what_it_printed_and_whether_it_succeeded() {
+        let wait = Duration::from_secs(30);
+        let said = sh("printf '  ok\\n\\n'", wait, 64).await.unwrap();
+        assert!(said.ok && said.out == "ok", "trimmed: {:?}", said.out);
+        let failed = sh("printf said; exit 3", wait, 64).await.unwrap();
+        assert!(!failed.ok && failed.out == "said");
+        assert!(!sh("no-such-program-anywhere", wait, 64).await.unwrap().ok);
+        assert!(sh("echo \"$PATH\" | grep -q /", wait, 64).await.unwrap().ok, "PATH is set");
+    }
+
+    /// A command that runs over is none at its time, and what it started dies with it.
+    #[tokio::test]
+    async fn a_command_past_its_time_is_none_and_leaves_nothing_running() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
         let line = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
         let start = Instant::now();
-        let answer = probe(&here(), &line, Duration::from_millis(500)).await;
-        assert_eq!(answer, Fact::Bool(false));
+        assert!(sh(&line, Duration::from_millis(500), 64).await.is_none());
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
         let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
         let pid = rustix::process::Pid::from_raw(pid).unwrap();
@@ -701,16 +658,15 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gone).await.expect("the sleep was killed");
     }
 
-    /// A probe's output is cut at the cap, and the rest is drained so it still finishes.
+    /// A command's output is cut at the cap, and the rest is drained so it still finishes.
     #[tokio::test]
     async fn a_long_output_is_cut_at_the_cap() {
         let line = "head -c 1000000 /dev/zero | tr '\\0' a";
-        // The cap is under test, not the clock: a probe runs at utility priority, which a loaded
-        // machine starves past `PROBE_WAIT`.
-        let answer = probe(&here(), line, Duration::from_secs(120)).await;
-        let Fact::Text(out) = answer else { panic!("a text, not {answer:?}") };
-        assert_eq!(out.len(), PROBE_OUTPUT_MAX);
-        assert!(out.bytes().all(|b| b == b'a'));
+        // The cap is under test, not the clock: a command runs at utility priority, which a
+        // loaded machine starves.
+        let ran = sh(line, Duration::from_secs(120), 1024).await.unwrap();
+        assert_eq!(ran.out.len(), 1024);
+        assert!(ran.ok && ran.out.bytes().all(|b| b == b'a'));
     }
 
     /// A cap that cuts a character in half drops the half, not the text.
@@ -845,13 +801,8 @@ mod tests {
     /// the server fills in itself.
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn this_mac_reports_its_toolchains_and_what_its_person_said() {
-        let own = Own {
-            labels: Facts::from([("rack".to_owned(), Fact::Text("b2".to_owned()))]),
-            probes: BTreeMap::from([("ok".to_owned(), "true".to_owned())]),
-            acp: BTreeMap::new(),
-        };
-        let facts = gather(own).await;
+    async fn this_mac_reports_its_toolchains() {
+        let facts = gather(OwnAcp::new()).await;
         assert!(
             matches!(facts.get("gpus"), Some(Fact::List(gpus)) if !gpus.is_empty()),
             "{facts:?}"
@@ -859,10 +810,7 @@ mod tests {
         let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
         assert!(toolchains.contains_key("cargo"), "the test runs under cargo: {toolchains:?}");
         assert!(matches!(facts.get("agents"), Some(Fact::Map(_))));
-        let probes = Facts::from([("ok".to_owned(), Fact::Bool(true))]);
-        assert_eq!(facts.get("probes"), Some(&Fact::Map(probes)));
-        let rack = Facts::from([("rack".to_owned(), Fact::Text("b2".to_owned()))]);
-        assert_eq!(facts.get("labels"), Some(&Fact::Map(rack)));
+        assert!(matches!(facts.get("acp"), Some(Fact::Map(_))));
         for server_filled in ["os", "os_version", "arch", "memory_mb", "encoders", "displays"] {
             assert!(!facts.contains_key(server_filled), "{server_filled}");
         }

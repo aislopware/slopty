@@ -363,19 +363,15 @@ mod tests {
         );
     }
 
-    /// Once registered, the worker tells the server what it has: its toolchains, and the labels
-    /// and probes in its settings, a probe that prints as its text and one that fails as `false`.
-    /// What the server fills in itself from the registration is left to it.
+    /// Once registered, the worker tells the server what it has, its toolchains among it. What
+    /// the server fills in itself from the registration is left to it.
     #[tokio::test]
-    async fn the_server_hears_the_workers_facts_with_its_labels_and_probes() {
+    async fn the_server_hears_the_workers_facts() {
         use slopty_proto::project::Fact;
 
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        let settings = "[worker.labels]\nfast-disk = true\nrack = \"b2\"\nvram_gb = 24\n\
-                        [worker.probes]\nok = \"printf ok\"\nbad = \"false\"\n";
-        std::fs::write(data.join("settings.toml"), settings).unwrap();
         // The cargo running this test, found where the worker looks for toolchains.
         let programs = dir.path().join("programs");
         std::fs::create_dir_all(&programs).unwrap();
@@ -398,14 +394,6 @@ mod tests {
                 _ => None,
             })
             .expect("heard above");
-        let text = |s: &str| Fact::Text(s.to_owned());
-        let labels =
-            [("fast-disk", Fact::Bool(true)), ("rack", text("b2")), ("vram_gb", Fact::Int(24))]
-                .map(|(name, fact)| (name.to_owned(), fact));
-        assert_eq!(facts.get("labels"), Some(&Fact::Map(labels.into())), "{facts:?}");
-        let probes = [("bad", Fact::Bool(false)), ("ok", text("ok"))];
-        let probes = probes.map(|(name, fact)| (name.to_owned(), fact));
-        assert_eq!(facts.get("probes"), Some(&Fact::Map(probes.into())), "{facts:?}");
         let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
         assert!(
             matches!(toolchains.get("cargo"), Some(Fact::Text(v)) if !v.is_empty()),

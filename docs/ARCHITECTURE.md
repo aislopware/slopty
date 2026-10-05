@@ -415,8 +415,8 @@ a log line cut short at its end is passed over. The hub answers the project verb
   agent's worker (`FromServer::Deliver`), and the agent's own `SessionStart`,
   `UserPromptSubmit` and `Stop` hooks hand it over (`slopty hook reports`,
   `slopty_agent::reports`). Nothing is typed into a terminal.
-- Each worker reports open facts (`ToServer::Facts`: toolchains, GPUs, power, its person's
-  labels and probe commands, from `slopty-worker::facts`). The hub adds the facts it knows
+- Each worker reports open facts (`ToServer::Facts`: agents, toolchains, GPUs and power, from
+  `slopty-worker::facts`). The hub adds the facts it knows
   itself (os, cpus, memory, load, live agents, repos), and `slopty workers --json` shows them
   all. The orchestrator reads them and names the worker in `task_start`.
 - `TaskSpawn` starts a task on its pinned worker, or on one with room: beside a clone of the

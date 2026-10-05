@@ -251,15 +251,15 @@ pub enum Fact {
     Text(String),
     /// Several (`gpus`, `rust_targets`).
     List(Vec<Self>),
-    /// Named parts (`agents`, `toolchains`, `labels`, `probes`).
+    /// Named parts (`agents`, `acp`, `toolchains`).
     Map(BTreeMap<String, Self>),
 }
 
-/// What a worker is and has, by name: an open map any placement expression reads.
+/// What a worker is and has, by name: an open map the orchestrator reads to pick a worker.
 ///
 /// The server fills in what it knows itself (`name`, `worker`, `os`, `cpus`, `load`,
 /// `online`, `live_agents`, `repos`); the worker reports the rest (`docs/decisions/projects.md`
-/// lists the built-in names), including the person's own `labels` and `probes`.
+/// lists the built-in names).
 pub type Facts = BTreeMap<String, Fact>;
 
 /// One worker's facts.

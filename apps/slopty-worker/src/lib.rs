@@ -344,7 +344,7 @@ impl Drop for Joined {
 
 /// Register with the server at `addr` on a task of its own that dials and keeps dialing
 /// (`server::run`), registering with the daemon's [`Daemon::caps`], and gather this worker's
-/// facts for it on another ([`slopty_worker::facts::watch`]), the person's labels and probes
+/// facts for it on another ([`slopty_worker::facts::watch`]), the person's own ACP agents
 /// read from the settings under `data_dir` each time. `None` when no endpoint could be bound.
 fn join_server(
     daemon: &Daemon,
@@ -380,8 +380,7 @@ fn join_server(
     }
     let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
     let settings = slopty_settings::path_in(data_dir);
-    let own =
-        move || server::own_facts(&slopty_settings::Settings::load(&settings).settings.worker);
+    let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
     let facts_task = tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };
     let run = tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));

@@ -242,9 +242,9 @@ pub enum ToServer {
     /// What a worker's agent did beyond its status: where its work lands, Claude Code's own
     /// subagents and task list (`docs/decisions/projects.md`).
     Report(crate::project::AgentReport),
-    /// What a worker is and has beyond its capabilities: its own facts, its person's labels
-    /// and probes (`docs/decisions/projects.md`). Sent after registering and when they change;
-    /// each replaces the last.
+    /// What a worker is and has beyond its capabilities: its toolchains, agents, GPUs and power
+    /// (`docs/decisions/projects.md`). Sent after registering and when they change; each
+    /// replaces the last.
     Facts(crate::project::Facts),
     /// How far a clone the server asked for ([`crate::orchestration::Verb::CloneRepo`]) has
     /// come, sent as it moves.
