@@ -18,8 +18,8 @@
 //!
 //! Two lines are the app's own rather than the worker's ([`app_lines`]): whether notifications
 //! reach the person, and whether Slopty's place in Finder is switched on. Neither is in the way
-//! of adding this Mac, but each is easy to miss: the flow stays open on them, ready, until the
-//! person is done.
+//! of adding this Mac. The flow ends on its checklist, ready, with the way to bring in a phone,
+//! until the person says Done; the add panel's row brings it back later.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -32,31 +32,15 @@ pub use slopty_platform::privacy::Pane;
 use slopty_proto::ctl::LinkState;
 use slopty_proto::tailnet::BackendState;
 
-pub mod actions {
-    //! The palette's way to this Mac's checklist after the first run.
-    #![expect(
-        clippy::derive_partial_eq_without_eq,
-        reason = "gpui::actions! derives PartialEq only"
-    )]
-    use gpui::actions;
-
-    actions!(
-        workers,
-        [
-            /// Install the worker on this Mac and walk its permissions until the server lists
-            /// it.
-            UseThisMac,
-        ]
-    );
-}
-
 /// The entry's words, and the checklist's heading.
 pub const TITLE: &str = "Use this Mac";
 /// What a missing grant's line says to do: its button opens the list to do it in, and shows
 /// the worker in Finder, since a background worker's request may leave it out of that list.
-pub const TURN_ON: &str = "Turn on slopty-worker there, or drag it in from Finder.";
+pub const TURN_ON: &str = "Turn on slopty-worker, or drag it in.";
 /// What the entry's row says under its words: what pressing it does.
 pub const ROW_META: &str = "Shares its shells and windows through your server";
+/// What it says once the server lists this Mac: the way back to its checklist.
+pub const ROW_META_LISTED: &str = "Shared through your server. Check what it needs";
 /// The checklist's line under its heading.
 pub const BLURB: &str = "Slopty shares this Mac's shells and windows through your server.";
 /// Why Slopty moves before it installs: where it runs now is gone after a restart.
@@ -67,9 +51,10 @@ pub const LOOPBACK: &str = "127.0.0.1";
 /// How many times, [`RETRY`] apart (20 s in all), a new worker's listing is looked for in the
 /// server's directory: counted, not timed, so a test's clock drives it.
 pub const LISTED_TRIES: u32 = 80;
-/// What the flow says once the server lists this Mac while the app's own lines still have
-/// something for the person.
+/// What the flow says at its end, once the server lists this Mac.
 pub const READY: &str = "This Mac is ready.";
+/// What it says there while the tailnet does not reach this Mac.
+pub const READY_ALONE: &str = "This Mac is ready. Only this Mac reaches it until Tailscale is up.";
 /// What the flow says when the directory never listed this Mac.
 pub const NOT_LISTED: &str = "This Mac's worker has not registered with the server.";
 
@@ -302,8 +287,8 @@ pub struct Flow {
     /// Slopty's place in Finder, as showing the machines there would find it; `None` until
     /// read.
     pub finder: Option<crate::finder::Step>,
-    /// The server lists this Mac, and the flow stays open on what the app still lacks
-    /// ([`Flow::advice_left`]) until the person is done.
+    /// The server lists this Mac: the flow's end, open until the person is done, with the
+    /// way to bring in a phone.
     pub listed: bool,
 }
 
@@ -343,9 +328,12 @@ impl Flow {
         matches!(&self.worker, Worker::Up(d) if !d.screen_recording)
     }
 
-    /// One of the app's own lines ([`app_lines`]) still has something for the person to do.
-    pub fn advice_left(&self) -> bool {
-        app_lines(self).iter().any(|line| line.fix.is_some())
+    /// What the end of the flow says: ready, and whether only this Mac reaches it.
+    pub const fn ready_words(&self) -> &'static str {
+        match &self.worker {
+            Worker::Up(d) if !matches!(d.tailnet, Tailnet::Reachable(_)) => READY_ALONE,
+            _ => READY,
+        }
     }
 
     /// An install or a read is under way: pressing the entry again waits for it.
@@ -1128,7 +1116,7 @@ mod tests {
 
     /// The app's own lines: unread they say what they are for; notifications never asked offer
     /// "Allow", turned off open their settings, and a build with no bundle or no extension says
-    /// so with nothing to press. Only a line the person can fix keeps the flow open.
+    /// so with nothing to press.
     #[test]
     fn the_apps_own_lines_say_what_it_lacks() {
         use crate::finder::Step;
@@ -1136,11 +1124,7 @@ mod tests {
         let lines = |notes, finder| app_lines(&flow(notes, finder)).map(|l| (l.mark, l.fix));
         let open = Some(Step::Open(PathBuf::from("/Users/me/Library/CloudStorage/Slopty-studio")));
         assert_eq!(lines(None, None), [(Mark::Unknown, None), (Mark::Unknown, None)]);
-        assert_eq!(
-            lines(Some(Alerts::Allowed), open.clone()),
-            [(Mark::Ok, None), (Mark::Ok, None)]
-        );
-        assert!(!flow(Some(Alerts::Allowed), open.clone()).advice_left());
+        assert_eq!(lines(Some(Alerts::Allowed), open), [(Mark::Ok, None), (Mark::Ok, None)]);
         let asked = lines(Some(Alerts::Unasked), Some(Step::SwitchOn));
         assert_eq!(
             asked,
@@ -1153,13 +1137,11 @@ mod tests {
         assert_eq!(off[0].fix, Some(Fix::Open(Place::Notifications)));
         assert_eq!(off[0].status(), slopty_ui::icons::Status::NeedsYou, "the person's to do");
         assert_eq!((off[1].mark, off[1].fix), (Mark::Unknown, None), "no machine to show yet");
-        assert!(flow(Some(Alerts::Denied), open).advice_left());
         let failed = Some(Step::Failed("the system would not say".to_owned()));
         let bare = app_lines(&flow(Some(Alerts::Unavailable), failed));
         assert_eq!(bare.each_ref().map(|l| (l.mark, l.fix)), [(Mark::Advisory, None); 2]);
         assert_eq!(bare[1].detail, "the system would not say", "the reason, as it came");
         assert_eq!(bare[0].status(), slopty_ui::icons::Status::Idle, "nothing to press: quiet");
-        assert!(!flow(Some(Alerts::Unavailable), Some(Step::Unsigned)).advice_left());
     }
 
     /// The Server line says where the server comes from while it is looked for and installed,

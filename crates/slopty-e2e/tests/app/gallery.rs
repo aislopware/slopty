@@ -82,7 +82,8 @@ pub async fn first_shell(drv: &mut Driver) -> Dump {
 
 /// The first run: connecting to a server is the way forward, and nothing else on the screen
 /// is there to choose from. Once connected, its workers come, and "Add a machine" installs
-/// one rather than taking an address, no longer offering this Mac, which the server lists.
+/// one rather than taking an address, keeps this Mac's row as the way back to its checklist,
+/// and offers a phone's way in.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_first_run_offers_one_way_in() {
@@ -137,7 +138,8 @@ async fn the_first_run_offers_one_way_in() {
         .unwrap();
     let buttons = labels(&dump, "Button");
     assert!(!buttons.iter().any(|b| b == "Connect" || b == "Add"), "no address: {buttons:?}");
-    assert!(!buttons.iter().any(|b| b == THIS_MAC), "this Mac is listed already: {buttons:?}");
+    assert!(buttons.iter().any(|b| b == THIS_MAC), "this Mac's checklist, again: {buttons:?}");
+    assert!(buttons.iter().any(|b| b == "Connect a phone or iPad"), "{buttons:?}");
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "add-worker").await;
     stack.shutdown().await;

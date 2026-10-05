@@ -131,10 +131,6 @@ ListItem │ Update all machines
 Button │ Keys for Update all machines
 ListItem │ Update the server
 Button │ Keys for Update the server
-ListItem │ Use this Mac
-Button │ Keys for Use this Mac
-ListItem │ Install on a machine over SSH
-Button │ Keys for Install on a machine over SSH
 ListItem │ Show machines in Finder
 Button │ Keys for Show machines in Finder
 Heading │ Layout
@@ -258,10 +254,22 @@ ListItem │ Queue message │ ⌘↩
 Button │ Keys for Queue message │ ⌘↩
 ListItem │ Edit the last queued message │ ⌥↑
 Button │ Keys for Edit the last queued message │ ⌥↑
-ListItem │ Cycle effort
-Button │ Keys for Cycle effort
+ListItem │ Next effort level
+Button │ Keys for Next effort level
 ListItem │ Ask aside
 Button │ Keys for Ask aside
+ListItem │ Review changes
+Button │ Keys for Review changes
+ListItem │ Show the agent's terminal
+Button │ Keys for Show the agent's terminal
+ListItem │ Take back from the terminal
+Button │ Keys for Take back from the terminal
+ListItem │ Compact context
+Button │ Keys for Compact context
+ListItem │ Branch from here…
+Button │ Keys for Branch from here…
+ListItem │ Resume the agent
+Button │ Keys for Resume the agent
 ListItem │ Previous prompt │ ⌘↑
 Button │ Keys for Previous prompt │ ⌘↑
 ListItem │ Next prompt │ ⌘↓
@@ -340,6 +348,12 @@ ListItem │ Open │ ↩
 Button │ Keys for Open │ ↩
 ListItem │ Enclosing folder │ ⌫, ⌘↑
 Button │ Keys for Enclosing folder │ ⌫, ⌘↑
+ListItem │ New folder │ ⇧⌘N
+Button │ Keys for New folder │ ⇧⌘N
+ListItem │ Rename or move…
+Button │ Keys for Rename or move…
+ListItem │ Move to Trash │ ⌘⌫
+Button │ Keys for Move to Trash │ ⌘⌫
 Heading │ Project boards
 ListItem │ Select previous │ ↑, K
 Button │ Keys for Select previous │ ↑, K

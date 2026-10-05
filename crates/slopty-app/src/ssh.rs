@@ -40,7 +40,7 @@ use crate::this_mac::{self, Pending};
 use crate::{FIELD_H, Workspace};
 
 pub mod actions {
-    //! The palette's way to the sheet.
+    //! The palette's updates of every machine and of the server.
     #![expect(
         clippy::derive_partial_eq_without_eq,
         reason = "gpui::actions! derives PartialEq only"
@@ -50,8 +50,6 @@ pub mod actions {
     actions!(
         workers,
         [
-            /// Put the worker on a machine over SSH, registered with the server.
-            InstallOverSsh,
             /// Bring every worker on a different build to this one.
             UpdateAllWorkers,
             /// Bring the server to this build where it runs.

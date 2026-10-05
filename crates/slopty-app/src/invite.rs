@@ -47,6 +47,8 @@ const SERVER_KEY: &str = "server";
 
 /// The palette's line, and the dialog's heading.
 pub(crate) const TITLE: &str = "Connect a phone or iPad";
+/// What the add panel's row says under its words.
+pub(crate) const ROW_META: &str = "Shows a code its Camera reads";
 /// What the dialog says under the code.
 pub(crate) const HOW: &str =
     "Point the Camera of your iPhone or iPad at the code, then press Connect in Slopty.";

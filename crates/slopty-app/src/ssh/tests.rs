@@ -192,6 +192,13 @@ fn sheet_progress(ws: &Entity<Workspace>, cx: &VisualTestContext) -> Option<Prog
     ws.read_with(cx, |ws, _| ws.adding.as_ref()?.ssh.as_ref()?.progress().cloned())
 }
 
+/// "Add a machine…", then its "Install over SSH" row.
+fn open_sheet(cx: &mut VisualTestContext) {
+    cx.dispatch_action(crate::AddWorker);
+    cx.run_until_parked();
+    click(cx, "install-over-ssh");
+}
+
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
     let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"));
     cx.simulate_click(at.center(), Modifiers::none());
@@ -376,8 +383,7 @@ fn a_run_can_be_cancelled_and_a_failure_says_why(cx: &mut TestAppContext) {
     let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
-    cx.dispatch_action(actions::InstallOverSsh);
-    cx.run_until_parked();
+    open_sheet(cx);
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
     deployer.say(cx, [Event::Step(Step::Reach)]);
@@ -420,8 +426,7 @@ fn a_new_machine_s_key_is_offered_and_trusted_from_the_sheet(cx: &mut TestAppCon
     let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
-    cx.dispatch_action(actions::InstallOverSsh);
-    cx.run_until_parked();
+    open_sheet(cx);
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
     assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"]);
@@ -912,8 +917,7 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
     let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
-    cx.dispatch_action(actions::InstallOverSsh);
-    cx.run_until_parked();
+    open_sheet(cx);
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
     assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"]);

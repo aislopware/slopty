@@ -16,6 +16,8 @@ Terminal │ shell │ ~ %
 Group │ Status
 Status │ e2e-worker
 Heading │ Add a machine
+Button │ Use this Mac
 Status │ Nothing answered on your tailnet
+Button │ Connect a phone or iPad
 Button │ Cancel
 Status │ Connected to e2e-server

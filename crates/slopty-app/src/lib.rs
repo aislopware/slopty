@@ -68,8 +68,7 @@ use slopty_ui::workspace::{
     Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
     WorkspaceEvent, WorkspaceView,
 };
-pub use ssh::actions::{InstallOverSsh, UpdateAllWorkers, UpdateServer};
-pub use this_mac::actions::UseThisMac;
+pub use ssh::actions::{UpdateAllWorkers, UpdateServer};
 pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
 pub use window::{HELP_URL, show as show_main_window};
 pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant};
@@ -551,7 +550,7 @@ pub struct Workspace {
     /// Runs of it so far, so an answer for one left behind is dropped.
     this_mac_runs: u64,
     /// This Mac's worker, as its `doctor` last said: once the server lists it, "Add a
-    /// machine" no longer offers this Mac.
+    /// machine"'s row for this Mac says so.
     this_mac_worker: Option<WorkerId>,
     /// What installs and updates a worker over SSH; `None` where it is not offered.
     deployer: Option<Rc<dyn ssh::Deployer>>,
@@ -1843,7 +1842,7 @@ impl Workspace {
         .detach();
     }
 
-    /// "Use this Mac", from the panel, the palette or a failed line's "Try again": decide the
+    /// "Use this Mac", from the panel's row or a failed line's "Try again": decide the
     /// server, install, then read the worker's `doctor` as the panel's checklist. A run already
     /// looking, installing or waiting for the directory is left to finish.
     fn use_this_mac(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1942,36 +1941,26 @@ impl Workspace {
                 .update_in(cx, |ws, window, cx| ws.this_mac_installed(run, outcome, window, cx));
         })
         .detach();
-        self.read_this_app(run, window, cx);
+        self.read_this_app(run, cx);
         cx.notify();
     }
 
     /// Read the app's own lines of run `run`'s checklist: its notifications and its place in
     /// Finder.
-    fn read_this_app(&self, run: u64, window: &Window, cx: &Context<Self>) {
+    fn read_this_app(&self, run: u64, cx: &Context<Self>) {
         let Some(host) = self.this_mac.clone() else { return };
         let (notes, finder) = (host.notes(), host.finder());
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let (notes, finder) = (notes.await, finder.await);
-            let _gone = this.update_in(cx, |ws, window, cx| {
+            let _gone = this.update(cx, |ws, cx| {
                 if let Some(flow) = ws.this_mac_flow(run) {
                     flow.notes = Some(notes);
                     flow.finder = Some(finder);
+                    cx.notify();
                 }
-                ws.this_app_read(run, window, cx);
             });
         })
         .detach();
-    }
-
-    /// The app's own lines of run `run` changed: a flow that stayed open on them closes once
-    /// none has anything left for the person.
-    fn this_app_read(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(flow) = self.this_mac_flow(run) else { return };
-        if flow.listed && !flow.advice_left() {
-            self.close_this_mac(run, window, cx);
-        }
-        cx.notify();
     }
 
     /// Back from this Mac's checklist to the panel it was opened from.
@@ -2089,8 +2078,7 @@ impl Workspace {
                 }
                 match this.update(cx, |ws, _cx| ws.directory.get(worker).is_some()) {
                     Ok(true) => {
-                        let _gone = this
-                            .update_in(cx, |ws, window, cx| ws.this_mac_listed(run, window, cx));
+                        let _gone = this.update(cx, |ws, cx| ws.this_mac_listed(run, cx));
                         return;
                     }
                     Ok(false) => {}
@@ -2115,42 +2103,27 @@ impl Workspace {
     /// The server lists this Mac: the panel closes onto its workspace, with a word when the
     /// tailnet does not reach it yet; or, while the app's own lines still have something for
     /// the person, it stays open on them, ready, until they are done.
-    fn this_mac_listed(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn this_mac_listed(&mut self, run: u64, cx: &mut Context<Self>) {
         let Some(flow) = self.this_mac_flow(run) else { return };
-        if flow.advice_left() {
-            flow.listing = false;
-            flow.listed = true;
-            if let this_mac::Worker::Up(d) = &flow.worker {
-                self.this_mac_worker = Some(d.worker);
-            }
-            cx.notify();
-            return;
+        flow.listing = false;
+        flow.listed = true;
+        if let this_mac::Worker::Up(d) = &flow.worker {
+            self.this_mac_worker = Some(d.worker);
         }
-        self.close_this_mac(run, window, cx);
+        cx.notify();
     }
 
-    /// The flow is over: the panel gives way to the workspace, with a word when the tailnet
-    /// does not reach this Mac yet.
-    fn close_this_mac(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(flow) = self.this_mac_flow(run) else { return };
-        let (reached, worker) = match &flow.worker {
-            this_mac::Worker::Up(d) => {
-                (matches!(d.tailnet, this_mac::Tailnet::Reachable(_)), Some(d.worker))
-            }
-            _ => (true, None),
-        };
-        self.this_mac_worker = worker.or(self.this_mac_worker);
+    /// "Done" at the end of this Mac's flow: the panel gives way to the workspace.
+    fn close_this_mac(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.adding = None;
-        self.show_notice(
-            if reached {
-                "This Mac is ready".to_owned()
-            } else {
-                "This Mac is ready. Only this Mac reaches it until Tailscale is up.".to_owned()
-            },
-            cx,
-        );
         self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
         cx.notify();
+    }
+
+    /// A phone or iPad's way in, from the add panel: the panel gives way to the code.
+    fn connect_device_from_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.adding = None;
+        self.show_invite(window, cx);
     }
 
     /// A missing line's button: its pane of System Settings, or the install again.
@@ -2161,7 +2134,7 @@ impl Workspace {
                     host.open(place);
                 }
             }
-            this_mac::Fix::AllowNotes => self.allow_notes(window, cx),
+            this_mac::Fix::AllowNotes => self.allow_notes(cx),
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
@@ -2170,20 +2143,20 @@ impl Workspace {
 
     /// The Notifications line's "Allow": the system asks the person, and the line says how they
     /// answered.
-    fn allow_notes(&self, window: &Window, cx: &Context<Self>) {
+    fn allow_notes(&self, cx: &Context<Self>) {
         let Some(host) = self.this_mac.clone() else { return };
         let Some(run) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.run)
         else {
             return;
         };
         let asked = host.ask_notes();
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let notes = asked.await;
-            let _gone = this.update_in(cx, |ws, window, cx| {
+            let _gone = this.update(cx, |ws, cx| {
                 if let Some(flow) = ws.this_mac_flow(run) {
                     flow.notes = Some(notes);
+                    cx.notify();
                 }
-                ws.this_app_read(run, window, cx);
             });
         })
         .detach();
@@ -2243,7 +2216,7 @@ impl Workspace {
     /// Recording was what it lacked.
     fn this_mac_activated(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some(flow) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()) else { return };
-        self.read_this_app(flow.run, window, cx);
+        self.read_this_app(flow.run, cx);
         if !flow.rereads() {
             return;
         }
@@ -2322,7 +2295,7 @@ impl Workspace {
         // field for.
         let from_a_mac = adding.mode == Panel::Worker
             && !in_flow
-            && (self.this_mac.is_none() || self.this_mac_listed_here())
+            && self.this_mac.is_none()
             && self.deployer.is_none()
             && adding.search.is_none();
         let blurb = if from_a_mac { FROM_A_MAC } else { blurb };
@@ -2445,11 +2418,11 @@ impl Workspace {
         // offers the servers found, the address and a server over SSH; on a machine's panel it
         // shares a worker over SSH beside it.
         let serving = adding.mode == Panel::Server;
-        let this_mac_entry = (self.this_mac.is_some() && !in_flow && !self.this_mac_listed_here())
-            .then(|| {
-                this_mac_row(theme)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
-            });
+        // Listed already, the row stays: it is the way back to this Mac's checklist.
+        let this_mac_entry = (self.this_mac.is_some() && !in_flow).then(|| {
+            this_mac_row(theme, self.this_mac_listed_here())
+                .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
+        });
         let ssh_entry = (!in_flow).then(|| self.ssh_row(cx)).flatten();
         let group =
             |id: &'static str, label_id: &'static str, label: &'static str, rows: Vec<_>| {
@@ -2505,6 +2478,19 @@ impl Workspace {
             }
             sections.extend(set_up_server.map(IntoElement::into_any_element));
         }
+        // A phone or iPad joins the server, not as a machine, but this is where a person
+        // looks for a way to bring one in.
+        let phone = (!in_flow && !serving).then(|| {
+            phone_row(theme).on_click(
+                cx.listener(|this, _ev, window, cx| this.connect_device_from_panel(window, cx)),
+            )
+        });
+        let phone = group(
+            "add-worker-phone",
+            "add-worker-phone-label",
+            PHONE_LABEL,
+            phone.into_iter().collect(),
+        );
         if from_a_mac {
             let how = kit::meta(div(), theme)
                 .debug_selector(|| "add-worker-from-a-mac".to_owned())
@@ -2523,6 +2509,7 @@ impl Workspace {
             sections.push(how.into_any_element());
             sections.push(rows.into_any_element());
         }
+        sections.extend(phone.map(IntoElement::into_any_element));
         let checklist = flow.map(|flow| self.this_mac_checklist(flow, cx));
         let ssh_sheet = sheet.map(|sheet| self.ssh_sheet(sheet, cx));
         let panel = div()
@@ -2725,7 +2712,7 @@ impl Workspace {
             (None, true) => {
                 Some(("Waiting for the server to list this Mac\u{2026}".to_owned(), s.text_muted))
             }
-            (None, false) if flow.listed => Some((this_mac::READY.to_owned(), s.text_muted)),
+            (None, false) if flow.listed => Some((flow.ready_words().to_owned(), s.text_muted)),
             (None, false) => None,
         };
         let run = flow.run;
@@ -2737,11 +2724,15 @@ impl Workspace {
             )
         });
         let done = flow.listed.then(|| {
-            kit::button(theme, "this-mac-done", "Done", ButtonKind::Link).on_click(cx.listener(
-                move |this, _ev, window, cx| {
-                    this.close_this_mac(run, window, cx);
-                },
-            ))
+            kit::button(theme, "this-mac-done", "Done", ButtonKind::Primary)
+                .on_click(cx.listener(|this, _ev, window, cx| this.close_this_mac(window, cx)))
+        });
+        // The end of the flow is where a phone joins: this Mac's server is set by now.
+        let phone = flow.listed.then(|| {
+            let row = phone_row(theme).on_click(
+                cx.listener(|this, _ev, window, cx| this.connect_device_from_panel(window, cx)),
+            );
+            kit::card(theme).flex().flex_col().p(px(spacing.xxs)).child(row)
         });
         div()
             .flex()
@@ -2759,10 +2750,11 @@ impl Workspace {
                         .items_center()
                         .gap(px(spacing.sm))
                         .child(div().text_color(hsla(tone)).child(SharedString::from(text)))
-                        .children(again)
-                        .children(done),
+                        .children(again),
                 )
             })
+            .children(phone)
+            .when_some(done, |el, done| el.child(div().flex().justify_end().child(done)))
             .into_any_element()
     }
 
@@ -2781,7 +2773,9 @@ impl Workspace {
         });
         let muted = line.mark == this_mac::Mark::Unknown;
         // A line's detail wraps rather than cut off a path or a reason, so the line grows from
-        // a two-line row's height instead of holding it.
+        // a two-line row's height instead of holding it. The fix stands beside the title and
+        // the detail together, centred on them, so a line with a button is as tall as one
+        // without.
         kit::inset_x(div(), theme)
             .id(gpui::ElementId::Name(format!("this-mac-{}", check.slug()).into()))
             .debug_selector(move || format!("this-mac-{}", check.slug()))
@@ -2795,7 +2789,6 @@ impl Workspace {
             .py(px(theme.spacing.xs))
             .child(status_mark(theme, Some(status), 1.0))
             .child(
-                // The fix sits on the title's row, so the detail below takes the full width.
                 div()
                     .flex_1()
                     .min_w_0()
@@ -2803,22 +2796,15 @@ impl Workspace {
                     .flex_col()
                     .child(
                         div()
-                            .flex()
-                            .items_start()
-                            .justify_between()
-                            .gap(px(theme.spacing.sm))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(theme.typography.ui_size))
-                                    .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-                                    .text_color(hsla(if muted { s.text_secondary } else { s.text }))
-                                    .child(check.title()),
-                            )
-                            .children(fix),
+                            .min_w_0()
+                            .text_size(px(theme.typography.ui_size))
+                            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                            .text_color(hsla(if muted { s.text_secondary } else { s.text }))
+                            .child(check.title()),
                     )
                     .child(kit::meta(div(), theme).child(SharedString::from(line.detail))),
             )
+            .when_some(fix, |el, fix| el.child(div().flex_none().self_center().child(fix)))
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
@@ -3303,12 +3289,6 @@ impl Render for Workspace {
                 this.show_invite(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopyTailnetGrant, _window, cx| this.copy_grant(cx)))
-            .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
-                this.use_this_mac(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &InstallOverSsh, window, cx| {
-                this.open_ssh(window, cx);
-            }))
             .on_action(
                 cx.listener(|this, _: &UpdateAllWorkers, _window, cx| this.update_all_workers(cx)),
             )
@@ -3575,14 +3555,23 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
 const THIS_MAC_LABEL: &str = "On this Mac";
 /// The label over this Mac's row and the SSH row together.
 const SET_UP_LABEL: &str = "Set up a machine";
+/// The label over the machine panel's row for a phone or iPad.
+const PHONE_LABEL: &str = "On a phone or iPad";
 /// The label over the server panel's rows: the server on this Mac, or over SSH.
 const SET_UP_SERVER_LABEL: &str = "Set up the server";
 
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
-fn this_mac_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn this_mac_row(theme: &Theme, listed: bool) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::IconName;
-    entry_row(theme, "use-this-mac", IconName::Monitor, this_mac::TITLE, this_mac::ROW_META)
+    let meta = if listed { this_mac::ROW_META_LISTED } else { this_mac::ROW_META };
+    entry_row(theme, "use-this-mac", IconName::Monitor, this_mac::TITLE, meta)
+}
+
+/// A phone or iPad's way in as a row to press: the code it scans, opened from the add panel.
+fn phone_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    use slopty_ui::icons::IconName;
+    entry_row(theme, "connect-device", IconName::Smartphone, invite::TITLE, invite::ROW_META)
 }
 
 /// A way to add a worker that goes on to a sheet of its own, as a row to press drawn as a found
@@ -3646,12 +3635,6 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("update_all_workers", UpdateAllWorkers, &[]),
         app_command("update_server", UpdateServer, &[]),
     ];
-    if this_mac::OFFERED {
-        commands.push(app_command("use_this_mac", UseThisMac, &[]));
-    }
-    if ssh::OFFERED {
-        commands.push(app_command("install_over_ssh", InstallOverSsh, &[]));
-    }
     if finder::OFFERED {
         commands.push(app_command("show_workers_in_finder", ShowWorkersInFinder, &[]));
     }
@@ -3694,12 +3677,6 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item(ssh::UPDATE_ALL, IconName::Download, Box::new(UpdateAllWorkers)),
         item(server::UPDATE_SERVER, IconName::Download, Box::new(UpdateServer)),
     ];
-    if this_mac::OFFERED {
-        items.push(item(this_mac::TITLE, IconName::Monitor, Box::new(UseThisMac)));
-    }
-    if ssh::OFFERED {
-        items.push(item(ssh::TITLE, IconName::Terminal, Box::new(InstallOverSsh)));
-    }
     if finder::OFFERED {
         items.push(item(finder::TITLE, IconName::FolderOpen, Box::new(ShowWorkersInFinder)));
     }
@@ -5077,8 +5054,9 @@ mod tests {
     /// answering it starts one here and installs the worker against it, then shows the
     /// worker's `doctor` as the checklist: the missing grant's button opens its own pane. Back
     /// from System Settings the worker is started again and asked again; once it may stream
-    /// and take input the flow waits for the server to list it, and then gives way to its
-    /// workspace, after which "Add a machine" no longer offers this Mac.
+    /// and take input the flow waits for the server to list it. Its end says this Mac is
+    /// ready, with a phone's way in, and Done gives way to the workspace. After that "Add a
+    /// machine" keeps this Mac's row as the way back to its checklist, beside a phone's.
     #[gpui::test]
     fn this_mac_runs_the_server_then_waits_for_it_to_list_the_worker(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -5128,21 +5106,33 @@ mod tests {
         list(&ws, cx, worker, "mac-studio");
         cx.executor().advance_clock(this_mac::RETRY);
         cx.run_until_parked();
+        let status = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.this_mac.is_some()));
+        assert_eq!(status, Some(true), "the flow ends on its checklist");
+        assert_eq!(flow(&ws, cx).map(|f| f.ready_words()), Some(this_mac::READY));
+        assert!(cx.debug_bounds("connect-device").is_some(), "where a phone joins");
+        let done = cx.debug_bounds("this-mac-done").expect("Done");
+        cx.simulate_click(done.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
         assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "the page gave way to this Mac");
 
-        // Listed now, this Mac is no longer offered as a machine to add.
+        // Listed now, the row is the way back to this Mac's checklist.
         cx.dispatch_action(AddWorker);
         cx.run_until_parked();
         assert!(cx.debug_bounds("install-over-ssh").is_some(), "a machine's panel");
-        assert!(cx.debug_bounds("use-this-mac").is_none(), "this Mac is listed already");
+        assert!(cx.debug_bounds("use-this-mac").is_some(), "this Mac's checklist, again");
+        let phone = cx.debug_bounds("connect-device").expect("a phone's way in");
+        cx.simulate_click(phone.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let shown = ws.read_with(cx, |ws, _| (ws.adding.is_none(), ws.inviting.is_some()));
+        assert_eq!(shown, (true, true), "the panel gives way to the code");
     }
 
     /// The app's own lines: with notifications off and Slopty's place in Finder switched off,
-    /// the flow stays open once the server lists this Mac, ready, each line's button opening
-    /// its place in System Settings. Back from there with both turned on, it closes onto the
-    /// workspace. Notifications never asked for are asked for from the line's "Allow".
+    /// each line's button opens its place in System Settings, and back from there with both
+    /// turned on, both lines say so. Notifications never asked for are asked for from the
+    /// line's "Allow".
     #[gpui::test]
-    fn this_mac_stays_open_on_what_the_app_lacks_until_it_is_turned_on(cx: &mut TestAppContext) {
+    fn this_mac_checks_what_the_app_lacks_and_reads_it_again(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, false);
@@ -5166,8 +5156,7 @@ mod tests {
         list(&ws, cx, ready.worker, "mac-studio");
         cx.executor().advance_clock(this_mac::RETRY);
         cx.run_until_parked();
-        assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, and open still");
-        assert!(cx.debug_bounds("this-mac-done").is_some(), "the person says when they are done");
+        assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, the flow's end");
         let _listing = host.asked();
 
         let notes = cx.debug_bounds("this-mac-fix-notifications").expect("notifications' button");
@@ -5181,18 +5170,31 @@ mod tests {
         *host.finder.borrow_mut() = Some(finder::Step::Open(dir.path().to_path_buf()));
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
         cx.run_until_parked();
-        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "nothing left: it closes");
+        let marks = |cx: &mut VisualTestContext| {
+            flow(&ws, cx).map(|f| this_mac::app_lines(&f).map(|l| (l.mark, l.fix)))
+        };
+        let on = (this_mac::Mark::Ok, None);
+        assert_eq!(marks(cx), Some([on, on]), "read again: both on");
 
         // Never asked: "Allow" asks, and the answer is the line's.
+        let done = cx.debug_bounds("this-mac-done").expect("Done");
+        cx.simulate_click(done.center(), gpui::Modifiers::none());
         host.notes.set(Some(this_mac::Alerts::Unasked));
-        cx.dispatch_action(UseThisMac);
-        cx.run_until_parked();
-        assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, open on the question");
+        pick(cx, "use-this-mac");
         let allow = cx.debug_bounds("this-mac-fix-notifications").expect("Allow");
         cx.simulate_click(allow.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert!(host.asked().contains(&"ask notes".to_owned()), "the system asks the person");
-        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "allowed: nothing left, it closes");
+        assert_eq!(flow(&ws, cx).and_then(|f| f.notes), Some(this_mac::Alerts::Allowed));
+    }
+
+    /// "Add a machine…", then its row `row`.
+    fn pick(cx: &mut VisualTestContext, row: &'static str) {
+        cx.dispatch_action(AddWorker);
+        cx.run_until_parked();
+        let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("the {row} row"));
+        cx.simulate_click(at.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
     }
 
     /// With several servers answering, or none to look on, "Use this Mac" asks for the server
@@ -5270,8 +5272,7 @@ mod tests {
         host.stops.borrow_mut().push_back(failed);
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
-        cx.dispatch_action(UseThisMac);
-        cx.run_until_parked();
+        pick(cx, "use-this-mac");
         assert_eq!(host.asked(), ["install join hub:45560"], "the server set already");
         assert_eq!(
             flow(&ws, cx).map(|f| f.worker),
@@ -5302,8 +5303,7 @@ mod tests {
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
         let worker = |cx: &mut VisualTestContext| flow(&ws, cx).map(|f| f.worker);
-        cx.dispatch_action(UseThisMac);
-        cx.run_until_parked();
+        pick(cx, "use-this-mac");
         assert_eq!(host.asked(), ["install join hub:45560"]);
         assert_eq!(worker(cx), Some(this_mac::Worker::EndsSessions(plan)));
         let lines = flow(&ws, cx).map(|f| this_mac::checklist(&f, "", "")).expect("the flow");
@@ -5336,11 +5336,14 @@ mod tests {
         assert!(offered);
     }
 
-    /// The palette offers it on a Mac.
+    /// This Mac and a machine over SSH are rows of "Add a machine…", which is the palette's
+    /// one line for them.
     #[test]
-    fn the_palette_offers_this_mac_on_a_mac() {
-        let offered = app_palette_items().iter().any(|item| item.label == this_mac::TITLE);
-        assert_eq!(offered, this_mac::OFFERED);
+    fn the_palette_adds_a_machine_in_one_line() {
+        let labels: Vec<_> = app_palette_items().into_iter().map(|item| item.label).collect();
+        assert!(labels.iter().any(|l| l == "Add a machine\u{2026}"), "{labels:?}");
+        let rows = [this_mac::TITLE, ssh::TITLE];
+        assert!(!labels.iter().any(|l| rows.contains(&l.as_str())), "rows only: {labels:?}");
     }
 
     /// The palette offers the workers in Finder on a Mac, under a command the keymap can bind.

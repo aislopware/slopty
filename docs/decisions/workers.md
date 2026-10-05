@@ -713,7 +713,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     those lines include the note that the previous worker is back.
   - **The sheet.** The add panel lists "Install on a machine over SSH" beside "Use this Mac as
     a worker", in one framed section headed "Set up a worker". The palette offers the same
-    (`app.install_over_ssh`, no default chord). The first run is that panel, so it offers SSH
+    (`app.install_over_ssh`, no default chord; merged into the panel's rows on 2026-10-05). The first run is that panel, so it offers SSH
     too. The form asks for a host (`user@host` fills the user), then an optional user and port,
     and says that it uses the person's ssh config and agent. While it runs, the form gives way
     to five step lines: connect, copy, install, check, add. Under them is a bar that fills while
@@ -1186,3 +1186,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   only on the server's panel, where there is a field to type into. The state is chosen from
   what the device has, not from the platform, so a headless test on the Mac holds it.
   Test: `slopty-app` `a_device_that_adds_no_machine_says_they_are_added_from_a_mac`.
+
+- ✅ **The add panel holds this Mac, SSH and a phone; "Use this Mac" ends on a ready page**
+  (2026-10-05, readiness G12 and the merge ruled that day). The palette had three lines for
+  one panel: "Add a machine…", "Use this Mac" and "Install on a machine over SSH". A phone's
+  way in, "Connect a phone or iPad", was in the palette only. Neither the finished "Use this
+  Mac" nor the Mac's "Add a machine" mentioned it.
+  - **Rows only.** The palette lines and their keymap rows (`app.use_this_mac`,
+    `app.install_over_ssh`) are deleted with their actions. Both are rows of "Add a machine…"
+    only. This Mac's row stays once the server lists it, saying so ("Shared through your
+    server. Check what it needs"), since it is the one way back to this Mac's checklist.
+  - **A phone's row.** The machine panel ends with "On a phone or iPad", whose row opens the
+    code in the panel's place.
+  - **The flow's end.** Once the server lists this Mac, the checklist stays up. It says this
+    Mac is ready (and that only this Mac reaches it while Tailscale is down), offers the
+    phone's row, and Done gives way to the workspace. The notice that said "ready" as the
+    panel closed is gone: the page says it, where the person is looking.
+  - **A fix's button sits centred beside the title and the line under it**, not on the
+    title's line, so a line with a button is as tall as one without.
+  - Tests: `slopty-app` `this_mac_runs_the_server_then_waits_for_it_to_list_the_worker`
+    (the ready page, Done, the row kept, the phone's row), `ssh::tests` open the sheet from
+    the panel's row.
+
