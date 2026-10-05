@@ -3618,3 +3618,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_running_command_survives_a_reflow_and_finishes_after_one`, worker
     `command_blocks_reach_every_viewer` (the end and its time through a real session), golden
     `worker_frame_blocks`.
+
+- ✅ **A pseudo-terminal XNU made no slave for is opened again** (2026-10-05, measured). The
+  land net's tests lane hung once in `no_descriptor_of_the_daemon_leaks_into_a_shell`, and six
+  processes running that test side by side hung 6 times in about 150 runs. Every hung process
+  was spinning in `grantpt`'s `TIOCPTYGRANT`, and the kernel had logged
+  `devfs_make_node() call failed for ptmx_get_ioctl()` at each hang. In XNU
+  (`bsd/kern/tty_ptmx.c`), the last close of a pair frees its minor under the devfs lock and
+  removes its `/dev/ttysN` node only after dropping it. A new pair handed that minor in between
+  finds the name taken, so it gets no node. `grantpt` on it then gets `ERESTART`
+  (`_devfs_setattr`, `bsd/kern/tty_dev.c`), and the kernel reissues the call forever. The
+  terminal behind it never opens, and the thread is lost.
+  - `Pty::open` reads the slave's name with `TIOCPTYGNAME` before granting. That is the ioctl
+    itself, not `ptsname_r`: Apple's `ptsname_r` `stat`s the name, fails when there is no node,
+    and returns -1, which rustix reads as an error number. It grants only when the node is
+    root's, which a node made for this pair is until it is granted. If there is no node, or the
+    node is still owned by the old pair's owner, it closes the master and opens another, up to
+    64 times. By then the old node is gone.
+  - Not covered: a stale node whose old pair was granted by root and never handed to its user.
+    Root-run pty programs (sshd, sudo) give theirs to the user.
+  - Linux's devpts makes the slave with the pair, under its lock, and is unchanged.
+  - Evidence (`docs/MEASUREMENTS.md`, 2026-10-05): after the fix, 480 runs of the six-process
+    contention had no hang, while the kernel logged 3 slaveless pairs. The probe
+    `ptmx_churn::opens_beside_closes_in_other_processes_never_wedge` (ignored, two minutes of
+    six processes opening and closing) wedges a churner with the check turned off, and passes
+    with it while the kernel logs 11 slaveless pairs. Eight threads of one process never met
+    the race in eighteen runs, so no regular test can see it in reasonable time.

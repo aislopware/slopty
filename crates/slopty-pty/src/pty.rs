@@ -53,12 +53,8 @@ pub struct Pty {
 impl Pty {
     /// Open a new PTY at `size`.
     pub fn open(size: TermSize) -> Result<Self, PtyError> {
-        let master = open_master().map_err(|e| PtyError::os("open /dev/ptmx", e))?;
-        rustix::pty::grantpt(&master).map_err(|e| PtyError::os("grantpt", e))?;
+        let (master, slave_path) = open_granted()?;
         rustix::pty::unlockpt(&master).map_err(|e| PtyError::os("unlockpt", e))?;
-        let name =
-            rustix::pty::ptsname(&master, Vec::new()).map_err(|e| PtyError::os("ptsname", e))?;
-        let slave_path = PathBuf::from(OsString::from(name.to_string_lossy().into_owned()));
         // The tty state only exists once the slave is open; size it through the slave so the
         // child sees the right geometry from its first syscall.
         let slave = rustix::fs::open(
@@ -209,6 +205,75 @@ fn open_master() -> io::Result<OwnedFd> {
 #[cfg(not(target_os = "macos"))]
 fn open_master() -> io::Result<OwnedFd> {
     open_ptmx().map_err(io::Error::from).map_err(exhausted)
+}
+
+/// The path of `master`'s slave, which may not exist ([`open_granted`]). The ioctl itself and
+/// not `ptsname_r`, which `stat`s the name and fails when there is no node, returning -1 where
+/// rustix reads an error number.
+#[cfg(target_os = "macos")]
+fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use rustix::ioctl::{Getter, ioctl, opcode};
+    /// `TIOCPTYGNAME` in `sys/ttycom.h`: `_IOC(IOC_OUT, 't', 83, 128)`.
+    const NAME: rustix::ioctl::Opcode = opcode::read::<[u8; 128]>(b't', 83);
+    // SAFETY: `NAME` is the opcode, and the kernel writes the slave's NUL-terminated name
+    // into exactly the 128 bytes it declares.
+    let getter = unsafe { Getter::<NAME, [u8; 128]>::new() };
+    // SAFETY: as above; `master` is an open descriptor of the clone device.
+    let name = unsafe { ioctl(master, getter) }.map_err(|e| PtyError::os("ptsname", e))?;
+    let name = std::ffi::CStr::from_bytes_until_nul(&name)
+        .map_err(|e| PtyError::os("ptsname", io::Error::new(io::ErrorKind::InvalidData, e)))?;
+    Ok(PathBuf::from(OsStr::from_bytes(name.to_bytes())))
+}
+
+/// The path of `master`'s slave.
+#[cfg(not(target_os = "macos"))]
+fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
+    let name = rustix::pty::ptsname(master, Vec::new()).map_err(|e| PtyError::os("ptsname", e))?;
+    Ok(PathBuf::from(OsString::from(name.to_string_lossy().into_owned())))
+}
+
+/// How many times [`open_granted`] replaces a master whose slave XNU never made.
+#[cfg(target_os = "macos")]
+const REMAKES: usize = 64;
+
+/// A new master granted to this user (`grantpt`), and its slave's path. XNU makes the slave's
+/// `/dev/ttysN` when the clone hands out minor N, and fails to when the pair that last had N is
+/// between freeing the minor and removing its node (`ptmx_free_ioctl`, `tty_ptmx.c`): the name
+/// is still taken, the kernel logs `devfs_make_node() call failed`, and the pair has no node.
+/// `TIOCPTYGRANT` on such a master answers `ERESTART` (`_devfs_setattr`, `tty_dev.c`), which
+/// the kernel turns into the same call again, so `grantpt` spins in the kernel for good: 6 of
+/// 6 runs of six processes opening beside closes did (`docs/MEASUREMENTS.md`, 2026-10-05). A
+/// node made for this pair is root's until granted; the old pair's was granted to its owner,
+/// and once removed there is none. So a slave path that is not root's marks a master to close
+/// and open again, by which time the old node is going or gone.
+#[cfg(target_os = "macos")]
+fn open_granted() -> Result<(OwnedFd, PathBuf), PtyError> {
+    for _ in 0..REMAKES {
+        let master = open_master().map_err(|e| PtyError::os("open /dev/ptmx", e))?;
+        let slave_path = slave_path(&master)?;
+        if rustix::fs::stat(&slave_path).is_ok_and(|node| node.st_uid == 0) {
+            rustix::pty::grantpt(&master).map_err(|e| PtyError::os("grantpt", e))?;
+            return Ok((master, slave_path));
+        }
+        drop(master);
+        std::thread::yield_now();
+    }
+    Err(PtyError::os(
+        "grantpt",
+        io::Error::new(io::ErrorKind::ResourceBusy, "no new pseudo-terminal got its slave device"),
+    ))
+}
+
+/// A new master granted to this user, and its slave's path. devpts makes the slave with the
+/// pair, under its lock.
+#[cfg(not(target_os = "macos"))]
+fn open_granted() -> Result<(OwnedFd, PathBuf), PtyError> {
+    let master = open_master().map_err(|e| PtyError::os("open /dev/ptmx", e))?;
+    rustix::pty::grantpt(&master).map_err(|e| PtyError::os("grantpt", e))?;
+    let slave_path = slave_path(&master)?;
+    Ok((master, slave_path))
 }
 
 /// How many times [`regrown`] makes again an open refused with ENXIO.

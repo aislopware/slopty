@@ -14777,3 +14777,33 @@ Encode time, submit → callback (p50 / p95 / max, ms):
   not chroma.
 - The cost of 4:4:4 is bits, not time: about 1.6× the rate for the same luma (2026-09-28).
   That is why the gate, not the person, decides, from the rate the link allows.
+
+## 2026-10-05 — a pseudo-terminal with no slave wedged `grantpt`
+
+mac-studio (Darwin 27.0.0), load 17 to 35 from other sessions. The land net's tests lane timed
+out after 120 s on `slopty-pty::spawn` `no_descriptor_of_the_daemon_leaks_into_a_shell`, and
+that test passed 150 times out of 150 run on its own. Six copies running side by side, each
+given 30 s, hung at runs 2, 12, 19, 29, 33 and 55. `sample` showed each hung process with every
+round done and the test thread in `JoinHandle::join` on an opener thread. That opener, and in
+one process the test's own round loop too, was in `Pty::open` → `grantpt` → `__ioctl`, running,
+not sleeping. The kernel log held `devfs_make_node() call failed for ptmx_get_ioctl()` at each
+hang (`log show --predicate 'eventMessage CONTAINS "devfs_make_node"'`). The cause is in
+`docs/decisions/terminal.md`, "A pseudo-terminal XNU made no slave for is opened again".
+
+| Run | Hung | Slaveless pairs the kernel logged |
+| --- | --- | --- |
+| six processes × the spawn test, 30 s each, before the fix | 6 of 6 processes, within 2 to 55 runs | one per hang |
+| the same, 80 runs each, with the fix | 0 of 480 | 3 |
+| `opens_beside_closes_in_other_processes_never_wedge`, the check turned off | a churner wedged; the probe failed at 180 s | 1 |
+| the same probe with the fix | 0; six churners done at 120 s | 11 |
+| eight threads of one process, 2,000 opens each: 12 runs with the fix, 6 with the check off | 0 | 0 in the 6 runs checked |
+
+The race needs other processes: within one process it never came. With the fix, an open costs
+one `stat` of the slave's node more, and the eight-thread churn still opened and closed its
+16,000 pairs in 1.4 to 1.8 s.
+
+```sh
+cargo test -p slopty-pty --test ptmx_churn --no-run   # target/debug/deps/ptmx_churn-<hash>
+target/debug/deps/ptmx_churn-<hash> --exact churn::opens_beside_closes_in_other_processes_never_wedge --ignored
+log show --last 5m --predicate 'eventMessage CONTAINS "devfs_make_node"'   # the slaveless pairs it met
+```
