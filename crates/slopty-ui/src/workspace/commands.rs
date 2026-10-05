@@ -616,7 +616,8 @@ impl WorkspaceView {
     }
 
     /// The working directory of an item: a terminal's session's, a file tile's directory, the
-    /// folder a folder tile is at.
+    /// folder a folder tile or a folder's changes are at, and where the agent of a thread, or
+    /// of the thread a review is of, works, as its worker's table says.
     pub(super) fn cwd_of(&self, item: &Item) -> Option<String> {
         match &item.kind {
             ItemKind::Terminal { session } => self.summary(*session).and_then(|s| s.cwd.clone()),
@@ -624,7 +625,12 @@ impl WorkspaceView {
             ItemKind::File { path } if path.starts_with('/') => path
                 .rsplit_once('/')
                 .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned()),
-            ItemKind::Folder { path } if path.starts_with('/') => Some(path.clone()),
+            ItemKind::Folder { path } | ItemKind::Changes { path } if path.starts_with('/') => {
+                Some(path.clone())
+            }
+            ItemKind::Thread { thread } | ItemKind::Review { thread } => {
+                self.thread_place(*thread).and_then(|p| p.cwd.clone())
+            }
             _ => None,
         }
     }

@@ -1309,6 +1309,9 @@ pub enum PaletteEvent {
     Dismiss,
 }
 
+/// What a step makes of the text typed in its field ([`CommandPalette::set_typed`]).
+type TypedLines = dyn Fn(&str) -> Vec<PaletteItem>;
+
 /// The palette: a field and the items that match it.
 pub struct CommandPalette {
     items: Vec<PaletteItem>,
@@ -1316,6 +1319,9 @@ pub struct CommandPalette {
     places: Vec<String>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
     path_items: Vec<PaletteItem>,
+    /// What a step makes of typed text in place of [`path_items`]: the folder step's typed
+    /// folder, for one.
+    typed: Option<Rc<TypedLines>>,
     /// `Open <path>` for the files the worker found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
     input: Entity<InputState>,
@@ -1426,6 +1432,7 @@ impl CommandPalette {
             items,
             places,
             path_items: Vec::new(),
+            typed: None,
             found: Vec::new(),
             input,
             scope: cx.focus_handle(),
@@ -1451,6 +1458,20 @@ impl CommandPalette {
         };
         palette.refresh(cx);
         palette
+    }
+
+    /// Make typed text into `lines` in this step, in place of the path lines: the folder step
+    /// takes a folder typed from its root, for one.
+    pub fn set_typed(&mut self, lines: impl Fn(&str) -> Vec<PaletteItem> + 'static, cx: &App) {
+        self.typed = Some(Rc::new(lines));
+        let text = self.input.read(cx).value().to_string();
+        self.path_items = self.typed_lines(&text);
+        self.refresh(cx);
+    }
+
+    /// The lines typed `text` adds: the step's own, else the path lines.
+    fn typed_lines(&self, text: &str) -> Vec<PaletteItem> {
+        self.typed.as_ref().map_or_else(|| path_items(text), |lines| lines(text))
     }
 
     /// What the list says while it has no line: what its lines wait on, or why there are none.
@@ -1524,7 +1545,7 @@ impl CommandPalette {
     /// Start the field at `text` (a path to finish), its path lines listed at once.
     pub fn seed(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
-        self.path_items = path_items(text);
+        self.path_items = self.typed_lines(text);
         self.refresh(cx);
     }
 
@@ -1666,7 +1687,7 @@ impl CommandPalette {
         self.selected = 0;
         self.reveal = true;
         let text = self.input.read(cx).value().to_string();
-        self.path_items = path_items(&text);
+        self.path_items = self.typed_lines(&text);
         self.found.clear();
         self.refresh(cx);
         cx.emit(PaletteEvent::Changed(text));

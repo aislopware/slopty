@@ -447,3 +447,46 @@ fn added_comments_no_composer_takes_stay(cx: &mut TestAppContext) {
     let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("The agent's composer did not open"));
 }
+
+/// ⌘T from a thread's own tile, or from its review, opens the shell where its agent works, as
+/// its worker's table says, not in the machine's home.
+#[gpui::test]
+fn a_shell_opened_from_a_thread_or_its_review_starts_where_the_agent_works(
+    cx: &mut TestAppContext,
+) {
+    use slopty_proto::thread::AgentId;
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = AgentId::named(AgentId::CODEX);
+    state.meta.cwd = "/w/app".to_owned();
+    let thread = state.meta.id;
+    table_of(&view, cx, key, 1, &state);
+    view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let cwd_of_new_shell = |cx: &mut VisualTestContext, studio: &mut Fake| {
+        studio.drain();
+        view.update_in(cx, |v, w, cx| v.new_terminal(&NewTerminal, w, cx));
+        cx.run_until_parked();
+        studio.drain().into_iter().find_map(|m| match m {
+            ClientMsg::OpenSession { spec, .. } => spec.cwd,
+            _ => None,
+        })
+    };
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    assert_eq!(cwd_of_new_shell(cx, &mut studio).as_deref(), Some("/w/app"), "from the thread");
+
+    let _review = review_from(&view, cx, &own, thread);
+    let at = view.read_with(cx, |v, _| {
+        v.layout().tiles().find(|t| {
+            v.item(*t)
+                .is_some_and(|i| matches!(i.kind, ItemKind::Review { thread: r } if r == thread))
+        })
+    });
+    let at = at.expect("the review's tile");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(at, cx));
+    assert_eq!(cwd_of_new_shell(cx, &mut studio).as_deref(), Some("/w/app"), "from its review");
+}

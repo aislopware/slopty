@@ -45,6 +45,9 @@ const PICK_FOLDER: &str = "In which folder";
 /// The folder step's line for a new worktree of a repository there, its name after it.
 pub(super) const NEW_WORKTREE: &str = "New worktree of";
 
+/// The folder step's line for a folder typed from its root: "Start in ~/w/app".
+pub(super) const TYPED_FOLDER: &str = "Start in";
+
 /// The folder step's last line.
 pub(super) const RESUME_PAST: &str = "Resume a past session\u{2026}";
 
@@ -209,10 +212,30 @@ impl WorkspaceView {
         }
     }
 
-    /// The repository `cwd` is in on `worker`, as a shell standing there reported it.
-    fn repo_at(&self, worker: WorkerKey, cwd: &str) -> Option<String> {
+    /// The repository `cwd` is in on `worker`: as a shell or a thread standing there reported
+    /// it; else the one of those `cwd` is inside; else `cwd` itself when a folder tile there
+    /// lists a `.git`.
+    fn repo_at(&self, worker: WorkerKey, cwd: &str, cx: &gpui::App) -> Option<String> {
         let w = self.workers.get(&worker)?;
-        w.sessions.values().find(|s| s.cwd.as_deref() == Some(cwd)).and_then(|s| s.repo.clone())
+        let shells = w.sessions.values().map(|s| (s.cwd.clone(), s.repo.clone()));
+        let threads = self.places_on(worker, cx).into_iter().map(|p| (p.cwd, p.repo));
+        let known: Vec<(Option<String>, String)> =
+            shells.chain(threads).filter_map(|(at, repo)| Some((at, repo?))).collect();
+        let standing = known.iter().find(|(at, _)| at.as_deref() == Some(cwd));
+        let inside = || {
+            known.iter().find(|(_, repo)| {
+                cwd == repo || cwd.strip_prefix(repo.as_str()).is_some_and(|r| r.starts_with('/'))
+            })
+        };
+        if let Some((_, repo)) = standing.or_else(inside) {
+            return Some(repo.clone());
+        }
+        let cloned = self
+            .folders
+            .values()
+            .map(|f| f.read(cx))
+            .any(|f| f.path() == cwd && f.entries().iter().any(|e| e.name == ".git"));
+        cloned.then(|| cwd.to_owned())
     }
 
     /// The folders `agent` may start in on `worker`, each once: the focused shell's there, the
@@ -244,7 +267,7 @@ impl WorkspaceView {
         let mut repos: Vec<String> = Vec::new();
         let mut worktrees: Vec<PaletteItem> = Vec::new();
         for cwd in &folders {
-            let Some(repo) = self.repo_at(worker, cwd).filter(|r| !repos.contains(r)) else {
+            let Some(repo) = self.repo_at(worker, cwd, cx).filter(|r| !repos.contains(r)) else {
                 continue;
             };
             let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
@@ -269,7 +292,13 @@ impl WorkspaceView {
         lines.extend(worktrees);
         let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
         lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
+        let agent = agent.clone();
         self.open_step(lines, PICK_FOLDER, window, cx);
+        if let Some(palette) = self.palette.clone() {
+            palette.update(cx, |p, cx| {
+                p.set_typed(move |text| typed_folder(text, worker, &agent), cx);
+            });
+        }
     }
 
     /// "Resume a past session…": the machine is asked for the agent's sessions, and the step
@@ -370,6 +399,20 @@ impl WorkspaceView {
         let palette = cx.new(|cx| CommandPalette::pick_step(lines, placeholder, theme, window, cx));
         self.show_palette(palette, window, cx);
     }
+}
+
+/// A folder typed from its root in the folder step (`/…`, `~/…`, `~`): the line that starts
+/// `agent` there on `worker`. Anything else adds none; the step's own lines are found by it.
+fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId) -> Vec<PaletteItem> {
+    let typed = text.trim();
+    if !(typed.starts_with('/') || typed.starts_with("~/") || typed == "~") {
+        return Vec::new();
+    }
+    let cwd = if typed == "/" { typed } else { typed.trim_end_matches('/') }.to_owned();
+    // As typed: it is the person's own spelling of where.
+    let shown = format!("{TYPED_FOLDER} {cwd}");
+    let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
+    vec![PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Glyph::Icon(IconName::Folder))]
 }
 
 /// The session step's line for `session` on `worker`: what it is about (its title, else the

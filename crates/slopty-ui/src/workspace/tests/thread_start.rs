@@ -651,3 +651,61 @@ fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
     assert!(suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
     assert_eq!(start.cwd, "/w/atlas", "the first folder in it, the most recent shell's");
 }
+
+/// The folder step takes a folder typed from its root as a line of its own, and starts there.
+/// A thread's own tile offers a new worktree of the repository its agent works in, as its
+/// worker's table says, with no shell standing there.
+#[gpui::test]
+fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAppContext) {
+    use super::super::agent_start::{NEW_WORKTREE, TYPED_FOLDER};
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    studio.drain();
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("/srv/api/");
+    settle(cx);
+    let typed = format!("{TYPED_FOLDER} /srv/api");
+    assert!(step_lines(&view, cx).contains(&typed), "{:?}", step_lines(&view, cx));
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("go");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut studio);
+    let [(_, _, cwd, _)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!(cwd, "/srv/api", "started where it was typed");
+
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = AgentId::named(AgentId::CODEX);
+    state.meta.cwd = "/w/atlas".to_owned();
+    let thread = state.meta.id;
+    let mut row = state.row(WallMs::ZERO);
+    row.repo = Some("/w/atlas".to_owned());
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        let table = slopty_proto::thread::wire::TableFrame::Snapshot {
+            cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
+            rows: vec![row],
+        };
+        v.thread_table(key, &table, cx);
+        v.open_thread(key, thread, cx);
+    });
+    settle(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    settle(cx);
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let lines = step_lines(&view, cx);
+    assert_eq!(lines.first().map(String::as_str), Some("w/atlas"), "its folder first: {lines:?}");
+    assert!(lines.contains(&format!("{NEW_WORKTREE} atlas")), "{lines:?}");
+}

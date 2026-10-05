@@ -1625,3 +1625,20 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `layout::tests::{wide_work_meets_the_leading_edge_and_leaves_no_bare_band,
     a_strip_narrower_than_the_view_starts_at_its_edge, wide_work_leaves_no_sliver_beside_it,
     a_fling_past_either_end_stops_at_the_end_snap}`.
+
+- ✅ **New work starts where the focused work is** (2026-10-05, readiness 10-06 N16 and N14).
+  - *From any tile that knows a folder.* ⌘T, "New agent…" and "Open folder…" start in the
+    focused tile's folder. That was a terminal's, a file's or a folder tile's. It is now also a
+    thread tile's or a review's, taken from where the thread's agent works as its worker's table
+    says (`ThreadPlace::cwd`), and a folder's changes, taken from their path. Before, a shell
+    opened from a Codex thread or from a review landed in home.
+  - *A typed folder.* The folder step of "New agent…" takes a folder typed from its root
+    (`/…`, `~/…`, `~`) as a line of its own, "Start in" and the path as typed. That uses a
+    step's own typed lines (`CommandPalette::set_typed`), in place of the main palette's file
+    and folder lines, which in a step would have started something else.
+  - *Worktrees of every repository known.* "New worktree of" is offered for a folder whose
+    repository a shell or a thread there reported. It is also offered for a folder inside such a
+    repository, and for a folder tile that lists a `.git`. The worker already resolves the clone
+    from any folder in it, and refuses in words for a folder in no repository.
+  - Tests: `workspace::tests::review_tile::a_shell_opened_from_a_thread_or_its_review_starts_where_the_agent_works`,
+    `workspace::tests::thread_start::the_folder_step_takes_a_typed_folder_and_a_threads_repository`.

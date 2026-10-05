@@ -341,6 +341,13 @@ impl WorkspaceView {
         self.faces.threads.places.get(&thread)
     }
 
+    /// Where each of `worker`'s threads works, as its table last said.
+    pub(super) fn places_on(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadPlace> {
+        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
+        let places = &self.faces.threads.places;
+        hub.read(cx).threads().rows().rows.keys().filter_map(|t| places.get(t).cloned()).collect()
+    }
+
     /// `thread`'s title as its worker's table last said, while it has one.
     pub(super) fn thread_named(&self, thread: ThreadId) -> Option<String> {
         self.faces.threads.titles.get(&thread).filter(|t| !t.trim().is_empty()).cloned()
