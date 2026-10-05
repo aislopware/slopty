@@ -62,6 +62,10 @@ objc2-foundation = { workspace = true, features = [
     "NSFileManager",
     # Which of the trash's errors is a volume without one (`trash`).
     "FoundationErrors",
+    # One GET through the system's URL loading (`fetch`).
+    "NSURLSession",
+    "NSURLResponse",
+    "NSData",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [

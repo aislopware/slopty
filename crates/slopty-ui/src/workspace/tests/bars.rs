@@ -138,6 +138,28 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     assert_eq!(lines, 4, "a tile and a browser line for each port");
 }
 
+/// A newer Slopty is said quietly on the bar's right until this build is the latest, and the
+/// line opens its release page.
+#[gpui::test]
+fn a_newer_release_is_said_in_the_bar_and_opens_its_page(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    assert!(cx.debug_bounds("status-release").is_none(), "nothing while this is the latest");
+    let page = "https://github.com/aislopware/slopty/releases/tag/v0.2.0";
+    let release =
+        slopty_client::update::Release { version: "0.2.0".to_owned(), page: page.to_owned() };
+    view.update(cx, |v, cx| v.set_release(Some(release), cx));
+    cx.run_until_parked();
+    assert!(labels(&view, cx).iter().any(|l| l == "Slopty 0.2.0 is out"));
+    let right = cx.debug_bounds("status-right").expect("the right");
+    assert!(cx.debug_bounds("status-release").is_some_and(|r| right.contains(&r.center())));
+    click(cx, "status-release");
+    assert_eq!(cx.opened_url().as_deref(), Some(page));
+    view.update(cx, |v, cx| v.set_release(None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-release").is_none(), "gone once this build is the latest");
+}
+
 /// A quick round trip is said only under the pointer, and its samples draw nothing; a slow
 /// one stands on its own. Either lands at the start of the bar's right, so nothing else there
 /// moves, and the figure says its unit, not "RTT".

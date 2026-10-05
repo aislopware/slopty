@@ -4,6 +4,10 @@
 //! The link found it in the wire prefix ([`WrongBuild`]) before any message. The client
 //! stops its fast redials to that host and says this instead. The app shows it on the worker,
 //! and the CLI prints it ([`std::fmt::Display`]).
+//!
+//! The app's own updates are read from its repository's latest release on GitHub
+//! ([`latest_release_feed`], [`newer_release`]): a release is published, never pushed, so the
+//! app asks and says what it found, and the person downloads it.
 
 use slopty_net::{NetError, WrongBuild};
 use slopty_proto::wire::BUILD;
@@ -99,6 +103,63 @@ impl std::fmt::Display for UpdateNotice {
 /// An error in its own right, so a dial that fails for it can carry it.
 impl std::error::Error for UpdateNotice {}
 
+/// A Slopty release newer than this build.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Release {
+    /// Its version, without the tag's `v`: `0.2.0`.
+    pub version: String,
+    /// Its page, which has the notes and the download.
+    pub page: String,
+}
+
+/// The latest-release feed of `repository`, the `https://github.com/<owner>/<repo>` Cargo knows
+/// the package by; `None` for a repository elsewhere, which has no such feed.
+#[must_use]
+pub fn latest_release_feed(repository: &str) -> Option<String> {
+    let path = repository.trim_end_matches('/').strip_prefix("https://github.com/")?;
+    let (owner, repo) = path.trim_end_matches(".git").split_once('/')?;
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (plain(owner) && plain(repo))
+        .then(|| format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"))
+}
+
+/// The release in `body`, GitHub's latest-release answer, when it is final and newer.
+///
+/// That is a published release, not a draft or a pre-release, newer than `current`. Anything
+/// else is `None`: no release yet (GitHub says "Not Found"), a draft or a pre-release, an
+/// answer that does not parse, a page that is not https, or a version that is not newer.
+#[must_use]
+pub fn newer_release(body: &[u8], current: &str) -> Option<Release> {
+    #[derive(serde::Deserialize)]
+    struct Latest {
+        tag_name: String,
+        html_url: String,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        prerelease: bool,
+    }
+    let latest: Latest = serde_json::from_slice(body).ok()?;
+    if latest.draft || latest.prerelease || !latest.html_url.starts_with("https://") {
+        return None;
+    }
+    let version = latest.tag_name.strip_prefix('v').unwrap_or(&latest.tag_name);
+    (version_parts(version)? > version_parts(current)?)
+        .then(|| Release { version: version.to_owned(), page: latest.html_url.clone() })
+}
+
+/// `major.minor.patch` as numbers, build metadata (`+…`) aside; `None` for anything else,
+/// a pre-release suffix included.
+fn version_parts(version: &str) -> Option<[u64; 3]> {
+    let core = version.split_once('+').map_or(version, |(core, _build)| core);
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+    let numbers = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(numbers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +199,52 @@ mod tests {
             assert_eq!(notice.command(), "slopty server install", "{here}");
         }
         assert!(!notice.here(), "hub is another machine");
+    }
+
+    /// The feed comes from the repository Cargo names, so a fork reads its own releases.
+    #[test]
+    fn the_feed_is_the_repository_s_latest_release() {
+        assert_eq!(
+            latest_release_feed("https://github.com/aislopware/slopty").as_deref(),
+            Some("https://api.github.com/repos/aislopware/slopty/releases/latest")
+        );
+        assert_eq!(
+            latest_release_feed("https://github.com/me/slopty.git/").as_deref(),
+            Some("https://api.github.com/repos/me/slopty/releases/latest")
+        );
+        for elsewhere in
+            ["https://gitlab.com/a/b", "https://github.com/a", "", "https://github.com/a/b?x"]
+        {
+            assert_eq!(latest_release_feed(elsewhere), None, "{elsewhere}");
+        }
+    }
+
+    /// Only a published, final release newer than this build is news.
+    #[test]
+    fn only_a_newer_final_release_is_news() {
+        let answer = |tag: &str, extra: &str| {
+            format!(
+                r#"{{"tag_name":"{tag}","html_url":"https://github.com/a/b/releases/tag/{tag}",
+                "draft":false,"prerelease":false{extra},"assets":[]}}"#
+            )
+        };
+        let newer = newer_release(answer("v0.2.0", "").as_bytes(), "0.1.9").unwrap();
+        assert_eq!(newer.version, "0.2.0");
+        assert_eq!(newer.page, "https://github.com/a/b/releases/tag/v0.2.0");
+        assert!(newer_release(answer("v0.10.0", "").as_bytes(), "0.9.3").is_some(), "by number");
+        assert!(newer_release(answer("v0.1.0", "").as_bytes(), "0.1.0").is_none(), "this one");
+        assert!(newer_release(answer("v0.1.0", "").as_bytes(), "0.2.0").is_none(), "older");
+        assert!(newer_release(answer("v0.3.0-rc.1", "").as_bytes(), "0.2.0").is_none());
+        let draft = answer("v1.0.0", "").replace(r#""draft":false"#, r#""draft":true"#);
+        assert!(newer_release(draft.as_bytes(), "0.2.0").is_none(), "a draft");
+        let pre = answer("v1.0.0", "").replace(r#""prerelease":false"#, r#""prerelease":true"#);
+        assert!(newer_release(pre.as_bytes(), "0.2.0").is_none(), "a pre-release");
+        let none = br#"{"message":"Not Found","status":"404"}"#;
+        assert!(newer_release(none, "0.1.0").is_none(), "no release yet");
+        assert!(newer_release(b"<html>", "0.1.0").is_none(), "not an answer");
+        let page = answer("v1.0.0", "").replace("https://github.com", "file:///etc");
+        assert!(newer_release(page.as_bytes(), "0.1.0").is_none(), "only an https page opens");
+        assert!(newer_release(answer("v1.0.0+abc", "").as_bytes(), "0.1.0+wire.1").is_some());
     }
 
     #[test]

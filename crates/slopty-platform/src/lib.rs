@@ -27,6 +27,8 @@ pub mod dock;
 #[cfg(target_os = "macos")]
 pub mod drag;
 #[cfg(target_vendor = "apple")]
+pub mod fetch;
+#[cfg(target_vendor = "apple")]
 pub mod file_drop;
 #[cfg(target_os = "macos")]
 pub mod files;

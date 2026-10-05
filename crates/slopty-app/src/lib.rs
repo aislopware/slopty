@@ -31,6 +31,8 @@ mod server;
 pub mod settings;
 pub mod ssh;
 pub mod this_mac;
+#[cfg(target_os = "macos")]
+mod update;
 pub mod window;
 pub mod workers;
 
@@ -3874,6 +3876,11 @@ pub fn open_workspace(
     }
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
     hangs::watch(cx);
+    // A self-test reads no network.
+    #[cfg(target_os = "macos")]
+    if !self_test() {
+        update::watch(&workspace, cx);
+    }
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
     // that launched the app waited for `taps` above and arrives first, once the window is up.

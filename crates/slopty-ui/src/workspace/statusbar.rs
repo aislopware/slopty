@@ -5,7 +5,8 @@
 //! (the checkout and the branch) is the title bar's breadcrumb's to say, and the directory the
 //! tile header's. On the right, the link to the focused worker while it is worth a look (a
 //! round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is over the bar,
-//! what is wrong with the link when something is, what the focused tile says of itself (a
+//! what is wrong with the link when something is, a newer Slopty while one is out (which opens
+//! its release page when clicked), what the focused tile says of itself (a
 //! file's language and caret; a page's host is its header's), the plan's windows the focused
 //! machine's agents last published (`5h 23% · 7d 41%`, in `warn` from 80 %, which list every
 //! machine's when clicked), the ports forwarded here (which list them when clicked), the transfers
@@ -36,6 +37,7 @@ use gpui::{
 use slopty_client::layout::WorkerKey;
 use slopty_client::pacing::PaintRate;
 use slopty_client::relay::RelayNotice;
+use slopty_client::update::Release;
 use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
@@ -94,6 +96,8 @@ pub(super) struct Bar {
     transfers_open: bool,
     /// The popover just closed, drawn for the moment it takes to fade away.
     leaving: Option<Popover>,
+    /// A newer Slopty that is out, as the app last found it.
+    release: Option<Release>,
 }
 
 impl Bar {
@@ -415,6 +419,12 @@ impl WorkspaceView {
             }))
         });
         let transfers = (!phone).then(|| self.transfers_button(cx)).flatten();
+        let release = self.bar.release.as_ref().filter(|_| !phone).map(|release| {
+            let text = SharedString::from(release_line(release));
+            let page = release.page.clone();
+            let el = button("status-release", text.clone(), theme).child(text);
+            tab_stop(el, s.accent).on_click(move |_ev, _w, cx| cx.open_url(&page))
+        });
         let clock = cx.background_executor().now();
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
             let path = w.relay.path().map(path_label);
@@ -447,6 +457,7 @@ impl WorkspaceView {
             plan.map(gpui::IntoElement::into_any_element),
             ports.map(gpui::IntoElement::into_any_element),
             transfers.map(gpui::IntoElement::into_any_element),
+            release.map(gpui::IntoElement::into_any_element),
             frame.map(gpui::IntoElement::into_any_element),
             (!phone).then(|| self.render_yard(window, cx)).flatten(),
         ];
@@ -963,6 +974,22 @@ fn spaced(el: Stateful<Div>, text: &str, theme: &Theme) -> Stateful<Div> {
 }
 
 /// A readout: a status the screen reader reads as `text`, on one line.
+impl WorkspaceView {
+    /// The newer Slopty that is out, or `None` once this build is the latest: the bar says it
+    /// quietly until then.
+    pub fn set_release(&mut self, release: Option<Release>, cx: &mut Context<Self>) {
+        if self.bar.release != release {
+            self.bar.release = release;
+            App::notify(cx, self.chrome.statusbar.entity_id());
+        }
+    }
+}
+
+/// What the bar says of a newer release: "Slopty 0.2.0 is out".
+pub(super) fn release_line(release: &Release) -> String {
+    format!("Slopty {} is out", release.version)
+}
+
 fn readout(selector: &'static str, text: SharedString) -> Stateful<Div> {
     div()
         .id(selector)

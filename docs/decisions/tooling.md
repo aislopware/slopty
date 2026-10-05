@@ -1087,3 +1087,25 @@ more full-window layer.
   lanes passed and only the promote failed. The promote job now says in the run's summary that
   a workflow changed and which command to run. A token with the `workflows` scope in the
   repository's secrets would let CI do it itself; that is the person's call.
+
+- ✅ **The Mac app says when a newer Slopty is out** (2026-10-05, readiness G11). Worker and
+  server builds already follow the app, but the app itself never learned of a release.
+  - **What it reads.** The GitHub latest-release feed of the repository Cargo names
+    (`CARGO_PKG_REPOSITORY`), so a fork reads its own releases. It reads at launch and every
+    24 hours after. Only a published, final release whose `major.minor.patch` is past this
+    build counts: no release yet (GitHub answers 404), a draft, a pre-release, an answer that
+    does not parse, or a page that is not https says nothing.
+  - **How it is said.** As a quiet line in the status bar, "Slopty 0.2.0 is out", which opens
+    the release page when clicked. It stays until this build is the latest. A toast would
+    interrupt for something that can wait a day, and a notification would be louder still.
+  - **What it does not do.** It downloads and installs nothing. The person updates from the
+    page, at least until Developer ID signing and notarisation run on every release.
+  - **Only the Mac asks.** An iPhone or iPad takes its builds from the App Store or TestFlight,
+    not from a release page. A self-test reads no network.
+  - **How it fetches.** One GET through `NSURLSession` (`slopty_platform::fetch`), so the
+    system's TLS, proxy and network path apply, and there is no HTTP stack of our own for a
+    request a day.
+  - Tests: `slopty_client::update` `the_feed_is_the_repository_s_latest_release` and
+    `only_a_newer_final_release_is_news`; `slopty_platform::fetch`
+    `a_get_brings_the_body_or_why_not` (a loopback server: 200, 404, refused, not a URL);
+    `slopty-ui` `a_newer_release_is_said_in_the_bar_and_opens_its_page`.
