@@ -1492,3 +1492,36 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   context the workspace adds only while a closed tile's notice stands (`CLOSING_CTX`). After
   that the palette's "Reopen" lines still bring a closed tile back. Test:
   `workspace::tests::a_closed_shell_can_be_taken_back`.
+- ✅ **A thread is found again: the "Earlier" fold, past sessions, and a closed agent reopened**
+  (2026-10-05, readiness 10-05 G2). The navigator listed a thread with no tile only while it
+  was at work, a closed agent's tile ended its session after its notice and left the "Reopen"
+  list, and the worker's past sessions (`ThreadRequest::Sessions`) were asked by nobody. So a
+  thread at rest, or one whose tile was closed, could not be found again.
+  - *Earlier.* The navigator ends with one fold, "Earlier", over the threads at rest (idle, or
+    their agent exited) with no tile here and no tile of their terminal, newest first, each
+    with how long it has rested. It starts folded. Open, it lists the newest 8 and a "Show N
+    more" line; while the filter holds words it lists every match, as a fold hides nothing
+    then. A scope narrows it to the project's threads, and a facet empties it, as for tiles. A
+    row opens the thread's tile (an exited agent's thread offers Resume there). One fold at the
+    end was chosen over a fold in each project: a project whose tiles are all closed would
+    otherwise keep a header for its old threads, and the list would grow with every thread a
+    worker ever kept.
+  - *Resume a past session…* ends "New agent…"'s folder step. It asks the machine for the
+    agent's sessions from the agent's own record, last prompted first (up to 50, every folder),
+    and the next step opens at once saying it reads them, then lists each by its title, else
+    its last prompt, with its folder and age; typing finds a session by its prompts too. The
+    answer may say why there are none (the agent keeps no list), and the step says that. A
+    session whose kept thread runs opens that thread's tile, since one writer holds a session;
+    one whose agent exited opens and is taken up again as below; one with no thread here starts
+    its agent on it in the agent's own words (`PastSession::resume`), and the worker finds the
+    thread kept of it before making another. The app hands `WorkerMsg::Sessions` to
+    `WorkspaceView::past_sessions`; an answer no open step waits on is dropped.
+  - *A closed agent tile.* Its session still ends after the notice, so a closed agent stops as
+    the person meant, but the tile stays on the "Reopen" list with its thread. Reopened, it
+    comes back where it was as its thread's tile, and the thread hub takes the agent up again
+    through its own door once the thread is known here (`ThreadHub::resume_when_known`, by
+    `exited::gone`): Claude Code and Codex by a start of their session, pi and an ACP agent by
+    the next message, nothing for an agent that cannot load its sessions.
+  - Tests: `workspace::tests::thread_waits::threads_at_rest_wait_under_the_earlier_fold`,
+    `a_closed_agent_tile_comes_back_as_its_thread_taken_up_again`;
+    `workspace::tests::thread_start::a_past_session_is_found_and_taken_up_again`.

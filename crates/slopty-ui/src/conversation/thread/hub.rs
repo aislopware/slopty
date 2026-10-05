@@ -16,7 +16,7 @@
 //! that exited is taken up again from here too ([`ThreadHub::resume`]): a start of its own
 //! session, answered as any start is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -121,6 +121,9 @@ pub struct ThreadHub {
     /// Starts that take an exited thread's session up again, not yet answered: each goes again
     /// under its id when the link comes back.
     resuming: HashMap<IntentId, (ThreadId, Start)>,
+    /// Threads to take up again as soon as they are known here and their agent has exited:
+    /// a closed agent tile reopened after its session ended.
+    waking: HashSet<ThreadId>,
     /// The git ops asked of this worker's repositories, and what each last said.
     git: GitBook,
     /// The agents this worker can start a thread of, as its link says.
@@ -161,6 +164,7 @@ impl ThreadHub {
             writing: None,
             refusals: Vec::new(),
             resuming: HashMap::new(),
+            waking: HashSet::new(),
             git: GitBook::default(),
             agents: Vec::new(),
             searched: None,
@@ -292,6 +296,7 @@ impl ThreadHub {
         match changed {
             Changed::Nothing => {}
             Changed::Thread => {
+                self.wake(thread, cx);
                 self.rest(thread, cx);
                 self.keep_outbox(cx);
                 cx.emit(HubEvent::Thread(thread));
@@ -478,6 +483,30 @@ impl ThreadHub {
             cx.emit(HubEvent::Send(vec![msg]));
         }
         id
+    }
+
+    /// Take `thread` up again once it is known here, by its agent's own door
+    /// ([`crate::conversation::thread::view::exited::gone`]): a start of its session, where its
+    /// agent takes one. One whose next message starts it, one that cannot go on, and one still
+    /// running are left as they are.
+    pub fn resume_when_known(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
+        self.waking.insert(thread);
+        self.wake(thread, cx);
+    }
+
+    /// `thread` is known now: take it up again if it was asked to be.
+    fn wake(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
+        if !self.waking.contains(&thread) {
+            return;
+        }
+        let Some(state) = self.threads.mirror(thread).and_then(|m| m.state()) else { return };
+        self.waking.remove(&thread);
+        let gone = crate::conversation::thread::view::exited::gone(state);
+        if let Some(crate::conversation::thread::view::exited::Gone::Resume(start)) = gone
+            && !self.resuming(thread)
+        {
+            let _id = self.resume(thread, start, cx);
+        }
     }
 
     /// Whether a start taking `thread` up again is on its way.

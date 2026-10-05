@@ -633,6 +633,8 @@ struct ClosedTile {
     offered: bool,
     /// For a plain shell: what a new shell takes once its session has ended.
     shell: Option<Reshell>,
+    /// For an agent's terminal: its thread, taken up again once its session has ended.
+    thread: Option<slopty_proto::thread::ThreadId>,
 }
 
 impl ClosedTile {
@@ -703,6 +705,8 @@ pub struct WorkspaceView {
     attention_at: Option<usize>,
     /// The last agent started, where and in which folder: what "New agent…" lists first.
     last_start: Option<agent_start::LastStart>,
+    /// The past sessions the open step waits on: of which agent, on which machine.
+    sessions_asked: Option<(WorkerKey, slopty_proto::thread::AgentId, gpui::EntityId)>,
     /// The tiles of threads on their way.
     starting: starting::Starts,
     /// Each worker's items kept on this device.
@@ -988,6 +992,7 @@ impl WorkspaceView {
             drawn_thread_waits: Vec::new(),
             attention_at: None,
             last_start: None,
+            sessions_asked: None,
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
             faces_dirty: true,
@@ -1913,6 +1918,8 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::start_thread_action))
             .on_action(cx.listener(Self::new_agent_of))
             .on_action(cx.listener(Self::new_agent_on))
+            .on_action(cx.listener(Self::resume_past_session))
+            .on_action(cx.listener(Self::resume_session))
             .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))

@@ -222,6 +222,22 @@ impl WorkspaceView {
         self.send_start(item, prompt, cx);
     }
 
+    /// Take a past session of `agent` on `key` up again by a start in `cwd` with `args`, the
+    /// agent's own words for it: its tile opens at once saying it is starting.
+    pub(super) fn start_resumed(
+        &mut self,
+        key: WorkerKey,
+        agent: AgentId,
+        cwd: String,
+        args: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let item = ItemId::new();
+        let starting = super::starting::Starting::new(key, agent, cwd, None).with_args(args);
+        self.open_starting(item, starting, cx);
+        self.send_start(item, None, cx);
+    }
+
     /// Send the start of the thread on its way in `item`'s tile, with `prompt` as its first
     /// message.
     pub(super) fn send_start(
@@ -239,7 +255,7 @@ impl WorkspaceView {
             drive: None,
             prompt,
             model: None,
-            args: Vec::new(),
+            args: starting.args.clone(),
         };
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));
@@ -546,6 +562,37 @@ impl WorkspaceView {
         tracing::info!(id = %item.id, %thread, "open thread");
         self.propose(key, ItemOp::Add(item), cx);
         cx.notify();
+    }
+
+    /// A closed agent tile taken back after its session ended: `thread`'s tile where it was
+    /// (`at`), focused, and its agent taken up again through its own door once the thread is
+    /// known here ([`ThreadHub::resume_when_known`]).
+    pub(super) fn reopen_thread(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        at: Option<slopty_client::layout::Pos>,
+        cx: &mut Context<Self>,
+    ) {
+        let tile = self.tile_of_thread(thread).unwrap_or_else(|| {
+            let id = ItemId::new();
+            self.open_thread_as(key, thread, id, cx);
+            TileRef { worker: key, item: id }
+        });
+        if let Some(at) = at {
+            self.tick();
+            self.layout.move_tile(
+                tile,
+                slopty_client::layout::DropTarget::NewColumn {
+                    workspace: at.workspace,
+                    index: at.column,
+                },
+            );
+            self.layout_touched(cx);
+        }
+        self.focus_tile(tile, cx);
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.resume_when_known(thread, cx));
     }
 
     /// The tile that shows `thread`, on any worker.
@@ -1022,6 +1069,9 @@ impl WorkspaceView {
                 let stand = ThreadStand {
                     worker: super::projects::worker_key(r.at.worker),
                     rung: r.rung,
+                    // The server's ladder ranks threads; whether an agent exited is its
+                    // worker's word.
+                    exited: false,
                     asks: None,
                     terminal: r.terminal,
                     since: r.since_ms,
@@ -1121,6 +1171,8 @@ pub(super) struct ThreadStand {
     pub worker: WorkerKey,
     /// Its rung on the attention ladder, its subagents' folded in.
     pub rung: Rung,
+    /// Its agent has exited.
+    pub exited: bool,
     /// What it asks while it waits on the person: its first open request.
     pub asks: Option<RequestCard>,
     /// Its terminal, whose agent status speaks for it where it has one.
@@ -1197,6 +1249,7 @@ fn stands_of<'a>(
             let stand = ThreadStand {
                 worker: key,
                 rung: Rung::of(r),
+                exited: matches!(r.status.liveness, slopty_proto::thread::Liveness::Exited { .. }),
                 asks: r.requests.first().cloned(),
                 terminal: r.terminal,
                 since: r.updated_ms,

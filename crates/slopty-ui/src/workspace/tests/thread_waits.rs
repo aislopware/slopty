@@ -3,7 +3,7 @@
 //! thread whose terminal's agent already says it is not counted twice.
 
 use slopty_proto::thread::wire::{RequestCard, TableFrame, ThreadRow};
-use slopty_proto::thread::{AskId, Cursor, Request};
+use slopty_proto::thread::{AskId, Cursor, Request, ThreadId};
 
 use super::*;
 use crate::icons::Status;
@@ -110,12 +110,12 @@ fn a_thread_its_terminal_speaks_for_is_counted_once(cx: &mut TestAppContext) {
 
 /// A thread of `rows`' kind with an id of its own.
 fn another(mut row: ThreadRow) -> ThreadRow {
-    row.id = slopty_proto::thread::ThreadId::new();
+    row.id = ThreadId::new();
     row
 }
 
 /// The thread tiles `drained` asked the worker to add.
-fn thread_tiles_added(drained: &[ClientMsg]) -> Vec<slopty_proto::thread::ThreadId> {
+fn thread_tiles_added(drained: &[ClientMsg]) -> Vec<ThreadId> {
     drained
         .iter()
         .filter_map(|m| match m {
@@ -152,7 +152,7 @@ fn the_ladder_and_needs_you_list_a_waiting_thread_by_its_rung(cx: &mut TestAppCo
     table(&view, cx, key, vec![tiled.clone(), untiled.clone(), failed.clone()]);
 
     let ladder = view.read_with(cx, |v, _| v.attention_ladder());
-    let said: Vec<(Option<TileRef>, Option<slopty_proto::thread::ThreadId>)> = ladder
+    let said: Vec<(Option<TileRef>, Option<ThreadId>)> = ladder
         .iter()
         .map(|step| match step {
             Step::Session(w) => (w.tile, None),
@@ -232,12 +232,8 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     table(&view, cx, key, vec![own.clone()]);
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1, "the link's own word");
 
-    let (alone, on_terminal, also_on_terminal, terminal) = (
-        slopty_proto::thread::ThreadId::new(),
-        slopty_proto::thread::ThreadId::new(),
-        slopty_proto::thread::ThreadId::new(),
-        SessionId::new(),
-    );
+    let (alone, on_terminal, also_on_terminal, terminal) =
+        (ThreadId::new(), ThreadId::new(), ThreadId::new(), SessionId::new());
     let ranked = |worker: WorkerId, thread, terminal| Ranked {
         at: ThreadAt { worker, thread },
         rung: Rung::NeedsYou,
@@ -469,4 +465,113 @@ fn long_words_never_push_a_row_s_answers_out_of_view(cx: &mut TestAppContext) {
     let row = cx.debug_bounds(leak(format!("nav-waiting-{thread}"))).expect("its row");
     let allow = cx.debug_bounds(leak(format!("nav-allow-{thread}"))).expect("Allow on its row");
     assert!(allow.right() <= row.right(), "Allow {allow:?} inside its row {row:?}");
+}
+
+/// A thread at rest at `ms` with no request, its agent's turn over.
+fn resting(ms: u64) -> ThreadRow {
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.id = ThreadId::new();
+    state.meta.terminal = None;
+    state.status.phase = slopty_proto::thread::Phase::Idle;
+    let mut row = state.row(WallMs::from_millis(ms));
+    row.requests.clear();
+    row.to_review = false;
+    row.title = format!("rested {ms}");
+    row.updated_ms = WallMs::from_millis(ms);
+    row
+}
+
+/// The threads at rest with no tile here are found again under the navigator's last fold,
+/// "Earlier": folded at first, then the newest few, then every one, each a click from its
+/// tile. A thread at work is never among them, and one with a tile leaves the fold.
+#[gpui::test]
+fn threads_at_rest_wait_under_the_earlier_fold(cx: &mut TestAppContext) {
+    use crate::workspace::navigator::EARLIER_SHOWN;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let rows: Vec<ThreadRow> = (1..=10_u64).map(|n| resting(n.saturating_mul(1000))).collect();
+    let newest = rows.last().map(|r| r.id).expect("ten");
+    let mut working = asking(None);
+    working.requests.clear();
+    working.status.phase = slopty_proto::thread::Phase::Working;
+    let at_work = working.id;
+    table(&view, cx, key, rows.iter().cloned().chain([working]).collect());
+    let shown = |cx: &mut VisualTestContext, thread: ThreadId| {
+        cx.debug_bounds(leak(format!("nav-thread-{thread}"))).is_some()
+    };
+    assert!(cx.debug_bounds("nav-earlier").is_some(), "the fold");
+    assert!(!shown(cx, newest), "folded at first");
+    assert!(shown(cx, at_work), "a thread at work is listed with its project, as before");
+
+    let fold = cx.debug_bounds("nav-earlier").expect("the fold");
+    cx.simulate_click(fold.center(), Modifiers::none());
+    cx.run_until_parked();
+    let listed = rows.iter().filter(|r| shown(cx, r.id)).count();
+    assert_eq!(listed, EARLIER_SHOWN, "the newest few");
+    assert!(shown(cx, newest));
+    let more = cx.debug_bounds("nav-earlier-more").expect("the rest a click away");
+    cx.simulate_click(more.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(rows.iter().filter(|r| shown(cx, r.id)).count(), rows.len(), "every one");
+
+    let row = cx.debug_bounds(leak(format!("nav-thread-{newest}"))).expect("its row");
+    cx.simulate_click(row.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(newest)).is_some(), "its tile opens");
+    assert!(!shown(cx, newest), "and it leaves the fold");
+}
+
+/// A closed agent's tile stays on the "Reopen" list after its session ends, and comes back as
+/// its thread's tile with its agent taken up again by the agent's own door: Claude Code by a
+/// start of its session.
+#[gpui::test]
+fn a_closed_agent_tile_comes_back_as_its_thread_taken_up_again(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{ThreadFrame, ThreadRequest};
+    use slopty_proto::thread::{AgentId, Drive, Liveness};
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let session = SessionId::new();
+    let _tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = AgentId::named(AgentId::CLAUDE_CODE);
+    state.meta.drive = Drive::named(Drive::OBSERVED);
+    state.meta.native = "5f1c".to_owned();
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    table(&view, cx, key, vec![state.row(WallMs::ZERO)]);
+
+    view.update_in(cx, |v, _w, cx| v.close_shell(session, cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(UNDO_CLOSE);
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.closed_lines().len()), 1, "still on the list");
+    state.meta.terminal = None;
+    state.status.liveness = Liveness::Exited { resumable: true };
+    table(&view, cx, key, vec![state.row(WallMs::ZERO)]);
+    studio.drain();
+
+    view.update_in(cx, |v, _w, cx| v.take_back(None, cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(thread)).is_some(), "its thread's tile");
+    let hub = view.update(cx, |v, cx| v.thread_hub(key, cx));
+    let frame =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, state: Box::new(state) };
+    hub.update(cx, |hub, cx| hub.frame(thread, frame, cx));
+    cx.run_until_parked();
+    let resumed: Vec<Vec<String>> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start.args),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resumed, [vec!["--resume".to_owned(), "5f1c".to_owned()]], "taken up again");
 }

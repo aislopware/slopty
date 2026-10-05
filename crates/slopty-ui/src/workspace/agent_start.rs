@@ -7,13 +7,24 @@
 //! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
 //! offers all it has. The folders are the focused shell's on that machine, then the last start's
 //! there, then where its shells stand, most recent first, then its home.
+//!
+//! The folder step ends with "Resume a past session…": the machine lists the agent's sessions
+//! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
+//! that opens at once saying it reads them. A session picked opens the thread kept of it, its
+//! agent taken up again if it exited, or starts the agent on it in its own words.
+
+use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Window};
 use slopty_client::layout::WorkerKey;
+use slopty_proto::ClientMsg;
 use slopty_proto::thread::AgentId;
+use slopty_proto::thread::wire::{PastSession, PastSessions, ThreadRequest};
 
 use super::WorkspaceView;
-use super::actions::{NewAgent, NewAgentOf, NewAgentOn, StartThread};
+use super::actions::{
+    NewAgent, NewAgentOf, NewAgentOn, ResumePastSession, ResumeSession, StartThread,
+};
 use super::projects::agent_label;
 use crate::icons::{Glyph, IconName};
 use crate::palette::{CommandPalette, PaletteItem};
@@ -29,6 +40,18 @@ const PICK_MACHINE: &str = "On which machine";
 
 /// What the folder step's field says.
 const PICK_FOLDER: &str = "In which folder";
+
+/// The folder step's last line.
+pub(super) const RESUME_PAST: &str = "Resume a past session\u{2026}";
+
+/// What the session step's field says.
+const PICK_SESSION: &str = "Which session";
+
+/// What the session step says until the machine has listed them.
+pub(super) const READING_SESSIONS: &str = "Reading past sessions\u{2026}";
+
+/// The most past sessions the step lists.
+const SESSIONS_LISTED: u32 = 50;
 
 /// The last start: what each step lists first next time.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -206,7 +229,7 @@ impl WorkspaceView {
         if !folders.iter().any(|f| *f == home || Some(f.as_str()) == self.home_of(worker)) {
             folders.push(home);
         }
-        let lines = folders
+        let mut lines: Vec<PaletteItem> = folders
             .into_iter()
             .map(|cwd| {
                 let shown = super::tile::cwd_tail(&cwd, self.home_of(worker));
@@ -214,7 +237,92 @@ impl WorkspaceView {
                 PaletteItem::new(&shown, IconName::Folder, action, &[])
             })
             .collect();
+        let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
+        lines.push(PaletteItem::new(RESUME_PAST, IconName::RotateCcwClock, past, &[]));
         self.open_step(lines, PICK_FOLDER, window, cx);
+    }
+
+    /// "Resume a past session…": the machine is asked for the agent's sessions, and the step
+    /// that lists them opens at once, saying it reads them.
+    pub(super) fn resume_past_session(
+        &mut self,
+        ask: &ResumePastSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ResumePastSession { worker, agent } = ask.clone();
+        if !self.workers.get(&worker).is_some_and(super::Worker::is_linked) {
+            let text = format!("{} is out of reach", self.worker_name(worker));
+            self.show_notice(text, cx);
+            return;
+        }
+        self.send(
+            worker,
+            ClientMsg::Thread(ThreadRequest::Sessions {
+                agent: Some(agent.clone()),
+                cwd: None,
+                query: String::new(),
+                limit: SESSIONS_LISTED,
+            }),
+        );
+        self.open_step(Vec::new(), PICK_SESSION, window, cx);
+        if let Some(palette) = self.palette.clone() {
+            palette.update(cx, |p, cx| p.set_empty(READING_SESSIONS, cx));
+            self.sessions_asked = Some((worker, agent, palette.entity_id()));
+        }
+    }
+
+    /// `key` listed an agent's past sessions: the step waiting on them lists them, or says why
+    /// there are none. An answer nothing waits on, or for another step, is dropped.
+    pub fn past_sessions(&mut self, key: WorkerKey, past: PastSessions, cx: &mut Context<Self>) {
+        let Some((worker, agent, step)) = self.sessions_asked.clone() else { return };
+        if worker != key || past.agent.as_ref() != Some(&agent) || past.cwd.is_some() {
+            return;
+        }
+        self.sessions_asked = None;
+        let Some(palette) = self.palette.clone().filter(|p| p.entity_id() == step) else {
+            return;
+        };
+        let now = crate::clock::now(cx).as_millis();
+        let home = self.home_of(worker).map(str::to_owned);
+        let lines: Vec<PaletteItem> = past
+            .sessions
+            .into_iter()
+            .map(|session| session_line(worker, session, home.as_deref(), now))
+            .collect();
+        let empty = past.absent.unwrap_or_else(|| {
+            format!("{} has no past {} sessions", self.worker_name(worker), agent_label(&agent))
+        });
+        if let Some(cut) = past.cut {
+            tracing::info!(%cut, "past sessions listed in part");
+        }
+        palette.update(cx, |p, cx| {
+            p.set_items(lines, cx);
+            p.set_empty(empty, cx);
+        });
+    }
+
+    /// A past session picked. The thread kept of it opens where it runs; one whose agent
+    /// exited opens and is taken up again through its agent's door; a session with no thread
+    /// here starts its agent on it, in the agent's own words.
+    pub(super) fn resume_session(
+        &mut self,
+        pick: &ResumeSession,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = pick.worker;
+        let session = &pick.session;
+        let kept = session.thread.and_then(|t| Some((t, self.thread_stand(t)?.exited)));
+        match kept {
+            Some((thread, false)) => self.open_thread(worker, thread, cx),
+            Some((thread, true)) => self.reopen_thread(worker, thread, None, cx),
+            None => {
+                let cwd = session.cwd.clone().unwrap_or_else(|| "~".to_owned());
+                let (agent, args) = (session.agent.clone(), session.resume.clone());
+                self.start_resumed(worker, agent, cwd, args, cx);
+            }
+        }
     }
 
     /// One step of the choice, as the palette.
@@ -232,4 +340,35 @@ impl WorkspaceView {
         let palette = cx.new(|cx| CommandPalette::pick_step(lines, placeholder, theme, window, cx));
         self.show_palette(palette, window, cx);
     }
+}
+
+/// The session step's line for `session` on `worker`: what it is about (its title, else the
+/// last prompt that matched, else its id), where it ran and how long ago, found as well by its
+/// prompts.
+fn session_line(
+    worker: WorkerKey,
+    session: PastSession,
+    home: Option<&str>,
+    now: u64,
+) -> PaletteItem {
+    let prompt = session.prompts.first().map(|p| crate::kit::first_line(&p.text).to_owned());
+    let label = session
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| prompt.clone().filter(|p| !p.is_empty()))
+        .unwrap_or_else(|| {
+            format!("Session {}", session.native.chars().take(8).collect::<String>())
+        });
+    let cwd = session.cwd.as_deref().map(|cwd| super::tile::cwd_tail(cwd, home));
+    let age =
+        session.updated_ms.map(|at| Duration::from_millis(now.saturating_sub(at.as_millis())));
+    let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
+    let glyph = Glyph::agent(&session.agent.0);
+    let action = Box::new(ResumeSession { worker, session: Box::new(session) });
+    PaletteItem::new(&label, IconName::RotateCcwClock, action, &[])
+        .with_icon(glyph)
+        .in_dir(cwd)
+        .aged(age)
+        .about((!about.is_empty()).then_some(about))
 }

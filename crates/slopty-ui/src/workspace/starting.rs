@@ -58,6 +58,8 @@ pub(super) struct Starting {
     pub agent: AgentId,
     /// The folder it starts in, as the machine takes it (`~` its home).
     pub cwd: String,
+    /// More words for its agent: those that take a past session up again.
+    pub args: Vec<String>,
     /// The first message's field, until the start is sent.
     pub field: Option<StartField>,
     /// Whether the start went to the machine.
@@ -73,7 +75,12 @@ impl Starting {
         cwd: String,
         field: Option<StartField>,
     ) -> Self {
-        Self { worker, agent, cwd, field, sent: false }
+        Self { worker, agent, cwd, args: Vec::new(), field, sent: false }
+    }
+
+    /// The same start, with `args` for its agent.
+    pub(super) fn with_args(self, args: Vec<String>) -> Self {
+        Self { args, ..self }
     }
 }
 

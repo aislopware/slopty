@@ -149,6 +149,7 @@ drawn![
     "regex",
     "replace",
     "replace-all",
+    "rotate-ccw-clock",
     "rotate-cw",
     "save",
     "scissors",

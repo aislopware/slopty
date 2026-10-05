@@ -862,6 +862,7 @@ impl WorkspaceView {
             cwd: self.summary(s).and_then(|summary| summary.cwd.clone()),
             name: item.name.clone(),
         });
+        let thread = session.and_then(|s| self.session_thread(s));
         let kept = session.map(|s| self.session_kept_for(s, cx));
         self.closed.push(ClosedTile {
             tile,
@@ -873,6 +874,7 @@ impl WorkspaceView {
             title: title.clone(),
             offered: true,
             shell,
+            thread,
         });
         while self.closed.len() > CLOSED_KEPT {
             let oldest = self.closed.remove(0);
@@ -928,13 +930,14 @@ impl WorkspaceView {
     }
 
     /// Closing `seq`'s session has run as long as it is kept: the worker closes it and its view
-    /// goes. A plain shell stays on the list, to come back as a new shell in its directory;
-    /// anything else ran a program that cannot come back, and leaves the list.
+    /// goes. A plain shell stays on the list, to come back as a new shell in its directory, and
+    /// an agent's to come back as its thread taken up again; anything else ran a program that
+    /// cannot come back, and leaves the list.
     fn session_ends(&mut self, seq: u64, cx: &mut Context<Self>) {
         let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
         let Some(closed) = self.closed.get_mut(ix) else { return };
         let (tile, session) = (closed.tile, closed.session.take());
-        if closed.shell.is_none() {
+        if closed.shell.is_none() && closed.thread.is_none() {
             let gone = self.closed.remove(ix);
             self.let_go_closed(&gone, cx);
         }
@@ -989,7 +992,8 @@ impl WorkspaceView {
     }
 
     /// Put back the closing `seq` (the toast's, a palette line's), or the latest. A shell whose
-    /// session has ended comes back as a new shell in its directory, under its name.
+    /// session has ended comes back as a new shell in its directory, under its name; an agent's
+    /// as its thread's tile where it was, the agent taken up again through its own door.
     pub(super) fn take_back(&mut self, seq: Option<u64>, cx: &mut Context<Self>) {
         let ix = match seq {
             Some(seq) => self.closed.iter().position(|c| c.seq == seq),
@@ -1005,6 +1009,12 @@ impl WorkspaceView {
             (&closed.item.kind, closed.session, closed.shell)
         {
             self.open_session_on(tile.worker, shell.cwd, Vec::new(), shell.name, cx);
+            return;
+        }
+        if let (ItemKind::Terminal { .. }, None, Some(thread)) =
+            (&closed.item.kind, closed.session, closed.thread)
+        {
+            self.reopen_thread(tile.worker, thread, closed.at, cx);
             return;
         }
         // The editor the file tile closed with, edit and all, is its view again; it reads the

@@ -126,6 +126,12 @@ pub(super) const BOARD: &str = "Board";
 /// What a thread's row says of it to assistive technology: it has no tile here yet.
 const NO_TILE_YET: &str = "no tile here";
 
+/// The fold at the list's end over the threads at rest with no tile here.
+pub(super) const EARLIER: &str = "Earlier";
+
+/// The threads at rest the open fold lists before "Show more".
+pub(super) const EARLIER_SHOWN: usize = 8;
+
 /// A board's words while it has no task.
 const NO_TASKS: &str = "No tasks yet";
 
@@ -210,6 +216,8 @@ pub(super) struct NavState {
     pub rail: bool,
     /// The filter over its rows.
     pub filter: Filter,
+    /// The fold over the threads at rest: open, and whether it lists every one.
+    pub earlier: (bool, bool),
     /// Its rows, as the list lays them out.
     pub list: NavList,
     /// Draws it again when a label it shows changes with the clock (a turn's time, an age).
@@ -765,6 +773,8 @@ struct NavThread {
     title: String,
     /// Its state in a word or two.
     word: Option<&'static str>,
+    /// How long it has been at rest, for one under [`EARLIER`].
+    age: Option<String>,
 }
 
 /// One block of the list: a project's or a worker's header, then its board, its tiles and
@@ -870,6 +880,10 @@ enum NavRow {
     Board(NavBoard),
     Tile(NavTile),
     Thread(NavThread),
+    /// The fold over the threads at rest with no tile here: how many, and whether it is open.
+    Earlier(usize, bool),
+    /// The open fold's last line while it lists only the newest: how many more there are.
+    EarlierMore(usize),
     /// An open worker with no tile, in one quiet line where its tiles would be.
     Vacant(WorkerKey),
     /// The filter left nothing.
@@ -888,6 +902,8 @@ impl NavRow {
             | Self::Agent(_)
             | Self::Board(_)
             | Self::Thread(_)
+            | Self::Earlier(..)
+            | Self::EarlierMore(_)
             | Self::Space(_)
             | Self::NewSpace
             | Self::Vacant(_)
@@ -1747,6 +1763,7 @@ impl WorkspaceView {
                 status: stand.status(),
                 title,
                 word,
+                age: None,
             };
             let facts = self.thread_listing_facts(stand.worker, thread);
             match super::grouping::listing_group(projects, &claims, &facts) {
@@ -1759,6 +1776,61 @@ impl WorkspaceView {
             }
         }
         (by_group, own, by_worker)
+    }
+
+    /// The threads at rest (idle, or their agent exited) with no tile here, nor their terminal
+    /// one, that the filter and the scope leave: the newest first, each with how long it has
+    /// rested. What [`Self::nav_threads`] leaves out, for the fold at the list's end.
+    fn nav_earlier(
+        &self,
+        query: &Query,
+        scope: Option<&GroupKey>,
+        projects: &Grouping,
+        now: u64,
+    ) -> Vec<NavThread> {
+        if !query.facets.is_empty() {
+            return Vec::new();
+        }
+        let shown: HashSet<ThreadId> = self
+            .layout
+            .tiles()
+            .filter_map(|tile| match self.item(tile).map(|i| &i.kind) {
+                Some(ItemKind::Thread { thread }) => Some(*thread),
+                Some(ItemKind::Terminal { session }) => self.session_thread(*session),
+                _ => None,
+            })
+            .collect();
+        let mut found: Vec<(ThreadId, &super::faces::ThreadStand)> = self
+            .thread_stands()
+            .filter(|(thread, stand)| stand.rung == Rung::Idle && !shown.contains(thread))
+            .collect();
+        found.sort_by_key(|(thread, stand)| (std::cmp::Reverse(stand.since), *thread));
+        let claims = if found.is_empty() || scope.is_none() { Vec::new() } else { self.claims() };
+        found
+            .into_iter()
+            .filter(|(thread, stand)| {
+                scope.is_none_or(|scope| {
+                    let facts = self.thread_listing_facts(stand.worker, *thread);
+                    super::grouping::listing_group(projects, &claims, &facts)
+                        .is_some_and(|g| g.key == *scope)
+                })
+            })
+            .map(|(thread, stand)| {
+                let rested = Duration::from_millis(now.saturating_sub(stand.since.as_millis()));
+                NavThread {
+                    worker: stand.worker,
+                    thread,
+                    glyph: self
+                        .thread_agent(thread)
+                        .map_or(Glyph::Agent(AgentMark::Other), Glyph::agent),
+                    status: None,
+                    title: self.thread_title(thread),
+                    word: None,
+                    age: (stand.since.as_millis() > 0).then(|| crate::palette::age_label(rested)),
+                }
+            })
+            .filter(|row| matches(&query.text, &[&row.title]))
+            .collect()
     }
 
     /// A declared project's title, else its name.
@@ -2146,6 +2218,21 @@ impl WorkspaceView {
             rows.push(heading("nav-workers", "Machines"));
         }
         self.push_blocks(&mut rows, workers);
+        let earlier = self.nav_earlier(&parsed, scope, &projects, now_ms(cx));
+        if !earlier.is_empty() {
+            // While the filter holds words, a fold hides nothing.
+            let (open, all) = self.nav.earlier;
+            let open = open || !query.is_empty();
+            let total = earlier.len();
+            rows.push(NavRow::Earlier(total, open));
+            if open {
+                let shown = if all || !query.is_empty() { total } else { total.min(EARLIER_SHOWN) };
+                rows.extend(earlier.into_iter().take(shown).map(NavRow::Thread));
+                if shown < total {
+                    rows.push(NavRow::EarlierMore(total.saturating_sub(shown)));
+                }
+            }
+        }
         if rows.is_empty() {
             rows.push(NavRow::Nothing);
         }
@@ -2255,6 +2342,8 @@ impl WorkspaceView {
             Some(NavRow::Group(group)) => self.group_header(group, cx),
             Some(NavRow::Board(board)) => self.board_row(board, cx),
             Some(NavRow::Thread(thread)) => self.thread_row(thread, cx),
+            Some(NavRow::Earlier(count, open)) => self.earlier_heading(*count, *open, cx),
+            Some(NavRow::EarlierMore(more)) => self.earlier_more(*more, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected.get(), cx),
             Some(NavRow::Vacant(key)) => {
                 let key = *key;
@@ -3166,8 +3255,63 @@ impl WorkspaceView {
                 .group_hover(row_group, move |st| st.text_color(hsla(ink))),
         )
         .children(t.word.map(|word| readout(theme, word)))
+        .children(t.age.clone().map(|age| readout(theme, age)))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
         .into_any_element()
+    }
+
+    /// The fold over the threads at rest with no tile here, a heading the list ends with: its
+    /// name, how many, and the chevron. A click opens or folds it.
+    fn earlier_heading(&self, count: usize, open: bool, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let label = format!("{EARLIER}, {count}, {}", if open { "open" } else { "folded" });
+        heading(theme, "nav-earlier".into(), EARLIER.into())
+            .aria_label(SharedString::from(label))
+            .aria_expanded(open)
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .cursor_pointer()
+            .child(readout(theme, count.to_string()))
+            .child(div().flex_1())
+            .child(kit::Disclosure::new(
+                "nav-earlier-chevron",
+                open,
+                theme,
+                px(theme.typography.icon()),
+                hsla(s.text_muted),
+            ))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.nav.earlier = (!this.nav.earlier.0, false);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// The open fold's last line while it lists the newest alone: a click lists the rest.
+    fn earlier_more(&self, more: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let words = SharedString::from(format!("Show {more} more"));
+        let hover = hsla(theme.surfaces.text_secondary);
+        kit::inset_x(div(), theme)
+            .id("nav-earlier-more")
+            .debug_selector(|| "nav-earlier-more".to_owned())
+            .role(Role::Button)
+            .aria_label(words.clone())
+            .h(px(kit::Row::One.height(theme)))
+            .flex()
+            .items_center()
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(theme.surfaces.text_muted))
+            .hover(move |st| st.text_color(hover))
+            .child(words)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.nav.earlier.1 = true;
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// A tile's row: its status glyph (else its kind), its title and at the end of that line

@@ -114,13 +114,14 @@ pub fn sentence_case(word: &str) -> String {
 pub(crate) fn quiet_line(
     theme: &Theme,
     id: &'static str,
-    text: &'static str,
+    text: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
+    let text = text.into();
     crate::kit::inset_x(div(), theme)
         .id(id)
         .debug_selector(move || id.to_owned())
         .role(gpui::accesskit::Role::Status)
-        .aria_label(text)
+        .aria_label(text.clone())
         .py(px(theme.spacing.sm))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(theme.surfaces.text_muted))
@@ -1362,6 +1363,9 @@ pub struct CommandPalette {
     leaving: bool,
     /// The fill under the selected line.
     plate: Plate,
+    /// What the list says while it has no line: that nothing matches, unless its owner says
+    /// otherwise ([`Self::set_empty`]).
+    empty: SharedString,
     theme: Theme,
     _events: Subscription,
     /// How many times the matches were worked out, and how many rows were drawn.
@@ -1443,12 +1447,19 @@ impl CommandPalette {
             fades_in: false,
             leaving: false,
             plate: Plate::default(),
+            empty: NO_COMMAND_MATCHES.into(),
             theme,
             _events: events,
             counts: Cell::default(),
         };
         palette.refresh(cx);
         palette
+    }
+
+    /// What the list says while it has no line: what its lines wait on, or why there are none.
+    pub fn set_empty(&mut self, words: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.empty = words.into();
+        cx.notify();
     }
 
     /// List only the tiles, the workers and a few commands while the field is empty.
@@ -1987,7 +1998,7 @@ impl Render for CommandPalette {
                                 el.py(px(list_pad(&theme))).child(quiet_line(
                                     &theme,
                                     "palette-empty",
-                                    NO_COMMAND_MATCHES,
+                                    self.empty.clone(),
                                 ))
                             }),
                     ),

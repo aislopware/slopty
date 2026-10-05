@@ -7,7 +7,8 @@ use slopty_core::WorkerId;
 use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 
-use super::super::actions::{NewAgent, NewAgentOf};
+use super::super::actions::{NewAgent, NewAgentOf, ResumeSession};
+use super::super::agent_start::{READING_SESSIONS, RESUME_PAST};
 use super::super::projects::worker_key;
 use super::*;
 use crate::palette::PaletteRun;
@@ -102,7 +103,11 @@ fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(step_lines(&view, cx), ["src/app", "~"], "only the studio has Codex: the folder");
+    assert_eq!(
+        step_lines(&view, cx),
+        ["src/app", "~", RESUME_PAST],
+        "only the studio has Codex: the folder"
+    );
     cx.simulate_keystrokes("enter");
     settle(cx);
     assert!(starts(&mut studio).is_empty(), "nothing goes before the first message");
@@ -146,7 +151,7 @@ fn per_agent_lines_skip_the_agent_step(cx: &mut TestAppContext) {
     cx.simulate_input("laptop");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(step_lines(&view, cx), ["~"], "the laptop has no shell: its home");
+    assert_eq!(step_lines(&view, cx), ["~", RESUME_PAST], "the laptop has no shell: its home");
     cx.simulate_keystrokes("enter");
     settle(cx);
     cx.simulate_keystrokes("enter");
@@ -310,7 +315,7 @@ fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
     settle(cx);
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(step_lines(&view, cx), ["src/app", "~"], "one machine: the folder");
+    assert_eq!(step_lines(&view, cx), ["src/app", "~", RESUME_PAST], "one machine: the folder");
     cx.simulate_keystrokes("enter");
     settle(cx);
     cx.simulate_keystrokes("enter");
@@ -332,7 +337,11 @@ fn the_plus_menus_machine_is_not_asked_again(cx: &mut TestAppContext) {
         v.new_agent(&NewAgent, window, cx);
     });
     settle(cx);
-    assert_eq!(step_lines(&view, cx), ["~"], "the laptop's one agent: straight to its folders");
+    assert_eq!(
+        step_lines(&view, cx),
+        ["~", RESUME_PAST],
+        "the laptop's one agent: straight to its folders"
+    );
     cx.simulate_keystrokes("enter");
     settle(cx);
     cx.simulate_keystrokes("enter");
@@ -404,4 +413,116 @@ fn a_workers_hub_knows_the_agents_it_can_start(cx: &mut TestAppContext) {
         v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
     });
     assert_eq!(agents(cx), Some(Vec::new()), "out of reach, it starts nothing");
+}
+
+/// "Resume a past session…" ends the folder step: the machine is asked for the agent's
+/// sessions and the step opens at once saying it reads them, then lists them, found by their
+/// prompts too. A session with no thread here starts its agent on it in its own words; one
+/// whose kept thread runs opens that thread's tile. An answer nothing waits on is dropped.
+#[gpui::test]
+fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{PastSession, PastSessions, PromptHit};
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let codex = AgentId::named(AgentId::CODEX);
+    let key = studio.key;
+    let session =
+        |native: &str, title: Option<&str>, prompt: &str, thread: Option<ThreadId>| PastSession {
+            agent: codex.clone(),
+            native: native.to_owned(),
+            cwd: Some("/src/app".to_owned()),
+            title: title.map(str::to_owned),
+            updated_ms: None,
+            thread,
+            resume: vec!["resume".to_owned(), native.to_owned()],
+            facts: BTreeMap::new(),
+            prompts: vec![PromptHit {
+                text: prompt.to_owned(),
+                spans: Vec::new(),
+                cut_before: false,
+                cut_after: false,
+                at_ms: None,
+            }],
+        };
+    let answer = |sessions: Vec<PastSession>| PastSessions {
+        agent: Some(codex.clone()),
+        cwd: None,
+        query: String::new(),
+        sessions,
+        absent: None,
+        cut: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.past_sessions(key, answer(Vec::new()), cx));
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("resume");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let asked: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Sessions { agent, cwd, query, .. }) => {
+                Some((agent, cwd, query))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, [(Some(codex.clone()), None, String::new())], "the machine is asked");
+    assert_eq!(step_lines(&view, cx), Vec::<String>::new());
+    assert!(cx.debug_bounds("palette-empty").is_some(), "{READING_SESSIONS}");
+
+    let running = ThreadId::new();
+    view.update_in(cx, |v, _w, cx| {
+        let sessions = vec![
+            session("019a", Some("Fix the parser"), "the parser drops a token", None),
+            session("019b", None, "port the CLI to clap 5", Some(running)),
+        ];
+        v.past_sessions(key, answer(sessions), cx);
+    });
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Fix the parser", "port the CLI to clap 5"]);
+    cx.simulate_input("token");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Fix the parser"], "found by its prompt");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some((start.cwd, start.args)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [("/src/app".to_owned(), vec!["resume".to_owned(), "019a".to_owned()])],
+        "its agent's own words take it up again"
+    );
+
+    let mut row = crate::conversation::thread::fixtures::thread("edit").row(WallMs::ZERO);
+    row.id = running;
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        let table = slopty_proto::thread::wire::TableFrame::Snapshot {
+            cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
+            rows: vec![row],
+        };
+        v.thread_table(key, &table, cx);
+    });
+    let pick = ResumeSession {
+        worker: key,
+        session: Box::new(session("019b", None, "port the CLI", Some(running))),
+    };
+    view.update_in(cx, |v, window, cx| v.resume_session(&pick, window, cx));
+    settle(cx);
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(running)).is_some(), "its tile");
+    assert!(starts(&mut studio).is_empty(), "a session that runs is not started twice");
 }

@@ -189,6 +189,27 @@ pub struct StartThread {
     pub cwd: String,
 }
 
+/// "Resume a past session…", the last line of "New agent…"'s folder step: `agent`'s past
+/// sessions on `worker` are listed next, the last prompted first.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ResumePastSession {
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+}
+
+/// A past session picked: its thread's tile, the agent taken up again on it.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ResumeSession {
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// The session, as its agent's record lists it.
+    pub session: Box<slopty_proto::thread::wire::PastSession>,
+}
+
 /// "New `agent` agent", or an agent picked in "New agent…": the machine to start it on is
 /// asked next, then the folder.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
