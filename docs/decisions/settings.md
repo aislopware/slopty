@@ -280,3 +280,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty_app::settings::tests::an_alert_sounds_only_in_the_background_unless_asked`,
     `slopty_settings` `the_clipboard_is_shared_by_default_and_per_worker_by_name` (the alert
     keys), `terminal_keys`, `remote_keys`.
+
+- ✅ **`[client] editor`: a link that opens a file in the person's own editor** (2026-10-05,
+  readiness G7, after the ruling in `.research/rulings-2026-10-04.md` that Slopty stays a
+  light editor and hands heavy editing to the person's IDE).
+  - **A link, not a command.** VS Code, Cursor and Zed each publish a link form for remote
+    editing over SSH, and an iPhone or iPad can open a link but cannot run a command. Any
+    editor with a link scheme works, so the setting is an open template, not a list of
+    editors.
+  - **Placeholders.** `{path}` is the file or folder on its machine, percent-encoded so a
+    space, `#` or `?` in a name stays part of the path. `{host}` is the machine's name; a
+    person who signs in as someone else writes `me@{host}`. `{line}` is the line in view,
+    else 1. Examples: `zed://ssh/{host}{path}`, `vscode://vscode-remote/ssh-remote+{host}{path}`.
+  - **Empty is the system's handler** for the file's type, the default.
+  - **Checked as it is typed.** A link must start with its scheme and hold `{path}`, since one
+    that cannot name the file opens nothing. The parser refuses it with that reason, and the
+    settings form shows the refusal on the row.
+  - The row sits under "This app" on the Network page, beside the server.
+  - Tests: `slopty_settings` `the_editor_link_opens_the_file_on_its_machine`,
+    `default_file_round_trips`, and `schema::tests::a_value_is_checked_by_its_key`.

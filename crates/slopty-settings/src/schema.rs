@@ -367,6 +367,8 @@ mod tests {
         let bad = field("colors.light", "cursor").check("\"#12\"").unwrap_err();
         assert!(bad.contains("#rrggbb") && !bad.contains('\n'), "{bad}");
         field("client", "server").check("\"studio:45560\"").unwrap();
+        field("client", "editor").check("\"zed://ssh/{host}{path}\"").unwrap();
+        assert!(field("client", "editor").check("\"zed://ssh/{host}\"").is_err());
         assert!(field("client", "server").check("\"studio:x\"").is_err());
         assert!(field("font", "mono_size").check("\"big\"").is_err());
     }

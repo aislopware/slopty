@@ -852,6 +852,74 @@ pub struct ClientSettings {
     #[serde(with = "server_address")]
     #[schemars(title = "Server", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
+    /// Opens files and folders in your own editor; empty uses the system's.
+    ///
+    /// A link holding `{path}` (the file or folder on its machine), and optionally `{host}`
+    /// (the machine's name) and `{line}` (the line in view, else 1), which any editor with a
+    /// link scheme opens, such as `zed://ssh/{host}{path}` or
+    /// `vscode://vscode-remote/ssh-remote+{host}{path}`. Empty opens the file with the
+    /// system's handler for its type.
+    #[schemars(title = "Editor", with = "String", example = "zed://ssh/{host}{path}")]
+    pub editor: EditorLink,
+}
+
+/// `[client] editor`: the link that opens a file in the person's editor, `""` for the system's.
+///
+/// It is a link rather than a command because every editor with remote editing publishes one,
+/// and a phone can open a link but run no command.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize)]
+#[serde(transparent)]
+pub struct EditorLink(String);
+
+impl EditorLink {
+    /// The link that opens `path` on `host` at `line`, or `None` for the system's handler.
+    #[must_use]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "the placeholders a person writes in the link, not Rust's"
+    )]
+    pub fn open(&self, host: &str, path: &str, line: Option<u32>) -> Option<String> {
+        if self.0.is_empty() {
+            return None;
+        }
+        Some(
+            self.0
+                .replace("{host}", host)
+                .replace("{line}", &line.unwrap_or(1).to_string())
+                .replace("{path}", &link_path(path)),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for EditorLink {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?.trim().to_owned();
+        let scheme = text.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+        if text.is_empty() || (scheme && text.contains("{path}")) {
+            Ok(Self(text))
+        } else {
+            Err(serde::de::Error::custom(
+                "an editor link starts with its scheme and holds {path}, as zed://ssh/{host}{path}",
+            ))
+        }
+    }
+}
+
+/// `path` as a link's path: every byte but the unreserved ones and `/` percent-encoded, so a
+/// space, `#` or `?` in a name stays part of it.
+fn link_path(path: &str) -> String {
+    use std::fmt::Write as _;
+    path.bytes().fold(String::with_capacity(path.len()), |mut out, b| {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            let _infallible = write!(out, "%{b:02X}");
+        }
+        out
+    })
 }
 
 /// `Option<HostAddr>` as the string a person types, `""` for none, the port defaulting to
@@ -1135,6 +1203,11 @@ server = \"\"
 # reach, \"host\" or \"host:port\" (port 45560 when absent). Empty until the
 # app is set up.
 server = \"\"
+# Opens files and folders in your own editor: a link holding {{path}}, and
+# optionally {{host}} and {{line}}, such as \"zed://ssh/{{host}}{{path}}\" or
+# \"vscode://vscode-remote/ssh-remote+{{host}}{{path}}\". Empty uses the system's
+# handler for the file's type.
+editor = \"\"
 ",
             mono_family = toml_string(&d.font.mono_family),
             mono_size = toml_float(d.font.mono_size),
@@ -1698,6 +1771,7 @@ mod tests {
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
+        assert!(text.contains("editor = \"\""), "{text}");
         assert!(!text.contains("[quick_terminal]"), "{text}");
         assert!(text.contains("[keys]\n# The app's keys"), "{text}");
     }
@@ -1716,6 +1790,31 @@ mod tests {
         let blank = Settings::parse("[client]\nserver = \"  \"\n");
         assert_eq!(blank.settings.client.server, None);
         assert!(blank.warnings.is_empty(), "the key is known even when empty");
+    }
+
+    /// The editor link fills in the machine, the line and the path, the path percent-encoded so
+    /// a name with a space or `#` stays whole; empty is the system's handler, and a link that
+    /// cannot name the file is refused.
+    #[test]
+    fn the_editor_link_opens_the_file_on_its_machine() {
+        assert_eq!(Settings::default().client.editor.open("studio", "/a", None), None);
+        let zed = Settings::parse("[client]\neditor = \"zed://ssh/{host}{path}:{line}\"\n");
+        assert!(zed.error.is_none() && zed.warnings.is_empty(), "{zed:?}");
+        assert_eq!(
+            zed.settings.client.editor.open("me@studio", "/src/a b#1.rs", Some(42)).as_deref(),
+            Some("zed://ssh/me@studio/src/a%20b%231.rs:42")
+        );
+        assert_eq!(
+            zed.settings.client.editor.open("studio", "/src", None).as_deref(),
+            Some("zed://ssh/studio/src:1"),
+            "no line in view is the first"
+        );
+        for refused in ["zed://ssh/{host}", "/usr/local/bin/zed {path}", "1x://{path}"] {
+            let bad = Settings::parse(&format!("[client]\neditor = \"{refused}\"\n"));
+            assert!(bad.error.is_some_and(|e| e.to_string().contains("{path}")), "{refused}");
+        }
+        let blank = Settings::parse("[client]\neditor = \" \"\n");
+        assert_eq!(blank.settings.client.editor.open("studio", "/a", None), None);
     }
 
     #[test]

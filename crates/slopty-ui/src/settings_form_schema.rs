@@ -124,7 +124,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
     ),
     (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps", "remote.muted"]),
-    (Section::Network, "This app", &["client.server"]),
+    (Section::Network, "This app", &["client.server", "client.editor"]),
     (
         Section::Network,
         "Share this Mac's shells and windows",
