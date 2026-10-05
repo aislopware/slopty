@@ -6665,3 +6665,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `review::tests::an_empty_review_names_its_span`,
     `screen::health::tests::the_plain_line_leads_with_the_human_numbers_and_flags_trouble`
     (updated).
+
+- ✅ **An agent with a terminal lives in that terminal's tile** (2026-10-05, readiness 10-05 §3).
+  A thread whose agent runs in a live terminal is shown in one tile, that terminal's, with two
+  faces: the thread and the agent's own TUI. Today that is Claude Code and pi's TUI, and Codex
+  where its TUI runs beside the app-server. `ItemKind::Thread` stays only for a thread with no
+  live terminal: an ACP or pi RPC agent, Codex with no TUI open, or an agent whose program has
+  exited. The rule follows the table's `ThreadRow.terminal` for the terminal's own thread (never
+  a subagent's row that shares it), not the agent's kind, so it holds for any agent the moment
+  it runs in a terminal. Before this, one agent could be in two kinds of tile. Drops,
+  attachments and keys behaved differently on each, and "Show the terminal" opened a second
+  tile beside the thread's.
+  - A thread tile whose thread gains a live terminal becomes that terminal's tile in its place
+    and under its id. Its item goes and comes straight back as the terminal's, so the layout
+    keeps it where it stood, and its name and facts go with it. Its `ThreadView` is handed to
+    the terminal's face, so the draft, the scroll and the keyboard go on. Where the terminal has
+    a tile already, the thread tile goes and that tile takes the focus. A start whose agent is
+    already in a live terminal lands straight in the terminal's tile, the start's own.
+  - An agent that exits leaves its terminal's tile showing the last screen, its thread's
+    Resume on the face. Taken up again, the agent runs in a new terminal, and that tile goes
+    on as the new terminal's in its place, under its id, with its face pick, draft and view.
+    The exited session is closed on its worker, since its screen has given way. A thread tile
+    is not made for it.
+  - One rule (`WorkspaceView::settle_thread_tiles`, run when a table arrives and when a session
+    is listed) covers a start landing, a thread tile gaining a terminal, a resume, and a layout
+    saved before this. No wire changes. The worker now tells every client of a terminal it
+    opens for an agent, with the same `SessionChanged` summary an `OpenSession` sends, so a
+    client knows the agent's terminal is live as soon as the table names it; before, a client
+    heard of it only once it moved or exited.
+  - The face is the tile's own state, saved with the layout by tile. A new start opens on the
+    thread face; a tile the person left on the TUI reopens on it. Opening a thread from the
+    navigator, a note, a notice or a line's author goes to its terminal's tile (or adds one),
+    and never flips the face the person picked.
+  - What arrives on the tile follows its face. Dropped files, pasted pictures and attachments go
+    to the composer on the thread face, and to the shell on the TUI face, as on any terminal.
+    The tile's accessible description says which face shows ("Conversation" or "Terminal"), and
+    the header's toggle is named for what it turns to ("Show terminal", "Show conversation").
+  - Deleted: the thread tile's own way to its terminal (`open_thread_terminal`), which opened a
+    second tile. "Show the agent's terminal" on a thread tile flips the tile to its terminal
+    once one is live, and otherwise says the terminal has ended.
+  - Tests: `workspace::tests::agent_tile::{a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face,
+    a_thread_tile_whose_agent_gains_a_terminal_becomes_its_tile_in_place,
+    a_thread_whose_terminal_already_has_a_tile_goes_to_it,
+    a_thread_with_no_live_terminal_keeps_its_own_tile,
+    opening_an_agents_thread_opens_its_terminals_tile,
+    an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again}`,
+    `workspace::tests::remote::drops_on_an_agents_tile_follow_its_face`, the workerd
+    `a_claude_code_start_with_no_prompt_opens_in_the_home_it_names` (extended), and the app
+    self-test
+    `a_palette_start_opens_the_agents_terminal_on_its_thread` (renamed from
+    `a_palette_start_opens_a_thread_tile`).

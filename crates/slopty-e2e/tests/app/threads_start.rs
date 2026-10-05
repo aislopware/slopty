@@ -1,8 +1,8 @@
 //! An agent's thread started from the palette in the real app: the machine's facts say which
 //! agents it can start, the palette offers "New … agent" for each, the folder step offers the
 //! shell's folder first, the new thread's field takes the first message (here none), and the
-//! thread the machine starts opens as a thread tile. Claude Code is `slopty-stub-claude`, first
-//! on the worker's `PATH`; no real agent runs.
+//! agent the machine starts opens in its terminal's tile, on the thread face. Claude Code is
+//! `slopty-stub-claude`, first on the worker's `PATH`; no real agent runs.
 
 use std::time::Duration;
 
@@ -60,11 +60,12 @@ async fn palette_offering(drv: &mut Driver) {
 
 /// "New Claude Code agent" from the palette asks the folder (one machine, so no machine step),
 /// and ↩ there opens the new thread's tile with a field for its first message; ↩ on the field
-/// left empty starts Claude Code bare in the focused shell's folder, and its thread opens in
-/// that tile, the shell's tile still there.
+/// left empty starts Claude Code bare in the focused shell's folder. The agent's terminal takes
+/// that tile, on its thread face with the keyboard in the composer, and no thread tile opens;
+/// the shell's tile is still there.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_palette_start_opens_a_thread_tile() {
+async fn a_palette_start_opens_the_agents_terminal_on_its_thread() {
     let mut stack = ProjectStack::launch("studio").await.unwrap();
     claude_installed(&stack).await;
     let drv = &mut stack.driver;
@@ -88,14 +89,13 @@ async fn a_palette_start_opens_a_thread_tile() {
     .unwrap();
     drv.keys("enter").await.unwrap();
     let dump = drv
-        .wait_for("a thread tile", STEP, |d| d.items.iter().any(|i| i.kind == "thread"))
+        .wait_for("the agent's terminal on its thread", STEP, |d| {
+            d.items.iter().filter(|i| i.kind == "terminal").count() == 2
+                && d.focused.starts_with("thread:")
+        })
         .await
         .unwrap();
     assert_eq!(dump.notice, None, "a start that went through says nothing");
-    assert!(
-        dump.items.iter().any(|i| i.kind == "terminal"),
-        "the shell's tile stays: {:?}",
-        dump.items
-    );
+    assert!(dump.items.iter().all(|i| i.kind != "thread"), "no thread tile: {:?}", dump.items);
     stack.shutdown().await;
 }

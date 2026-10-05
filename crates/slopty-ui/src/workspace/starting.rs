@@ -279,9 +279,10 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The machine answered `item`'s start with `thread`: the thread's tile takes the start's
-    /// place, under its id, and its composer the keyboard when the start had it. A tile closed
-    /// while it started opens nothing, and the thread is said to be there.
+    /// The machine answered `item`'s start with `thread`: the thread's tile, or its terminal's
+    /// where its agent runs in one, takes the start's place, under its id, and its composer the
+    /// keyboard when the start had it. A tile closed while it started opens nothing, and the
+    /// thread is said to be there.
     pub(super) fn start_landed(
         &mut self,
         key: WorkerKey,
@@ -301,7 +302,12 @@ impl WorkspaceView {
             self.open_thread(key, thread, cx);
             return;
         }
-        self.open_thread_as(key, thread, item, cx);
+        // An agent already in a live terminal lands in that terminal's tile; else the thread's
+        // own tile, until its table names a terminal ([`Self::settle_thread_tiles`]).
+        match self.live_terminal(thread) {
+            Some((at, session)) if at == key => self.open_terminal_as(key, session, item, cx),
+            _ => self.open_thread_as(key, thread, item, cx),
+        }
     }
 
     /// The machine would not start `item`'s thread: its tile goes, and `why` is said.

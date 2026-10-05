@@ -2680,9 +2680,10 @@ async fn palette_with(drv: &mut Driver, typed: &str, line: &str) {
     wait(drv, line, |d| offering(d, line)).await;
 }
 
-/// The thread tiles' ids.
+/// The ids of the tiles an agent's thread can show in: a thread's own, or a terminal's.
 fn threads(d: &Dump) -> Vec<String> {
-    d.items.iter().filter(|i| i.kind == "thread").map(|i| i.id.clone()).collect()
+    let agent_tile = |kind: &str| kind == "thread" || kind == "terminal";
+    d.items.iter().filter(|i| agent_tile(&i.kind)).map(|i| i.id.clone()).collect()
 }
 
 /// Start `agent`'s thread from the palette in the shell's folder; its tile's id.

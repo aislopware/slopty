@@ -96,6 +96,13 @@ pub const SHOW_CONVERSATION: &str = "Show conversation";
 /// The same button while the conversation shows.
 pub const SHOW_TERMINAL: &str = "Show terminal";
 
+/// What an agent's tile shows, as a screen reader hears it after the tile's name: its
+/// conversation (a thread tile, or a terminal on its thread face)...
+pub const SHOWS_CONVERSATION: &str = "Conversation";
+
+/// ...or its agent's own terminal.
+pub const SHOWS_TERMINAL: &str = "Terminal";
+
 /// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
 
@@ -720,6 +727,7 @@ impl WorkspaceView {
 
         let title = self.tile_title(item);
         let label = SharedString::from(title.clone());
+        let shows = self.tile_shows(item);
         let header = self.render_header(placed, item, title, chrome, cx);
         let body = self.render_body(placed, item, chrome, window, cx);
         // Files dropped on a shell go to its directory; on a thread, to its composer; on a
@@ -747,6 +755,7 @@ impl WorkspaceView {
                 .group(TILE_GROUP)
                 .role(Role::Group)
                 .aria_label(label)
+                .when_some(shows, gpui::StatefulInteractiveElement::aria_description)
                 .absolute()
                 .left(px(left))
                 .top(px(top))
@@ -1830,6 +1839,21 @@ impl WorkspaceView {
             | ItemKind::Thread { .. } => {}
         }
         actions
+    }
+
+    /// What an agent's tile shows, for a screen reader: its conversation or its terminal, as
+    /// its face and the header's toggle say. `None` for any other tile.
+    fn tile_shows(&self, item: &Item) -> Option<&'static str> {
+        match item.kind {
+            ItemKind::Thread { .. } => Some(SHOWS_CONVERSATION),
+            ItemKind::Terminal { session }
+                if self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None)
+                    && self.session_thread(session).is_some() =>
+            {
+                Some(if self.face_shown(session) { SHOWS_CONVERSATION } else { SHOWS_TERMINAL })
+            }
+            _ => None,
+        }
     }
 
     /// The buttons that turn an agent's tile between its TUI and its faces: controls, so they

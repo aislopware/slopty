@@ -956,7 +956,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     and it takes the keyboard. A Claude Code thread's terminal does not open a second tile
     beside it. The view's "terminal" action reveals that terminal's tile, or adds one for the
     session when it has none. This follows the GUI-first direction: the person directs and
-    reviews in the GUI, and the TUI stays able to take the session over.
+    reviews in the GUI, and the TUI stays able to take the session over. Superseded 2026-10-05
+    by **An agent with a terminal lives in that terminal's tile** (ui.md): a thread whose agent
+    runs in a live terminal is shown in that terminal's tile, and the thread tile is for the
+    rest.
   - **Refusals are said, never opened.** A worker that refuses a start (a missing binary, a
     Codex daemon not running) answers in words, shown as a notice, and no tile is added.
 

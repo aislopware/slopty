@@ -10,10 +10,12 @@
 //! layout. The thread view is made while it shows: its thread is followed while some view of
 //! it is open.
 //!
-//! A thread is a tile of its own too (`ItemKind::Thread`): the thread view, on the worker whose
-//! agent runs it, started from the palette ([`WorkspaceView::start_thread`]) or kept from before.
-//! A thread whose agent runs in a terminal (Claude Code, pi's TUI) keeps that terminal one action
-//! away: the view's "show the terminal" opens its tile beside the thread's, or goes to it.
+//! An agent that runs in a live terminal has one tile, that terminal's, whatever the agent: a
+//! thread tile (`ItemKind::Thread`) is for a thread with no live terminal (an ACP or pi RPC
+//! agent, Codex with no TUI open, an agent whose process has gone). A thread tile whose thread
+//! comes to run in a terminal becomes that terminal's tile in its place, under its id, and its
+//! thread view goes on as the terminal's face ([`WorkspaceView::settle_thread_tiles`]); a start
+//! lands the same way ([`WorkspaceView::start_thread`]).
 //!
 //! An aside ([`hub::is_aside`]) is its thread view's own business: it is no tile, no row and no
 //! terminal's thread here.
@@ -54,6 +56,20 @@ pub(super) struct Faces {
     pub drafts: HashMap<SessionId, String>,
     /// The thread views and the hubs they read.
     pub threads: ThreadFaces,
+}
+
+/// A tile to become the tile of the live terminal its agent runs in.
+struct Retile {
+    /// The tile, which keeps its place.
+    tile: TileRef,
+    /// Its item as it stands: a thread's, or the terminal an exited agent left.
+    item: Item,
+    /// The worker the terminal is on.
+    key: WorkerKey,
+    /// The terminal.
+    session: SessionId,
+    /// The exited terminal the tile showed, when it was one.
+    from: Option<SessionId>,
 }
 
 /// Where a thread works, as its row says.
@@ -118,6 +134,15 @@ pub(super) struct ThreadFaces {
     starts: HashMap<IntentId, (WorkerKey, AgentId, ItemId)>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
+    /// The view of a thread tile that became its terminal's, for that terminal's face to take
+    /// up: its draft, its scroll and its keyboard go on.
+    handed: HashMap<SessionId, Entity<ThreadView>>,
+    /// Thread tiles becoming their terminal's this moment: their item goes and comes straight
+    /// back under the same id, and the tile keeps its place.
+    retiling: HashSet<ItemId>,
+    /// The thread each listed terminal ran until its table stopped naming it there: what a
+    /// tile left by an exited agent goes on with once the thread is taken up again elsewhere.
+    ended: HashMap<SessionId, ThreadId>,
     /// Threads opened at a turn, and the turn, until a view of each shows it.
     going: HashMap<ThreadId, TurnId>,
 }
@@ -537,13 +562,167 @@ impl WorkspaceView {
         }
     }
 
-    /// Go to `thread`'s tile, or add one on `key`.
+    /// Go to `thread`'s tile, or add one on `key`: its terminal's, where its agent runs in a
+    /// live one.
     pub(super) fn open_thread(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
         if let Some(tile) = self.tile_of_thread(thread) {
             self.go_to(tile.item, cx);
             return;
         }
+        if let Some((at, session)) = self.live_terminal(thread) {
+            self.open_terminal_as(at, session, ItemId::new(), cx);
+            return;
+        }
         self.open_thread_as(key, thread, ItemId::new(), cx);
+    }
+
+    /// Add `session`'s tile on `key` as item `id`, to the front with the keyboard: a start's
+    /// tile keeps its place under it.
+    pub(super) fn open_terminal_as(
+        &mut self,
+        key: WorkerKey,
+        session: SessionId,
+        id: ItemId,
+        cx: &mut Context<Self>,
+    ) {
+        let item = Item {
+            id,
+            kind: ItemKind::Terminal { session },
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
+        tracing::info!(id = %item.id, %session, "open an agent's terminal");
+        self.propose(key, ItemOp::Add(item), cx);
+        self.faces.focus.insert(session);
+        self.pending_focus = Some(session);
+        cx.notify();
+    }
+
+    /// The live terminal `thread`'s agent runs in, as its worker's table last said, and the
+    /// worker it is on: one that worker lists, whose program has not exited.
+    pub(super) fn live_terminal(&self, thread: ThreadId) -> Option<(WorkerKey, SessionId)> {
+        let session = self.own_terminal(thread)?;
+        self.workers.iter().find_map(|(key, w)| {
+            let summary = w.sessions.get(&session)?;
+            let live =
+                !matches!(summary.state, slopty_proto::terminal::SessionState::Exited { .. });
+            live.then_some((*key, session))
+        })
+    }
+
+    /// Every thread tile whose thread runs in a live terminal now becomes that terminal's tile.
+    /// It keeps its place and its id where the terminal has no tile yet, and its thread view
+    /// goes on as the terminal's face; where the terminal has one, the thread tile goes and
+    /// that tile takes its focus. So does the tile of an agent that exited, once its thread is
+    /// taken up again in another terminal: the exited session closes, and its face and draft go
+    /// on in the new one.
+    pub(super) fn settle_thread_tiles(&mut self, cx: &mut Context<Self>) {
+        let found: Vec<Retile> = self
+            .layout
+            .tiles()
+            .filter_map(|tile| {
+                let item = self.item(tile)?;
+                let (thread, from) = match item.kind {
+                    ItemKind::Thread { thread } => (thread, None),
+                    ItemKind::Terminal { session } if !self.session_live(session) => {
+                        (*self.faces.threads.ended.get(&session)?, Some(session))
+                    }
+                    _ => return None,
+                };
+                let (key, session) = self.live_terminal(thread)?;
+                let elsewhere = from.is_some() && self.tile_of_session(session).is_some();
+                (!elsewhere).then(|| Retile { tile, item: item.clone(), key, session, from })
+            })
+            .collect();
+        for retile in found {
+            self.retile(retile, cx);
+        }
+        let tiled: HashSet<SessionId> = self
+            .items()
+            .filter_map(|(_, i)| match i.kind {
+                ItemKind::Terminal { session } => Some(session),
+                _ => None,
+            })
+            .collect();
+        self.faces.threads.ended.retain(|s, _| tiled.contains(s));
+    }
+
+    /// Whether `session` is listed by its worker and its program has not exited.
+    fn session_live(&self, session: SessionId) -> bool {
+        self.workers.values().any(|w| {
+            w.sessions.get(&session).is_some_and(|s| {
+                !matches!(s.state, slopty_proto::terminal::SessionState::Exited { .. })
+            })
+        })
+    }
+
+    /// A tile becomes its agent's terminal's, as `retile` says.
+    fn retile(&mut self, retile: Retile, cx: &mut Context<Self>) {
+        let Retile { tile, item, key, session, from } = retile;
+        tracing::info!(item = %tile.item, %session, ?from, "a tile becomes its agent's terminal's");
+        let focused = self.focused() == Some(tile);
+        let threads = &mut self.faces.threads;
+        let view = if let Some(old) = from {
+            threads.asks.remove(&old);
+            threads.views.remove(&old)
+        } else {
+            threads.item_asks.remove(&tile.item);
+            threads.items.remove(&tile.item)
+        };
+        if let Some(view) = view
+            && !threads.views.contains_key(&session)
+        {
+            threads.handed.insert(session, view);
+        }
+        if let Some(old) = from {
+            if let Some(face) = self.faces.chosen.remove(&old) {
+                self.faces.chosen.insert(session, face);
+            }
+            if let Some(draft) = self.faces.drafts.remove(&old) {
+                self.faces.drafts.insert(session, draft);
+            }
+        }
+        if focused {
+            self.faces.focus.insert(session);
+        }
+        if let Some(there) = self.tile_of_session(session) {
+            self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
+            if focused {
+                self.focus_tile(there, cx);
+            }
+            return;
+        }
+        let terminal = Item {
+            id: tile.item,
+            kind: ItemKind::Terminal { session },
+            name: item.name,
+            facts: item.facts,
+        };
+        if key == tile.worker {
+            self.faces.threads.retiling.insert(tile.item);
+            self.propose(key, ItemOp::Remove(tile.item), cx);
+            self.propose(key, ItemOp::Add(terminal), cx);
+            self.faces.threads.retiling.remove(&tile.item);
+            if focused {
+                self.after_focus_moved(cx);
+            }
+        } else {
+            // An item lives on its worker's registry: one on another machine is a tile there.
+            self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
+            self.propose(key, ItemOp::Add(Item { id: ItemId::new(), ..terminal }), cx);
+        }
+        // The exited session's last screen gave way to the agent taken up again.
+        if let Some(old) = from
+            && let Some(at) = self.worker_of_session(old)
+        {
+            self.close_session_on(at, old);
+        }
+    }
+
+    /// Whether thread tile `item` is becoming its terminal's this moment, so its going leaves
+    /// its place in the layout to the item that comes back under its id.
+    pub(super) fn retiling(&self, item: ItemId) -> bool {
+        self.faces.threads.retiling.contains(&item)
     }
 
     /// Add `thread`'s tile on `key` as item `id`: a start's tile keeps its place under it.
@@ -596,35 +775,28 @@ impl WorkspaceView {
         hub.update(cx, |hub, cx| hub.resume_when_known(thread, cx));
     }
 
-    /// The tile that shows `thread`, on any worker.
+    /// The tile that shows `thread`, on any worker: its own, else its terminal's.
     pub(super) fn tile_of_thread(&self, thread: ThreadId) -> Option<TileRef> {
-        self.items().find_map(|(worker, item)| match item.kind {
+        let own = self.items().find_map(|(worker, item)| match item.kind {
             ItemKind::Thread { thread: t } if t == thread => {
                 Some(TileRef { worker, item: item.id })
             }
             _ => None,
-        })
+        });
+        let live = || self.tile_of_session(self.live_terminal(thread)?.1);
+        let own_terminal = || self.tile_of_session(self.own_terminal(thread)?);
+        // The tile an agent left when it exited goes on with its thread taken up again.
+        let left = || {
+            let ended = &self.faces.threads.ended;
+            ended.iter().find(|(_, t)| **t == thread).and_then(|(s, _)| self.tile_of_session(*s))
+        };
+        own.or_else(live).or_else(own_terminal).or_else(left)
     }
 
-    /// Go to the tile of `thread`'s terminal on `key`, or add one beside the thread's.
-    fn open_thread_terminal(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
-        let Some(session) = self.faces.threads.terminals.get(&thread).copied() else {
-            self.show_notice("This thread runs in no terminal".to_owned(), cx);
-            return;
-        };
-        if self.tile_of_session(session).is_some() {
-            self.reveal_session(session, cx);
-            return;
-        }
-        let item = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Terminal { session },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        self.propose(key, ItemOp::Add(item), cx);
-        self.pending_focus = Some(session);
-        cx.notify();
+    /// The terminal whose own thread `thread` is: not one a subagent's row shares with its
+    /// parent's.
+    fn own_terminal(&self, thread: ThreadId) -> Option<SessionId> {
+        self.thread_terminal(thread).filter(|s| self.session_thread(*s) == Some(thread))
     }
 
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
@@ -644,8 +816,15 @@ impl WorkspaceView {
             .map(|w| w.sessions.keys().copied().collect())
             .unwrap_or_default();
         let of = &mut self.faces.threads.of_session;
+        let was: Vec<(SessionId, ThreadId)> =
+            of.iter().filter(|(s, _)| sessions.contains(*s)).map(|(s, t)| (*s, *t)).collect();
         of.retain(|session, _| !sessions.contains(session));
         of.extend(found);
+        for (session, thread) in was {
+            if of.get(&session) != Some(&thread) {
+                self.faces.threads.ended.insert(session, thread);
+            }
+        }
         let stands = stands_of(key, rows.iter().copied());
         let old = &self.faces.threads.stands;
         let moved = old.values().filter(|s| s.worker == key).count() != stands.len()
@@ -700,6 +879,7 @@ impl WorkspaceView {
         if self.faces.threads.meters != meters_before {
             App::notify(cx, self.chrome.statusbar.entity_id());
         }
+        self.settle_thread_tiles(cx);
         cx.notify();
     }
 
@@ -720,23 +900,35 @@ impl WorkspaceView {
                 continue;
             }
             let Some(key) = self.worker_of_session(*session) else { continue };
-            let hub = self.thread_hub(key, cx);
-            let theme = self.theme.clone();
-            let draft = self.faces.drafts.remove(session);
-            let view = cx.new(|cx| {
-                let mut view = ThreadView::new(hub, thread, theme, window, cx);
-                if let Some(draft) = draft {
-                    view.restore_draft(&draft, window, cx);
-                }
+            let handed = self.faces.threads.handed.remove(session);
+            let view = if let Some(view) = handed.filter(|v| v.read(cx).thread() == thread) {
                 view
-            });
+            } else {
+                let hub = self.thread_hub(key, cx);
+                let theme = self.theme.clone();
+                let draft = self.faces.drafts.remove(session);
+                cx.new(|cx| {
+                    let mut view = ThreadView::new(hub, thread, theme, window, cx);
+                    if let Some(draft) = draft {
+                        view.restore_draft(&draft, window, cx);
+                    }
+                    view
+                })
+            };
             let session = *session;
             // The keyboard follows the tile into the new view from what it replaces: the
-            // thread's last view, or the TUI the tile showed until its thread was known.
+            // thread's last view, the TUI the tile showed until its thread was known, or the
+            // view itself, handed from the thread tile this one was.
             let replaced =
                 self.faces.threads.views.get(&session).map(|v| v.read(cx).focus_handle(cx));
             let terminal = self.terminals.get(&session).map(|t| t.read(cx).focus_handle(cx));
-            if replaced.into_iter().chain(terminal).any(|h| h.contains_focused(window, cx)) {
+            let own = Some(view.read(cx).focus_handle(cx));
+            if replaced
+                .into_iter()
+                .chain(terminal)
+                .chain(own)
+                .any(|h| h.contains_focused(window, cx))
+            {
                 self.faces.focus.insert(session);
             }
             let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
@@ -828,7 +1020,15 @@ impl WorkspaceView {
     ) {
         let thread = view.read(cx).thread();
         match event {
-            ThreadViewEvent::ShowTerminal => self.open_thread_terminal(key, thread, cx),
+            // The view asks only once its thread names a terminal: the tile becomes that
+            // terminal's, on its TUI.
+            ThreadViewEvent::ShowTerminal => match self.live_terminal(thread) {
+                Some((_, session)) => {
+                    self.show_face(session, false, cx);
+                    self.settle_thread_tiles(cx);
+                }
+                None => self.show_notice("The agent's terminal has ended".to_owned(), cx),
+            },
             ThreadViewEvent::Review { thread } => {
                 self.faces.threads.review_asked = Some((key, thread));
                 cx.notify();
@@ -1015,9 +1215,18 @@ impl WorkspaceView {
         self.sync_thread_faces(&wanted, window, cx);
         self.sync_thread_items(window, cx);
         self.sync_changes(window, cx);
-        // Picks of sessions that are gone go with them.
+        // Picks of sessions that are gone go with them, and views handed to a tile that went.
         let terminals = &self.terminals;
         self.faces.chosen.retain(|s, _| terminals.contains_key(s));
+        let tiled: HashSet<SessionId> = self
+            .layout
+            .tiles()
+            .filter_map(|t| match self.item(t)?.kind {
+                ItemKind::Terminal { session } => Some(session),
+                _ => None,
+            })
+            .collect();
+        self.faces.threads.handed.retain(|s, _| tiled.contains(s));
         self.faces.drafts.retain(|s, _| terminals.contains_key(s));
         for session in std::mem::take(&mut self.faces.focus) {
             if !wanted.contains(&session) {

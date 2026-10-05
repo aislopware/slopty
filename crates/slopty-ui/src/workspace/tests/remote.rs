@@ -1190,6 +1190,37 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     assert!(stale.is_none(), "the chip: {}", stale.unwrap_or_default());
 }
 
+/// What lands on an agent's tile follows its face: on the thread face, dropped files are the
+/// composer's attachments; on the TUI face, they go to the shell's directory as on any
+/// terminal.
+#[gpui::test]
+fn drops_on_an_agents_tile_follow_its_face(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let (studio, _calls, _board) = connect_remote(&view, cx);
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(tile, cx);
+    });
+    agent_thread(&view, cx, studio.key, session);
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = dir.path().join("trace.log");
+    std::fs::write(&dropped, b"log").unwrap();
+
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&dropped), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("composer-attachment").is_some(), "the composer's chip");
+    assert!(view.read_with(cx, |v, _| v.header_upload(tile).is_none()), "not the shell's");
+
+    view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&dropped), cx));
+    cx.run_until_parked();
+    let upload = view.read_with(cx, |v, _| v.header_upload(tile).map(|(_, u)| u.session));
+    assert_eq!(upload, Some(Some(session)), "on the TUI, to the shell");
+}
+
 /// A worker's window tile streaming at `stream`, drawn.
 #[cfg(target_os = "macos")]
 fn streaming(

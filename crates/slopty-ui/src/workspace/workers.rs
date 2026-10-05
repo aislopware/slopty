@@ -599,6 +599,9 @@ impl WorkspaceView {
                     (false, _) => {}
                 }
             }
+            // A thread tile becoming its terminal's keeps its place and its focus: its id comes
+            // straight back as the terminal's item.
+            ItemChange::Removed(id) if self.retiling(id) => self.drop_item_views(id, cx),
             ItemChange::Removed(id) => {
                 self.layout.remove(TileRef { worker: key, item: id });
                 self.recency.retain(|r| *r != id);
@@ -654,6 +657,8 @@ impl WorkspaceView {
             w.sessions.insert(summary.id, summary);
         }
         self.reconcile(cx);
+        // A thread tile waiting on this session as its agent's terminal becomes its tile.
+        self.settle_thread_tiles(cx);
         cx.notify();
     }
 

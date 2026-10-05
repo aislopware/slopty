@@ -902,8 +902,11 @@ advertise `WorkerCaps::virtual_displays`; Linux says no.
 ## 4. Workspace
 
 Every worker's items in one scrollable tiling workspace, niri's model
-(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, file, folder, browser
-(`ItemKind` in `crates/slopty-proto/src/items.rs`). The worker keeps only the registry
+(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, file, folder, browser,
+thread, review, changes (`ItemKind` in `crates/slopty-proto/src/items.rs`). An agent in a live
+terminal is shown in that terminal's tile, its thread as the tile's face; a thread tile is for a
+thread with no live terminal, and turns into its terminal's tile in place once it has one
+(`slopty-ui::workspace::faces`). The worker keeps only the registry
 (`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/
 `Sleep`/`Remove`, each op carrying only the field it changes, a refused one answered with a snapshot,
 a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
