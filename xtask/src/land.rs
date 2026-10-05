@@ -68,15 +68,21 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
     cmd!(sh, "committed origin/main..HEAD --no-merge-commit")
         .run()
         .context("a commit to land breaks Conventional Commits: reword it, then land")?;
-    if opts.no_tests {
-        println!("! pushed without the checks before the push: CI is the first to build this");
-    } else {
-        crate::gate::land_checks("origin/main")?;
-    }
     let leased = cmd!(sh, "git rev-parse --verify --quiet refs/remotes/origin/{BRANCH}")
         .quiet()
         .read()
         .unwrap_or_default();
+    if opts.no_tests {
+        println!("! pushed without the checks before the push: CI is the first to build this");
+    } else {
+        // What `gate` already holds is CI's to check, so a land on top of one still running is
+        // checked for its own commits alone: from main, a lockfile change in the earlier land
+        // left every later one unchecked.
+        let pushed = !leased.is_empty()
+            && cmd!(sh, "git merge-base --is-ancestor origin/main {leased}").quiet().run().is_ok()
+            && cmd!(sh, "git merge-base --is-ancestor {leased} HEAD").quiet().run().is_ok();
+        crate::gate::land_checks(if pushed { &leased } else { "origin/main" })?;
+    }
     let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{leased}");
     cmd!(sh, "git push --quiet {lease} origin HEAD:refs/heads/{BRANCH}").run()?;
     let short = head.get(..10).unwrap_or(&head);
