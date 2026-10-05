@@ -139,11 +139,18 @@ const SKIP_PERMISSIONS: &str = "--dangerously-skip-permissions";
 /// The flag that only lets the person switch to that mode.
 const ALLOW_SKIP_PERMISSIONS: &str = "--allow-dangerously-skip-permissions";
 /// The flag the permission mode is given with.
-const PERMISSION_MODE: &str = "--permission-mode";
+pub const PERMISSION_MODE: &str = "--permission-mode";
 /// The modes `--permission-mode` takes (`claude --help`, 2.1.283). A hook's `default` is
 /// none of them: a session in it is started without the flag.
 const PERMISSION_MODES: [&str; 6] =
     ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"];
+
+/// Whether a start may ask for permission mode `mode`: one `--permission-mode` takes, short of
+/// skipping every permission, which only the person's own `claude` flags give.
+#[must_use]
+pub fn startable_mode(mode: &str) -> bool {
+    mode != "bypassPermissions" && PERMISSION_MODES.contains(&mode)
+}
 
 /// What of `args` (Claude Code's own arguments, [`crate::detect::agent_args`]) a resume keeps.
 ///

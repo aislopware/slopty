@@ -526,3 +526,56 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.tile_of_thread(running)).is_some(), "its tile");
     assert!(starts(&mut studio).is_empty(), "a session that runs is not started twice");
 }
+
+/// "Plan first" under a Claude Code start's field starts it in plan mode, its published
+/// `--permission-mode plan`, by a click or the palette's "Start in plan mode"; a Codex start
+/// has no such tick.
+#[gpui::test]
+fn a_claude_code_start_can_plan_first(cx: &mut TestAppContext) {
+    use super::super::starting::{PLAN_FIRST_LINE, plan_first_selector};
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    studio.drain();
+    let args = |studio: &mut Fake| -> Vec<Vec<String>> {
+        studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start.args),
+                _ => None,
+            })
+            .collect()
+    };
+    // The agent, then (Claude Code is on both machines) the machine, then the folder.
+    let begin = |agent: &str, steps: usize, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("cmd-shift-t");
+        settle(cx);
+        cx.simulate_input(agent);
+        for _ in 0..steps {
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+        }
+        let asking = |v: &WorkspaceView| {
+            v.layout().tiles().find(|t| v.starting.get(t.item).is_some_and(|s| !s.sent))
+        };
+        view.read_with(cx, |v, _| asking(v)).expect("its tile, asking")
+    };
+
+    let codex = begin("codex", 2, cx);
+    assert!(cx.debug_bounds(plan_first_selector(codex.item)).is_none(), "Codex: no tick");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(args(&mut studio), [Vec::<String>::new()]);
+
+    let claude = begin("claude", 3, cx);
+    let tick = cx.debug_bounds(plan_first_selector(claude.item)).expect("the tick");
+    cx.simulate_click(tick.center(), Modifiers::none());
+    settle(cx);
+    let offered = view.update(cx, |v, cx| v.palette_lines(cx));
+    assert!(offered.iter().any(|l| l.label == PLAN_FIRST_LINE), "and in the palette");
+    cx.simulate_input("make a plan");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(args(&mut studio), [vec!["--permission-mode".to_owned(), "plan".to_owned()]]);
+}

@@ -7,6 +7,10 @@
 //!
 //! The tile is the layout's alone: the item comes with the thread, under the tile's own id, so
 //! nothing moves when it lands.
+//!
+//! Under the field, "Plan first" starts an agent that can plan before it changes anything in
+//! that mode: Claude Code with `--permission-mode plan`, its published flag. The mode is the
+//! start's alone; the thread's mode chip then says the mode the agent reports.
 
 use std::collections::HashMap;
 
@@ -30,6 +34,27 @@ use crate::draw::Draw;
 use crate::icons::{Glyph, Status};
 use crate::kit;
 
+/// The tick under the first message's field.
+pub(super) const PLAN_FIRST: &str = "Plan first";
+
+/// The palette's line for the same, while a start's field has the keyboard.
+pub(super) const PLAN_FIRST_LINE: &str = "Start in plan mode";
+
+/// What `claude` takes to start in a permission mode, and the mode that plans
+/// (`slopty_agent::resume`, which the app does not link).
+const PERMISSION_MODE: [&str; 2] = ["--permission-mode", "plan"];
+
+/// The "Plan first" tick's selector on start `item`'s tile.
+#[cfg(test)]
+pub(super) fn plan_first_selector(item: ItemId) -> &'static str {
+    Box::leak(format!("plan-first-{}", item.as_uuid()).into_boxed_str())
+}
+
+/// Whether a start of `agent` can begin in plan mode.
+fn plans_first(agent: &AgentId) -> bool {
+    agent.is(AgentId::CLAUDE_CODE)
+}
+
 /// The tiles of threads on their way, by the id their item will have.
 #[derive(Default)]
 pub(super) struct Starts {
@@ -48,6 +73,12 @@ impl Starts {
     pub(super) fn get(&self, item: ItemId) -> Option<&Starting> {
         self.tiles.get(&item)
     }
+
+    /// Whether `item` is a start whose first message is still asked and whose agent can
+    /// start in plan mode.
+    pub(super) fn plans(&self, item: ItemId) -> bool {
+        self.tiles.get(&item).is_some_and(|s| s.field.is_some() && plans_first(&s.agent))
+    }
 }
 
 /// One thread on its way.
@@ -60,6 +91,8 @@ pub(super) struct Starting {
     pub cwd: String,
     /// More words for its agent: those that take a past session up again.
     pub args: Vec<String>,
+    /// It starts in plan mode.
+    pub plan: bool,
     /// The first message's field, until the start is sent.
     pub field: Option<StartField>,
     /// Whether the start went to the machine.
@@ -75,12 +108,18 @@ impl Starting {
         cwd: String,
         field: Option<StartField>,
     ) -> Self {
-        Self { worker, agent, cwd, args: Vec::new(), field, sent: false }
+        Self { worker, agent, cwd, args: Vec::new(), plan: false, field, sent: false }
     }
 
     /// The same start, with `args` for its agent.
     pub(super) fn with_args(self, args: Vec<String>) -> Self {
         Self { args, ..self }
+    }
+
+    /// What its agent is started with: the words it was given, then plan mode where asked.
+    pub(super) fn agent_args(&self) -> Vec<String> {
+        let plan = (self.plan && plans_first(&self.agent)).then_some(PERMISSION_MODE);
+        self.args.iter().cloned().chain(plan.into_iter().flatten().map(str::to_owned)).collect()
     }
 }
 
@@ -182,6 +221,25 @@ impl WorkspaceView {
         let prompt = starting.field.as_ref().map(|f| f.input.read(cx).value().trim().to_owned());
         let prompt = prompt.filter(|p| !p.is_empty());
         self.send_start(item, prompt, cx);
+    }
+
+    /// "Plan first" on the focused start, or off.
+    pub(super) fn toggle_plan_first(
+        &mut self,
+        _: &super::actions::TogglePlanFirst,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(item) = self.focused().map(|t| t.item) {
+            self.flip_plan(item, cx);
+        }
+    }
+
+    fn flip_plan(&mut self, item: ItemId, cx: &mut Context<Self>) {
+        if let Some(starting) = self.starting.tiles.get_mut(&item).filter(|s| s.field.is_some()) {
+            starting.plan = !starting.plan;
+            cx.notify();
+        }
     }
 
     /// The start of `item`'s thread goes to its machine; the tile says it is starting.
@@ -334,8 +392,8 @@ impl WorkspaceView {
                 .child(title.clone())
             });
         let body = (!shapes).then(|| {
-            if let Some(field) = &starting.field {
-                self.first_message(id, field, &place, k).into_any_element()
+            if let Some(asked) = self.first_message(id, starting, &place, k, cx) {
+                asked.into_any_element()
             } else {
                 let mark = crate::icons::status_icon(
                     theme,
@@ -391,11 +449,21 @@ impl WorkspaceView {
         )
     }
 
-    /// The first message's field, with where the thread will start under it.
-    fn first_message(&self, id: ItemId, field: &StartField, place: &str, k: f32) -> gpui::Div {
+    /// The first message's field, while `starting` asks for it, with where the thread will
+    /// start under it and, where the agent can plan first, the "Plan first" tick.
+    fn first_message(
+        &self,
+        id: ItemId,
+        starting: &Starting,
+        place: &str,
+        k: f32,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::Div> {
+        let field = starting.field.as_ref()?;
+        let plan = plans_first(&starting.agent).then_some(starting.plan);
         let theme = &self.theme;
         let s = &theme.surfaces;
-        kit::elevate(div(), theme)
+        let asked = kit::elevate(div(), theme)
             .debug_selector(move || format!("first-message-{}", id.as_uuid()))
             .w_full()
             .max_w(px(super::strip::EMPTY_W * k))
@@ -408,9 +476,52 @@ impl WorkspaceView {
             .child(
                 div()
                     .ml(px(kit::FIELD_INSET))
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.sm * k))
                     .text_size(px(theme.typography.small() * k))
                     .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(crate::palette::sentence_case(place))),
-            )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(crate::palette::sentence_case(place))),
+                    )
+                    .children(plan.map(|on| self.plan_tick(id, on, k, cx))),
+            );
+        Some(asked)
+    }
+
+    /// "Plan first": a tick and its words, pressed as one.
+    fn plan_tick(&self, id: ItemId, on: bool, k: f32, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let ink = if on { s.text_secondary } else { s.text_muted };
+        let hover = hsla(s.text);
+        div()
+            .id("plan-first")
+            .debug_selector(move || format!("plan-first-{}", id.as_uuid()))
+            .role(Role::CheckBox)
+            .aria_label(PLAN_FIRST)
+            .aria_toggled(if on {
+                gpui::accesskit::Toggled::True
+            } else {
+                gpui::accesskit::Toggled::False
+            })
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs * k))
+            .cursor_pointer()
+            .text_color(hsla(ink))
+            .hover(move |st| st.text_color(hover))
+            .child(kit::tick_box(theme, on, k))
+            .child(PLAN_FIRST)
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.flip_plan(id, cx)))
+            .into_any_element()
     }
 }

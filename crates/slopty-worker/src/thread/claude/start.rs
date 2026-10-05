@@ -159,19 +159,25 @@ async fn begin(
         return refused("Claude Code runs in its own terminal, observed");
     }
     let (model, prompt) = (start.model.as_deref(), start.prompt.as_deref());
-    let (mut args, native) = match start.args.as_slice() {
-        [] => slopty_agent::resume::started(model, prompt),
-        [flag, session] if flag == slopty_agent::resume::RESUME_FLAG => {
+    let asked = match StartArgs::of(&start.args) {
+        Ok(asked) => asked,
+        Err(why) => return refused(&why),
+    };
+    let (mut args, native) = match asked.resume {
+        None => slopty_agent::resume::started(model, prompt),
+        Some(session) => {
             let Some(args) = slopty_agent::resume::resumed(session, model, prompt) else {
                 return refused(&format!("{session} is no Claude Code session"));
             };
             if runs(host, session) {
                 return refused("Claude Code runs this session already");
             }
-            (args, session.clone())
+            (args, session.to_owned())
         }
-        _ => return refused("Claude Code takes no arguments from a start but --resume <id>"),
     };
+    if let Some(mode) = asked.mode {
+        args.splice(0..0, [slopty_agent::resume::PERMISSION_MODE.to_owned(), mode.to_owned()]);
+    }
     if !Path::new(&start.cwd).is_dir() {
         return refused(&format!("There is no folder {} here", start.cwd));
     }
@@ -190,6 +196,41 @@ async fn begin(
         host.typed(thread, id, prompt);
     }
     Outcome::Started { thread }
+}
+
+/// What a client's start may ask of Claude Code in [`Start::args`]: a session to take up again
+/// (`--resume <id>`) and a permission mode to start in (`--permission-mode <mode>`), each once.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StartArgs<'a> {
+    resume: Option<&'a str>,
+    mode: Option<&'a str>,
+}
+
+impl<'a> StartArgs<'a> {
+    /// `args` read; why not, in words, for anything else.
+    fn of(args: &'a [String]) -> Result<Self, String> {
+        let mut asked = Self::default();
+        let mut words = args.iter().map(String::as_str);
+        while let Some(flag) = words.next() {
+            let value = words.next();
+            match (flag, value) {
+                (slopty_agent::resume::RESUME_FLAG, Some(session)) if asked.resume.is_none() => {
+                    asked.resume = Some(session);
+                }
+                (slopty_agent::resume::PERMISSION_MODE, Some(mode))
+                    if asked.mode.is_none() && slopty_agent::resume::startable_mode(mode) =>
+                {
+                    asked.mode = Some(mode);
+                }
+                _ => {
+                    return Err("Claude Code takes no arguments from a start but --resume <id> \
+                         and --permission-mode <mode>"
+                        .to_owned());
+                }
+            }
+        }
+        Ok(asked)
+    }
 }
 
 /// Open Claude Code on a new conversation branched off the whole of thread `from`'s, in a

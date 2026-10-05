@@ -17,6 +17,9 @@ actions!(
         NewTerminal,
         /// Open a new Claude Code agent on the focused tile's worker.
         NewAgent,
+        /// Start the thread on its way in plan mode, or not: its agent plans before it
+        /// changes anything (Claude Code's `--permission-mode plan`).
+        TogglePlanFirst,
         /// Put an empty note beside the focused column.
         NewNote,
         /// Put a worker's window or display in the workspace.
@@ -326,6 +329,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     let mut items = vec![
         w("New terminal", IconName::SquareTerminal, Box::new(NewTerminal)),
         w("New agent\u{2026}", IconName::Sparkles, Box::new(NewAgent)),
+        w(super::starting::PLAN_FIRST_LINE, IconName::ListTodo, Box::new(TogglePlanFirst)),
         w("New note", IconName::StickyNote, Box::new(NewNote)),
         w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
         w("Open file…", IconName::FileText, Box::new(OpenFile)),
@@ -481,6 +485,8 @@ pub(super) struct Applies {
     pub offer: bool,
     /// An edit kept here has waited over a week for its tile.
     pub old_unsaved: bool,
+    /// A thread on its way whose agent can start in plan mode, its first message not sent.
+    pub plan: bool,
 }
 
 impl super::WorkspaceView {
@@ -508,6 +514,7 @@ impl super::WorkspaceView {
                 Some(
                     ItemKind::Terminal { .. }
                         | ItemKind::Folder { .. }
+                        | ItemKind::Thread { .. }
                         | ItemKind::Window { .. }
                         | ItemKind::Display { .. }
                 )
@@ -518,6 +525,7 @@ impl super::WorkspaceView {
             undo: !self.closed.is_empty(),
             offer: self.has_offer(),
             old_unsaved: self.has_old_unsaved(),
+            plan: focused.is_some_and(|t| self.starting.plans(t.item)),
         }
     }
 }

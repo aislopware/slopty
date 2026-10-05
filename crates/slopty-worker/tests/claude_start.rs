@@ -377,19 +377,37 @@ mod claude_start {
         assert_eq!(rig.opened().len(), 2);
     }
 
+    /// A start may ask for a permission mode to begin in, plan mode among them: the person's
+    /// `claude` opens with `--permission-mode <mode>`, on a new session or one taken up again.
+    #[tokio::test]
+    async fn a_start_in_plan_mode_opens_claude_planning() {
+        let rig = Rig::new();
+        let mut plan = rig.start(None);
+        plan.args = vec!["--permission-mode".to_owned(), "plan".to_owned()];
+        let Outcome::Started { thread } = rig.starter.start(IntentId::new(), plan).await else {
+            panic!("started");
+        };
+        let opened = rig.opened();
+        let (command, ..) = &opened[0];
+        assert_eq!(command[1..3], ["--permission-mode", "plan"]);
+        assert_eq!(command[3..5], ["--session-id".to_owned(), thread_native(&rig, thread)]);
+    }
+
     /// What a start cannot be is refused in words, and opens nothing: arguments of a client's
-    /// other than a resume,
+    /// other than a resume and a permission mode (one that skips every permission among them),
     /// another way to drive it, a folder that is not here, and a worker with no `claude`.
     #[tokio::test]
     async fn a_start_claude_code_cannot_take_is_refused_and_opens_nothing() {
         let rig = Rig::new();
         let mut args = rig.start(None);
         args.args = vec!["--dangerously-skip-permissions".to_owned()];
+        let mut bypass = rig.start(None);
+        bypass.args = vec!["--permission-mode".to_owned(), "bypassPermissions".to_owned()];
         let mut driven = rig.start(None);
         driven.drive = Some(Drive::named(Drive::DRIVEN));
         let mut nowhere = rig.start(None);
         nowhere.cwd = rig.work.join("missing").to_string_lossy().into_owned();
-        for start in [args, driven, nowhere] {
+        for start in [args, bypass, driven, nowhere] {
             let outcome = rig.starter.start(IntentId::new(), start).await;
             assert!(matches!(outcome, Outcome::Refused { .. }), "{outcome:?}");
         }

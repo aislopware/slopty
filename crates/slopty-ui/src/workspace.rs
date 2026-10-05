@@ -1939,6 +1939,7 @@ impl gpui::Render for WorkspaceView {
             })
             .when(applies.project, |el| el.on_action(cx.listener(Self::toggle_project_board)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
+            .when(applies.plan, |el| el.on_action(cx.listener(Self::toggle_plan_first)))
             .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
             .when(applies.old_unsaved, |el| el.on_action(cx.listener(Self::discard_old_unsaved)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))

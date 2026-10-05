@@ -2194,3 +2194,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_mod_is_off_for_its_first_reason`, `the_doctor_says_why_the_mod_is_off`,
     `a_provisional_mod_is_dropped_at_its_first_unreadable_event` and
     `a_provisional_mod_is_dropped_with_its_blocks`.
+- ✅ **A Claude Code start can plan first** (2026-10-05, readiness 10-05 G13). The thread's
+  mode chip already reads the permission mode every hook reports (`permission_mode`, to
+  `Meters::mode` in the observed adapter), read-only, with the hint that the mode is changed in
+  Claude Code's own terminal: Slopty never cycles its mode key. What was missing was a start in
+  plan mode, though `--permission-mode` is a published flag. Under a Claude Code start's
+  first-message field, a "Plan first" tick (and the palette's "Start in plan mode" while that
+  field has the keyboard) starts it with `--permission-mode plan`. The worker takes from a
+  client's start only `--resume <id>` and `--permission-mode <mode>`, each once, in any order,
+  and the mode only among those Claude Code's help lists, short of `bypassPermissions`, which
+  stays with the person's own `claude` flags. A start of an agent that has no such flag shows no
+  tick. The same batch lets the palette's "Upload…" reach a thread tile, which takes files since
+  "Every thread takes files".
+  - Tests: `workspace::tests::thread_start::a_claude_code_start_can_plan_first`; worker
+    `claude_start::a_start_in_plan_mode_opens_claude_planning` and
+    `a_start_claude_code_cannot_take_is_refused_and_opens_nothing`.
