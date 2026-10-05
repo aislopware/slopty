@@ -11,6 +11,10 @@
 //! the next review overwrites. A push names the person's branches, never `refs/slopty`, and none
 //! of these commits is an ancestor of a branch, so none leaves the machine.
 //!
+//! A folder's working tree is reviewed the same way with no thread ([`working_tree`]), against
+//! `HEAD` or the branch's base, through a scratch copy of the person's index that goes with the
+//! review.
+//!
 //! Hunks are cut here, with three lines of context, the same way every time: a hunk named by
 //! its place ([`Pick::hunks`]) is the hunk the review showed, as long as both of its sides are
 //! the blobs it showed. Each change is checked against them before anything is written.
@@ -22,7 +26,7 @@ use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, DiffTag};
 use slopty_proto::thread::detail::{Hunk, heading};
-use slopty_proto::thread::wire::{FileDiff, Pick};
+use slopty_proto::thread::wire::{Against, FileDiff, Pick, Review, ReviewScope};
 use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
 use tokio::io::AsyncWriteExt as _;
 
@@ -113,6 +117,46 @@ impl Repo {
     async fn line(&self, args: &[&str], index: Option<&Path>) -> Result<String, Failed> {
         let out = self.run(args, index, None).await?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
+    /// The tree `against` names: `HEAD`'s, the empty tree on an unborn branch; or that of where
+    /// the branch left its base, the first of `origin`'s default branch, `origin/main`,
+    /// `origin/master`, `main` and `master` that shares history with it. `None` when no base
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn against(&self, against: Against) -> Result<Option<TreeRef>, Failed> {
+        let verify = async |rev: &str| {
+            let spec = format!("{rev}^{{commit}}");
+            self.line(&["rev-parse", "-q", "--verify", "--end-of-options", &spec], None).await.ok()
+        };
+        let commit = match against {
+            Against::Head => verify("HEAD").await,
+            Against::Base => {
+                if verify("HEAD").await.is_none() {
+                    return Ok(None);
+                }
+                let mut found = None;
+                for base in BASES {
+                    let Some(base) = verify(base).await else { continue };
+                    if let Ok(fork) = self.line(&["merge-base", "HEAD", &base], None).await {
+                        found = Some(fork);
+                        break;
+                    }
+                }
+                let Some(fork) = found else { return Ok(None) };
+                Some(fork)
+            }
+        };
+        let tree = if let Some(commit) = commit {
+            self.line(&["rev-parse", &format!("{commit}^{{tree}}")], None).await?
+        } else {
+            let empty = self.run(&["hash-object", "-t", "tree", "--stdin"], None, Some(b""));
+            String::from_utf8_lossy(&empty.await?).trim().to_owned()
+        };
+        Ok(Some(TreeRef(tree)))
     }
 
     /// The working tree as a tree, through the thread's index.
@@ -545,6 +589,46 @@ fn trailers(out: &str) -> std::collections::HashMap<String, (ThreadId, slopty_co
 
 fn refs(thread: ThreadId) -> String {
     format!("refs/slopty/threads/{thread}")
+}
+
+/// The branches a working tree's base is looked for on, in order ([`Repo::against`]).
+const BASES: [&str; 5] = ["origin/HEAD", "origin/main", "origin/master", "main", "master"];
+
+/// Why a working tree's review against its base has nothing to compare.
+pub const NO_BASE: &str = "This branch has no base branch to compare with";
+
+/// The working tree of the repository at `root` now, new files and all, as a review against
+/// `against`.
+///
+/// The tree is written through a scratch copy of the person's index, so it hashes only what
+/// changed since git last looked, and their index, `HEAD` and refs are never touched.
+///
+/// # Errors
+///
+/// When git fails, or no scratch index can be made.
+pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<Review, Failed> {
+    let scratch = tempfile::tempdir().map_err(|e| Failed(format!("a scratch index: {e}")))?;
+    let index = scratch.path().join("index");
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: index.clone() };
+    let own = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
+    let own = PathBuf::from(repo.line(&own, None).await?);
+    // No index yet (nothing ever added): the scratch one starts from `HEAD` instead.
+    if tokio::fs::copy(&own, &index).await.is_err() {
+        let _partial = tokio::fs::remove_file(&index).await;
+    }
+    let scope = ReviewScope::WorkingTree(against);
+    let Some(from) = repo.against(against).await? else {
+        return Ok(Review {
+            scope,
+            from: None,
+            to: None,
+            files: Vec::new(),
+            absent: Some(NO_BASE.to_owned()),
+        });
+    };
+    let to = repo.take().await?;
+    let files = repo.changes(&from, &to).await?;
+    Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
 }
 
 const fn edge_name(edge: Edge) -> &'static str {

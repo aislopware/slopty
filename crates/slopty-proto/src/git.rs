@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::thread::wire::{Against, Review};
+
 /// The most files a status names; the rest are counted ([`GitStatus::more`]).
 pub const FILES_MAX: usize = 2000;
 /// The longest commit message or pull request body taken, in bytes.
@@ -62,6 +64,13 @@ pub enum GitOp {
         /// Delete the branch once merged, here and on the remote.
         delete_branch: bool,
     },
+    /// The working tree's changes, new files and all, against `HEAD` or the branch's base
+    /// ([`GitDone::Changes`]): a review of a folder that needs no thread. Nothing in the
+    /// repository moves; its index is not touched.
+    Changes {
+        /// What the working tree is compared with.
+        against: Against,
+    },
 }
 
 /// What a [`GitOp`] did.
@@ -103,6 +112,10 @@ pub enum GitDone {
         /// The pull request as it stands after, when gh could say.
         pull: Option<Box<PullStatus>>,
     },
+    /// The working tree's changes as a review, its scope
+    /// [`ReviewScope::WorkingTree`](crate::thread::wire::ReviewScope::WorkingTree); why there is
+    /// nothing to compare in [`Review::absent`].
+    Changes(Box<Review>),
 }
 
 /// A pull request as its forge reports it through gh. The forge's words are kept as it spells

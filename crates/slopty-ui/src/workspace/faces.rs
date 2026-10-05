@@ -198,7 +198,7 @@ impl WorkspaceView {
         for view in self.faces.threads.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
-        for view in self.faces.threads.reviews.values() {
+        for view in self.faces.threads.reviews.values().chain(self.changes_views()) {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.faces.threads.items.values() {
@@ -1014,6 +1014,7 @@ impl WorkspaceView {
             .collect();
         self.sync_thread_faces(&wanted, window, cx);
         self.sync_thread_items(window, cx);
+        self.sync_changes(window, cx);
         // Picks of sessions that are gone go with them.
         let terminals = &self.terminals;
         self.faces.chosen.retain(|s, _| terminals.contains_key(s));

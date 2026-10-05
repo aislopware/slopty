@@ -1,5 +1,8 @@
 //! Review tiles: a thread's changes, opened from its thread view as a tile of their own beside
-//! the agent's (`ItemKind::Review`).
+//! the agent's (`ItemKind::Review`), and a folder's, with no thread (`ItemKind::Changes`).
+//!
+//! "Review changes" opens the changes of the focused folder, or of the repository the focused
+//! shell is in, as a tile on that machine, or goes to the one already open there.
 //!
 //! A thread view asks for its review; the faces make the review's view
 //! ([`WorkspaceView::take_review`]) and this side opens it as an item on the agent's worker, or
@@ -11,13 +14,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{Context, Subscription, Window};
+use gpui::{AppContext as _, Context, Entity, Subscription, Window};
+use slopty_client::layout::WorkerKey;
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
+use super::actions::ReviewChanges;
 use crate::review::{ReviewEvent, ReviewView};
+
+/// The palette's line that opens a folder's changes.
+pub(super) const REVIEW_CHANGES: &str = "Review changes";
 
 /// What the strip keeps of review tiles.
 #[derive(Default)]
@@ -28,6 +36,8 @@ pub(super) struct Reviews {
     opening: HashSet<ThreadId>,
     /// Each hosted review view's events, heard while its tile is there.
     hearing: HashMap<ThreadId, Subscription>,
+    /// The view of each folder's changes tile, kept while its tile is there.
+    changes: HashMap<ItemId, Entity<ReviewView>>,
 }
 
 impl WorkspaceView {
@@ -107,12 +117,7 @@ impl WorkspaceView {
     }
 
     /// Hear the review of `thread`: comments sent take the keyboard to the agent's tile.
-    fn hear_review(
-        &mut self,
-        thread: ThreadId,
-        view: &gpui::Entity<ReviewView>,
-        cx: &mut Context<Self>,
-    ) {
+    fn hear_review(&mut self, thread: ThreadId, view: &Entity<ReviewView>, cx: &mut Context<Self>) {
         let hearing = cx.subscribe(view, |this, _view, event: &ReviewEvent, cx| match event {
             ReviewEvent::CommentsSent { thread } => {
                 if let Some(session) = this.thread_session(*thread, cx) {
@@ -128,5 +133,80 @@ impl WorkspaceView {
             ReviewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
         });
         self.reviews.hearing.insert(thread, hearing);
+    }
+
+    /// The folder whose changes "Review changes" opens from the focus: a folder tile's, or the
+    /// repository the focused shell stands in; with the machine.
+    pub(super) fn changes_here(&self) -> Option<(WorkerKey, String)> {
+        use slopty_proto::items::ItemKind;
+        let tile = self.focused()?;
+        let path = match &self.item(tile)?.kind {
+            ItemKind::Folder { path } | ItemKind::Changes { path } => path.clone(),
+            ItemKind::Terminal { session } => self.summary(*session)?.repo.clone()?,
+            _ => return None,
+        };
+        Some((tile.worker, path))
+    }
+
+    /// "Review changes": the focused folder's changes, in their own tile on its machine; the
+    /// one open there already for that folder takes the focus instead.
+    pub(super) fn review_changes(
+        &mut self,
+        _: &ReviewChanges,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((key, path)) = self.changes_here() else { return };
+        let open = self.layout.tiles().find_map(|t| match &self.item(t)?.kind {
+            ItemKind::Changes { path: p } if t.worker == key && *p == path => Some(t.item),
+            _ => None,
+        });
+        if let Some(item) = open {
+            self.go_to(item, cx);
+            return;
+        }
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Changes { path },
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
+        tracing::info!(id = %item.id, %key, "open changes");
+        self.propose(key, ItemOp::Add(item), cx);
+        cx.notify();
+    }
+
+    /// Make the view of each folder's changes tile, and let go of those whose tile is gone.
+    pub(super) fn sync_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tiled: Vec<(ItemId, WorkerKey, String)> = self
+            .layout
+            .tiles()
+            .filter_map(|t| match &self.item(t)?.kind {
+                ItemKind::Changes { path } => Some((t.item, t.worker, path.clone())),
+                _ => None,
+            })
+            .collect();
+        for (item, key, path) in &tiled {
+            if self.reviews.changes.contains_key(item) {
+                continue;
+            }
+            let hub = self.thread_hub(*key, cx);
+            let theme = self.theme.clone();
+            let path = path.clone();
+            let view = cx.new(|cx| ReviewView::folder(hub, path, theme, window, cx));
+            self.reviews.changes.insert(*item, view);
+        }
+        self.reviews.changes.retain(|item, _| tiled.iter().any(|(i, ..)| i == item));
+    }
+
+    /// The view of the folder's changes tile `item`, once made.
+    #[must_use]
+    pub fn changes_view(&self, item: ItemId) -> Option<&Entity<ReviewView>> {
+        self.reviews.changes.get(&item)
+    }
+
+    /// Every folder's changes tile's view.
+    pub(super) fn changes_views(&self) -> impl Iterator<Item = &Entity<ReviewView>> {
+        self.reviews.changes.values()
     }
 }

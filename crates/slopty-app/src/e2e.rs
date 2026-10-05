@@ -1140,6 +1140,7 @@ impl Workspace {
                 ItemKind::Browser { .. } => ("browser", None),
                 ItemKind::Review { .. } => ("review", None),
                 ItemKind::Thread { .. } => ("thread", None),
+                ItemKind::Changes { .. } => ("changes", None),
             };
             let file = match &item.kind {
                 ItemKind::File { path } => Some(FileItemInfo {

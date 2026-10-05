@@ -53,9 +53,9 @@ impl ReviewView {
         let Some(blob) = file.to.clone() else { return };
         let path = file.path.clone();
         self.authors_asked.insert(at);
-        let thread = self.thread;
+        let thread = self.own();
         let stamp = Stamp::Blob(blob);
-        let held = self.hub.update(cx, |hub, cx| hub.authors(Some(thread), &path, &stamp, cx));
+        let held = self.hub.update(cx, |hub, cx| hub.authors(thread, &path, &stamp, cx));
         if let Some(authors) = held {
             let authored = self.with_writers(authors, cx);
             self.authored.insert(at, authored);
@@ -133,14 +133,14 @@ impl ReviewView {
         let authored = self.authored.get(&at)?;
         let run = authored.at(line?)?;
         let writer = self.writers.get(&run.thread).or_else(|| authored.writers.get(&run.thread));
-        let own = Some(self.thread);
+        let own = self.own();
         let opens = Opens { thread: run.thread, turn: run.turn };
         let id = SharedString::from(format!("review-author-{at}-{hunk}-{ix}"));
         let tag = authorship::tag(&self.theme, id, run, writer, own, crate::clock::now(cx))
             .bg(crate::colors::hsla(self.theme.content()))
             // A press on the tag is the tag's: it starts no comment on the line under it.
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .when(writer.is_some() || run.thread == self.thread, |el| {
+            .when(writer.is_some() || own == Some(run.thread), |el| {
                 el.on_click(cx.listener(move |_this, _ev, _w, cx| {
                     cx.emit(ReviewEvent::OpenThread(opens));
                 }))

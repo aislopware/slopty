@@ -9,6 +9,11 @@
 //! agent reads what was meant. The comments go to the agent at once, or into the thread's
 //! draft to send with more words.
 //!
+//! A folder's changes are reviewed the same way with no thread ([`Reviewed::Folder`]): its
+//! working tree against `HEAD` or against the branch's base, read from its repository
+//! (`GitOp::Changes`). With no agent to tell, it keeps no comments and takes no keep or put
+//! back; the commit sheet and who wrote each line are there as for a thread.
+//!
 //! "Review with `<agent>`" asks the thread's agent for its own review of the change on show,
 //! through its own door ([`Intent::Review`]), where it has one. The tile holds what it shows
 //! while the agent reviews, and reads the findings from the agent's answer once it rests: each
@@ -30,6 +35,8 @@ use gpui::{
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::threads::Mirror;
+use slopty_proto::RequestId;
+use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Intent, Review, ReviewScope};
 use slopty_proto::thread::{
     AgentId, Cap, Delivery, IntentId, ItemBody, Phase, ThreadId, ThreadState, TurnId, TurnState,
@@ -164,10 +171,19 @@ struct Drafting {
     after: Row,
 }
 
+/// What a review tile reviews.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Reviewed {
+    /// A thread's work, between the snapshots of its turns.
+    Thread(ThreadId),
+    /// A folder's working tree, with no thread: absolute, or `~/…`.
+    Folder(String),
+}
+
 /// The review tile.
 pub struct ReviewView {
     hub: Entity<ThreadHub>,
-    thread: ThreadId,
+    reviewed: Reviewed,
     theme: Theme,
     zoom: f32,
     width: f32,
@@ -189,6 +205,9 @@ pub struct ReviewView {
     picks: HashSet<IntentId>,
     /// The branch's pull request was asked for, once the thread's folder was known.
     pull_asked: bool,
+    /// The last of the person's git ops in a folder's repository that this tile read its
+    /// changes again after.
+    said: Option<RequestId>,
     /// The commit sheet over the tile, while it is open.
     commit: Option<(Entity<CommitSheet>, Subscription)>,
     /// The agent's own review, while it runs.
@@ -213,7 +232,7 @@ pub struct ReviewView {
 impl std::fmt::Debug for ReviewView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReviewView")
-            .field("thread", &self.thread)
+            .field("reviewed", &self.reviewed)
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
@@ -237,6 +256,29 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::of(hub, Reviewed::Thread(thread), theme, window, cx)
+    }
+
+    /// The review of the folder `path`'s changes from `hub`'s machine, with no thread: what is
+    /// not committed, read from its repository.
+    pub fn folder(
+        hub: Entity<ThreadHub>,
+        path: String,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::of(hub, Reviewed::Folder(path), theme, window, cx)
+    }
+
+    fn of(
+        hub: Entity<ThreadHub>,
+        reviewed: Reviewed,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let folder = matches!(reviewed, Reviewed::Folder(_));
         let draft = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on this line"));
         let writing = cx.subscribe_in(&draft, window, |this, _input, event, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
@@ -244,24 +286,27 @@ impl ReviewView {
             }
         });
         let hearing = cx.subscribe(&hub, |this, _hub, event, cx| match event {
-            HubEvent::Review(t) if *t == this.thread => this.reviewed(cx),
-            HubEvent::Thread(t) if *t == this.thread => this.thread_moved(cx),
-            HubEvent::Git(repo) if this.repo(cx).as_ref() == Some(repo) => cx.notify(),
+            HubEvent::Review(t) if this.own() == Some(*t) => this.reviewed(cx),
+            HubEvent::Thread(t) if this.own() == Some(*t) => this.thread_moved(cx),
+            HubEvent::Git(repo) if this.repo(cx).as_ref() == Some(repo) => this.git_moved(cx),
             HubEvent::Authors => this.authors_came(cx),
             _ => {}
         });
         let watching = cx.observe(&draft, |_, _, cx| cx.notify());
-        cx.on_release(move |this, cx| {
-            this.hub.update(cx, |hub, cx| hub.close(thread, cx));
-        })
-        .detach();
+        if let Reviewed::Thread(thread) = &reviewed {
+            let thread = *thread;
+            cx.on_release(move |this, cx| {
+                this.hub.update(cx, |hub, cx| hub.close(thread, cx));
+            })
+            .detach();
+        }
         let mut view = Self {
             hub,
-            thread,
+            reviewed,
             theme,
             zoom: 1.0,
             width: 0.0,
-            scope: Scope::default(),
+            scope: if folder { Scope::Uncommitted } else { Scope::default() },
             asked: None,
             model: Model::default(),
             blocks: HashMap::new(),
@@ -272,6 +317,7 @@ impl ReviewView {
             draft,
             picks: HashSet::new(),
             pull_asked: false,
+            said: None,
             commit: None,
             reviewing: None,
             came: None,
@@ -283,23 +329,38 @@ impl ReviewView {
             hovered: None,
             _subscriptions: vec![writing, hearing, watching],
         };
-        view.hub.update(cx, |hub, cx| hub.open(thread, cx));
+        if let Some(thread) = view.own() {
+            view.hub.update(cx, |hub, cx| hub.open(thread, cx));
+        }
         view.reviewed(cx);
         view.ask(cx);
         view.ask_pull(cx);
         view
     }
 
-    /// The thread it reviews.
+    /// The thread it reviews; none for a folder's changes.
     #[must_use]
-    pub const fn thread(&self) -> ThreadId {
-        self.thread
+    pub const fn thread(&self) -> Option<ThreadId> {
+        self.own()
+    }
+
+    /// What it reviews.
+    #[must_use]
+    pub const fn subject(&self) -> &Reviewed {
+        &self.reviewed
+    }
+
+    const fn own(&self) -> Option<ThreadId> {
+        match self.reviewed {
+            Reviewed::Thread(thread) => Some(thread),
+            Reviewed::Folder(_) => None,
+        }
     }
 
     /// The title of the thread it reviews, once known.
     #[must_use]
     pub fn title(&self, cx: &App) -> Option<String> {
-        self.hub.read(cx).threads().title(self.thread).map(str::to_owned)
+        self.hub.read(cx).threads().title(self.own()?).map(str::to_owned)
     }
 
     /// The span on show.
@@ -354,8 +415,19 @@ impl ReviewView {
     /// Ask for the scope on show, unless it was asked over the same turns already. While the
     /// agent reviews, or its findings are here, the change it was asked about stays on show.
     fn ask(&mut self, cx: &mut Context<Self>) {
+        let thread = match &self.reviewed {
+            Reviewed::Thread(thread) => *thread,
+            Reviewed::Folder(path) => {
+                let (path, scope) = (path.clone(), self.scope.wire_alone());
+                let Some(ReviewScope::WorkingTree(against)) = scope else { return };
+                self.asked = scope;
+                let op = GitOp::Changes { against };
+                let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&path, op, cx));
+                return;
+            }
+        };
         let hub = self.hub.read(cx);
-        let Some(state) = hub.threads().mirror(self.thread).and_then(Mirror::state) else {
+        let Some(state) = hub.threads().mirror(thread).and_then(Mirror::state) else {
             return;
         };
         let held = self.reviewing.is_some() || self.model.has_findings();
@@ -366,15 +438,18 @@ impl ReviewView {
             return;
         }
         self.asked = Some(scope);
-        let thread = self.thread;
         self.hub.update(cx, |hub, cx| hub.ask_review(thread, scope, cx));
     }
 
     /// The folder the thread works in, when the worker said: its repository is the one the
     /// commit sheet and the pull request are of.
     fn repo(&self, cx: &App) -> Option<String> {
+        let thread = match &self.reviewed {
+            Reviewed::Thread(thread) => *thread,
+            Reviewed::Folder(path) => return Some(path.clone()),
+        };
         let hub = self.hub.read(cx);
-        let state = hub.threads().mirror(self.thread).and_then(Mirror::state)?;
+        let state = hub.threads().mirror(thread).and_then(Mirror::state)?;
         Some(state.meta.cwd.clone()).filter(|cwd| !cwd.trim().is_empty())
     }
 
@@ -385,9 +460,7 @@ impl ReviewView {
         }
         let Some(repo) = self.repo(cx) else { return };
         self.pull_asked = true;
-        let _asked = self
-            .hub
-            .update(cx, |hub, cx| hub.git_op(&repo, slopty_proto::git::GitOp::PullStatus, cx));
+        let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&repo, GitOp::PullStatus, cx));
     }
 
     /// Open the commit sheet over the tile.
@@ -423,11 +496,12 @@ impl ReviewView {
     /// The thread moved on: a new turn asks the last-turn review again, and a keep or a put
     /// back the worker acted on asks the review again.
     fn thread_moved(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.own() else { return };
         let hub = self.hub.read(cx);
         let waiting: HashSet<IntentId> = hub
             .threads()
             .outbox()
-            .of(self.thread)
+            .of(thread)
             .filter(|s| s.outcome.is_none())
             .map(|s| s.id)
             .collect();
@@ -442,11 +516,47 @@ impl ReviewView {
         cx.notify();
     }
 
-    /// The worker's review came.
+    /// The worker's review came: a thread's on its stream, a folder's from its repository.
     fn reviewed(&mut self, cx: &mut Context<Self>) {
-        let Some(review) = self.hub.read(cx).review(self.thread).cloned() else { return };
+        let hub = self.hub.read(cx);
+        let review = match (&self.reviewed, self.scope.wire_alone()) {
+            (Reviewed::Thread(thread), _) => hub.review(*thread).cloned(),
+            (Reviewed::Folder(path), Some(ReviewScope::WorkingTree(against))) => {
+                hub.git().repo(path).and_then(|r| r.changes.get(&against)).cloned()
+            }
+            (Reviewed::Folder(_), _) => None,
+        };
+        let Some(review) = review else { return };
+        // A folder hears every word of its repository; only a new reading is shown again.
+        let folder = self.own().is_none();
+        if folder && self.model.review().is_some_and(|shown| Arc::ptr_eq(shown, &review)) {
+            return;
+        }
         self.show(review);
         self.author_review(cx);
+        cx.notify();
+    }
+
+    /// The repository said something: a folder's changes came, or a commit or a merge went,
+    /// after which they are read again.
+    fn git_moved(&mut self, cx: &mut Context<Self>) {
+        if let Reviewed::Folder(path) = &self.reviewed {
+            let said = self.hub.read(cx).git().repo(path).and_then(|r| r.said.clone());
+            let went = said.as_ref().is_some_and(|(_, said)| said.went());
+            let request = said.map(|(request, _)| request);
+            if went && request != self.said {
+                self.said = request;
+                self.ask(cx);
+            }
+            self.reviewed(cx);
+        }
+        cx.notify();
+    }
+
+    /// Read the folder's changes again.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.asked = None;
+        self.ask(cx);
         cx.notify();
     }
 
@@ -518,9 +628,10 @@ impl ReviewView {
 
     // ----- what the person does --------------------------------------------------------
 
-    fn intent(&self, intent: Intent, cx: &mut Context<Self>) -> IntentId {
-        let thread = self.thread;
-        self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
+    /// Send `intent` to the thread; nothing for a folder's changes, which have none.
+    fn intent(&self, intent: Intent, cx: &mut Context<Self>) -> Option<IntentId> {
+        let thread = self.own()?;
+        Some(self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx)))
     }
 
     /// Keep or put back the file at `at`, or one of its hunks. A refusal of an earlier try
@@ -530,8 +641,7 @@ impl ReviewView {
             self.hub.update(cx, |hub, cx| hub.dismiss(refused, cx));
         }
         let hunks = hunk.and_then(|h| u32::try_from(h).ok()).into_iter().collect();
-        if let Some(intent) = self.model.pick(at, hunks, keep) {
-            let id = self.intent(intent, cx);
+        if let Some(id) = self.model.pick(at, hunks, keep).and_then(|i| self.intent(i, cx)) {
             self.picks.insert(id);
         }
     }
@@ -539,8 +649,9 @@ impl ReviewView {
     /// Keep every file shown.
     fn mark_reviewed(&mut self, cx: &mut Context<Self>) {
         for intent in self.model.keep_all() {
-            let id = self.intent(intent, cx);
-            self.picks.insert(id);
+            if let Some(id) = self.intent(intent, cx) {
+                self.picks.insert(id);
+            }
         }
     }
 
@@ -554,7 +665,7 @@ impl ReviewView {
     /// The agent that reviews through its own door, and its name.
     fn door_of(&self, cx: &App) -> Option<(AgentId, String)> {
         let hub = self.hub.read(cx);
-        let state = hub.threads().mirror(self.thread).and_then(Mirror::state)?;
+        let state = hub.threads().mirror(self.own()?).and_then(Mirror::state)?;
         let agent = state.meta.agent.clone();
         let name = crate::conversation::thread::view::agent_label(&agent);
         state.meta.can(Cap::REVIEW).then_some((agent, name))
@@ -575,16 +686,17 @@ impl ReviewView {
         let Some(agent) = self.door(cx) else { return };
         let Some(review) = self.model.review().filter(|r| !r.files.is_empty()) else { return };
         let (Some(from), Some(to)) = (review.from.clone(), review.to.clone()) else { return };
+        let Some(thread) = self.own() else { return };
         let after = self
             .hub
             .read(cx)
             .threads()
-            .mirror(self.thread)
+            .mirror(thread)
             .and_then(Mirror::state)
             .and_then(|s| s.last_turn().map(|t| t.id));
+        let Some(intent) = self.intent(Intent::Review { from, to }, cx) else { return };
         self.pinned = self.asked;
         self.came = None;
-        let intent = self.intent(Intent::Review { from, to }, cx);
         self.reviewing = Some(Reviewing { intent, after, agent });
         cx.notify();
     }
@@ -593,16 +705,16 @@ impl ReviewView {
     /// answered, each put on its line in the diff or kept as a note.
     fn settle_review(&mut self, cx: &App) {
         let Some(asked) = self.reviewing.clone() else { return };
+        let Some(thread) = self.own() else { return };
         let hub = self.hub.read(cx);
-        let refused =
-            hub.refusals(self.thread).find(|r| r.id == asked.intent).map(|r| r.words.clone());
+        let refused = hub.refusals(thread).find(|r| r.id == asked.intent).map(|r| r.words.clone());
         if let Some(words) = refused {
             self.reviewing = None;
             self.pinned = None;
             self.came = Some(Came { agent: asked.agent, words, refused: Some(asked.intent) });
             return;
         }
-        let Some(state) = hub.threads().mirror(self.thread).and_then(Mirror::state) else {
+        let Some(state) = hub.threads().mirror(thread).and_then(Mirror::state) else {
             return;
         };
         let Some(answer) = answered(state, &asked) else { return };
@@ -679,24 +791,26 @@ impl ReviewView {
 
     /// Send the comments as one message.
     fn send_comments(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.own() else { return };
         let Some(text) = self.model.take_message() else { return };
         let _id = self
             .intent(Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() }, cx);
         self.came = None;
         self.release_pin();
         self.rebuild();
-        cx.emit(ReviewEvent::CommentsSent { thread: self.thread });
+        cx.emit(ReviewEvent::CommentsSent { thread });
         cx.notify();
     }
 
     /// Put the comments into the thread's draft rather than send them: the host gives the
     /// draft the keyboard.
     fn add_to_message(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.own() else { return };
         let Some(text) = self.model.take_message() else { return };
         self.came = None;
         self.release_pin();
         self.rebuild();
-        cx.emit(ReviewEvent::AddToMessage { thread: self.thread, text });
+        cx.emit(ReviewEvent::AddToMessage { thread, text });
         cx.notify();
     }
 
@@ -745,6 +859,10 @@ impl ReviewView {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
+        // A comment is for an agent to read; a folder's changes have none.
+        if self.own().is_none() {
+            return;
+        }
         let from = self
             .drafting
             .as_ref()
@@ -852,7 +970,7 @@ impl ReviewView {
     fn picking(&self, at: usize, hunk: Option<usize>, cx: &App) -> Option<&'static str> {
         let path = &self.model.file(at)?.path;
         let hunk = hunk.and_then(|h| u32::try_from(h).ok());
-        self.hub.read(cx).threads().unshown(self.thread).find_map(|s| {
+        self.hub.read(cx).threads().unshown(self.own()?).find_map(|s| {
             let (pick, words) = match &s.intent {
                 Intent::Keep(p) => (p, "Keeping"),
                 Intent::Revert(p) => (p, "Putting back"),
@@ -869,7 +987,7 @@ impl ReviewView {
     fn refused(&self, at: usize, hunk: Option<usize>, cx: &App) -> Option<(IntentId, String)> {
         let path = &self.model.file(at)?.path;
         let hunk = hunk.and_then(|h| u32::try_from(h).ok());
-        self.hub.read(cx).refusals(self.thread).rev().find_map(|refusal| {
+        self.hub.read(cx).refusals(self.own()?).rev().find_map(|refusal| {
             let Some(Intent::Keep(pick) | Intent::Revert(pick)) = &refusal.intent else {
                 return None;
             };
@@ -940,7 +1058,7 @@ impl ReviewView {
             .border_b(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
-            .children(Scope::ALL.into_iter().map(|scope| {
+            .children(self.scopes().iter().copied().map(|scope| {
                 let on = scope == self.scope;
                 let id = format!("review-scope-{scope:?}");
                 let selector = id.clone();
@@ -963,9 +1081,34 @@ impl ReviewView {
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)))
             }))
             .child(div().flex_1())
+            .children(self.refresh_part(cx))
             .children(self.review_part(cx))
             .children(self.git_part(cx))
             .into_any_element()
+    }
+
+    /// The spans the switch offers: a thread's turns, or a folder's working tree.
+    const fn scopes(&self) -> &'static [Scope] {
+        match self.reviewed {
+            Reviewed::Thread(_) => &Scope::THREAD,
+            Reviewed::Folder(_) => &Scope::FOLDER,
+        }
+    }
+
+    /// A folder's changes are read when asked, so they are read again from here; a thread's
+    /// follow its turns.
+    fn refresh_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.own().is_none().then(|| {
+            kit::icon_button_at(
+                &self.theme,
+                "review-refresh",
+                IconName::RotateCw,
+                "Refresh",
+                self.zoom,
+            )
+            .on_click(cx.listener(|this, _ev, _w, cx| this.refresh(cx)))
+            .into_any_element()
+        })
     }
 
     /// The agent's own review: the way to ask it, where the agent has a door and there is a
@@ -1326,6 +1469,9 @@ impl ReviewView {
 
     /// Keep and put back, or what is on its way.
     fn picks(&self, at: usize, hunk: Option<usize>, what: &str, cx: &Context<Self>) -> AnyElement {
+        if self.own().is_none() {
+            return div().into_any_element();
+        }
         let s = self.theme.surfaces;
         if let Some(words) = self.picking(at, hunk, cx) {
             return div()
@@ -1772,7 +1918,7 @@ impl Render for ReviewView {
         let band = self.findings_band(cx);
         let body = self.body(cx);
         let door = self.door_of(cx).is_some();
-        let foot = self.foot(cx);
+        let foot = self.own().map(|_| self.foot(cx));
         div()
             .id("review")
             .debug_selector(|| "review".to_owned())
@@ -1806,7 +1952,7 @@ impl Render for ReviewView {
             .child(scopes)
             .children(band)
             .child(body)
-            .child(foot)
+            .children(foot)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
     }
 }

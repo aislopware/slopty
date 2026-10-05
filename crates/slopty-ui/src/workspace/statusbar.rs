@@ -294,6 +294,7 @@ impl WorkspaceView {
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }
             | ItemKind::Review { .. }
+            | ItemKind::Changes { .. }
             | ItemKind::Thread { .. } => None,
         }
     }

@@ -674,6 +674,7 @@ impl WorkspaceView {
                 ItemKind::File { .. }
                 | ItemKind::Browser { .. }
                 | ItemKind::Review { .. }
+                | ItemKind::Changes { .. }
                 | ItemKind::Thread { .. },
             )
             | None => {

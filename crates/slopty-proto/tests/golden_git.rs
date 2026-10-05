@@ -140,4 +140,57 @@ mod golden_git {
             GitOutcome::Failed { said: "! [rejected] feature -> feature (fetch first)".to_owned() };
         snap("worker_git_failed", &done(5, failed));
     }
+
+    /// A folder's working tree reviewed with no thread: asked against `HEAD` and against the
+    /// branch's base, answered as a review or with why there is nothing to compare.
+    #[test]
+    fn folder_changes() {
+        use slopty_proto::thread::detail::Hunk;
+        use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope};
+        use slopty_proto::thread::{Patch, TreeRef};
+
+        let ask = |request, op| ClientMsg::Git { request, repo: "~/src/demo".to_owned(), op };
+        snap("client_git_changes_head", &ask(9, GitOp::Changes { against: Against::Head }));
+        snap("client_git_changes_base", &ask(10, GitOp::Changes { against: Against::Base }));
+        let file = FileDiff {
+            path: "src/lib.rs".to_owned(),
+            from: Some("1f2e3d4c".to_owned()),
+            to: Some("5a6b7c8d".to_owned()),
+            binary: false,
+            patch: Patch {
+                hunks: vec![Hunk {
+                    old_start: 3,
+                    old_lines: 1,
+                    new_start: 3,
+                    new_lines: 1,
+                    heading: Some("fn main()".to_owned()),
+                    lines: vec!["-    old();".to_owned(), "+    new();".to_owned()],
+                }],
+                added: 1,
+                removed: 1,
+                clipped_lines: 0,
+                full: None,
+            },
+        };
+        let review = Review {
+            scope: ReviewScope::WorkingTree(Against::Head),
+            from: Some(TreeRef("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned())),
+            to: Some(TreeRef("9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d".to_owned())),
+            files: vec![file],
+            absent: None,
+        };
+        let done = |request, review: Review| WorkerMsg::GitDone {
+            request,
+            outcome: GitOutcome::Done(GitDone::Changes(Box::new(review))),
+        };
+        snap("worker_git_changes", &done(9, review));
+        let none = Review {
+            scope: ReviewScope::WorkingTree(Against::Base),
+            from: None,
+            to: None,
+            files: Vec::new(),
+            absent: Some("This repository has no base branch to compare with".to_owned()),
+        };
+        snap("worker_git_changes_absent", &done(10, none));
+    }
 }

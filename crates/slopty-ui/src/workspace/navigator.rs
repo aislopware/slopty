@@ -1236,6 +1236,7 @@ impl WorkspaceView {
             | ItemKind::File { .. }
             | ItemKind::Folder { .. }
             | ItemKind::Review { .. }
+            | ItemKind::Changes { .. }
             | ItemKind::Thread { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
         }

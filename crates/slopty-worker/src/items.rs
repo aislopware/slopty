@@ -305,7 +305,7 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         ItemKind::File { path } if !good_path(path) => {
             Err(WorkerError::Items("bad file path".to_owned()))
         }
-        ItemKind::Folder { path } if !good_path(path) => {
+        ItemKind::Folder { path } | ItemKind::Changes { path } if !good_path(path) => {
             Err(WorkerError::Items("bad folder path".to_owned()))
         }
         ItemKind::Browser { url } if !web_address(url) => {
@@ -318,7 +318,8 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         | ItemKind::Folder { .. }
         | ItemKind::Browser { .. }
         | ItemKind::Review { .. }
-        | ItemKind::Thread { .. } => Ok(()),
+        | ItemKind::Thread { .. }
+        | ItemKind::Changes { .. } => Ok(()),
     }
 }
 

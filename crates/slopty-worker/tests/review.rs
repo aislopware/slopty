@@ -295,6 +295,80 @@ mod review {
         assert_eq!(left, "", "every ref of the thread goes with it");
     }
 
+    /// A folder's working tree, reviewed with no thread through the person's git op: against
+    /// `HEAD` it is what is not committed, a new file too, and the person's index stays as it
+    /// was; against the base it is the branch's commits as well; a branch with no base says
+    /// so; and a thread's review over the same span reads the same.
+    #[tokio::test]
+    async fn a_folders_working_tree_is_reviewed_with_no_thread() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+        use slopty_proto::thread::wire::Against;
+        use slopty_worker::repo::commit::{Programs, apply};
+        use slopty_worker::repo::snapshot::NO_BASE;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        run(&repo, &["switch", "-q", "-c", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "on the branch\n").unwrap();
+        run(&repo, &["add", "feature.txt"]);
+        run(&repo, &["commit", "-q", "-m", "feature"]);
+        std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
+        std::fs::write(repo.join("new.txt"), "not added\n").unwrap();
+        let index = std::fs::read(repo.join(".git/index")).unwrap();
+        let programs = Programs { git: Some(git()), gh: None };
+        let folder = repo.to_string_lossy().into_owned();
+        let changes =
+            async |against| match apply(&programs, &folder, GitOp::Changes { against }).await {
+                GitOutcome::Done(GitDone::Changes(review)) => *review,
+                other => panic!("{other:?}"),
+            };
+        let paths =
+            |review: &Review| review.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+
+        let head = changes(Against::Head).await;
+        assert_eq!(head.scope, ReviewScope::WorkingTree(Against::Head));
+        assert_eq!(paths(&head), ["a.txt", "new.txt"], "what is not committed, new files too");
+        assert_eq!(std::fs::read(repo.join(".git/index")).unwrap(), index, "the index untouched");
+        let base = changes(Against::Base).await;
+        assert_eq!(paths(&base), ["a.txt", "feature.txt", "new.txt"], "the branch's work too");
+
+        let rig = Rig::new(dir.path(), &repo);
+        let threads =
+            rig.snapshots.review(rig.thread, ReviewScope::WorkingTree(Against::Head)).await;
+        assert_eq!(paths(&threads), paths(&head), "a thread's review of the span reads the same");
+
+        let alone = dir.path().join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        run(&alone, &["init", "-q", "-b", "trunk"]);
+        run(
+            &alone,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "c0",
+            ],
+        );
+        std::fs::write(alone.join("draft.txt"), "draft\n").unwrap();
+        let folder = alone.to_string_lossy().into_owned();
+        let none = match apply(&programs, &folder, GitOp::Changes { against: Against::Base }).await
+        {
+            GitOutcome::Done(GitDone::Changes(review)) => *review,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(none.absent.as_deref(), Some(NO_BASE), "no main, no master, no origin");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let folder = outside.to_string_lossy().into_owned();
+        let refused = apply(&programs, &folder, GitOp::Changes { against: Against::Head }).await;
+        assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
+    }
+
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one
     /// with nothing changed, and one after a file changed. A measurement for
     /// `docs/MEASUREMENTS.md`, not a pass or fail.

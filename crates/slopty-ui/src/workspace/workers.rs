@@ -957,6 +957,7 @@ impl WorkspaceView {
                     | ItemKind::Folder { .. }
                     | ItemKind::Browser { .. }
                     | ItemKind::Review { .. }
+                    | ItemKind::Changes { .. }
                     | ItemKind::Thread { .. } => None,
                 })
                 .collect();

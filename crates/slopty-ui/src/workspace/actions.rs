@@ -31,6 +31,9 @@ actions!(
         OpenFolder,
         /// Open a web page in a tile (the palette, ready for an address).
         OpenUrl,
+        /// Review the changes of the focused folder's repository, or of the focused shell's,
+        /// with no thread: what is not committed, and the whole branch.
+        ReviewChanges,
         /// Open the page a shell last asked to open that was held back in a notice.
         OpenLastOffer,
         /// Let go of the unsaved edits kept on this device for over a week without a tile to
@@ -336,6 +339,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
         w("Open file…", IconName::FileText, Box::new(OpenFile)),
         w("Open folder…", IconName::FolderOpen, Box::new(OpenFolder)),
+        w(super::reviews::REVIEW_CHANGES, IconName::FolderGit2, Box::new(ReviewChanges)),
         w("Enclosing folder", IconName::ArrowUp, Box::new(crate::folder::OpenParent)),
         w("Save file", IconName::Save, Box::new(crate::file::SaveFile)),
         w("Done with this file", IconName::Check, Box::new(crate::file::FinishEdit)),
@@ -489,6 +493,8 @@ pub(super) struct Applies {
     pub old_unsaved: bool,
     /// A thread on its way whose agent can start in plan mode, its first message not sent.
     pub plan: bool,
+    /// A folder, or a shell in a repository: its changes can be reviewed.
+    pub changes: bool,
 }
 
 impl super::WorkspaceView {
@@ -528,6 +534,7 @@ impl super::WorkspaceView {
             offer: self.has_offer(),
             old_unsaved: self.has_old_unsaved(),
             plan: focused.is_some_and(|t| self.starting.plans(t.item)),
+            changes: self.changes_here().is_some(),
         }
     }
 }

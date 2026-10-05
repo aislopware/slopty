@@ -1550,3 +1550,33 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `slopty-workerd` `threads::a_start_in_a_worktree_opens_its_agent_there`,
     `workspace::tests::thread_start::a_start_can_take_a_new_worktree_of_a_repository`; goldens
     `client_start` (changed), `client_start_in_worktree` (new), `start_thread` (changed).
+
+- ✅ **A folder's changes are reviewed with no thread** (2026-10-05, readiness 10-05 G10). A
+  review covered one thread's turns only, so work from an agent outside Slopty, from several
+  threads, or from the person's own hands could not be read in the review tile.
+  - *On the wire.* `ReviewScope::WorkingTree(Against)` is the working tree now, new files and
+    all, against `HEAD` (what is not committed) or against the branch's base (all of the
+    branch's work). The base is the merge base of `HEAD` with the first of `origin/HEAD`,
+    `origin/main`, `origin/master`, `main` and `master` that shares history with it. A branch
+    with none says so in the review's `absent`. A folder asks it as the person's git op,
+    `GitOp::Changes`, answered with `GitDone::Changes(Review)`. That path already numbers,
+    routes and keeps answers per repository (`GitBook`), so no new message and no new arm in the
+    app were needed. A thread's review takes the same scope (`Snapshots::review`). A folder's
+    changes tile is `ItemKind::Changes { path }`, placed, restored and closed like any tile.
+  - *The person's index is never touched.* The tree is written through a scratch copy of the
+    repository's own index (`repo::snapshot::working_tree`), so git hashes only what changed
+    since it last looked, and the copy goes with the review. This was chosen over a persistent
+    index per repository, which two clients could lock at once, and over a fresh index, which
+    hashes every file on each review.
+  - *The tile.* "Review changes" in the palette opens the focused folder's changes, or the
+    changes of the repository the focused shell stands in, on that machine. If a changes tile is
+    already open for that folder, it takes the focus instead. The tile is the review tile with
+    no thread (`Reviewed::Folder`). Its switch offers "Uncommitted" and "Whole branch". With no
+    agent to tell, it has no keep, put back, comments, foot or agent review. The commit sheet,
+    the pull request and who wrote each line are there as for a thread. Its changes are read
+    when asked, so a refresh button stands at the switch's end. They are also read again after
+    a commit or merge from its sheet.
+  - Tests: `slopty-worker` `review::a_folders_working_tree_is_reviewed_with_no_thread`,
+    `workspace::tests::review_tile::a_folders_changes_open_as_a_tile_with_no_thread`; goldens
+    `client_git_changes_head`, `client_git_changes_base`, `worker_git_changes`,
+    `worker_git_changes_absent` and `worker_item_changes` (all new; no golden changed).

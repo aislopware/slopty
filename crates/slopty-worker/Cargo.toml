@@ -58,6 +58,8 @@ objc2-core-foundation = { workspace = true, features = [ "CFArray", "CFString" ]
 objc2-core-services = { workspace = true, features = [ "FSEvents", "dispatch2" ] }
 # Xcode's version, read from its `version.plist` rather than by running `xcodebuild` (`facts`).
 plist.workspace = true
+# The scratch index a folder's working tree is reviewed through (`repo::snapshot::working_tree`).
+tempfile.workspace = true
 
 [dev-dependencies]
 # The encoder's measurement surface (VBV mode, property probes) for `tests/screen.rs`.
@@ -66,7 +68,6 @@ slopty-client.workspace = true
 slopty-grid.workspace = true
 # A live test's skip, which the VM lane counts as a failure (`slopty_testkit::live`).
 slopty-testkit.workspace = true
-tempfile.workspace = true
 # Paused time for the change counts' coalescing test.
 tokio = { workspace = true, features = [ "test-util" ] }
 

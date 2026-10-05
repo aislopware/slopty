@@ -180,7 +180,7 @@ impl WorkspaceView {
                 path.rsplit_once('/')
                     .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned())
             }),
-            ItemKind::Folder { path } => Some(path.clone()),
+            ItemKind::Folder { path } | ItemKind::Changes { path } => Some(path.clone()),
             ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
@@ -262,6 +262,7 @@ impl WorkspaceView {
                 | ItemKind::Browser { .. }
                 | ItemKind::Folder { .. }
                 | ItemKind::Review { .. }
+                | ItemKind::Changes { .. }
                 | ItemKind::Thread { .. } => continue,
             };
             if let Ok(total) = u32::try_from(total) {

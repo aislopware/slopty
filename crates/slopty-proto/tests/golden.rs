@@ -922,6 +922,20 @@ mod golden {
                 }),
             }),
         );
+        // A folder's changes, reviewed with no thread.
+        snap(
+            "worker_item_changes",
+            &WorkerMsg::Items(ItemSync::Delta {
+                version: 15,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: ItemOp::Add(Item {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7f)),
+                    kind: ItemKind::Changes { path: "/w/slopty".to_owned() },
+                    name: None,
+                    facts: std::collections::BTreeMap::new(),
+                }),
+            }),
+        );
         snap(
             "worker_folder_listed",
             &WorkerMsg::Folder {

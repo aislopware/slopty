@@ -4,14 +4,16 @@
 //! branch's pull request (`slopty_proto::git`).
 //!
 //! [`GitBook`] numbers each op sent to the worker, holds it until the worker answers, and keeps
-//! what each repository last said: the status, the pull request, and how the person's last op
-//! went. A commit asked "and push" pushes once the commit is made, never alongside it. After
-//! every op that changes something, the status is asked again, so the list shows what is left.
-//! The hub owns one book per worker ([`super::ThreadHub::git`]).
+//! what each repository last said: the status, the pull request, its working tree's changes,
+//! and how the person's last op went. A commit asked "and push" pushes once the commit is made,
+//! never alongside it. After every op that changes something, the status is asked again, so the
+//! list shows what is left. The hub owns one book per worker ([`super::ThreadHub::git`]).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use slopty_proto::git::{GitDone, GitOp, GitOutcome, GitStatus, PullStanding, PullStatus};
+use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
 /// What an op asked while the machine is out of reach says.
@@ -100,6 +102,9 @@ pub struct Repo {
     pub no_gh: Option<String>,
     /// How the person's last op went, under the op's number.
     pub said: Option<(RequestId, Said)>,
+    /// Its working tree's changes against each commit it was compared with, as last read, or
+    /// why they could not be ([`Review::absent`]).
+    pub changes: HashMap<Against, Arc<Review>>,
 }
 
 /// An op on its way.
@@ -179,7 +184,7 @@ impl GitBook {
         let asked = self.asked.remove(&request)?;
         let repo = self.repos.entry(asked.repo.clone()).or_default();
         let mut then = Vec::new();
-        let read = matches!(asked.op, GitOp::Status | GitOp::PullStatus);
+        let read = !changes(&asked.op);
         match outcome {
             GitOutcome::Done(done) => {
                 repo_done(repo, request, done, asked.then_push, &mut then);
@@ -267,6 +272,11 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
                 None => then.push(Then::Pull),
             }
         }
+        GitDone::Changes(review) => {
+            if let ReviewScope::WorkingTree(against) = review.scope {
+                repo.changes.insert(against, Arc::from(review));
+            }
+        }
     }
 }
 
@@ -281,6 +291,16 @@ fn missed(
     match op {
         GitOp::Status => repo.unread = Some(words),
         GitOp::PullStatus => repo.pull_unread = Some(words),
+        GitOp::Changes { against } => {
+            let review = Review {
+                scope: ReviewScope::WorkingTree(*against),
+                from: None,
+                to: None,
+                files: Vec::new(),
+                absent: Some(words),
+            };
+            repo.changes.insert(*against, Arc::new(review));
+        }
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -291,7 +311,7 @@ const fn refused(why: String) -> Said {
 
 /// Whether `op` changes the repository or its pull request, rather than reads it.
 const fn changes(op: &GitOp) -> bool {
-    !matches!(op, GitOp::Status | GitOp::PullStatus)
+    !matches!(op, GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. })
 }
 
 /// A file's status in git's letters as the person reads it: the working tree's letter where it

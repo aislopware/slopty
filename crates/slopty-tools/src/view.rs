@@ -1216,6 +1216,7 @@ const fn kind_word(kind: &ItemKind) -> &'static str {
         ItemKind::Browser { .. } => "browser",
         ItemKind::Review { .. } => "review",
         ItemKind::Thread { .. } => "thread",
+        ItemKind::Changes { .. } => "changes",
     }
 }
 
@@ -1241,7 +1242,9 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 }
                 ItemKind::Window { window } => view.window = Some(window.0),
                 ItemKind::Display { display } => view.display = Some(display.0),
-                ItemKind::File { path } | ItemKind::Folder { path } => view.path = Some(path),
+                ItemKind::File { path }
+                | ItemKind::Folder { path }
+                | ItemKind::Changes { path } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => {
                     view.thread = Some(thread.to_string());
@@ -1266,7 +1269,9 @@ pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
                 }
                 ItemKind::Window { window } => window.0.to_string(),
                 ItemKind::Display { display } => display.to_string(),
-                ItemKind::File { path } | ItemKind::Folder { path } => path.clone(),
+                ItemKind::File { path }
+                | ItemKind::Folder { path }
+                | ItemKind::Changes { path } => path.clone(),
                 ItemKind::Browser { url } => url.clone(),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => thread.to_string(),
             };

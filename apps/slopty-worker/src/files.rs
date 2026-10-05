@@ -157,9 +157,14 @@ pub async fn save_in_order(
             }
             Save::Edited(reply) => handoffs.lock().replied(client, reply),
             Save::Fs { request, op } => fs_op(client, &out, request, op).await,
-            // A status or a commit is the disk's, in order with the saves around it; a push or a
-            // pull request waits on the network, so it runs beside them, after what came before.
-            Save::Git { request, repo, op: op @ (GitOp::Status | GitOp::Commit { .. }) } => {
+            // A status, a commit or a review of the changes is the disk's, in order with the
+            // saves around it; a push or a pull request waits on the network, so it runs beside
+            // them, after what came before.
+            Save::Git {
+                request,
+                repo,
+                op: op @ (GitOp::Status | GitOp::Commit { .. } | GitOp::Changes { .. }),
+            } => {
                 git_op(client, &out, request, repo, op).await;
             }
             Save::Git { request, repo, op } => {
@@ -196,6 +201,7 @@ pub async fn git_op(
         GitOp::PullRequest { .. } => "pull request",
         GitOp::PullStatus => "pull request status",
         GitOp::Merge { .. } => "merge",
+        GitOp::Changes { .. } => "changes",
     };
     let outcome = slopty_worker::repo::commit::apply(
         &slopty_worker::repo::commit::Programs::here(),

@@ -135,6 +135,8 @@ pub const OPENING: &str = "Opening…";
 pub const READING: &str = crate::file::READING;
 /// What a review tile's header says, and its body while the review is on its way.
 pub const REVIEW: &str = "Review";
+/// What a folder's changes tile's header says, and its body while they are on their way.
+pub const CHANGES: &str = "Changes";
 
 /// How the chrome is scaled this frame: `k`, the overview's zoom, and whether that zoom is
 /// in motion (chrome text then paints from the raster ladder).
@@ -485,11 +487,12 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
         ItemKind::Folder { .. } => Glyph::Icon(IconName::Folder),
         ItemKind::Browser { .. } => Glyph::Icon(IconName::Globe),
         ItemKind::Review { .. } => Glyph::Icon(IconName::FileDiff),
+        ItemKind::Changes { .. } => Glyph::Icon(IconName::FolderGit2),
     }
 }
 
 /// The word for what an item is: `terminal`, `window`, `display`, `file`, `folder`,
-/// `browser`, `review`.
+/// `browser`, `review`, `thread`, `changes`.
 pub(super) const fn kind_name(item: &Item) -> &'static str {
     match item.kind {
         ItemKind::Terminal { .. } => "terminal",
@@ -500,6 +503,7 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
         ItemKind::Browser { .. } => "browser",
         ItemKind::Review { .. } => "review",
         ItemKind::Thread { .. } => "thread",
+        ItemKind::Changes { .. } => "changes",
     }
 }
 
@@ -520,6 +524,8 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
+            // The folder whose changes they are: the title says what they are.
+            ItemKind::Changes { path } => Some(folder_title(path)),
             // The host alone: the path is the page's business, and the title names the page.
             ItemKind::Browser { .. } => self.page_facts(item.id).and_then(|page| {
                 let host = page.short_url.split('/').next().unwrap_or_default();
@@ -547,6 +553,7 @@ impl WorkspaceView {
                 .page_facts(item.id)
                 .map_or_else(|| crate::browser::short_url(url).to_owned(), |p| p.title.clone()),
             ItemKind::Review { .. } => REVIEW.to_owned(),
+            ItemKind::Changes { .. } => CHANGES.to_owned(),
             ItemKind::Thread { thread } => self.thread_title(*thread),
         }
     }
@@ -1850,7 +1857,10 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::File { .. } | ItemKind::Review { .. } | ItemKind::Thread { .. } => {}
+            ItemKind::File { .. }
+            | ItemKind::Review { .. }
+            | ItemKind::Changes { .. }
+            | ItemKind::Thread { .. } => {}
         }
         actions
     }
@@ -2679,6 +2689,16 @@ impl WorkspaceView {
                 }
                 None if !worker_up => well(),
                 None => self.waiting_body(item, Wait::Loading(REVIEW.into()), k),
+            },
+            ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
+                Some(view) => {
+                    let width = placed.target.w;
+                    let handed = Handed::Review { zoom: k, width };
+                    self.hand_over(cx, &view, handed, move |v, cx| v.set_layout(k, width, cx));
+                    fixed(self.body_view(&view, placed, cx))
+                }
+                None if !worker_up => well(),
+                None => self.waiting_body(item, Wait::Loading(CHANGES.into()), k),
             },
             // The thread view, under the tile's header, which says its title already.
             ItemKind::Thread { .. } => match self.thread_item(item.id).cloned() {

@@ -228,7 +228,7 @@ fn a_drag_comments_on_a_run_and_add_to_message_sends_nothing(cx: &mut TestAppCon
     assert_eq!(
         *heard.borrow(),
         [ReviewEvent::AddToMessage {
-            thread: view.read_with(cx, |v, _| v.thread()),
+            thread: view.read_with(cx, |v, _| v.thread()).expect("a thread's review"),
             text: "In `src/lib.rs` lines 10\u{2013}11:\n```diff\n fn main() {\n-    old();\n+    \
                    new();\n```\nWhy swap these?"
                 .to_owned(),
@@ -318,7 +318,7 @@ fn door_tile(
     cx: &mut TestAppContext,
 ) -> (Entity<ReviewView>, Entity<ThreadHub>, Sent, &mut VisualTestContext) {
     let (view, hub, sent, cx) = tile(cx, 1200.0);
-    let thread = view.read_with(cx, |v, _| v.thread());
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     let mut state = fixtures::thread("edit");
     state.meta.id = thread;
     state.meta.caps.push(Cap::named(Cap::REVIEW));
@@ -410,7 +410,7 @@ fn review_with_the_agent_shows_only_where_it_has_a_door(cx: &mut TestAppContext)
 #[gpui::test]
 fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppContext) {
     let (view, hub, sent, cx) = door_tile(cx);
-    let thread = view.read_with(cx, |v, _| v.thread());
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     click(cx, "review-by-agent");
     assert_eq!(
         intents(&sent),
@@ -458,7 +458,7 @@ fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppCon
 #[gpui::test]
 fn findings_are_let_go_and_a_review_says_how_it_came_out(cx: &mut TestAppContext) {
     let (view, hub, _sent, cx) = door_tile(cx);
-    let thread = view.read_with(cx, |v, _| v.thread());
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     click(cx, "review-by-agent");
     answered(&hub, cx, thread, "- Nothing placed here\n- Another loose one");
     assert!(cx.debug_bounds("review-note-1").is_some(), "kept, though they name no place");
@@ -518,7 +518,7 @@ fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext
     use crate::authorship::Opens;
 
     let (view, hub, sent, cx) = tile(cx, 800.0);
-    let thread = view.read_with(cx, |v, _| v.thread());
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     let asked: Vec<String> = sent
         .borrow()
         .iter()
@@ -577,7 +577,7 @@ fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext
 #[gpui::test]
 fn an_empty_review_names_its_span(cx: &mut TestAppContext) {
     let (view, hub, _sent, cx) = tile(cx, 1200.0);
-    let thread = view.read_with(cx, |view, _cx| view.thread());
+    let thread = view.read_with(cx, |view, _cx| view.thread()).expect("a thread's review");
     let nothing = Review { files: Vec::new(), ..review() };
     hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(nothing)), cx));
     cx.run_until_parked();

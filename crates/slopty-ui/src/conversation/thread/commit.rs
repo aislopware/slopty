@@ -955,7 +955,7 @@ impl CommitSheet {
                 GitOp::Push => "Pushing\u{2026}",
                 GitOp::PullRequest { .. } => "Opening the pull request\u{2026}",
                 GitOp::Merge { .. } => "Merging\u{2026}",
-                GitOp::Status | GitOp::PullStatus => return None,
+                GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. } => return None,
             };
             return Some(self.quiet("commit-busy", words).into_any_element());
         }

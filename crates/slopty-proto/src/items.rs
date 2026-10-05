@@ -62,6 +62,12 @@ pub enum ItemKind {
         /// The thread.
         thread: crate::thread::ThreadId,
     },
+    /// A folder's changes in its repository, reviewed with no thread: what is in it comes from
+    /// its repository (`crate::git::GitOp::Changes`), not the registry.
+    Changes {
+        /// A folder in the repository: absolute, or `~/…`.
+        path: String,
+    },
 }
 
 /// One item on a worker.

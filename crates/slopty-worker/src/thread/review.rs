@@ -181,6 +181,12 @@ impl Snapshots {
             absent: Some(why.to_owned()),
         };
         let Some(repo) = self.repo(thread) else { return absent(NOT_IN_GIT) };
+        if let ReviewScope::WorkingTree(against) = scope {
+            return match crate::repo::snapshot::working_tree(&repo.git, &repo.root, against).await {
+                Ok(review) => review,
+                Err(e) => absent(&e.to_string()),
+            };
+        }
         let sides = self.host.update(thread, |state| (vec![], sides(state, scope)));
         let Some((from, to)) = sides else { return absent("The thread is gone") };
         let from = match (scope, from) {
@@ -343,6 +349,8 @@ fn sides(state: &ThreadState, scope: ReviewScope) -> (Option<TreeRef>, Option<Tr
         },
         ReviewScope::Since(id) => (turn(id).and_then(|t| t.before.clone()), None),
         ReviewScope::Kept => (base(state), None),
+        // Not between snapshots: [`Snapshots::review`] reads it from the repository.
+        ReviewScope::WorkingTree(_) => (None, None),
     }
 }
 

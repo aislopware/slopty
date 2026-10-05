@@ -514,8 +514,10 @@ pub enum ThreadFrame {
     Review(Box<Review>),
 }
 
-/// The span of a thread's work a review covers, each a diff between two snapshots of the
-/// working tree ([`Action::Snapshot`]); "now" is a snapshot taken for the review.
+/// The span of work a review covers: a diff between two trees of the working tree.
+///
+/// "Now" is one taken for the review. A thread's spans are between its snapshots
+/// ([`Action::Snapshot`]); [`Self::WorkingTree`] is any folder's, a thread's or none.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ReviewScope {
     /// One turn: from its start to its end, or to now while it runs.
@@ -524,6 +526,19 @@ pub enum ReviewScope {
     Since(TurnId),
     /// From what the person has kept ([`Intent::Keep`]) to now; what is left to review.
     Kept,
+    /// The working tree now, new files and all, against a commit of its repository
+    /// (`crate::git::GitOp::Changes` asks it of a folder with no thread).
+    WorkingTree(Against),
+}
+
+/// What a working tree's review compares it with ([`ReviewScope::WorkingTree`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Against {
+    /// `HEAD`: what is not committed.
+    Head,
+    /// Where the branch left its base branch: the merge base of `HEAD` and `origin`'s default
+    /// branch, else of the local `main` or `master`. All the branch's work, committed or not.
+    Base,
 }
 
 /// A review: each file that differs between two trees.

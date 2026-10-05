@@ -68,6 +68,10 @@ pub async fn apply(programs: &Programs, repo: &str, op: GitOp) -> GitOutcome {
         GitOp::Merge { method, head, delete_branch } => {
             super::pull::merge(gh, &root, &method, head.as_deref(), delete_branch).await
         }
+        GitOp::Changes { against } => super::snapshot::working_tree(git, &root, against)
+            .await
+            .map(|review| GitDone::Changes(Box::new(review)))
+            .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
     };
     done.map_or_else(|o| o, GitOutcome::Done)
 }

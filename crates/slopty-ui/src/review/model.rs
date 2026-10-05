@@ -5,7 +5,7 @@
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
 
-use slopty_proto::thread::wire::{FileDiff, Intent, Pick, Review, ReviewScope};
+use slopty_proto::thread::wire::{Against, FileDiff, Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{ThreadState, TurnId};
 
 use super::findings::Finding;
@@ -20,11 +20,20 @@ pub enum Scope {
     SinceReviewed,
     /// Everything since the thread's first turn.
     AllTurns,
+    /// The working tree against `HEAD`: what is not committed. A folder's default.
+    Uncommitted,
+    /// The working tree against where the branch left its base: all of the branch's work.
+    WholeBranch,
 }
 
 impl Scope {
-    /// Every scope, in the switch's order.
-    pub const ALL: [Self; 3] = [Self::LastTurn, Self::SinceReviewed, Self::AllTurns];
+    /// Every scope.
+    pub const ALL: [Self; 5] =
+        [Self::LastTurn, Self::SinceReviewed, Self::AllTurns, Self::Uncommitted, Self::WholeBranch];
+    /// A folder's scopes, in the switch's order.
+    pub const FOLDER: [Self; 2] = [Self::Uncommitted, Self::WholeBranch];
+    /// A thread's scopes, in the switch's order.
+    pub const THREAD: [Self; 3] = [Self::LastTurn, Self::SinceReviewed, Self::AllTurns];
 
     /// Its name on the switch.
     #[must_use]
@@ -33,6 +42,8 @@ impl Scope {
             Self::LastTurn => "Last turn",
             Self::SinceReviewed => "Since reviewed",
             Self::AllTurns => "All turns",
+            Self::Uncommitted => "Uncommitted",
+            Self::WholeBranch => "Whole branch",
         }
     }
 
@@ -44,6 +55,8 @@ impl Scope {
             Self::LastTurn => "The last turn changed no files",
             Self::SinceReviewed => "Nothing new since you last reviewed",
             Self::AllTurns => "No turn has changed a file yet",
+            Self::Uncommitted => "Nothing here is uncommitted",
+            Self::WholeBranch => "This branch has changed nothing since its base",
         }
     }
 
@@ -55,6 +68,18 @@ impl Scope {
             Self::LastTurn => state.last_turn().map(|t| ReviewScope::Turn(t.id)),
             Self::SinceReviewed => Some(ReviewScope::Kept),
             Self::AllTurns => first.map(ReviewScope::Since),
+            Self::Uncommitted | Self::WholeBranch => self.wire_alone(),
+        }
+    }
+
+    /// What to ask the worker for with no thread: a working tree's span; `None` for a span
+    /// of a thread's turns.
+    #[must_use]
+    pub const fn wire_alone(self) -> Option<ReviewScope> {
+        match self {
+            Self::Uncommitted => Some(ReviewScope::WorkingTree(Against::Head)),
+            Self::WholeBranch => Some(ReviewScope::WorkingTree(Against::Base)),
+            Self::LastTurn | Self::SinceReviewed | Self::AllTurns => None,
         }
     }
 }

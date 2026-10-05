@@ -160,3 +160,92 @@ fn a_thread_goes_by_its_agents_tile_everywhere(cx: &mut TestAppContext) {
     let named = review.read_with(cx, |r, _| r.writer(thread).map(|w| w.title.clone()));
     assert_eq!(named.as_deref(), Some("Login fix"));
 }
+
+/// "Review changes" on a folder opens its changes as a tile of their own on its machine, with
+/// no thread: the tile asks the repository for what is not committed and shows it, the whole
+/// branch on a click, with no keep, put back or comments, which are for an agent. A second
+/// ask goes to that tile rather than adding another.
+#[gpui::test]
+fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
+    use slopty_proto::RequestId;
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+    use slopty_proto::thread::Patch;
+    use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope};
+
+    use super::super::actions::ReviewChanges;
+    use super::super::reviews::REVIEW_CHANGES;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let folder = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let offered = view.update(cx, |v, cx| v.palette_lines(cx));
+    assert!(offered.iter().any(|l| l.label == REVIEW_CHANGES), "a folder's changes apply");
+
+    cx.dispatch_action(ReviewChanges);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let sent = studio.drain();
+    let added: Vec<&Item> = sent
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(item)) => Some(item),
+            _ => None,
+        })
+        .collect();
+    let [item] = added.as_slice() else { panic!("one item: {added:?}") };
+    assert_eq!(item.kind, ItemKind::Changes { path: "/w/atlas".into() });
+    let changes = |sent: &[ClientMsg]| -> Vec<(RequestId, Against)> {
+        sent.iter()
+            .filter_map(|m| match m {
+                ClientMsg::Git { request, repo, op: GitOp::Changes { against } }
+                    if repo == "/w/atlas" =>
+                {
+                    Some((*request, *against))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let first = changes(&sent);
+    let [(request, Against::Head)] = first.as_slice() else {
+        panic!("what is not committed, asked: {first:?}")
+    };
+    let file = FileDiff {
+        path: "src/lib.rs".to_owned(),
+        from: Some("old".to_owned()),
+        to: Some("new".to_owned()),
+        binary: false,
+        patch: Patch { hunks: Vec::new(), added: 1, removed: 0, clipped_lines: 0, full: None },
+    };
+    let review = Review {
+        scope: ReviewScope::WorkingTree(Against::Head),
+        from: None,
+        to: None,
+        files: vec![file],
+        absent: None,
+    };
+    let done = GitOutcome::Done(GitDone::Changes(Box::new(review)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-head-0").is_some(), "the file shows");
+    assert!(cx.debug_bounds("review-keep-file-0").is_none(), "nothing to keep for an agent");
+    assert!(cx.debug_bounds("review-mark").is_none(), "and no foot");
+
+    let branch = cx.debug_bounds("review-scope-WholeBranch").expect("the whole branch");
+    cx.simulate_click(branch.center(), Modifiers::none());
+    cx.run_until_parked();
+    let then = changes(&studio.drain());
+    assert!(matches!(then.as_slice(), [(_, Against::Base)]), "{then:?}");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
+    cx.dispatch_action(ReviewChanges);
+    cx.run_until_parked();
+    let again = studio.drain().into_iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(_))));
+    assert!(!again, "the tile open already takes the focus");
+}
