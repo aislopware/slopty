@@ -1270,7 +1270,10 @@ fn run_archive(
         ),
     )?;
     let nextest = which("cargo-nextest")?;
-    copy_to(home, ip, &[archive.as_str(), nextest.as_str()], GUEST_STAGE)?;
+    let config = session.dir.join("nextest.toml");
+    std::fs::write(&config, guest_nextest_config(&root)?)
+        .with_context(|| format!("write {config}"))?;
+    copy_to(home, ip, &[archive.as_str(), nextest.as_str(), config.as_str()], GUEST_STAGE)?;
     // The crates' own directories (a test runs in its crate's, and some read files there) and
     // nextest's config.
     let dirs: Vec<Utf8PathBuf> = workspace_packages()?
@@ -1305,6 +1308,8 @@ fn run_archive(
         &format!("{GUEST_STAGE}/cargo-nextest"),
         "nextest",
         "run",
+        "--config-file",
+        &format!("{GUEST_STAGE}/nextest.toml"),
         "--archive-file",
         &format!("{GUEST_STAGE}/{archive_name}"),
         "--extract-to",
@@ -1333,6 +1338,24 @@ fn run_archive(
     println!("  results and artifacts under {back}, the run's output in {log}");
     ensure!(status.success(), "the tests failed in the guest ({status})");
     pulled
+}
+
+/// nextest's config for the guest: this checkout's, less its setup scripts. They run cargo, which
+/// the guest has none of, and the archive already holds every binary they would build.
+fn guest_nextest_config(root: &Utf8Path) -> Result<String> {
+    let path = root.join(".config/nextest.toml");
+    let text = std::fs::read_to_string(&path).with_context(|| format!("read {path}"))?;
+    let mut config: toml::Table = text.parse().with_context(|| format!("parse {path}"))?;
+    let _scripts = config.remove("scripts");
+    let _experimental = config.remove("experimental");
+    if let Some(toml::Value::Table(profiles)) = config.get_mut("profile") {
+        for (_name, profile) in profiles.iter_mut() {
+            if let toml::Value::Table(profile) = profile {
+                let _scripts = profile.remove("scripts");
+            }
+        }
+    }
+    Ok(toml::to_string(&config)?)
 }
 
 /// Run `command` with its output, stdout and stderr interleaved by line, on this terminal and in
@@ -1618,6 +1641,17 @@ mod tests {
         assert_eq!(allow.len(), 2, "{allow:?}");
         let again = toml::to_string(&merged).expect("toml");
         assert!(admitting(&again, "192.168.64.1").expect("parses").is_none(), "already there");
+    }
+
+    /// The guest's nextest config is this checkout's with no setup script left to run cargo.
+    #[test]
+    fn the_guest_s_nextest_config_runs_no_setup_script() {
+        let root = repo_root().expect("the checkout");
+        let config: toml::Table = guest_nextest_config(&root).expect("read").parse().expect("toml");
+        assert!(!config.contains_key("scripts") && !config.contains_key("experimental"));
+        let profiles = config["profile"].as_table().expect("profiles");
+        assert!(profiles.values().all(|p| p.get("scripts").is_none()), "{profiles:?}");
+        assert!(profiles["default"].get("overrides").is_some(), "the rest is kept");
     }
 
     /// Two runs never hold one MAC, and a lock goes with its holder.
