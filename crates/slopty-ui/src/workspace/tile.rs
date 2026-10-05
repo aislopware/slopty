@@ -1107,7 +1107,9 @@ impl WorkspaceView {
         let silenced = self.silenced(tile, item, chrome, cx);
         let face = match agent {
             Some((session, _)) => self.face_switch(tile, session, chrome, cx),
-            None => self.preview_toggle(tile, chrome, cx).map(|toggle| (toggle, 1)),
+            None => self
+                .preview_toggle(tile, chrome, cx)
+                .map(|toggle| (toggle, kit::icon_button_side(&self.theme) * chrome.k)),
         };
         // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
         // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
@@ -1941,25 +1943,28 @@ impl WorkspaceView {
     /// Terminal, and Board for an orchestrator, the one on show on the selected wash. A control,
     /// so it sits with fullscreen and close in the trailing strip. Quiet at rest, since every
     /// agent's tile carries it and the person mostly watches: the icons in the muted ink, no
-    /// outline round them. Each is an icon button's square, a finger's 44 pt under touch.
-    /// With its width in icon buttons; `None` while the tile has one face, a shell no agent
-    /// runs in.
+    /// outline round them. Each is an icon button's square, a finger's 44 pt under touch. A
+    /// spacing step stands between it and the tile's own buttons, so the header reads as one
+    /// switch and two actions, not four alike buttons. With its width in points, that step
+    /// included; `None` while the tile has one face, a shell no agent runs in.
     fn face_switch(
         &self,
         tile: TileRef,
         session: SessionId,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
-    ) -> Option<(gpui::AnyElement, usize)> {
+    ) -> Option<(gpui::AnyElement, f32)> {
         let faces = self.faces_of(session);
         if faces.len() < 2 {
             return None;
         }
         let shown = self.tile_face(session);
-        let width = faces.len();
         let theme = &self.theme;
         let s = theme.surfaces;
         let k = chrome.k;
+        let apart = theme.spacing.sm * k;
+        let segments_wide = f32::from(u8::try_from(faces.len()).unwrap_or(u8::MAX));
+        let width = segments_wide.mul_add(kit::icon_button_side(theme) * k, apart);
         let side = px(kit::icon_button_side(theme) * k);
         let segments = faces.into_iter().map(|face| {
             let on = face == shown;
@@ -2010,6 +2015,7 @@ impl WorkspaceView {
                 .role(Role::RadioGroup)
                 .aria_label(FACE_SWITCH)
                 .flex_none()
+                .mr(px(apart))
                 .flex()
                 .items_center()
                 .children(segments)
@@ -2092,7 +2098,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         readouts: Vec<gpui::AnyElement>,
-        face: Option<(gpui::AnyElement, usize)>,
+        face: Option<(gpui::AnyElement, f32)>,
         k: f32,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
@@ -2126,10 +2132,8 @@ impl WorkspaceView {
                 this.close_tile(tile, window, cx);
             }));
         let quiet = readouts.is_empty();
-        let buttons =
-            f32::from(1_u8.saturating_add(u8::from(offer_fullscreen)).saturating_add(
-                face.as_ref().map_or(0, |(_, n)| u8::try_from(*n).unwrap_or(u8::MAX)),
-            ));
+        let buttons = f32::from(1_u8.saturating_add(u8::from(offer_fullscreen)));
+        let face_w = face.as_ref().map_or(0.0, |(_, w)| *w);
         let controls = div()
             .absolute()
             .top_0()
@@ -2160,7 +2164,7 @@ impl WorkspaceView {
                 .debug_selector(move || format!("strip-{id}"))
                 .relative()
                 .h_full()
-                .min_w(px(buttons * kit::icon_button_side(theme) * k))
+                .min_w(px(buttons.mul_add(kit::icon_button_side(theme) * k, face_w)))
                 .flex()
                 .items_center()
                 .justify_end(),

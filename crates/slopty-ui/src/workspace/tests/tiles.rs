@@ -756,8 +756,10 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let (strip, name, pill) = (bounds(cx, "strip"), bounds(cx, "name"), bounds(cx, "agent"));
     assert!(strip.contains(&pill.center()), "the pill is in the strip");
     let side = crate::kit::icon_button_side(&Theme::default());
-    // Thread and terminal on the switch, fullscreen and close.
-    assert!(f32::from(strip.size.width) >= 4.0_f32.mul_add(side, -0.5), "room for the buttons");
+    // Thread and terminal on the switch, the step that sets it apart, fullscreen and close.
+    let apart = Theme::default().spacing.sm;
+    let room = 4.0_f32.mul_add(side, apart);
+    assert!(f32::from(strip.size.width) >= room - 0.5, "room for the buttons");
     assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
 
     let header = bounds(cx, "title").center();
@@ -771,6 +773,9 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let face = cx.debug_bounds(selector("faces", waiting.item)).expect("the face switch");
     assert!(strip.contains(&face.center()), "the switch is one of the controls");
     assert!(face.right() <= close.left(), "before close: {face:?} {close:?}");
+    let next = cx.debug_bounds(selector("fullscreen", waiting.item)).unwrap_or(close);
+    let gap = f32::from(next.left() - face.right());
+    assert!(gap >= apart - 0.5, "set apart from the tile's own buttons: {gap}");
 }
 
 /// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
