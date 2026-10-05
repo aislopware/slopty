@@ -122,6 +122,9 @@ enum Cmd {
     /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
     /// fast-forwards main to it once all pass.
     Land(land::LandOpts),
+    /// Fast-forward main to a commit every gate lane passed on (the `gate` branch's head by
+    /// default), from this checkout: CI's token may not update a workflow file.
+    Promote(land::PromoteOpts),
     /// nextest's setup script: build every binary a test spawns before the first test starts.
     SpawnedBins,
     /// Delete the build units and incremental caches nothing has used for a while, in every
@@ -341,6 +344,7 @@ pub fn main() -> Result<()> {
             gated
         }
         Cmd::Land(opts) => land::run(&sh, &opts),
+        Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {
             let mut limits = prune::Limits::from_env()?;

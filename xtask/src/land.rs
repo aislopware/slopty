@@ -42,6 +42,73 @@ pub struct LandOpts {
     pub no_tests: bool,
 }
 
+/// A run as `promote` reads it from `gh run list`.
+#[derive(serde::Deserialize)]
+struct Listed {
+    #[serde(rename = "databaseId")]
+    id: u64,
+    url: String,
+    status: String,
+}
+
+/// `cargo xtask promote` options.
+#[derive(clap::Args, Debug)]
+pub struct PromoteOpts {
+    /// The commit to move main to; the `gate` branch's head when left out.
+    pub commit: Option<String>,
+}
+
+/// Move main to a commit every gate lane passed on, from this checkout. CI's `promote` job does
+/// this with the run's own token, which GitHub never lets update a workflow file: a commit that
+/// changes `.github/workflows/` is refused there however green (runs 37254289819, 37255378937).
+/// The same checks as that job: the run on the commit is complete, every `gate` job in it
+/// passed, and main fast-forwards to the commit.
+pub fn promote(sh: &Shell, opts: &PromoteOpts) -> Result<()> {
+    cmd!(sh, "git fetch --quiet origin main").run()?;
+    cmd!(sh, "git fetch --quiet origin +refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}").run()?;
+    let wanted = opts.commit.clone().unwrap_or_else(|| format!("origin/{BRANCH}"));
+    let wanted = format!("{wanted}^{{commit}}");
+    let head = cmd!(sh, "git rev-parse --verify {wanted}").read()?;
+    let main = cmd!(sh, "git rev-parse origin/main").read()?;
+    if main == head {
+        println!("✔ main is already at {head}");
+        return Ok(());
+    }
+    let listed = cmd!(
+        sh,
+        "gh run list --workflow {WORKFLOW} --branch {BRANCH} --commit {head} --limit 1 --json databaseId,url,status"
+    )
+    .quiet()
+    .read()
+    .context("gh run list (is `gh` installed and logged in?)")?;
+    let runs: Vec<Listed> = serde_json::from_str(&listed).context("gh run list's JSON")?;
+    let Some(run) = runs.into_iter().next() else {
+        bail!("no {WORKFLOW} run on {BRANCH} for {head}: land it first");
+    };
+    ensure!(run.status == "completed", "the gate on {head} is still {}: {}", run.status, run.url);
+    ensure!(gate_passed(sh, run.id)?, "not every gate lane passed on {head}: {}", run.url);
+    let on_main = cmd!(sh, "git merge-base --is-ancestor {main} {head}").quiet().run().is_ok();
+    ensure!(on_main, "{head} is not on top of origin/main ({main}); main only fast-forwards");
+    cmd!(sh, "git push --quiet origin {head}:refs/heads/main").run()?;
+    println!("✔ main fast-forwarded to {head}, which every gate lane passed in {}", run.url);
+    Ok(())
+}
+
+/// Whether the run has `gate` jobs and every one of them passed; `promote` and `release` are not
+/// lanes.
+fn gate_passed(sh: &Shell, id: u64) -> Result<bool> {
+    let id = id.to_string();
+    let jobs = cmd!(sh, "gh run view {id} --json jobs --jq .jobs[]|[.name,.conclusion]|@tsv")
+        .quiet()
+        .read()?;
+    let lanes: Vec<(&str, &str)> = jobs
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(name, _)| name.starts_with("gate"))
+        .collect();
+    Ok(!lanes.is_empty() && lanes.iter().all(|(_, conclusion)| *conclusion == "success"))
+}
+
 pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
     let branch = cmd!(sh, "git symbolic-ref --quiet --short HEAD")
         .read()
@@ -176,6 +243,11 @@ fn outcome(sh: &Shell, run: &Run, conclusion: &str, head: &str) -> Result<()> {
             "run {id} was cancelled, most likely while it waited, by a newer push to {BRANCH}, \
              whose run decides"
         ),
+        // Every lane passed and only CI's promote was refused: a change to a workflow file.
+        _ if gate_passed(sh, run.id)? => {
+            println!("  CI could not promote it (a workflow file changed); promoting from here");
+            promote(sh, &PromoteOpts { commit: Some(head.to_owned()) })
+        }
         _ => {
             let failed = cmd!(
                 sh,

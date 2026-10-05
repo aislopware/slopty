@@ -284,6 +284,13 @@ jobs:
             echo "::error::$short is not a fast-forward of main"
             exit 1
           fi
+          # GitHub never lets this job's token update a workflow file, however green the run.
+          if [ -n "$(git diff --name-only origin/main "$GITHUB_SHA" -- .github/workflows)" ]; then
+            echo "### ✋ not promoted: $short changes a workflow file" >> "$GITHUB_STEP_SUMMARY"
+            echo "Every lane passed. From a checkout: \`cargo xtask promote $short\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$short changes .github/workflows, which this token may not push; run cargo xtask promote"
+            exit 1
+          fi
           git push origin "$GITHUB_SHA:refs/heads/main"
           echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
 

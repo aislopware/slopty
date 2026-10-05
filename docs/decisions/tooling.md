@@ -1077,3 +1077,13 @@ more full-window layer.
 - ❌ **Not taken: caching the xtask binary across CI jobs** (2026-10-05, the same study's item 7).
   `target/xtask` is 1.3 GB, and the Actions cache's 10 GB holds sccache's units, which save more
   per byte than the about 50 s each job spends compiling xtask.
+
+- ✅ **A commit that changes a workflow is promoted from a checkout** (2026-10-05). GitHub never
+  lets a run's own token create or update a file under `.github/workflows/`, so CI's `promote`
+  job was refused on 10193e1a and on 373913ce after every lane had passed. Main stayed behind,
+  and nothing said why except the push's error. `cargo xtask promote [commit]` makes the same
+  checks the job does and pushes from here: the run on the commit is complete, every `gate`
+  job in it passed, and main fast-forwards to the commit. `land --wait` calls it when the
+  lanes passed and only the promote failed. The promote job now says in the run's summary that
+  a workflow changed and which command to run. A token with the `workflows` scope in the
+  repository's secrets would let CI do it itself; that is the person's call.
