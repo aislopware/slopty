@@ -1,4 +1,4 @@
-Window
+Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
 Group │ Where

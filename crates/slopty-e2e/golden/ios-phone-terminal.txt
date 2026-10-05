@@ -1,7 +1,7 @@
 Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
-Heading │ Terminal
+Heading │ terminal Terminal
 Button │ Needs you
 Button │ More
 Group │ Terminal

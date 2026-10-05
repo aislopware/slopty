@@ -303,16 +303,18 @@ mod tests {
         assert!(nav_x.abs() < 1.0 && nav_w < shown.window.width * 0.9, "{nav_x} {nav_w}");
         golden(drv, &dir, dev, "navigator", None).await;
         // A shell is titled by what it runs or where it stands, so its row is found by the
-        // title its header shows.
-        let title = shown
+        // name its tile goes by, as a screen reader says it: the group holding the terminal.
+        // (A phone's bar heads only the focused tile, here the note.)
+        let at = shown
             .a11y
             .iter()
-            .find_map(|n| {
-                let label = n.label.as_deref().filter(|_| n.role == "Heading")?;
-                let rest = label.strip_prefix("terminal")?;
-                Some(rest.strip_prefix(' ').unwrap_or(label).to_owned())
-            })
-            .unwrap_or_else(|| panic!("the shell's heading: {:#?}", shown.a11y));
+            .position(|n| n.role == "Terminal")
+            .unwrap_or_else(|| panic!("the shell: {:#?}", shown.a11y));
+        let title = shown.a11y[..at]
+            .iter()
+            .rev()
+            .find_map(|n| n.label.clone().filter(|_| n.role == "Group"))
+            .unwrap_or_else(|| panic!("the shell's tile: {:#?}", shown.a11y));
         let row = shown
             .a11y
             .iter()

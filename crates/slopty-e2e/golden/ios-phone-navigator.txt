@@ -1,25 +1,19 @@
-Window
+Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
-Heading │ e2e-ios-worker, 2 tiles
+Heading │ file scratch
 Button │ Needs you
 Button │ More
 Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ scratch
-Heading │ file scratch
-Label │ home
-Button │ Show preview
-Button │ Close tile
 Document │ File $SCRATCH/home/note-$MOMENT.md │ 1 line, Markdown, not on disk
 Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md (focused)
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Navigation │ Navigator
+Heading │ e2e-ios-worker
 TextInput │ Filter
 Heading │ Workspaces
 Button │ e2e-ios-worker, 2 tiles
