@@ -2277,29 +2277,42 @@ impl Workspace {
             Panel::Server => "Connect to a server instead",
             Panel::Worker => "Add a machine another way",
         };
+        let welcome = self.welcome();
+        // The first run asks where to work before anything about servers: this Mac, or a
+        // server that already lists machines (`docs/decisions/ui.md`, "The first run
+        // asks where to work"). A device with no Mac to share has one way, the server.
+        let choosing =
+            welcome && adding.mode == Panel::Server && !in_flow && self.this_mac.is_some();
         let (title, blurb) = match (flow, sheet, asking) {
             (Some(_), ..) => (this_mac::TITLE, this_mac::BLURB),
             (None, Some(sheet), _) => (sheet.heading(), sheet.blurb()),
             (None, None, Some(asking)) => (this_mac::TITLE, asking.words()),
+            (None, None, None) if choosing => (CHOOSE_TITLE, CHOOSE_BLURB),
             (None, None, None) => (title, blurb),
         };
-        let welcome = self.welcome();
         // The page leads with the app's mark over its heading, as Raycast's and Linear's first
         // screens do; a dialog over the workspace needs no sign.
         let brand = welcome.then(|| kit::brand(theme, None));
+        let roles = theme.roles();
         let heading = div()
             .id("add-worker-title")
+            .debug_selector(|| "add-worker-title".to_owned())
             .role(Role::Heading)
             .aria_label(title)
-            .text_size(px(if welcome { ty.display() } else { ty.title() }))
-            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+            .map(|el| {
+                if welcome {
+                    kit::typed(el, roles.first_run, 1.0)
+                } else {
+                    el.text_size(px(ty.title()))
+                        .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+                }
+            })
             .text_color(hsla(s.text))
             .child(title);
         let intro = div().flex().flex_col().gap(px(spacing.xs)).child(heading).child(
-            div()
+            kit::typed(div(), roles.chrome, 1.0)
                 .id("add-worker-blurb")
                 .debug_selector(|| "add-worker-blurb".to_owned())
-                .text_size(px(ty.ui_size))
                 .text_color(hsla(s.text_secondary))
                 .child(blurb),
         );
@@ -2392,10 +2405,14 @@ impl Workspace {
         let serving = adding.mode == Panel::Server;
         // Listed already, the row stays: it is the way back to this Mac's checklist.
         let this_mac_entry = (self.this_mac.is_some() && !in_flow).then(|| {
-            this_mac_row(theme, self.this_mac_listed_here())
+            this_mac_row(theme, self.this_mac_listed_here(), choosing)
                 .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
         });
         let ssh_entry = (!in_flow).then(|| self.ssh_row(cx)).flatten();
+        // The first run's page sets its groups 24 pt apart and their parts 12 pt; a dialog
+        // keeps to its own tighter steps.
+        let (apart, within) =
+            if welcome { (spacing.xl, spacing.md) } else { (spacing.lg, spacing.sm) };
         let group =
             |id: &'static str, label_id: &'static str, label: &'static str, rows: Vec<_>| {
                 (!rows.is_empty()).then(|| {
@@ -2405,12 +2422,28 @@ impl Workspace {
                         .id(id)
                         .flex()
                         .flex_col()
-                        .gap(px(spacing.sm))
+                        .gap(px(within))
                         .child(panel_label(theme, label_id, label))
                         .child(frame)
                 })
             };
-        let (use_this_mac, set_up_server) = if serving {
+        let (use_this_mac, set_up_server) = if choosing {
+            // The row is the choice, its words its own: no label over it.
+            let mac = this_mac_entry.map(|row| {
+                div()
+                    .id("add-worker-this-mac")
+                    .child(kit::card(theme).flex().flex_col().p(px(spacing.xxs)).child(row))
+            });
+            (
+                mac,
+                group(
+                    "add-worker-server",
+                    "add-worker-server-label",
+                    SET_UP_SERVER_LABEL,
+                    ssh_entry.into_iter().collect(),
+                ),
+            )
+        } else if serving {
             (
                 group(
                     "add-worker-this-mac",
@@ -2441,6 +2474,39 @@ impl Workspace {
         if asking.is_some() {
             sections.extend(tailnet);
             sections.push(entry.into_any_element());
+        } else if choosing {
+            // The other choice: a server that lists machines already, what it is in one line,
+            // then the servers the tailnet answered with and the address. What the link needs
+            // is the list's own line and the page's foot.
+            let head = div()
+                .flex()
+                .flex_col()
+                .child(
+                    kit::typed(div(), roles.action, 1.0)
+                        .id("add-worker-connect-title")
+                        .role(Role::Heading)
+                        .aria_label(CONNECT_TITLE)
+                        .text_color(hsla(s.text))
+                        .child(CONNECT_TITLE),
+                )
+                .child(
+                    kit::typed(div(), roles.chrome, 1.0)
+                        .text_color(hsla(s.text_secondary))
+                        .child(CONNECT_LINE),
+                );
+            let connect = div()
+                .id("add-worker-connect")
+                .debug_selector(|| "add-worker-connect".to_owned())
+                .flex()
+                .flex_col()
+                .gap(px(within))
+                .child(head)
+                .children(tailnet)
+                .children(unlisted)
+                .child(entry);
+            sections.extend(use_this_mac.map(IntoElement::into_any_element));
+            sections.push(connect.into_any_element());
+            sections.extend(set_up_server.map(IntoElement::into_any_element));
         } else if !in_flow {
             sections.extend(use_this_mac.map(IntoElement::into_any_element));
             sections.extend(tailnet);
@@ -2492,7 +2558,7 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(spacing.lg))
+            .gap(px(apart))
             .w(px(ADD_PANEL_W))
             .max_w_full()
             .font_family(ty.ui_family.clone())
@@ -2666,10 +2732,14 @@ impl Workspace {
         let session = slopty_platform::service::Session::native();
         let logs = session.logs(slopty_platform::service::WORKER);
         let server_logs = session.logs(slopty_platform::service::SERVER);
-        let lines = this_mac::checklist(flow, &logs, &server_logs)
+        let all: Vec<this_mac::Line> = this_mac::checklist(flow, &logs, &server_logs)
             .into_iter()
             .chain(this_mac::app_lines(flow))
-            .map(|line| self.this_mac_line(line, cx));
+            .collect();
+        // What a line that holds says of itself waits under Details: the checklist says what
+        // is ready and what to do, and the versions and names are a press away.
+        let details = self.this_mac_details(flow, &all, cx);
+        let lines = all.into_iter().map(|line| self.this_mac_line(line, cx));
         let frame = kit::card(theme)
             .id("this-mac-checklist")
             .debug_selector(|| "this-mac-checklist".to_owned())
@@ -2711,6 +2781,7 @@ impl Workspace {
             .flex_col()
             .gap(px(spacing.sm))
             .child(frame)
+            .child(details)
             .when_some(status, |el, (text, tone)| {
                 el.child(
                     kit::meta(div(), theme)
@@ -2730,8 +2801,56 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// One line of this Mac's checklist: its mark, its name over what it is for or what to do,
-    /// and a missing line's button.
+    /// The checklist's Details: a link that opens and closes them, then, open, what each line
+    /// that holds says of itself and the app's version and build, quiet, a line each.
+    fn this_mac_details(
+        &self,
+        flow: &this_mac::Flow,
+        lines: &[this_mac::Line],
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let theme = &self.theme;
+        let spacing = theme.spacing;
+        let open = flow.details;
+        let run = flow.run;
+        let toggle = kit::button(
+            theme,
+            "this-mac-details",
+            if open { HIDE_DETAILS } else { SHOW_DETAILS },
+            ButtonKind::Link,
+        )
+        .aria_expanded(open)
+        .on_click(cx.listener(move |this, _ev, _window, cx| {
+            if let Some(flow) = this.this_mac_flow(run) {
+                flow.details = !flow.details;
+            }
+            cx.notify();
+        }));
+        let facts = open.then(|| {
+            let (version, build) = slopty_ui::settings_form::schema::about();
+            let held = lines
+                .iter()
+                .filter(|line| line.mark == this_mac::Mark::Ok)
+                .map(|line| format!("{} \u{b7} {}", line.check.title(), line.detail));
+            let app = format!("Slopty {version} \u{b7} {build}");
+            div()
+                .id("this-mac-facts")
+                .debug_selector(|| "this-mac-facts".to_owned())
+                .role(Role::List)
+                .aria_label(SHOW_DETAILS)
+                .flex()
+                .flex_col()
+                .children(held.chain(std::iter::once(app)).map(|fact| {
+                    kit::typed(kit::meta(div(), theme), theme.roles().metadata, 1.0)
+                        .child(SharedString::from(fact))
+                }))
+        });
+        div().flex().flex_col().items_start().gap(px(spacing.xs)).child(toggle).children(facts)
+    }
+
+    /// One line of this Mac's checklist: its mark and its name, then, while it does not hold,
+    /// what it waits on or what to do, and a missing line's button. A line that holds is its
+    /// name alone; what it says of itself is under Details ([`Self::this_mac_details`]).
     fn this_mac_line(&self, line: this_mac::Line, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
         use slopty_ui::icons::status_mark;
         let theme = &self.theme;
@@ -2744,6 +2863,7 @@ impl Workspace {
             )
         });
         let muted = line.mark == this_mac::Mark::Unknown;
+        let holds = line.mark == this_mac::Mark::Ok;
         // A line's detail wraps rather than cut off a path or a reason, so the line grows from
         // a two-line row's height instead of holding it. The fix stands beside the title and
         // the detail together, centred on them, so a line with a button is as tall as one
@@ -2757,8 +2877,9 @@ impl Workspace {
             .flex()
             .items_start()
             .gap(px(theme.spacing.sm))
-            .min_h(px(kit::Row::Two.height(theme)))
+            .min_h(px(if holds { kit::Row::One } else { kit::Row::Two }.height(theme)))
             .py(px(theme.spacing.xs))
+            .when(holds, gpui::Styled::items_center)
             .child(status_mark(theme, Some(status), 1.0))
             .child(
                 div()
@@ -2774,7 +2895,9 @@ impl Workspace {
                             .text_color(hsla(if muted { s.text_secondary } else { s.text }))
                             .child(check.title()),
                     )
-                    .child(kit::meta(div(), theme).child(SharedString::from(line.detail))),
+                    .when(!holds, |el| {
+                        el.child(kit::meta(div(), theme).child(SharedString::from(line.detail)))
+                    }),
             )
             .when_some(fix, |el, fix| el.child(div().flex_none().self_center().child(fix)))
     }
@@ -3506,6 +3629,18 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
 
 /// The label over this Mac's row on the add panels.
 const THIS_MAC_LABEL: &str = "On this Mac";
+/// The link that opens this Mac's checklist details.
+const SHOW_DETAILS: &str = "Show details";
+/// The same link once they are open.
+const HIDE_DETAILS: &str = "Hide details";
+/// The first run's heading: where to work comes before any server.
+const CHOOSE_TITLE: &str = "Choose where to work";
+/// The line under it: what the choice is about, in one line of a 402 pt phone.
+const CHOOSE_BLURB: &str = "Run your agents and shells here or on your other machines.";
+/// The first run's other choice: a server that lists machines already.
+const CONNECT_TITLE: &str = "Connect to an existing server";
+/// What it is, in one line of a 402 pt phone.
+const CONNECT_LINE: &str = "Reach the machines a Slopty server already lists.";
 /// The label over this Mac's row and the SSH row together.
 const SET_UP_LABEL: &str = "Set up a machine";
 /// The label over the machine panel's row for a phone or iPad.
@@ -3515,8 +3650,15 @@ const SET_UP_SERVER_LABEL: &str = "Set up the server";
 
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
-fn this_mac_row(theme: &Theme, listed: bool) -> gpui::Stateful<gpui::Div> {
+fn this_mac_row(theme: &Theme, listed: bool, choosing: bool) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::Symbol;
+    if choosing {
+        // The first run's choice says what it does in a line at the body's size.
+        let line = kit::typed(div(), theme.roles().chrome, 1.0)
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .child(this_mac::CHOICE);
+        return entry_row_saying(theme, "use-this-mac", Symbol::Display, this_mac::TITLE, line);
+    }
     let meta = if listed { this_mac::ROW_META_LISTED } else { this_mac::ROW_META };
     entry_row(theme, "use-this-mac", Symbol::Display, this_mac::TITLE, meta)
 }
@@ -3536,6 +3678,17 @@ fn entry_row(
     glyph: slopty_ui::icons::Symbol,
     title: &'static str,
     meta: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    entry_row_saying(theme, id, glyph, title, kit::meta(div(), theme).child(meta))
+}
+
+/// [`entry_row`] with `line` as its second line.
+fn entry_row_saying(
+    theme: &Theme,
+    id: &'static str,
+    glyph: slopty_ui::icons::Symbol,
+    title: &'static str,
+    line: gpui::Div,
 ) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::{IconSize, Symbol, icon};
     let s = theme.surfaces;
@@ -3565,7 +3718,7 @@ fn entry_row(
                         .text_color(hsla(s.text))
                         .child(title),
                 )
-                .child(kit::meta(div(), theme).child(meta)),
+                .child(line),
         )
         .child(
             icon(theme, Symbol::ChevronRight, IconSize::Inline, hsla(s.text_muted))
@@ -5105,6 +5258,45 @@ mod tests {
         cx.run_until_parked();
         let shown = ws.read_with(cx, |ws, _| (ws.adding.is_none(), ws.inviting.is_some()));
         assert_eq!(shown, (true, true), "the panel gives way to the code");
+    }
+
+    /// This Mac's checklist says what is ready in a line each and what is not over what to
+    /// do; what a ready line says of itself (the worker's version, this Mac's name on the
+    /// tailnet) and the app's build wait under Details, which opens and closes.
+    #[gpui::test]
+    fn the_checklist_is_concise_and_its_details_open_on_request(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.simulate_resize(size(px(900.0), px(800.0)));
+        let lacking = this_mac::Doctor { screen_recording: false, ..green() };
+        let host = StandIn::answering(Some(lacking));
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, cx| {
+            ws.this_mac = Some(shared);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let title = cx.debug_bounds("add-worker-title");
+        assert!(title.is_some_and(|t| t.size.height >= px(32.0)), "26/32 heading: {title:?}");
+        let entry = cx.debug_bounds("use-this-mac").expect("the entry");
+        cx.simulate_click(entry.center(), gpui::Modifiers::none());
+        let none = net::Tailnet { running: true, ..net::Tailnet::default() };
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(none, window, cx)));
+        cx.run_until_parked();
+        let ready = cx.debug_bounds("this-mac-accessibility").expect("a line that holds");
+        let missing = cx.debug_bounds("this-mac-screen").expect("a line that does not");
+        assert!(ready.size.height < missing.size.height, "{ready:?} is its name alone");
+        assert!(cx.debug_bounds("this-mac-facts").is_none(), "the details start closed");
+        let details = cx.debug_bounds("this-mac-details").expect("the way to them");
+        cx.simulate_click(details.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("this-mac-facts").is_some(), "open on request");
+        assert_eq!(flow(&ws, cx).map(|f| f.details), Some(true));
+        let details = cx.debug_bounds("this-mac-details").expect("the way back");
+        cx.simulate_click(details.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("this-mac-facts").is_none(), "and closed again");
     }
 
     /// The app's own lines: with notifications off and Slopty's place in Finder switched off,

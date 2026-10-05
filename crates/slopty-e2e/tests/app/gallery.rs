@@ -87,10 +87,10 @@ pub async fn first_shell(drv: &mut Driver) -> Dump {
     .unwrap()
 }
 
-/// The first run: connecting to a server is the way forward, and nothing else on the screen
-/// is there to choose from. Once connected, its workers come, and "Add a machine" installs
-/// one rather than taking an address, keeps this Mac's row as the way back to its checklist,
-/// and offers a phone's way in.
+/// The first run asks where to work: this Mac, or a server that lists machines already, and
+/// nothing else on the screen is there to choose from. Once connected, its workers come, and
+/// "Add a machine" installs one rather than taking an address, keeps this Mac's row as the way
+/// back to its checklist, and offers a phone's way in.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_first_run_offers_one_way_in() {
@@ -120,7 +120,12 @@ async fn the_first_run_offers_one_way_in() {
     let drv = &mut stack.driver;
     drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
     let dump = drv.dump().await.unwrap();
-    assert_eq!(labels(&dump, "Heading"), ["Connect to a server"], "{:#?}", dump.a11y);
+    assert_eq!(
+        labels(&dump, "Heading"),
+        ["Choose where to work", "Connect to an existing server"],
+        "{:#?}",
+        dump.a11y
+    );
     // The way in and the other way in; no menu, no tile, no column marks to wonder about.
     let buttons = labels(&dump, "Button");
     for absent in ["Open", "More", "Columns"] {

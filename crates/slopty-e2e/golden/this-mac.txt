@@ -17,4 +17,5 @@ ListItem │ Notifications
 Image │ Done
 ListItem │ Finder
 Image │ Idle
+Button │ Show details
 Button │ Connect to a server instead

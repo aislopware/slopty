@@ -1,7 +1,8 @@
 Window │ Slopty
 Label │ Slopty
-Heading │ Connect to a server
+Heading │ Choose where to work
 Button │ Use this Mac
+Heading │ Connect to an existing server
 Status │ Nothing answered on your tailnet
 TextInput │ Server address (focused)
 Button │ Connect

@@ -7255,3 +7255,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`,
     `workspace::tests::frame::an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at`,
     `workspace::tests::thread_start::new_agent_opens_the_picker_with_the_last_choices`.
+- ✅ **The first run asks where to work** (2026-10-06,
+  `.research/design-critique-astra-2026-10-05.md` finding 20). The first page led with
+  "Connect to a server" and the tailnet, so the infrastructure came before the choice it
+  serves. The local checklist also buried "is this Mac ready" under versions and addresses.
+  - **The page** opens on "Choose where to work" in the first-run role (26/32, strong), with
+    one line under it. Then come the two ways, 24 pt apart, each said in one 13/19 line.
+    "Use this Mac" is a row to press ("Work on this Mac. Your other devices reach it too.").
+    "Connect to an existing server" is a heading over its line ("Reach the machines a Slopty
+    server already lists"). Under it, 12 pt apart, are the servers the tailnet answered with
+    (or the line saying nothing did, and what to start), and the address with Connect. What
+    the link needs stays as secondary help: that line, and the foot about the tailnet's
+    encryption. Setting a server up over SSH follows.
+  - **Only where there is a choice.** A device with no Mac to share (an iPhone, an iPad) has
+    one way in, so its first run stays "Connect to a server". So does the "Connect to a
+    server…" dialog over the workspace.
+  - **This Mac's checklist is concise.** A line that holds is its mark and its name. A line
+    that does not keeps what it waits on or what to do, with its button. "Turn on
+    slopty-worker" keeps the worker's name, since System Settings lists it by that name.
+    What a line that holds says of itself (the worker's version, where the server runs,
+    this Mac's name on the tailnet), with the app's version and build, waits under "Show
+    details" below the list (`Flow::details`).
+  - Tests: `slopty-app` `tests::the_checklist_is_concise_and_its_details_open_on_request`,
+    `tests::this_mac_runs_the_server_then_waits_for_it_to_list_the_worker`; e2e
+    `gallery::the_first_run_offers_one_way_in` (its headings),
+    `through_server` (the first run's heading). Goldens: `first-run`, `first-run-dark`,
+    `this-mac`, `add-worker` (the blurb's 13/19 line).

@@ -39,6 +39,8 @@ pub const TITLE: &str = "Use this Mac";
 pub const TURN_ON: &str = "Turn on slopty-worker, or drag it in.";
 /// What the entry's row says under its words: what pressing it does.
 pub const ROW_META: &str = "Shares its shells and windows through your server";
+/// What the first run's choice says under its words: what working here means.
+pub const CHOICE: &str = "Work on this Mac. Your other devices reach it too.";
 /// What it says once the server lists this Mac: the way back to its checklist.
 pub const ROW_META_LISTED: &str = "Shared through your server. Check what it needs";
 /// The checklist's line under its heading.
@@ -290,6 +292,10 @@ pub struct Flow {
     /// The server lists this Mac: the flow's end, open until the person is done, with the
     /// way to bring in a phone.
     pub listed: bool,
+    /// The checklist's details are open: what each line that holds says of itself (the
+    /// worker's version, the server's place, this Mac's name on the tailnet) and the app's
+    /// build.
+    pub details: bool,
 }
 
 impl Flow {
@@ -305,6 +311,7 @@ impl Flow {
             notes: None,
             finder: None,
             listed: false,
+            details: false,
         }
     }
 

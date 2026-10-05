@@ -150,7 +150,7 @@ mod tests {
         // (1) The first run offers the server; its address is typed and entered.
         let d = drv.wait_for("the first-run panel", STEP, |d| d.adding).await.unwrap();
         assert!(d.workers.is_empty(), "nothing known at the first run: {d:#?}");
-        assert!(d.a11y_node("Heading", Some("Connect to a server")).is_some(), "{:#?}", d.a11y);
+        assert!(d.a11y_node("Heading", Some("Choose where to work")).is_some(), "{:#?}", d.a11y);
         let server = fleet.server.address().to_owned();
         let drv = &mut fleet.driver;
         drv.type_text(&server).await.unwrap();
