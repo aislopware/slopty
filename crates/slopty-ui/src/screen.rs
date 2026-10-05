@@ -939,8 +939,10 @@ fn screen_refresh_hz(screen: Option<u32>) -> u16 {
 /// `docs/decisions/video.md`).
 #[cfg(target_os = "macos")]
 pub const ASKED_CHROMA: Chroma = Chroma::Full;
-/// The chroma a stream asks for: 4:2:0 until an iPhone's and an iPad's decoder are proven to
-/// take 4:4:4 (`docs/decisions/video.md`, "Full chroma follows the rate").
+/// The chroma a stream asks for: 4:2:0.
+///
+/// An iPhone's and an iPad's decoder are not yet proven to take 4:4:4
+/// (`docs/decisions/video.md`, "Full chroma follows the rate").
 #[cfg(not(target_os = "macos"))]
 pub const ASKED_CHROMA: Chroma = Chroma::Subsampled;
 

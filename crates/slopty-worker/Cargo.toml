@@ -43,6 +43,8 @@ slopty-pty.workspace = true
 # This machine's LAN ports for its caps, and the magic packet it sends for a sleeping peer.
 slopty-tailnet.workspace = true
 slopty-vdisplay.workspace = true
+# The scratch index a folder's working tree is reviewed through (`repo::snapshot::working_tree`).
+tempfile.workspace = true
 thiserror.workspace = true
 rustix.workspace = true
 tokio.workspace = true
@@ -58,8 +60,6 @@ objc2-core-foundation = { workspace = true, features = [ "CFArray", "CFString" ]
 objc2-core-services = { workspace = true, features = [ "FSEvents", "dispatch2" ] }
 # Xcode's version, read from its `version.plist` rather than by running `xcodebuild` (`facts`).
 plist.workspace = true
-# The scratch index a folder's working tree is reviewed through (`repo::snapshot::working_tree`).
-tempfile.workspace = true
 
 [dev-dependencies]
 # The encoder's measurement surface (VBV mode, property probes) for `tests/screen.rs`.
