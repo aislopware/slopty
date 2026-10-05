@@ -536,12 +536,16 @@ async fn a_tile_kept_nowhere_says_its_worker_is_away() {
     stack.kill_app().await.unwrap();
     stack.kill_worker().await.unwrap();
     std::fs::remove_dir_all(app_dir.join("items")).unwrap();
+    // The app shows the server's word once the server has noticed, and its own dial's before:
+    // which one the frame holds was a race, lost on a slow runner (CI e2e run 37359580819).
+    // The server is waited for, as a worker that died a while ago is met.
+    stack.server_lists_worker("unreachable", STEP).await.unwrap();
     stack.relaunch_app_unlinked().await.unwrap();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let away = |d: &Dump| {
         d.a11y_node("Group", Some("e2e-worker")).is_some()
-            && d.a11y_node("Status", Some("Reconnecting\u{2026}")).is_some()
+            && d.a11y_node("Status", Some("e2e-worker is unreachable")).is_some()
     };
     drv.wait_for("the tile standing with its worker away", STEP, away).await.unwrap();
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();

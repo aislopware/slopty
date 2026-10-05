@@ -1102,6 +1102,28 @@ impl Stack {
         Ok(())
     }
 
+    /// Wait until the server's directory lists the worker with `liveness` (`"unreachable"`, say),
+    /// for at most `bound`. What the app shows of an away worker depends on whether the server
+    /// has noticed yet, so a test that draws it waits for the server first.
+    ///
+    /// # Errors
+    ///
+    /// When the CLI fails, or the server does not within `bound`.
+    pub async fn server_lists_worker(&self, liveness: &str, bound: Duration) -> Result<()> {
+        let cli = self.dir.path().join("cli");
+        let started = tokio::time::Instant::now();
+        loop {
+            let workers = slopty_json(self.server.address(), &cli, &["workers"], b"").await?;
+            let listed =
+                workers.as_array().is_some_and(|all| all.iter().any(|w| w["liveness"] == liveness));
+            if listed {
+                return Ok(());
+            }
+            ensure!(started.elapsed() < bound, "no worker {liveness} after {bound:?}: {workers}");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     /// [`Self::launch`] plus a second app on the same worker: `b` gets its own data directory,
     /// identity and socket, and follows the same server. The
     /// first app is left to open its first shell before the second comes up, so the two do not

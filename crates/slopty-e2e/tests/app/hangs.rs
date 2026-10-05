@@ -20,10 +20,12 @@ async fn a_hang_of_the_main_thread_is_filed_like_a_crash() {
     stack.driver.ok(&Command::HoldMain { ms: 600 }).await.unwrap();
     let asked = Instant::now();
     let (hang, stall_ms, cause) = loop {
+        // The hold's own report: on a slow machine a draw can hang too and be filed first (CI
+        // e2e run 37359580819, "held 514 ms by drawing a window").
         let hang = slopty_crash::reports_with(&crashes, None).into_iter().find_map(|report| {
             let Kind::Hang { stall_ms, cause, .. } = &report.kind else { return None };
             let (stall_ms, cause) = (*stall_ms, cause.clone());
-            Some((report, stall_ms, cause))
+            cause.contains("slopty-app/src/e2e.rs").then_some((report, stall_ms, cause))
         });
         if let Some(hang) = hang {
             break hang;
