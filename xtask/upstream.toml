@@ -19,8 +19,8 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "2e2c73a75b6edb9c68077153f72e74ccaba229ae"
-base_date = "2026-10-02"
+base = "5c31c703937ecc406b8bdd369c630e6afc31cb86"
+base_date = "2026-10-05"
 checked = "2026-10-05"
 check_every_days = 0
 
@@ -31,8 +31,8 @@ check_every_days = 0
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
 checkout = ".research/zed-main"
-base = "279fe070bb389b79652e52065b2f001edcc0b11b"
-base_date = "2026-10-04"
+base = "96837d78cb0f2128c1965716f8df56b8aea59742"
+base_date = "2026-10-05"
 checked = "2026-10-05"
 check_every_days = 7
 
@@ -43,7 +43,7 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "87d10ae5e1299d1be18670a37570c5402f952e34"
+base = "8d8cc6715e8f9f0765e8c1a0b005eb70f4c59b52"
 base_date = "2026-10-05"
 checked = "2026-10-05"
 # It lands several changes a day, so every gate asks.

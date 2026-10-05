@@ -1109,3 +1109,19 @@ more full-window layer.
     `only_a_newer_final_release_is_news`; `slopty_platform::fetch`
     `a_get_brings_the_body_or_why_not` (a loopback server: 200, 404, refused, not a URL);
     `slopty-ui` `a_newer_release_is_said_in_the_bar_and_opens_its_page`.
+
+- ✅ **gpui-fast takes longbridge `5c31c703` and zed `96837d78`; gpui-kit takes upstream `8d8cc671`**
+  (2026-10-05).
+  - **What upstream changed.**
+    - Longbridge's commit (#36) is the compat move to gpui-pre 0.3.8. The fork had already made
+      it (`7e4b5a2`), so the merge is a no-op.
+    - Zed's commit drops a reentrancy flag in `flush_effects` that `pending_updates == 1`
+      already guards.
+    - gpui-kit's #3371 sizes `TextView`'s headings and block spacing from the font size it
+      inherits, not from a fixed 14 px base. It builds the heading hierarchy with weight more
+      than size.
+  - **Adopted:** the thread's Markdown is a `TextView`, so its headings now follow the
+    thread's own text size. The goldens that show a heading or list were reviewed and retaken
+    with this sync.
+  - **Our own commit on gpui-kit:** a guard test that an opening bracket stays on the line of
+    the inline code after it (`12daeb01`).
