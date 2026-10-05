@@ -571,18 +571,19 @@ impl WorkspaceView {
         self.terminals.values().find_map(|v| v.read(cx).drag_fetch(drag, rep.item, &rep.kind, max))
     }
 
-    /// Attachment `id` of `session`'s face goes up to a directory of its own on the worker, its
-    /// chip showing meanwhile: files as they are, a pasted picture written to a scratch
-    /// directory here first, which goes once the upload ends.
-    pub(super) fn attach_to_face(
+    /// Attachment `id` of the thread composer on `tile` goes up to a directory of its own on
+    /// the tile's worker, its chip showing meanwhile: files as they are, a pasted picture
+    /// written to a scratch directory here first, which goes once the upload ends. With no
+    /// tile, the chip ends.
+    pub(super) fn attach_to_composer(
         &mut self,
-        session: SessionId,
+        tile: Option<TileRef>,
         composer: Target,
         id: u64,
         what: Attach,
         cx: &mut Context<Self>,
     ) {
-        let Some(tile) = self.tile_of_session(session) else {
+        let Some(tile) = tile else {
             composer.ended(id, cx);
             return;
         };
@@ -616,9 +617,14 @@ impl WorkspaceView {
         }
     }
 
-    /// The human took attachment `id` off `session`'s draft: its upload stops. A picture still
+    /// The person took attachment `id` off `composer`'s draft: its upload stops. A picture still
     /// being written here has no upload yet; it goes up, and lands on no chip.
-    pub(super) fn detach_from_face(&mut self, composer: &Target, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn detach_from_composer(
+        &mut self,
+        composer: &Target,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let xfer = self.uploads.iter().find_map(|(xfer, upload)| {
             upload.attach.as_ref().filter(|(c, at)| *at == id && c == composer).map(|_| *xfer)
         });
@@ -638,9 +644,10 @@ impl WorkspaceView {
     }
 
     /// Files dropped on `tile`: to the shell's directory for a terminal, whose paths are typed
-    /// into it once they are there; to its face's composer, as attachments, while the face shows;
-    /// to the worker's staging for a remote window, where they wait on its clipboard; into the
-    /// folder a folder tile is at. Nothing happens on a note, a file or a page.
+    /// into it once they are there; to the thread's composer, as attachments, on a thread tile
+    /// and on a terminal while its thread face shows; to the worker's staging for a remote
+    /// window, where they wait on its clipboard; into the folder a folder tile is at. Nothing
+    /// happens on a file, a page or a review.
     ///
     /// Files the platform received for the drop wait in its landing: the upload deletes it
     /// when it ends, and a tile that takes nothing deletes it at once.
@@ -654,6 +661,13 @@ impl WorkspaceView {
                 Upload::to_face(tile, composer, id)
             }
             Some(ItemKind::Terminal { session }) => Upload::to_shell(tile, *session),
+            Some(ItemKind::Thread { .. })
+                if let Some(composer) =
+                    self.thread_item(tile.item).map(|v| Target(v.downgrade()))
+                    && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
+            {
+                Upload::to_face(tile, composer, id)
+            }
             Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
             Some(ItemKind::Folder { path }) => Upload::to_folder(tile, path.clone()),
             Some(

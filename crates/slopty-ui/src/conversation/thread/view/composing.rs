@@ -12,13 +12,12 @@
 //!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`), and the effort
 //!   chip with how hard its model can think (`Intent::SetEffort`).
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
-//!   go up through the workspace as a drop on the face does; each shows as a chip
-//!   ([`crate::conversation::chips`]) until the message goes, which carries their paths after its
-//!   text ([`attach::with_paths`]). Files go up through the terminal the thread's agent runs in, so
-//!   a thread with none (Codex, pi, an ACP agent) takes no attachment: the composer says so in
-//!   words, and no chip waits for an upload that never starts. ↵ while one is still on its way up
-//!   arms the message: it goes as soon as the last one lands, and an upload that fails disarms it,
-//!   saying so, rather than sending without the file.
+//!   go up through the workspace to the worker's attachment directory, for every agent; each shows
+//!   as a chip ([`crate::conversation::chips`]) until the message goes, which carries their paths
+//!   in `Intent::Send::attachments`. The worker gives them to the agent in its own form: a picture
+//!   as a picture where the agent takes one, any other file by its path. ↵ while one is still on
+//!   its way up arms the message: it goes as soon as the last one lands, and an upload that fails
+//!   disarms it, saying so, rather than sending without the file.
 //! - **Recall.** ↑ on the first line of an empty composer brings back the message sent before, ↓ on
 //!   the last line the one after, past the newest to an empty draft, as a shell does. A recalled
 //!   message that is edited is a draft like any other, and the arrows move in it.
@@ -796,20 +795,9 @@ impl ThreadView {
     // ----- attachments -----------------------------------------------------------------
 
     /// A paste into the composer: a picture with no text on the clipboard, or files copied
-    /// here, are attached rather than pasted as text. Whether the paste was taken: one this
-    /// thread cannot take is taken all the same, said so, since a picture or a path on this
-    /// Mac means nothing pasted as text to the agent.
+    /// here, are attached rather than pasted as text. Whether the paste was taken.
     pub fn paste_attachment(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
         Attach::of_paste(item).map(|what| self.attach(what, cx)).is_some()
-    }
-
-    /// Why this thread takes no attachment, in words; `None` when it takes them. Files go up
-    /// through the terminal its agent runs in.
-    pub fn attachments_refused(&self, cx: &App) -> Option<String> {
-        let meta = &self.state(cx)?.meta;
-        meta.terminal.is_none().then(|| {
-            format!("Files can't be attached to {} threads yet", super::agent_name(&meta.agent))
-        })
     }
 
     /// Say `words` above the field until the draft changes.
@@ -818,21 +806,8 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// The attach button: the picker, or why this thread takes no files.
-    pub(super) fn pick_files(&mut self, cx: &mut Context<Self>) {
-        match self.attachments_refused(cx) {
-            Some(why) => self.say(why, cx),
-            None => cx.emit(ThreadViewEvent::PickFiles),
-        }
-    }
-
-    /// Show `what`'s chip and ask the workspace to send it up; or say why this thread takes no
-    /// attachment, with no chip.
+    /// Show `what`'s chip and ask the workspace to send it up.
     pub fn attach(&mut self, what: Attach, cx: &mut Context<Self>) {
-        if let Some(why) = self.attachments_refused(cx) {
-            self.say(why, cx);
-            return;
-        }
         let id = self.composing.attachments.add(what.name());
         if let Some(picture) = what.picture() {
             self.composing.pictures.insert(id, picture);
@@ -965,15 +940,16 @@ impl ThreadView {
         )
     }
 
-    /// The message to send, the landed attachments' paths after its text; `None` while there
+    /// The message to send and where its attachments landed on the worker; `None` while there
     /// is nothing to send or an attachment is still on its way up.
-    pub(super) fn take_message(&mut self, cx: &App) -> Option<String> {
+    pub(super) fn take_message(&mut self, cx: &App) -> Option<(String, Vec<String>)> {
         let attachments = &self.composing.attachments;
         if attachments.uploading() {
             return None;
         }
-        let text = attach::with_paths(self.draft(cx).trim(), &attachments.paths());
-        if text.trim().is_empty() {
+        let text = self.draft(cx).trim().to_owned();
+        let paths = attachments.paths();
+        if text.is_empty() && paths.is_empty() {
             return None;
         }
         self.composing.attachments.clear();
@@ -981,7 +957,7 @@ impl ThreadView {
         self.composing.asked = None;
         self.composing.found = None;
         self.composing.notice = None;
-        Some(text)
+        Some((text, paths))
     }
 
     /// The chips over the field.

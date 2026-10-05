@@ -1112,11 +1112,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (those keep their own line), as "Couldn't stop: …" or "Couldn't keep lib.rs: …". It stays
     until the person dismisses it or tries again, and holds up to 32. An intent the agent has no
     door for reads "the agent can't do that through Slopty".
-  - **Attachments are refused in words where they cannot go.** A file reaches an agent only
-    through a terminal its prompt runs in. On a thread with none (Codex, pi, ACP), attaching
-    says "Files can't be attached to {agent} threads yet" and adds no chip. ↵ while a file is
-    still uploading waits for it ("Sends once the attachments are up") and sends by itself when
-    it lands. A failed upload sends nothing and says so, keeping the words.
+  - **An attachment on its way holds the message.** ↵ while a file is still uploading waits for
+    it ("Sends once the attachments are up") and sends by itself when it lands. A failed upload
+    sends nothing and says so, keeping the words. (Threads with no terminal refused files here
+    until "Every thread takes files" on 2026-10-05.)
   - **Codex queues.** A message queued while a Codex turn runs is held by the thread's mapping
     (`Shared::send` → `Send::Held`), shown as pending, changeable and withdrawable. It goes as the
     next `turn/start` once Codex says the turn ended. Codex has no queue of its own, so the
@@ -1236,8 +1235,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   message goes.
   - A file counts as a picture by its first bytes (PNG, JPEG, GIF, WebP) and only up to 20 MiB.
     Anything else, and a picture that cannot be read, goes by its path, so the message is never
-    lost for a file. At most 32 files go with one message, each an absolute path to a file on
-    the worker, checked when the intent is decided.
+    lost for a file. At most 32 files go with one message, each an absolute path to a file or a
+    folder on the worker (a folder goes by its path), checked when the intent is decided.
   - Each agent gets the files the way it takes them. Codex gets the words, then each file's
     path, then a `localImage` per picture, which Codex reads itself. pi gets the words with the
     paths after them and each picture in `images`. An ACP agent gets each picture as an image
@@ -1246,10 +1245,29 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     paths after them, shell-quoted, since its prompt reads a pasted path as a file.
   - The words in the thread stay as the person wrote them. The paths ride on the pending
     message, so a queued message keeps its files.
-  - Tests: `pictures_are_read_whole_and_the_rest_go_by_path`, `only_files_here_are_taken`
+  - Tests: `pictures_are_read_whole_and_the_rest_go_by_path`, `files_and_folders_here_are_taken`
     (`slopty-worker::thread::attach`), `a_picture_goes_to_pi_with_the_message`,
     `a_picture_goes_as_an_image_and_a_file_as_a_link`,
     `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`, golden `intent_send_attachments`.
+
+- ✅ **Every thread takes files, and a thread tile takes a drop** (2026-10-05, readiness 10-05
+  G3a). The worker took attachments from every adapter ("Files go with a message"), but the
+  composer still refused them on a thread with no terminal, and sent the landed paths typed
+  after the words, so Codex, pi and ACP never saw a picture as a picture. Now:
+  - the composer sends the landed paths in `Intent::Send::attachments` for every agent and the
+    words as written; each adapter gives them in its agent's form, Claude Code's TUI the paths
+    after the words as before;
+  - an attachment goes up to the worker of the tile the composer is on (a thread tile, or a
+    terminal on its thread face), not through a terminal, so a thread with none takes one;
+  - a thread tile is a drop target, and its attach button opens the picker for that tile;
+  - a message of files alone goes, and a waiting message's line shows its files (the names when
+    it has no words, a paperclip and how many when it has);
+  - a folder goes by its path, as a terminal drop types one, rather than being refused.
+  - Tests: `conversation::thread::tests::composing::a_thread_with_no_terminal_takes_files_too`,
+    `a_message_waits_for_its_attachment_and_carries_its_path`;
+    `workspace::tests::remote::a_thread_tile_takes_a_drop_as_an_attachment`,
+    `a_picture_pasted_into_the_composer_stays_a_chip_until_sent`; worker
+    `files_and_folders_here_are_taken`.
 
 - ✅ **Past sessions per folder, from each agent's own record** (2026-10-04, readiness item 3).
   `ThreadRequest::Sessions` asks one agent's sessions in one folder and is answered with

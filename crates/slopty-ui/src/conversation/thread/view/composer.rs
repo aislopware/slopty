@@ -799,7 +799,9 @@ impl ThreadView {
                     .when(!editing, |el| {
                         el.child(
                             self.icon_button("thread-attach", IconName::Plus, "Attach files")
-                                .on_click(cx.listener(|this, _ev, _w, cx| this.pick_files(cx))),
+                                .on_click(cx.listener(|_this, _ev, _w, cx| {
+                                    cx.emit(ThreadViewEvent::PickFiles);
+                                })),
                         )
                     })
                     .children(self.model_chip(cx))

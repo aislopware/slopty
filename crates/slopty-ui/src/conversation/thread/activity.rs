@@ -27,6 +27,8 @@ pub struct Queued {
     pub intent: IntentId,
     /// What it says.
     pub text: String,
+    /// Where the files sent with it are on the worker.
+    pub attachments: Vec<String>,
     /// When it goes: with the turn, or held until its moment.
     pub delivery: Delivery,
     /// Where it is, in words, when something holds it.
@@ -130,6 +132,7 @@ impl<'a> Activity<'a> {
                 let mut queued = Queued {
                     intent: p.intent,
                     text: p.text.clone(),
+                    attachments: p.attachments.clone(),
                     delivery: p.delivery,
                     held: match &p.state {
                         PendingState::Held { reason } => Some(reason.clone()),
@@ -159,7 +162,7 @@ impl<'a> Activity<'a> {
             })
             .collect();
         queue.extend(threads.unshown(thread).filter_map(|s| match &s.intent {
-            Intent::Send { text, delivery, .. }
+            Intent::Send { text, delivery, attachments }
                 if !s.failed()
                     && matches!(
                         delivery,
@@ -169,6 +172,7 @@ impl<'a> Activity<'a> {
                 Some(Queued {
                     intent: s.id,
                     text: text.clone(),
+                    attachments: attachments.clone(),
                     delivery: *delivery,
                     held: None,
                     stopped: false,

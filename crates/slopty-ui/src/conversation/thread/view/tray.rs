@@ -943,8 +943,17 @@ impl ThreadView {
         let editable = open && !queued.going && !self.composing.editing();
         // The words the composer takes: a refused change's, so they are not lost.
         let words = refused.as_ref().map_or_else(|| queued.text.clone(), |(_, t, _)| t.clone());
-        let first = kit::first_line(&queued.text).to_owned();
-        let said = state.as_ref().map_or_else(|| first.clone(), |st| format!("{first}, {st}"));
+        let first = queued_words(queued);
+        let files = queued.attachments.len();
+        let with_words = !kit::first_line(&queued.text).is_empty();
+        let mut said = first.clone();
+        if files > 0 && with_words {
+            let files = u64::try_from(files).unwrap_or(u64::MAX);
+            said = format!("{said}, {}", kit::count(files, "file", "files"));
+        }
+        if let Some(st) = &state {
+            said = format!("{said}, {st}");
+        }
         self.section()
             .id(ElementId::Name(format!("queued-{pending}").into()))
             .debug_selector(move || format!("queued-{pending}"))
@@ -952,11 +961,21 @@ impl ThreadView {
             .aria_label(SharedString::from(said))
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::Clock, s.text_muted)))
-            .child(kit::fit_label(
-                format!("queued-words-{pending}"),
-                kit::first_line(&queued.text).to_owned(),
-                &self.theme,
-            ))
+            .child(kit::fit_label(format!("queued-words-{pending}"), first, &self.theme))
+            .when(files > 0 && with_words, |el| {
+                el.child(
+                    div()
+                        .debug_selector(move || format!("queued-files-{pending}"))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(self.z(self.theme.spacing.xxs))
+                        .text_size(self.z(self.theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(self.icon(IconName::Paperclip, s.text_muted))
+                        .child(SharedString::from(files.to_string())),
+                )
+            })
             .children(state.map(|st| {
                 div()
                     .flex_none()
@@ -1282,6 +1301,18 @@ fn answer_mark(
         Effect::Deny => Some((IconName::X, quiet.then_some(s.error))),
         Effect::Answer => None,
     }
+}
+
+/// What a waiting message's line says of it: its first line, or the names of its files when it
+/// is files alone.
+fn queued_words(queued: &crate::conversation::thread::activity::Queued) -> String {
+    let first = kit::first_line(&queued.text);
+    if !first.is_empty() || queued.attachments.is_empty() {
+        return first.to_owned();
+    }
+    let names: Vec<&str> =
+        queued.attachments.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
+    names.join(", ")
 }
 
 #[cfg(test)]

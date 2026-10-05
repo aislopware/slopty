@@ -746,7 +746,7 @@ impl WorkspaceView {
             let theme = self.theme.clone();
             let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
             let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
-                this.thread_item_event(key, &view, event.clone(), cx);
+                this.thread_item_event(key, item, &view, event.clone(), cx);
             });
             self.faces.threads.item_asks.insert(item, asks);
             self.faces.threads.items.insert(item, view);
@@ -769,17 +769,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// What a thread tile's view asks for. Files go up through the thread's terminal, when it
-    /// runs in one.
+    /// What the view of thread tile `item` asks for. Files attached go up to the tile's worker.
     fn thread_item_event(
         &mut self,
         key: WorkerKey,
+        item: ItemId,
         view: &Entity<ThreadView>,
         event: ThreadViewEvent,
         cx: &mut Context<Self>,
     ) {
         let thread = view.read(cx).thread();
-        let terminal = self.faces.threads.terminals.get(&thread).copied();
         match event {
             ThreadViewEvent::ShowTerminal => self.open_thread_terminal(key, thread, cx),
             ThreadViewEvent::Review { thread } => {
@@ -787,18 +786,17 @@ impl WorkspaceView {
                 cx.notify();
             }
             ThreadViewEvent::Attach { id, what } => {
-                if let Some(session) = terminal {
-                    self.attach_to_face(session, Target(view.downgrade()), id, what, cx);
-                }
+                let tile = self.tile_of(item);
+                self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
             }
             ThreadViewEvent::Detach { id } => {
-                self.detach_from_face(&Target(view.downgrade()), id, cx);
+                self.detach_from_composer(&Target(view.downgrade()), id, cx);
             }
             ThreadViewEvent::Watch { thread, screen } => {
                 self.watch_agent_screen(key, thread, &screen, cx);
             }
             ThreadViewEvent::PickFiles => {
-                if let Some(tile) = terminal.and_then(|s| self.tile_of_session(s)) {
+                if let Some(tile) = self.tile_of(item) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
                 }
             }
@@ -852,10 +850,11 @@ impl WorkspaceView {
                 }
             }
             ThreadViewEvent::Attach { id, what } => {
-                self.attach_to_face(session, Target(view.downgrade()), id, what, cx);
+                let tile = self.tile_of_session(session);
+                self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
             }
             ThreadViewEvent::Detach { id } => {
-                self.detach_from_face(&Target(view.downgrade()), id, cx);
+                self.detach_from_composer(&Target(view.downgrade()), id, cx);
             }
             ThreadViewEvent::Watch { thread, screen } => {
                 if let Some(key) = self.worker_of_session(session) {

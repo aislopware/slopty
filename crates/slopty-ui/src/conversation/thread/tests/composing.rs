@@ -165,8 +165,8 @@ fn a_queued_message_is_changed_in_the_composer(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-editing").is_none());
 }
 
-/// A thread with a terminal takes files: ↵ while one is on its way up waits for it, says so,
-/// and sends by itself the moment it lands, carrying its path.
+/// A thread takes files: ↵ while one is on its way up waits for it, says so, and sends by
+/// itself the moment it lands, carrying where it landed.
 #[gpui::test]
 fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -200,10 +200,13 @@ fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppConte
     let landed = ["/drop/x/shot.png".to_owned()];
     view.update(cx, |v, cx| v.attachment_landed(id, &landed, cx));
     cx.run_until_parked();
-    let text = attach::with_paths("Look at this", &landed);
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text, delivery: Delivery::Steer, attachments: vec![] }]
+        [Intent::Send {
+            text: "Look at this".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: landed.to_vec()
+        }]
     );
     assert!(cx.debug_bounds("composer-attachment").is_none(), "the chip went with it");
     assert!(cx.debug_bounds("thread-composer-notice").is_none(), "nothing left to say");
@@ -263,10 +266,10 @@ fn a_failed_upload_under_a_waiting_send_sends_nothing_and_says_so(cx: &mut TestA
     );
 }
 
-/// A thread with no terminal (Codex, pi, ACP) can't take a file yet: offering one says so in
-/// the composer, adds no chip, and \u{21b5} still sends the words.
+/// A thread with no terminal (Codex, pi, ACP) takes files as one with a terminal does: the
+/// chip, the upload, and the message carrying where it landed; a picture alone is a message.
 #[gpui::test]
-fn a_thread_with_no_terminal_says_it_cannot_take_a_file(cx: &mut TestAppContext) {
+fn a_thread_with_no_terminal_takes_files_too(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = state();
     state.meta.agent = AgentId::named(AgentId::PI);
@@ -277,21 +280,24 @@ fn a_thread_with_no_terminal_says_it_cannot_take_a_file(cx: &mut TestAppContext)
     cx.run_until_parked();
     let asked = asked(cx, &view);
 
-    view.update(cx, |v, cx| v.attach(Attach::Files(vec!["/tmp/shot.png".into()]), cx));
+    let picture = Attach::Picture { name: attach::picture_name("png"), bytes: vec![0x89] };
+    view.update(cx, |v, cx| v.attach(picture, cx));
     cx.run_until_parked();
-    assert!(asked.borrow().is_empty(), "nothing is sent up");
-    assert!(cx.debug_bounds("composer-attachment").is_none(), "no chip");
-    let notice = view.read_with(cx, |v, _| v.composer_notice().map(str::to_owned));
-    assert_eq!(notice.as_deref(), Some("Files can't be attached to pi threads yet"));
-
-    cx.simulate_input("Look at this");
+    let id = match asked.borrow().as_slice() {
+        [ThreadViewEvent::Attach { id, .. }] => *id,
+        other => panic!("the workspace is asked to send it up: {other:?}"),
+    };
+    assert!(cx.debug_bounds("composer-attachment").is_some(), "its chip");
+    let landed = ["/drop/y/pasted-image.png".to_owned()];
+    view.update(cx, |v, cx| v.attachment_landed(id, &landed, cx));
+    cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     assert_eq!(
         intents(&sent),
         [Intent::Send {
-            text: "Look at this".to_owned(),
+            text: String::new(),
             delivery: Delivery::Steer,
-            attachments: vec![]
+            attachments: landed.to_vec()
         }]
     );
 }

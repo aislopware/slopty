@@ -1,31 +1,16 @@
 //! What a composer attaches: a picture pasted into it or files dropped on it, each a chip from
 //! the paste until the message goes ([`Attachments`]).
 //!
-//! An attachment goes the way an agent takes one from a terminal: by its path in the message.
 //! The file goes up to a fresh directory of the worker's drop directory (`Dest::Attachment`),
 //! never the thread's working tree, where a screenshot would show in `git status` and could be
-//! committed. The draft never holds a worker's temporary path: sending puts the landed paths
-//! after the text ([`with_paths`]), the same bytes a terminal drop at the end of the draft
-//! would have put there.
+//! committed. The draft never holds a worker's temporary path: the message carries the landed
+//! paths beside its text (`Intent::Send::attachments`), and the worker gives each to the agent
+//! in the agent's own form (`slopty_agent::attach`).
 
 /// The name a pasted picture lands under, in a directory of its own on the worker.
 #[must_use]
 pub fn picture_name(extension: &str) -> String {
     format!("pasted-image.{extension}")
-}
-
-/// The message `text` with the attachments that landed at `paths`: the text, then each path
-/// as a terminal drop types it (quoted where a shell would need it), a space apart.
-#[must_use]
-pub fn with_paths(text: &str, paths: &[String]) -> String {
-    let text = text.trim_end();
-    let typed = slopty_client::xfer::paste_paths(paths);
-    let typed = typed.trim_end();
-    match (text.trim().is_empty(), typed.is_empty()) {
-        (_, true) => text.to_owned(),
-        (true, false) => typed.to_owned(),
-        (false, false) => format!("{text} {typed}"),
-    }
 }
 
 /// What an attachment is before it goes up.
@@ -259,10 +244,9 @@ mod tests {
     use super::*;
 
     /// An attachment is a chip from the paste until the message goes: it says how far it got
-    /// while it uploads and stays once it landed; the message then ends with its path as a
-    /// terminal drop types it.
+    /// while it uploads and stays once it landed, and the message carries where it landed.
     #[test]
-    fn an_attachment_stays_a_chip_and_its_path_goes_with_the_message() {
+    fn an_attachment_stays_a_chip_until_the_message_carries_it() {
         let mut attached = Attachments::default();
         let shot = attached.add(picture_name("png"));
         let other = attached.add("notes.txt".to_owned());
@@ -280,14 +264,6 @@ mod tests {
         assert!(attached.land(other, &[]) && !attached.end(other), "landing nowhere ends it");
         assert!(!attached.uploading());
         assert_eq!(attached.paths(), std::slice::from_ref(&path));
-        assert_eq!(with_paths("look at", &attached.paths()), format!("look at {path}"));
-        assert_eq!(with_paths("look at", &[]), "look at");
-        assert_eq!(with_paths("", &attached.paths()), path, "a picture alone is the message");
-        assert_eq!(
-            with_paths("this", &["/tmp/Screen Shot.png".to_owned()]),
-            "this '/tmp/Screen Shot.png'",
-            "quoted as a drop on a shell is"
-        );
         attached.clear();
         assert_eq!(attached.chips(), []);
     }

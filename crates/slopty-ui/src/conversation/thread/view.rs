@@ -750,8 +750,8 @@ impl ThreadView {
             self.arm(delivery, window, cx);
             return;
         }
-        let Some(text) = self.take_message(cx) else { return };
-        let _id = self.intent(Intent::Send { text, delivery, attachments: Vec::new() }, cx);
+        let Some((text, attachments)) = self.take_message(cx) else { return };
+        let _id = self.intent(Intent::Send { text, delivery, attachments }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
     }

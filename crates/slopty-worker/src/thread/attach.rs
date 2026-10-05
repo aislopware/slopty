@@ -6,12 +6,14 @@ use std::path::Path;
 use slopty_agent::attach::{self, Attached};
 use tokio::io::AsyncReadExt as _;
 
-/// Whether `paths` can go with a message: few enough, and each a file here; why not, in words.
-/// A look at each file's metadata only, so it is quick enough to decide an intent by.
+/// Whether `paths` can go with a message: few enough, and each a file or a folder here.
+///
+/// Why not, in words. A folder goes by its path, as a file too large to be a picture does. A
+/// look at each one's metadata only, so it is quick enough to decide an intent by.
 ///
 /// # Errors
 ///
-/// When there are more than [`attach::MAX`], or one is not an absolute path to a file.
+/// When there are more than [`attach::MAX`], or one is not an absolute path to something here.
 pub fn check(paths: &[String]) -> Result<(), String> {
     if paths.len() > attach::MAX {
         return Err(format!("A message takes at most {} files", attach::MAX));
@@ -20,8 +22,8 @@ pub fn check(paths: &[String]) -> Result<(), String> {
         if !Path::new(path).is_absolute() {
             return Err(format!("{path} is not a path on this machine"));
         }
-        if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
-            return Err(format!("There is no file {path} here"));
+        if std::fs::metadata(path).is_err() {
+            return Err(format!("There is nothing at {path} here"));
         }
     }
     Ok(())
@@ -50,12 +52,12 @@ pub async fn read(paths: &[String]) -> Vec<Attached> {
     read
 }
 
-/// The picture at `path` and its media type, or `None` when it is no picture or too large to
-/// send as one.
+/// The picture at `path` and its media type, or `None` when it is no picture (a folder is none)
+/// or too large to send as one.
 async fn picture(path: &str) -> std::io::Result<Option<(&'static str, Vec<u8>)>> {
     let mut file = tokio::fs::File::open(path).await?;
-    let size = file.metadata().await?.len();
-    if size > attach::PICTURE_MAX {
+    let meta = file.metadata().await?;
+    if !meta.is_file() || meta.len() > attach::PICTURE_MAX {
         return Ok(None);
     }
     let mut head = [0_u8; attach::HEAD];
@@ -83,7 +85,7 @@ mod tests {
     const PNG: [u8; 12] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
 
     /// A picture is read whole by its bytes whatever it is named; text goes by its path, and so
-    /// does a file that went before it was read.
+    /// do a folder and a file that went before it was read.
     #[tokio::test]
     async fn pictures_are_read_whole_and_the_rest_go_by_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -92,8 +94,10 @@ mod tests {
         let notes = dir.path().join("notes.png");
         std::fs::write(&notes, "# not a picture").unwrap();
         let gone = dir.path().join("gone.png");
+        let folder = dir.path().join("src.png");
+        std::fs::create_dir_all(&folder).unwrap();
         let paths: Vec<String> =
-            [&shot, &notes, &gone].iter().map(|p| p.display().to_string()).collect();
+            [&shot, &notes, &gone, &folder].iter().map(|p| p.display().to_string()).collect();
         let read = read(&paths).await;
         assert_eq!(
             read,
@@ -105,21 +109,23 @@ mod tests {
                 },
                 Attached::File { path: paths[1].clone() },
                 Attached::File { path: paths[2].clone() },
+                Attached::File { path: paths[3].clone() },
             ]
         );
     }
 
-    /// Only files here go: a relative path, a folder or a missing file is refused in words, and
-    /// so are more files than a message takes.
+    /// Files and folders here go: a relative path or a missing file is refused in words, and so
+    /// are more files than a message takes.
     #[test]
-    fn only_files_here_are_taken() {
+    fn files_and_folders_here_are_taken() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "a").unwrap();
         let file = file.display().to_string();
         assert_eq!(check(std::slice::from_ref(&file)), Ok(()));
+        assert_eq!(check(&[dir.path().display().to_string()]), Ok(()), "a folder, by its path");
         assert_eq!(check(&[]), Ok(()));
-        for bad in ["a.txt".to_owned(), dir.path().display().to_string(), format!("{file}.gone")] {
+        for bad in ["a.txt".to_owned(), format!("{file}.gone")] {
             assert!(check(std::slice::from_ref(&bad)).is_err(), "{bad}");
         }
         assert!(check(&vec![file; attach::MAX + 1]).is_err(), "too many");

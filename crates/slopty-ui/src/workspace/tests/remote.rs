@@ -654,9 +654,9 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
 
 /// A picture pasted into an agent's thread composer goes up to a directory of its own on the
 /// worker, with a chip in the composer from the paste until the message goes; the draft never
-/// holds its path, and nothing is sent until the message is, its text followed by the landed
-/// path. A file dropped on the thread, or picked with the attach button, is attached the same
-/// way.
+/// holds its path, and nothing is sent until the message is, carrying the landed path beside
+/// its text. A file dropped on the thread, or picked with the attach button, is attached the
+/// same way.
 #[gpui::test]
 fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -716,24 +716,10 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
         "no path in the draft"
     );
     assert!(!file.exists(), "the scratch copy here goes with the upload");
-    let sent = |studio: &mut Fake| -> Vec<String> {
-        use slopty_proto::thread::wire::{Intent, ThreadRequest};
-        studio
-            .drain()
-            .into_iter()
-            .filter_map(|m| match m {
-                ClientMsg::Thread(ThreadRequest::Intent {
-                    intent: Intent::Send { text, .. },
-                    ..
-                }) => Some(text),
-                _ => None,
-            })
-            .collect()
-    };
     assert!(sent(&mut studio).is_empty(), "the chip waits for the message");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert_eq!(sent(&mut studio), [format!("look at {landed}")], "the path goes with it");
+    assert_eq!(sent(&mut studio), [("look at".to_owned(), vec![landed])], "the path goes with it");
     assert!(chips(cx).is_empty(), "the chip went with it");
 
     let dir = tempfile::tempdir().unwrap();
@@ -758,6 +744,67 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
 
     // The attach button asks for the system's picker, for this tile.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&asked);
+    cx.update(|_, cx| {
+        cx.set_global(crate::workspace::folders::FilesSeam(std::rc::Rc::new(
+            move |ask: &crate::workspace::folders::FilesAsk| sink.borrow_mut().push(ask.clone()),
+        )));
+    });
+    let clip = cx.debug_bounds("thread-attach").expect("the attach button");
+    cx.simulate_click(clip.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
+}
+
+/// The messages sent to the worker's threads: each one's text and attachments.
+fn sent(studio: &mut Fake) -> Vec<(String, Vec<String>)> {
+    use slopty_proto::thread::wire::{Intent, ThreadRequest};
+    studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                intent: Intent::Send { text, attachments, .. },
+                ..
+            }) => Some((text, attachments)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A thread tile with no terminal (a Codex, pi or ACP thread) takes files as a face does: one
+/// dropped on the tile goes up to the worker's attachment directory with a chip in its
+/// composer, and the attach button asks the picker for that tile.
+#[gpui::test]
+fn a_thread_tile_takes_a_drop_as_an_attachment(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    view.update_in(cx, |v, _w, cx| v.threads_linked(studio.key, cx));
+    let thread = slopty_proto::thread::ThreadId::new();
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let composer = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("drawn");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = dir.path().join("trace.log");
+    std::fs::write(&dropped, b"log").unwrap();
+    let at = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn").center();
+    cx.simulate_event(FileDropEvent::Entered {
+        position: at,
+        paths: ExternalPaths(std::iter::once(dropped.clone()).collect()),
+    });
+    cx.simulate_event(FileDropEvent::Pending { position: at });
+    cx.simulate_event(FileDropEvent::Submit { position: at });
+    cx.run_until_parked();
+    let Call::Upload(_xfer, files, dest) = calls.try_recv().expect("an upload") else {
+        panic!("an upload");
+    };
+    assert_eq!((files, dest), (vec![dropped], Dest::Attachment), "never its working tree");
+    let chips = composer.read_with(cx, |c, _| c.attachments().len());
+    assert_eq!(chips, 1, "its chip in the thread's composer");
+
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = std::rc::Rc::clone(&asked);
     cx.update(|_, cx| {

@@ -723,13 +723,15 @@ impl WorkspaceView {
         let label = SharedString::from(title.clone());
         let header = self.render_header(placed, item, title, chrome, cx);
         let body = self.render_body(placed, item, chrome, window, cx);
-        // Files dropped on a shell go to its directory; on a remote window, to the worker's
-        // clipboard; on a folder, into it.
+        // Files dropped on a shell go to its directory; on a thread, to its composer; on a
+        // remote window, to the worker's clipboard; on a folder, into it.
         // On the Mac a drag over a remote window or display is the worker's own drag, carried
         // to the point under it (`remote::DropIn`), not a file drop.
         let takes_files = worker_up
             && match item.kind {
-                ItemKind::Terminal { .. } | ItemKind::Folder { .. } => true,
+                ItemKind::Terminal { .. } | ItemKind::Folder { .. } | ItemKind::Thread { .. } => {
+                    true
+                }
                 ItemKind::Window { .. } | ItemKind::Display { .. } => !cfg!(target_os = "macos"),
                 _ => false,
             };
