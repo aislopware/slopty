@@ -1326,11 +1326,11 @@ fn a_fling_past_either_end_stops_at_the_end_snap() {
     swipe(&mut l, 1000, -5000.0, 5, 10, 1050);
     near(view_pos(&l), 0.0);
     assert_eq!(active_col(&l), 0);
-    // A cancelled drag settles with the focus in view, moving the least: right-aligned.
+    // A cancelled drag settles with the focus in view, and never with room before the strip.
     l.view_gesture_begin();
     l.view_gesture_update(-900.0, MS(2000));
     assert!(l.view_gesture_end(true));
-    near(view_pos(&l), -640.0);
+    near(view_pos(&l), 0.0);
     assert_eq!(active_col(&l), 0);
     // No gesture: updates and ends are refused.
     assert!(!l.view_gesture_update(10.0, MS(3000)));
@@ -1878,4 +1878,50 @@ fn a_window_frame_is_kept_only_when_it_can_be_opened_again() {
     let json = serde_json::to_string(&saved).expect("serialises");
     let back: Saved = serde_json::from_str(&json).expect("parses");
     assert_eq!(back.window, Some(frame), "round-trips through layout.json");
+}
+
+/// Focused work that opens wide meets the working area's leading edge, its neighbour after it:
+/// a board opened on the orchestrator between a shell and an agent leaves no bare band before
+/// it, whatever the camera showed before.
+#[test]
+fn wide_work_meets_the_leading_edge_and_leaves_no_bare_band() {
+    let mut l = columns(3);
+    l.set_viewport(1032.0, 800.0);
+    l.focus(t(3));
+    l.focus(t(2));
+    l.suit(t(2), true);
+    let (shell, board, agent) = (rect(&l, t(1)), rect(&l, t(2)), rect(&l, t(3)));
+    near(board.x, 0.0);
+    near(board.w, WIDE_LEAST);
+    near(shell.x + shell.w, 0.0);
+    near(agent.x, WIDE_LEAST);
+}
+
+/// The view never shows room before the first column: a strip narrower than the view starts
+/// at its leading edge, wherever the focus is.
+#[test]
+fn a_strip_narrower_than_the_view_starts_at_its_edge() {
+    let mut l = columns(2);
+    drag(&mut l, -300.0);
+    l.focus(t(1));
+    l.focus(t(2));
+    near(rect(&l, t(1)).x, 0.0);
+    let last = rect(&l, t(2));
+    assert!(last.x + last.w <= 1280.0, "{last:?}");
+}
+
+/// Wide work that would leave less than [`PEEK_LEAST`] beside it takes the whole working
+/// width: a review beside its thread in a 752 pt strip shows no sliver of the thread's cut
+/// words, and the thread is one column away.
+#[test]
+fn wide_work_leaves_no_sliver_beside_it() {
+    let mut l = columns(2);
+    l.set_viewport(752.0, 800.0);
+    l.suit(t(2), true);
+    let (thread, review) = (rect(&l, t(1)), rect(&l, t(2)));
+    near(review.x, 0.0);
+    near(review.w, 752.0);
+    assert!(thread.x + thread.w <= 0.0, "the thread is off the view: {thread:?}");
+    l.focus(t(1));
+    near(rect(&l, t(1)).x, 0.0);
 }

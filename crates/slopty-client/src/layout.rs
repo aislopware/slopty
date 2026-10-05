@@ -48,6 +48,11 @@ pub const WIDE_SHARE: f32 = 2.0 / 3.0;
 /// The least a column holding wide work is, in points, where the working width has it: a board
 /// shows two lanes and its header in it, and a review a diff with room beside its gutter.
 pub const WIDE_LEAST: f32 = 720.0;
+/// The least room wide work leaves beside it, in points: a board's lane.
+///
+/// That is the narrowest column that reads as work. Less would show a neighbour as a sliver of
+/// cut words, so wide work then takes the whole working width ([`Layout::suit`]).
+pub const PEEK_LEAST: f32 = 280.0;
 /// Gap between workspaces as a share of the viewport height.
 const WORKSPACE_GAP: f32 = 0.1;
 /// The overview's zoom, niri's, while every workspace fits the window at it.
@@ -1133,9 +1138,12 @@ impl Workspace {
         let offset =
             compute_new_view_offset(x + g.working_x(), g.working_w(), col_x, col.resolved_width(g))
                 - g.working_x();
+        // The view never shows room past either end of the strip while the strip has work to
+        // show there: past the last column only once the whole strip fits, and never before the
+        // first.
         let strip_w = self.column_x(self.columns.len(), g);
         let last_view_x = (strip_w - g.working_w()).max(0.0) - g.working_x();
-        offset.min(last_view_x - col_x)
+        offset.min(last_view_x - col_x).max(-g.working_x() - col_x)
     }
 
     /// Column `column` back to the width a column opens at: the double-click on its divider.
@@ -1473,8 +1481,11 @@ impl Workspace {
             return;
         }
         let width = if wide {
-            let least = (WIDE_LEAST / g.working_w()).min(1.0);
-            ColumnWidth::Proportion(WIDE_SHARE.max(least))
+            let working = g.working_w();
+            let share = WIDE_SHARE.max((WIDE_LEAST / working).min(1.0));
+            let beside = working * (1.0 - share);
+            // Within half a point: 720 of 1000 leaves 280 however the share rounds.
+            ColumnWidth::Proportion(if beside + 0.5 < PEEK_LEAST { 1.0 } else { share })
         } else {
             ctx.new_width
         };
@@ -1489,7 +1500,11 @@ impl Workspace {
         if column < self.active {
             self.view.offset(-(new - old));
         }
-        self.animate_view_to_column(ctx, None, self.active);
+        // Focused work that opens wide meets the working area's leading edge, its neighbour
+        // after it, as far as the strip's end allows ([`Self::fit_offset`]).
+        let leading =
+            (wide && column == self.active).then(|| self.column_x(column, &ctx.g) - g.working_x());
+        self.animate_view_to_column(ctx, leading, self.active);
     }
 
     fn toggle_full_width(&mut self, ctx: &Ctx) {

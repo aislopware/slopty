@@ -398,7 +398,8 @@ fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
     let body = cx.debug_bounds("project-body").expect("drawn");
     let width = lanes[0].size.width;
     assert!(
-        lanes.iter().all(|l| (l.size.width - width).abs() < px(0.5)),
+        // Within a pixel: the grid snaps each cell's edges to the pixel grid.
+        lanes.iter().all(|l| (l.size.width - width).abs() <= px(1.0)),
         "one width for every lane: {lanes:?}"
     );
     let right = lanes.iter().map(Bounds::right).fold(px(0.0), Pixels::max);

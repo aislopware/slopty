@@ -1602,3 +1602,26 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     which would have left the person two ways to almost do the same thing.
   - Tests: `slopty-client` `layout::tests::wide_work_takes_two_thirds_and_at_least_720_unless_the_person_sized_it`,
     `workspace::tests::niri_keys::focus_mode_gives_the_work_the_width_and_puts_everything_back`.
+
+- ✅ **The strip shows no bare band and no sliver of cut words** (2026-10-05, from the goldens
+  retaken after wide work). Two scenes broke the first proportions. In the first, the board
+  opened right-aligned with an empty band between the navigator and it (`project-lanes`). In
+  the second, a review that took 720 of a 752 pt strip left its thread peeking as 32 pt of cut
+  glyphs (`review-agent`). Three rules now hold, all in `slopty_client::layout`.
+  - *No room past either end.* The view never rests before the first column, and it rests past
+    the last only once the whole strip fits (`Workspace::fit_offset`). A strip narrower than the
+    view starts at its leading edge, and a cancelled drag settles there rather than right-aligned
+    with bare room before the strip. niri lets that room show; Slopty does not, because the
+    space reads as broken.
+  - *Wide work meets the leading edge.* Focused work that opens wide (`Layout::suit`) puts its
+    column's leading edge on the working area's, with its neighbour after it, as far as the end
+    of the strip allows. That was chosen over keeping niri's least-movement fit, which
+    right-aligned a column that grew past the view's end.
+  - *No sliver beside wide work.* Wide work that would leave less than `PEEK_LEAST` (280 pt, a
+    board's lane, the narrowest column that reads as work) beside it takes the whole working
+    width, and the neighbour is one column away. Masking a sliver to its ground was the other
+    choice. It was turned down because it is still a strip that holds nothing, and it would hide
+    work the camera could simply leave out.
+  - Tests: `layout::tests::{wide_work_meets_the_leading_edge_and_leaves_no_bare_band,
+    a_strip_narrower_than_the_view_starts_at_its_edge, wide_work_leaves_no_sliver_beside_it,
+    a_fling_past_either_end_stops_at_the_end_snap}`.
