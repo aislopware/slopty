@@ -265,8 +265,7 @@ pub fn defaults() -> Vec<Command> {
 
     use crate::conversation::{
         AllowRequest, AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort,
-        DenyRequest, EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges,
-        ShowAgentTerminal, TakeBack,
+        DenyRequest, EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges, TakeBack,
     };
     use crate::terminal as t;
 
@@ -397,7 +396,6 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "cycle_effort", CycleEffort, &[], &[FACE]),
         c(Conversation, "ask_aside", AskAside, &[], &[FACE]),
         c(Conversation, "review_changes", ReviewChanges, &[], &[FACE]),
-        c(Conversation, "show_agent_terminal", ShowAgentTerminal, &[], &[FACE]),
         c(Conversation, "take_back", TakeBack, &[], &[FACE]),
         c(Conversation, "compact_context", CompactContext, &[], &[FACE]),
         c(Conversation, "branch_from_here", BranchFromHere, &[], &[FACE]),

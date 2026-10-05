@@ -1,5 +1,5 @@
-//! The thread's buttons on the keyboard: Review, the agent's terminal, Take back, Compact,
-//! Branch from here and Resume, each an action the palette lists and a key can be bound to.
+//! The thread's buttons on the keyboard: Review, Take back, Compact, Branch from here and
+//! Resume, each an action the palette lists and a key can be bound to.
 //!
 //! The view answers an action only while its button would show, so the palette never offers a
 //! line that does nothing.
@@ -13,9 +13,7 @@ use super::exited::Gone;
 use super::{ThreadView, ThreadViewEvent};
 use crate::conversation::thread::activity::Activity;
 use crate::conversation::thread::find;
-use crate::conversation::{
-    BranchFromHere, CompactContext, ResumeAgent, ReviewChanges, ShowAgentTerminal, TakeBack,
-};
+use crate::conversation::{BranchFromHere, CompactContext, ResumeAgent, ReviewChanges, TakeBack};
 
 impl ThreadView {
     /// `el` answering each of the thread's keyed buttons that would show now.
@@ -25,9 +23,6 @@ impl ThreadView {
             el.on_action(cx.listener(move |_this, _: &ReviewChanges, _w, cx| {
                 cx.emit(ThreadViewEvent::Review { thread });
             }))
-        })
-        .when(self.state(cx).is_some_and(|st| st.meta.terminal.is_some()), |el| {
-            el.on_action(cx.listener(|this, _: &ShowAgentTerminal, _w, cx| this.show_terminal(cx)))
         })
         .when(self.takes_back(cx), |el| {
             el.on_action(cx.listener(|this, _: &TakeBack, _w, cx| {

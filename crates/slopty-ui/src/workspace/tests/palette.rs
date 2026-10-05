@@ -607,7 +607,7 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
         SAVE_A_COPY,
         "Mute sound",
         "Stop the agent",
-        "Show conversation or terminal",
+        "Show thread or terminal",
         "Show project board or terminal",
         "Enclosing folder",
         "Undo close",
@@ -629,7 +629,7 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
     for label in always.iter().chain(&of_a_tile) {
         assert!(has(&shell, label), "{label} with a shell: {shell:?}");
     }
-    for label in ["Clear the screen and history", "Find in terminal, file or conversation"] {
+    for label in ["Clear the screen and history", "Find in terminal, file or thread"] {
         assert!(has(&shell, label), "the terminal's own {label}: {shell:?}");
     }
     for label in elsewhere {

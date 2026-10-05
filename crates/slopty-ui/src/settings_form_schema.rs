@@ -293,7 +293,7 @@ pub const KEY_GROUPS: [&str; 9] = [
     "General",
     "Layout",
     "Terminal",
-    "Conversation",
+    "Threads",
     "Files",
     "Folders",
     "Project boards",
@@ -315,7 +315,7 @@ fn key_group(command: &Command) -> &'static str {
             if layout { "Layout" } else { "General" }
         }
         Scope::Terminal => "Terminal",
-        Scope::Conversation => "Conversation",
+        Scope::Conversation => "Threads",
         Scope::File => "Files",
         Scope::Folder => "Folders",
         Scope::Project => "Project boards",

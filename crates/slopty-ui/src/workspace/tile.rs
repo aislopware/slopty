@@ -112,15 +112,15 @@ pub const CLOSE_TILE: &str = "Close tile";
 /// The accessible name of a tile's fullscreen button.
 pub const FULLSCREEN_TILE: &str = "Fullscreen tile";
 
-/// The header button that shows an agent terminal's conversation.
-pub const SHOW_CONVERSATION: &str = "Show conversation";
+/// The header button that shows an agent terminal's thread.
+pub const SHOW_CONVERSATION: &str = "Show thread";
 
-/// The same button while the conversation shows.
+/// The same button while the thread shows.
 pub const SHOW_TERMINAL: &str = "Show terminal";
 
-/// What an agent's tile shows, as a screen reader hears it after the tile's name: its
-/// conversation (a thread tile, or a terminal on its thread face)...
-pub const SHOWS_CONVERSATION: &str = "Conversation";
+/// What an agent's tile shows, as a screen reader hears it after the tile's name: its thread
+/// (a thread tile, or a terminal on its thread face)...
+pub const SHOWS_CONVERSATION: &str = "Thread";
 
 /// ...or its agent's own terminal.
 pub const SHOWS_TERMINAL: &str = "Terminal";

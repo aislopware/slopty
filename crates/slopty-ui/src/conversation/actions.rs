@@ -27,8 +27,6 @@ gpui::actions!(
         WatchAgentScreen,
         /// Open the review of the files the last turn changed, as the tray's "Review" does.
         ReviewChanges,
-        /// Bring the thread's agent's own terminal into view.
-        ShowAgentTerminal,
         /// Take the session back from the agent's own TUI once it rests.
         TakeBack,
         /// Ask the agent to compact its context, where it compacts through Slopty.

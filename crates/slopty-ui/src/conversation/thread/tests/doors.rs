@@ -313,13 +313,14 @@ fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
 }
 
 /// Each of the thread's buttons is an action too, for the palette and a bound key, answered only
-/// while its button would show: Review over the last turn's edits, the agent's terminal and Take
-/// back while its own TUI holds the session, Compact where the agent compacts through Slopty,
-/// Branch from here under the last message, and Resume once the agent has exited.
+/// while its button would show: Review over the last turn's edits, Take back while its own TUI
+/// holds the session, Compact where the agent compacts through Slopty, Branch from here under
+/// the last message, and Resume once the agent has exited. The agent's terminal is ⌘J's, on the
+/// tile, so the thread has no action of its own for it.
 #[gpui::test]
 fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContext) {
     use crate::conversation::{
-        BranchFromHere, CompactContext, ResumeAgent, ReviewChanges, ShowAgentTerminal, TakeBack,
+        BranchFromHere, CompactContext, ResumeAgent, ReviewChanges, TakeBack,
     };
 
     let (hub, sent) = hub(cx, None);
@@ -335,7 +336,6 @@ fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContex
         cx.update(|window, cx| window.is_action_available(action, cx))
     };
     assert!(!available(cx, &TakeBack), "Slopty drives it");
-    assert!(!available(cx, &ShowAgentTerminal), "no terminal");
     assert!(!available(cx, &ResumeAgent), "it runs");
 
     cx.dispatch_action(ReviewChanges);
@@ -355,8 +355,6 @@ fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContex
     assert_eq!(intents(&sent), [Intent::Compact, Intent::TakeBack]);
     cx.run_until_parked();
     assert!(!available(cx, &TakeBack), "once, while it is on its way");
-    cx.dispatch_action(ShowAgentTerminal);
-    assert!(matches!(asked.borrow().last(), Some(ThreadViewEvent::ShowTerminal)));
     state.meta.terminal = None;
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
     cx.run_until_parked();

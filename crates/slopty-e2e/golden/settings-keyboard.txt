@@ -105,8 +105,8 @@ ListItem │ Smaller text │ ⌘-
 Button │ Keys for Smaller text │ ⌘-
 ListItem │ Default text size │ ⌘0
 Button │ Keys for Default text size │ ⌘0
-ListItem │ Show conversation or terminal │ ⌘J
-Button │ Keys for Show conversation or terminal │ ⌘J
+ListItem │ Show thread or terminal │ ⌘J
+Button │ Keys for Show thread or terminal │ ⌘J
 ListItem │ Show project board or terminal │ ⇧⌘J
 Button │ Keys for Show project board or terminal │ ⇧⌘J
 ListItem │ Edit page address │ ⌘L
@@ -247,9 +247,9 @@ ListItem │ Attach selection
 Button │ Keys for Attach selection
 ListItem │ Clear the screen and history │ ⌘K
 Button │ Keys for Clear the screen and history │ ⌘K
-Heading │ Conversation
-ListItem │ Conversation density │ ⌃O
-Button │ Keys for Conversation density │ ⌃O
+Heading │ Threads
+ListItem │ Thread density │ ⌃O
+Button │ Keys for Thread density │ ⌃O
 ListItem │ Stop the agent │ ⎋
 Button │ Keys for Stop the agent │ ⎋
 ListItem │ Queue message │ ⌘↩
@@ -262,8 +262,6 @@ ListItem │ Ask aside
 Button │ Keys for Ask aside
 ListItem │ Review changes
 Button │ Keys for Review changes
-ListItem │ Show the agent's terminal
-Button │ Keys for Show the agent's terminal
 ListItem │ Take back from the terminal
 Button │ Keys for Take back from the terminal
 ListItem │ Compact context

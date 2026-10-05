@@ -2522,7 +2522,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keeps the same PTY and session under both.
   - **The toggle.** ⌘J (`ToggleConversation`, Workspace context) switches between them, as ⌘J
     shows and hides the terminal in the editors this app learns from. The header has a quiet
-    icon button that does the same, and the palette lists "Show conversation or terminal". The
+    icon button that does the same, and the palette lists "Show thread or terminal". The
     keyboard goes with the body: the composer when the face shows, the TUI when it hides.
     Showing the face sends `Follow`. Hiding it, closing the tile, the agent leaving or a new
     link sends `Unfollow` or drops the follow, so the worker hands a held prompt back to the
@@ -6653,13 +6653,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   held the focus, which is what told this apart from a hover.
 
 - ✅ **Every thread button is an action too, answered only while it shows** (2026-10-05,
-  readiness 10-05 G5). Review, Show the agent's terminal, Take back from the terminal, Compact
-  context, Branch from here… and Resume the agent were buttons only, so the keyboard could not
+  readiness 10-05 G5). Review, Take back from the terminal, Compact context, Branch from
+  here… and Resume the agent were buttons only, so the keyboard could not
   reach them and the palette did not list them. Each is now an action in the `conversation`
   namespace with a palette line and an unbound keymap entry (keys are the person's to give,
   and the palette shows one once given). The thread view listens for an action only while its
-  button would show (`thread/view/keyed.rs`): Review over a last turn that changed files, the
-  terminal while the thread has one, Take back while the agent's TUI holds the session and no
+  button would show (`thread/view/keyed.rs`): Review over a last turn that changed files, Take
+  back while the agent's TUI holds the session and no
   take-back is on its way, Compact where the agent compacts through Slopty, Branch from here
   under the person's last message (scrolled into view), Resume once the agent has exited and
   can be taken up. So the palette, which keeps a line only where the focus answers it ("The
@@ -6667,6 +6667,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   palette lines (`conversation::palette_items`) had been written and never added to the
   workspace's, so Commit…, Refresh pull request, Review with the agent, Watch the agent's
   screen, Ask aside and Next effort level reach the palette with them now.
+  - *Deleted: "Show the agent's terminal"* (readiness 10-06 item 8). Once an agent's tile
+    turned between its thread and its TUI, the line did what ⌘J ("Show thread or
+    terminal") does, under a second name and a second action. The tile's header toggle and ⌘J
+    are the one way to the TUI. A thread tile whose agent has a live terminal already becomes
+    that terminal's tile, so it needs no way of its own. The thread still brings the terminal
+    into view by itself where its answer goes there: "Answer in the terminal", and Codex's TUI
+    once it joins.
+  - *One noun: thread* (readiness 10-06 item 9). The chrome called the same object a thread
+    in some places and a conversation in others: the tile's toggle and its accessible
+    description, three palette lines, and the Keyboard settings group. Every one now says
+    thread ("Show thread", "Show thread or terminal", "Thread density", "Find in terminal,
+    file or thread", and the "Threads" group, plural like Files and Folders). Words that name
+    the agent's own context ("Compacted the conversation", a slash command's description) keep
+    the agent's word. The keymap's `conversation.*` names and the `Conversation` key context
+    are config, not chrome, and stay.
   - *The keyboard stays on the thread when the field goes.* The field leaves while the
     agent's own TUI holds the session and once an agent has exited for good, the two states
     whose buttons matter most here. A focus on what is no longer drawn reaches nothing, so the
@@ -6732,10 +6747,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and never flips the face the person picked.
   - What arrives on the tile follows its face. Dropped files, pasted pictures and attachments go
     to the composer on the thread face, and to the shell on the TUI face, as on any terminal.
-    The tile's accessible description says which face shows ("Conversation" or "Terminal"), and
-    the header's toggle is named for what it turns to ("Show terminal", "Show conversation").
+    The tile's accessible description says which face shows ("Thread" or "Terminal"), and
+    the header's toggle is named for what it turns to ("Show terminal", "Show thread").
   - Deleted: the thread tile's own way to its terminal (`open_thread_terminal`), which opened a
-    second tile. "Show the agent's terminal" on a thread tile flips the tile to its terminal
+    second tile. A thread that brings its terminal into view flips its tile to that terminal
     once one is live, and otherwise says the terminal has ended.
   - Tests: `workspace::tests::agent_tile::{a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face,
     a_thread_tile_whose_agent_gains_a_terminal_becomes_its_tile_in_place,
