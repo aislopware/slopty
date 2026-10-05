@@ -60,7 +60,7 @@ const FILES_BIN: &str = "slopty-files";
 const FILES_ID: &str = "files";
 /// The app group the app and the extension share, prefixed with the signing team, which needs
 /// no provisioning profile under a Developer ID (`slopty_platform::files::GROUP`).
-const GROUP: &str = "AJ4R8GWM7A.dev.aislopware.slopty";
+const GROUP: &str = "UK58J62H8L.dev.aislopware.slopty";
 
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone, Default)]
@@ -473,11 +473,11 @@ mod tests {
     #[test]
     fn each_binary_is_signed_under_its_identifier() {
         let path = Utf8Path::new("/b/Slopty.app/Contents/MacOS/slopty-worker");
-        let id = Signing::Identity("Developer ID Application: A (AJ4R8GWM7A)".to_owned());
+        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
         assert_eq!(
             id.codesign(Some("dev.aislopware.slopty.worker"), path).join(" "),
             "--force --options runtime --timestamp --identifier dev.aislopware.slopty.worker \
-             --sign Developer ID Application: A (AJ4R8GWM7A) /b/Slopty.app/Contents/MacOS/slopty-worker"
+             --sign Developer ID Application: A (UK58J62H8L) /b/Slopty.app/Contents/MacOS/slopty-worker"
         );
         assert_eq!(
             Signing::AdHoc.codesign(None, path).join(" "),
@@ -496,7 +496,7 @@ mod tests {
         let developer_id = "designated => identifier \"dev.aislopware.slopty.worker\" and anchor \
              apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and \
              certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate \
-             leaf[subject.OU] = AJ4R8GWM7A";
+             leaf[subject.OU] = UK58J62H8L";
         assert!(stable(developer_id, id));
         assert!(!stable("designated => cdhash H\"0123abcd\"", id));
         assert!(!stable(developer_id, "dev.aislopware.slopty.ptyd"));

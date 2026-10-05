@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn notarisation_needs_an_identity_and_credentials() {
         let profile = Notary::Profile("slopty".to_owned());
-        let id = Signing::Identity("Developer ID Application: A (AJ4R8GWM7A)".to_owned());
+        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
         assert_eq!(plan_notary(&id, Some(&profile), false), Ok(()));
         assert!(plan_notary(&id, None, false).unwrap_err().contains(PROFILE_ENV));
         assert!(
@@ -404,7 +404,7 @@ mod tests {
     /// build passes as it is.
     #[test]
     fn a_tag_is_published_only_signed_and_notarised() {
-        let id = Signing::Identity("Developer ID Application: A (AJ4R8GWM7A)".to_owned());
+        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
         let skipped = Notarised::Skipped("no credentials".to_owned());
         publishable(true, &id, &Notarised::Done).unwrap();
         let ad_hoc = publishable(true, &Signing::AdHoc, &skipped).unwrap_err().to_string();

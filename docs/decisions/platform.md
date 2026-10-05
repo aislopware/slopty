@@ -536,7 +536,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `SloptyFilesExtension`), all Rust: `apps/slopty-files`, whose `main` registers its
     `define_class!` classes and calls Foundation's `NSExtensionMain`. It is sandboxed with the
     network both ways (QUIC binds a UDP socket of its own) and the app group
-    `AJ4R8GWM7A.dev.aislopware.slopty`, which a Developer ID signs without a provisioning
+    `UK58J62H8L.dev.aislopware.slopty`, which a Developer ID signs without a provisioning
     profile. No File Provider entitlement exists to ask for.
   - **What Finder sees.** One domain per worker the server lists, named for the worker, under
     Locations and at `~/Library/CloudStorage/Slopty-<worker>`. The app follows the directory it
@@ -567,7 +567,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     macOS asks the person before a process reads a group container it is not entitled to, so
     `cargo run`, a test binary or an ad hoc bundle would raise that prompt. The container is
     used only when the process's own signature (`SecCodeCopySigningInformation`) names the
-    team `AJ4R8GWM7A`; any other build follows no directory, adds no domain, and says, when
+    team `UK58J62H8L`; any other build follows no directory, adds no domain, and says, when
     asked to show the workers, that it has no Finder extension. The self-test follows nothing
     either.
   - **Forks, each taken the way that feels most like a local disk.**
@@ -779,3 +779,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-app` `this_mac::tests::the_apps_own_lines_say_what_it_lacks`,
     `this_mac_stays_open_on_what_the_app_lacks_until_it_is_turned_on`; `slopty-ui`
     `notes_turned_off_are_said_once_on_coming_back`; the `this-mac` golden's two new lines.
+
+- ✅ **JMango's Developer ID signs Slopty** (the person, 2026-10-05). The team is `UK58J62H8L`
+  (JMANGO VIETNAM OPERATIONS COMPANY LIMITED), in place of `AJ4R8GWM7A`, with its certificate
+  imported into this Mac's keychain. `slopty_platform::files::TEAM` and the app group
+  `UK58J62H8L.dev.aislopware.slopty` follow it, and xtask's `sign::TEAM` with them, which a
+  test holds equal.
+  - The keychain holds two Developer ID Application certificates. xtask took the first, which
+    was the other team's, so it now takes only the team's (`sign::pick_identity`). Another
+    team's signature has no right to the app group: the build would lose its shared container
+    without a word.
+  - A grant made to the old team's builds doesn't carry over, since a designated requirement
+    names the team. Screen Recording and Accessibility are asked again once for the re-signed
+    worker. Notarising still needs the App Store Connect key, and CI's release job the
+    certificate, both as secrets.

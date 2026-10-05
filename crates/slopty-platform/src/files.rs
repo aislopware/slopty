@@ -36,11 +36,11 @@ use slopty_core::WorkerId;
 use tokio::sync::oneshot;
 
 /// The team that signs Slopty, whose identifier prefixes [`GROUP`].
-pub const TEAM: &str = "AJ4R8GWM7A";
+pub const TEAM: &str = "UK58J62H8L";
 
 /// The app group the app and the extension share, prefixed with the signing team, which
 /// needs no provisioning profile under a Developer ID.
-pub const GROUP: &str = "AJ4R8GWM7A.dev.aislopware.slopty";
+pub const GROUP: &str = "UK58J62H8L.dev.aislopware.slopty";
 
 /// The directory's file in the shared container.
 pub const DIRECTORY: &str = "workers.json";

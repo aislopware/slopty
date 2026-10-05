@@ -141,8 +141,8 @@ What a person installs, and how this tree makes it.
   installs. `--no-linux` leaves the Linux builds out (no zig needed, and no Linux installs);
   `--debug` builds a dev bundle.
 - **Signing.** The bundle is signed with `--sign <identity>`, else `$SLOPTY_SIGN_IDENTITY`, else
-  the keychain's Developer ID Application certificate (`security find-identity -v -p
-  codesigning`; here team AJ4R8GWM7A), with a secure timestamp and the hardened runtime. Each
+  the keychain's Developer ID Application certificate of team UK58J62H8L (`security find-identity -v -p
+  codesigning`; another team's is never taken), with a secure timestamp and the hardened runtime. Each
   daemon is signed under its `LaunchAgent` label (`dev.aislopware.slopty.worker`, `.ptyd`,
   `.server`, `.cli`), so a Screen Recording or Accessibility grant made once survives every
   update, on this Mac and on each Mac a worker is deployed to. The bundle step checks that the

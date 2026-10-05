@@ -42,15 +42,23 @@ pub fn identifier(suffix: &str) -> String {
     format!("{IDENTIFIER_PREFIX}.{suffix}")
 }
 
-/// The first `Developer ID Application` certificate in `security find-identity` output.
+/// The team that signs Slopty (`slopty_platform::files::TEAM`), whose identifier prefixes the
+/// app group the app and its extension share.
+pub const TEAM: &str = "UK58J62H8L";
+
+/// The [`TEAM`]'s `Developer ID Application` certificate in `security find-identity` output.
 ///
 /// Only that kind is taken. An Apple Development certificate expires within the year, and a TCC
 /// approval tied to one disappears with it, which is the failure this command exists to end.
+/// Another team's Developer ID is not taken either, though a keychain may hold several: its
+/// signature has no right to the team's app group, so the build would lose its shared container
+/// without a word, and every grant made to the team's builds.
 fn pick_identity(listing: &str) -> Option<&str> {
+    let team = format!("({TEAM})");
     listing
         .lines()
         .filter_map(|line| line.split('"').nth(1))
-        .find(|name| name.starts_with("Developer ID Application:"))
+        .find(|name| name.starts_with("Developer ID Application:") && name.ends_with(&team))
 }
 
 /// The identity to sign with: the flag, then the environment, then the keychain.
@@ -67,7 +75,7 @@ pub fn resolve_identity(sh: &Shell, given: Option<&str>) -> Result<String> {
         .context("security find-identity")?;
     pick_identity(&listing).map(str::to_owned).with_context(|| {
         format!(
-            "no Developer ID Application certificate in the keychain; \
+            "no Developer ID Application certificate of team {TEAM} in the keychain; \
              pass --identity or set {IDENTITY_ENV}"
         )
     })
@@ -113,7 +121,7 @@ pub fn sign_if_possible(sh: &Shell, release: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{identifier, pick_identity};
+    use super::{TEAM, identifier, pick_identity};
 
     #[test]
     fn a_daemon_is_signed_under_its_launchagent_label() {
@@ -122,17 +130,32 @@ mod tests {
     }
 
     #[test]
-    fn the_first_developer_id_certificate_is_the_one_taken() {
+    fn the_teams_developer_id_certificate_is_taken_whatever_comes_first() {
         let listing = concat!(
             "  1) 0C4A \"Apple Development: Someone (VGK9Q8GX84)\"\n",
-            "  2) BE54 \"Developer ID Application: A Company (AJ4R8GWM7A)\"\n",
-            "  3) C0DE \"Developer ID Application: Another (4TCGAUU87K)\"\n",
+            "  2) BE54 \"Developer ID Application: Another Company (AJ4R8GWM7A)\"\n",
+            "  3) FE38 \"Developer ID Application: The Company (UK58J62H8L)\"\n",
             "     3 valid identities found\n",
         );
         assert_eq!(
             pick_identity(listing),
-            Some("Developer ID Application: A Company (AJ4R8GWM7A)")
+            Some("Developer ID Application: The Company (UK58J62H8L)")
         );
+        let others = "  1) BE54 \"Developer ID Application: Another (AJ4R8GWM7A)\"\n  1 found\n";
+        assert_eq!(pick_identity(others), None, "another team's has no right to the app group");
+    }
+
+    /// xtask signs for the team the platform crate names, whose app group both spell out.
+    #[test]
+    fn the_signing_team_is_the_platforms() {
+        let root = crate::tools::repo_root().expect("repo root");
+        let files = std::fs::read_to_string(root.join("crates/slopty-platform/src/files.rs"))
+            .expect("files.rs");
+        assert!(files.contains(&format!("pub const TEAM: &str = \"{TEAM}\";")), "TEAM");
+        let group = format!("\"{TEAM}.dev.aislopware.slopty\"");
+        assert!(files.contains(&group), "the platform's group");
+        let bundle = std::fs::read_to_string(root.join("xtask/src/bundle.rs")).expect("bundle.rs");
+        assert!(bundle.contains(&group), "the bundle's group");
     }
 
     #[test]

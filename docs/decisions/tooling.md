@@ -815,7 +815,7 @@ more full-window layer.
   - **Ruling.** A bundle is signed with `--sign`, else `$SLOPTY_SIGN_IDENTITY`, else the
     keychain's Developer ID Application certificate, as `cargo xtask sign` already picks one
     (`sign::resolve_identity`). Here that is the one Developer ID in the keychain, team
-    AJ4R8GWM7A. Each daemon is signed under its `LaunchAgent` label as identifier
+    UK58J62H8L. Each daemon is signed under its `LaunchAgent` label as identifier
     (`dev.aislopware.slopty.worker`, `.ptyd`, `.server`, and `.cli` for the CLI); the app is
     signed as the bundle, `dev.aislopware.slopty`. The designated requirement is then the
     identifier and the team's certificate, which every later build of either shares, wherever

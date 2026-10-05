@@ -342,7 +342,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       runs use a signed `cargo xtask bundle --debug` at a fixed path, registered with
       `lsregister`. `bundle` gains the appex, its `NSExtension` plist
       (`com.apple.fileprovider-nonui`) and the entitlements: the app sandbox, the
-      `AJ4R8GWM7A.dev.aislopware.slopty` app group and `network.client`.
+      `UK58J62H8L.dev.aislopware.slopty` app group and `network.client`.
     - *A risk to settle first.* The worker daemon runs from the bundle under its own signing
       identifier (`dev.aislopware.slopty.worker`). Whether `NSFileProviderManager` lets it add
       a domain for the bundle's extension is unknown. If not, the worker's side needs a small
