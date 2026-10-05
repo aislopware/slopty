@@ -317,6 +317,29 @@ fn a_thread_scrolled_up_offers_the_way_down(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.following()), "following the newest row again");
 }
 
+/// On a long thread, rows above the newest are measured only as they come into view, so how
+/// far the list reaches is unknown at first. Scrolled up from the newest row all the same, the
+/// way down shows at once, and the frame drawn is the one a frame from scratch draws.
+#[gpui::test]
+fn a_long_thread_scrolled_up_a_little_offers_the_way_down(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::long(12, 0);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(px(400.0), px(420.0)));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-down").is_none(), "at the newest row, no way down");
+
+    scroll(cx, 60.0);
+    assert!(!view.read_with(cx, |v, _| v.following()), "scrolled up");
+    assert!(cx.debug_bounds("thread-down").is_some(), "the way down shows at once");
+    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    assert!(stale.is_none(), "{stale:?}");
+}
+
 /// Scrolled up while the thread moves on, the way down says how much came ("3 new"), and
 /// announces it politely only once the count has held for 700 ms; back at the newest row
 /// the count goes.

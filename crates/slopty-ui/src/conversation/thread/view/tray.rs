@@ -97,7 +97,15 @@ impl ThreadView {
             .and_then(|request| request.item.as_ref())
             .and_then(|item| self.call_row(item))
             .map(|row| (row, self.placement_of(row)));
-        Marks { asked, down: self.list.is_scrolled_to_end() == Some(false) }
+        Marks { asked, down: self.away_from_newest() }
+    }
+
+    /// Whether the way down shows: the list does not follow its newest row, and is not known
+    /// to stand at its end. Rows the list has not measured leave the end unknown, as on a
+    /// long thread scrolled up from its newest row: the way down shows then too, rather than
+    /// only once every row above has been measured.
+    fn away_from_newest(&self) -> bool {
+        !self.list.is_following_tail() && self.list.is_scrolled_to_end() != Some(true)
     }
 
     /// Draw again once the list's layout moved what the frame drew from it: the request's
@@ -107,7 +115,7 @@ impl ThreadView {
         let was = self.marks.get();
         let now = Marks {
             asked: was.asked.map(|(row, _)| (row, self.placement_of(row))),
-            down: self.list.is_scrolled_to_end() == Some(false),
+            down: self.away_from_newest(),
         };
         if now != was {
             #[cfg(test)]
