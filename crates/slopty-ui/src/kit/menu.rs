@@ -362,9 +362,13 @@ impl RenderOnce for MenuPanel {
                 }
             });
         let focus = cursor.read(cx).focus.clone();
+        // The keyboard moves once this frame is drawn: a panel drawn late in a frame (a view's
+        // deferred menu, built as the frame is prepainted) taking it here would leave two
+        // elements in one frame claiming it, the one that had it and the panel.
         if !inert && !cursor.read(cx).took {
             cursor.update(cx, |c, _| c.took = true);
-            window.focus(&focus, cx);
+            let took = focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&took, cx));
         }
         let marked = cursor.read(cx).at;
         let mut rows = head;

@@ -40,6 +40,7 @@ mod authors;
 mod breadcrumb;
 mod browsers;
 mod commands;
+mod context_menus;
 mod desktop;
 mod faces;
 mod facts;
@@ -811,6 +812,10 @@ pub struct WorkspaceView {
     menu_keyed: bool,
     /// The bar's menu just closed, drawn for the moment it takes to fade away.
     menu_leaving: Option<titlebar::MenuKind>,
+    /// Where a press opened the menu, which then hangs there rather than from a button.
+    menu_at: Option<gpui::Point<Pixels>>,
+    /// What a press on a tile or a project opened, while it shows.
+    context_menu: Option<context_menus::ContextMenu>,
     /// The worker "+" chose for the next new tile, where there are several; the focused tile's
     /// worker otherwise.
     new_on: Option<WorkerKey>,
@@ -1065,6 +1070,8 @@ impl WorkspaceView {
             menu: None,
             menu_keyed: false,
             menu_leaving: None,
+            menu_at: None,
+            context_menu: None,
             new_on: None,
             anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),

@@ -7376,7 +7376,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     focused). A subagent's thread takes no messages, so it has no Quote in reply. Branch from
     here appears under the person's own messages where the thread can branch. Esc closes it,
     and the keyboard goes back where it was.
-  - **Still to come.** Navigator rows, tile headers, tabs, folder rows and review files
-    follow.
+  - **A tile, a project, a machine.** A tile's navigator row and its header open the tile's
+    menu: Open (from the navigator only), Rename, Fullscreen, Copy path where it has one, then
+    Close tile set apart. A project's header offers New shell here and Fold or Unfold. A
+    machine's row opens the menu its "…" opens, at the press. These are drawn by the bar's menu
+    machinery (`MenuKind::Context`, `workspace/context_menus.rs`), hung at the press instead of
+    under a button. Every row runs what a key or a palette line already runs.
+  - **A folder's rows.** A press selects the row and offers Open, Rename or move…, Download…
+    (Save to Files… on an iPhone or iPad), Open in the person's editor where that would open
+    something, Copy path, and Move to Trash set apart (`folder/menu.rs`).
+  - **The keyboard moves after the frame.** `kit::MenuPanel` took the keyboard while it was
+    drawn. A view's own menu is built late in a frame, so the element that had the keyboard and
+    the panel both claimed it in one frame (a screen reader is told of one focus a frame). The
+    panel now takes it once the frame is drawn.
+  - **Still to come.** Tabs and review files.
   - Tests: `conversation::thread::tests::composing::a_right_click_on_a_message_quotes_or_copies_it`,
-    `conversation::thread::view::message_menu::tests::a_quote_marks_every_line_and_keeps_the_blank_ones`.
+    `conversation::thread::view::message_menu::tests::a_quote_marks_every_line_and_keeps_the_blank_ones`,
+    `workspace::tests::context_menus::a_right_click_or_a_long_press_opens_a_things_own_menu`,
+    `workspace::tests::folders::a_right_click_on_a_row_offers_what_its_keys_do`.

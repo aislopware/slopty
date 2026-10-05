@@ -716,3 +716,57 @@ fn a_long_folder_comes_a_page_at_a_time(cx: &mut TestAppContext) {
     assert_eq!(shown, 50, "the page joins the rows");
     assert!(pages(&mut studio).is_empty(), "every entry is here");
 }
+
+/// A right click on a row selects it and opens its own menu there: Copy path puts its path on
+/// the clipboard, and Move to Trash asks the worker as ⌘⌫ does. Esc closes it.
+#[gpui::test]
+fn a_right_click_on_a_row_offers_what_its_keys_do(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w".into() }, 1);
+    let top = listed("/w", vec![entry("docs", FileKind::Dir), entry("a.txt", FileKind::File)]);
+    answer(&view, cx, &studio, "/w", &top);
+    studio.drain();
+    cx.update(|_w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new())));
+    let right_click = |cx: &mut VisualTestContext, row: &'static str| {
+        let at = cx.debug_bounds(row).expect("the row").center();
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    };
+    let pick = |cx: &mut VisualTestContext, row: &'static str| {
+        let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row}")).center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("folder-menu").is_none(), "{row} closes the menu");
+    };
+
+    right_click(cx, "folder-row-1");
+    assert_eq!(selected(&view, cx, tile), "a.txt", "the row pressed is selected");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Menu", Some("Folder item"))), "{nodes:#?}");
+    for label in ["Open", "Rename or move\u{2026}", "Copy path", "Move to Trash"] {
+        assert!(nodes.iter().any(|n| n.is("MenuItem", Some(label))), "{label}");
+    }
+    pick(cx, "folder-menu-copy-path");
+    let copied = cx.update(|_w, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("/w/a.txt"));
+
+    right_click(cx, "folder-row-1");
+    pick(cx, "folder-menu-trash");
+    let trashed: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::FsOp { op, .. } => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trashed, [slopty_proto::folder::FsOp::Trash { path: "/w/a.txt".into() }]);
+
+    right_click(cx, "folder-row-0");
+    assert!(cx.debug_bounds("folder-menu").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-menu").is_none(), "Esc closes it");
+    assert_eq!(folder_path(&view, cx, tile), "/w", "and opens nothing");
+}

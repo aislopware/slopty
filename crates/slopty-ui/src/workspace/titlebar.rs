@@ -96,6 +96,8 @@ pub(super) enum MenuKind {
     Machine(WorkerKey),
     /// The server's readout while it is offline: try it now, or another server.
     Server,
+    /// A tile's or a project's own menu, opened by a press on it (`context_menus`).
+    Context,
 }
 
 /// What the title bar's empty span asks of the window, as a native title bar does.
@@ -260,6 +262,7 @@ impl WorkspaceView {
             self.dismiss_menu(window, cx);
         } else {
             self.menu = Some(which);
+            self.menu_at = None;
             self.menu_keyed = window.last_input_was_keyboard();
             cx.notify();
         }
@@ -606,6 +609,9 @@ impl WorkspaceView {
             MenuKind::Machine(key) => self.machine_entries(key, &entity, cx),
             MenuKind::Workspaces => self.workspace_entries(&entity),
             MenuKind::Server => self.server_entries.clone(),
+            MenuKind::Context => {
+                self.context_menu.as_ref().map(|m| m.entries.clone()).unwrap_or_default()
+            }
             MenuKind::Checkouts => self.checkout_entries(&entity),
             // The palette's names for the same actions, which the rows run as the keys do.
             MenuKind::New => {
@@ -670,8 +676,14 @@ impl WorkspaceView {
                     cx.listener(|this, _ev, window, cx| this.dismiss_menu(window, cx)),
                 )
             })
-            .child(
-                div()
+            .child(match self.menu_at {
+                // A menu a press opened hangs where it landed, kept inside the window.
+                Some(at) => gpui::anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(spacing.sm))
+                    .child(panel)
+                    .into_any_element(),
+                None => div()
                     .absolute()
                     // "+" and the breadcrumb hang their menus from their own left edges, as a
                     // menu bar's menus do; a machine's from its "…", under its row.
@@ -694,13 +706,14 @@ impl WorkspaceView {
                             MenuKind::Machine(_) => {
                                 left(el.top(at.map_or(under_bar, |b| b.bottom() + px(gap))))
                             }
-                            MenuKind::More => {
+                            MenuKind::More | MenuKind::Context => {
                                 el.top(under_bar).right(px(spacing.inset()) + safe.right)
                             }
                         }
                     })
-                    .child(panel),
-            );
+                    .child(panel)
+                    .into_any_element(),
+            });
         let layer = crate::palette::Layer::Popover.priority();
         Some(gpui::deferred(away).with_priority(layer).into_any_element())
     }
@@ -719,17 +732,22 @@ impl WorkspaceView {
         let theme = &self.theme;
         let spacing = theme.spacing;
         let (closing, dismissing) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let panel =
-            kit::MenuPanel::new("menu", menu_name(which), Rc::new(menu), theme, move |w, cx| {
+        let panel = kit::MenuPanel::new(
+            "menu",
+            self.menu_name(which),
+            Rc::new(menu),
+            theme,
+            move |w, cx| {
                 // The menu closes first, so the row runs with the keyboard back where it was.
                 let _gone = closing.update(cx, |this, cx| this.close_menu(w, cx));
-            })
-            .on_dismiss(move |w, cx| {
-                let _gone = dismissing.update(cx, |this, cx| this.dismiss_menu(w, cx));
-            })
-            .head(head)
-            .keyed(self.menu_keyed)
-            .inert(leaving);
+            },
+        )
+        .on_dismiss(move |w, cx| {
+            let _gone = dismissing.update(cx, |this, cx| this.dismiss_menu(w, cx));
+        })
+        .head(head)
+        .keyed(self.menu_keyed)
+        .inert(leaving);
         let panel = div().child(panel);
         let panel =
             if leaving { panel.debug_selector(|| "menu-leaving".to_owned()) } else { panel };
@@ -738,6 +756,17 @@ impl WorkspaceView {
             .arrives_whole(self.menu_keyed || !self.chrome_moves(cx))
             .travel(-spacing.xs)
             .into_any_element()
+    }
+}
+
+impl WorkspaceView {
+    /// What a menu is called, as a screen reader names it: a pressed thing's own says what
+    /// the thing is.
+    fn menu_name(&self, which: MenuKind) -> &'static str {
+        match which {
+            MenuKind::Context => self.context_menu.as_ref().map_or("Menu", |m| m.name),
+            _ => menu_name(which),
+        }
     }
 }
 
@@ -750,5 +779,6 @@ const fn menu_name(which: MenuKind) -> &'static str {
         MenuKind::Workspaces => "Workspaces",
         MenuKind::Checkouts => "Checkouts",
         MenuKind::Server => "Server",
+        MenuKind::Context => "Menu",
     }
 }

@@ -44,6 +44,8 @@ use crate::colors::hsla;
 use crate::icons::{IconSize, Symbol};
 use crate::palette::Plate;
 
+mod menu;
+
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 mod actions {
     gpui::actions!(
@@ -177,6 +179,8 @@ pub struct FolderView {
     press: Option<(usize, Point<Pixels>)>,
     /// The press became a drag: the click that ends it opens nothing.
     dragged: bool,
+    /// A row's own menu, open where it was pressed.
+    row_menu: Option<menu::RowMenu>,
     /// Where the list and its rows were drawn last, for [`Self::path_at`].
     drawn: Rc<RefCell<Drawn>>,
     zoom: f32,
@@ -220,6 +224,7 @@ impl FolderView {
             home: None,
             press: None,
             dragged: false,
+            row_menu: None,
             drawn: Rc::default(),
             zoom: 1.0,
             theme,
@@ -1012,8 +1017,7 @@ impl FolderView {
                 this.save_selected(cx);
             }))
         });
-        let row = div()
-            .id(numbered("folder-row", ix))
+        let row = Self::row_menu_press(div().id(numbered("folder-row", ix)), ix, cx)
             .debug_selector(move || format!("folder-row-{ix}"))
             .role(Role::ListBoxOption)
             .aria_label(SharedString::from(entry.name.clone()))
@@ -1261,6 +1265,7 @@ impl Render for FolderView {
             .font_family(self.theme.typography.ui_family.clone())
             .text_size(px(self.theme.typography.ui_size * k))
             .children(body)
+            .children(self.row_menu_panel(cx))
     }
 }
 

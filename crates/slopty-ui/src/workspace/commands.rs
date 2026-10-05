@@ -329,7 +329,7 @@ impl WorkspaceView {
 
     /// A width change: the layout's, then the remote windows of the column asked to take the
     /// size their tile now has.
-    fn width_action(
+    pub(super) fn width_action(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut slopty_client::layout::Layout),

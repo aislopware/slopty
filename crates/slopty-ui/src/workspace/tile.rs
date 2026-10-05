@@ -1020,8 +1020,7 @@ impl WorkspaceView {
         // At the overview's small zoom the miniature's label names the tile; a band on top of it in
         // another step, and a hairline under only some of them, read as tiles half drawn.
         let shapes = k < SHAPES_BELOW;
-        let header = div()
-            .id("title")
+        let header = Self::tile_menu_press(div().id("title"), tile, false, cx)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
             .role(Role::Heading)

@@ -3072,26 +3072,27 @@ impl WorkspaceView {
                 None => el.child(rest).child(hover),
             });
         let lines = if worker.warning.is_some() { kit::Row::Two } else { kit::Row::One };
-        row(
+        let row = row(
             theme,
             lines,
             ElementId::Name(format!("nav-worker-{key}").into()),
             format!("nav-worker-{key}"),
             label,
             false,
-        )
-        .group(group)
-        .child(lead)
-        .child(name)
-        .child(trailing)
-        .on_click(cx.listener(move |this, _ev, _w, cx| {
-            let group = GroupKey::machine(key);
-            if !this.nav.folded.remove(&group) {
-                this.nav.folded.insert(group);
-            }
-            cx.notify();
-        }))
-        .into_any_element()
+        );
+        Self::machine_menu_press(row, key, cx)
+            .group(group)
+            .child(lead)
+            .child(name)
+            .child(trailing)
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                let group = GroupKey::machine(key);
+                if !this.nav.folded.remove(&group) {
+                    this.nav.folded.insert(group);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// A project's header: its glyph and its name in the strong weight, where it is when
@@ -3205,25 +3206,26 @@ impl WorkspaceView {
             .child(rest)
             .child(hover);
         let fold = key.clone();
-        row(
+        let row = row(
             theme,
             kit::Row::One,
             ElementId::Name(format!("nav-group-{key}").into()),
             format!("nav-group-{key}"),
             label,
             false,
-        )
-        .group(hover_group)
-        .child(lead)
-        .child(name)
-        .child(trailing)
-        .on_click(cx.listener(move |this, _ev, _w, cx| {
-            if !this.nav.folded.remove(&fold) {
-                this.nav.folded.insert(fold.clone());
-            }
-            cx.notify();
-        }))
-        .into_any_element()
+        );
+        Self::project_menu_press(row, key, group.new_shell.clone(), cx)
+            .group(hover_group)
+            .child(lead)
+            .child(name)
+            .child(trailing)
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                if !this.nav.folded.remove(&fold) {
+                    this.nav.folded.insert(fold.clone());
+                }
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// A declared project's board, first under its header and set in as its tiles are: the
@@ -3539,52 +3541,56 @@ impl WorkspaceView {
                 .children(bar)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
-        row(
+        let row = row(
             theme,
             lines,
             ElementId::Name(format!("nav-tile-{id}").into()),
             format!("nav-tile-{id}"),
             label.into(),
             selected,
-        )
-        .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
-        .group(row_group)
-        // The two lines sit in the middle of the row at either density, the kind beside the
-        // first.
-        .items_center()
-        // The kind's glyph under the worker's name, past its icon and the gap after it: the
-        // slot is wider than the glyph centred in it, so it starts that margin to the left.
-        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
-        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
-        .child(
-            div()
-                .debug_selector(move || format!("nav-lines-{id}"))
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_start()
-                .gap(px(theme.spacing.xs))
-                .child(div().h(px(first)).flex().items_center().child(lead))
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(line1)
-                        .children(line2),
-                ),
-        )
-        .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
-            row.child(
-                canvas(|bounds, window, _cx| window.request_autoscroll(bounds), |_, (), _, _| {})
+        );
+        Self::tile_menu_press(row, tile, true, cx)
+            .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
+            .group(row_group)
+            // The two lines sit in the middle of the row at either density, the kind beside the
+            // first.
+            .items_center()
+            // The kind's glyph under the worker's name, past its icon and the gap after it: the
+            // slot is wider than the glyph centred in it, so it starts that margin to the left.
+            .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+            .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
+            .child(
+                div()
+                    .debug_selector(move || format!("nav-lines-{id}"))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_start()
+                    .gap(px(theme.spacing.xs))
+                    .child(div().h(px(first)).flex().items_center().child(lead))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(line1)
+                            .children(line2),
+                    ),
+            )
+            .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
+                row.child(
+                    canvas(
+                        |bounds, window, _cx| window.request_autoscroll(bounds),
+                        |_, (), _, _| {},
+                    )
                     .absolute()
                     .inset_0(),
-            )
-        })
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
-        .into_any_element()
+                )
+            })
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
+            .into_any_element()
     }
 }
 

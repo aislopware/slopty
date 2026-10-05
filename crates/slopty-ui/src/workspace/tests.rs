@@ -1585,6 +1585,7 @@ mod attach_block;
 mod away;
 mod bars;
 mod bodies;
+mod context_menus;
 mod cwd;
 mod desktop;
 mod faces;
