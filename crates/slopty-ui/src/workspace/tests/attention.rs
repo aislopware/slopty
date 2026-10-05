@@ -242,6 +242,52 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
     );
 }
 
+/// Only an agent that needs the person is Time Sensitive, breaking through a Focus: as the look
+/// sees it, with its buttons and without, and as the server says it, a project's included. A
+/// finished turn, a failure, a long command and a program's own note wait like any other.
+#[test]
+fn only_needs_you_breaks_through_a_focus() {
+    let (mut own, memory) = attention();
+    own.set_active(false);
+    let (a, b, c, d) = (route(1), route(2), route(3), route(4));
+    own.look(&Look {
+        asking: vec![asking(a, "Run cargo test")],
+        turns: vec![Turn { route: b, title: "api".into(), body: "Done".into() }],
+        unread: 2,
+        projects: HashMap::new(),
+    });
+    let held = Asking { approval: Some("7".into()), ..asking(a, "Run cargo test") };
+    own.look(&Look { asking: vec![held], ..Look::default() });
+    let done =
+        Finished { command: "cargo build".into(), exit: Some(1), elapsed: Duration::from_secs(60) };
+    own.command_finished(c, "build".into(), &done, Duration::from_secs(5));
+    own.program(d, "vim".into(), "Saved".into());
+    let urgent: Vec<(String, bool)> =
+        memory.posted().into_iter().map(|n| (n.id, n.urgent)).collect();
+    let id = |r: Route| r.about.note_id();
+    let expected = [(id(a), true), (id(b), false), (id(a), true), (id(c), false), (id(d), false)];
+    assert_eq!(urgent, expected, "asks only");
+
+    let (mut led, memory) = attention();
+    led.set_server_led(true);
+    led.set_active(false);
+    let stack = |id: &str| Some(Stack { id: id.into(), project: "p".into() });
+    let notices = [
+        (NoticeKind::NeedsYou, None),
+        (NoticeKind::Failed, None),
+        (NoticeKind::Finished, None),
+        (NoticeKind::Project, None),
+        (NoticeKind::NeedsYou, stack("s1")),
+        (NoticeKind::Project, stack("s2")),
+    ];
+    for (kind, stack) in notices {
+        let (title, body) = ("t".into(), "b".into());
+        led.notice(&Heard { route: route(5), kind, title, body, stack });
+    }
+    let urgent: Vec<bool> = memory.posted().into_iter().map(|n| n.urgent).collect();
+    assert_eq!(urgent, [true, false, false, false, true, false], "the server's, by their kind");
+}
+
 /// With notifications off, a note that goes out while the app is away reaches nobody: back in
 /// front, the app says so, once a run. Nothing is said while they are on, nor when nothing went
 /// unsaid, nor a second time.

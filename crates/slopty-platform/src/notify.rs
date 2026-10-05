@@ -54,6 +54,11 @@ pub struct Note {
     /// No sound: it only says more about a note already up under its identifier, which
     /// sounded when it came.
     pub silent: bool,
+    /// Time Sensitive: an agent that needs the person, which breaks through a Focus and the
+    /// notification summary. Nothing else is: the system shows the person how often an app
+    /// uses it, and lets them take it away. The level wants its entitlement, which wants a
+    /// provisioning profile; without one the system shows the note as an ordinary one.
+    pub urgent: bool,
 }
 
 /// A notification the human tapped, or one of its buttons.
@@ -278,9 +283,10 @@ mod apple {
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotification, UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
         UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
-        UNNotificationDismissActionIdentifier, UNNotificationPresentationOptions,
-        UNNotificationRequest, UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
-        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNNotificationDismissActionIdentifier, UNNotificationInterruptionLevel,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+        UNUserNotificationCenterDelegate,
     };
     use parking_lot::Mutex;
     use tokio::sync::mpsc::error::SendError;
@@ -782,6 +788,9 @@ mod apple {
         content.setBody(&NSString::from_str(&note.body));
         if !note.silent {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
+        if note.urgent {
+            content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
         }
         if let Some(category) = note.category {
             content.setCategoryIdentifier(&NSString::from_str(category.id));

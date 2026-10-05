@@ -828,3 +828,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_failed_install_offers_another_try`; `slopty-ui`
     `settings_form::tests::open_at_login_is_the_systems_switch`; the `this-mac` golden's new
     line.
+
+- ✅ **Needs you is Time Sensitive; nothing else is** (readiness N5, 2026-10-06). Under a Work
+  focus or Notification Summary, the one note that matters waited in the pile with the rest.
+  A note now carries `urgent` (`slopty_platform::notify::Note`), which sets
+  `UNNotificationInterruptionLevelTimeSensitive`. The workspace's attention sets it only for
+  an agent that needs the person: the look's asks, with their approval buttons or without, and
+  the server's `NeedsYou` notices, a project's included. A finished turn, a failure, a long
+  command and a program's own note stay at the active level. Two reasons: the system shows
+  the person how often an app breaks through, and lets them take that away, and the 10-04
+  APNs ruling already picked the same split.
+  - **No entitlement yet.** `com.apple.developer.usernotifications.time-sensitive` is a
+    portal capability, so it needs a provisioning profile. The Developer ID app embeds none,
+    and AMFI refuses to launch a binary that claims an unprovisioned `com.apple.developer`
+    entitlement, so adding it now would break every signed build. Without it, the system
+    shows the note at the active level, and nothing fails. Enabling the capability and its
+    profiles for the Mac and iOS is the person's step (readiness 10-06 §5). After that it is
+    one line in each entitlements writer (`xtask/src/bundle.rs`, `xtask/src/ios.rs`).
+  - Test: `slopty-ui` `workspace::attention::tests::only_needs_you_breaks_through_a_focus`.

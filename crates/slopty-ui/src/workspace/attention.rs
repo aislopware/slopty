@@ -29,6 +29,10 @@
 //! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
 //! A shell's moments are this client's own and post as before.
 //!
+//! A note of an agent that needs the person is Time Sensitive (`Note::urgent`), so it reaches
+//! them through a Focus and past the notification summary; a finished turn, a failure, a
+//! shell's command and a program's own note wait there like any other app's.
+//!
 //! A project's held-up work comes only as the server's notice ([`Heard::stack`]): each is a
 //! note of its own, stacked with the project's others, leading to its orchestrator. With the
 //! app in front the app says it as a notice instead.
@@ -180,6 +184,7 @@ impl Asking {
             info,
             category: self.approval.as_ref().map(|_| APPROVAL),
             silent,
+            urgent: true,
             thread: None,
         }
     }
@@ -380,6 +385,7 @@ impl Attention {
                 body: heard.body.clone(),
                 info: heard.route.info(),
                 thread: Some(stack.project.clone()),
+                urgent: heard.kind == NoticeKind::NeedsYou,
                 ..Note::default()
             });
             return;
@@ -528,6 +534,8 @@ impl Attention {
     fn post(&mut self, about: About, why: Why, mut note: Note) {
         tracing::debug!(?about, ?why, "attention note");
         note.thread = self.projects.get(&about).cloned();
+        // Only an agent that needs the person breaks through a Focus.
+        note.urgent = why == Why::Asks;
         if why != Why::Asks {
             self.answers.remove(&about);
         }
