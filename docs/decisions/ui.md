@@ -3979,8 +3979,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       own, later edit.
   - A backup goes only when its tile is clean (saved and answered, reloaded) or closed for
     good (after ⌘Z's window), never because a layout lacks it. A kept edit whose worker has not
-    come back for a week is mentioned at start, and the palette's "Discard unsaved edits over a
-    week old" lets such edits go. Nothing is dropped unasked.
+    come back for a week is mentioned at start, in a notice that stays until the person picks
+    "Discard", which lets such edits go, or "Keep". Nothing is dropped unasked. A palette line
+    did the discarding until 2026-10-05; it was deleted (readiness 10-05 item 17) because the
+    notice is where the question is asked, and a standing palette line for a rare start-up case
+    was clutter (test `workspace::tests::unsaved::an_edit_a_week_old_is_told_of_at_start_and_discarded_on_the_notice`).
   - **A closed tile never leaves `$EDITOR` waiting.** A tile a program waits on answers it as
     "Done" would on close: it saves, then tells. When that save is refused, fails or loses its
     link, the program hears it was given up once ⌘Z's window has passed, and the edit stays

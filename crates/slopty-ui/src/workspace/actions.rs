@@ -36,9 +36,6 @@ actions!(
         ReviewChanges,
         /// Open the page a shell last asked to open that was held back in a notice.
         OpenLastOffer,
-        /// Let go of the unsaved edits kept on this device for over a week without a tile to
-        /// take them (their worker has not come back).
-        DiscardOldUnsaved,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -346,7 +343,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w(SAVE_A_COPY, IconName::Download, Box::new(SaveCopy)),
         w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
         w("Open last offered page", IconName::ExternalLink, Box::new(OpenLastOffer)),
-        w("Discard unsaved edits over a week old", IconName::Eraser, Box::new(DiscardOldUnsaved)),
         w("Edit page address", IconName::Link, Box::new(EditAddress)),
         w("Page back", IconName::ArrowLeft, Box::new(PageBack)),
         w("Page forward", IconName::ArrowRight, Box::new(PageForward)),
@@ -489,8 +485,6 @@ pub(super) struct Applies {
     pub undo: bool,
     /// A page was held back in a notice.
     pub offer: bool,
-    /// An edit kept here has waited over a week for its tile.
-    pub old_unsaved: bool,
     /// A thread on its way whose agent can start in plan mode, its first message not sent.
     pub plan: bool,
     /// A folder, or a shell in a repository: its changes can be reviewed.
@@ -532,7 +526,6 @@ impl super::WorkspaceView {
             streams: !self.screens.is_empty(),
             undo: !self.closed.is_empty(),
             offer: self.has_offer(),
-            old_unsaved: self.has_old_unsaved(),
             plan: focused.is_some_and(|t| self.starting.plans(t.item)),
             changes: self.changes_here().is_some(),
         }

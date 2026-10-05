@@ -21,14 +21,14 @@
 //! worker was forgotten, or it was closed with a waiting program's save unresolved) leaves its
 //! edit here, keyed by the item that went. The first snapshot of its worker after the app next
 //! starts gives it a tile again: a clean tile on its file takes it, else a new tile is opened
-//! for it, never one holding another edit. One that waits more than [`OLD_AFTER`]
-//! for its worker is told of at start, and "Discard unsaved edits over a week old" lets such
-//! edits go; nothing is dropped unasked.
+//! for it, never one holding another edit. Those that wait more than [`OLD_AFTER`] for their
+//! worker are told of at start, in a notice whose "Discard" lets them go; nothing is dropped
+//! unasked.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use gpui::{Context, Entity, Window};
+use gpui::{Context, Entity};
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Store;
 use slopty_core::{ItemId, WallMs};
@@ -36,7 +36,7 @@ use slopty_proto::handoff::EditOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 
 use super::WorkspaceView;
-use super::actions::DiscardOldUnsaved;
+use super::toast::ToastKind;
 use crate::file::{Backup, FileView, Mark};
 
 /// How often, at most, the edits are written while they keep changing.
@@ -63,7 +63,7 @@ const FAILS_SAID: u32 = 3;
 pub(super) const NOT_KEPT: &str = "Unsaved edits can't be kept on this device";
 
 /// A kept edit whose tile has not come back for this long is old: the person hears of it at
-/// start, and the palette can let it go.
+/// start, with the way to let it go.
 const OLD_AFTER: Duration = Duration::from_hours(7 * 24);
 
 /// One file tile on one worker: the worker's item, which outlives the app.
@@ -207,7 +207,7 @@ impl WorkspaceView {
             self.reopen_kept(key, cx);
         }
         if old > 0 {
-            self.show_notice(old_notice(old), cx);
+            self.show_toast(ToastKind::OldUnsaved(old_notice(old)), cx);
         }
     }
 
@@ -396,22 +396,9 @@ impl WorkspaceView {
         self.keep_unsaved(cx);
     }
 
-    /// Whether an edit kept here has waited over a week for its tile.
-    pub(super) fn has_old_unsaved(&self) -> bool {
-        let now = WallMs::now();
-        self.kept
-            .as_ref()
-            .is_some_and(|k| k.pending.values().any(|p| now.since(p.kept_ms) > OLD_AFTER))
-    }
-
-    /// The palette's "Discard unsaved edits over a week old": the kept edits no tile has
-    /// taken for a week go, on the person's word.
-    pub fn discard_old_unsaved(
-        &mut self,
-        _: &DiscardOldUnsaved,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The start-up notice's "Discard": the kept edits no tile has taken for a week go, on
+    /// the person's word.
+    pub(super) fn discard_old_unsaved(&mut self, cx: &mut Context<Self>) {
         let Some(kept) = self.kept.as_mut() else { return };
         let now = WallMs::now();
         let old: Vec<TileKey> = kept
@@ -502,12 +489,11 @@ fn offer<'a>(wanted: &mut Wanted<'a>, key: TileKey, mark: Option<Mark>, source: 
 
 /// What the person hears at start of `n` kept edits over [`OLD_AFTER`] old.
 fn old_notice(n: usize) -> String {
-    let what = if n == 1 {
+    if n == 1 {
         "An unsaved edit over a week old waits for its machine".to_owned()
     } else {
         format!("{n} unsaved edits over a week old wait for their machines")
-    };
-    format!("{what}: \u{201c}Discard unsaved edits over a week old\u{201d} lets them go")
+    }
 }
 
 /// How long the passes wait after one that wrote `bytes`: [`KEEP_EVERY`], or longer for a large

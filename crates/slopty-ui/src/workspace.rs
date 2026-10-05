@@ -1939,7 +1939,6 @@ impl gpui::Render for WorkspaceView {
             .when(applies.plan, |el| el.on_action(cx.listener(Self::toggle_plan_first)))
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
             .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
-            .when(applies.old_unsaved, |el| el.on_action(cx.listener(Self::discard_old_unsaved)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
             .when(applies.screen, |el| {
                 el.on_action(cx.listener(Self::toggle_mute))

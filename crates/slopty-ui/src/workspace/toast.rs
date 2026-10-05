@@ -75,6 +75,9 @@ pub(super) enum ToastKind {
     Failed(String),
     /// A page a program in a shell asked to open, held back: "Open" opens it.
     Offered(Box<super::handoffs::Offer>),
+    /// Unsaved edits kept on this device have waited over a week for their machines, said at
+    /// start: "Discard" lets them go, "Keep" keeps them waiting. It stays until one is chosen.
+    OldUnsaved(String),
     /// An entry went to a worker's trash: "Put back" moves it back where it was.
     Trashed {
         /// The worker.
@@ -114,14 +117,17 @@ impl WorkspaceView {
         let seq = toast.seq;
         // One on its way out gives its place at once to the one coming in.
         toast.shown.retain(|shown| !shown.leaving);
-        let sticky = matches!(what, ToastKind::Failed(_));
+        let sticky = matches!(what, ToastKind::Failed(_) | ToastKind::OldUnsaved(_));
         toast.shown.push(Shown { seq, what, leaving: false, held: false });
-        // Past the most shown, the oldest goes, a failure only when nothing else is left to go.
+        // Past the most shown, the oldest goes, one that waits for an answer only when nothing
+        // else is left to go.
         while toast.shown.len() > SHOWN {
             let at = toast
                 .shown
                 .iter()
-                .position(|shown| !matches!(shown.what, ToastKind::Failed(_)))
+                .position(|shown| {
+                    !matches!(shown.what, ToastKind::Failed(_) | ToastKind::OldUnsaved(_))
+                })
                 .unwrap_or(0);
             toast.shown.remove(at);
         }
@@ -336,6 +342,23 @@ impl WorkspaceView {
                 body = Some(self.offer_body(offer));
                 ("offered", Some(Glyph::Icon(IconName::Globe)), vec![open, dismiss])
             }
+            ToastKind::OldUnsaved(_) => {
+                let seq = shown.seq;
+                let discard = action("toast-discard", "Discard").on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
+                        this.drop_toasts(|shown| shown.seq == seq);
+                        this.discard_old_unsaved(cx);
+                    },
+                ));
+                let keep = action("toast-keep", "Keep")
+                    .text_color(hsla(s.text_secondary))
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        if this.drop_toasts(|shown| shown.seq == seq) {
+                            cx.notify();
+                        }
+                    }));
+                ("old-unsaved", Some(Glyph::Icon(IconName::FileText)), vec![discard, keep])
+            }
             ToastKind::Trashed { worker, back, .. } => {
                 let (worker, back, seq) = (*worker, back.clone(), shown.seq);
                 let put_back = action("toast-put-back", "Put back").on_click(cx.listener(
@@ -534,7 +557,9 @@ impl WorkspaceView {
 fn toast_line(what: &ToastKind) -> String {
     match what {
         ToastKind::Closed { title, .. } => format!("Closed {title}"),
-        ToastKind::Said(text) | ToastKind::Failed(text) => text.clone(),
+        ToastKind::Said(text) | ToastKind::Failed(text) | ToastKind::OldUnsaved(text) => {
+            text.clone()
+        }
         ToastKind::Offered(offer) => offer.line(),
         ToastKind::Attention { line, .. } | ToastKind::Trashed { line, .. } => line.clone(),
     }

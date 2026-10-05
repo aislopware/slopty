@@ -45,8 +45,6 @@ ListItem │ Review changes
 Button │ Keys for Review changes
 ListItem │ Open last offered page
 Button │ Keys for Open last offered page
-ListItem │ Discard unsaved edits over a week old
-Button │ Keys for Discard unsaved edits over a week old
 ListItem │ Save a copy…
 Button │ Keys for Save a copy…
 ListItem │ Close tile │ ⌘W

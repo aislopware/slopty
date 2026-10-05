@@ -419,3 +419,48 @@ fn two_tiles_on_one_file_each_take_their_own_edit_back(cx: &mut TestAppContext) 
     texts.sort();
     assert_eq!(texts, ["a# Notes", "b# Notes"], "both still kept");
 }
+
+/// A kept edit that has waited over a week for its machine is told of at start, in a notice
+/// that waits for the person: "Keep" leaves it kept, "Discard" lets it go and says so. One
+/// younger than a week is not mentioned and never discarded.
+#[gpui::test]
+fn an_edit_a_week_old_is_told_of_at_start_and_discarded_on_the_notice(cx: &mut TestAppContext) {
+    let (dir, store) = store();
+    let week = Duration::from_hours(8 * 24).as_millis();
+    let edit = |path: &str, kept_ms: WallMs| Unsaved {
+        worker: WorkerKey::new(7),
+        item: ItemId::new(),
+        path: path.to_owned(),
+        text: "draft".to_owned(),
+        newline: true,
+        base_modified_ms: None,
+        conflict: false,
+        kept_ms,
+    };
+    let now = WallMs::now();
+    let old = WallMs::from_millis(now.as_millis().saturating_sub(u64::try_from(week).unwrap()));
+    store.put(&edit("/w/old.txt", old), 1).expect("put");
+    store.put(&edit("/w/new.txt", now), 2).expect("put");
+    let (view, cx) = workspace(cx);
+    let start = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.update(cx, |v, cx| v.set_unsaved_store(relaunched(&dir), cx));
+        cx.run_until_parked();
+    };
+    start(&view, cx);
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("An unsaved edit over a week old waits for its machine"));
+    let keep = cx.debug_bounds("toast-keep").expect("Keep");
+    cx.simulate_click(keep.center(), Modifiers::none());
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "the notice goes");
+    assert_eq!(store.all().len(), 2, "kept, as asked");
+
+    start(&view, cx);
+    let discard = cx.debug_bounds("toast-discard").expect("Discard");
+    cx.simulate_click(discard.center(), Modifiers::none());
+    settle(cx);
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("Discarded an unsaved edit over a week old"));
+    let left: Vec<String> = store.all().into_iter().map(|u| u.path).collect();
+    assert_eq!(left, ["/w/new.txt"], "only the old one goes");
+}
