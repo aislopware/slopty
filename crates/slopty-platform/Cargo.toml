@@ -221,6 +221,8 @@ objc2-web-kit = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# This process's footprint, for the symbols' pool test (`tests/symbols.rs`).
+slopty-testkit.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
 # The install plan's JSON, as the CLI prints it for a deploy (`service::Ptyd`).
