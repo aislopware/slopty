@@ -77,6 +77,7 @@ impl WebView {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         }
         super::adopt_view(&web, &delegate);
+        super::opened(worker, &web);
         let request = NSURLRequest::requestWithURL(&address);
         // SAFETY: WebKit rule: any `NSURLRequest` may be loaded; the navigation it returns
         // may be ignored.
@@ -253,6 +254,7 @@ impl Drop for WebView {
         }
         super::forget_view(&self.web, &self.delegate);
         self.web.removeFromSuperview();
+        super::close_page(&self.web);
     }
 }
 

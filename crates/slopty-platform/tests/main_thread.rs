@@ -26,23 +26,29 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 2] = [
+    pub const TESTS: [(&str, fn()); 3] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
         ),
         ("every_page_is_open_to_web_inspector", every_page_is_open_to_web_inspector),
+        (
+            "a_forgotten_workers_store_goes_once_its_last_page_has",
+            a_forgotten_workers_store_goes_once_its_last_page_has,
+        ),
     ];
 
-    /// Run the main run loop until `done`, five seconds at most.
+    /// Run the main run loop until `done`, twenty seconds at most: a page loads under a loaded
+    /// machine too.
     fn until(what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now().checked_add(Duration::from_secs(20)).unwrap();
         while !done() {
             assert!(Instant::now() < deadline, "{what}");
             // SAFETY: CoreFoundation rule: `kCFRunLoopDefaultMode` is a constant string valid
             // for the life of the process.
             let mode = unsafe { kCFRunLoopDefaultMode };
-            let _ran = CFRunLoop::run_in_mode(mode, 0.01, true);
+            // Each turn in a pool of its own, as AppKit's event loop drains one per event.
+            let _ran = objc2::rc::autoreleasepool(|_| CFRunLoop::run_in_mode(mode, 0.01, true));
         }
     }
 
@@ -102,6 +108,58 @@ mod mac {
         // Worker 0: a store that keeps nothing on disk.
         let page = WebView::new(host, 0, "about:blank", std::rc::Rc::new(|_event| {})).unwrap();
         assert!(page.inspectable(), "open to the inspector");
+    }
+
+    /// A forgotten worker's store goes with its last page: forgotten as the page goes, as the app
+    /// forgets it, with no wait or retry of the caller's.
+    fn a_forgotten_workers_store_goes_once_its_last_page_has() {
+        use std::cell::RefCell;
+        use std::io::{Read as _, Write as _};
+        use std::rc::Rc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut asked = [0_u8; 4096];
+                let _read = stream.read(&mut asked);
+                let page = "<html><head><title>a page</title></head><body>here</body></html>";
+                let said = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                     Set-Cookie: seen=1\r\nConnection: close\r\n\r\n{page}",
+                    page.len()
+                );
+                let _wrote = stream.write_all(said.as_bytes());
+            }
+        });
+        let mtm = MainThreadMarker::new().unwrap();
+        let gpui = NSView::new(mtm);
+        let host = NonNull::from(&*gpui).cast();
+        // A worker of this run's own, so a store left by another run is not this one.
+        let worker = (u128::from(std::process::id()) << 64) | 0x5107_7e57;
+        let loaded = Rc::new(RefCell::new(0_usize));
+        let heard = Rc::clone(&loaded);
+        let sink = Rc::new(move |event| {
+            if matches!(event, slopty_platform::web::WebEvent::Loaded) {
+                let more = heard.borrow().saturating_add(1);
+                *heard.borrow_mut() = more;
+            }
+        });
+        objc2::rc::autoreleasepool(|_| slopty_platform::web::route(worker, 9));
+        let page = objc2::rc::autoreleasepool(|_| {
+            WebView::new(host, worker, &format!("http://127.0.0.1:{port}/"), sink).unwrap()
+        });
+        until("the page loads", || *loaded.borrow() == 1);
+        objc2::rc::autoreleasepool(|_| page.load(&format!("http://127.0.0.1:{port}/next")));
+        until("and a second", || *loaded.borrow() == 2);
+        // As the app does: the worker is forgotten as its tiles go, their pages still open.
+        let gone = Rc::new(RefCell::new(None));
+        let told = Rc::clone(&gone);
+        slopty_platform::web::forget(worker, move |said| *told.borrow_mut() = Some(said));
+        objc2::rc::autoreleasepool(|_| drop(page));
+        until("WebKit lets the store go", || gone.borrow().is_some());
+        assert_eq!(gone.borrow_mut().take(), Some(Ok(())), "the store goes with its last page");
     }
 }
 

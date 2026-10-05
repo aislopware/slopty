@@ -165,7 +165,8 @@ libc.workspace = true
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
 objc2-game-controller.workspace = true
-objc2-core-foundation.workspace = true
+# The main run loop's observer that asks again for a forgotten worker's page store (`web`).
+objc2-core-foundation = { workspace = true, features = [ "CFRunLoop" ] }
 objc2-ui-kit = { workspace = true, features = [
     "UIApplication",
     "UIResponder",

@@ -426,7 +426,7 @@ impl Workspace {
             Change::Unlisted(id) => {
                 if let Some(key) = self.slot(id).map(|slot| slot.key) {
                     self.drop_slot(id, cx);
-                    Self::forget_pages(key, cx);
+                    Self::forget_pages(key);
                 }
             }
             Change::Load(id) => {

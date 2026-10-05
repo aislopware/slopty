@@ -81,17 +81,6 @@ use workers::{Hearing, Tick, WorkerSlot};
 /// shell symbols), a Paste where the Mac has ⌘V, full-width primary actions.
 pub(crate) const TOUCH: bool = cfg!(target_os = "ios");
 
-/// The waits before each ask to delete a forgotten worker's page store: at once, then over
-/// about eight seconds.
-const FORGET_PAGES_WAITS: [std::time::Duration; 6] = [
-    std::time::Duration::ZERO,
-    std::time::Duration::from_millis(250),
-    std::time::Duration::from_millis(500),
-    std::time::Duration::from_secs(1),
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(4),
-];
-
 /// The key bar is for a touch platform typing on glass: a hardware keyboard has every key on
 /// it, so the row hides while one is attached and comes back when it is unplugged.
 const fn key_bar_visible(touch_platform: bool, hardware_keyboard: bool) -> bool {
@@ -1145,30 +1134,15 @@ impl Workspace {
         .detach();
     }
 
-    /// A forgotten worker's pages lose their cookies and storage once the tiles that held them
-    /// have gone. `WebKit` lets go of a store a little after its last view, so a refusal is
-    /// asked again, a few times over some seconds.
-    fn forget_pages(key: WorkerKey, cx: &Context<Self>) {
-        cx.spawn(async move |_this, cx| {
-            let mut why = String::new();
-            for wait in FORGET_PAGES_WAITS {
-                cx.background_executor().timer(wait).await;
-                let (said, heard) = tokio::sync::oneshot::channel();
-                // An app gone drops `said` unheard, which ends the asking.
-                cx.update(|_cx| {
-                    slopty_platform::web::forget(key.value(), move |gone| {
-                        let _heard = said.send(gone);
-                    });
-                });
-                match heard.await {
-                    Ok(Ok(())) => return,
-                    Ok(Err(e)) => why = e,
-                    Err(_dropped) => return,
-                }
+    /// A forgotten worker's pages lose their cookies and storage with the tiles that held them,
+    /// which go as this change is handled: `WebKit` deletes the store once it lets go of their
+    /// last page (`slopty_platform::web::forget`).
+    fn forget_pages(key: WorkerKey) {
+        slopty_platform::web::forget(key.value(), |gone| {
+            if let Err(why) = gone {
+                tracing::warn!(%why, "a forgotten worker's pages kept their store");
             }
-            tracing::warn!(%why, "a forgotten worker's pages kept their store");
-        })
-        .detach();
+        });
     }
 
     /// Drop a worker's slot: its link, and its tiles.

@@ -68,6 +68,7 @@ impl WebView {
         // `WKNavigationDelegate`, held weakly; `self` keeps it alive as long as the view.
         let () = unsafe { msg_send![&*web, setNavigationDelegate: &*delegate] };
         super::adopt_view(&web, &delegate);
+        super::opened(worker, &web);
         let this = Self { web, sink, delegate, mtm };
         this.load_address(&address);
         Some(this)
@@ -235,5 +236,6 @@ impl Drop for WebView {
         let () = unsafe { msg_send![&*self.web, setNavigationDelegate: None::<&AnyObject>] };
         super::forget_view(&self.web, &self.delegate);
         self.web.removeFromSuperview();
+        super::close_page(&self.web);
     }
 }

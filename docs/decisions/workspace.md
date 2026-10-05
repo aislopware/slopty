@@ -277,11 +277,24 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   - Forgetting a worker deletes its pages' store, cookies and storage with it
     (`slopty_platform::web::forget`, 2026-10-01). Its pages go with its tiles at once: they
     used to wait for the workspace's next draw, which a hidden window never makes, so a
-    forgotten worker's pages kept running and WebKit refused the removal as "in use". WebKit
-    still lets go of a store a little after its last view, so the app asks again over about
-    eight seconds. Tests: `a_removed_worker_with_open_tiles_leaves_nothing` (the page gone
-    before any draw) and the app e2e above, which forgets the worker and sees its store go
-    from `~/Library/WebKit`.
+    forgotten worker's pages kept running and WebKit refused the removal as "in use".
+    - Since 2026-10-05 nothing holds a page past its owner:
+      - A dropped page closes at once (`-[WKWebView _close]`, private; Slopty ships only to
+        internal TestFlight, and a test checks the selector still exists).
+      - gpui-fast's frame keeps the views it may rebuild weakly (fork PR #29). Before, the last
+        frame held a dropped tile, and with it the page's view, until the window next drew.
+    - WebKit still refuses until the process that showed the page has answered its close, a
+      few run-loop turns later (about 15 ms measured; seconds on a loaded machine). The
+      removal is asked once, and a refusal is asked again each time the main run loop is
+      about to wait, which is how that answer arrives. It gives up after 30 s; there is no
+      ladder of timed retries.
+    - Tests:
+      - `a_forgotten_workers_store_goes_once_its_last_page_has` (slopty-platform
+        `main_thread`): one ask right after the drop; 20 of 20 passed under twice as many CPU
+        hogs as cores.
+      - `a_removed_worker_with_open_tiles_leaves_nothing`: the page is gone before any draw.
+      - The app e2e above, which forgets the worker and sees its store go from
+        `~/Library/WebKit`.
 
 - ✅ **A file tile is an editor** (2026-09-25). The user wanted to fix a line where they read
   it rather than type `$EDITOR` into a shell, so the file tile's body is gpui-kit's code

@@ -15,17 +15,22 @@
 //! The keyboard differs by platform; each module says how.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol};
+use objc2::runtime::{AnyClass, AnyObject, Bool, MessageReceiver as _, NSObjectProtocol, Sel};
 use objc2::{
     AnyThread as _, DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _,
     define_class, msg_send,
+};
+use objc2_core_foundation::{
+    CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopObserver, CFRunLoopObserverContext,
+    kCFRunLoopCommonModes,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSError, NSNumber, NSObject, NSProgress, NSString, NSURL, NSURLRequest,
@@ -312,12 +317,23 @@ fn identifier(worker: u128) -> Option<Retained<NSUUID>> {
     NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(&uuid_text(worker)))
 }
 
+/// How long a forgotten worker's store is asked for while `WebKit` still holds it.
+const FORGET_WITHIN: Duration = Duration::from_secs(30);
+
+/// The start of `WebKit`'s refusal while it holds a store: a page of it is open, or the process
+/// that showed one has not gone yet (`WebsiteDataStore::removeDataStoreWithIdentifier`,
+/// `WebsiteDataStoreCocoa.mm`). The error carries no code of its own, only these words.
+const IN_USE: &str = "Data store is in use";
+
 /// Delete `worker`'s data store once the person has forgotten the worker, and tell `done`
 /// whether it went.
 ///
-/// Its cookies, caches and storage go with it. `WebKit` refuses while it still holds the store
-/// for a page, which can outlast the page's view a little: `done` then gets its reason. Main
-/// thread only.
+/// Its cookies, caches and storage go with it. The worker's pages still open end first: their
+/// processes end and their pages close, and their views go as their owners drop them. `WebKit`
+/// refuses while it still holds the store, which lasts until those views are freed and its
+/// teardown of their processes has run, a few run-loop turns. So a refusal is asked again each
+/// time the main run loop has handled what woke it, for thirty seconds at most; `done` then
+/// gets `WebKit`'s reason. Main thread only.
 pub fn forget(worker: u128, done: impl FnOnce(Result<(), String>) + 'static) {
     let Some(mtm) = MainThreadMarker::new() else {
         return done(Err("not on the main thread".to_owned()));
@@ -328,25 +344,134 @@ pub fn forget(worker: u128, done: impl FnOnce(Result<(), String>) + 'static) {
     let Some(identifier) = identifier(worker) else {
         return done(Err("no identifier for the worker".to_owned()));
     };
-    let done = Cell::new(Some(done));
-    let handler = RcBlock::new(move |error: *mut NSError| {
-        // SAFETY: WebKit rule: the handler's error is nil or an `NSError` that lives for the
-        // call.
-        let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
-        if let Some(done) = done.take() {
-            done(why.map_or(Ok(()), Err));
-        }
+    end_pages(worker);
+    let forgetting = Rc::new(Forgetting {
+        identifier,
+        done: Cell::new(Some(Box::new(done))),
+        until: Instant::now().checked_add(FORGET_WITHIN),
+        asking: Cell::new(false),
+        observer: RefCell::new(None),
     });
-    // SAFETY: WebKit rule (`WKWebsiteDataStore.h`): any identifier but the null UUID may be
-    // removed on the main thread; one never made, or still in use, is an error the handler
-    // gets.
-    unsafe {
-        WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
-            &identifier,
-            &handler,
-            mtm,
-        );
+    forgetting.ask(mtm);
+}
+
+/// What hears whether a forgotten worker's store went.
+type Done = Box<dyn FnOnce(Result<(), String>)>;
+
+/// A forgotten worker's store, asked for until `WebKit` lets it go.
+struct Forgetting {
+    identifier: Retained<NSUUID>,
+    done: Cell<Option<Done>>,
+    /// When a refusal is final.
+    until: Option<Instant>,
+    /// A removal is under way: its answer has not come.
+    asking: Cell<bool>,
+    /// What asks again at each turn of the main run loop, once `WebKit` has refused.
+    observer: RefCell<Option<CFRetained<CFRunLoopObserver>>>,
+}
+
+impl Forgetting {
+    fn ask(self: &Rc<Self>, mtm: MainThreadMarker) {
+        self.asking.set(true);
+        let this = Rc::clone(self);
+        let handler = RcBlock::new(move |error: *mut NSError| {
+            // SAFETY: WebKit rule: the handler's error is nil or an `NSError` that lives for
+            // the call.
+            let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
+            this.asking.set(false);
+            let waiting = this.until.is_some_and(|until| Instant::now() < until);
+            match why {
+                Some(why) if why.starts_with(IN_USE) && waiting => this.wait(why),
+                why => this.finish(why.map_or(Ok(()), Err)),
+            }
+        });
+        // SAFETY: WebKit rule (`WKWebsiteDataStore.h`): any identifier but the null UUID may
+        // be removed on the main thread; one never made, or still in use, is an error the
+        // handler gets.
+        unsafe {
+            WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
+                &self.identifier,
+                &handler,
+                mtm,
+            );
+        }
     }
+
+    /// Ask again whenever the main run loop is about to wait, having handled what woke it.
+    fn wait(self: &Rc<Self>, why: String) {
+        if self.observer.borrow().is_some() {
+            return;
+        }
+        let Some(main) = CFRunLoop::main() else { return self.finish(Err(why)) };
+        let mut context = CFRunLoopObserverContext {
+            version: 0,
+            info: Rc::into_raw(Rc::clone(self)).cast_mut().cast(),
+            retain: None,
+            release: Some(let_go),
+            copyDescription: None,
+        };
+        // SAFETY: CoreFoundation rule (`CFRunLoop.h`): the context is copied; `info` is handed
+        // to the callout and to `release` once, when the observer is invalidated or freed,
+        // which `let_go` balances against the `Rc::into_raw` above.
+        let observer = unsafe {
+            CFRunLoopObserver::new(
+                None,
+                CFRunLoopActivity::BeforeWaiting.0,
+                true,
+                0,
+                Some(turned),
+                &raw mut context,
+            )
+        };
+        let Some(observer) = observer else {
+            // SAFETY: no observer took `info`, so it is still the `Rc` made above.
+            unsafe {
+                let_go(context.info.cast_const());
+            }
+            return self.finish(Err(why));
+        };
+        // SAFETY: a `CFRunLoopMode` static CoreFoundation defines, read-only.
+        let common = unsafe { kCFRunLoopCommonModes };
+        main.add_observer(Some(&observer), common);
+        *self.observer.borrow_mut() = Some(observer);
+    }
+
+    fn finish(&self, outcome: Result<(), String>) {
+        let observer = self.observer.borrow_mut().take();
+        if let Some(observer) = observer {
+            observer.invalidate();
+        }
+        if let Some(done) = self.done.take() {
+            done(outcome);
+        }
+    }
+}
+
+/// The main run loop is about to wait: ask for the store again, unless an ask is under way.
+unsafe extern "C-unwind" fn turned(
+    _observer: *mut CFRunLoopObserver,
+    _activity: CFRunLoopActivity,
+    info: *mut c_void,
+) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let forgetting = info.cast_const().cast::<Forgetting>();
+    // SAFETY: `info` is the `Rc<Forgetting>` the observer holds while it is valid, and a valid
+    // observer's callout runs only then; this takes one more count of it for the call, as an
+    // ask can invalidate the observer and so let go of the observer's own.
+    unsafe {
+        Rc::increment_strong_count(forgetting);
+    }
+    // SAFETY: the count just taken is this call's own, given back as the `Rc` drops.
+    let forgetting = unsafe { Rc::from_raw(forgetting) };
+    if !forgetting.asking.get() {
+        forgetting.ask(mtm);
+    }
+}
+
+/// The observer let go of its `info`: the count `Forgetting::wait` gave it.
+unsafe extern "C-unwind" fn let_go(info: *const c_void) {
+    // SAFETY: `info` is the pointer `Rc::into_raw` made in `Forgetting::wait`, released once.
+    drop(unsafe { Rc::from_raw(info.cast::<Forgetting>()) });
 }
 
 /// `value` as a UUID is written: `01020304-0506-0708-090a-0b0c0d0e0f10`.
@@ -729,6 +854,79 @@ fn forget_view(web: &AnyObject, delegate: &Delegate) {
     delegate.cancel_downloads();
 }
 
+thread_local! {
+    /// Every page open on this thread, the main one, with its worker: what [`forget`] ends.
+    static PAGES: RefCell<Vec<(u128, objc2::rc::Weak<AnyObject>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `web` is a page of `worker`'s, for [`forget`] to end if the worker is forgotten.
+fn opened(worker: u128, web: &AnyObject) {
+    PAGES.with_borrow_mut(|pages| {
+        pages.retain(|(_, page)| page.load().is_some());
+        pages.push((worker, objc2::rc::Weak::new(web)));
+    });
+}
+
+/// End every page of `worker`'s still open: its process ends now and its page closes, so
+/// nothing of `WebKit`'s holds the worker's store but views about to be freed.
+///
+/// A page's process otherwise ends only once it has answered its page's close, which a loaded
+/// machine can hold off for many seconds: a hidden page's process runs at background
+/// priority. Ending it is right only here, where every page of the worker goes: a page opened
+/// by another (`window.open`) can share its process.
+fn end_pages(worker: u128) {
+    let ending: Vec<Retained<AnyObject>> = PAGES.with_borrow_mut(|pages| {
+        let mut ending = Vec::new();
+        pages.retain(|(of, page)| {
+            let mine = *of == worker;
+            if mine && let Some(page) = page.load() {
+                ending.push(page);
+            }
+            !mine && page.load().is_some()
+        });
+        ending
+    });
+    let kill = kill_selector();
+    for web in ending {
+        // SAFETY: `NSObject` rule: `respondsToSelector:` may be asked of any object.
+        let private: bool = unsafe { msg_send![&*web, respondsToSelector: kill] };
+        if private {
+            // SAFETY: WebKit rule (`WKWebViewPrivate.h`): `_killWebContentProcessAndResetState`
+            // takes no argument and ends the page's process at once; the page is closed next
+            // and never loads again.
+            let () = unsafe { (&*web).send_message(kill, ()) };
+        }
+        close_page(&web);
+    }
+}
+
+/// `-[WKWebView _killWebContentProcessAndResetState]` (`WKWebViewPrivate.h`, `WebKit`'s
+/// `WKWebView.mm`): ends the page's process now, which `WebKit` tears down at once rather than
+/// after the process answers.
+fn kill_selector() -> Sel {
+    objc2::sel!(_killWebContentProcessAndResetState)
+}
+
+/// `-[WKWebView _close]` (`WKWebViewPrivate.h`, `WebKit`'s `WKWebView.mm`): closes the view's page
+/// now, where only the view's freeing would close it otherwise.
+fn close_selector() -> Sel {
+    objc2::sel!(_close)
+}
+
+/// Close `web`'s page as its owner drops it, not whenever the view is freed: an autorelease
+/// pool or a callback under way can keep the view a while, and its page holds the worker's
+/// store until it closes ([`forget`]).
+fn close_page(web: &AnyObject) {
+    let close = close_selector();
+    // SAFETY: `NSObject` rule: `respondsToSelector:` may be asked of any object.
+    let private: bool = unsafe { msg_send![web, respondsToSelector: close] };
+    if private {
+        // SAFETY: WebKit rule (`WKWebViewPrivate.h`): `_close` takes no argument and closes
+        // the view's page; the view is never used again, as its owner is dropping it.
+        let () = unsafe { web.send_message(close, ()) };
+    }
+}
+
 /// Find `text` in `web`'s page, the next match after the selection (or before it,
 /// `backwards`), wrapping round; the answer comes back as [`WebEvent::Found`].
 fn find_in(web: &AnyObject, text: &str, backwards: bool, sink: Sink) {
@@ -813,6 +1011,19 @@ fn zoom_in(web: &AnyObject, zoom: f64) {
 
 #[cfg(test)]
 mod tests {
+    /// The private selectors a page is closed and ended by are still `WebKit`'s: were one gone,
+    /// pages would close only as their views are freed and their processes end only as they
+    /// answer, and a forgotten worker's store would wait.
+    #[test]
+    fn webkit_still_answers_the_private_selectors_named_here() {
+        let view = AnyClass::get(c"WKWebView").expect("WebKit is linked");
+        assert!(view.responds_to(close_selector()), "-[WKWebView _close]");
+        assert!(
+            view.responds_to(kill_selector()),
+            "-[WKWebView _killWebContentProcessAndResetState]"
+        );
+    }
+
     /// A worker's store is named by its key written as a UUID, as the worker writes its id.
     #[test]
     fn a_key_is_written_as_its_uuid() {
