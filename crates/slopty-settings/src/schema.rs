@@ -60,6 +60,9 @@ pub enum Kind {
     Colour,
     /// A font family.
     Font,
+    /// A map from names the person picks to values of one kind (`[clipboard.workers]`, a
+    /// machine's name to a switch); a map of maps is the Keyboard page's, not a row's.
+    Map(Box<Self>),
 }
 
 /// One option of a [`Kind::Choice`].
@@ -94,6 +97,17 @@ impl Field {
     /// Why not, as the parser says it: a colour that is not one, a host with a bad port.
     pub fn check(&self, literal: &str) -> Result<(), String> {
         let text = format!("[{}]\n{} = {literal}\n", self.table, self.key);
+        toml::from_str::<Settings>(&text).map(drop).map_err(|e| e.message().trim().to_owned())
+    }
+
+    /// Whether `literal` is a value this map takes for its entry `name`.
+    ///
+    /// # Errors
+    ///
+    /// Why not, as the parser says it.
+    pub fn check_entry(&self, name: &str, literal: &str) -> Result<(), String> {
+        let name = crate::edit::key_text(name);
+        let text = format!("[{}.{}]\n{name} = {literal}\n", self.table, self.key);
         toml::from_str::<Settings>(&text).map(drop).map_err(|e| e.message().trim().to_owned())
     }
 }
@@ -211,6 +225,11 @@ fn kind(schema: &Json) -> Option<Kind> {
             _ => Kind::Text,
         }),
         "array" => Some(Kind::List),
+        "object" => {
+            let entry = kind(schema.get("additionalProperties")?)?;
+            matches!(entry, Kind::Switch | Kind::Text | Kind::List | Kind::Number(_))
+                .then(|| Kind::Map(Box::new(entry)))
+        }
         _ => None,
     }
 }
@@ -248,7 +267,10 @@ fn from_toml(value: &toml::Value) -> Value {
             .map(|i| i.as_str().map(str::to_owned))
             .collect::<Option<Vec<_>>>()
             .map_or_else(|| Value::Other(value.to_string()), Value::List),
-        toml::Value::Datetime(_) | toml::Value::Table(_) => Value::Other(value.to_string()),
+        toml::Value::Table(table) => {
+            Value::Map(table.iter().map(|(k, v)| (k.clone(), from_toml(v))).collect())
+        }
+        toml::Value::Datetime(_) => Value::Other(value.to_string()),
     }
 }
 
@@ -278,15 +300,16 @@ mod tests {
     }
 
     /// Every key of the default file is a field, with the default the file writes, and every
-    /// field names a key of it, a nested table's (`colors.light`) included.
+    /// field names a key of it, a nested table's (`colors.light`) included. A map empty by
+    /// default (`clipboard.workers`) is a key of its own.
     #[test]
     fn every_key_is_a_field_with_its_default() {
         fn keys_of(table: &toml::Table, prefix: &str, out: &mut Vec<String>) {
             for (key, value) in table {
                 let name = format!("{prefix}.{key}");
                 match value.as_table() {
-                    Some(inner) => keys_of(inner, &name, out),
-                    None => out.push(name),
+                    Some(inner) if !inner.is_empty() => keys_of(inner, &name, out),
+                    Some(_) | None => out.push(name),
                 }
             }
         }
@@ -347,6 +370,13 @@ mod tests {
         assert_eq!(field("colors.dark", "cursor").table_title, "Dark terminal colours");
         assert_eq!(field("font", "mono_family").kind, Kind::Font);
         assert_eq!(field("font", "mono_family").default, Value::Str("JetBrains Mono".to_owned()));
+        let shared = field("clipboard", "workers");
+        assert_eq!(
+            (&shared.kind, &shared.default),
+            (&Kind::Map(Box::new(Kind::Switch)), &Value::Map(Vec::new()))
+        );
+        assert_eq!(field("worker", "acp").kind, Kind::Map(Box::new(Kind::List)));
+        assert!(fields().iter().all(|f| f.table != "keys"), "a map of maps is not a row");
         let server = field("client", "server");
         assert_eq!((&server.kind, &server.default), (&Kind::Text, &Value::Str(String::new())));
         assert_eq!(field("worker", "allow").example.as_deref(), Some("100.64.0.0/10, fd00::/8"));
@@ -360,6 +390,9 @@ mod tests {
         let bad = field("colors.light", "cursor").check("\"#12\"").unwrap_err();
         assert!(bad.contains("#rrggbb") && !bad.contains('\n'), "{bad}");
         field("client", "server").check("\"studio:45560\"").unwrap();
+        field("clipboard", "workers").check_entry("my mac", "false").unwrap();
+        assert!(field("clipboard", "workers").check_entry("studio", "\"no\"").is_err());
+        field("worker", "acp").check_entry("mine", "[\"/opt/mine\", \"--acp\"]").unwrap();
         field("client", "editor").check("\"zed://ssh/{host}{path}\"").unwrap();
         assert!(field("client", "editor").check("\"zed://ssh/{host}\"").is_err());
         assert!(field("client", "server").check("\"studio:x\"").is_err());

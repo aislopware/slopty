@@ -115,7 +115,12 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (
         Section::Input,
         "Clipboard",
-        &["clipboard.sync", "terminal.copy_on_select", "terminal.paste_protection"],
+        &[
+            "clipboard.sync",
+            "clipboard.workers",
+            "terminal.copy_on_select",
+            "terminal.paste_protection",
+        ],
     ),
     (
         Section::Input,

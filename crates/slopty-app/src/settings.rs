@@ -67,20 +67,18 @@ pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> 
 }
 
 /// `text` (a `settings.toml`) with the clipboard shared with the machine called `name` or not,
-/// under `[clipboard.workers]`, every other line kept as it was.
+/// in `[clipboard] workers` however the file writes that map, every other line kept as it was.
 ///
 /// # Errors
 ///
-/// When `text` does not parse, or the edit does not read back as asked (the table written
-/// some other way by hand): editing it blind would bury the mistake.
+/// When `text` does not parse, or the edit does not read back as asked: editing it blind would
+/// bury the mistake.
 pub fn with_clipboard_shared(text: &str, name: &str, share: bool) -> Result<String, String> {
     if let Some(error) = Settings::parse(text).error {
         return Err(error.to_string());
     }
-    let bare =
-        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    let key = if bare { name.to_owned() } else { format!("{name:?}") };
-    let out = slopty_settings::edit::write(text, "clipboard.workers", &key, &share.to_string());
+    let out =
+        slopty_settings::edit::write_entry(text, "clipboard", "workers", name, &share.to_string());
     match Settings::parse(&out) {
         Loaded { error: None, settings, .. } if settings.clipboard.shared_with(name) == share => {
             Ok(out)
@@ -232,7 +230,7 @@ mod tests {
     use super::*;
 
     /// Stopping the clipboard for one machine keeps every other line, sets it again in place,
-    /// and leaves the rest shared; a name a bare key cannot hold is quoted.
+    /// and leaves the rest shared; a name a bare key cannot hold is quoted, and set in place.
     #[test]
     fn the_clipboard_is_kept_off_for_one_machine_by_name() {
         let text = "# mine\n[clipboard]\nsync = true\n";
@@ -245,6 +243,8 @@ mod tests {
         assert!(Settings::parse(&on).settings.clipboard.shared_with("studio"));
         let spaced = with_clipboard_shared(text, "Cong's Mac", false).expect("quoted");
         assert!(!Settings::parse(&spaced).settings.clipboard.shared_with("Cong's Mac"), "{spaced}");
+        let again = with_clipboard_shared(&spaced, "Cong's Mac", true).expect("set again");
+        assert_eq!(again.matches("Cong's Mac").count(), 1, "a quoted name in place too: {again}");
         assert!(with_clipboard_shared("[clipboard\n", "studio", false).is_err(), "broken file");
     }
 

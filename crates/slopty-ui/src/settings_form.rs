@@ -57,6 +57,9 @@ use crate::palette::PaletteItem;
 #[path = "settings_form_schema.rs"]
 pub mod schema;
 
+#[path = "settings_form_map.rs"]
+pub mod map;
+
 use schema::{KeyRow, Row, Section, System, rows};
 
 /// How much of a row's width its description may take: Zed's two thirds, so the words read as
@@ -219,6 +222,12 @@ pub struct SettingsForm {
     recording: Option<Recording>,
     scroll: ScrollHandle,
     font_scroll: ScrollHandle,
+    /// Each map entry's own parts, by row and name.
+    entries: map::Entries,
+    /// Map entries typed into since their value was last checked.
+    entry_typed: Vec<(usize, String)>,
+    /// The entry switch just turned and the turn's count: only it slides, and only once.
+    entry_moved: Option<((usize, String), usize)>,
     /// Whether the app opens at login, as the system said or as just turned; `None` until read,
     /// and with no [`LoginItem`] installed.
     login: Option<Login>,
@@ -256,6 +265,21 @@ impl SettingsForm {
             let placeholder = match row.field.kind {
                 Kind::Text | Kind::List => row.field.example.as_deref().unwrap_or_default(),
                 Kind::Colour => THEME_COLOUR,
+                Kind::Map(_) => {
+                    let state =
+                        cx.new(|cx| InputState::new(window, cx).placeholder(map::ADD_ENTRY));
+                    subscriptions.push(cx.subscribe_in(
+                        &state,
+                        window,
+                        move |this, _s, event, window, cx| {
+                            if matches!(event, InputEvent::PressEnter { .. }) {
+                                this.add_entry(ix, window, cx);
+                            }
+                        },
+                    ));
+                    fields.push(Some(state));
+                    continue;
+                }
                 Kind::Switch | Kind::Choice(_) | Kind::Number(_) | Kind::Font => {
                     fields.push(None);
                     continue;
@@ -280,7 +304,7 @@ impl SettingsForm {
         }));
         Self::read_login(cx);
         let handle = |cx: &mut Context<Self>| cx.focus_handle().tab_index(0).tab_stop(true);
-        Self {
+        let mut form = Self {
             theme,
             text: text.to_owned(),
             applied: text.to_owned(),
@@ -306,10 +330,15 @@ impl SettingsForm {
             recording: None,
             thumbs: std::cell::RefCell::default(),
             login: None,
+            entries: map::Entries::new(),
+            entry_typed: Vec::new(),
+            entry_moved: None,
             scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
-        }
+        };
+        form.sync_entries(window, cx);
+        form
     }
 
     /// Read how the login item stands, off the main thread, when the app installed its way to it.
@@ -352,13 +381,18 @@ impl SettingsForm {
         self.pending = None;
         self.typed.clear();
         self.errors.fill(None);
+        self.entry_typed.clear();
         for (row, field) in rows().iter().zip(&self.fields) {
-            let Some(field) = field else { continue };
+            let Some(field) = field.as_ref().filter(|_| !matches!(row.field.kind, Kind::Map(_)))
+            else {
+                continue;
+            };
             let value = field_text(text, row);
             if field.read(cx).value().as_ref() != value {
                 field.update(cx, |state, cx| state.set_value(value, window, cx));
             }
         }
+        self.sync_entries(window, cx);
         cx.notify();
     }
 
@@ -366,7 +400,11 @@ impl SettingsForm {
     /// it): show what it holds now, unless the person's own change is on its way to it, which
     /// lands next and wins. `true` when the form took the file's text.
     pub fn follow_file(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.pending.is_some() || self.text != self.applied || !self.typed.is_empty() {
+        if self.pending.is_some()
+            || self.text != self.applied
+            || !self.typed.is_empty()
+            || !self.entry_typed.is_empty()
+        {
             return false;
         }
         self.set_text(text, window, cx);
@@ -473,7 +511,7 @@ impl SettingsForm {
         let spelled = |value: Value| match value {
             Value::Str(value) => Some(value),
             Value::Bool(on) => Some(on.to_string()),
-            Value::Number(_) | Value::List(_) | Value::Other(_) => None,
+            Value::Number(_) | Value::List(_) | Value::Map(_) | Value::Other(_) => None,
         };
         let find =
             |value: Option<String>| options.iter().find(|c| Some(&c.value) == value.as_ref());
@@ -556,6 +594,7 @@ impl SettingsForm {
             };
             self.write(ix, &literal);
         }
+        self.check_typed_entries(cx);
     }
 
     fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1479,6 +1518,7 @@ impl SettingsForm {
                     .child(div().flex_none().child(self.control(ix, row, cx))),
             )
             .child(under)
+            .children(self.map_entries(ix, row, cx))
             .into_any_element()
     }
 
@@ -1490,7 +1530,8 @@ impl SettingsForm {
             }
             Kind::Number(_) => self.stepper(ix, row, cx),
             Kind::Font => self.font(ix, row, self.family(row), cx),
-            Kind::Text | Kind::List | Kind::Colour => self.field(ix, row, cx),
+            // A map's control is the field a new entry's name is typed in.
+            Kind::Text | Kind::List | Kind::Colour | Kind::Map(_) => self.field(ix, row, cx),
         }
     }
 
@@ -1513,37 +1554,63 @@ impl SettingsForm {
     /// A switch: the neutral solid with its knob at its end when on, a quiet track when off. The
     /// knob slides when it is turned, unless motion is reduced.
     fn switch(&self, ix: usize, row: &Row, on: bool, cx: &Context<Self>) -> AnyElement {
+        let turned = self.moved.and_then(|(moved, turn)| (moved == ix).then_some(turn));
+        let el = self
+            .switch_el(
+                format!("settings-switch-{ix}"),
+                format!("settings-knob-{ix}"),
+                on,
+                turned,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(ix, cx)));
+        self.stop(ix, row, el, cx).into_any_element()
+    }
+
+    /// A switch's track and knob, named `selector`, its knob `knob`; `turned` (the
+    /// turn's count) when it was just turned, so the knob slides once.
+    fn switch_el(
+        &self,
+        selector: String,
+        knob: String,
+        on: bool,
+        turned: Option<usize>,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
-        let (height, knob) = (spacing.lg, 2.0_f32.mul_add(-spacing.xxs, spacing.lg));
+        let (height, knob_size) = (spacing.lg, 2.0_f32.mul_add(-spacing.xxs, spacing.lg));
         let width = spacing.xl + spacing.xs;
-        let travel = 2.0_f32.mul_add(-spacing.xxs, width - knob);
+        let travel = 2.0_f32.mul_add(-spacing.xxs, width - knob_size);
         let (track, ink) = if on {
             (hsla(s.solid), hsla(s.solid_ink))
         } else {
             (hsla(s.selected), hsla(s.text_secondary))
         };
         let to = if on { travel } else { 0.0 };
+        let slide_id = SharedString::from(knob.clone());
         let dot = div()
-            .debug_selector(move || format!("settings-knob-{ix}"))
+            .debug_selector(move || knob)
             .flex_none()
-            .size(px(knob))
+            .size(px(knob_size))
             .rounded_full()
             .bg(ink);
-        let dot = match self.moved {
-            Some((moved, turn)) if moved == ix && crate::kit::motion(cx) => {
+        let dot = match turned {
+            Some(turn) if crate::kit::motion(cx) => {
                 let from = travel - to;
                 let slide = crate::kit::Pace::Settle.animation();
-                dot.with_animation(("settings-knob", turn), slide, move |el, t| {
+                let turn = u64::try_from(turn).unwrap_or_default();
+                let named = gpui::ElementId::NamedInteger(slide_id, turn);
+                dot.with_animation(named, slide, move |el, t| {
                     el.ml(px((to - from).mul_add(t, from)))
                 })
                 .into_any_element()
             }
             _ => dot.ml(px(to)).into_any_element(),
         };
-        let el = div()
-            .id(("settings-switch", ix))
-            .debug_selector(move || format!("settings-switch-{ix}"))
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
             .role(gpui::accesskit::Role::Switch)
             .aria_toggled(if on {
                 gpui::accesskit::Toggled::True
@@ -1559,9 +1626,7 @@ impl SettingsForm {
             .rounded_full()
             .bg(track)
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(ix, cx)))
-            .child(dot);
-        self.stop(ix, row, el, cx).into_any_element()
+            .child(dot)
     }
 
     /// A segmented choice: the options side by side in a track, the chosen one on a raised
@@ -1997,7 +2062,7 @@ fn field_text(text: &str, row: &Row) -> String {
         Some(Value::List(items)) => items.join(", "),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::Bool(on)) => on.to_string(),
-        None => String::new(),
+        Some(Value::Map(_)) | None => String::new(),
     }
 }
 
@@ -2243,5 +2308,93 @@ mod tests {
             form.read_with(cx, |f, _| f.error(ix).map(str::to_owned)).as_deref(),
             Some("Operation not permitted")
         );
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use gpui::{TestAppContext, VisualTestContext, size};
+
+    use super::*;
+
+    fn leak(text: String) -> &'static str {
+        Box::leak(text.into_boxed_str())
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}"));
+        cx.simulate_click(at.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// A map's entries are lines under its row, read from the file: a switch turns its entry,
+    /// a name typed in the row's field and ↩ adds one, off, and × takes one out, the last one
+    /// out its table with it. The rest of the file, its comment included, stays as written.
+    #[gpui::test]
+    fn a_maps_entries_are_lines_to_set_add_and_take_out(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let file = "# Mine.\n[clipboard]\nsync = true\n\n[clipboard.workers]\nlaptop = false\n";
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new(file, Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let ix = rows()
+            .iter()
+            .position(|r| r.table() == "clipboard" && r.key() == "workers")
+            .expect("the map's row");
+        click(cx, leak(format!("settings-section-{}", Section::Input.index())));
+        let entry = |name: &str| leak(format!("settings-entry-{ix}-{name}"));
+        assert!(cx.debug_bounds(entry("laptop")).is_some(), "the file's entry, a line");
+        let row = cx.debug_bounds(leak(format!("settings-row-{ix}"))).expect("its row");
+        let line = cx.debug_bounds(entry("laptop")).expect("its line");
+        assert!(row.contains(&line.center()), "under the row's words: {row:?} {line:?}");
+
+        click(cx, leak(format!("settings-entry-{ix}-laptop-switch")));
+        let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
+        assert_eq!(text(cx), file.replace("laptop = false", "laptop = true"), "turned");
+
+        click(cx, leak(format!("settings-field-{ix}")));
+        cx.simulate_input("my mac");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(text(cx).ends_with("laptop = true\n\"my mac\" = false\n"), "{}", text(cx));
+        assert!(cx.debug_bounds(entry("my mac")).is_some(), "added, a line");
+        let focused = form.read_with(cx, |f, _| {
+            f.entries.get(&(ix, "my mac".to_owned())).map(|p| p.handle().clone())
+        });
+        let focused = focused.expect("its parts");
+        assert!(cx.update(|window, _| focused.is_focused(window)), "the keyboard went to it");
+
+        click(cx, leak(format!("settings-entry-{ix}-laptop-remove")));
+        click(cx, leak(format!("settings-entry-{ix}-my mac-remove")));
+        assert_eq!(text(cx), "# Mine.\n[clipboard]\nsync = true\n", "no empty table left");
+        assert!(cx.debug_bounds(entry("laptop")).is_none(), "and no lines");
+    }
+
+    /// A map of command lines takes each entry's line as a field, written once the hand
+    /// pauses, as a row's field is.
+    #[gpui::test]
+    fn a_command_line_entry_is_written_once_typed(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let file = "[worker.acp]\nmine = []\n";
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new(file, Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let ix = rows()
+            .iter()
+            .position(|r| r.table() == "worker" && r.key() == "acp")
+            .expect("the map's row");
+        click(cx, leak(format!("settings-section-{}", Section::Network.index())));
+        let field = form.read_with(cx, |f, _| {
+            f.entries.get(&(ix, "mine".to_owned())).and_then(|p| p.field().cloned())
+        });
+        let field = field.expect("a field for the command line");
+        cx.update(|window, cx| field.update(cx, |state, cx| state.focus(window, cx)));
+        cx.simulate_input("/opt/mine, --acp");
+        cx.executor().advance_clock(SETTLE);
+        cx.run_until_parked();
+        let text = form.read_with(cx, |f, _| f.text().to_owned());
+        assert_eq!(text, "[worker.acp]\nmine = [\"/opt/mine\", \"--acp\"]\n");
     }
 }

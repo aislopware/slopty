@@ -1,7 +1,8 @@
 //! The settings form in the real app: ⌘, opens it on its sections, and a change made in it lands
 //! in `settings.toml` and applies at once, with no Save and the dialog still open, the rest of
 //! the file as it was. The terminal's page is held as a golden. The Keyboard page lists what
-//! the running app binds, its own ⌘, among the workspace's keys.
+//! the running app binds, its own ⌘, among the workspace's keys. The Input page shows a map's
+//! entries, the clipboard's machines by name.
 
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
@@ -25,7 +26,10 @@ async fn the_settings_form_edits_the_file() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let settings = dir.join("app").join("settings.toml");
-    let before = std::fs::read_to_string(&settings).unwrap();
+    // Two machines by name, so the Input page shows a map's entries.
+    let mut before = std::fs::read_to_string(&settings).unwrap();
+    before.push_str("\n[clipboard.workers]\nlaptop = false\nstudio = true\n");
+    std::fs::write(&settings, &before).unwrap();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
@@ -80,12 +84,33 @@ async fn the_settings_form_edits_the_file() {
         .unwrap();
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "settings-about").await;
+    // A map's entries are lines under its row: a machine's name and its switch.
+    press(drv, &keys, "Tab", "Input").await;
+    let input = drv
+        .wait_for("the input page", STEP, |d| d.a11y_node("ListItem", Some("laptop")).is_some())
+        .await
+        .unwrap();
+    assert!(input.a11y_node("Switch", Some("studio")).is_some(), "{:#?}", input.a11y);
+    // Scrolled until the map's lines are in the page, under the dialog's title and over its foot.
+    let mut lines = input;
+    for _ in 0..20 {
+        let [_, y, _, h] = lines.a11y_node("ListItem", Some("studio")).expect("studio").bounds;
+        let [_, top, _, _] = lines.a11y_node("ListItem", Some("laptop")).expect("laptop").bounds;
+        if top > 200.0 && y + h < 500.0 {
+            break;
+        }
+        drv.ok(&Command::Scroll { x: 520.0, y: 350.0, dx: 0.0, dy: -2.0 }).await.unwrap();
+        lines = drv.dump().await.unwrap();
+    }
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "settings-input").await;
     press(drv, &keys, "Tab", "Terminal").await;
-    drv.wait_for("back on the terminal's page", STEP, |d| {
-        d.a11y_node("Switch", Some("Ligatures")).is_some()
-    })
-    .await
-    .unwrap();
+    let dump = drv
+        .wait_for("back on the terminal's page", STEP, |d| {
+            d.a11y_node("Switch", Some("Ligatures")).is_some()
+        })
+        .await
+        .unwrap();
 
     // A switch writes the file as it turns, and the dialog stays open.
     let file = || std::fs::read_to_string(&settings).unwrap_or_default();

@@ -377,3 +377,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     with the sidebar), `settings_editor::tests::every_description_fits_two_lines_at_the_narrowest_sheet`.
     Goldens: `settings`, `settings-dark`, `settings-form`, `settings-keyboard`,
     `settings-about`.
+- ✅ **A map setting is edited entry by entry, in the form the file already gives it**
+  (2026-10-06, readiness G20). Two keys are maps by name: `clipboard.workers` (a machine's
+  own clipboard setting) and `worker.acp` (ACP agents beyond the known ones). The form had
+  no row for them, and the clipboard's per-machine toggle quoted its key by hand.
+  - **The form.** The schema reads a map from its JSON Schema (`"object"` with
+    `additionalProperties`) as `Kind::Map(inner)`, for a switch, text, list or number inner
+    kind. The row's control is an "Add by name" field (↩ adds the entry and focuses it).
+    Under it, each entry is one kit row: the name, the inner control (a switch, or a field
+    that writes once typed, as every text row does), and the kit's remove button. Nothing in
+    it is hand-styled: every value comes from the kit and the theme tokens.
+  - **The file.** `slopty_settings::edit::write_entry` and `remove_entry` change one entry
+    and touch nothing else. The map can be written under its own header
+    (`[clipboard.workers]`), as dotted keys under its parent, or inline (`{ … }`). An entry
+    is set in place where it already exists. A new entry goes beside the last one, in the
+    same form. When the map has no entries yet, it gets its own header. Inline tables are
+    split by hand, so their order survives: `toml::Table` sorts its keys. A name that is not
+    a bare key is quoted by `key_text`, the single place a key is ever quoted. The last
+    entry out takes its header (and the blank line before it) or its inline key, so no
+    empty table is left behind. `settings::with_clipboard_shared` in the app now calls
+    `write_entry`.
+  - Tests: `edit::tests::a_maps_entries_read_in_every_form`,
+    `edit::tests::an_entry_is_written_where_the_map_is`,
+    `edit::tests::the_last_entry_out_takes_its_table` (comments and the order of other keys
+    kept), `settings_form::map_tests::a_maps_entries_are_lines_to_set_add_and_take_out`,
+    `settings_form::map_tests::a_command_line_entry_is_written_once_typed`, and
+    `settings::tests::the_clipboard_is_kept_off_for_one_machine_by_name` (a quoted name set
+    twice stays one line). Golden: `settings-input`. `clipboard.workers` sits under "Share
+    the clipboard" in the Input page's Clipboard group. `worker.acp` goes on its table's
+    home page, as any key the layout does not name does.

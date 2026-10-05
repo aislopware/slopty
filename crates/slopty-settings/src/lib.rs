@@ -521,8 +521,9 @@ pub struct ClipboardSettings {
     /// crosses either way; a terminal's own copy and paste still work.
     #[schemars(title = "Share the clipboard")]
     pub sync: bool,
-    /// Machines by name, each shared with or not whatever `sync` says: a Mac others use can
-    /// be kept out of it.
+    /// Each machine named here keeps its own setting.
+    ///
+    /// A Mac others use can be kept out of it.
     #[schemars(title = "By machine")]
     pub workers: BTreeMap<String, bool>,
 }
@@ -656,7 +657,7 @@ pub struct WorkerSettings {
     #[serde(with = "server_address")]
     #[schemars(title = "Register with", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
-    /// Agents that speak ACP, beside the ones Slopty knows; an empty command line hides one.
+    /// ACP agents beside the ones Slopty knows; an empty command hides one.
     ///
     /// A name and the command line that serves the Agent Client Protocol on stdio
     /// (`mine = ["/opt/mine/bin/agent", "--acp"]`). A name Slopty already knows (`gemini`,
