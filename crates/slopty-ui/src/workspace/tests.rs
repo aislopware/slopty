@@ -21,7 +21,8 @@ use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::{
-    Frame, OpenSession, SessionState, SessionSummary, TermEvent, TermRequest,
+    BlockEnd, BlockMark, Blocks, Frame, OpenSession, SessionState, SessionSummary, TermEvent,
+    TermRequest,
 };
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -285,7 +286,7 @@ fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> Ter
         total_lines: rows.len() as u64,
         input_ack: 0,
         above: None,
-        blocks: None,
+        blocks: Some(blocks_of(rows, cursor_row)),
         images: Vec::new(),
         updates: rows
             .iter()
@@ -297,6 +298,30 @@ fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> Ter
             })
             .collect(),
     })
+}
+
+/// The worker's command blocks as `rows` and the cursor tell them, listed whole: a prompt's
+/// block started once the cursor left its rows or a newer prompt followed, and ended with that
+/// prompt's status once one did.
+fn blocks_of(rows: &[(&str, SemanticMark)], cursor_row: u16) -> Blocks {
+    let prompts: Vec<usize> = (0..rows.len()).filter(|&r| rows[r].1.starts_prompt()).collect();
+    let mut marks = Vec::new();
+    for (n, &prompt) in prompts.iter().enumerate() {
+        let last_typed = (prompt..rows.len())
+            .skip(1)
+            .take_while(|&r| {
+                matches!(rows[r].1, SemanticMark::Input | SemanticMark::PromptContinuation { .. })
+            })
+            .last()
+            .unwrap_or(prompt);
+        let end = prompts
+            .get(n.saturating_add(1))
+            .map(|&next| BlockEnd { exit: rows[next].1.exit(), took_ms: None });
+        if end.is_some() || usize::from(cursor_row) > last_typed {
+            marks.push(BlockMark { prompt: LineIndex(u64::try_from(prompt).unwrap()), end });
+        }
+    }
+    Blocks { whole: true, marks }
 }
 
 /// `debug_bounds` wants a static selector; tests may leak a handful.

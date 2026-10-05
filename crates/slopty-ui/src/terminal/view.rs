@@ -2633,15 +2633,20 @@ impl TerminalView {
                     tracing::info!(session = %self.session, %command, "command started");
                     self.command_started = Some(Instant::now());
                 }
-                Effect::CommandFinished { prompt, command, exit } => {
+                Effect::CommandFinished { prompt, command, exit, took } => {
                     let started = self.command_started.take();
-                    let elapsed = started.map_or(Duration::ZERO, |t| crate::clock::since(t, cx));
+                    // The worker's time from the marks, which a command too quick to be seen
+                    // running between two frames has too; this view's own only for a block the
+                    // worker did not see start.
+                    let elapsed = took.unwrap_or_else(|| {
+                        started.map_or(Duration::ZERO, |t| crate::clock::since(t, cx))
+                    });
                     tracing::info!(
                         session = %self.session,
                         %command,
                         ?exit,
                         ?elapsed,
-                        timed = started.is_some(),
+                        timed = took.is_some() || started.is_some(),
                         "command finished"
                     );
                     if let Some(prompt) = prompt {
@@ -5522,7 +5527,14 @@ mod tests {
                 total_lines: 3,
                 input_ack: 0,
                 above: None,
-                blocks: None,
+                // Running once the cursor left the prompt row, as the worker tells it.
+                blocks: (cursor_row > 0).then(|| slopty_proto::terminal::Blocks {
+                    whole: false,
+                    marks: vec![slopty_proto::terminal::BlockMark {
+                        prompt: LineIndex(0),
+                        end: None,
+                    }],
+                }),
                 images: Vec::new(),
                 updates: rows
                     .iter()
@@ -6115,8 +6127,10 @@ mod tests {
         // The marks: `ls` at line 0, `false` (failed) at 3, `seq 2` at 4, over 6 lines of
         // history and the 3-row screen.
         view.update_in(cx, |view, window, cx| {
-            let mark =
-                |line, exit| slopty_proto::terminal::BlockMark { prompt: LineIndex(line), exit };
+            let mark = |line, exit| slopty_proto::terminal::BlockMark {
+                prompt: LineIndex(line),
+                end: Some(slopty_proto::terminal::BlockEnd { exit, took_ms: None }),
+            };
             let marks = vec![mark(0, Some(0)), mark(3, Some(1)), mark(4, Some(0))];
             let blocks = Some(slopty_proto::terminal::Blocks { whole: true, marks });
             let frame = Frame {
@@ -7783,8 +7797,8 @@ mod tests {
             })
             .detach();
         });
-        // A prompt whose command is running: the block head is `cargo build`, the cursor sits
-        // in its output, so `command_running` holds.
+        // A prompt whose command is running: the block head is `cargo build`, and the worker
+        // says its block started, so `command_running` holds.
         view.update_in(cx, |view, _window, cx| {
             view.apply(
                 TermEvent::Frame(Frame {
@@ -7800,7 +7814,13 @@ mod tests {
                     total_lines: 3,
                     input_ack: 0,
                     above: None,
-                    blocks: None,
+                    blocks: Some(slopty_proto::terminal::Blocks {
+                        whole: false,
+                        marks: vec![slopty_proto::terminal::BlockMark {
+                            prompt: LineIndex(0),
+                            end: None,
+                        }],
+                    }),
                     images: Vec::new(),
                     updates: vec![
                         RowUpdate {

@@ -764,10 +764,10 @@ impl GhosttyEngine {
         self.block_news.clear();
         self.screen_runs.clear();
         self.runs_above.clear();
-        if let Some(output) = open {
+        if let Some(open) = open {
             let history = self.term.scrollback_rows().map_or(0, |n| n as u64);
             let y = self.term.cursor_y().map_or(0, u64::from);
-            self.reopen_command(history.saturating_add(y), output);
+            self.reopen_command(history.saturating_add(y), open);
         }
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }

@@ -589,14 +589,27 @@ pub struct PixelRect {
 /// hundred points tall shows no more distinct marks, and each is a few bytes on the wire.
 pub const MAX_BLOCKS: usize = 4096;
 
-/// A command block as the shell integration marked it (`OSC 133`): a prompt where a command
-/// was typed and its output started. What the scrollbar marks.
+/// A command block as the shell integration marked it (`OSC 133`).
+///
+/// A prompt where a command was typed and its output started: what the scrollbar marks, and
+/// how a client hears a command run and end however quickly it ran.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BlockMark {
     /// The absolute line its prompt starts on.
     pub prompt: LineIndex,
-    /// The status its `133;D` carried; `None` while it runs, or when the shell gave none.
+    /// Its end (`133;D`); `None` while it runs.
+    pub end: Option<BlockEnd>,
+}
+
+/// How a command block ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BlockEnd {
+    /// The status its `133;D` carried, when the shell gave one.
     pub exit: Option<u8>,
+    /// Milliseconds from its output's start (`133;C`) to its end, as the worker read the two
+    /// marks from the program; `None` when the worker did not see it start (a block brought
+    /// back from a checkpoint).
+    pub took_ms: Option<u64>,
 }
 
 /// The command blocks a frame carries ([`Frame::blocks`]). A client forgets a block whose

@@ -408,8 +408,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   moment its row is no longer a prompt row in ghostty's eyes (the frame walk sees every dirty
   row, so an erase is noticed on the next frame; a row scrolled into history is untouched);
   (5) the client treats any change of the newest prompt's index as a new prompt, not only an
-  increase. Tests: `a_screen_erased_in_place_drops_the_marks_of_its_rows` (engine bytes) and
-  the ⌃L frames in `a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts`.
+  increase (gone 2026-10-05 with the prompt tracking itself). Test:
+  `a_screen_erased_in_place_drops_the_marks_of_its_rows` (engine bytes).
 
 - ✅ **A slow command's row says how long it took** (2026-09-14). Warp writes a block's
   duration in its header; here the badge for a command that ended unwatched carried the
@@ -423,7 +423,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `alpha::TINT`, flush with the grid's right edge, and left out when the command's
   text comes within a cell of it (the text wins); the row keeps it through history; (3) rows are numbered
   per epoch, so a new epoch (a reflow, a reset, the alt screen) empties the map; the host
-  is not asked (the marks carry no time); (4) the sticky block header carries the same
+  is not asked (the marks carry no time; superseded 2026-10-05: the worker times each block);
+  (4) the sticky block header carries the same
   caption at its right end (`block-header-took`), so a long output scrolled past its prompt
   still says how long its command took. Tests: kit `a_duration_reads_one_way`,
   headless `a_slow_commands_row_says_how_long_it_took` (the element's captions read back
@@ -462,9 +463,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   badge, and a press activates the item, which is also what clears it (`activate`), so the
   human's look is the acknowledgement; (6) no system notification and no `needs-you` count:
   those mean an agent is waiting on the human, and a finished command is waiting on nobody.
-  Tests: `a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts`
-  (`slopty-client`, the state machine: typed-not-entered, entered, still running, the next
-  prompt with its status, a new epoch), `a_long_command_that_ends_unwatched_badges_its_item`
+  (Rulings 1 to 3 superseded 2026-10-05: the client follows the worker's block news, and the
+  time is the worker's; see "A command's end and time ride on its block".) Tests: the
+  client's command tests (now `a_command_runs_and_finishes_as_its_block_says`), `a_long_command_that_ends_unwatched_badges_its_item`
   (headless canvas: the active item badges nothing, the other item's badge reads "done
   0.0 s" as a Button, a press activates and clears), `a_finished_badge_says_the_status_and_the_time`,
   and the app self-test's first scenario (`sleep 6` in the first shell, ⌘N to a second: the
@@ -3586,3 +3587,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: worker `a_silent_driver_hands_the_seat_to_the_viewer_that_types` (an answering
     driver keeps it, a silent one loses it within `DRIVER_SILENCE` + 1 s, at the typist's
     size), `a_closed_sink_keeps_the_drivers_seat_until_its_connection_detaches_it`.
+
+- ✅ **A command's end and time ride on its block** (2026-10-05). The client guessed a command's
+  life from the rows: running once the cursor left the prompt, finished when a newer prompt
+  appeared. A command that started and ended between two frames (`ls`, `git status`, most of
+  them) was never seen running, so it finished unheard: no caption, no badge, no end for
+  anything that waits on one. The time was the client's own, from the frame that showed it
+  running to the frame that showed the next prompt, so it carried the network and the frame
+  pacing as well. The worker reads every `133;C` and `133;D` as the program writes them.
+  - **The wire.** `BlockMark` carries `end: Option<BlockEnd>`, and `BlockEnd` the status and
+    `took_ms`: milliseconds from the `C` to the `D` as the engine read them. A block brought
+    back from a checkpoint has no time (`None`); one carried across a renumbering keeps its
+    start.
+  - **The client follows the news.** Block news that a block started is `CommandStarted`;
+    news that one ended is `CommandFinished` with its status and time, also when it was never
+    seen running. A list taken whole (a reflow, a joiner) speaks only of its newest block: it
+    re-keys the running command when that block names the same command, finishes it when it
+    ended, and says nothing of blocks long ended. A block starting while another runs whose end
+    never came finishes that one with no status (and, in a list taken whole, no row: the old
+    number names nothing in the new numbering). The prompt tracking (`track_command`, the
+    newest prompt) is deleted.
+  - **The view** takes the worker's time; its own clock only times a block the worker did not
+    see start.
+  - Cost: two `Instant` reads per command and a few bytes more per ended block on the wire (3
+    for one under 128 ms, 5 under 35 minutes). The client no longer reads the prompt's rows on
+    every frame.
+  - Tests: engine `a_block_ends_with_how_long_it_took_however_quick`, client
+    `a_command_between_two_frames_still_finishes_with_its_time`,
+    `a_command_runs_and_finishes_as_its_block_says`,
+    `a_running_command_survives_a_reflow_and_finishes_after_one`, worker
+    `command_blocks_reach_every_viewer` (the end and its time through a real session), golden
+    `worker_frame_blocks`.

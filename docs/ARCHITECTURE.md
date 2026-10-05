@@ -1483,10 +1483,11 @@ rows have all scrolled above, a one-row header over the grid (`block-header`, ro
 `TerminalView::block_header`, reading `TermState::block_head` — the prompt's rows alone, never
 the output) names the command in the mono face on the panel colour, ruled
 under with the block's separator colour; a click on it puts the prompt back at the top.
-`TermState` also follows the blocks frame by frame (`track_command`, the prompt's rows
-alone): a command is running once the cursor has left the rows it was typed on
-(`Effect::CommandStarted`) and finished when a newer prompt starts, whose `exit` is its
-status (`Effect::CommandFinished`); the view times the two and emits
+`TermState` also follows the worker's block news (`follow_command`): a block whose output
+started is the running command (`Effect::CommandStarted`), and one that ended finishes it with
+the status and the time the worker read between its `133;C` and `133;D`
+(`Effect::CommandFinished`), even when it ran and ended between two frames; the view takes
+that time (its own clock only for a block the worker did not see start) and emits
 `TerminalViewEvent::CommandFinished { command, exit, elapsed }`, and the workspace badges the
 tile's header ("done 12.3 s", "failed (1) 1 m 04 s" — `took_label`'s clock — in the success or warn tone,
 `finished-<uuid>`, role Button) when the command ran at least `SLOW_COMMAND` (5 s) and its

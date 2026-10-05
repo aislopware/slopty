@@ -2,15 +2,16 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use slopty_grid::{
     CellWidth, Cursor, Line, LineFlags, LineIndex, RowUpdate, Screen, Scrollback, SemanticMark,
     TermModes,
 };
 use slopty_proto::terminal::{
-    Blocks, ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_ABOVE, MAX_BLOCKS,
-    MAX_FETCH_LINES, Placement, PointerShape, Progress, Restored, SearchMatch, TermEvent,
-    TermRequest, TermSize,
+    BlockMark, Blocks, ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_ABOVE,
+    MAX_BLOCKS, MAX_FETCH_LINES, Placement, PointerShape, Progress, Restored, SearchMatch,
+    TermEvent, TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
@@ -104,17 +105,19 @@ pub enum Effect {
         /// Why.
         message: String,
     },
-    /// A shell command left its prompt: it is running (shell integration marks only).
+    /// A shell command's output started (its block's `133;C`): it is running.
     CommandStarted(String),
-    /// The shell printed its next prompt: the running command finished.
+    /// The running command finished (its block's `133;D`).
     CommandFinished {
-        /// The row the command was typed at (its block's prompt); `None` when the numbering
-        /// changed while it ran and its prompt is not among the rows held here.
+        /// The row the command was typed at (its block's prompt); `None` when its prompt is not
+        /// among the rows held here.
         prompt: Option<LineIndex>,
         /// What was typed.
         command: String,
         /// Its exit status, when the shell said.
         exit: Option<u8>,
+        /// How long it ran, as the worker read its marks; `None` when it did not see it start.
+        took: Option<Duration>,
     },
 }
 
@@ -149,9 +152,8 @@ pub struct TermState {
     driving: bool,
     resync_pending: bool,
     frames: u64,
-    /// The newest prompt start seen this epoch; a newer one ends the running command.
-    latest_prompt: Option<LineIndex>,
-    /// The command running since the cursor left its prompt, with the prompt it was typed at.
+    /// The command running since the worker said its block's output started, with the prompt
+    /// it was typed at.
     running: Option<(LineIndex, String)>,
     /// Images the worker sent, by id, for the placements of the frames.
     images: BTreeMap<u32, TermImage>,
@@ -207,7 +209,6 @@ struct Fetch {
 struct Parked {
     epoch: u32,
     scrollback: Scrollback,
-    latest_prompt: Option<LineIndex>,
 }
 
 /// The pixels of one image the worker sent (kitty graphics).
@@ -277,7 +278,6 @@ impl TermState {
             driving: false,
             resync_pending: false,
             frames: 0,
-            latest_prompt: None,
             running: None,
             images: BTreeMap::new(),
             image_bytes: 0,
@@ -689,11 +689,10 @@ impl TermState {
             self.blocks.clear();
         }
         if let Some(blocks) = frame.blocks {
-            self.list_blocks(blocks);
+            self.list_blocks(blocks, &mut effects);
         }
         self.placements = frame.images;
         self.input_ack = frame.input_ack;
-        self.track_command(&mut effects);
         // Scrolled up, the lines on screen hold still as output arrives below them: the offset
         // counts from the bottom, so it grows by what arrived. In another numbering the old top
         // names nothing, and the offset is only kept within the history.
@@ -721,12 +720,22 @@ impl TermState {
         self.above = above;
     }
 
-    /// The worker's command blocks: every one, or the news of some.
-    fn list_blocks(&mut self, blocks: Blocks) {
+    /// The worker's command blocks: every one, or the news of some. News of a block that
+    /// started or ended tells its command running or finished, however quickly it ran between
+    /// two frames; a whole list says only whether the newest block still runs.
+    fn list_blocks(&mut self, blocks: Blocks, effects: &mut Vec<Effect>) {
         if blocks.whole {
             self.blocks.clear();
+            if let Some(&newest) = blocks.marks.last() {
+                self.follow_command(newest, false, effects);
+            }
+        } else {
+            for &mark in &blocks.marks {
+                self.follow_command(mark, true, effects);
+            }
         }
-        self.blocks.extend(blocks.marks.into_iter().map(|m| (m.prompt, m.exit)));
+        self.blocks
+            .extend(blocks.marks.into_iter().map(|m| (m.prompt, m.end.and_then(|e| e.exit))));
         while self.blocks.len() > MAX_BLOCKS {
             self.blocks.pop_first();
         }
@@ -761,13 +770,11 @@ impl TermState {
         let parked = self.parked.take();
         let to_alt = frame.modes.contains(TermModes::ALT_SCREEN)
             && !self.screen.modes().contains(TermModes::ALT_SCREEN);
-        let latest_prompt = self.latest_prompt.take();
         let mut taken_back = false;
         if to_alt {
-            self.parked = self.epoch.map(|epoch| Parked { epoch, scrollback: held, latest_prompt });
+            self.parked = self.epoch.map(|epoch| Parked { epoch, scrollback: held });
         } else if let Some(back) = parked.filter(|p| p.epoch == frame.epoch) {
             self.scrollback = back.scrollback;
-            self.latest_prompt = back.latest_prompt;
             taken_back = true;
         }
         self.epoch = Some(frame.epoch);
@@ -792,63 +799,55 @@ impl TermState {
         }
     }
 
-    /// Follow the shell's command blocks from the marks: a command is running once the cursor
-    /// has left the rows it was typed on, and finished when a newer prompt starts (whose `exit`
-    /// is its status). Reads the prompt's rows only, so it runs on every frame.
-    fn track_command(&mut self, effects: &mut Vec<Effect>) {
-        let Some(prompt) = self.newest_prompt() else { return };
-        match self.latest_prompt {
-            // The first prompt of an epoch (a reflow, a reset, the alt screen coming or going)
-            // says nothing about what ran before it — unless a command was running: its
-            // block is either still the newest (running on, under new numbers) or not (it
-            // finished, and the newest prompt carries its status).
+    /// Follow the command a block mark tells of. A block that started is the running command,
+    /// under its prompt's number now (a reflow renumbers it, and the list taken whole names the
+    /// same command); one that ended finishes it, or, told as `news`, a command that started
+    /// and ended between two frames. A newer block starting while one runs (its end never
+    /// came) finishes that one without a status.
+    fn follow_command(&mut self, mark: BlockMark, news: bool, effects: &mut Vec<Effect>) {
+        match mark.end {
             None => {
-                self.latest_prompt = Some(prompt);
-                if let Some((_, command)) = &self.running {
-                    let head = self.block_head(prompt);
-                    if head.as_ref().and_then(|h| h.command.as_ref()) == Some(command) {
-                        self.running = Some((prompt, command.clone()));
-                    } else if let Some((_, command)) = self.running.take() {
-                        let typed_at = self.prompt_before(prompt).filter(|&p| {
-                            self.block_head(p).and_then(|h| h.command) == Some(command.clone())
-                        });
-                        let exit = self.line(prompt).and_then(|l| l.mark.exit());
-                        effects.push(Effect::CommandFinished { prompt: typed_at, command, exit });
+                let typed = self.command_at(mark.prompt);
+                if let Some((prompt, command)) = self.running.as_mut()
+                    && if news {
+                        *prompt == mark.prompt
+                    } else {
+                        typed.is_empty() || typed == *command
                     }
+                {
+                    *prompt = mark.prompt;
+                    return;
                 }
-            }
-            // Newer, or the screen was erased in place (⌃L at a prompt keeps the numbering
-            // and redraws the prompt higher up): either way a prompt the shell just drew.
-            Some(seen) if prompt != seen => {
-                self.latest_prompt = Some(prompt);
-                if let Some((typed_at, command)) = self.running.take() {
-                    let exit = self.line(prompt).and_then(|l| l.mark.exit());
-                    effects.push(Effect::CommandFinished { prompt: Some(typed_at), command, exit });
+                if let Some((prompt, command)) = self.running.take() {
+                    // A list taken whole is in another numbering, where its old row names
+                    // nothing.
+                    let prompt = Some(prompt).filter(|&p| news && self.line(p).is_some());
+                    effects.push(Effect::CommandFinished {
+                        prompt,
+                        command,
+                        exit: None,
+                        took: None,
+                    });
                 }
+                self.running = Some((mark.prompt, typed.clone()));
+                effects.push(Effect::CommandStarted(typed));
             }
-            Some(_) => {}
-        }
-        if self.running.is_some() {
-            return;
-        }
-        // Idle at a prompt, the cursor is still on its rows: settled from the marks alone,
-        // without reading the command's text.
-        let cursor = self.first_visible.offset(u64::from(self.screen.cursor().row));
-        if cursor.0 >= self.block_body(prompt).0
-            && let Some(head) = self.block_head(prompt)
-            && let Some(command) = head.command
-        {
-            self.running = Some((prompt, command.clone()));
-            effects.push(Effect::CommandStarted(command));
+            Some(end) => {
+                let command = match self.running.take() {
+                    Some((_, command)) => command,
+                    None if news => self.command_at(mark.prompt),
+                    None => return,
+                };
+                let prompt = self.line(mark.prompt).is_some().then_some(mark.prompt);
+                let took = end.took_ms.map(Duration::from_millis);
+                effects.push(Effect::CommandFinished { prompt, command, exit: end.exit, took });
+            }
         }
     }
 
-    /// The newest prompt start on the screen.
-    fn newest_prompt(&self) -> Option<LineIndex> {
-        (0..self.screen.rows())
-            .rev()
-            .map(|r| self.first_visible.offset(u64::from(r)))
-            .find(|&index| self.line(index).is_some_and(|l| l.mark.starts_prompt()))
+    /// The command typed at `prompt`, as its rows held here read; empty when they are not.
+    fn command_at(&self, prompt: LineIndex) -> String {
+        self.block_head(prompt).and_then(|h| h.command).unwrap_or_default()
     }
 
     /// Scroll the viewport by `delta` lines (positive = up into history). Returns fetch requests
@@ -1544,147 +1543,179 @@ mod tests {
         line.cells[1] = Cell::spacer_tail(Style::DEFAULT);
         line.mark = SemanticMark::Prompt { exit: None, input: Some(4) };
         f.cursor.row = 1;
+        f.blocks = Some(Blocks { whole: false, marks: vec![running(0)] });
         assert_eq!(state.apply(TermEvent::Frame(f)), vec![Effect::CommandStarted("ls".to_owned())]);
         assert_eq!(state.block_head(LineIndex(0)).and_then(|h| h.command).as_deref(), Some("ls"));
     }
 
+    /// A block still running, at the prompt on `line`.
+    fn running(line: u64) -> BlockMark {
+        BlockMark { prompt: LineIndex(line), end: None }
+    }
+
+    /// A block that ended with `exit`, after `took_ms`.
+    fn ended(line: u64, exit: Option<u8>, took_ms: Option<u64>) -> BlockMark {
+        BlockMark {
+            prompt: LineIndex(line),
+            end: Some(slopty_proto::terminal::BlockEnd { exit, took_ms }),
+        }
+    }
+
+    /// `f` carrying the worker's block news, or its whole list.
+    fn told(f: Frame, whole: bool, marks: Vec<BlockMark>) -> TermEvent {
+        TermEvent::Frame(Frame { blocks: Some(Blocks { whole, marks }), ..f })
+    }
+
+    fn commands(effects: Vec<Effect>) -> Vec<Effect> {
+        effects
+            .into_iter()
+            .filter(|e| matches!(e, Effect::CommandStarted(_) | Effect::CommandFinished { .. }))
+            .collect()
+    }
+
+    /// A command runs once the worker says its block started, and finishes when it says it
+    /// ended, with the status and the time the worker read from the marks.
     #[test]
-    fn a_command_is_reported_when_it_leaves_its_prompt_and_when_the_next_prompt_starts() {
+    fn a_command_runs_and_finishes_as_its_block_says() {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let mut state = TermState::new(size());
-        let at = |mut f: Frame, row: u16| {
-            f.cursor.row = row;
-            f
-        };
-        let commands = |effects: Vec<Effect>| {
-            effects
-                .into_iter()
-                .filter(|e| matches!(e, Effect::CommandStarted(_) | Effect::CommandFinished { .. }))
-                .collect::<Vec<_>>()
-        };
-        // An empty prompt: nothing runs.
-        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ")]);
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ sleep 9")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
-        assert!(!state.command_running());
-        // Typed but not entered: the cursor is still on the prompt row.
-        let mut f = frame(2, false, 0, 0, 3, &[(0, "$ sleep 9")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
-        // Enter: the cursor left the command's rows.
-        let f = frame(3, false, 0, 0, 3, &[(1, "")]);
+        assert_eq!(commands(state.apply(TermEvent::Frame(f))), Vec::<Effect>::new());
+        assert!(!state.command_running(), "typed, not entered");
+        let f = frame(2, false, 0, 0, 3, &[(1, "")]);
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            commands(state.apply(told(f, false, vec![running(0)]))),
             vec![Effect::CommandStarted("sleep 9".to_owned())]
         );
-        // Still running: nothing new.
-        let f = frame(4, false, 0, 0, 3, &[(1, "")]);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 1)))), Vec::<Effect>::new());
+        let f = frame(3, false, 0, 0, 3, &[(1, "")]);
+        assert_eq!(commands(state.apply(TermEvent::Frame(f))), Vec::<Effect>::new());
         assert!(state.command_running());
-        // The next prompt carries the status.
-        let mut f = frame(5, false, 0, 0, 3, &[(2, "$ ")]);
+        let mut f = frame(4, false, 0, 0, 3, &[(2, "$ ")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(Some(1));
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 2)))),
+            commands(state.apply(told(f, false, vec![ended(0, Some(1), Some(9_012))]))),
             vec![Effect::CommandFinished {
                 prompt: Some(LineIndex(0)),
                 command: "sleep 9".to_owned(),
-                exit: Some(1)
+                exit: Some(1),
+                took: Some(Duration::from_millis(9_012)),
             }]
         );
         assert!(!state.command_running());
-        // ⌃L at the prompt: the shell erases the screen in place and redraws its prompt on the
-        // first row, a lower index than the one it replaces. The command typed there is
-        // finished by the prompt below it as usual.
-        let mut f = frame(6, true, 0, 0, 3, &[(0, "$ "), (1, ""), (2, "")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
-        let mut f = frame(7, false, 0, 0, 3, &[(0, "$ sleep 2")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
-        let f = frame(8, false, 0, 0, 3, &[(1, "")]);
-        assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
-            vec![Effect::CommandStarted("sleep 2".to_owned())]
-        );
-        let mut f = frame(9, false, 0, 0, 3, &[(1, "$ ")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = prompt(Some(0));
-        assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
-            vec![Effect::CommandFinished {
-                prompt: Some(LineIndex(0)),
-                command: "sleep 2".to_owned(),
-                exit: Some(0)
-            }]
-        );
-        // A new epoch forgets which prompt was newest, so its first prompt ends nothing.
-        let mut f = frame(10, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 1)))), Vec::<Effect>::new());
     }
 
-    /// The numbering changes under a running command (the window was resized, so the worker
-    /// reflowed): while its block is still the newest it runs on under the new numbers, and
-    /// once a newer prompt exists it finished, with that prompt's status and its own new row
-    /// when it is held here.
+    /// A command that started and ended between two frames is never seen running, and still
+    /// finishes with its status and how long it took: one frame carries its end as news.
+    #[test]
+    fn a_command_between_two_frames_still_finishes_with_its_time() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ls"), (1, "a  b"), (2, "$ ")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[2].line).mark = prompt(Some(0));
+        assert_eq!(
+            commands(state.apply(told(f, false, vec![ended(0, Some(0), Some(3))]))),
+            vec![Effect::CommandFinished {
+                prompt: Some(LineIndex(0)),
+                command: "ls".to_owned(),
+                exit: Some(0),
+                took: Some(Duration::from_millis(3)),
+            }]
+        );
+        assert!(!state.command_running());
+        // A list taken whole (a viewer joining) tells nothing of blocks long ended.
+        let f = frame(2, true, 0, 0, 3, &[]);
+        assert_eq!(
+            commands(state.apply(told(f, true, vec![ended(0, Some(0), Some(3))]))),
+            Vec::<Effect>::new()
+        );
+    }
+
+    /// The numbering changes under a running command (a reflow lists the blocks again, whole):
+    /// it runs on under its new prompt, and finishes with the end the worker tells, its row
+    /// read from the rows held here or `None` when they are not. A newer block starting while
+    /// one runs whose end never came finishes that one without a status.
     #[test]
     fn a_running_command_survives_a_reflow_and_finishes_after_one() {
         let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
         let mut state = TermState::new(size());
-        let at = |mut f: Frame, row: u16| {
-            f.cursor.row = row;
-            f
-        };
-        let commands = |effects: Vec<Effect>| {
-            effects
-                .into_iter()
-                .filter(|e| matches!(e, Effect::CommandStarted(_) | Effect::CommandFinished { .. }))
-                .collect::<Vec<_>>()
-        };
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ sleep 9"), (1, ""), (2, "")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            commands(state.apply(told(f, false, vec![running(0)]))),
             vec![Effect::CommandStarted("sleep 9".to_owned())]
         );
-        // Reflowed: the same block, one row further down, still the newest.
         let mut f = frame(2, true, 1, 0, 3, &[(0, ""), (1, "$ sleep 9"), (2, "")]);
         Arc::make_mut(&mut f.updates[1].line).mark = prompt(None);
-        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 2)))), Vec::<Effect>::new());
+        assert_eq!(commands(state.apply(told(f, true, vec![running(1)]))), Vec::<Effect>::new());
         assert!(state.command_running(), "runs on under the new numbers");
         assert_eq!(state.running.as_ref().map(|(p, _)| *p), Some(LineIndex(1)));
-        // Reflowed again, and this time the shell has printed the next prompt.
+        // Reflowed again, and it ended meanwhile: the whole list says so.
         let mut f = frame(3, true, 2, 0, 3, &[(0, "$ sleep 9"), (1, "$ "), (2, "")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(3));
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            commands(state.apply(told(f, true, vec![ended(0, Some(3), Some(9_000))]))),
             vec![Effect::CommandFinished {
                 prompt: Some(LineIndex(0)),
                 command: "sleep 9".to_owned(),
-                exit: Some(3)
+                exit: Some(3),
+                took: Some(Duration::from_millis(9_000)),
             }]
         );
-        assert!(!state.command_running());
-        // A command whose prompt scrolled out of the rows held here still finishes; the
-        // caption has no row to land on.
+        // A command whose prompt is not among the rows held here (a reflow took them) still
+        // finishes.
         let mut f = frame(4, true, 3, 0, 3, &[(0, "$ make"), (1, ""), (2, "")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            commands(state.apply(told(f, false, vec![running(0)]))),
             vec![Effect::CommandStarted("make".to_owned())]
         );
-        let mut f = frame(5, true, 4, 10, 13, &[(0, "out"), (1, "$ "), (2, "")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
-        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
+        let f = frame(5, true, 4, 10, 13, &[(0, "out"), (1, "$ "), (2, "")]);
         assert_eq!(
-            commands(state.apply(TermEvent::Frame(at(f, 1)))),
+            commands(state.apply(told(f, true, vec![ended(0, Some(0), Some(40))]))),
             vec![Effect::CommandFinished {
                 prompt: None,
                 command: "make".to_owned(),
-                exit: Some(0)
+                exit: Some(0),
+                took: Some(Duration::from_millis(40)),
             }]
+        );
+        // One whose end never came, then another starting.
+        let mut f = frame(6, true, 5, 0, 3, &[(0, "$ a"), (1, "$ b"), (2, "")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(None);
+        let _started = state.apply(told(f, false, vec![running(0)]));
+        let f = frame(7, false, 5, 0, 3, &[]);
+        assert_eq!(
+            commands(state.apply(told(f, false, vec![running(1)]))),
+            vec![
+                Effect::CommandFinished {
+                    prompt: Some(LineIndex(0)),
+                    command: "a".to_owned(),
+                    exit: None,
+                    took: None,
+                },
+                Effect::CommandStarted("b".to_owned()),
+            ]
+        );
+        // A reflow whose newest block running is another command: the one held here ended
+        // unheard, its row lost to the renumbering, and the other runs.
+        let mut f = frame(8, true, 6, 0, 3, &[(0, "$ y"), (1, ""), (2, "")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        assert_eq!(
+            commands(state.apply(told(f, true, vec![running(0)]))),
+            vec![
+                Effect::CommandFinished {
+                    prompt: None,
+                    command: "b".to_owned(),
+                    exit: None,
+                    took: None,
+                },
+                Effect::CommandStarted("y".to_owned()),
+            ]
         );
     }
 
@@ -2144,8 +2175,10 @@ mod tests {
     /// nothing.
     #[test]
     fn block_marks_follow_the_workers_list() {
-        use slopty_proto::terminal::BlockMark;
-        let mark = |line, exit| BlockMark { prompt: LineIndex(line), exit };
+        let mark = |line, exit: Option<Option<u8>>| BlockMark {
+            prompt: LineIndex(line),
+            end: exit.map(|exit| slopty_proto::terminal::BlockEnd { exit, took_ms: None }),
+        };
         let held = |s: &TermState| -> Vec<(u64, Option<u8>)> {
             s.block_marks().iter().map(|(p, e)| (p.0, *e)).collect()
         };
@@ -2153,8 +2186,16 @@ mod tests {
             TermEvent::Frame(Frame { blocks: Some(Blocks { whole, marks }), ..f })
         };
         let mut s = TermState::new(size());
-        s.apply(with(frame(1, true, 0, 0, 3, &[]), true, vec![mark(0, Some(0)), mark(2, None)]));
-        s.apply(with(frame(2, false, 0, 0, 3, &[]), false, vec![mark(2, Some(1)), mark(5, None)]));
+        s.apply(with(
+            frame(1, true, 0, 0, 3, &[]),
+            true,
+            vec![mark(0, Some(Some(0))), mark(2, None)],
+        ));
+        s.apply(with(
+            frame(2, false, 0, 0, 3, &[]),
+            false,
+            vec![mark(2, Some(Some(1))), mark(5, None)],
+        ));
         assert_eq!(held(&s), [(0, Some(0)), (2, Some(1)), (5, None)]);
 
         let mut on = frame(3, false, 0, 4, 7, &[]);

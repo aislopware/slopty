@@ -15,8 +15,8 @@ mod golden {
         Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest,
     };
     use slopty_proto::terminal::{
-        BlockMark, Blocks, ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors,
-        TermEvent, TermRequest,
+        BlockEnd, BlockMark, Blocks, ColorOverrides, Frame, PixelRect, Placement, SearchMatch,
+        TermColors, TermEvent, TermRequest,
     };
     use slopty_proto::transfer::{
         BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Held, Offer, Peer, Purpose,
@@ -1696,13 +1696,20 @@ mod golden {
         snap("worker_frame_images_above", &listing(Some(vec![placement]), None));
     }
 
-    /// A frame carrying the command blocks the scrollbar marks: a failed one, then one still
-    /// running.
+    /// A frame carrying the command blocks the scrollbar marks: a failed one that took 7 ms,
+    /// one brought back from a checkpoint with no time, then one still running.
     #[test]
     fn frame_blocks() {
         let marks = vec![
-            BlockMark { prompt: slopty_grid::LineIndex(12), exit: Some(1) },
-            BlockMark { prompt: slopty_grid::LineIndex(300), exit: None },
+            BlockMark {
+                prompt: slopty_grid::LineIndex(12),
+                end: Some(BlockEnd { exit: Some(1), took_ms: Some(7) }),
+            },
+            BlockMark {
+                prompt: slopty_grid::LineIndex(40),
+                end: Some(BlockEnd { exit: None, took_ms: None }),
+            },
+            BlockMark { prompt: slopty_grid::LineIndex(300), end: None },
         ];
         snap("worker_frame_blocks", &listing(None, Some(Blocks { whole: true, marks })));
     }

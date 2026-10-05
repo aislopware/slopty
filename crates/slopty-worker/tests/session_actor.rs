@@ -935,10 +935,10 @@ done
 "#;
 
     /// A command that prints nothing while it runs (the e2e's `sleep 6` after ⌘K) is seen
-    /// running while it runs, not when its prompt comes back: the `133;C` that takes the
-    /// cursor's row out of the prompt reaches the client as a frame of its own, so the
-    /// block tracking sees the cursor below the command while it runs. The command outlasts
-    /// the wait, so only its end (or a hang) could come first, however slow the machine.
+    /// running while it runs, not when its prompt comes back: the `133;C` reaches the client
+    /// as block news in a frame of its own, the cursor already below the command. The command
+    /// outlasts the wait, so only its end (or a hang) could come first, however slow the
+    /// machine.
     #[tokio::test]
     async fn a_silent_command_after_a_clear_is_seen_running_at_once() {
         fn pump(events: &[TermEvent], state: &mut TermState, effects: &mut Vec<Effect>) {
@@ -2585,11 +2585,19 @@ exec sleep 60"#;
             |s: &TermState| s.block_marks().iter().map(|(p, e)| (*p, *e)).collect::<Vec<_>>();
         let ended = |ev: &[TermEvent]| {
             ev.iter().any(|e| {
-                matches!(e, TermEvent::Frame(f) if f.blocks.as_ref().is_some_and(|b| b.marks.iter().any(|m| m.exit.is_some())))
+                matches!(e, TermEvent::Frame(f) if f.blocks.as_ref().is_some_and(|b| b.marks.iter().any(|m| m.end.is_some())))
             })
         };
-        let _seen = wait_for(&mut rx, |ev, _| ended(ev)).await;
+        let (seen, _) = wait_for(&mut rx, |ev, _| ended(ev)).await;
         assert_eq!(blocks(&rx.state), [(LineIndex(0), Some(1))], "the watcher hears of it");
+        let end = seen.iter().find_map(|e| match e {
+            TermEvent::Frame(f) => f.blocks.as_ref()?.marks.iter().find_map(|m| m.end),
+            _ => None,
+        });
+        assert!(
+            end.is_some_and(|e| e.exit == Some(1) && e.took_ms.is_some()),
+            "its end, timed though it ran within one write: {end:?}"
+        );
 
         let (tx, mut late) = viewer(256);
         session.attach(ClientId::new(), size(40, 6), tx).unwrap();

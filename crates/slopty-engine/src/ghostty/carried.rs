@@ -136,12 +136,13 @@ pub(super) fn decode(body: &[u8], base: u64) -> Option<Carried> {
                 line: abs(line, base)?,
                 col: parts.next()?.parse().ok()?,
                 exit: exit(parts.next()?).ok()?,
+                took: None,
             }),
         };
         if parts.next().is_some() {
             return None;
         }
-        marks.commands.push_back(Block { prompt, output, end });
+        marks.commands.push_back(Block { prompt, output, started: None, end });
     }
     Some(marks)
 }
@@ -176,10 +177,11 @@ mod tests {
             Block {
                 prompt: 100,
                 output: Some(101),
-                end: Some(End { line: 98, col: 4, exit: Some(3) }),
+                started: None,
+                end: Some(End { line: 98, col: 4, exit: Some(3), took: None }),
             },
-            Block { prompt: 105, output: None, end: None },
-            Block { prompt: 106, output: Some(107), end: None },
+            Block { prompt: 105, output: None, started: None, end: None },
+            Block { prompt: 106, output: Some(107), started: None, end: None },
         ]);
         let payload = Payload {
             base: 100,
@@ -207,6 +209,7 @@ mod tests {
             .map(|b| Block {
                 prompt: moved(b.prompt),
                 output: b.output.map(moved),
+                started: None,
                 end: b.end.map(|e| End { line: moved(e.line), ..e }),
             })
             .collect();

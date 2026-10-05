@@ -8,11 +8,13 @@
 //! formatted, so a read near the end of a 50 000-line history costs its own rows, not the
 //! history's ten milliseconds.
 
+use std::time::{Duration, Instant};
+
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::selection::Selection;
 use libghostty_vt::terminal::{Point, PointCoordinate};
 use slopty_grid::{LineFlags, LineIndex, SemanticMark};
-use slopty_proto::terminal::{BlockMark, MAX_BLOCKS};
+use slopty_proto::terminal::{BlockEnd, BlockMark, MAX_BLOCKS};
 
 use super::GhosttyEngine;
 use crate::{EngineError, osc133};
@@ -31,6 +33,8 @@ const SINCE_ROWS: u64 = 4096;
 pub(super) struct Block {
     pub prompt: u64,
     pub output: Option<u64>,
+    /// When its `133;C` was read; `None` for a block brought back from a checkpoint.
+    pub started: Option<Instant>,
     pub end: Option<End>,
 }
 
@@ -39,6 +43,19 @@ pub(super) struct End {
     pub line: u64,
     pub col: u16,
     pub exit: Option<u8>,
+    /// From its `133;C` to its `133;D`, as they were read.
+    pub took: Option<Duration>,
+}
+
+impl Block {
+    /// The block as the frames list it.
+    fn mark(&self) -> BlockMark {
+        let end = self.end.map(|e| BlockEnd {
+            exit: e.exit,
+            took_ms: e.took.map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX)),
+        });
+        BlockMark { prompt: LineIndex(self.prompt), end }
+    }
 }
 
 /// The screen as text.
@@ -123,15 +140,21 @@ impl GhosttyEngine {
                 if self.commands.back().is_some_and(|b| b.output.is_none()) {
                     self.commands.pop_back();
                 }
-                self.commands.push_back(Block { prompt: line, output: None, end: None });
+                self.commands.push_back(Block {
+                    prompt: line,
+                    output: None,
+                    started: None,
+                    end: None,
+                });
             }
             osc133::Mark::OutputStart => {
                 if let Some(block) = self.commands.back_mut()
                     && block.output.is_none()
                 {
                     block.output = Some(line.max(block.prompt));
-                    let prompt = LineIndex(block.prompt);
-                    self.note_block(BlockMark { prompt, exit: None });
+                    block.started = Some(Instant::now());
+                    let mark = block.mark();
+                    self.note_block(mark);
                 }
             }
             osc133::Mark::CommandEnd { exit } => {
@@ -139,9 +162,10 @@ impl GhosttyEngine {
                     && block.output.is_some()
                     && block.end.is_none()
                 {
-                    block.end = Some(End { line, col, exit });
-                    let prompt = LineIndex(block.prompt);
-                    self.note_block(BlockMark { prompt, exit });
+                    let took = block.started.map(|at| at.elapsed());
+                    block.end = Some(End { line, col, exit, took });
+                    let mark = block.mark();
+                    self.note_block(mark);
                     self.commands_ended = self.commands_ended.wrapping_add(1);
                 }
             }
@@ -210,18 +234,18 @@ impl GhosttyEngine {
         Ok(rows)
     }
 
-    /// The newest block, when it has not ended: `Some(true)` once its output started.
-    pub(super) fn open_command(&self) -> Option<bool> {
-        self.commands.back().filter(|b| b.end.is_none()).map(|b| b.output.is_some())
+    /// The newest block, when it has not ended.
+    pub(super) fn open_command(&self) -> Option<Block> {
+        self.commands.back().filter(|b| b.end.is_none()).copied()
     }
 
     /// The numbering changed (a resize, a full reset, history evicted past the anchor) and
     /// took the rows of every block with it. A command that was open is still open, at `line`
     /// (the cursor): its `133;C` and `133;D` still find it (a `reset` command writes the
     /// reset, then its shell the end).
-    pub(super) fn reopen_command(&mut self, line: u64, output: bool) {
-        let output = output.then_some(line);
-        self.commands.push_back(Block { prompt: line, output, end: None });
+    pub(super) fn reopen_command(&mut self, line: u64, open: Block) {
+        let output = open.output.map(|_| line);
+        self.commands.push_back(Block { prompt: line, output, started: open.started, end: None });
     }
 
     /// Where the cursor is, as a [`Position`].
@@ -375,10 +399,7 @@ impl GhosttyEngine {
     pub(super) fn block_marks(&self) -> Vec<BlockMark> {
         let started = self.commands.iter().filter(|b| b.output.is_some() && b.prompt >= self.base);
         let skip = started.clone().count().saturating_sub(MAX_BLOCKS);
-        started
-            .skip(skip)
-            .map(|b| BlockMark { prompt: LineIndex(b.prompt), exit: b.end.and_then(|e| e.exit) })
-            .collect()
+        started.skip(skip).map(Block::mark).collect()
     }
 
     /// What was typed between a prompt and its output: the cells libghostty marked as input
@@ -437,7 +458,11 @@ mod tests {
     /// takes whole, a joiner's included, without taking the others' news.
     #[test]
     fn blocks_go_out_as_news_and_whole() {
-        let mark = |prompt, exit| BlockMark { prompt: LineIndex(prompt), exit };
+        // What a mark says but its time: where, and whether and how it ended.
+        let mark = |prompt, end: Option<Option<u8>>| (LineIndex(prompt), end);
+        let said = |marks: &[BlockMark]| -> Vec<_> {
+            marks.iter().map(|m| (m.prompt, m.end.map(|e| e.exit))).collect()
+        };
         let mut e = engine(20, 5);
         let first = e.full_frame(0).unwrap();
         assert_eq!(first.blocks.map(|b| (b.whole, b.marks.len())), Some((true, 0)));
@@ -446,7 +471,7 @@ mod tests {
         let frame = e.take_frame(0).unwrap().expect("a frame");
         let news = frame.blocks.expect("news");
         assert!(!news.whole);
-        assert_eq!(news.marks, [mark(0, Some(1))], "started and ended: its end");
+        assert_eq!(said(&news.marks), [mark(0, Some(Some(1)))], "started and ended: its end");
 
         // An empty Enter at a prompt is no block.
         e.write(PROMPT);
@@ -460,14 +485,39 @@ mod tests {
         let joined = e.join_frame(0).unwrap();
         let whole = joined.frame.blocks.expect("a joiner hears of every block");
         assert!(whole.whole);
-        assert_eq!(whole.marks, [mark(0, Some(1)), mark(3, None)]);
+        assert_eq!(said(&whole.marks), [mark(0, Some(Some(1))), mark(3, None)]);
         let frame = e.take_frame(0).unwrap().expect("a frame");
         let news = frame.blocks.expect("the others' news is theirs still");
-        assert_eq!((news.whole, news.marks), (false, vec![mark(3, None)]));
+        assert_eq!((news.whole, said(&news.marks)), (false, vec![mark(3, None)]));
 
         // Every viewer takes a resize whole.
         let resized = e.full_frame(0).unwrap();
         assert_eq!(resized.blocks.map(|b| b.whole), Some(true));
+    }
+
+    /// A command that starts and ends between two frames still goes out ended, with how long it
+    /// took from its `C` to its `D` as they were read; one read 50 ms apart took that long.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the command's own run time, read by the engine's clock"
+    )]
+    fn a_block_ends_with_how_long_it_took_however_quick() {
+        let mut e = engine(20, 5);
+        let _first = e.full_frame(0).unwrap();
+        run(&mut e, "true", "", 0);
+        let news = e.take_frame(0).unwrap().and_then(|f| f.blocks).expect("news");
+        let end = news.marks.last().and_then(|m| m.end).expect("it ended");
+        assert_eq!(end.exit, Some(0));
+        assert!(end.took_ms.is_some_and(|ms| ms < 50), "quick: {end:?}");
+
+        e.write(PROMPT);
+        e.write(b"sleep 0.05\r\n\x1b]133;C\x07");
+        std::thread::sleep(Duration::from_millis(50));
+        e.write(b"\x1b]133;D;0\x07");
+        let news = e.take_frame(0).unwrap().and_then(|f| f.blocks).expect("news");
+        let end = news.marks.last().and_then(|m| m.end).expect("it ended");
+        assert!(end.took_ms.is_some_and(|ms| ms >= 50), "{end:?}");
     }
 
     /// A shell session as the integration scripts write it: prompt, typed command, `C`,
