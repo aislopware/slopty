@@ -7430,3 +7430,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is not a column of solids, since nothing holds them.
   - Tests: `project::tests` (the pipeline's failed stages, a failed push). Golden:
     `project-live-lanes`.
+- ✅ **"New project…" starts its orchestrator first** (2026-10-06,
+  `.research/readiness-2026-10-06.md` N12). Starting a project needed a terminal that already
+  ran an agent: open a terminal, start an agent in it, then "Start a project here". Away from
+  one, the app only said to stand in a terminal.
+  - **The steps.** The palette's "New project…" runs New agent's steps (agent, machine,
+    folder) with the same last-first order and passing over a step that has one choice. The
+    agent step lists only the agents that run in a terminal, because a project's orchestrator
+    is one, and its field says so: Claude Code, whose TUI Slopty observes, and Codex, beside
+    whose TUI Slopty is a second client (`agent_start::runs_in_terminal`). pi and ACP agents
+    are driven over their protocols and have no terminal. The folder step offers no past
+    sessions.
+  - **Then the sheet.** The folder's pick starts the agent at once, with nothing said
+    (`StartOrchestrator`). Once its tile is its terminal's, the "New project" sheet opens over
+    it, filled in from that terminal as "Start a project here" fills it. A start that fails or
+    a tile closed first drops the wait.
+  - **The words.** Away from a terminal, the refusal now names the way that works: "A project
+    is run by an agent in a terminal: start one with "New project…"".
+  - Test: `workspace::tests::projects::new_project_starts_its_orchestrator_then_asks_for_the_project`.

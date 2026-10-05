@@ -21,7 +21,7 @@ use slopty_proto::project::{
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
-use super::actions::MakeOrchestrator;
+use super::actions::{MakeOrchestrator, StartOrchestrator};
 use super::agents::{agent_ask_text, agent_mark_of};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
@@ -29,8 +29,8 @@ use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
-/// What "Start a project here" says away from a terminal.
-pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project there";
+/// What "Start a project here" says away from an agent's terminal, and the way that works.
+pub(crate) const NO_TERMINAL: &str = "A project is run by an agent in a terminal: start one with \u{201c}New project\u{2026}\u{201d}";
 /// How many pages of the timeline a recap reads back from the server, past what the board
 /// holds: far enough for a night away from a busy project.
 const RECAP_PAGES: usize = 8;
@@ -74,6 +74,9 @@ pub(super) struct ProjectsState {
     pub opening: Option<(ProjectId, TermRef)>,
     /// The "New project" sheet, open over the workspace for the orchestrator it names.
     pub sheet: Option<Sheet>,
+    /// The tile of an agent "New project…" started, whose sheet opens once it is its
+    /// terminal's tile ([`WorkspaceView::orchestrator_started`]).
+    pub orchestrating: Option<ItemId>,
     /// The "Run on" picker open on a task, per project.
     pub run_on: HashMap<ProjectId, RunOnPicker>,
     /// How far this client read each project's timeline, as its board last hid.
@@ -479,6 +482,7 @@ impl WorkspaceView {
     /// hand every board what it shows now, drop the boards of projects gone, and give the
     /// keyboard to a board just turned to.
     pub(super) fn sync_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.orchestrator_started(window, cx);
         if !std::mem::take(&mut self.projects.dirty) {
             return;
         }
@@ -870,7 +874,8 @@ impl WorkspaceView {
     /// "Start a project here": the "New project" sheet for the focused terminal's agent as
     /// its orchestrator, named for the terminal's directory, its repository and the branch
     /// checked out filled in. A terminal that orchestrates one already shows that one, and a
-    /// plain shell is refused: nothing in it would hear what the board tells it.
+    /// plain shell is refused: nothing in it would hear what the board tells it. Away from a
+    /// terminal (a thread tile's agent has none) it points to "New project…".
     pub(super) fn start_project(
         &mut self,
         _: &StartProject,
@@ -881,6 +886,56 @@ impl WorkspaceView {
             self.show_notice(NO_TERMINAL.to_owned(), cx);
             return;
         };
+        self.open_project_sheet(session, window, cx);
+    }
+
+    /// The last step of "New project…": `agent` starts at once in its own tile, with no first
+    /// message, and is what each step lists first next time. Its sheet opens once the tile is
+    /// its terminal's ([`Self::orchestrator_started`]).
+    pub(super) fn start_orchestrator(
+        &mut self,
+        start: &StartOrchestrator,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let StartOrchestrator { worker, agent, cwd, worktree } = start.clone();
+        let last = super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone() };
+        self.last_start = Some(last);
+        let item = ItemId::new();
+        let starting = super::starting::Starting::new(worker, agent, cwd, None);
+        self.open_starting(item, starting.in_worktree(worktree, item), cx);
+        self.send_start(item, None, cx);
+        self.projects.orchestrating = Some(item);
+    }
+
+    /// Once a frame: the agent "New project…" started is in its terminal's tile, so the
+    /// "New project" sheet opens for it. While it starts, or its tile waits on its worker's
+    /// word, nothing yet; a start that failed or a tile closed lets it go.
+    fn orchestrator_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.projects.orchestrating else { return };
+        if self.starting.has(item) || self.projects.sheet.is_some() {
+            return;
+        }
+        let Some(tile) = self.layout.tiles().find(|t| t.item == item) else {
+            self.projects.orchestrating = None;
+            return;
+        };
+        let Some(ItemKind::Terminal { session }) = self.item(tile).map(|i| i.kind.clone()) else {
+            return;
+        };
+        self.projects.orchestrating = None;
+        self.focus_tile(tile, cx);
+        self.open_project_sheet(session, window, cx);
+    }
+
+    /// The "New project" sheet for `session`'s agent as its orchestrator; or that terminal's
+    /// project, where it orchestrates one; or why not.
+    fn open_project_sheet(
+        &mut self,
+        session: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(project) =
             self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
         {

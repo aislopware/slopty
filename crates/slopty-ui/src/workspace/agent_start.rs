@@ -13,6 +13,11 @@
 //! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
 //! that opens at once saying it reads them. A session picked opens the thread kept of it, its
 //! agent taken up again if it exited, or starts the agent on it in its own words.
+//!
+//! "New project…" runs the same steps for the agent that will orchestrate the project. It lists
+//! only the agents that run in a terminal, since a project's orchestrator is one, and offers no
+//! past sessions. Its last step starts the agent at once ([`StartOrchestrator`]), and the
+//! "New project" sheet opens over its terminal's tile.
 
 use std::time::Duration;
 
@@ -24,7 +29,8 @@ use slopty_proto::thread::wire::{PastSession, PastSessions, ThreadRequest};
 
 use super::WorkspaceView;
 use super::actions::{
-    NewAgent, NewAgentOf, NewAgentOn, ResumePastSession, ResumeSession, StartThread,
+    NewAgent, NewAgentOf, NewAgentOn, NewProject, NewProjectOf, NewProjectOn, ResumePastSession,
+    ResumeSession, StartOrchestrator, StartThread,
 };
 use super::projects::agent_label;
 use crate::icons::{Status, Symbol};
@@ -35,6 +41,32 @@ pub(super) const NO_AGENT: &str = "No machine has an agent to start";
 
 /// What the agent step's field says.
 const PICK_AGENT: &str = "Which agent";
+
+/// The palette's line that starts a project with a new agent as its orchestrator.
+pub(super) const NEW_PROJECT: &str = "New project\u{2026}";
+
+/// What "New project…"'s agent step says: only an agent in a terminal can orchestrate.
+pub(super) const PICK_ORCHESTRATOR: &str = "Which agent runs the project, in a terminal";
+
+/// What "New project…" says when no machine has an agent that runs in a terminal.
+pub(super) const NO_ORCHESTRATOR: &str =
+    "No machine has an agent that runs in a terminal, and only one can orchestrate a project";
+
+/// What the steps start: an agent of its own, or one to orchestrate a new project.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum For {
+    /// "New agent…".
+    Agent,
+    /// "New project…".
+    Project,
+}
+
+/// Whether a start of `agent` opens a terminal, so it can orchestrate a project: Claude Code,
+/// whose TUI Slopty observes, and Codex, beside whose TUI Slopty is a second client. pi and
+/// ACP agents are driven over their protocols and have no terminal until a handoff.
+pub(super) fn runs_in_terminal(agent: &AgentId) -> bool {
+    agent.is(AgentId::CLAUDE_CODE) || agent.is(AgentId::CODEX)
+}
 
 /// What the machine step's field says.
 const PICK_MACHINE: &str = "On which machine";
@@ -135,8 +167,8 @@ impl WorkspaceView {
         }
         match (agents.as_slice(), chosen) {
             ([], _) => self.show_notice(NO_AGENT.to_owned(), cx),
-            ([agent], Some(worker)) => self.pick_folder(agent, worker, window, cx),
-            ([agent], None) => self.pick_machine(agent, window, cx),
+            ([agent], Some(worker)) => self.pick_folder(agent, worker, For::Agent, window, cx),
+            ([agent], None) => self.pick_machine(agent, For::Agent, window, cx),
             _ => {
                 let lines = agents
                     .into_iter()
@@ -162,7 +194,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pick_machine(&of.agent, window, cx);
+        self.pick_machine(&of.agent, For::Agent, window, cx);
     }
 
     /// A machine picked: in which folder.
@@ -172,12 +204,72 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pick_folder(&on.agent, on.worker, window, cx);
+        self.pick_folder(&on.agent, on.worker, For::Agent, window, cx);
+    }
+
+    /// "New project…": which agent will orchestrate it, of those that run in a terminal, the
+    /// last one started first; with one, straight to the machine.
+    pub(super) fn new_project(
+        &mut self,
+        _: &NewProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut agents: Vec<AgentId> =
+            self.startable_agents().into_iter().filter(runs_in_terminal).collect();
+        if let Some(at) =
+            self.last_start.as_ref().and_then(|last| agents.iter().position(|a| *a == last.agent))
+        {
+            let agent = agents.remove(at);
+            agents.insert(0, agent);
+        }
+        match agents.as_slice() {
+            [] => self.show_notice(NO_ORCHESTRATOR.to_owned(), cx),
+            [agent] => self.pick_machine(agent, For::Project, window, cx),
+            _ => {
+                let lines = agents
+                    .into_iter()
+                    .map(|agent| {
+                        let label = agent_label(&agent);
+                        let mark = crate::icons::Mark::agent(&agent.0);
+                        PaletteItem::new(&label, Box::new(NewProjectOf { agent }), &[])
+                            .with_icon(mark)
+                    })
+                    .collect();
+                self.open_step(lines, PICK_ORCHESTRATOR, window, cx);
+            }
+        }
+    }
+
+    /// An orchestrator's agent picked: on which machine.
+    pub(super) fn new_project_of(
+        &mut self,
+        of: &NewProjectOf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_machine(&of.agent, For::Project, window, cx);
+    }
+
+    /// An orchestrator's machine picked: in which folder.
+    pub(super) fn new_project_on(
+        &mut self,
+        on: &NewProjectOn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_folder(&on.agent, on.worker, For::Project, window, cx);
     }
 
     /// The machines that can start `agent`: the last start's first, then the one the focus is
     /// on, then the rest by name; with one, straight to the folder.
-    fn pick_machine(&mut self, agent: &AgentId, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_machine(
+        &mut self,
+        agent: &AgentId,
+        purpose: For,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut machines: Vec<WorkerKey> = self
             .workers
             .keys()
@@ -197,13 +289,17 @@ impl WorkspaceView {
                 let text = format!("No machine can start {} now", agent_label(agent));
                 self.show_notice(text, cx);
             }
-            [worker] => self.pick_folder(agent, *worker, window, cx),
+            [worker] => self.pick_folder(agent, *worker, purpose, window, cx),
             _ => {
                 let lines = machines
                     .into_iter()
                     .map(|worker| {
                         let name = self.worker_name(worker);
-                        let action = Box::new(NewAgentOn { agent: agent.clone(), worker });
+                        let agent = agent.clone();
+                        let action: Box<dyn gpui::Action> = match purpose {
+                            For::Agent => Box::new(NewAgentOn { agent, worker }),
+                            For::Project => Box::new(NewProjectOn { agent, worker }),
+                        };
                         PaletteItem::new(&name, action, &[]).with_icon(Symbol::ServerRack)
                     })
                     .collect();
@@ -240,11 +336,13 @@ impl WorkspaceView {
 
     /// The folders `agent` may start in on `worker`, each once: the focused shell's there, the
     /// last start's there, where its shells stand (the most recent first), then its home. A new
-    /// worktree of each repository among them follows, then "Resume a past session…".
+    /// worktree of each repository among them follows, then, for an agent of its own, "Resume a
+    /// past session…".
     fn pick_folder(
         &mut self,
         agent: &AgentId,
         worker: WorkerKey,
+        purpose: For,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -271,31 +369,30 @@ impl WorkspaceView {
                 continue;
             };
             let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
-            let action =
-                StartThread { worker, agent: agent.clone(), cwd: cwd.clone(), worktree: true };
+            let action = start(purpose, worker, agent, cwd.clone(), true);
             let shown = format!("{NEW_WORKTREE} {name}");
-            worktrees.push(
-                PaletteItem::new(&shown, Box::new(action), &[])
-                    .with_icon(Symbol::ArrowTriangleBranch),
-            );
+            worktrees
+                .push(PaletteItem::new(&shown, action, &[]).with_icon(Symbol::ArrowTriangleBranch));
             repos.push(repo);
         }
         let mut lines: Vec<PaletteItem> = folders
             .into_iter()
             .map(|cwd| {
                 let shown = super::tile::cwd_tail(&cwd, home);
-                let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
-                PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Symbol::Folder)
+                let action = start(purpose, worker, agent, cwd, false);
+                PaletteItem::new(&shown, action, &[]).with_icon(Symbol::Folder)
             })
             .collect();
         lines.extend(worktrees);
-        let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
-        lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
+        if purpose == For::Agent {
+            let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
+            lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
+        }
         let agent = agent.clone();
         self.open_step(lines, PICK_FOLDER, window, cx);
         if let Some(palette) = self.palette.clone() {
             palette.update(cx, |p, cx| {
-                p.set_typed(move |text| typed_folder(text, worker, &agent), cx);
+                p.set_typed(move |text| typed_folder(text, worker, &agent, purpose), cx);
             });
         }
     }
@@ -402,7 +499,7 @@ impl WorkspaceView {
 
 /// A folder typed from its root in the folder step (`/…`, `~/…`, `~`): the line that starts
 /// `agent` there on `worker`. Anything else adds none; the step's own lines are found by it.
-fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId) -> Vec<PaletteItem> {
+fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId, purpose: For) -> Vec<PaletteItem> {
     let typed = text.trim();
     if !(typed.starts_with('/') || typed.starts_with("~/") || typed == "~") {
         return Vec::new();
@@ -410,8 +507,24 @@ fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId) -> Vec<PaletteIt
     let cwd = if typed == "/" { typed } else { typed.trim_end_matches('/') }.to_owned();
     // As typed: it is the person's own spelling of where.
     let shown = format!("{TYPED_FOLDER} {cwd}");
-    let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
-    vec![PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Symbol::Folder)]
+    let action = start(purpose, worker, agent, cwd, false);
+    vec![PaletteItem::new(&shown, action, &[]).with_icon(Symbol::Folder)]
+}
+
+/// The folder step's action for a line: start `agent` on `worker` in `cwd`, as an agent of its
+/// own or as a new project's orchestrator.
+fn start(
+    purpose: For,
+    worker: WorkerKey,
+    agent: &AgentId,
+    cwd: String,
+    worktree: bool,
+) -> Box<dyn gpui::Action> {
+    let agent = agent.clone();
+    match purpose {
+        For::Agent => Box::new(StartThread { worker, agent, cwd, worktree }),
+        For::Project => Box::new(StartOrchestrator { worker, agent, cwd, worktree }),
+    }
 }
 
 /// The session step's line for `session` on `worker`: what it is about (its title, else the

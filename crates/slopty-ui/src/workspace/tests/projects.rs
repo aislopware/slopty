@@ -686,6 +686,96 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     assert!(!shown(&view, cx, orchestrator), "the header's way back to the terminal");
 }
 
+/// "New project…" offers only the agents that run in a terminal, as an orchestrator must: with
+/// Claude Code and pi installed it passes the agent step over for Claude Code, and the one
+/// machine's too. The folder step offers no past sessions. Its pick starts the agent at once,
+/// with nothing said, and the "New project" sheet opens over its tile once that is its
+/// terminal's, filled in from it.
+#[gpui::test]
+fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAppContext) {
+    use slopty_proto::server::InstalledAgent;
+    use slopty_proto::thread::wire::{IntentDone, Outcome as Done, TableFrame, ThreadRequest};
+    use slopty_proto::thread::{AgentId, Cursor};
+
+    use super::super::actions::NewProject;
+    use super::super::agent_start::RESUME_PAST;
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let agents = [AgentId::CLAUDE_CODE, AgentId::PI]
+        .map(|a| InstalledAgent { agent: AgentId::named(a), version: "1.0".to_owned() });
+    let caps = WorkerCaps { agents: agents.to_vec(), ..healthy() };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, caps, cx);
+        v.threads_linked(key, cx);
+    });
+    let shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.dispatch_action(NewProject);
+    cx.run_until_parked();
+    let lines: Vec<String> = view
+        .read_with(cx, |v, cx| {
+            v.palette
+                .clone()
+                .map(|p| p.read(cx).matches().iter().map(|l| l.label.clone()).collect())
+        })
+        .unwrap_or_default();
+    assert!(!lines.is_empty(), "straight to the folder step");
+    assert!(!lines.iter().any(|l| l == RESUME_PAST), "no past sessions: {lines:?}");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let started: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { id, start }) => Some((id, start)),
+            _ => None,
+        })
+        .collect();
+    let [(intent, start)] = started.as_slice() else { panic!("one start: {started:?}") };
+    assert_eq!(start.agent, AgentId::named(AgentId::CLAUDE_CODE), "pi has no terminal");
+    assert_eq!((start.cwd.as_str(), start.prompt.as_deref()), ("/src/app", None), "at once");
+    assert!(cx.debug_bounds("project-sheet").is_none(), "not before its terminal");
+
+    // The worker opens the agent's terminal, its table names the thread there, and the start
+    // is answered.
+    let session = SessionId::new();
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.session_opened(key, summary(session, Some("/src/app")), cx);
+        v.agent_event(working(session), cx);
+        v.thread_table(key, &table, cx);
+        v.thread_done(key, &IntentDone { id: *intent, outcome: Done::Started { thread } }, cx);
+    });
+    cx.run_until_parked();
+    for op in studio.drain().into_iter().filter_map(|m| match m {
+        ClientMsg::Items(op) => Some(op),
+        _ => None,
+    }) {
+        let echo = ItemSync::Delta { version: 2, by: studio.me, op };
+        view.update_in(cx, |v, _w, cx| v.apply_sync(key, echo, cx));
+    }
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-sheet").is_some(), "the sheet over the agent's tile");
+    let typed = view.read_with(cx, WorkspaceView::project_sheet_typed).expect("the sheet");
+    assert_eq!((typed.title.as_str(), typed.repo.as_str()), ("app", "/src/app"));
+    view.update_in(cx, |v, _w, cx| v.close_project_sheet(cx));
+    cx.run_until_parked();
+    let on = view.read_with(cx, |v, _| v.focused().and_then(|t| v.item(t)).map(|i| i.kind.clone()));
+    assert_eq!(on, Some(ItemKind::Terminal { session }), "back on the orchestrator");
+}
+
 /// "Start a project here" opens the "New project" sheet for the focused terminal's agent,
 /// named for its directory and kept clear of the names taken, its repository and branch
 /// filled in; Create makes the project with what the sheet holds and that terminal as its

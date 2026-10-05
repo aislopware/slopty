@@ -16,6 +16,9 @@ actions!(
         NewTerminal,
         /// Open a new Claude Code agent on the focused tile's worker.
         NewAgent,
+        /// "New project…": New agent's steps for the agent that will orchestrate it (one that
+        /// runs in a terminal), then the "New project" sheet over its tile.
+        NewProject,
         /// Start the thread on its way in plan mode, or not: its agent plans before it
         /// changes anything (Claude Code's `--permission-mode plan`).
         TogglePlanFirst,
@@ -235,6 +238,39 @@ pub struct NewAgentOn {
     pub worker: slopty_client::layout::WorkerKey,
 }
 
+/// An agent picked in "New project…": the machine to start its orchestrator on is asked next.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewProjectOf {
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+}
+
+/// A machine picked in "New project…": the folder its orchestrator starts in is asked next.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewProjectOn {
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+}
+
+/// The last step of "New project…": `agent` starts on `worker` in `cwd` at once, with no first
+/// message, and the "New project" sheet opens over its terminal's tile once it has one.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct StartOrchestrator {
+    /// Where it runs.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+    /// In which folder, as the worker spells it (`~` its home).
+    pub cwd: String,
+    /// In a new worktree of its own, made from the clone the folder is in.
+    pub worktree: bool,
+}
+
 /// "Group the navigator by …": the fact keys it groups the tiles by, the first a tile has
 /// winning ([`slopty_client::groups`]). The palette offers a line for each fact a tile in the
 /// layout has.
@@ -329,6 +365,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     let mut items = vec![
         w("New terminal", Box::new(NewTerminal)),
         w("New agent\u{2026}", Box::new(NewAgent)),
+        w(super::agent_start::NEW_PROJECT, Box::new(NewProject)),
         w(super::starting::PLAN_FIRST_LINE, Box::new(TogglePlanFirst)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
