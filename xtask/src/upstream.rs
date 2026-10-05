@@ -273,6 +273,16 @@ fn plan(names: &[&'static str], no_push: bool) -> Result<Vec<Step>> {
     Ok(steps)
 }
 
+/// gpui-fast's stand-ins for gpui-kit's gpui-pre snapshots, which the root manifest patches in.
+const GPUI_PRE_COMPAT: [&str; 6] = [
+    "gpui-pre",
+    "gpui-pre-platform",
+    "gpui-pre-macros",
+    "gpui-pre-sum-tree",
+    "gpui-pre-web",
+    "gpui-pre-reqwest-client",
+];
+
 /// The workspace package that pins each fork in `Cargo.lock` (`cargo update -p`); ghostty is
 /// pinned through libghostty-rs and the submodule, not the lock.
 fn lock_package(fork: &str) -> Option<&'static str> {
@@ -500,9 +510,29 @@ fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken
     if pinned.is_empty() {
         return Ok(());
     }
-    let packages: Vec<&str> = pinned.iter().flat_map(|(package, _)| ["-p", package]).collect();
+    let mut packages: Vec<&str> = pinned.iter().flat_map(|(package, _)| ["-p", package]).collect();
+    // The root manifest patches gpui-kit's gpui-pre snapshots with gpui-fast's `compat/` crates.
+    // Updated with neither fork, they kept the old snapshot's version: when gpui-kit moved to
+    // gpui-pre 0.3.8, the 0.3.7 patch went unused and crates.io's GPUI was locked beside ours.
+    let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
+    if pinned.iter().any(|(package, _)| matches!(*package, "gpui" | "gpui-kit")) {
+        packages.extend(
+            GPUI_PRE_COMPAT
+                .iter()
+                .filter(|c| lock.contains(&format!("name = \"{c}\"\n")))
+                .flat_map(|c| ["-p", c]),
+        );
+    }
     let _dir = sh.push_dir(root);
-    step("cargo update", &cmd!(sh, "cargo update {packages...}"))?;
+    let updated = cmd!(sh, "cargo update {packages...}").output()?;
+    let said = String::from_utf8_lossy(&updated.stderr);
+    eprint!("{said}");
+    ensure!(updated.status.success(), "cargo update failed");
+    ensure!(
+        !said.contains("was not used in the crate graph"),
+        "a [patch] went unused: its version no longer meets what the graph asks for (move the \
+         fork's compat crates with gpui-kit's gpui-pre), and the lock would carry two GPUIs"
+    );
     // The fuzz crate is a workspace of its own with its own lock: left behind, it built the
     // engine against an older binding of the same vendored ghostty, and its own zig build too.
     let fuzz_lock = root.join("fuzz").join("Cargo.lock");
