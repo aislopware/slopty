@@ -345,7 +345,7 @@ impl CommitSheet {
                 .gap(px(self.theme.spacing.xs))
                 .cursor_pointer()
                 .child(kit::tick_box(&self.theme, on, 1.0)),
-            s.accent,
+            s.focus,
         )
     }
 

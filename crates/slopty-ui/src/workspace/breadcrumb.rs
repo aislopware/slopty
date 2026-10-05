@@ -281,7 +281,7 @@ impl WorkspaceView {
             .on_click(
                 cx.listener(move |this, _ev, window, cx| this.toggle_menu(which, window, cx)),
             );
-        tab_stop(el, s.accent)
+        tab_stop(el, s.focus)
     }
 
     /// A segment that opens nothing: its words, on the same grid as a button's.

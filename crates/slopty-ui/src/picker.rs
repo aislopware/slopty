@@ -497,7 +497,7 @@ impl WindowPicker {
                 crate::kit::meta(div(), theme).flex_none().child(dotted(theme, worker))
             }));
         let row = if chosen { self.plate.mark(row, ix) } else { row };
-        tab_stop(row, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+        tab_stop(row, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(on_pick.clone());
         }))
     }

@@ -12,14 +12,13 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, FollowMode, FontWeight, InteractiveElement as _,
+    AnyElement, App, Context, Div, ElementId, FollowMode, InteractiveElement as _,
     IntoElement as _, LiveRegion as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, relative,
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{BackgroundTask, Cap, Delivery, Drive, ItemId, Request};
-use slopty_theme::Typography;
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, ThreadViewEvent, tail};
@@ -221,7 +220,7 @@ impl ThreadView {
                         this.list.set_follow_mode(FollowMode::Tail);
                         cx.notify();
                     })),
-                s.accent,
+                s.focus,
             ))
             .into_any_element()
     }
@@ -744,8 +743,7 @@ impl ThreadView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_size(self.z(theme.typography.task_title()))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .map(|el| kit::typed(el, theme.roles().task_title, self.zoom))
                             .text_color(hsla(s.text))
                             .child(SharedString::from(title)),
                     )
@@ -767,7 +765,7 @@ impl ThreadView {
                     .mx(self.z(theme.spacing.md))
                     .mb(self.z(theme.spacing.md))
                     .whitespace_normal()
-                    .text_size(self.z(theme.typography.ui_size));
+                    .map(|el| kit::typed(el, theme.roles().chrome, self.zoom));
                 if code {
                     el.px(self.z(theme.spacing.sm))
                         .py(self.z(theme.spacing.xs))

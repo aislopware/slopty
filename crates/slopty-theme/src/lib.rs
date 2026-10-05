@@ -613,6 +613,88 @@ impl Typography {
     }
 }
 
+/// A type role: a size, the line it sits on, and its weight, in points at zoom 1.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TypeRole {
+    /// The text's size.
+    pub size: f32,
+    /// The height of its line.
+    pub line: f32,
+    /// Its weight: 400, [`Typography::MEDIUM_WEIGHT`] or [`Typography::STRONG_WEIGHT`].
+    pub weight: f32,
+}
+
+/// The type roles: what a piece of text is, each its size, line and weight, for a pointer or a
+/// finger ([`Typography::roles`]).
+///
+/// One scale for the chrome made the work itself read as settings: a task's name and a
+/// request's question sat at the size of the facts round them. A role says what the text is,
+/// and its numbers follow: the desktop's from the 13 pt chrome, the touch ones a step larger
+/// so a label has the presence its 44 pt row gives it. Each follows the chrome size setting,
+/// and prose its own.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TypeRoles {
+    /// A timestamp or a dense diagnostic figure, which can be left out: 11/16. Never a reason
+    /// or a scope the person must read.
+    pub caption: TypeRole,
+    /// Facts about a thing: where it is, when, its counts. 12/18.
+    pub metadata: TypeRole,
+    /// A control's or a row's words: 13/19.
+    pub chrome: TypeRole,
+    /// The same, for what acts or is chosen: 13/19 at the medium weight.
+    pub action: TypeRole,
+    /// What a piece of work is called where it is the thing to act on: a task, a request
+    /// put to the person. 14/20 at the medium weight.
+    pub task_title: TypeRole,
+    /// A section's heading in a list or a panel: 13/18 at the strong weight.
+    pub section: TypeRole,
+    /// A panel's or a dialog's title: 16/22 at the strong weight.
+    pub panel_title: TypeRole,
+    /// What is read at length, at [`Typography::prose_size`]: 15/24.
+    pub prose: TypeRole,
+    /// A page's heading inside the window: 22/28 at the strong weight.
+    pub page_heading: TypeRole,
+    /// The heading of a page that is the whole window, the first run: 26/32 at the strong
+    /// weight.
+    pub first_run: TypeRole,
+}
+
+impl Typography {
+    /// The regular weight.
+    pub const REGULAR_WEIGHT: f32 = 400.0;
+
+    /// The type roles for a pointer (`touch` false) or a finger.
+    #[must_use]
+    pub fn roles(&self, touch: bool) -> TypeRoles {
+        let base = self.ui_size;
+        // (size over the chrome size, leading) for a pointer, then for a finger.
+        let role = |desk: (f32, f32), finger: (f32, f32), weight: f32| {
+            let (step, leading) = if touch { finger } else { desk };
+            let size = (base + step).max(6.0);
+            TypeRole { size, line: size + leading, weight }
+        };
+        let (regular, medium, strong) =
+            (Self::REGULAR_WEIGHT, Self::MEDIUM_WEIGHT, Self::STRONG_WEIGHT);
+        let prose = self.prose() + if touch { 2.0 } else { 0.0 };
+        TypeRoles {
+            caption: role((-2.0, 5.0), (-1.0, 5.0), regular),
+            metadata: role((-1.0, 6.0), (0.0, 5.0), regular),
+            chrome: role((0.0, 6.0), (4.0, 5.0), regular),
+            action: role((0.0, 6.0), (4.0, 5.0), medium),
+            task_title: role((1.0, 6.0), (4.0, 5.0), medium),
+            section: role((0.0, 5.0), (2.0, 5.0), strong),
+            panel_title: role((3.0, 6.0), (7.0, 5.0), strong),
+            prose: TypeRole {
+                size: prose,
+                line: (prose * self.prose_line_height).round(),
+                weight: regular,
+            },
+            page_heading: role((9.0, 6.0), (11.0, 6.0), strong),
+            first_run: role((13.0, 6.0), (15.0, 6.0), strong),
+        }
+    }
+}
+
 impl Default for Typography {
     fn default() -> Self {
         Self {
@@ -866,13 +948,18 @@ pub struct Surfaces {
     pub text_secondary: Rgb,
     /// Hints, timestamps, folds, inactive titles, second lines.
     pub text_muted: Rgb,
-    /// The interaction accent, the brand's green as text and lines: the focus ring, a link in
-    /// prose, a mark that says "live" or "chosen". Spent sparingly: the primary action is
-    /// [`Self::solid`], not this.
+    /// The interaction accent, the brand's green as text and lines: a link in prose, a mark
+    /// that says "live" or "chosen". Spent sparingly: the primary action is [`Self::solid`],
+    /// and the keyboard's ring is [`Self::focus`], not this.
     pub accent: Rgb,
-    /// Connected, agent done, lines added: as text. The brand's green, as the accent is, so
-    /// green means one thing (live, chosen, good) wherever it shows.
+    /// Connected, agent done, lines added: as text. Its own seed, the brand's green as the
+    /// accent's is for now, so a done state and a live mark can part without touching every
+    /// use of either.
     pub success: Rgb,
+    /// The keyboard's ring and any outline that says "this has the keyboard": the chrome's
+    /// text, neutral, so green keeps meaning live and done. Drawn at `alpha::STRONG`, it clears
+    /// 3:1 on every surface it can ring (WCAG 2.4.13).
+    pub focus: Rgb,
     /// Agent waiting, "N need you", muted, reconnecting: as text.
     pub warn: Rgb,
     /// A failed result or command, a pairing error: as text.
@@ -953,9 +1040,12 @@ struct Tones {
     /// before they are lifted.
     text_secondary: f32,
     text_muted: f32,
-    /// The brand's green as text (the accent and success), and as a mark.
+    /// The brand's green as text, and as a mark: the accent.
     accent: Oklch,
     accent_fill: Oklch,
+    /// Done and good as text, and as a mark: its own seed, the accent's green for now.
+    success: Oklch,
+    success_fill: Oklch,
     /// Text on the green mark.
     accent_ink: Oklch,
     warn: Rgb,
@@ -1010,6 +1100,8 @@ const DARK_TONES: Tones = Tones {
     text_muted: 0.651,
     accent: BRAND_OKLCH,
     accent_fill: BRAND_OKLCH,
+    success: BRAND_OKLCH,
+    success_fill: BRAND_OKLCH,
     accent_ink: ON_GREEN,
     warn: Rgb::hex(0xe5c07b),
     // A light coral, near Radix's dark red 11 (`ff9592`): at One Dark's lightness (`f27d84`)
@@ -1054,6 +1146,8 @@ const LIGHT_TONES: Tones = Tones {
     // never greyed.
     accent: Oklch { l: 0.49, c: 0.135, h: BRAND_OKLCH.h },
     accent_fill: Oklch { l: 0.64, c: 0.16, h: BRAND_OKLCH.h },
+    success: Oklch { l: 0.49, c: 0.135, h: BRAND_OKLCH.h },
+    success_fill: Oklch { l: 0.64, c: 0.16, h: BRAND_OKLCH.h },
     accent_ink: ON_GREEN,
     // A touch more amber than brown, so waiting reads as amber and never as a brown.
     warn: Rgb::hex(0x8a5600),
@@ -1217,6 +1311,7 @@ impl Surfaces {
         let word = Floor { ratio: floor, lc: MUTED_LC };
         let green = lift_to(t.accent.rgb(), &under, t.pole, word);
         let green_fill = t.accent_fill.rgb();
+        let done = lift_to(t.success.rgb(), &under, t.pole, word);
         Self {
             canvas,
             panel,
@@ -1239,11 +1334,12 @@ impl Surfaces {
             text_secondary,
             text_muted,
             accent: green,
-            success: green,
+            success: done,
+            focus: text,
             warn: lift_to(t.warn, &under, t.pole, word),
             error: lift_to(t.error, &under, t.pole, word),
             accent_fill: green_fill,
-            success_fill: green_fill,
+            success_fill: t.success_fill.rgb(),
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
             fill_fg: t.fill_fg,
@@ -1778,6 +1874,12 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The type roles at this theme's density: a finger's when its targets are a finger's.
+    #[must_use]
+    pub fn roles(&self) -> TypeRoles {
+        self.typography.roles(self.density.hit > Density::COMPACT.hit)
+    }
+
     /// The theme for `variant` with default typography.
     #[must_use]
     pub fn new(variant: Variant) -> Self {
@@ -2123,6 +2225,75 @@ mod tests {
             (CursorBlink::Never.blinks(true), CursorBlink::Never.blinks(false)),
             (false, false)
         );
+    }
+
+    /// The keyboard's ring is neutral, the chrome's text and not the green, so green keeps
+    /// meaning live and done; drawn at its strength it clears 3:1 on every ground it rings,
+    /// on every background and at either contrast.
+    #[test]
+    fn the_focus_ring_is_neutral_and_seen_everywhere() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            for contrast in [Contrast::Standard, Contrast::Increased] {
+                let s = Surfaces::derive(content, contrast);
+                assert_eq!(s.focus, s.text, "{name}: the ring is the text's tone");
+                assert_ne!(s.focus, s.accent, "{name}: not the green");
+                for (ground, under) in under_text(&s, content) {
+                    let ring = under.mix(s.focus, alpha::STRONG);
+                    let ratio = ring.contrast(under);
+                    assert!(ratio >= NON_TEXT, "{name} {contrast:?} on {ground}: {ratio:.2}");
+                }
+            }
+        }
+    }
+
+    /// Success has its own seed, apart from the accent's, though both are the brand's green
+    /// for now: as text each reads on every ground, as the accent does.
+    #[test]
+    fn success_is_its_own_token() {
+        for tones in [DARK_TONES, LIGHT_TONES] {
+            assert_eq!(tones.success, tones.accent, "one green for now");
+            assert_eq!(tones.success_fill, tones.accent_fill);
+        }
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            for (ground, under) in under_text(&s, theme.content()) {
+                assert!(s.success.contrast(under) >= 3.0, "{variant:?} on {ground}");
+            }
+        }
+    }
+
+    /// The type roles: the desktop's from the 13 pt chrome, the touch ones a step larger, each
+    /// following the chrome size, prose its own; a touch theme picks the touch ones.
+    #[test]
+    fn the_type_roles_are_the_scale_the_critique_set() {
+        let t = Typography::default();
+        let at = |r: TypeRole| (r.size, r.line, r.weight);
+        let desk = t.roles(false);
+        assert_eq!(at(desk.caption), (11.0, 16.0, 400.0));
+        assert_eq!(at(desk.metadata), (12.0, 18.0, 400.0));
+        assert_eq!(at(desk.chrome), (13.0, 19.0, 400.0));
+        assert_eq!(at(desk.action), (13.0, 19.0, 500.0));
+        assert_eq!(at(desk.task_title), (14.0, 20.0, 500.0));
+        assert_eq!(at(desk.section), (13.0, 18.0, 600.0));
+        assert_eq!(at(desk.panel_title), (16.0, 22.0, 600.0));
+        assert_eq!(at(desk.prose), (15.0, 24.0, 400.0));
+        assert_eq!(at(desk.page_heading), (22.0, 28.0, 600.0));
+        assert_eq!(at(desk.first_run), (26.0, 32.0, 600.0));
+        let touch = t.roles(true);
+        assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
+        assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
+        assert_eq!(at(touch.task_title), (17.0, 22.0, 500.0));
+        assert_eq!(at(touch.section), (15.0, 20.0, 600.0));
+        assert_eq!(at(touch.panel_title), (20.0, 25.0, 600.0));
+        assert_eq!(at(touch.first_run), (28.0, 34.0, 600.0));
+        let larger = Typography { ui_size: 15.0, ..Typography::default() }.roles(false);
+        assert_eq!(at(larger.task_title), (16.0, 22.0, 500.0), "it follows the chrome size");
+        assert_eq!(larger.prose, desk.prose, "prose keeps its own size");
+        let finger = Theme { density: Density::TOUCH, ..Theme::default() };
+        assert_eq!(finger.roles(), touch);
+        assert_eq!(Theme::default().roles(), desk);
     }
 
     /// Terminal backgrounds the chrome is derived for, with a name for the messages: the two

@@ -2951,7 +2951,7 @@ impl Workspace {
             .role(Role::Button)
             .aria_label(SharedString::from(key_label(label, lit)))
             .child(SharedString::from(label));
-        tab_stop(key, self.theme.surfaces.accent)
+        tab_stop(key, self.theme.surfaces.focus)
             .on_click(move |_ev, window, cx| on_click(window, cx))
     }
 
@@ -3042,7 +3042,7 @@ impl Workspace {
         width: f32,
         cx: &Context<Self>,
     ) -> (gpui::AnyElement, f32) {
-        let accent = self.theme.surfaces.accent;
+        let focus = self.theme.surfaces.focus;
         let view = terminal.read(cx);
         let (armed, armed_command) = (view.sticky_control(), view.sticky_command());
         let armed_alt = view.sticky_alt();
@@ -3093,7 +3093,7 @@ impl Workspace {
         #[cfg(target_os = "ios")]
         let clipboard =
             clipboard.children((!has_selection).then(|| self.paste_key_spot()).flatten());
-        let clipboard = tab_stop(clipboard, accent).on_click(move |_ev, window, cx| {
+        let clipboard = tab_stop(clipboard, focus).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if has_selection {
                     // Copy, then the key reads "Paste" again.
@@ -3113,7 +3113,7 @@ impl Workspace {
             .role(Role::Button)
             .aria_label(if finding { "Close find" } else { "Find" })
             .child("Find");
-        let find = tab_stop(find, accent).on_click(move |_ev, window, cx| {
+        let find = tab_stop(find, focus).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if finding {
                     t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
@@ -3539,7 +3539,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
             icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
                 .size(glyph_size),
         );
-    tab_stop(row, s.accent)
+    tab_stop(row, s.focus)
 }
 
 /// The label over this Mac's row on the add panels.
@@ -3609,7 +3609,7 @@ fn entry_row(
             icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
                 .size(glyph_size),
         );
-    tab_stop(row, s.accent)
+    tab_stop(row, s.focus)
 }
 
 /// The app's own commands, bound outside any view's context: its rows of the keymap's table

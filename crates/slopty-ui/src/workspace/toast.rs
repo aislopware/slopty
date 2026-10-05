@@ -290,7 +290,7 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .hover(gpui::Styled::underline)
                 .child(label);
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         };
         let mut body = None;
         let mut mark = None;

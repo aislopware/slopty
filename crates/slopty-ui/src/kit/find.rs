@@ -373,7 +373,7 @@ impl RenderOnce for FindBar {
                         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                         .active(move |el| el.bg(hsla(s.pressed)))
                         .child(label);
-                    crate::a11y::tab_stop(el, s.accent)
+                    crate::a11y::tab_stop(el, s.focus)
                         .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                         .on_click(move |_ev, window, cx| on_replace(all, window, cx))
                 };

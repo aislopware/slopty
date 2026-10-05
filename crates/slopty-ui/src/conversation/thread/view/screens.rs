@@ -91,7 +91,7 @@ impl ThreadView {
                 cx.new(|_| kit::Hint::new(label.clone(), "", theme)).into()
             })
         };
-        Some(crate::a11y::tab_stop(chip, s.accent).into_any_element())
+        Some(crate::a11y::tab_stop(chip, s.focus).into_any_element())
     }
 }
 

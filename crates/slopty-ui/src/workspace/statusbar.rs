@@ -414,7 +414,7 @@ impl WorkspaceView {
         let ports = (!phone).then(|| self.forwarded_count()).filter(|n| *n > 0).map(|n| {
             let text = SharedString::from(counted(n, "port", "ports"));
             let el = button("status-ports", text.clone(), theme).child(tabular(div()).child(text));
-            tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, window, cx| {
+            tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
                 this.list_ports(&super::actions::ListPorts, window, cx);
             }))
         });
@@ -423,7 +423,7 @@ impl WorkspaceView {
             let text = SharedString::from(release_line(release));
             let page = release.page.clone();
             let el = button("status-release", text.clone(), theme).child(text);
-            tab_stop(el, s.accent).on_click(move |_ev, _w, cx| cx.open_url(&page))
+            tab_stop(el, s.focus).on_click(move |_ev, _w, cx| cx.open_url(&page))
         });
         let clock = cx.background_executor().now();
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
@@ -624,7 +624,7 @@ impl WorkspaceView {
             .when(warn, |el| el.text_color(hsla(s.warn)))
             .child(words)
             .when(self.bar.plans_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
-        Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
+        Some(tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, _window, cx| {
             this.toggle_popover(Popover::Plans, cx);
         })))
     }
@@ -650,7 +650,7 @@ impl WorkspaceView {
         let el =
             spaced(tabular(button("status-transfers", text.clone().into(), theme)), &text, theme)
                 .when(self.bar.transfers_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
-        Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
+        Some(tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, _window, cx| {
             this.toggle_popover(Popover::Transfers, cx);
         })))
     }
@@ -727,12 +727,12 @@ impl WorkspaceView {
             .map(kit::eased)
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .child("Cancel");
-        let stop = tab_stop(stop, s.accent)
+        let stop = tab_stop(stop, s.focus)
             .invisible()
             .group_hover(group.clone(), gpui::Styled::visible)
             // Its own focus, as the navigator's row actions: not any focused ancestor's.
             .focus(gpui::Styled::visible)
-            .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible())
+            .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).visible())
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 cx.stop_propagation();
                 this.cancel_transfer(xfer, cx);

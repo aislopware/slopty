@@ -12,6 +12,7 @@
 use std::rc::Rc;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div,
@@ -192,7 +193,7 @@ impl ThreadView {
                 .px(self.z(theme.spacing.xs))
                 .rounded_r(self.z(theme.radii.sm))
                 .cursor_pointer();
-            crate::a11y::tab_stop(kit::secondary(el, theme), s.accent)
+            crate::a11y::tab_stop(kit::secondary(el, theme), s.focus)
                 .child(self.icon(IconName::ChevronDown, s.text_secondary))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.denials_open = if this.denials_open.as_ref() == Some(&ask) {
@@ -283,8 +284,7 @@ impl ThreadView {
             .flex_col()
             .gap(self.z(theme.spacing.xs))
             .child(
-                div()
-                    .text_size(self.z(theme.typography.small()))
+                kit::typed(div(), theme.roles().metadata, self.zoom)
                     .text_color(hsla(s.text_muted))
                     .child(STANDING),
             )
@@ -313,7 +313,7 @@ impl ThreadView {
                             .min_w_0()
                             .flex_1()
                             .whitespace_normal()
-                            .text_size(self.z(theme.typography.ui_size))
+                            .map(|el| kit::typed(el, theme.roles().chrome, self.zoom))
                             .text_color(hsla(s.text_secondary))
                             .child(SharedString::from(reach.to_owned()))
                     }))

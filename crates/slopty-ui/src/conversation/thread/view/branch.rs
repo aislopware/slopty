@@ -243,7 +243,7 @@ impl ThreadView {
                         let theme = std::rc::Rc::clone(&hint_theme);
                         cx.new(|_| kit::Hint::new("Branch from here", "", theme)).into()
                     }),
-                s.accent,
+                s.focus,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_branch(&item, turn, cx)))
             .into_any_element(),
@@ -281,7 +281,7 @@ impl ThreadView {
                 .when(!on, |el| el.hover(move |el| el.bg(hsla(s.hover))))
                 .children(mark)
                 .child(label),
-            s.accent,
+            s.focus,
         )
     }
 

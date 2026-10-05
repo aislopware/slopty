@@ -1037,7 +1037,7 @@ impl TerminalView {
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 })
                 .child(label);
-            crate::a11y::tab_stop(row, s.accent)
+            crate::a11y::tab_stop(row, s.focus)
         };
         Some(
             div()
@@ -2735,7 +2735,7 @@ impl TerminalView {
                 .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 .child(label)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.run_restored(cx)));
-            crate::a11y::tab_stop(button, s.accent)
+            crate::a11y::tab_stop(button, s.focus)
         });
         let dismiss = div()
             .id("terminal-restored-dismiss")
@@ -2763,7 +2763,7 @@ impl TerminalView {
                 .font_family(theme.typography.ui_family.clone())
                 .child(div().flex_none().text_color(hsla(s.text_secondary)).child("Restored"))
                 .children(run)
-                .child(crate::a11y::tab_stop(dismiss, s.accent)),
+                .child(crate::a11y::tab_stop(dismiss, s.focus)),
         )
     }
 
@@ -2863,7 +2863,7 @@ impl TerminalView {
                 .bottom(px(theme.spacing.lg * k))
                 .flex()
                 .justify_center()
-                .child(crate::a11y::tab_stop(element, s.accent)),
+                .child(crate::a11y::tab_stop(element, s.focus)),
         )
     }
 

@@ -154,7 +154,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.md))
                 .py(self.z(theme.spacing.sm))
-                .map(|el| self.shell(el, capped))
+                .map(|el| self.shell(el, capped, false))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(if resuming {

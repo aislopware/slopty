@@ -1466,7 +1466,7 @@ impl ScreenView {
             .child(div().flex_none().size(px(HEALTH_DOT * k)).rounded_full().bg(hsla(dot)))
             .child(health.word());
         Some(
-            crate::a11y::tab_stop(mark, s.accent)
+            crate::a11y::tab_stop(mark, s.focus)
                 .on_click(move |_ev, _w, cx| view.update(cx, |v, cx| v.set_hud(true, cx)))
                 .into_any_element(),
         )

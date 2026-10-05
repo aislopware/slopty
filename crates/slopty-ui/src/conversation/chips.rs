@@ -96,7 +96,7 @@ fn remove_button(
             crate::icons::icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted))
                 .size(px(theme.typography.small() * zoom)),
         );
-    crate::a11y::tab_stop(button, s.accent).into_any_element()
+    crate::a11y::tab_stop(button, s.focus).into_any_element()
 }
 
 /// A pasted picture's chip: the picture itself in a small square on the hairline, its ✕ on a

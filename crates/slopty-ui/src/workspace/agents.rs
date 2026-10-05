@@ -496,7 +496,7 @@ impl WorkspaceView {
         let pill = if let Some(session) = waiting {
             tab_stop(
                 pill.cursor_pointer().hover(move |el| el.bg(hsla_alpha(color, alpha::TINT))),
-                theme.surfaces.accent,
+                theme.surfaces.focus,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)))
         } else {
@@ -546,7 +546,7 @@ impl WorkspaceView {
                     .fill()
                     .zooming(chrome.zooming),
             );
-        tab_stop(pill, theme.surfaces.accent)
+        tab_stop(pill, theme.surfaces.focus)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()
     }

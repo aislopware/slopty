@@ -335,106 +335,6 @@ impl Element for Breathing {
     }
 }
 
-/// A bar of parts, each a capsule of its own share and tone with round ends.
-///
-/// A `spacing.xxs` gap parts them, and what no part holds is left as the quiet track, a capsule
-/// too. A board's
-/// tasks read as merged, then under way, then up next. It holds still: a part changes when what
-/// it counts does, and nothing on a board moves on its own.
-#[derive(IntoElement)]
-pub struct Segments {
-    id: SharedString,
-    parts: Vec<(f32, Rgb)>,
-    height: Pixels,
-    gap: Pixels,
-    track: Hsla,
-    label: Option<SharedString>,
-}
-
-impl std::fmt::Debug for Segments {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Segments")
-            .field("id", &self.id)
-            .field("parts", &self.parts)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Segments {
-    /// No parts yet under `id`, `spacing.xs` tall.
-    #[must_use]
-    pub fn new(theme: &Theme, id: impl Into<SharedString>) -> Self {
-        Self {
-            id: id.into(),
-            parts: Vec::new(),
-            height: px(theme.spacing.xs),
-            gap: px(theme.spacing.xxs),
-            track: track_tone(theme),
-            label: None,
-        }
-    }
-
-    /// A part of `share` (0 to 1 of the whole) in `tone`, after the parts before it. A part of
-    /// nothing is left out; parts past the whole are cut to it.
-    #[must_use]
-    pub fn part(mut self, share: f32, tone: Rgb) -> Self {
-        let room = 1.0 - self.parts.iter().map(|(s, _)| s).sum::<f32>();
-        let share = share.clamp(0.0, room.max(0.0));
-        if share > 0.0 {
-            self.parts.push((share, tone));
-        }
-        self
-    }
-
-    /// What a screen reader calls it ("2 of 6 merged").
-    #[must_use]
-    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// `height` tall, its gaps `gap`, for a bar drawn at a zoom of its own.
-    #[must_use]
-    pub const fn size(mut self, height: Pixels, gap: Pixels) -> Self {
-        self.height = height;
-        self.gap = gap;
-        self
-    }
-}
-
-impl RenderOnce for Segments {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let Self { id, parts, height, gap, track, label } = self;
-        let rest = 1.0 - parts.iter().map(|(s, _)| s).sum::<f32>();
-        let capsule = move |share: f32, fill: Hsla| {
-            div()
-                // Shares of the room the gaps leave.
-                .flex_basis(px(0.0))
-                .flex_grow(share)
-                .flex_shrink(1.0)
-                .min_w(height)
-                .h_full()
-                .rounded_full()
-                .bg(fill)
-        };
-        let selector = format!("{id}-part");
-        div()
-            .id(ElementId::Name(id))
-            .role(Role::ProgressIndicator)
-            .when_some(label, gpui::StatefulInteractiveElement::aria_label)
-            .w_full()
-            .h(height)
-            .flex_none()
-            .flex()
-            .gap(gap)
-            .children(parts.into_iter().map(move |(share, tone)| {
-                let selector = selector.clone();
-                capsule(share, hsla(tone)).debug_selector(move || selector)
-            }))
-            .when(rest > 1e-4, |el| el.child(capsule(rest, track)))
-    }
-}
-
 /// The ring's track: `border`, so a part-full ring reads as a gauge and not a spinner.
 #[must_use]
 pub fn ring_track(theme: &Theme) -> Hsla {
@@ -532,17 +432,6 @@ mod tests {
 
     /// An unknown share breathes between its floor and `alpha::STRONG` over one breath, and
     /// comes back where it began.
-    #[test]
-    fn a_part_of_nothing_is_left_out_and_parts_never_pass_the_whole() {
-        let theme = Theme::default();
-        let s = theme.surfaces;
-        let bar = super::Segments::new(&theme, "b")
-            .part(0.5, s.accent_fill)
-            .part(0.0, s.warn_fill)
-            .part(0.75, s.text_muted);
-        assert_eq!(bar.parts, [(0.5, s.accent_fill), (0.5, s.text_muted)]);
-    }
-
     #[test]
     fn an_unknown_share_breathes() {
         let breath = Motion::DEFAULT.breath;

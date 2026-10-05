@@ -327,7 +327,7 @@ impl WorkspaceView {
                 .map(crate::kit::eased)
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(label);
-            crate::a11y::tab_stop(el, s.accent)
+            crate::a11y::tab_stop(el, s.focus)
         };
         let of = answer.thread.to_string();
         let answered = |allow: bool| {

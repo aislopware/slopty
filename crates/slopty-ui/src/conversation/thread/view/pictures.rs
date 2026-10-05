@@ -103,7 +103,7 @@ impl ThreadView {
                         .border_color(hsla(s.border_subtle))
                         .map(|el| kit::inset(el, &theme))
                         .children(shown.map(|p| img(p).size_full().object_fit(ObjectFit::Cover))),
-                    s.accent,
+                    s.focus,
                 )
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();

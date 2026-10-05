@@ -1090,7 +1090,7 @@ impl ThreadView {
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .active(move |el| el.bg(hsla(s.pressed))),
         };
-        crate::a11y::tab_stop(el, s.accent)
+        crate::a11y::tab_stop(el, s.focus)
     }
 
     /// A bare icon button: its glyph brightens under the pointer.
@@ -1122,7 +1122,7 @@ impl ThreadView {
                     crate::icons::icon(&self.theme, icon, IconSize::Inline, hsla(s.text_muted))
                         .size(self.z(self.theme.typography.icon())),
                 ),
-            s.accent,
+            s.focus,
         )
     }
 
@@ -1382,7 +1382,7 @@ impl ThreadView {
                     if copied { IconName::Check } else { IconName::Copy },
                     if copied { s.success } else { s.text_muted },
                 )),
-            s.accent,
+            s.focus,
         )
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             this.copy(item.clone(), words.clone(), cx);
@@ -2088,7 +2088,8 @@ impl Render for ThreadView {
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
         let tucked = bar.as_ref().is_some_and(|(_, tucked)| *tucked);
         let bar = bar.map(|(bar, _)| bar);
-        let composer = composes.then(|| self.composer_box(tucked, cx));
+        let typing = self.composer.focus_handle(cx).contains_focused(window, cx);
+        let composer = composes.then(|| self.composer_box(tucked, typing, cx));
         self.keep_keyboard(composes, window, cx);
         div()
             .id("thread")

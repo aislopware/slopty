@@ -790,7 +790,7 @@ impl SettingsForm {
                     this.tab_key(section, ev, window, cx);
                 }))
                 .child(section.label());
-            crate::a11y::tab_stop(el, s.accent)
+            crate::a11y::tab_stop(el, s.focus)
         });
         div()
             .flex_none()
@@ -1051,16 +1051,15 @@ impl SettingsForm {
                 cx.new(|_| crate::kit::Hint::new(name, "", theme).mono()).into()
             })
             .child(
-                div()
+                crate::kit::typed(div(), theme.roles().action, 1.0)
                     .min_w_0()
                     .truncate()
-                    .text_size(px(theme.typography.ui_size))
-                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
                     .child(row.label.clone()),
             )
             .children(was.map(|was| {
                 crate::kit::meta(div(), theme)
+                    .line_height(px(theme.roles().metadata.line))
                     .debug_selector(move || format!("settings-key-was-{ix}"))
                     .flex_shrink(1.0)
                     .min_w_0()
@@ -1087,7 +1086,7 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.xs))
                     .children(reset)
-                    .child(crate::a11y::tab_stop(well, s.accent)),
+                    .child(crate::a11y::tab_stop(well, s.focus)),
             )
             .into_any_element()
     }
@@ -1166,7 +1165,7 @@ impl SettingsForm {
                     IconSize::Inline,
                     hsla(s.text_muted),
                 ));
-            children.push(crate::a11y::tab_stop(link, s.accent).into_any_element());
+            children.push(crate::a11y::tab_stop(link, s.focus).into_any_element());
         }
     }
 
@@ -1333,7 +1332,7 @@ impl SettingsForm {
                 this.control_key(ix, ev, window, cx);
             },
         ));
-        crate::a11y::tab_stop(el, self.theme.surfaces.accent)
+        crate::a11y::tab_stop(el, self.theme.surfaces.focus)
     }
 
     /// A switch: the neutral solid with its knob at its end when on, a quiet track when off. The

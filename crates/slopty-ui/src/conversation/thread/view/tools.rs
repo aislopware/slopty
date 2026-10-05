@@ -415,7 +415,7 @@ impl ThreadView {
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(host(&link.url).to_owned())),
                     ),
-                s.accent,
+                s.focus,
             )
             .on_click(move |_ev, _w, cx| cx.open_url(&url))
         });

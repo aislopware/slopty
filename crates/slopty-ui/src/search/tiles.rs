@@ -168,7 +168,7 @@ impl ProjectSearch {
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.set_scope(scope, cx)))
                 .child(label);
             let el = if on { crate::kit::selected(el, theme, true) } else { el };
-            crate::a11y::tab_stop(el, s.accent)
+            crate::a11y::tab_stop(el, s.focus)
         };
         div()
             .id("search-scope")

@@ -1581,7 +1581,7 @@ impl FileView {
                 .hover(move |st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .active(move |st| st.bg(hsla(s.pressed))),
         };
-        crate::a11y::tab_stop(button, s.accent).on_click(on_click).into_any_element()
+        crate::a11y::tab_stop(button, s.focus).on_click(on_click).into_any_element()
     }
 }
 

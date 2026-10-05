@@ -132,7 +132,7 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text)))
                     .child(label),
-                s.accent,
+                s.focus,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_item(item.clone(), cx)))
         });

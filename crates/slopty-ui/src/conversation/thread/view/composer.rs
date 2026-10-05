@@ -184,7 +184,7 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
-            .map(|el| self.shell(el, capped))
+            .map(|el| self.shell(el, capped, false))
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(self.icon(IconName::SquareTerminal, s.text_muted))
@@ -304,7 +304,7 @@ impl ThreadView {
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
                     .active(move |el| el.bg(hsla(s.pressed)))
                     .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
-                s.accent,
+                s.focus,
             )
             .into_any_element()
         } else {
@@ -367,7 +367,7 @@ impl ThreadView {
                         kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))),
                     )
                     .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
-                s.accent,
+                s.focus,
             )
             .into_any_element(),
         )
@@ -419,7 +419,7 @@ impl ThreadView {
                         .size(self.z(theme.typography.small())),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
-                s.accent,
+                s.focus,
             )
             .into_any_element()
         } else {
@@ -472,7 +472,7 @@ impl ThreadView {
                             .size(self.z(theme.typography.small())),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
-                    s.accent,
+                    s.focus,
                 )
                 .into_any_element(),
             );
@@ -532,7 +532,7 @@ impl ThreadView {
                         .size(self.z(theme.typography.small())),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_efforts(cx))),
-                s.accent,
+                s.focus,
             )
             .into_any_element(),
         )
@@ -576,7 +576,7 @@ impl ThreadView {
                         this.tasks_open = !this.tasks_open;
                         cx.notify();
                     })),
-                s.accent,
+                s.focus,
             )
             .into_any_element(),
         )
@@ -628,7 +628,7 @@ impl ThreadView {
                         let theme = std::rc::Rc::new(hint_theme.clone());
                         cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
                     }),
-                s.accent,
+                s.focus,
             )
             .into_any_element(),
         )
@@ -678,35 +678,19 @@ impl ThreadView {
         } else {
             label.into()
         };
-        let el = div()
-            .id(id)
-            .debug_selector(move || id.to_owned())
-            .role(Role::Button)
-            .aria_label(label)
-            .flex_none()
-            .size(self.z(theme.density.control))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(self.z(theme.radii.sm))
-            .cursor_pointer()
-            .child(
-                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.solid_ink))
-                    .size(self.z(theme.typography.icon())),
-            )
+        let el = kit::message::send_control(theme, self.zoom, id, icon, label)
             .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
                 cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
             });
-        let el =
-            kit::solid_pressable(el, theme).on_click(cx.listener(move |this, _ev, window, cx| {
-                if stop {
-                    this.interrupt(cx);
-                } else {
-                    let delivery = this.send_now(cx);
-                    this.submit(delivery, window, cx);
-                }
-            }));
+        let el = el.on_click(cx.listener(move |this, _ev, window, cx| {
+            if stop {
+                this.interrupt(cx);
+            } else {
+                let delivery = this.send_now(cx);
+                this.submit(delivery, window, cx);
+            }
+        }));
         // A long press (a right click on the Mac) sends after the turn under way, as ⌘↵ does:
         // the one way to queue with no keyboard.
         let queues = !stop && self.state(cx).is_some_and(|st| st.meta.can(Cap::QUEUE));
@@ -715,29 +699,26 @@ impl ThreadView {
                 this.submit(Delivery::Queue, window, cx);
             }))
         });
-        crate::a11y::tab_stop(el, s.accent).into_any_element()
+        crate::a11y::tab_stop(el, s.focus).into_any_element()
     }
 
-    /// The composer's shell, which what stands in its place shares: the floating surface on
-    /// the resting elevation inside one hairline, all its corners round, or with the tray as
-    /// its head only the foot's (the tray then takes the rim's top edge in dark).
-    pub(super) fn shell<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let el = if capped {
-            let r = self.z(theme.radii.lg);
-            el.rounded_bl(r).rounded_br(r)
-        } else {
-            el.rounded(self.z(theme.radii.lg))
-        };
-        let el = el.border(kit::hair(theme)).border_color(hsla(s.border)).bg(hsla(s.elevated));
-        kit::rests(el, theme, !capped, true)
+    /// The composer's shell, which what stands in its place shares: a message's frame
+    /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, all
+    /// its corners round, or with the tray as its head only the foot's. `focused`: the field
+    /// has the keyboard, and the hairline says so.
+    pub(super) fn shell<E: gpui::Styled>(&self, el: E, capped: bool, focused: bool) -> E {
+        kit::message::shell(el, &self.theme, self.zoom, capped, focused)
     }
 
     /// The composer card. While the agent's own TUI holds the session, where it is instead.
     /// `capped`: the tray stands on it as its head, so its top corners are square and its top
     /// edge is the quieter hairline between the two.
-    pub(super) fn composer_box(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn composer_box(
+        &self,
+        capped: bool,
+        focused: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         if self.tui_holds(cx) == Some(true) {
             return self.held_strip(capped, cx);
         }
@@ -755,7 +736,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .map(|el| self.shell(el, capped))
+            .map(|el| self.shell(el, capped, focused))
             // Under the tray, the one line in the shell: the quieter hairline, where the
             // tray's head meets the field.
             .when(capped, |el| el.border_t_0().child(kit::rule(theme, s.border_subtle)))

@@ -265,12 +265,12 @@ mod tests {
         }
     }
 
-    /// Tab puts the ring round a stop: 2 pt clear of it, 2 pt wide, the accent at
-    /// `alpha::STRONG`, drawn outside so nothing moves. A click shows no ring.
+    /// Tab puts the ring round a stop: 2 pt clear of it, 2 pt wide, the focus tone (the chrome's
+    /// text) at `alpha::STRONG`, drawn outside so nothing moves. A click shows no ring.
     #[gpui::test]
     fn the_keyboard_rings_a_stop_and_the_pointer_does_not(cx: &mut TestAppContext) {
         let theme = Theme::default();
-        let color = hsla_alpha(theme.surfaces.accent, alpha::STRONG);
+        let color = hsla_alpha(theme.surfaces.focus, alpha::STRONG);
         let (_view, cx) = cx.add_window_view(|_window, _cx| Buttons(theme.clone()));
         let rings = |cx: &mut gpui::VisualTestContext| {
             cx.run_until_parked();

@@ -584,7 +584,7 @@ pub(super) fn row(
         .cursor_pointer()
         .text_size(px(theme.typography.ui_size))
         .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
-    tab_stop(el, s.accent)
+    tab_stop(el, s.focus)
 }
 
 /// A row's title, cut with an ellipsis.
@@ -2136,7 +2136,7 @@ impl WorkspaceView {
                 .on_click(
                     cx.listener(|this, _ev, window, cx| this.clear_navigator_filter(window, cx)),
                 );
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         });
         // A scope leads the field as a token: what every row below is narrowed to.
         let scope = self.scope_name().map(|name| {
@@ -2530,7 +2530,7 @@ impl WorkspaceView {
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
                 .child(badge);
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         };
         let words = |name: String, more: Option<String>, rollup: Rollup| {
             [Some(name), more]
@@ -2951,7 +2951,7 @@ impl WorkspaceView {
                     let run = Rc::clone(&run);
                     cx.defer_in(window, move |_this, window, cx| run(window, cx));
                 }));
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         });
         let add = worker.linked.then(|| {
             let el = div()
@@ -2973,7 +2973,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                     this.open_session_on(key, None, Vec::new(), None, cx);
                 }));
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         });
         // "…": what the machine says of itself and what can be done to it, hung from here.
         let menu = {
@@ -3013,7 +3013,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                     this.toggle_menu(kind, window, cx);
                 }));
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         };
         // Under the pointer, or while its menu is up: the chevron, "+" and "…" in their fixed
         // places over the readouts. Each is hidden on its own, not by the strip that holds
@@ -3030,7 +3030,7 @@ impl WorkspaceView {
             el.when(!shown && !touch, |el| el.opacity(0.0))
                 .group_hover(group.clone(), |st| st.opacity(1.0))
                 .focus(|st| st.opacity(1.0))
-                .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).opacity(1.0))
+                .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).opacity(1.0))
         };
         let chevron = lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
             .when(!touch, |el| el.invisible().group_hover(group.clone(), gpui::Styled::visible));
@@ -3164,7 +3164,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                     this.open_session_on(worker, Some(cwd.clone()), Vec::new(), None, cx);
                 }));
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         });
         // A finger has no hover: on touch they stand at rest, after the place.
         let hover = div()

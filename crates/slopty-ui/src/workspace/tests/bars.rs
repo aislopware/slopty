@@ -341,7 +341,7 @@ fn the_keyboard_reaches_a_machines_menu(cx: &mut TestAppContext) {
     assert!(nodes.iter().any(|n| n.is("Button", Some("Machine actions, laptop"))), "{nodes:#?}");
     let button = cx.debug_bounds(leak(format!("nav-machine-menu-{laptop_key}"))).expect("laid out");
     let ring =
-        crate::colors::hsla_alpha(Theme::default().surfaces.accent, slopty_theme::alpha::STRONG);
+        crate::colors::hsla_alpha(Theme::default().surfaces.focus, slopty_theme::alpha::STRONG);
     let ringed = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
