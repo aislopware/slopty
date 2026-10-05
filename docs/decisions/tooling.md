@@ -997,8 +997,9 @@ more full-window layer.
   is missing (`dist::publishable`). Any other `dist` builds as before. Test: `xtask`
   `dist::tests::a_tag_is_published_only_signed_and_notarised`.
 
-- ✅ **`land` checks the changed packages first: tests, rustdoc, and iOS and Linux clippy**
-  (2026-10-05, `.research/dev-speed-2026-10-05.md`). Of the last 34 gate runs, 14 were red, and
+- ❌ **`land` checks the changed packages first: tests, rustdoc, and iOS and Linux clippy**
+  (2026-10-05, `.research/dev-speed-2026-10-05.md`; now opt-in as `land --check`, superseded by
+  "Nothing heavy runs here before a land" below). Of the last 34 gate runs, 14 were red, and
   9 of those failed on rustdoc or on the iOS and Linux clippy. Both fail every time, and neither
   the quick gate nor `land`'s tests ran them, so each cost a ~22-minute run, a fix and another
   run: about 5.7 minutes per land on average.
@@ -1014,6 +1015,24 @@ more full-window layer.
   - `--no-tests` now prints that CI is the first to build the push.
   - Track the share of red runs whose failed step is rustdoc or clippy-ios. The target is near
     zero.
+
+- ✅ **Nothing heavy runs here before a land** (2026-10-05). The user wants this Mac's cores
+  on the work, and the heavy checks on GitHub Actions. Before, each land compiled for minutes
+  here, beside two agents' builds: host clippy in the quick gate, the changed packages' tests,
+  rustdoc and iOS and Linux clippy in `land`, and the app's e2e by hand.
+  - The quick gate is the tools lane alone (`gate::QUICK`): fmt, taplo, deny, hakari, shear,
+    typos, `committed`, and both lockfiles `--locked` (`gate::locked`, the check host clippy's
+    `--locked` made). It compiles nothing and takes seconds.
+  - `land` pushes at once. `land --check` keeps the old checks for a change likely to go red.
+  - CI already ran host clippy. It now also runs the app's e2e (`e2e (app)` in `ci.yml`,
+    `cargo xtask e2e app --review`, a changed frame's render and diff in the `e2e-app`
+    artifact). It is not a gate lane until its renders on a hosted Mac's virtual GPU are shown
+    to match the goldens, which a Mac with its own GPU draws. It is a sixth macOS job beside
+    five, so it starts as soon as a lane ends.
+  - The cost is a red run found later: about 5.7 minutes per land on CI's wall clock (the entry
+    above), while the agents keep working, against minutes of every core here per land. Agents
+    still run clippy and their own crate's tests as they code.
+  - Test: `gate::tests::the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e`.
 
 - ✅ **binstall gets the job's token on CI** (2026-10-05). In 33 of 111 test-lane setups,
   binstall's unauthenticated GitHub API calls hit the runner's shared rate limit and timed out,

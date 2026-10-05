@@ -76,10 +76,11 @@ in it until checked here.
 - **The quick gate checks the index here; CI's full gate decides what lands.** Stage exactly
   what you mean to land (`git add <paths>`). Then run
   `cargo gate -m '<message>' > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`:
-  fmt, the tools, `committed` and host clippy, about a minute warm. Unstaged edits are invisible
-  to it. Read `GATE_EXIT=0` or "gate passed" in the log, then
+  fmt, the tools, the locks and `committed`, which compile nothing and take seconds. Unstaged
+  edits are invisible to it. Read `GATE_EXIT=0` or "gate passed" in the log, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, and `cargo xtask land`. That pushes
-  to the `gate` branch, where CI runs every lane and fast-forwards main once all pass. Keep
+  at once to the `gate` branch, where CI runs every lane (clippy, tests, rustdoc, the app's e2e)
+  and fast-forwards main once all pass. Nothing heavy runs on this Mac for a land. Keep
   working meanwhile. A red run names its lane and tests in the run's summary, and the fix lands
   on top. The wrapper's own exit code is the `echo`'s. Batch several changes per land.
 - **Parallel work happens in this one checkout, with no worktrees.** Split the work by

@@ -6,9 +6,10 @@
 //! gate at a time on that branch; a newer push waits behind the run in progress, and only the
 //! newest waits, since its green covers every commit under it.
 //!
-//! Before the push, the tests, rustdoc and the iOS and Linux clippy of the packages the commits
-//! change, and of their dependents, run here ([`crate::gate::land_checks`]): a red run on CI
-//! costs the better part of an hour, most of them a test or a lint a few minutes here fail.
+//! Nothing compiles here first: CI's lanes are the checks, and this Mac's cores stay on the work
+//! (`docs/decisions/tooling.md`, "Nothing heavy runs here before a land"). `--check` runs the
+//! tests, rustdoc and the iOS and Linux clippy of the packages the commits change, and of their
+//! dependents, before the push ([`crate::gate::land_checks`]), for a change likely to go red.
 
 use std::time::{Duration, Instant};
 
@@ -36,10 +37,10 @@ pub struct LandOpts {
     /// Block until CI promoted the commit to main, or failed, and report which.
     #[arg(long)]
     pub wait: bool,
-    /// Push without first checking the packages the commits change (tests, rustdoc, iOS and
-    /// Linux clippy).
+    /// Check the packages the commits change here before the push (tests, rustdoc, iOS and
+    /// Linux clippy), as CI will.
     #[arg(long)]
-    pub no_tests: bool,
+    pub check: bool,
 }
 
 /// A run as `promote` reads it from `gh run list`.
@@ -139,9 +140,7 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         .quiet()
         .read()
         .unwrap_or_default();
-    if opts.no_tests {
-        println!("! pushed without the checks before the push: CI is the first to build this");
-    } else {
+    if opts.check {
         // What `gate` already holds is CI's to check, so a land on top of one still running is
         // checked for its own commits alone: from main, a lockfile change in the earlier land
         // left every later one unchecked.

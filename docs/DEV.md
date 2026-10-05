@@ -25,11 +25,11 @@ zed itself so it is never behind zed while longbridge lags.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
-  gate takes about a minute with a warm build; it prints the next step when it passes. `land`
-  first runs, under `nice`, the tests of the packages the commits change and of their
-  dependents, on HEAD's tree (nextest's `land` profile; `--no-tests` skips it). It then pushes
-  the commit to the `gate` branch, where CI runs every lane, and main moves to that commit only
-  once all of them pass (below, "Gate"). A red run names the failed lane and tests in its
+  gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes
+  the commit at once to the `gate` branch, where CI runs every lane and the app's e2e, and main
+  moves to that commit only once every lane passes (below, "Gate"). `land --check` first runs,
+  under `nice`, the tests, rustdoc and iOS and Linux clippy of the packages the commits change
+  and of their dependents, for a change likely to go red. A red run names the failed lane and tests in its
   summary: fix it in a new commit and land again; that push's run, which waits for any run in
   progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
@@ -195,9 +195,9 @@ Linux (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on the server'
 the worker's that build there, `xtask/src/tools.rs` `LINUX_CRATES`, and
 `x86_64-unknown-linux-musl` on the server's), nextest,
 doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
-- Here, `cargo gate` runs the lanes that take seconds to a minute: the tools lane (fmt with
-  nightly rustfmt, taplo, deny, hakari, shear, typos, and `committed` on the history since the
-  last tag) and host clippy. `-m '<message>'` has `committed` check the message of the commit
+- Here, `cargo gate` runs only the lane that compiles nothing, in seconds: the tools lane (fmt
+  with nightly rustfmt, taplo, deny, hakari, shear, typos, both lockfiles `--locked`, and
+  `committed` on the history since the last tag). `-m '<message>'` has `committed` check the message of the commit
   about to be made too, and leaves it in `target/gate/COMMIT_MSG` for `git commit -F`. It ends
   by printing the next step.
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
@@ -205,7 +205,8 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
   as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
   `xtask/src/gate.rs`), rustdoc runs after iOS clippy on its runner, and the tools lane and Linux
   clippy (`clippy-linux`, with `CC=clang` for the build scripts' C) run on Linux, which keeps the
-  run within five Macs. Before the push, `land` runs the tests, rustdoc and the iOS and Linux
+  run within five Macs. The app's e2e (`e2e (app)`) runs on a sixth, not yet a gate lane. Nothing
+  compiles here before the push; `land --check` runs the tests, rustdoc and the iOS and Linux
   clippy of the packages the commits change and of their dependents, side by side at a low
   priority (`gate::land_checks`). Runs on that branch
   form one concurrency group. A newer push waits behind the run in progress rather than

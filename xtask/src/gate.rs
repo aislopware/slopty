@@ -1,9 +1,10 @@
 //! `xtask gate`: everything that must be green before a commit lands.
 //!
-//! Here, before a commit, the gate runs the lanes that take seconds to a minute ([`QUICK`]: the
-//! tools and host clippy) and prints the next step. The rest (tests, clippy for iOS and Linux,
-//! rustdoc) runs on GitHub Actions when `cargo xtask land` pushes the commit to the `gate`
-//! branch, and `main` moves to it only once every lane there passed (`.github/workflows/ci.yml`).
+//! Here, before a commit, the gate runs only the lane that compiles nothing ([`QUICK`]: the
+//! tools, seconds) and prints the next step, so this Mac's cores stay on the work. Every lane
+//! that compiles (host, iOS and Linux clippy, the tests, rustdoc) runs on GitHub Actions when
+//! `cargo xtask land` pushes the commit to the `gate` branch, and `main` moves to it only once
+//! every lane there passed (`.github/workflows/ci.yml`).
 //! `--full` runs every lane here, as `cargo xtask release` and CI do. The `linux` lane, the
 //! Linux worker's build and tests, runs only on a Linux host: CI's Linux runner.
 //!
@@ -53,8 +54,9 @@ pub struct Options {
     pub message: Option<String>,
 }
 
-/// The lanes a gate runs here before a commit: about a minute once the host build is warm.
-pub const QUICK: [LaneId; 2] = [LaneId::Tools, LaneId::ClippyHost];
+/// The lanes a gate runs here before a commit: the tools, which read text and compile nothing
+/// (`docs/decisions/tooling.md`, "Nothing heavy runs here before a land").
+pub const QUICK: [LaneId; 1] = [LaneId::Tools];
 
 /// Where a gate given `--message` leaves it, for `git commit -F`.
 const MESSAGE_FILE: &str = "target/gate/COMMIT_MSG";
@@ -704,6 +706,7 @@ fn tools_lane(
     let on_tree = &on_tree;
     let results: Vec<Result<()>> = std::thread::scope(|scope| {
         let handles = [
+            scope.spawn(move || locked(&on_tree()?)),
             scope.spawn(move || deny(&on_tree()?)),
             scope.spawn(move || hakari(&on_tree()?, false)),
             scope.spawn(move || shear(&on_tree()?, false)),
@@ -1344,6 +1347,20 @@ pub fn doc(sh: &Shell, open: bool) -> Result<()> {
     )
 }
 
+/// Both lockfiles hold what the manifests ask for, as CI's `cargo fetch --locked` wants: a lock
+/// written from a manifest left out of the index fails here, in seconds, rather than every
+/// lane on the `gate` branch.
+fn locked(sh: &Shell) -> Result<()> {
+    quiet_step("cargo fetch --locked", cmd!(sh, "cargo fetch --locked"))?;
+    if sh.path_exists("fuzz/Cargo.toml") {
+        quiet_step(
+            "cargo fetch --locked (fuzz)",
+            cmd!(sh, "cargo fetch --locked --manifest-path fuzz/Cargo.toml"),
+        )?;
+    }
+    Ok(())
+}
+
 fn deny(sh: &Shell) -> Result<()> {
     quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))?;
     one_gpui(&sh.read_file(sh.current_dir().join("Cargo.lock"))?)
@@ -1523,6 +1540,18 @@ mod tests {
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
+    }
+
+    /// Nothing that compiles runs here before a land: the quick gate is the tools lane, and
+    /// CI carries host clippy and the app's live tests, which ran on this Mac before.
+    #[test]
+    fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
+        assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
+        let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
+        let workflow = std::fs::read_to_string(&path).expect("ci.yml");
+        assert!(workflow.contains("{ lane: clippy-host, os: macos-26 }"), "host clippy on CI");
+        assert!(workflow.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
+        assert!(workflow.contains("name: e2e-app\n          path: target/e2e/artifacts"));
     }
 
     /// A shard builds the spawned binaries beside its own packages without the others' tests,
