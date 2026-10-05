@@ -1,13 +1,10 @@
-Window
+Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
-Heading │ e2e-ios-worker, 1 tile
+Heading │ Terminal
 Button │ Needs you
 Button │ More
 Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
 Button │ Escape
