@@ -392,7 +392,7 @@ impl WorkspaceView {
     }
 
     /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
-    pub(super) fn kind_glyph(&self, item: &Item) -> crate::icons::Glyph {
+    pub(super) fn kind_glyph(&self, item: &Item) -> crate::icons::Symbol {
         super::tile::kind_icon(item, self.item_agent(item).is_some())
     }
 

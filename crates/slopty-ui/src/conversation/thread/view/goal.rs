@@ -19,7 +19,7 @@ use slopty_proto::thread::Goal;
 
 use super::{ThreadView, context_tone, tokens};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// What the Stop button's hint adds while a goal is active.
@@ -80,7 +80,7 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.xs))
-            .child(self.icon(IconName::Flag, s.text_muted))
+            .child(self.icon(Symbol::Flag, s.text_muted))
             .child(kit::fit_label("thread-goal-objective", goal.objective.clone(), theme))
             .children(
                 standing

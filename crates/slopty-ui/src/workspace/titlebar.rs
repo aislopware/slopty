@@ -46,7 +46,7 @@ use super::strip::NEW_WORKSPACE;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// The bar's height under the safe area, with a pointer.
@@ -264,7 +264,7 @@ impl WorkspaceView {
     pub(super) fn navigator_toggle(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let hint_theme = Rc::new(theme.clone());
-        kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
+        kit::icon_button(theme, "navigator-toggle", Symbol::SidebarLeft, "Navigator")
             .when(SHORTCUT_HINTS, |el| {
                 kit::hint_timing(el).tooltip(move |_window, cx| {
                     let keys = crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
@@ -308,7 +308,7 @@ impl WorkspaceView {
             )
             .absolute()
             .inset_0();
-            kit::icon_button(theme, "new-menu", IconName::Plus, NEW)
+            kit::icon_button(theme, "new-menu", Symbol::Plus, NEW)
                 .relative()
                 .aria_expanded(self.menu == Some(MenuKind::New))
                 .child(measure)
@@ -355,13 +355,13 @@ impl WorkspaceView {
                     .text_size(px(theme.typography.caption()))
                     .child(count)
             });
-            kit::icon_button(theme, "bell", IconName::Bell, super::navigator::NEEDS_YOU)
+            kit::icon_button(theme, "bell", Symbol::Bell, super::navigator::NEEDS_YOU)
                 .group(BELL)
                 .relative()
                 .children(badge)
                 .on_click(cx.listener(|this, _ev, window, cx| this.needs_you_shown(window, cx)))
         });
-        let more = kit::icon_button(theme, "more", IconName::Ellipsis, "More")
+        let more = kit::icon_button(theme, "more", Symbol::Ellipsis, "More")
             .aria_expanded(self.menu == Some(MenuKind::More))
             .on_click(
                 cx.listener(|this, _ev, window, cx| this.toggle_menu(MenuKind::More, window, cx)),

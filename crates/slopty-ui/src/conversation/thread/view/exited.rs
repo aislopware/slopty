@@ -21,7 +21,7 @@ use slopty_proto::thread::{AgentId, Drive, Liveness, ThreadState};
 
 use super::{ThreadView, agent_name};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::ButtonKind;
 
 /// What `claude` takes to go on with a session: `--resume <id>`
@@ -109,7 +109,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .child(self.icon(IconName::Power, s.text_muted))
+                .child(self.icon(Symbol::Power, s.text_muted))
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
                 .into_any_element(),
         )
@@ -160,7 +160,7 @@ impl ThreadView {
                 .child(if resuming {
                     self.spinner(true)
                 } else {
-                    self.icon(IconName::Power, s.text_muted)
+                    self.icon(Symbol::Power, s.text_muted)
                 })
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
                 .children(button)

@@ -27,7 +27,7 @@ use super::actions::{
     NewAgent, NewAgentOf, NewAgentOn, ResumePastSession, ResumeSession, StartThread,
 };
 use super::projects::agent_label;
-use crate::icons::{Glyph, IconName, Status};
+use crate::icons::{Status, Symbol};
 use crate::palette::{CommandPalette, PaletteItem};
 
 /// What is said when no machine can start an agent.
@@ -146,7 +146,7 @@ impl WorkspaceView {
                             Some(worker) => Box::new(NewAgentOn { agent, worker }),
                             None => Box::new(NewAgentOf { agent }),
                         };
-                        PaletteItem::new(&label, action, &[]).with_icon(Glyph::AGENT)
+                        PaletteItem::new(&label, action, &[]).with_icon(crate::icons::AGENT)
                     })
                     .collect();
                 self.open_step(lines, PICK_AGENT, window, cx);
@@ -203,8 +203,7 @@ impl WorkspaceView {
                     .map(|worker| {
                         let name = self.worker_name(worker);
                         let action = Box::new(NewAgentOn { agent: agent.clone(), worker });
-                        PaletteItem::new(&name, action, &[])
-                            .with_icon(Glyph::Icon(IconName::Server))
+                        PaletteItem::new(&name, action, &[]).with_icon(Symbol::ServerRack)
                     })
                     .collect();
                 self.open_step(lines, PICK_MACHINE, window, cx);
@@ -276,7 +275,7 @@ impl WorkspaceView {
             let shown = format!("{NEW_WORKTREE} {name}");
             worktrees.push(
                 PaletteItem::new(&shown, Box::new(action), &[])
-                    .with_icon(Glyph::Icon(IconName::GitBranch)),
+                    .with_icon(Symbol::ArrowTriangleBranch),
             );
             repos.push(repo);
         }
@@ -285,8 +284,7 @@ impl WorkspaceView {
             .map(|cwd| {
                 let shown = super::tile::cwd_tail(&cwd, home);
                 let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
-                PaletteItem::new(&shown, Box::new(action), &[])
-                    .with_icon(Glyph::Icon(IconName::Folder))
+                PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Symbol::Folder)
             })
             .collect();
         lines.extend(worktrees);
@@ -412,7 +410,7 @@ fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId) -> Vec<PaletteIt
     // As typed: it is the person's own spelling of where.
     let shown = format!("{TYPED_FOLDER} {cwd}");
     let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
-    vec![PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Glyph::Icon(IconName::Folder))]
+    vec![PaletteItem::new(&shown, Box::new(action), &[]).with_icon(Symbol::Folder)]
 }
 
 /// The session step's line for `session` on `worker`: what it is about (its title, else the
@@ -441,7 +439,7 @@ fn session_line(
     let running = session.facts.contains_key(slopty_proto::thread::wire::PAST_RUNNING);
     let action = Box::new(ResumeSession { worker, session: Box::new(session) });
     PaletteItem::new(&label, action, &[])
-        .with_icon(Glyph::AGENT)
+        .with_icon(crate::icons::AGENT)
         .with_status(running.then_some(Status::Running))
         .in_dir(cwd)
         .aged(age)

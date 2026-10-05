@@ -61,7 +61,7 @@ pub use symbols::SYMBOLS_CTX;
 use crate::authorship::{self, Authored, Opens};
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit::{ButtonKind, size_label};
 use crate::terminal::Find;
 
@@ -1380,7 +1380,7 @@ impl FileView {
                     cx.emit(FileViewEvent::Run(pager.clone()));
                 }),
             ));
-        self.notice(IconName::FileText, TOO_LARGE, Some(too_large_detail(size)), Some(ways))
+        self.notice(Symbol::DocText, TOO_LARGE, Some(too_large_detail(size)), Some(ways))
     }
 
     /// The line the tile was opened at, 1-based, for a command that opens the file there.
@@ -1392,7 +1392,7 @@ impl FileView {
     /// mark, what is so, why, and any ways on.
     fn notice(
         &self,
-        icon: IconName,
+        icon: Symbol,
         title: &'static str,
         detail: Option<String>,
         ways: Option<gpui::Div>,
@@ -1435,7 +1435,7 @@ impl FileView {
         let (text, mark, actions): (SharedString, _, Vec<AnyElement>) = match &self.trouble {
             Some(Trouble::Conflict) => (
                 CHANGED_ON_DISK.into(),
-                (IconName::CircleAlert, s.warn, s.warn_fill),
+                (Symbol::ExclamationmarkTriangle, s.warn, s.warn_fill),
                 vec![
                     self.bar_button(
                         "file-compare",
@@ -1464,12 +1464,12 @@ impl FileView {
             ),
             Some(Trouble::Failed(error)) => (
                 format!("Not saved: {error}").into(),
-                (IconName::CircleX, s.error, s.error_fill),
+                (Symbol::XmarkCircle, s.error, s.error_fill),
                 Vec::new(),
             ),
             // A program waiting on it says so on its own line, which "Done" makes the file from.
             None if self.is_new() && self.waiting.is_none() => {
-                (NOT_ON_DISK.into(), (IconName::FilePlus, s.text_muted, s.text_muted), Vec::new())
+                (NOT_ON_DISK.into(), (Symbol::DocBadgePlus, s.text_muted, s.text_muted), Vec::new())
             }
             None => return None,
         };
@@ -1499,7 +1499,7 @@ impl FileView {
                 cx.listener(|this, _ev, _w, cx| this.give_up(cx)),
             ),
         ];
-        let mark = (IconName::SquareTerminal, s.accent, s.accent_fill);
+        let mark = (Symbol::Terminal, s.accent, s.accent_fill);
         Some(self.bar_line("file-waiting", PROGRAM_WAITS.into(), mark, actions))
     }
 
@@ -1509,7 +1509,7 @@ impl FileView {
         &self,
         part: &'static str,
         text: SharedString,
-        (icon, tone, fill): (IconName, slopty_theme::Rgb, slopty_theme::Rgb),
+        (icon, tone, fill): (Symbol, slopty_theme::Rgb, slopty_theme::Rgb),
         actions: Vec<AnyElement>,
     ) -> AnyElement {
         let theme = &self.theme;
@@ -1658,14 +1658,14 @@ impl Render for FileView {
             None if !self.away && !crate::screen::past_grace("file-reading", window, cx) => {
                 div().size_full().into_any_element()
             }
-            None if self.away => self.notice(IconName::File, OPENS_WHEN_BACK, None, None),
-            None => self.notice(IconName::File, READING, None, None),
+            None if self.away => self.notice(Symbol::Doc, OPENS_WHEN_BACK, None, None),
+            None => self.notice(Symbol::Doc, READING, None, None),
             Some(FileRead::TooLarge { size }) if self.base.is_none() => self.too_large(*size, cx),
             Some(FileRead::Binary { size }) if self.base.is_none() => {
-                self.notice(IconName::File, NOT_TEXT, Some(size_label(*size)), None)
+                self.notice(Symbol::Doc, NOT_TEXT, Some(size_label(*size)), None)
             }
             Some(FileRead::Missing { error }) if self.base.is_none() => {
-                self.notice(IconName::FileText, CANNOT_READ, Some(error.clone()), None)
+                self.notice(Symbol::DocText, CANNOT_READ, Some(error.clone()), None)
             }
             Some(FileRead::Media { .. }) if self.base.is_none() => self.render_preview(cx),
             Some(_) if self.previewing() => self.render_reading(cx),

@@ -365,12 +365,12 @@ fn an_agents_tile_names_it_in_words_beside_the_one_agent_glyph(cx: &mut TestAppC
         })
     };
     let (glyph, title, place) = read(cx, tile);
-    assert_eq!(glyph, crate::icons::Glyph::AGENT, "the one agent glyph");
+    assert_eq!(glyph, crate::icons::AGENT, "the one agent glyph");
     let place = place.expect("a place");
     assert!(place.starts_with("Claude Code \u{b7} "), "the agent named first: {place}");
     assert_ne!(title, "Claude Code", "named once: {title}");
 
     let (glyph, _, place) = read(cx, shell);
-    assert_eq!(glyph, crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal));
+    assert_eq!(glyph, crate::icons::Symbol::Terminal);
     assert!(!place.unwrap_or_default().contains("Claude Code"), "a shell names no agent");
 }

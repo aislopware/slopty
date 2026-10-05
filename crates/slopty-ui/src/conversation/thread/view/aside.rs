@@ -24,7 +24,7 @@ use slopty_proto::thread::{Cap, IntentId, ThreadId};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::{self, ButtonKind};
 
 /// The share of the thread's height the sheet takes.
@@ -174,7 +174,7 @@ impl ThreadView {
             .py(self.z(theme.spacing.xs))
             .border_b(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
-            .child(self.icon(IconName::MessageCircleQuestionMark, s.text_muted))
+            .child(self.icon(Symbol::QuestionmarkBubble, s.text_muted))
             .child(
                 div()
                     .flex_1()
@@ -187,7 +187,7 @@ impl ThreadView {
                     .on_click(cx.listener(|this, _ev, _w, cx| this.keep_aside(cx)))
                     .into_any_element()
             }))
-            .child(self.icon_button("aside-close", IconName::X, "Close the aside").on_click(
+            .child(self.icon_button("aside-close", Symbol::Xmark, "Close the aside").on_click(
                 cx.listener(|this, _ev, _w, cx| {
                     this.close_aside(cx);
                 }),

@@ -35,7 +35,7 @@ use super::marks::Marks;
 use super::tile::Chrome;
 use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// How far a header press travels before it is a move rather than a click.
@@ -909,7 +909,7 @@ impl WorkspaceView {
                         div().size(px(glyph_slot)).flex().items_center().justify_center().child(
                             crate::icons::icon(
                                 theme,
-                                IconName::Plus,
+                                Symbol::Plus,
                                 crate::icons::IconSize::Inline,
                                 muted,
                             )
@@ -1028,17 +1028,9 @@ impl WorkspaceView {
                 continue;
             }
             let (icon, words, id) = if right {
-                (
-                    IconName::ChevronRight,
-                    "Show the next columns",
-                    format!("overview-more-right-{ix}"),
-                )
+                (Symbol::ChevronRight, "Show the next columns", format!("overview-more-right-{ix}"))
             } else {
-                (
-                    IconName::ChevronLeft,
-                    "Show the columns before",
-                    format!("overview-more-left-{ix}"),
-                )
+                (Symbol::ChevronLeft, "Show the columns before", format!("overview-more-left-{ix}"))
             };
             let button = kit::elevate(kit::icon_button_at(theme, id, icon, words, 1.0), theme)
                 .rounded(px(theme.radii.full))
@@ -1099,7 +1091,7 @@ impl WorkspaceView {
         let column = if self.workers.is_empty() {
             let add = self.add_worker_run().map(|run| {
                 div().w_full().pt(px(spacing.md)).child(
-                    self.begin_row("empty-add-worker", IconName::Plus, ADD_WORKER, "", true)
+                    self.begin_row("empty-add-worker", Symbol::Plus, ADD_WORKER, "", true)
                         .on_click(move |_ev, window, cx| run(window, cx)),
                 )
             });
@@ -1116,13 +1108,13 @@ impl WorkspaceView {
                 .flex()
                 .flex_col()
                 .child(
-                    self.begin_row("empty-agent", IconName::Sparkles, NEW_AGENT, agent, true)
+                    self.begin_row("empty-agent", crate::icons::AGENT, NEW_AGENT, agent, true)
                         .on_click(cx.listener(|this, _ev, window, cx| this.start_here(window, cx))),
                 )
                 .child(
                     self.begin_row(
                         "empty-terminal",
-                        IconName::SquareTerminal,
+                        Symbol::Terminal,
                         NEW_TERMINAL,
                         terminal,
                         false,
@@ -1132,7 +1124,7 @@ impl WorkspaceView {
                     })),
                 )
                 .child(
-                    self.begin_row("empty-window", IconName::AppWindow, ADD_WINDOW, window, false)
+                    self.begin_row("empty-window", Symbol::Macwindow, ADD_WINDOW, window, false)
                         .on_click(cx.listener(|this, _ev, window, cx| {
                             this.add_window(&super::actions::AddWindow, window, cx);
                         })),
@@ -1155,7 +1147,7 @@ impl WorkspaceView {
                         format!("New terminal in {}", place.name)
                     };
                     let (key, cwd) = (place.worker, place.cwd);
-                    self.place_row(("empty-place", ix), IconName::Folder, place.name, meta)
+                    self.place_row(("empty-place", ix), Symbol::Folder, place.name, meta)
                         .debug_selector(move || format!("empty-place-{ix}"))
                         .aria_label(SharedString::from(label))
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -1203,7 +1195,7 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(s.hover)))
                     .active(|st| st.bg(hsla(s.pressed)))
-                    .child(crate::palette::icon_slot(theme, IconName::Server, muted))
+                    .child(crate::palette::icon_slot(theme, Symbol::ServerRack, muted))
                     .child(
                         div()
                             .flex_1()
@@ -1306,7 +1298,7 @@ impl WorkspaceView {
     fn place_row(
         &self,
         id: impl Into<gpui::ElementId>,
-        icon: IconName,
+        icon: Symbol,
         name: String,
         meta: String,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1358,7 +1350,7 @@ impl WorkspaceView {
     fn begin_row(
         &self,
         id: &'static str,
-        icon: IconName,
+        icon: Symbol,
         label: &'static str,
         keys: &str,
         primary: bool,

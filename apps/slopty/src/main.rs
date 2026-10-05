@@ -82,7 +82,7 @@ pub fn main() -> Result<()> {
     // window is covered and the direct path would be abandoned.
     let _activity = slopty_platform::Activity::latency_critical("Slopty remote session");
 
-    let app = gpui_kit::application().with_assets(slopty_ui::icons::Assets);
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     // A click on the Dock icon brings the window back after it was closed.
     app.on_reopen(slopty_app::show_main_window);
     app.run(move |cx| {

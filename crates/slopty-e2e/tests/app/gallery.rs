@@ -64,6 +64,14 @@ pub async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
     assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
 }
 
+/// [`golden`] drawn at `scale` device pixels to the point whatever display the window is on:
+/// the Retina picture, which a 1x runner draws offscreen afresh.
+pub async fn golden_at(drv: &mut Driver, stack_dir: &std::path::Path, name: &str, scale: f32) {
+    settled(drv).await;
+    let frame = drv.render_at(&stack_dir.join(format!("{name}.png")), scale).await.unwrap();
+    assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+}
+
 /// The labels of every node with `role`, in tree order.
 fn labels(d: &Dump, role: &str) -> Vec<String> {
     d.a11y.iter().filter(|n| n.role == role).filter_map(|n| n.label.clone()).collect()

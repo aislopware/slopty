@@ -18,7 +18,7 @@ use slopty_theme::Theme;
 
 use super::attach::Attachment;
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
 /// The widest an attachment's chip grows, in points at zoom 1; a longer name is cut short.
@@ -93,7 +93,7 @@ fn remove_button(
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(remove)
         .child(
-            crate::icons::icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted))
+            crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
                 .size(px(theme.typography.small() * zoom)),
         );
     crate::a11y::tab_stop(button, s.focus).into_any_element()
@@ -163,7 +163,7 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
     let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
     // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
     let mark = if chip.landed() {
-        crate::icons::icon(theme, IconName::File, IconSize::Inline, hsla(s.text_muted))
+        crate::icons::icon(theme, Symbol::Doc, IconSize::Inline, hsla(s.text_muted))
             .size(z(theme.typography.icon()))
             .into_any_element()
     } else {

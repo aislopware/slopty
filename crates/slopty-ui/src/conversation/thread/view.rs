@@ -46,7 +46,7 @@ use crate::conversation::{
     AllowRequest, AskAside, CTX, CycleDensity, CycleEffort, DenyRequest, EditLastQueued, Interrupt,
     OpenCommit, QueueMessage, RefreshPullRequest, WatchAgentScreen,
 };
-use crate::icons::{IconName, IconSize, Status};
+use crate::icons::{IconSize, Status, Symbol};
 use crate::kit::{self, ButtonKind};
 
 /// The pointer group a message and its actions answer as one.
@@ -1005,7 +1005,7 @@ impl ThreadView {
         kit::Disclosure::new(id, open, &self.theme, side, tone).into_any_element()
     }
 
-    fn icon(&self, name: IconName, tone: Rgb) -> AnyElement {
+    fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(self.z(self.theme.typography.icon()))
             .into_any_element()
@@ -1097,7 +1097,7 @@ impl ThreadView {
     fn icon_button(
         &self,
         id: impl Into<SharedString>,
-        icon: IconName,
+        icon: Symbol,
         label: &'static str,
     ) -> gpui::Stateful<Div> {
         let s = self.theme.surfaces;
@@ -1379,7 +1379,7 @@ impl ThreadView {
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .active(move |el| el.bg(hsla(s.pressed)))
                 .child(self.icon(
-                    if copied { IconName::Check } else { IconName::Copy },
+                    if copied { Symbol::Checkmark } else { Symbol::DocOnDoc },
                     if copied { s.success } else { s.text_muted },
                 )),
             s.focus,
@@ -2011,11 +2011,7 @@ impl ThreadView {
                 if bar.waiting().next().is_some() {
                     return None;
                 }
-                let mark = crate::icons::glyph(
-                    crate::icons::Glyph::AGENT,
-                    self.z(theme.typography.icon()),
-                    hsla(theme.surfaces.text_secondary),
-                );
+                let mark = kit::notice_mark(theme, crate::icons::AGENT, k);
                 let title = format!("New {} thread", agent_label(&state.meta.agent));
                 let detail = new_thread_place(
                     &state.meta.cwd,
@@ -2026,7 +2022,18 @@ impl ThreadView {
             }
             None if hub.threads().linked() => crate::screen::AfterGrace::new(
                 SharedString::from(format!("thread-reading-{}", self.thread.as_uuid())),
-                kit::notice(theme, k, self.spinner(true), READING, None),
+                kit::notice(
+                    theme,
+                    k,
+                    crate::icons::notice_status(
+                        theme,
+                        Status::Running,
+                        hsla(theme.surfaces.text_muted),
+                        k,
+                    ),
+                    READING,
+                    None,
+                ),
             )
             .into_any_element(),
             None => return None,
@@ -2360,20 +2367,19 @@ fn context_used(meters: &slopty_proto::thread::Meters) -> Option<f64> {
 }
 
 /// The icon of a call's kind.
-fn tool_icon(kind: &str) -> IconName {
+fn tool_icon(kind: &str) -> Symbol {
     match kind {
-        kind::READ => IconName::FileText,
-        kind::EDIT => IconName::FilePen,
-        kind::WRITE => IconName::FilePlus,
-        kind::EXEC => IconName::SquareTerminal,
-        kind::SEARCH => IconName::Search,
-        kind::FETCH | kind::WEB_SEARCH => IconName::Globe,
-        kind::MCP => IconName::Plug,
-        kind::AGENT => IconName::Sparkles,
-        kind::QUESTION => IconName::MessageSquare,
-        kind::PLAN => IconName::Map,
-        kind::TASKS => IconName::ListTodo,
-        _ => IconName::Wrench,
+        kind::READ => Symbol::DocText,
+        kind::EDIT => Symbol::Pencil,
+        kind::WRITE => Symbol::DocBadgePlus,
+        kind::EXEC => Symbol::Terminal,
+        kind::SEARCH => Symbol::Magnifyingglass,
+        kind::FETCH | kind::WEB_SEARCH => Symbol::Globe,
+        kind::MCP => Symbol::PuzzlepieceExtension,
+        kind::AGENT => crate::icons::AGENT,
+        kind::QUESTION => Symbol::QuestionmarkBubble,
+        kind::PLAN | kind::TASKS => Symbol::Checklist,
+        _ => Symbol::WrenchAndScrewdriver,
     }
 }
 
@@ -2441,8 +2447,13 @@ fn code_actions(theme: &Theme, zoom: f32, block: &gpui_kit::base::text::CodeBloc
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
-                    crate::icons::icon(theme, IconName::Copy, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(theme.typography.icon() * zoom)),
+                    crate::icons::icon(
+                        theme,
+                        Symbol::DocOnDoc,
+                        IconSize::Inline,
+                        hsla(s.text_muted),
+                    )
+                    .size(px(theme.typography.icon() * zoom)),
                 )
                 .on_click(move |_ev, _window, cx| {
                     cx.stop_propagation();

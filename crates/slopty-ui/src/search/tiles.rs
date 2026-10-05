@@ -232,8 +232,8 @@ impl ProjectSearch {
         let chosen = self.tiles.at == ix;
         let pad = crate::palette::list_pad(theme);
         let icon = match hit.open {
-            TileOpen::Session(_) => crate::icons::IconName::SquareTerminal,
-            TileOpen::File(_) => crate::icons::IconName::FileText,
+            TileOpen::Session(_) => crate::icons::Symbol::Terminal,
+            TileOpen::File(_) => crate::icons::Symbol::DocText,
         };
         let total = usize::try_from(hit.total).unwrap_or(usize::MAX);
         let label = format!("{}, {}", hit.title, super::count_label(total));

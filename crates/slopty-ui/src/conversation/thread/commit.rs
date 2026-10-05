@@ -31,7 +31,7 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 use super::git::{self, Method, Pull, Repo, Said};
 use super::hub::{HubEvent, ThreadHub};
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit::{self, ButtonKind};
 
 /// File rows shown before the list scrolls.
@@ -301,7 +301,7 @@ impl CommitSheet {
 
     // ----- drawing: pieces -------------------------------------------------------------
 
-    fn icon(&self, name: IconName, tone: Rgb) -> gpui::Svg {
+    fn icon(&self, name: Symbol, tone: Rgb) -> Div {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(px(self.theme.typography.icon()))
     }
@@ -402,7 +402,7 @@ impl CommitSheet {
                     .gap(px(theme.spacing.xxs))
                     .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
-                    .children(status.map(|_| self.icon(IconName::GitBranch, s.text_muted)))
+                    .children(status.map(|_| self.icon(Symbol::ArrowTriangleBranch, s.text_muted)))
                     .children(status.map(|st| {
                         div()
                             .min_w_0()
@@ -413,11 +413,11 @@ impl CommitSheet {
                     })),
             )
             .child(
-                kit::icon_button(theme, "commit-refresh", IconName::RotateCw, "Refresh")
+                kit::icon_button(theme, "commit-refresh", Symbol::ArrowClockwise, "Refresh")
                     .on_click(cx.listener(|this, _ev, _w, cx| this.refresh(cx))),
             )
             .child(
-                kit::icon_button(theme, "commit-close", IconName::X, "Close")
+                kit::icon_button(theme, "commit-close", Symbol::Xmark, "Close")
                     .on_click(cx.listener(|_this, _ev, _w, cx| Self::close(cx))),
             )
     }
@@ -447,7 +447,7 @@ impl CommitSheet {
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs))
-                    .child(self.icon(IconName::GitPullRequest, s.text_muted))
+                    .child(self.icon(Symbol::ArrowTrianglePull, s.text_muted))
                     .child(self.quiet("commit-no-pull", "No pull request for this branch")),
             ),
             (Pull::Unknown, None) if reading => {
@@ -465,9 +465,8 @@ impl CommitSheet {
         let standing = pull.standing();
         let tone = standing_tone(theme, standing);
         let icon = match standing {
-            PullStanding::Merged => IconName::GitMerge,
-            PullStanding::Draft => IconName::GitPullRequestDraft,
-            _ => IconName::GitPullRequest,
+            PullStanding::Merged => Symbol::ArrowTriangleMerge,
+            _ => Symbol::ArrowTrianglePull,
         };
         let url = pull.url.clone();
         div()
@@ -522,10 +521,10 @@ impl CommitSheet {
             .enumerate()
             .map(|(ix, check)| {
                 let (icon, tone) = match check.bucket() {
-                    CheckBucket::Failed => (IconName::CircleX, s.error),
-                    CheckBucket::Running => (IconName::CircleDashed, s.text_secondary),
-                    CheckBucket::Passed => (IconName::CircleCheck, s.text_muted),
-                    CheckBucket::Skipped => (IconName::Minus, s.text_muted),
+                    CheckBucket::Failed => (Symbol::XmarkCircle, s.error),
+                    CheckBucket::Running => (Symbol::CircleDashed, s.text_secondary),
+                    CheckBucket::Passed => (Symbol::CheckmarkCircle, s.text_muted),
+                    CheckBucket::Skipped => (Symbol::Minus, s.text_muted),
                 };
                 let link = check.link.clone();
                 div()
@@ -623,7 +622,7 @@ impl CommitSheet {
                         .cursor_pointer(),
                     theme,
                 )
-                .child(self.icon(IconName::ChevronDown, s.solid_ink))
+                .child(self.icon(Symbol::ChevronDown, s.solid_ink))
                 .on_click(cx.listener(|this, _ev, _w, cx| {
                     this.methods_open = !this.methods_open;
                     cx.notify();
@@ -961,7 +960,7 @@ impl CommitSheet {
             return Some(self.quiet("commit-busy", words).into_any_element());
         }
         let (_, said) = self.state(cx)?.said.as_ref()?;
-        let line = |icon: IconName, words: String| {
+        let line = |icon: Symbol, words: String| {
             div()
                 .id("commit-said")
                 .debug_selector(|| "commit-said".to_owned())
@@ -978,17 +977,17 @@ impl CommitSheet {
             Said::Committed { commit, files } => {
                 let short: String = commit.chars().take(7).collect();
                 line(
-                    IconName::CircleCheck,
+                    Symbol::CheckmarkCircle,
                     format!("Committed {short} \u{b7} {}", files_words(*files as usize)),
                 )
                 .into_any_element()
             }
             Said::Pushed { to } => {
-                line(IconName::Upload, format!("Pushed to {to}")).into_any_element()
+                line(Symbol::ArrowUpToLine, format!("Pushed to {to}")).into_any_element()
             }
             Said::Opened { url } => {
                 let open = url.clone();
-                line(IconName::GitPullRequest, "Opened".to_owned())
+                line(Symbol::ArrowTrianglePull, "Opened".to_owned())
                     .child(
                         div()
                             .id("commit-opened")

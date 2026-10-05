@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
-use crate::gallery::{STEP, first_shell, golden, settled};
+use crate::gallery::{STEP, first_shell, golden, golden_at, settled};
 
 /// The thread's renders: room for the list, the request card and the header's chips.
 const WINDOW: (f32, f32) = (1000.0, 720.0);
@@ -143,6 +143,9 @@ async fn an_agent_tile_opens_on_its_thread() {
         assert!(labels(&dump, "Button").iter().any(|l| l == answer), "{answer}: {:#?}", dump.a11y);
     }
     golden(drv, &dir, "thread").await;
+    // The symbols, the text and the hairlines as a Retina display draws them, which a 1x
+    // picture cannot show.
+    golden_at(drv, &dir, "thread@2x", 2.0).await;
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();

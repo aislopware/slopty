@@ -2501,7 +2501,7 @@ impl Workspace {
             let other = entry_row(
                 theme,
                 "connect-another-server",
-                slopty_ui::icons::IconName::Link,
+                slopty_ui::icons::Symbol::Link,
                 "Connect to another server",
                 "One that lists other machines",
             )
@@ -2643,7 +2643,7 @@ impl Workspace {
     /// only what can be chosen stands on a step, and a status on one with a magnifier read as
     /// a search field to type in.
     fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
-        use slopty_ui::icons::{IconName, IconSize, Status, icon, status_icon};
+        use slopty_ui::icons::{IconSize, Status, Symbol, icon, status_icon};
         let theme = &self.theme;
         let (s, spacing, ty) = (theme.surfaces, theme.spacing, &theme.typography);
         let section = div().id("add-worker-tailnet").flex().flex_col().gap(px(spacing.sm));
@@ -2654,7 +2654,7 @@ impl Workspace {
                     Some(status_icon(theme, Status::Running, mark, hsla(s.text_muted)))
                 }
                 Search::Answered { running: false, .. } => Some(
-                    icon(theme, IconName::WifiOff, IconSize::Inline, hsla(s.text_muted))
+                    icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted))
                         .size(mark)
                         .into_any_element(),
                 ),
@@ -3484,11 +3484,11 @@ fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpu
 /// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
     use slopty_net::discover::Answer;
-    use slopty_ui::icons::{IconName, IconSize, icon};
+    use slopty_ui::icons::{IconSize, Symbol, icon};
     let s = theme.surfaces;
     let (glyph, what, verb) = match host {
-        Host::Server => (IconName::Server, "Server", "Connect to"),
-        Host::Worker => (IconName::Monitor, "Machine", "Add"),
+        Host::Server => (Symbol::ServerRack, "Server", "Connect to"),
+        Host::Worker => (Symbol::Display, "Machine", "Add"),
     };
     // What it answered decides what the press does, and the row says that.
     let (verb, said) = match &offer.answer {
@@ -3536,7 +3536,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                 ),
         )
         .child(
-            icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
+            icon(theme, Symbol::ChevronRight, IconSize::Inline, hsla(s.text_muted))
                 .size(glyph_size),
         );
     tab_stop(row, s.focus)
@@ -3554,15 +3554,15 @@ const SET_UP_SERVER_LABEL: &str = "Set up the server";
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
 fn this_mac_row(theme: &Theme, listed: bool) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::IconName;
+    use slopty_ui::icons::Symbol;
     let meta = if listed { this_mac::ROW_META_LISTED } else { this_mac::ROW_META };
-    entry_row(theme, "use-this-mac", IconName::Monitor, this_mac::TITLE, meta)
+    entry_row(theme, "use-this-mac", Symbol::Display, this_mac::TITLE, meta)
 }
 
 /// A phone or iPad's way in as a row to press: the code it scans, opened from the add panel.
 fn phone_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::IconName;
-    entry_row(theme, "connect-device", IconName::Smartphone, invite::TITLE, invite::ROW_META)
+    use slopty_ui::icons::Symbol;
+    entry_row(theme, "connect-device", Symbol::Iphone, invite::TITLE, invite::ROW_META)
 }
 
 /// A way to add a worker that goes on to a sheet of its own, as a row to press drawn as a found
@@ -3571,11 +3571,11 @@ fn phone_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
 fn entry_row(
     theme: &Theme,
     id: &'static str,
-    glyph: slopty_ui::icons::IconName,
+    glyph: slopty_ui::icons::Symbol,
     title: &'static str,
     meta: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::{IconName, IconSize, icon};
+    use slopty_ui::icons::{IconSize, Symbol, icon};
     let s = theme.surfaces;
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
@@ -3606,7 +3606,7 @@ fn entry_row(
                 .child(kit::meta(div(), theme).child(meta)),
         )
         .child(
-            icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
+            icon(theme, Symbol::ChevronRight, IconSize::Inline, hsla(s.text_muted))
                 .size(glyph_size),
         );
     tab_stop(row, s.focus)
@@ -3775,6 +3775,10 @@ pub fn open_workspace(
     options: impl Fn(&App) -> WindowOptions + 'static,
 ) -> anyhow::Result<()> {
     let options: window::MakeOptions = Rc::new(options);
+    // The chrome's symbols, drawn on background threads while the window is made: the first
+    // symbol of a process loads the system's catalogue, 40–70 ms the first frame must not wait
+    // for (docs/MEASUREMENTS.md, "SF Symbols as masks").
+    slopty_ui::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();

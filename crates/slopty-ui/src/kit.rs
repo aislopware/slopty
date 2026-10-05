@@ -654,7 +654,7 @@ pub fn search_field(theme: &Theme, focused: bool) -> Div {
         .when(increased, |el| el.border(hair(theme)).border_color(hsla(s.border)))
         .child(crate::icons::icon(
             theme,
-            crate::icons::IconName::Search,
+            crate::icons::Symbol::Magnifyingglass,
             crate::icons::IconSize::Inline,
             hsla(s.text_muted),
         ))
@@ -1188,7 +1188,7 @@ pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
 pub fn icon_button(
     theme: &Theme,
     id: impl Into<SharedString>,
-    icon: crate::icons::IconName,
+    icon: crate::icons::Symbol,
     label: &'static str,
 ) -> gpui::Stateful<Div> {
     icon_button_at(theme, id, icon, label, 1.0)
@@ -1200,7 +1200,7 @@ pub fn icon_button(
 pub fn icon_button_at(
     theme: &Theme,
     id: impl Into<SharedString>,
-    icon: crate::icons::IconName,
+    icon: crate::icons::Symbol,
     label: &'static str,
     k: f32,
 ) -> gpui::Stateful<Div> {
@@ -1213,7 +1213,7 @@ pub fn icon_button_at(
 fn square_icon(
     theme: &Theme,
     id: SharedString,
-    icon: crate::icons::IconName,
+    icon: crate::icons::Symbol,
     label: &'static str,
     k: f32,
     ink: Rgb,
@@ -1253,7 +1253,7 @@ fn square_icon(
 pub fn icon_toggle(
     theme: &Theme,
     id: impl Into<SharedString>,
-    icon: crate::icons::IconName,
+    icon: crate::icons::Symbol,
     label: &'static str,
     on: bool,
     k: f32,
@@ -1340,7 +1340,7 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
         solid(el, theme).border_color(hsla(s.solid)).child(
             crate::icons::icon(
                 theme,
-                crate::icons::IconName::Check,
+                crate::icons::Symbol::Checkmark,
                 crate::icons::IconSize::Inline,
                 hsla(s.solid_ink),
             )
@@ -1351,16 +1351,17 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
     }
 }
 
-/// The side of the disc an empty state's mark sits in, in points at zoom 1: `HeroUI`'s small
-/// empty state's, the glyph at the inline icon size in its middle.
-pub const NOTICE_DISC: f32 = 40.0;
+/// The side of an empty state's mark, in points at zoom 1.
+///
+/// It holds a symbol at the page heading's size ([`slopty_theme::Typography::heading`]) at the
+/// light weight and large scale, as the system's own empty states draw theirs.
+pub const NOTICE_MARK: f32 = 28.0;
 
 /// What a tile's body says when it has nothing to show, as one block in its middle.
 ///
-/// A mark seated in a raised [`NOTICE_DISC`] ([`raised`]), which gives the empty body a centre
-/// of mass without decoration (a bare grey glyph floated in it), a line at `small()` in the medium
-/// weight saying what is so, and under it an optional muted line saying why or where. The
-/// caller adds the identity and its actions under it.
+/// A mark on its own, [`NOTICE_MARK`] square ([`notice_mark`]) with no plate under it, a line at
+/// `small()` in the medium weight saying what is so, and under it an optional muted line saying why
+/// or where. The caller adds the identity and its actions under it.
 ///
 /// A remote window on its way, a file that cannot be opened here and an empty or missing
 /// folder all say it this way. Before, a file printed its summary alone ("binary, 2 MB") and a
@@ -1385,11 +1386,10 @@ pub fn notice(
         .font_family(theme.typography.ui_family.clone())
         .text_center()
         .child(
-            raised(div(), theme)
+            div()
                 .flex_none()
-                .size(px(NOTICE_DISC * k))
+                .min_h(px(NOTICE_MARK * k))
                 .mb(px(theme.spacing.xs * k))
-                .rounded(px(theme.radii.full))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1407,12 +1407,12 @@ pub fn notice(
         }))
 }
 
-/// A [`notice`]'s mark: a kind's icon at the inline size in `text_secondary`, for its disc.
+/// A [`notice`]'s mark: a kind's symbol, light and large at the page heading's size, in
+/// `text_muted`.
 #[must_use]
-pub fn notice_mark(theme: &Theme, icon: crate::icons::IconName, k: f32) -> gpui::Svg {
-    let ink = hsla(theme.surfaces.text_secondary);
-    crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, ink)
-        .size(px(theme.typography.icon() * k))
+pub fn notice_mark(theme: &Theme, icon: crate::icons::Symbol, k: f32) -> Div {
+    let ink = hsla(theme.surfaces.text_muted);
+    crate::icons::Drawn::notice(theme, icon).slot(px(NOTICE_MARK * k), ink)
 }
 
 /// What the app is called where it names itself.
@@ -1694,6 +1694,13 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     TextViewDefaults::global(cx)
         .with_code_block_highlighter(crate::highlight::code_block(theme.clone()))
         .install(cx);
+    // The components' own icons (a questionnaire's check, a field's chevron) are the chrome's
+    // symbols too; one the chrome has no symbol for keeps the kit's drawing.
+    let drawn = theme.clone();
+    cx.set_global(gpui_kit::component::IconPainter(Rc::new(move |path, side, ink| {
+        let symbol = crate::icons::kit_symbol(path)?;
+        Some(crate::icons::symbol(&drawn, symbol, side, ink))
+    })));
 }
 
 #[cfg(test)]
@@ -2130,7 +2137,7 @@ mod tests {
     #[test]
     fn a_toggle_rests_on_the_selected_fill_only_while_on() {
         let theme = Theme::default();
-        let icon = crate::icons::IconName::MousePointer2;
+        let icon = crate::icons::Symbol::Cursorarrow;
         let mut off = icon_toggle(&theme, "t", icon, "Trackpad mode", false, 1.0);
         let mut on = icon_toggle(&theme, "t", icon, "Trackpad mode", true, 1.0);
         assert_eq!(off.style().background, None, "off is bare");
@@ -3389,25 +3396,43 @@ mod tests {
         assert!(ew - lw >= 40.0 && eh - lh >= 40.0, "far enough apart to tell apart");
     }
 
-    /// Every icon the chrome names is one Hugeicons draws: one gpui-kit's Lucide bundle backs
-    /// would be the one glyph on screen at another hand and weight.
+    /// The chrome draws its icons as the OS's symbols (`docs/decisions/ui.md`, "The chrome's
+    /// icons are SF Symbols"): no SVG is drawn in the app's own code but the app's mark, and
+    /// no icon name of another set is left.
     #[test]
-    fn every_icon_the_chrome_names_is_drawn_by_one_set() {
-        let by_name: std::collections::HashMap<String, SharedString> =
-            crate::icons::IconName::ALL.iter().map(|i| (format!("{i:?}"), i.path())).collect();
+    fn the_chrome_draws_symbols() {
         let mut stray = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line, text) in chrome_lines(dir) {
-                for rest in text.split("IconName::").skip(1) {
-                    let name: String =
-                        rest.chars().take_while(char::is_ascii_alphanumeric).collect();
-                    let Some(path) = by_name.get(&name) else { continue };
-                    if !crate::icons::drawn(path) {
-                        stray.push(format!("{file}:{line}: {name}"));
-                    }
+                let code = text.split("//").next().unwrap_or_default();
+                // The app's mark is the one drawing of ours (`brand`), and `icons.rs` names the
+                // kit's drawings it stands symbols in for.
+                let mark = code.contains("assets/icon.svg") || file.ends_with("icons.rs");
+                if !mark
+                    && ["svg()", ".svg\"", "IconName", "Glyph::"].iter().any(|b| code.contains(b))
+                {
+                    stray.push(format!("{file}:{line}: {}", text.trim()));
                 }
             }
         }
-        assert!(stray.is_empty(), "drawn by the Lucide fallback:\n{}", stray.join("\n"));
+        assert!(stray.is_empty(), "an icon not drawn as a symbol:\n{}", stray.join("\n"));
+    }
+
+    /// An icon takes its words' size: a symbol is sized only in `icons.rs`, from the type
+    /// scale ([`crate::icons::IconSize`], [`crate::icons::Drawn`]), and painted only there, so
+    /// no call site picks a point size of its own.
+    #[test]
+    fn an_icon_takes_its_words_size() {
+        let mut stray = Vec::new();
+        for (file, line, text) in chrome_lines("slopty-ui/src") {
+            if file.ends_with("icons.rs") {
+                continue;
+            }
+            let code = text.split("//").next().unwrap_or_default();
+            if ["SymbolSize", "paint_mask(", "rasterize("].iter().any(|bad| code.contains(bad)) {
+                stray.push(format!("{file}:{line}: {}", text.trim()));
+            }
+        }
+        assert!(stray.is_empty(), "a symbol sized apart from its words:\n{}", stray.join("\n"));
     }
 }

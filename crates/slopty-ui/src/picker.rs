@@ -21,10 +21,9 @@ use slopty_theme::Theme;
 
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{IconName, Status};
+use crate::icons::{Status, Symbol};
 use crate::palette::{
-    Plate, dotted, field_row, icon_slot, line_height, list_pad, quiet_line, section_heading,
-    status_slot,
+    Plate, dotted, field_row, line_height, list_pad, quiet_line, section_heading, status_slot,
 };
 
 /// What the field says before anything is typed: the picker's title, since the field heads the
@@ -81,7 +80,7 @@ pub struct SessionRow {
 /// human).
 #[derive(Clone)]
 struct Line {
-    icon: IconName,
+    icon: Symbol,
     primary: String,
     secondary: String,
     hot: bool,
@@ -90,7 +89,7 @@ struct Line {
 }
 
 impl Line {
-    const fn new(icon: IconName, primary: String, secondary: String) -> Self {
+    const fn new(icon: Symbol, primary: String, secondary: String) -> Self {
         Self { icon, primary, secondary, hot: false, mark: None, worker: None }
     }
 }
@@ -278,8 +277,7 @@ impl WindowPicker {
         for (i, s) in self.sessions.iter().enumerate() {
             let status = s.status.clone().unwrap_or_default();
             // A session an agent was seen in is an agent's; the rest are shells.
-            let icon =
-                if s.status.is_some() { IconName::Sparkles } else { IconName::SquareTerminal };
+            let icon = if s.status.is_some() { crate::icons::AGENT } else { Symbol::Terminal };
             rows.push(Row {
                 id: ("session", i),
                 section: Section::Sessions,
@@ -303,7 +301,7 @@ impl WindowPicker {
                 id: ("display", i),
                 section: Section::Displays,
                 line: Line::new(
-                    IconName::Monitor,
+                    Symbol::Display,
                     format!("Display {}", d.id.0),
                     format!("{}×{} @{}× {}Hz", d.w, d.h, d.scale, d.hz),
                 ),
@@ -319,7 +317,7 @@ impl WindowPicker {
             rows.push(Row {
                 id: ("window", i),
                 section: Section::Windows,
-                line: Line::new(IconName::AppWindow, w.app.clone(), title.clone()),
+                line: Line::new(Symbol::Macwindow, w.app.clone(), title.clone()),
                 on_pick: PickerEvent::Pick {
                     target: CaptureTarget::Window(w.id),
                     size: (w.w, w.h),
@@ -515,7 +513,12 @@ impl WindowPicker {
         row.role(gpui::accesskit::Role::Status)
             .aria_label(LOADING_WINDOWS)
             .text_color(muted)
-            .child(icon_slot(theme, IconName::LoaderCircle, muted))
+            .child(crate::icons::status_icon(
+                theme,
+                Status::Working,
+                px(theme.typography.icon()),
+                muted,
+            ))
             .child(LOADING_WINDOWS)
     }
 

@@ -23,7 +23,7 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::fuzzy::{Fuzzy, Rank, best_first};
-use crate::icons::{self, Glyph, IconName, IconSize, Status};
+use crate::icons::{self, IconSize, Status, Symbol};
 use crate::kit::Pace;
 
 /// What the list says when the query leaves nothing.
@@ -671,7 +671,7 @@ pub struct PaletteItem {
     pub run: PaletteRun,
     /// The icon in the leading slot: what a thing is (a tile, a machine, a file, an agent).
     /// A command has none: it is its words (`docs/decisions/ui.md`, "A command is its words").
-    pub icon: Option<Glyph>,
+    pub icon: Option<Symbol>,
     /// How the tile or worker is doing: its mark takes the leading slot from the kind icon, and
     /// a tile's word takes the right edge while it is not idle.
     pub status: Option<Status>,
@@ -696,7 +696,7 @@ impl PaletteItem {
         label: String,
         keys: String,
         run: PaletteRun,
-        icon: Option<Glyph>,
+        icon: Option<Symbol>,
         section: Section,
     ) -> Self {
         Self {
@@ -735,7 +735,7 @@ impl PaletteItem {
             title.to_owned(),
             String::new(),
             PaletteRun::Session(session),
-            Some(IconName::SquareTerminal.into()),
+            Some(Symbol::Terminal),
             Section::Tiles,
         )
     }
@@ -747,7 +747,7 @@ impl PaletteItem {
             name.to_owned(),
             detail.to_owned(),
             PaletteRun::Worker(worker),
-            Some(IconName::Server.into()),
+            Some(Symbol::ServerRack),
             Section::Workers,
         )
     }
@@ -774,21 +774,21 @@ impl PaletteItem {
             title.to_owned(),
             String::new(),
             run,
-            Some(IconName::Workflow.into()),
+            Some(Symbol::RectangleSplit3x1),
             Section::Tiles,
         )
     }
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
     #[must_use]
-    pub fn group(name: &str, glyph: IconName, group: slopty_client::layout::GroupKey) -> Self {
+    pub fn group(name: &str, glyph: Symbol, group: slopty_client::layout::GroupKey) -> Self {
         let run = PaletteRun::Group(group);
-        Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
+        Self::line(name.to_owned(), String::new(), run, Some(glyph), Section::Projects)
     }
 
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
-    pub fn item(title: &str, icon: Glyph, item: slopty_core::ItemId) -> Self {
+    pub fn item(title: &str, icon: Symbol, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
         Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Tiles)
     }
@@ -818,7 +818,7 @@ impl PaletteItem {
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
-        let glyph = Glyph::file(&path);
+        let glyph = icons::file_symbol(&path);
         let run = PaletteRun::OpenFile { path, line: None, found: true };
         Self::line(format!("Open {relative}"), String::new(), run, Some(glyph), Section::Files)
     }
@@ -840,7 +840,13 @@ impl PaletteItem {
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
         let keys = line.map(|n| format!("line {n}")).unwrap_or_default();
         let run = PaletteRun::OpenFile { path: path.to_owned(), line, found: false };
-        Self::line(format!("Open {path}"), keys, run, Some(Glyph::file(path)), Section::Files)
+        Self::line(
+            format!("Open {path}"),
+            keys,
+            run,
+            Some(icons::file_symbol(path)),
+            Section::Files,
+        )
     }
 
     /// `Open folder <dir>` for a directory typed into the field: a folder tile there.
@@ -848,7 +854,7 @@ impl PaletteItem {
     pub fn open_folder(path: &str) -> Self {
         let run = PaletteRun::OpenFolder { path: path.to_owned() };
         let label = format!("Open folder {path}");
-        Self::line(label, String::new(), run, Some(IconName::Folder.into()), Section::Files)
+        Self::line(label, String::new(), run, Some(Symbol::Folder), Section::Files)
     }
 
     /// `New terminal in <dir>` for a directory typed into the field.
@@ -869,7 +875,7 @@ impl PaletteItem {
 
     /// The same line with another kind icon.
     #[must_use]
-    pub const fn with_icon(mut self, icon: Glyph) -> Self {
+    pub const fn with_icon(mut self, icon: Symbol) -> Self {
         self.icon = Some(icon);
         self
     }
@@ -1067,7 +1073,7 @@ pub(crate) fn section_heading(
 }
 
 /// The fixed square a row's kind icon sits in, so every title starts on one edge.
-pub(crate) fn icon_slot(theme: &Theme, name: IconName, color: gpui::Hsla) -> gpui::Div {
+pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui::Div {
     div()
         .flex_none()
         .size(px(theme.typography.icon()))
@@ -1083,7 +1089,7 @@ pub(crate) fn icon_slot(theme: &Theme, name: IconName, color: gpui::Hsla) -> gpu
 /// row. `k` is the chrome's zoom (a tile header's in the overview); a list passes 1.
 pub(crate) fn status_slot(
     theme: &Theme,
-    kind: impl Into<Glyph>,
+    kind: impl Into<Symbol>,
     status: Option<Status>,
     ink: gpui::Hsla,
     k: f32,
@@ -1093,7 +1099,7 @@ pub(crate) fn status_slot(
         Some(status) => {
             icons::status_icon(theme, status, side, hsla(status.tone(theme))).into_any_element()
         }
-        None => icons::glyph(kind.into(), side, ink),
+        None => icons::symbol(theme, kind.into(), side, ink),
     };
     div()
         .id("status")
@@ -1812,7 +1818,7 @@ impl CommandPalette {
             .children(match (item.icon, item.status) {
                 (None, None) => self.marked.then(|| empty_slot(theme).into_any_element()),
                 (icon, status) => Some(
-                    status_slot(theme, icon.unwrap_or(Glyph::AGENT), status, hsla(icon_ink), 1.0)
+                    status_slot(theme, icon.unwrap_or(icons::AGENT), status, hsla(icon_ink), 1.0)
                         .into_any_element(),
                 ),
             })
@@ -2754,7 +2760,7 @@ mod tests {
         assert_eq!(done.trailing(), Some(("12m".to_owned(), None)), "done: the dot, then the age");
         let fresh = PaletteItem::session("zsh", SessionId::new()).aged(minutes(0));
         assert_eq!(fresh.trailing(), None, "no age under a minute");
-        let file = PaletteItem::item("PLAN.md", IconName::FileText.into(), ItemId::new())
+        let file = PaletteItem::item("PLAN.md", Symbol::DocText, ItemId::new())
             .placed(Some("docs".to_owned()))
             .on_worker(Some("studio".to_owned()));
         assert_eq!(file.context(), "studio · docs");
@@ -2776,32 +2782,18 @@ mod tests {
         assert!(Layer::Popover.priority() > 0, "over a panel drawn at the default");
     }
 
-    /// Every icon a line can carry is one the app loads: an icon missing from the assets draws
-    /// as nothing, and the slot would sit empty.
+    /// Every line that is a thing leads with what it is, and a file's line with its kind.
     #[test]
-    fn every_line_icon_is_embedded() {
-        use gpui::AssetSource as _;
-
+    fn every_thing_leads_with_what_it_is() {
         let session = SessionId::new();
-        let mut names: Vec<Option<Glyph>> = vec![PaletteItem::session("zsh", session).icon];
-        names.push(PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1)).icon);
-        names.extend(PaletteItem::found_dir("/w", "src").map(|line| line.icon));
-        names.extend([
-            PaletteItem::open_file("/w/a.rs", None).icon,
-            PaletteItem::url("a", "", "http://a/").icon,
-            PaletteItem::in_tile("a", "", "http://a/").icon,
-            PaletteItem::project("p", slopty_proto::project::ProjectId::new("p").expect("a name"))
-                .icon,
-        ]);
+        assert_eq!(PaletteItem::session("zsh", session).icon, Some(Symbol::Terminal));
+        let worker = PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1));
+        assert_eq!(worker.icon, Some(Symbol::ServerRack));
         assert_eq!(
-            PaletteItem::open_file("/w/a.rs", None).icon.map(Glyph::path).as_deref(),
-            Some("file-types/rust.svg"),
-            "a file line shows its type"
+            PaletteItem::open_file("/w/a.rs", None).icon,
+            Some(icons::FileType::Code.symbol()),
+            "a file line shows its kind"
         );
-        names.extend(crate::workspace::palette_items().into_iter().map(|line| line.icon));
-        for name in names.into_iter().flatten() {
-            let bytes = icons::Assets.load(&name.path()).ok().flatten();
-            assert!(bytes.is_some(), "{name:?} is not embedded");
-        }
+        assert_eq!(PaletteItem::open_file("/w/notes", None).icon, Some(Symbol::Doc));
     }
 }

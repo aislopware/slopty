@@ -25,7 +25,7 @@ use super::WorkspaceView;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Glyph, IconName};
+use crate::icons::Symbol;
 
 /// How long a pointing or a word stays up.
 pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
@@ -302,7 +302,7 @@ impl WorkspaceView {
                     .closed
                     .iter()
                     .find(|c| c.seq == seq)
-                    .map_or(Glyph::Icon(IconName::X), |c| self.kind_glyph(&c.item));
+                    .map_or(Symbol::Xmark, |c| self.kind_glyph(&c.item));
                 let undo = action("toast-undo", "Undo")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
                 ("closed", Some(icon), vec![undo])
@@ -340,7 +340,7 @@ impl WorkspaceView {
                         cx.notify();
                     }));
                 body = Some(self.offer_body(offer));
-                ("offered", Some(Glyph::Icon(IconName::Globe)), vec![open, dismiss])
+                ("offered", Some(Symbol::Globe), vec![open, dismiss])
             }
             ToastKind::OldUnsaved(_) => {
                 let seq = shown.seq;
@@ -357,7 +357,7 @@ impl WorkspaceView {
                             cx.notify();
                         }
                     }));
-                ("old-unsaved", Some(Glyph::Icon(IconName::FileText)), vec![discard, keep])
+                ("old-unsaved", Some(Symbol::DocText), vec![discard, keep])
             }
             ToastKind::Trashed { worker, back, .. } => {
                 let (worker, back, seq) = (*worker, back.clone(), shown.seq);
@@ -368,7 +368,7 @@ impl WorkspaceView {
                         cx.notify();
                     },
                 ));
-                ("trashed", Some(Glyph::Icon(IconName::Trash)), vec![put_back])
+                ("trashed", Some(Symbol::Trash), vec![put_back])
             }
             ToastKind::Attention { tile, status, .. } => {
                 let tile = *tile;
@@ -409,7 +409,12 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
             .children(icon.map(|icon| {
-                crate::icons::glyph(icon, px(theme.typography.icon()), hsla(s.text_secondary))
+                crate::icons::symbol(
+                    theme,
+                    icon,
+                    px(theme.typography.icon()),
+                    hsla(s.text_secondary),
+                )
             }))
             .children(mark)
             .child(body.unwrap_or_else(|| {

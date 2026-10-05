@@ -13,7 +13,7 @@ use slopty_proto::thread::AgentScreen;
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
 /// The widest a screen's name stands in the toolbar, in points at zoom 1.
@@ -28,12 +28,12 @@ pub fn short(screen: &AgentScreen) -> &str {
 
 /// A screen's mark: a phone for a simulator, a globe for a browser, a monitor for a display.
 #[must_use]
-pub const fn mark(kind: &str) -> IconName {
+pub const fn mark(kind: &str) -> Symbol {
     match kind.as_bytes() {
-        b"simulator" => IconName::Smartphone,
-        b"browser" => IconName::Globe,
-        b"desktop" => IconName::Monitor,
-        _ => IconName::AppWindow,
+        b"simulator" => Symbol::Iphone,
+        b"browser" => Symbol::Globe,
+        b"desktop" => Symbol::Display,
+        _ => Symbol::Macwindow,
     }
 }
 
@@ -102,7 +102,7 @@ mod tests {
     use slopty_proto::thread::AgentScreen;
 
     use super::{mark, short};
-    use crate::icons::IconName;
+    use crate::icons::Symbol;
 
     #[test]
     fn a_screen_goes_by_its_windows_title() {
@@ -115,7 +115,7 @@ mod tests {
         let sim = screen(AgentScreen::SIMULATOR, "Simulator \u{2014} iPhone 17 Pro");
         assert_eq!(short(&sim), "iPhone 17 Pro");
         assert_eq!(short(&screen(AgentScreen::DESKTOP, "Desktop")), "Desktop");
-        assert_eq!(mark(&sim.kind), IconName::Smartphone);
-        assert_eq!(mark("anything else"), IconName::AppWindow);
+        assert_eq!(mark(&sim.kind), Symbol::Iphone);
+        assert_eq!(mark("anything else"), Symbol::Macwindow);
     }
 }

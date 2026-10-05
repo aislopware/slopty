@@ -1290,9 +1290,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   that chrome carries no decorative glyph. An icon is not decoration when it names a kind, a
   state or an action. No emoji, and still no glyph without a meaning.
 
-  *Icons.* Hugeicons (MIT) under gpui-kit's Lucide names, at 1.75, backed by gpui-kit's Lucide
-  bundle at the same stroke (amended 2026-10-02, "One icon set at one weight"); the macOS and
-  iOS apps register the source. Sizes
+  *Icons.* SF Symbols, drawn by the OS at the size of the words beside them (amended
+  2026-10-05, "The chrome's icons are SF Symbols"; before, Hugeicons at 1.75). Sizes
   come from the type scale: `Typography::icon()` is base + 1 beside text and `icon_large()` is
   base + 3 standing alone. An icon takes the colour of the text it sits beside. Zed's icon crate
   is GPL, so none of its files are used.
@@ -4880,7 +4879,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   so the conversation keeps its rows. The plain allow is the one white button; "always" and rules are quiet buttons of
   their own that never lead.
 
-- ✅ **One icon set at one weight; files and agents by their own marks** (2026-10-02, design
+- ❌ **One icon set at one weight; files and agents by their own marks** (superseded
+  2026-10-05 by "The chrome's icons are SF Symbols" below; 2026-10-02, design
   checkpoint 4, `crates/slopty-ui/src/icons.rs`, `file_types.rs`; licences vendored beside the
   drawings).
   - **Hugeicons draws the chrome, at 1.75.** Its free set is MIT (`assets/icons/LICENSE`,
@@ -6900,7 +6900,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   one agent in two marks, neither readable at 1×.
   - **A row and a header lead with how they stand.** That is the status mark from
     `icons::Status` whenever there is one. At rest, every agent's tile, thread and palette line
-    shows the same neutral kind glyph (`Glyph::AGENT`) in the row's ink. A row under *Needs
+    shows the same neutral kind glyph (`icons::AGENT`, a conversation) in the row's ink. A row under *Needs
     you* or *To review* leads with its status mark, where it showed the agent's mark before.
   - **The agent is named in words.** A tile's place (its header, its navigator row and its
     palette line) starts with the agent's name ("Claude Code · ~") unless the title already
@@ -6943,9 +6943,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::doors::{an_approval_is_allow_and_deny_with_the_rest_set_apart,
     deny_with_a_reason_sends_the_reason_with_the_deny}`.
 
-- 🚧 **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
-  `.research/icons-2026-10-05.md` §4.3–4.4, steps 3 and 4 of its plan; the chrome's switch is
-  step 5).
+- ✅ **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
+  `.research/icons-2026-10-05.md` §4.3–4.4 and §5, steps 3 to 5 of its plan). Supersedes "One
+  icon set at one weight" above. At 1x, the person's view, only 14 % of the Hugeicons ink
+  pixels were solid; SF Symbols at the text's size have 77 % more, and sharpen and grey with
+  the system font beside them.
   - **The platform draws them** (`slopty_platform::symbols`). A `Symbol` is one of a closed
     list of SF Symbols names. `rasterize` draws one at a `SymbolSize` (the point size and
     weight of the text beside it, and the symbol scale) and a display's scale. The result is
@@ -6964,8 +6966,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Painted unscaled** by gpui-fast's `Window::paint_mask` (`fast/mask.rs` in the fork).
     `paint_svg` draws at twice the size and halves it, which cost the symbols crispness at
     1x.
+  - **Sized by the words beside it** (`icons::IconSize`, `icons::Drawn`). An inline icon is
+    drawn at the secondary text's point size in the `icon()` slot, a large one at the chrome's
+    size in `icon_large()`, a disclosure chevron at the caption's size, semibold and small, as
+    Apple draws its own. A slot sized again by the chrome's zoom draws its symbol larger by as
+    much. The ink is the slot's text colour.
+  - **A wide symbol fits its slot.** A symbol is drawn at the words' size, but a wide one
+    (`server.rack`, `folder`, `display`) at that size is wider than the square slot, and in the
+    first review a machine's rack touched its name. One wider than the slot is drawn again at
+    the point size that fits, in quarter points (`icons::fitted`), so it keeps its weight and
+    shrinks only as much as it must.
+  - **Drawn by us, three things only:** the app's mark; the working mark, now twelve spokes
+    whose brightness steps round on the existing spin clock (a ring turned in 30° jumps read as
+    dropped frames), upright and breathing under Reduce Motion; and the dot of a finish not yet
+    seen.
+  - **The status marks:** idle `circle`, waiting `circle.dashed`, needs you
+    `exclamationmark.circle.fill`, failed `xmark.circle.fill`, away `wifi.slash`. The two that
+    carry colour are filled, so the colour has a body at 1x.
+  - **A file is one of nine kinds** (`FileType`), each a monochrome symbol in the row's ink:
+    code, text, data, image, PDF, archive, audio, video, lock; anything else is the plain
+    document. The 55 coloured drawings are deleted, with `assets/icons` and `assets/file-types`.
+  - **The agent glyph is a conversation, `text.bubble`** (`icons::AGENT`), not the sparkles:
+    those are the cliché mark of AI, and Claude's own is a starburst. The empty thread's notice
+    shows it.
+  - **An empty state has no plate.** `kit::notice` puts its mark on its own, a light symbol at
+    the page heading's size and the large scale, as the system's own empty states do; the
+    raised 40-point disc under it is gone. A tile's state (away, opening, starting, a thread
+    being read) heads its notice with its status at the same size (`icons::notice_status`);
+    the plate had carried the small inline mark, and without it the mark was a speck.
+  - **A disclosure chevron is the system's own at rest**, right or down at exact pixels, and
+    only while it turns is the right one turned, by `paint_mask`'s transformation.
+  - **The kit's components draw the same symbols.** gpui-kit's `IconPainter` (our fork)
+    hands an icon a component names by path to the app, which draws its symbol; a name with
+    no symbol keeps the kit's SVG.
+  - Lints: `kit::tests::the_chrome_draws_symbols` (no SVG, `IconName` or `Glyph` in the
+    chrome but the app's mark) and `kit::tests::an_icon_takes_its_words_size` (a symbol is
+    sized and painted only in `icons.rs`, from the type scale).
   - Tests: `slopty-platform/tests/symbols.rs`, including
-    `every_symbol_the_chrome_draws_is_on_this_os`, which the macos-26 lane runs too.
+    `every_symbol_the_chrome_draws_is_on_this_os`, which the macos-26 lane runs too;
+    `icons::tests::{a_file_leads_with_its_types_symbol, each_status_has_its_own_mark}`,
+    `file_types::tests::*`. The `thread@2x` golden is the thread as a Retina display draws it,
+    since every other golden is at 1x and cannot show a symbol's or a hairline's detail. The
+    test socket's `Render` takes a scale, and gpui-fast's `Window::render_to_image_at` draws
+    the window offscreen afresh at it, so a 1x runner (CI's macos-26) takes it too.
 
 - ✅ **A command is its words** (2026-10-05, `.research/icons-2026-10-05.md` §4.5, step 2;
   premium pass T10). Every palette command led with an icon picked to decorate it (a sticky

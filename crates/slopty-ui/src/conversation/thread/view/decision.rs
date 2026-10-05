@@ -22,7 +22,7 @@ use slopty_proto::thread::{Choice, Effect, Request};
 use super::ThreadView;
 use super::denying::{deny_choice, plain_deny};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::{self, ButtonKind};
 
 /// What the deny's chevron opens, and its menu's name.
@@ -194,7 +194,7 @@ impl ThreadView {
                 .rounded_r(self.z(theme.radii.sm))
                 .cursor_pointer();
             crate::a11y::tab_stop(kit::secondary(el, theme), s.focus)
-                .child(self.icon(IconName::ChevronDown, s.text_secondary))
+                .child(self.icon(Symbol::ChevronDown, s.text_secondary))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.denials_open = if this.denials_open.as_ref() == Some(&ask) {
                         None

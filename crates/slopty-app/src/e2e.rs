@@ -97,7 +97,7 @@ pub(crate) fn serve(
                 Command::KeepDragged { .. } => {
                     Reply::Error { message: "no drag out of the app here".into() }
                 }
-                Command::Render { path } => {
+                Command::Render { path, scale } => {
                     // The frame the app draws with everything dispatched so far, as it draws
                     // it: only what was notified is built again. It must be the frame the same
                     // state drawn from scratch gives, or a view is showing an old state.
@@ -109,7 +109,7 @@ pub(crate) fn serve(
                     // leased while a dispatched action updates it.
                     let scheduled = cx.update_window(window, |_root, window, _cx| {
                         before_next_draw(window, move |window, cx| {
-                            let _sent = done_tx.send(render(window, cx, &path));
+                            let _sent = done_tx.send(render(window, cx, &path, scale));
                         });
                     });
                     let rendered = match scheduled {
@@ -840,10 +840,15 @@ const STALE_LINES: usize = 12;
 /// scratch: a difference is an error, and the frame from scratch is saved beside it
 /// (`<path>.scratch.png`) for the review.
 #[cfg(feature = "e2e")]
-fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
+fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> Reply {
     // Next-frame callbacks run before the frame is drawn: draw it as the app would.
     window.draw(cx).clear(cx);
-    let image = match window.render_to_image() {
+    let image = match scale {
+        // A scale the window is not on is drawn afresh offscreen, and the window's own put back.
+        Some(scale) => window.render_to_image_at(scale, cx),
+        None => window.render_to_image(),
+    };
+    let image = match image {
         Ok(image) => image,
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
     };
@@ -863,7 +868,9 @@ fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
             let a11y = a11y_nodes(window);
             window.set_a11y_active(false);
             tracing::info!(us = started.elapsed().as_micros(), nodes = a11y.len(), "frame text");
-            Reply::Rendered { width, height, a11y, scale: window.scale_factor() }
+            // The tree is in points, read at the window's own scale; the picture's scale maps it.
+            let scale = scale.unwrap_or_else(|| window.scale_factor());
+            Reply::Rendered { width, height, a11y, scale }
         }
         Some(stale) => {
             let scratch = format!("{path}.scratch.png");
@@ -876,7 +883,7 @@ fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
 }
 
 #[cfg(not(feature = "e2e"))]
-fn render(_window: &mut Window, _cx: &mut App, _path: &str) -> Reply {
+fn render(_window: &mut Window, _cx: &mut App, _path: &str, _scale: Option<f32>) -> Reply {
     Reply::Error { message: "built without the `e2e` feature; no renderer access".into() }
 }
 

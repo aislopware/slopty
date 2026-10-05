@@ -29,7 +29,7 @@ pub use pages::{CTX as PAGES_CTX, NextScreen, PreviousScreen, ScrollDown, Scroll
 use super::FileView;
 use super::decode::{self, Pdf, PictureSize, PreviewError};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::size_label;
 
 /// What a file tile says of a picture or PDF it cannot show, over the reason.
@@ -453,7 +453,7 @@ impl FileView {
         match &mut preview.body {
             Body::Failed(e) => {
                 let detail = e.say().to_owned();
-                self.notice(IconName::Image, CANNOT_SHOW, Some(detail), None)
+                self.notice(Symbol::Photo, CANNOT_SHOW, Some(detail), None)
             }
             Body::Picture(p) => {
                 let shown = p.shown.as_ref().map(|(_, image)| Arc::clone(image));

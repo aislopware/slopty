@@ -19,7 +19,7 @@ use slopty_proto::thread::{Cap, Delivery, ThreadState, TurnState};
 use super::ThreadView;
 use crate::colors::hsla;
 use crate::conversation::figures;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::ButtonKind;
 
 /// What goes at a limit's reset when nothing is typed.
@@ -81,7 +81,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .child(self.icon(IconName::Clock, s.text_muted))
+                .child(self.icon(Symbol::Clock, s.text_muted))
                 .child(
                     div()
                         .min_w_0()

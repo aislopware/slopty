@@ -19,7 +19,7 @@ use slopty_proto::thread::wire::Expanded;
 
 use super::ThreadView;
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// The tallest a picture is drawn, in points at zoom 1.
@@ -148,7 +148,7 @@ impl ThreadView {
         let picture = self.picture(&image, cx).map(|p| {
             img(p).size_full().object_fit(ObjectFit::Contain).rounded(self.z(theme.radii.md))
         });
-        let close = kit::icon_button_at(&theme, "picture-close", IconName::X, "Close", self.zoom)
+        let close = kit::icon_button_at(&theme, "picture-close", Symbol::Xmark, "Close", self.zoom)
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.view_picture(None, cx);

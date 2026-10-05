@@ -32,7 +32,7 @@ use gpui::{
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 
 /// Letters typed within this pause of each other make one prefix.
 pub const TYPING: Duration = Duration::from_millis(800);
@@ -60,7 +60,7 @@ pub struct MenuItem {
     key: SharedString,
     label: SharedString,
     detail: SharedString,
-    icon: Option<IconName>,
+    icon: Option<Symbol>,
     mark: Mark,
     disabled: bool,
     run: Run,
@@ -114,7 +114,7 @@ impl MenuItem {
 
     /// An icon before its words.
     #[must_use]
-    pub const fn icon(mut self, icon: IconName) -> Self {
+    pub const fn icon(mut self, icon: Symbol) -> Self {
         self.icon = Some(icon);
         self
     }
@@ -567,7 +567,7 @@ fn row(
             el.child(
                 crate::icons::icon(
                     theme,
-                    IconName::Check,
+                    Symbol::Checkmark,
                     IconSize::Inline,
                     hsla(s.text_secondary),
                 )

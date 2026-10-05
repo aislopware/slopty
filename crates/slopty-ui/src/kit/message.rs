@@ -17,7 +17,7 @@ use gpui::{
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 
 /// `el` as a message's frame at `zoom`.
 ///
@@ -41,7 +41,7 @@ pub fn send_control(
     theme: &Theme,
     zoom: f32,
     id: &'static str,
-    glyph: IconName,
+    glyph: Symbol,
     label: &'static str,
 ) -> Stateful<Div> {
     let s = theme.surfaces;

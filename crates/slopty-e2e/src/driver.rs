@@ -378,8 +378,22 @@ impl Driver {
     ///
     /// When the app was built without the `e2e` feature, or the file cannot be read.
     pub async fn render(&mut self, path: &Path) -> Result<Frame> {
+        self.rendered(path, None).await
+    }
+
+    /// [`Self::render`] at `scale` device pixels to the point rather than the window's own:
+    /// the Retina picture of a window on a 1x display, drawn afresh at that scale.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::render`].
+    pub async fn render_at(&mut self, path: &Path, scale: f32) -> Result<Frame> {
+        self.rendered(path, Some(scale)).await
+    }
+
+    async fn rendered(&mut self, path: &Path, scale: Option<f32>) -> Result<Frame> {
         let path_str = path.to_str().context("render path is not UTF-8")?.to_owned();
-        match self.call(&Command::Render { path: path_str }).await? {
+        match self.call(&Command::Render { path: path_str, scale }).await? {
             Reply::Rendered { width, height, a11y, scale } => {
                 let img = image::open(path)
                     .with_context(|| format!("read {}", path.display()))?

@@ -20,7 +20,7 @@ use slopty_theme::{Rgb, Theme};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit::{self, ButtonKind};
 
 /// What the composer says before anything is typed, while the thread has not said its agent.
@@ -187,7 +187,7 @@ impl ThreadView {
             .map(|el| self.shell(el, capped, false))
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
-            .child(self.icon(IconName::SquareTerminal, s.text_muted))
+            .child(self.icon(Symbol::Terminal, s.text_muted))
             .child(
                 div()
                     .min_w_0()
@@ -229,7 +229,7 @@ impl ThreadView {
 
     /// A small fact in the composer's toolbar, `name` its id's tail: its mark where it has one,
     /// then its words.
-    fn fact(&self, name: &str, icon: Option<IconName>, words: String) -> Div {
+    fn fact(&self, name: &str, icon: Option<Symbol>, words: String) -> Div {
         let theme = &self.theme;
         let s = theme.surfaces;
         div()
@@ -286,10 +286,9 @@ impl ThreadView {
             // and its place do not. The branch keeps its glyph, the one cue that tells a
             // branch's name from a folder's.
             .children(here.checkout.map(|c| self.fact("checkout", None, c).flex_shrink_1()))
-            .children(
-                here.branch
-                    .map(|b| self.fact("branch", Some(IconName::GitBranch), b).flex_shrink_1()),
-            );
+            .children(here.branch.map(|b| {
+                self.fact("branch", Some(Symbol::ArrowTriangleBranch), b).flex_shrink_1()
+            }));
         // Where it works opens the commit sheet on that repository.
         let place = if self.repo(cx).is_some() {
             crate::a11y::tab_stop(
@@ -357,7 +356,7 @@ impl ThreadView {
                     .child(
                         crate::icons::icon(
                             theme,
-                            IconName::GitPullRequest,
+                            Symbol::ArrowTrianglePull,
                             IconSize::Inline,
                             hsla(tone),
                         )
@@ -412,7 +411,7 @@ impl ThreadView {
                     .child(
                         crate::icons::icon(
                             theme,
-                            IconName::ChevronDown,
+                            Symbol::ChevronDown,
                             IconSize::Inline,
                             hsla(s.text_muted),
                         )
@@ -465,7 +464,7 @@ impl ThreadView {
                         .child(
                             crate::icons::icon(
                                 theme,
-                                IconName::ChevronDown,
+                                Symbol::ChevronDown,
                                 IconSize::Inline,
                                 hsla(s.text_muted),
                             )
@@ -525,7 +524,7 @@ impl ThreadView {
                     .child(
                         crate::icons::icon(
                             theme,
-                            IconName::ChevronDown,
+                            Symbol::ChevronDown,
                             IconSize::Inline,
                             hsla(s.text_muted),
                         )
@@ -553,7 +552,7 @@ impl ThreadView {
         let mark = if tasks.iter().any(BackgroundTask::is_running) {
             Some(self.spinner(true))
         } else if tasks.iter().any(|t| t.state == BackgroundTask::FAILED) {
-            Some(self.icon(IconName::CircleAlert, s.error))
+            Some(self.icon(Symbol::ExclamationmarkTriangle, s.error))
         } else {
             None
         };
@@ -662,15 +661,15 @@ impl ThreadView {
         let working = self.working(cx);
         let stop = working && empty && !stopping && !self.composing.editing();
         let (id, icon, label) = if stop {
-            ("thread-stop", IconName::Square, "Stop")
+            ("thread-stop", Symbol::StopFill, "Stop")
         } else if self.composing.editing() {
-            ("thread-send", IconName::Check, "Update")
+            ("thread-send", Symbol::Checkmark, "Update")
         } else if !working {
-            ("thread-send", IconName::ArrowUp, "Send")
+            ("thread-send", Symbol::ArrowUp, "Send")
         } else if self.send_now(cx) == Delivery::Queue {
-            ("thread-send", IconName::Clock, "Queue")
+            ("thread-send", Symbol::Clock, "Queue")
         } else {
-            ("thread-send", IconName::ArrowRight, "Steer")
+            ("thread-send", Symbol::ArrowRight, "Steer")
         };
         let hint_theme = std::rc::Rc::new(theme.clone());
         let hint: SharedString = if stop && self.goal_goes_on(cx) {
@@ -808,7 +807,7 @@ impl ThreadView {
         div()
             .relative()
             .flex_none()
-            .child(self.icon_button(ADD_BUTTON, IconName::Plus, ADD_LABEL).on_click(cx.listener(
+            .child(self.icon_button(ADD_BUTTON, Symbol::Plus, ADD_LABEL).on_click(cx.listener(
                 |this, _ev, _w, cx| {
                     this.add_open = !this.add_open;
                     cx.notify();

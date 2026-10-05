@@ -2212,7 +2212,7 @@ impl ScreenView {
             return None;
         }
         let id = format!("trackpad-{}", header.stream);
-        let icon = crate::icons::IconName::MousePointer2;
+        let icon = crate::icons::Symbol::Cursorarrow;
         let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad, k);
         let view = view.clone();
         Some(
@@ -3480,8 +3480,8 @@ impl ScreenView {
             return Some(self.unlock_line());
         }
         let icon = match self.source {
-            SourceState::Away => crate::icons::IconName::Monitor,
-            _ => crate::icons::IconName::Lock,
+            SourceState::Away => crate::icons::Symbol::Display,
+            _ => crate::icons::Symbol::Lock,
         };
         let unlock = (self.source == SourceState::Locked).then(|| {
             kit::button(theme, "screen-unlock-here", UNLOCK_HERE, kit::ButtonKind::Secondary)
@@ -3546,7 +3546,7 @@ impl ScreenView {
             .child(
                 crate::icons::icon(
                     theme,
-                    crate::icons::IconName::Lock,
+                    crate::icons::Symbol::Lock,
                     crate::icons::IconSize::Inline,
                     hsla(theme.surfaces.text_muted),
                 )
@@ -3616,11 +3616,7 @@ impl ScreenView {
         let details = kit::icon_button(
             theme,
             "stream-stats-details",
-            if open {
-                crate::icons::IconName::ChevronUp
-            } else {
-                crate::icons::IconName::ChevronDown
-            },
+            if open { crate::icons::Symbol::ChevronUp } else { crate::icons::Symbol::ChevronDown },
             "Details",
         )
         .aria_expanded(open)

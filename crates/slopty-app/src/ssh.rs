@@ -1082,7 +1082,7 @@ impl Workspace {
             .when(on, |b| {
                 kit::solid(b, theme).child(slopty_ui::icons::icon(
                     theme,
-                    slopty_ui::icons::IconName::Check,
+                    slopty_ui::icons::Symbol::Checkmark,
                     slopty_ui::icons::IconSize::Inline,
                     hsla(s.solid_ink),
                 ))
@@ -1123,7 +1123,7 @@ impl Workspace {
     /// offered.
     pub(crate) fn ssh_row(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         self.deployer.as_ref()?;
-        let glyph = slopty_ui::icons::IconName::Terminal;
+        let glyph = slopty_ui::icons::Symbol::Terminal;
         let server = self.adding.as_ref().is_some_and(|a| a.mode == crate::Panel::Server);
         let (id, title, meta) = if server {
             ("serve-over-ssh", SERVE_TITLE, SERVE_ROW_META)

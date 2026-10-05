@@ -1,413 +1,328 @@
-//! The icons chrome draws: Hugeicons' drawings (MIT, `assets/icons/LICENSE`) under the names
-//! of gpui-kit's Lucide set, a file's type (`crate::file_types`), and the agents' marks.
+//! The icons the chrome draws: SF Symbols, drawn by the OS at the size of the words beside them
+//! (`slopty_platform::symbols`), painted at exact device pixels in the ink of those words.
 //!
-//! Each file under `assets/icons` is the Hugeicons glyph for the Lucide name it carries, its
-//! stroke taken from 1.5 to 1.75 when it was vendored; an outline drawn as a fill gains the
-//! same weight from a quarter-point stroke. An icon this set does not draw falls back to
-//! gpui-kit's bundle, its stroke brought to the same 1.75. An icon takes its size from the
-//! type scale ([`slopty_theme::Typography::icon`]) and its colour from the text beside it, so
-//! it never outweighs the words it marks.
+//! A [`Symbol`] is one of a closed list. A file's type is one of nine of them
+//! ([`FileType::symbol`]), and every agent's thread is the one neutral [`AGENT`]. Nothing else
+//! is drawn by us but the working mark's twelve spokes and the dot of a finish not yet seen
+//! (`docs/decisions/ui.md`, "The chrome's icons are SF Symbols").
+//!
+//! An icon takes its size from the type scale: [`IconSize::Inline`] sits in the slot
+//! [`slopty_theme::Typography::icon`] beside the chrome's secondary text and is drawn at that
+//! text's point size; [`IconSize::Large`] stands in [`slopty_theme::Typography::icon_large`]
+//! at the chrome's own size. A slot sized larger or smaller (the chrome's zoom) draws its
+//! symbol larger or smaller by as much, so an icon never parts from its words' size.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, App, AssetSource, Bounds, DevicePixels, Div, Element, ElementId, EntityId, Global,
+    AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId, Global,
     GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, Pixels, RenderImage, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Svg, SvgSize, Transformation, Window, div, px,
-    radians, svg,
+    ParentElement as _, PathBuilder, Pixels, Point, ScaledPixels, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, TransformationMatrix, Window, canvas, div, point,
+    px, radians,
 };
-pub use gpui_kit::assets::IconName;
+use parking_lot::RwLock;
+use slopty_platform::symbols::{Masks, SymbolMask};
+pub use slopty_platform::symbols::{Scale, Symbol, SymbolSize, Weight};
 use slopty_theme::{Rgb, Theme};
 
 use crate::colors::hsla;
 pub use crate::file_types::FileType;
 
-macro_rules! drawn {
-    ($($stem:literal),* $(,)?) => {
-        /// The icons Hugeicons draws, by the path [`IconName::path`] gives, with their bytes.
-        const DRAWN: &[(&str, &[u8])] = &[$((
-            concat!("icons/", $stem, ".svg"),
-            include_bytes!(concat!("../assets/icons/", $stem, ".svg")),
-        )),*];
-    };
-}
+/// Every agent's thread, whichever agent it is: one neutral mark in the ink beside it, a
+/// conversation. Agents are told apart in words (`docs/decisions/ui.md`, "No agent wears a
+/// mark of its own").
+pub const AGENT: Symbol = Symbol::TextBubble;
 
-drawn![
-    "a-arrow-down",
-    "a-arrow-up",
-    "activity",
-    "align-center-horizontal",
-    "app-window",
-    "arrow-down",
-    "arrow-left",
-    "arrow-left-to-line",
-    "arrow-right",
-    "arrow-right-to-line",
-    "arrow-up",
-    "arrow-up-down",
-    "asterisk",
-    "bell",
-    "bell-ring",
-    "between-horizontal-end",
-    "between-horizontal-start",
-    "bot",
-    "brain",
-    "cable",
-    "case-sensitive",
-    "cast",
-    "check",
-    "chevron-down",
-    "chevron-left",
-    "chevron-right",
-    "chevron-up",
-    "chevrons-left",
-    "chevrons-right",
-    "circle",
-    "circle-alert",
-    "circle-check",
-    "circle-dashed",
-    "circle-dot",
-    "circle-pause",
-    "circle-x",
-    "clipboard",
-    "clock",
-    "columns-2",
-    "command",
-    "copy",
-    "corner-down-left",
-    "cpu",
-    "download",
-    "ellipsis",
-    "eraser",
-    "expand",
-    "external-link",
-    "eye",
-    "file",
-    "file-diff",
-    "file-pen",
-    "file-plus",
-    "file-text",
-    "flag",
-    "fold-horizontal",
-    "folder",
-    "folder-git-2",
-    "folder-open",
-    "folder-plus",
-    "folder-search",
-    "git-branch",
-    "git-merge",
-    "git-pull-request",
-    "git-pull-request-draft",
-    "globe",
-    "hand",
-    "image",
-    "inbox",
-    "info",
-    "kanban",
-    "keyboard",
-    "layout-dashboard",
-    "layout-grid",
-    "link",
-    "list-checks",
-    "list-filter",
-    "list-todo",
-    "list-tree",
-    "loader-circle",
-    "lock",
-    "map",
-    "maximize-2",
-    "message-circle-question-mark",
-    "message-square",
-    "message-square-warning",
-    "minus",
-    "monitor",
-    "monitor-off",
-    "mouse-pointer-2",
-    "move-down",
-    "move-horizontal",
-    "move-left",
-    "move-right",
-    "move-up",
-    "move-vertical",
-    "notebook-pen",
-    "panel-left",
-    "panels-top-left",
-    "paperclip",
-    "pause",
-    "pencil",
-    "play",
-    "plug",
-    "plus",
-    "power",
-    "regex",
-    "replace",
-    "replace-all",
-    "rotate-ccw-clock",
-    "rotate-cw",
-    "save",
-    "scissors",
-    "search",
-    "server",
-    "server-off",
-    "settings",
-    "shield",
-    "shield-ban",
-    "shield-off",
-    "shrink",
-    "smartphone",
-    "sparkles",
-    "square",
-    "square-terminal",
-    "sticky-note",
-    "terminal",
-    "text-cursor-input",
-    "text-search",
-    "trash",
-    "type",
-    "undo-2",
-    "unfold-horizontal",
-    "unfold-vertical",
-    "unplug",
-    "upload",
-    "volume-2",
-    "volume-x",
-    "whole-word",
-    "wifi",
-    "wifi-off",
-    "workflow",
-    "wrench",
-    "x",
-];
-
-/// The stroke gpui-kit's Lucide icons are drawn at, and the one this set's are.
-const LUCIDE_STROKE: &str = "stroke-width=\"2\"";
-const STROKE: &str = "stroke-width=\"1.75\"";
-
-/// The asset source every window registers: Hugeicons' drawings and the file types, then
-/// gpui-kit's bundle at this set's stroke.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        let ours = DRAWN
-            .iter()
-            .find(|(p, _)| *p == path)
-            .map(|(_, bytes)| *bytes)
-            .or_else(|| crate::file_types::load(path));
-        if let Some(bytes) = ours {
-            return Ok(Some(Cow::Borrowed(bytes)));
-        }
-        Ok(gpui_kit::assets::Assets.load(path)?.map(at_our_stroke))
-    }
-
-    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        let mut paths: Vec<SharedString> = DRAWN
-            .iter()
-            .map(|(p, _)| SharedString::from(*p))
-            .chain(crate::file_types::paths())
-            .filter(|p| p.starts_with(path))
-            .collect();
-        paths.extend(gpui_kit::assets::Assets.list(path)?);
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
-    }
-}
-
-/// A Lucide icon from gpui-kit's bundle at the stroke this set is drawn at.
-fn at_our_stroke(bytes: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
-    match std::str::from_utf8(&bytes) {
-        Ok(text) if text.contains(LUCIDE_STROKE) => {
-            Cow::Owned(text.replace(LUCIDE_STROKE, STROKE).into_bytes())
-        }
-        _ => bytes,
-    }
-}
-
-/// Whether Hugeicons draws the icon at `path` ([`IconName::path`]), rather than gpui-kit's
-/// Lucide fallback.
+/// The symbol for the file at `path`: its type's, or the plain document.
 #[must_use]
-pub fn drawn(path: &str) -> bool {
-    DRAWN.iter().any(|(p, _)| *p == path)
+pub fn file_symbol(path: &str) -> Symbol {
+    FileType::of(path).map_or(Symbol::Doc, FileType::symbol)
 }
 
-/// How large an icon is drawn.
+/// The symbol for an icon gpui-kit's components name by its asset path (`icons/check.svg`),
+/// where the chrome has one.
+#[must_use]
+pub fn kit_symbol(path: &str) -> Option<Symbol> {
+    let name = path.strip_prefix("icons/")?.strip_suffix(".svg")?;
+    Some(match name {
+        "check" => Symbol::Checkmark,
+        "x" | "close" => Symbol::Xmark,
+        "chevron-down" => Symbol::ChevronDown,
+        "chevron-up" => Symbol::ChevronUp,
+        "chevron-left" => Symbol::ChevronLeft,
+        "chevron-right" => Symbol::ChevronRight,
+        "minus" => Symbol::Minus,
+        "plus" => Symbol::Plus,
+        "search" => Symbol::Magnifyingglass,
+        "eye" => Symbol::Eye,
+        "copy" => Symbol::DocOnDoc,
+        "info" => Symbol::InfoCircle,
+        "circle-x" => Symbol::XmarkCircle,
+        "circle-check" => Symbol::CheckmarkCircle,
+        "triangle-alert" => Symbol::ExclamationmarkTriangle,
+        "ellipsis" => Symbol::Ellipsis,
+        _ => return None,
+    })
+}
+
+/// How large an icon is drawn, by the words it sits beside.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconSize {
-    /// Beside chrome text: [`slopty_theme::Typography::icon`].
+    /// Beside secondary chrome text: [`slopty_theme::Typography::small`]'s point size in
+    /// [`slopty_theme::Typography::icon`]'s slot.
     Inline,
-    /// Standing alone: [`slopty_theme::Typography::icon_large`].
+    /// Standing alone or beside a row's title: the chrome's size in
+    /// [`slopty_theme::Typography::icon_large`]'s slot.
     Large,
 }
 
-/// `name` at `size`, in `color`.
-#[must_use]
-pub fn icon(theme: &Theme, name: IconName, size: IconSize, color: Hsla) -> Svg {
-    let side = match size {
-        IconSize::Inline => theme.typography.icon(),
-        IconSize::Large => theme.typography.icon_large(),
-    };
-    svg().path(name.path()).flex_shrink_0().size(px(side)).text_color(color)
-}
-
-/// What a row or a header leads with: a chrome icon or a file's type.
-///
-/// No agent has a mark of its own (`docs/decisions/ui.md`, "No agent wears a mark"): an agent's
-/// row leads with its status, and at rest with the one neutral kind glyph ([`Glyph::AGENT`]),
-/// and its name is said in words.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Glyph {
-    /// A chrome icon, in the ink of the words beside it.
-    Icon(IconName),
-    /// A file's type, in its own colours.
-    File(FileType),
-}
-
-impl From<IconName> for Glyph {
-    fn from(icon: IconName) -> Self {
-        Self::Icon(icon)
-    }
-}
-
-impl Glyph {
-    /// Every agent's kind, whichever agent it is: one neutral mark in the ink beside it.
-    pub const AGENT: Self = Self::Icon(IconName::Sparkles);
-
-    /// The asset it is drawn from.
+impl IconSize {
+    /// The slot's side in points.
     #[must_use]
-    pub fn path(self) -> SharedString {
+    pub fn slot(self, theme: &Theme) -> f32 {
         match self {
-            Self::Icon(name) => name.path(),
-            Self::File(kind) => kind.path(),
+            Self::Inline => theme.typography.icon(),
+            Self::Large => theme.typography.icon_large(),
         }
     }
 
-    /// The file at `path`: its type's drawing, or the plain file icon for a type the set does
-    /// not draw.
+    /// The point size of the words beside it, which the symbol is drawn at.
     #[must_use]
-    pub fn file(path: &str) -> Self {
-        FileType::of(path).map_or(Self::Icon(IconName::File), Self::File)
-    }
-}
-
-/// `glyph`, `side` square: an icon in `ink`, a file's type in its own colours.
-#[must_use]
-pub fn glyph(glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement {
-    let path = glyph.path();
-    match glyph {
-        Glyph::Icon(_) => {
-            svg().path(path).flex_shrink_0().size(side).text_color(ink).into_any_element()
+    pub fn point(self, theme: &Theme) -> f32 {
+        match self {
+            Self::Inline => theme.typography.small(),
+            Self::Large => theme.typography.ui_size,
         }
-        Glyph::File(_) => Picture { path, side, inner: None }.into_any_element(),
     }
 }
 
-/// A drawing in its own colours, rasterised once for each size it shows at in the window's
-/// device pixels: as sharp as an icon, and there on the first frame, with no load to wait for.
-struct Picture {
-    path: SharedString,
-    side: Pixels,
-    inner: Option<AnyElement>,
+/// How a symbol is drawn in a slot: at `ratio` of the slot's side in points, `weight` and
+/// `scale`, turned by `turn` radians.
+#[derive(Clone, Copy, Debug)]
+pub struct Drawn {
+    symbol: Symbol,
+    ratio: f32,
+    weight: Weight,
+    scale: Scale,
+    turn: f32,
 }
 
-/// The pictures rasterised so far, by path and side in device pixels; `None` for one that
-/// would not draw, so it is not tried again.
-#[derive(Default)]
-struct Pictures(HashMap<(SharedString, i32), Option<Arc<RenderImage>>>);
-
-impl Global for Pictures {}
-
-/// `path` rasterised `device` pixels square.
-fn picture(cx: &mut App, path: &SharedString, device: i32) -> Option<Arc<RenderImage>> {
-    let key = (path.clone(), device);
-    if let Some(made) = cx.try_global::<Pictures>().and_then(|p| p.0.get(&key)) {
-        return made.clone();
+impl Drawn {
+    /// `symbol` in a slot of `size`, regular and at the medium scale.
+    #[must_use]
+    pub fn new(theme: &Theme, symbol: Symbol, size: IconSize) -> Self {
+        Self {
+            symbol,
+            ratio: size.point(theme) / size.slot(theme),
+            weight: Weight::Regular,
+            scale: Scale::Medium,
+            turn: 0.0,
+        }
     }
-    let renderer = cx.svg_renderer();
-    let side = gpui::size(DevicePixels(device), DevicePixels(device));
-    let made = Assets
-        .load(path)
-        .ok()
-        .flatten()
-        .and_then(|bytes| renderer.parse_svg(&bytes).ok())
-        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::ExactSize(side)).ok());
-    cx.default_global::<Pictures>().0.insert(key, made.clone());
-    made
-}
 
-impl IntoElement for Picture {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
+    /// At `weight`, as the words beside it are.
+    #[must_use]
+    pub const fn weight(mut self, weight: Weight) -> Self {
+        self.weight = weight;
         self
     }
+
+    /// At `scale`.
+    #[must_use]
+    pub const fn scale(mut self, scale: Scale) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// A disclosure chevron's drawing: Apple's semibold at the small scale, at the caption's
+    /// share of the inline slot.
+    #[must_use]
+    pub fn disclosure(theme: &Theme, symbol: Symbol) -> Self {
+        Self {
+            ratio: theme.typography.caption() / IconSize::Inline.slot(theme),
+            weight: Weight::Semibold,
+            scale: Scale::Small,
+            ..Self::new(theme, symbol, IconSize::Inline)
+        }
+    }
+
+    /// An empty state's mark: the page heading's size in [`crate::kit::NOTICE_MARK`], at the
+    /// light weight and the large scale.
+    #[must_use]
+    pub fn notice(theme: &Theme, symbol: Symbol) -> Self {
+        Self {
+            ratio: theme.typography.heading() / crate::kit::NOTICE_MARK,
+            weight: Weight::Light,
+            scale: Scale::Large,
+            ..Self::new(theme, symbol, IconSize::Large)
+        }
+    }
+
+    /// The size it is drawn at in a slot `side` points square.
+    #[must_use]
+    pub fn size(self, side: f32) -> SymbolSize {
+        SymbolSize { point: side * self.ratio, weight: self.weight, scale: self.scale }
+    }
+
+    /// Turned by `radians` about the slot's centre, while it moves; at rest it is upright, so
+    /// its pixels stay the screen's.
+    #[must_use]
+    pub const fn turned(mut self, radians: f32) -> Self {
+        self.turn = radians;
+        self
+    }
+
+    /// The slot, `side` square, its symbol in `color`. The slot can be sized again
+    /// (`.size(..)`), and the symbol is drawn larger or smaller by as much; its ink is the
+    /// slot's text colour, so `.text_color(..)` recolours it.
+    #[must_use]
+    pub fn slot(self, side: Pixels, color: Hsla) -> Div {
+        div().flex_none().size(side).text_color(color).child(
+            canvas(|_, _, _| {}, move |bounds, (), window, _cx| self.paint(bounds, window))
+                .size_full(),
+        )
+    }
+
+    /// Paints the symbol centred in `bounds`: its box across, its alignment rectangle (the
+    /// baseline to the cap height) down, as the words beside it centre.
+    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let side = f32::from(bounds.size.width.min(bounds.size.height));
+        let device = window.scale_factor();
+        let Some((mask, key)) =
+            fitted(self.symbol, self.size(side), f32::from(bounds.size.width) * device, device)
+        else {
+            return;
+        };
+        let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height))
+        else {
+            return;
+        };
+        let a = mask.alignment;
+        let centre = bounds.center();
+        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
+        let across = mask.width as f32 / device / 2.0;
+        let origin = point(centre.x - px(across), centre.y - px((a.y + a.height / 2.0) / device));
+        let transformation = if self.turn == 0.0 {
+            TransformationMatrix::unit()
+        } else {
+            let at = centre.scale(device);
+            TransformationMatrix::unit()
+                .translate(at)
+                .rotate(radians(self.turn))
+                .translate(Point::new(ScaledPixels(-at.x.0), ScaledPixels(-at.y.0)))
+        };
+        let devices = gpui::size(DevicePixels(width), DevicePixels(height));
+        let ink = window.text_style().color;
+        let painted = window
+            .paint_mask(origin, devices, key, transformation, ink, || Ok(Some(mask.alpha.clone())));
+        if let Err(error) = painted {
+            tracing::warn!(%error, symbol = self.symbol.name(), "a symbol was not painted");
+        }
+    }
 }
 
-impl Element for Picture {
-    type PrepaintState = ();
-    type RequestLayoutState = ();
+/// A drawn mask with the key the atlas keeps it under.
+type Kept = Option<(Arc<SymbolMask>, SharedString)>;
 
-    fn id(&self) -> Option<ElementId> {
-        None
+/// The masks every window paints from, shared with the prewarm's thread, and each one's atlas
+/// key, made once. A symbol the OS lacks is kept as a miss.
+struct Symbols {
+    masks: Masks,
+    kept: RwLock<HashMap<(Symbol, SymbolSize, u32), Kept>>,
+}
+
+static SYMBOLS: LazyLock<Symbols> =
+    LazyLock::new(|| Symbols { masks: Masks::new(), kept: RwLock::new(HashMap::new()) });
+
+/// `symbol` at `size` for a display of `device` pixels to the point, and its atlas key.
+fn mask(symbol: Symbol, size: SymbolSize, device: f32) -> Kept {
+    let at = (symbol, size, device.to_bits());
+    if let Some(kept) = SYMBOLS.kept.read().get(&at) {
+        return kept.clone();
     }
+    let kept = SYMBOLS.masks.get(symbol, size, device).map(|mask| {
+        let key = format!(
+            "sf:{}:{:08x}:{:?}:{:?}@{:08x}",
+            symbol.name(),
+            size.point.to_bits(),
+            size.weight,
+            size.scale,
+            device.to_bits()
+        );
+        (mask, SharedString::from(key))
+    });
+    SYMBOLS.kept.write().entry(at).or_insert(kept).clone()
+}
 
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
+/// `symbol` at `size`, drawn smaller where it is wider than `room` device pixels: a wide
+/// symbol (a server rack, a folder) kept in its slot, so it never reaches the words beside it.
+///
+/// The point size is scaled by the overflow and stepped down a quarter point at a time while
+/// the OS's rounding still leaves it a pixel over, so it shrinks no more than it must.
+fn fitted(symbol: Symbol, size: SymbolSize, room: f32, device: f32) -> Kept {
+    let room = room.ceil();
+    let mut kept = mask(symbol, size, device)?;
+    let mut point = size.point;
+    for _ in 0..FIT_STEPS {
+        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
+        let wide = kept.0.width as f32;
+        if wide <= room {
+            break;
+        }
+        point = (point * room / wide * 4.0).floor().min(point.mul_add(4.0, -1.0)) / 4.0;
+        if point < 1.0 {
+            break;
+        }
+        kept = mask(symbol, SymbolSize { point, ..size }, device)?;
     }
+    Some(kept)
+}
 
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        #[expect(clippy::cast_possible_truncation, reason = "an icon's side in device pixels")]
-        let device = (f32::from(self.side) * window.scale_factor()).round().max(1.0) as i32;
-        let box_ = div().flex_shrink_0().size(self.side);
-        let mut inner = match picture(cx, &self.path, device) {
-            Some(image) => gpui::img(image).flex_shrink_0().size(self.side).into_any_element(),
-            None => box_.into_any_element(),
-        };
-        let layout = inner.request_layout(window, cx);
-        self.inner = Some(inner);
-        (layout, ())
-    }
+/// How many times [`fitted`] draws a symbol smaller before it keeps the last.
+const FIT_STEPS: usize = 4;
 
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        if let Some(inner) = &mut self.inner {
-            inner.prepaint(window, cx);
+/// The display scales a window of this platform is likely shown at, the likeliest first.
+const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 2.0] };
+
+/// Draws every symbol at the chrome's sizes on background threads.
+///
+/// The first frame then finds them drawn. Start it before the first window: the first symbol
+/// of a process loads the system's catalogue, 40 to 70 ms (`docs/MEASUREMENTS.md`, "SF
+/// Symbols as masks").
+pub fn prewarm(theme: &Theme) {
+    let inline = IconSize::Inline.slot(theme);
+    let sizes = [
+        Drawn::new(theme, AGENT, IconSize::Large).size(IconSize::Large.slot(theme)),
+        Drawn::new(theme, AGENT, IconSize::Inline).size(inline),
+        Drawn::disclosure(theme, Symbol::ChevronRight).size(inline),
+        Drawn::notice(theme, AGENT).size(crate::kit::NOTICE_MARK),
+    ];
+    let wanted: Vec<(Symbol, SymbolSize)> = sizes
+        .into_iter()
+        .flat_map(|size| Symbol::ALL.iter().map(move |&symbol| (symbol, size)))
+        .collect();
+    for &scale in SCALES {
+        if let Err(error) = SYMBOLS.masks.prewarm(wanted.clone(), scale) {
+            tracing::warn!(%error, "the symbols' prewarm did not start");
         }
     }
+}
 
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(inner) = &mut self.inner {
-            inner.paint(window, cx);
-        }
-    }
+/// `symbol` at `size`, in `color`: a slot of the size's side.
+#[must_use]
+pub fn icon(theme: &Theme, symbol: Symbol, size: IconSize, color: Hsla) -> Div {
+    Drawn::new(theme, symbol, size).slot(px(size.slot(theme)), color)
+}
+
+/// `symbol` in a slot `side` square, in `ink`, drawn at the inline icon's share of the slot:
+/// a row's lead at whatever zoom.
+#[must_use]
+pub fn symbol(theme: &Theme, symbol: Symbol, side: Pixels, ink: Hsla) -> AnyElement {
+    Drawn::new(theme, symbol, IconSize::Inline).slot(side, ink).into_any_element()
 }
 
 /// The one vocabulary for how a thing is doing, wherever it is shown: a tile's header, a
@@ -437,17 +352,18 @@ pub enum Status {
 }
 
 impl Status {
-    /// The icon that marks it.
+    /// The symbol that marks it; `None` for the two marks drawn by us, the working mark's
+    /// spokes and the dot of a finish ([`status_icon`]). The two that carry colour are filled,
+    /// so the colour has a body at 1x.
     #[must_use]
-    pub const fn icon(self) -> IconName {
+    pub const fn symbol(self) -> Option<Symbol> {
         match self {
-            Self::Idle => IconName::Circle,
-            Self::Working => IconName::LoaderCircle,
-            Self::Running => IconName::CircleDashed,
-            Self::NeedsYou => IconName::CircleAlert,
-            Self::Done => IconName::CircleCheck,
-            Self::Failed => IconName::CircleX,
-            Self::Away => IconName::Unplug,
+            Self::Idle => Some(Symbol::Circle),
+            Self::Working | Self::Done => None,
+            Self::Running => Some(Symbol::CircleDashed),
+            Self::NeedsYou => Some(Symbol::ExclamationmarkCircleFill),
+            Self::Failed => Some(Symbol::XmarkCircleFill),
+            Self::Away => Some(Symbol::WifiSlash),
         }
     }
 
@@ -502,12 +418,27 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
     }
 }
 
+/// `status` as an empty state's mark, in `color` at the chrome's zoom `k`.
+///
+/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working spokes or
+/// the dot of a finish at the heading's size, so a tile's state reads at the size of the
+/// notice it heads.
+#[must_use]
+pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyElement {
+    match status.symbol() {
+        Some(symbol) => Drawn::notice(theme, symbol)
+            .slot(px(crate::kit::NOTICE_MARK * k), color)
+            .into_any_element(),
+        None => status_icon(theme, status, px(theme.typography.heading() * k), color),
+    }
+}
+
 /// `status`'s icon, `side` square, in `color`.
 ///
-/// [`Status::Working`]'s turns ([`spin_step`]), the only mark that moves; [`Status::Running`]
-/// (waiting on its own background work) is a still dashed ring, since a mark that moves says
-/// work is in progress; [`Status::Done`] is a dot, the navigator's unseen one at that size, centred
-/// where an icon would be.
+/// [`Status::Working`]'s spokes step round ([`spin_step`]), the only mark that moves;
+/// [`Status::Running`] (waiting on its own background work) is a still dashed ring, since a mark
+/// that moves says work is in progress; [`Status::Done`] is a dot, the navigator's unseen one at
+/// that size, centred where an icon would be.
 #[must_use]
 pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> AnyElement {
     match status {
@@ -523,7 +454,12 @@ pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> 
                 .child(div().size(dot).rounded_full().bg(color))
                 .into_any_element()
         }
-        _ => icon(theme, status.icon(), IconSize::Inline, color).size(side).into_any_element(),
+        _ => match status.symbol() {
+            Some(symbol) => {
+                icon(theme, symbol, IconSize::Inline, color).size(side).into_any_element()
+            }
+            None => div().flex_none().size(side).into_any_element(),
+        },
     }
 }
 
@@ -752,7 +688,16 @@ pub fn motion_setting_changed(cx: &mut App) {
     SpinClock::wake(cx);
 }
 
-/// The working mark: [`Status::Working`]'s icon, turned to the spin clock's step when laid out.
+/// The share of the side a spoke runs, and its width in points at the inline slot's side.
+const SPOKE_LENGTH: f32 = 0.28;
+const SPOKE_WIDTH: f32 = 1.5;
+
+/// The faintest spoke, the one the head has just left the furthest behind.
+const SPOKE_FAINTEST: f32 = 0.2;
+
+/// The working mark: twelve spokes round a centre, the head at the spin clock's step and the
+/// rest fading behind it, so the eye reads a turn while nothing turns (Apple's activity
+/// indicator). Under Reduce Motion it stands on its first step and breathes.
 struct Spinner {
     side: Pixels,
     color: Hsla,
@@ -764,6 +709,43 @@ impl IntoElement for Spinner {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Paints the twelve spokes in `bounds`, the head at `step`.
+fn paint_spokes(bounds: Bounds<Pixels>, step: u32, color: Hsla, window: &mut Window) {
+    let side = f32::from(bounds.size.width.min(bounds.size.height));
+    let unit = side / 14.0;
+    let half = SPOKE_WIDTH * unit / 2.0;
+    let outer = side / 2.0 - half;
+    let inner = SPOKE_LENGTH.mul_add(-side, outer);
+    let centre = bounds.center();
+    #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
+    let steps = SPIN_STEPS as f32;
+    for spoke in 0..SPIN_STEPS {
+        #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
+        let angle = spoke as f32 / steps * std::f32::consts::TAU;
+        let behind = step.wrapping_add(SPIN_STEPS).wrapping_sub(spoke) % SPIN_STEPS;
+        #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
+        let fade = behind as f32 / (steps - 1.0);
+        let opacity = (1.0 - SPOKE_FAINTEST).mul_add(-fade, 1.0);
+        let (sin, cos) = angle.sin_cos();
+        let at = |r: f32, across: f32| {
+            point(
+                centre.x + px(cos.mul_add(across, sin * r)),
+                centre.y + px(sin.mul_add(across, -cos * r)),
+            )
+        };
+        let mut path = PathBuilder::fill();
+        path.move_to(at(inner, half));
+        path.line_to(at(outer, half));
+        path.arc_to(point(px(half), px(half)), px(0.0), false, false, at(outer, -half));
+        path.line_to(at(inner, -half));
+        path.arc_to(point(px(half), px(half)), px(0.0), false, false, at(inner, half));
+        path.close();
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color.opacity(opacity));
+        }
     }
 }
 
@@ -788,16 +770,16 @@ impl Element for Spinner {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let reduce = cx.reduce_motion();
         let (step, breath) = SpinClock::drawn(cx);
-        #[expect(clippy::cast_precision_loss, reason = "a step under twelve")]
-        let turn = step as f32 / SPIN_STEPS as f32;
         let color = if reduce { self.color.opacity(breath) } else { self.color };
-        let mut inner = svg()
-            .path(Status::Working.icon().path())
-            .flex_shrink_0()
-            .size(self.side)
-            .text_color(color)
-            .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::TAU)))
-            .into_any_element();
+        let mut inner = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, _cx| {
+                paint_spokes(bounds, step, color, window);
+            },
+        )
+        .flex_none()
+        .size(self.side)
+        .into_any_element();
         let layout = inner.request_layout(window, cx);
         self.inner = Some(inner);
         (layout, ())
@@ -863,57 +845,59 @@ pub(crate) fn wake_at_next_step(window: &Window, cx: &mut App) {
 mod tests {
     use super::*;
 
-    /// Every drawing is the Hugeicons glyph for one of gpui-kit's names, at this set's stroke
-    /// and in the ink it is given; an icon the set does not draw comes from gpui-kit's bundle
-    /// at the same stroke.
+    /// The kit's icons map onto the chrome's symbols by their asset paths; one the chrome has
+    /// no symbol for is left to the kit.
     #[test]
-    fn every_icon_is_drawn_at_one_stroke_and_the_component_bundle_still_loads() {
-        let names: std::collections::HashSet<SharedString> =
-            IconName::ALL.iter().map(|i| i.path()).collect();
-        for (path, bytes) in DRAWN {
-            assert!(names.contains(*path), "{path} is not one of gpui-kit's names");
-            let text = std::str::from_utf8(bytes).unwrap_or_default();
-            assert!(text.starts_with("<svg"), "{path} is not an SVG");
-            assert!(text.contains(STROKE), "{path} is not at 1.75");
-            assert!(!text.contains("stroke-width=\"1.5\""), "{path} kept Hugeicons' 1.5");
-            assert!(!text.contains("#141B34"), "{path} paints its own ink");
-        }
-        let lucide = IconName::ALL
-            .iter()
-            .map(|i| i.path())
-            .find(|p| !drawn(p))
-            .and_then(|p| Assets.load(&p).ok().flatten())
-            .unwrap_or_default();
-        let text = std::str::from_utf8(&lucide).unwrap_or_default();
-        assert!(text.contains(STROKE) && !text.contains(LUCIDE_STROKE), "{text}");
-        let component = gpui_kit::assets::Assets.list("").unwrap_or_default();
-        let first = component.first().map(SharedString::to_string).unwrap_or_default();
-        assert!(Assets.load(&first).ok().flatten().is_some(), "component icon {first} lost");
+    fn the_kits_icons_are_the_chromes_symbols() {
+        assert_eq!(kit_symbol("icons/check.svg"), Some(Symbol::Checkmark));
+        assert_eq!(kit_symbol("icons/close.svg"), Some(Symbol::Xmark));
+        assert_eq!(kit_symbol("icons/chevron-down.svg"), Some(Symbol::ChevronDown));
+        assert_eq!(kit_symbol("icons/asterisk.svg"), None);
+        assert_eq!(kit_symbol("elsewhere/check.svg"), None);
     }
 
-    /// A file's type is its own drawing, and a type the set does not draw is the plain file.
+    /// A file's type is one of nine symbols, and a type it has none for is the plain
+    /// document; every agent's thread is the one neutral glyph.
     #[test]
-    fn a_file_leads_with_its_types_drawing() {
-        assert_eq!(Glyph::file("/w/main.rs").path().as_ref(), "file-types/rust.svg");
-        assert_eq!(Glyph::file("/w/notes"), Glyph::Icon(IconName::File));
+    fn a_file_leads_with_its_types_symbol() {
+        assert_eq!(file_symbol("/w/main.rs"), Symbol::ChevronLeftForwardslashChevronRight);
+        assert_eq!(file_symbol("/w/README.md"), Symbol::DocText);
+        assert_eq!(file_symbol("/w/notes"), Symbol::Doc);
+        assert_eq!(AGENT, Symbol::TextBubble, "a conversation, not the cliched sparkles");
     }
 
+    /// A symbol wider than its slot is drawn smaller until it fits, keeping its weight; one
+    /// that fits is drawn at the words' size.
     #[test]
-    fn each_status_has_its_own_icon_and_every_icon_is_embedded() {
-        let all = [
-            Status::Idle,
-            Status::Working,
-            Status::Running,
-            Status::NeedsYou,
-            Status::Done,
-            Status::Failed,
-            Status::Away,
-        ];
-        let icons: std::collections::HashSet<_> = all.iter().map(|s| s.icon()).collect();
-        assert_eq!(icons.len(), all.len());
-        for s in all {
-            assert!(drawn(&s.icon().path()), "{s:?}");
+    fn a_wide_symbol_fits_its_slot() {
+        let size = IconSize::Inline.point(&Theme::default());
+        let size = SymbolSize::new(size, Weight::Regular);
+        for device in [1.0, 2.0] {
+            let natural = mask(Symbol::ServerRack, size, device).unwrap().0;
+            let room = f32::from(u16::try_from(natural.width).unwrap()) - 3.0;
+            let fit = fitted(Symbol::ServerRack, size, room, device).unwrap().0;
+            assert!(
+                f32::from(u16::try_from(fit.width).unwrap()) <= room,
+                "{device}x: {}",
+                fit.width
+            );
+            assert!(fit.width + 6 >= natural.width, "{device}x shrank too far: {}", fit.width);
+            let roomy = fitted(Symbol::ServerRack, size, room + 3.0, device).unwrap().0;
+            assert_eq!(roomy.alpha, natural.alpha, "{device}x: one that fits is left alone");
         }
+    }
+
+    /// Each status the OS draws has its own symbol, and the two that carry colour are filled;
+    /// working and done are ours.
+    #[test]
+    fn each_status_has_its_own_mark() {
+        let all = [Status::Idle, Status::Running, Status::NeedsYou, Status::Failed, Status::Away];
+        let symbols: std::collections::HashSet<_> = all.iter().filter_map(|s| s.symbol()).collect();
+        assert_eq!(symbols.len(), all.len());
+        assert_eq!(Status::NeedsYou.symbol(), Some(Symbol::ExclamationmarkCircleFill));
+        assert_eq!(Status::Failed.symbol(), Some(Symbol::XmarkCircleFill));
+        assert_eq!(Status::Working.symbol(), None);
+        assert_eq!(Status::Done.symbol(), None);
     }
 
     /// Twelve steps make one turn a second, each held a twelfth of a second, and the timer
@@ -1134,10 +1118,5 @@ mod tests {
         cx.run_until_parked();
         let turning = renders_over(&view, cx, Duration::from_secs(1));
         assert!((11..=13).contains(&turning), "{turning} steps once it ran out");
-    }
-
-    #[test]
-    fn an_unknown_path_loads_nothing() {
-        assert!(!matches!(Assets.load("icons/not-an-icon.svg"), Ok(Some(_))));
     }
 }

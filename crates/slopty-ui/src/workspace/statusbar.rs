@@ -48,7 +48,7 @@ use super::rollup::{META_SEPARATOR, meta_line};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconName, IconSize, icon};
+use crate::icons::{IconSize, Symbol, icon};
 use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
 use crate::screen::fps_label;
@@ -707,7 +707,7 @@ impl WorkspaceView {
         let xfer = row.xfer;
         let group = SharedString::from(format!("transfers-row-{xfer}"));
         let (mark, way) =
-            if row.up { (IconName::Upload, "to") } else { (IconName::Download, "from") };
+            if row.up { (Symbol::ArrowUpToLine, "to") } else { (Symbol::ArrowDownToLine, "from") };
         let detail = format!("{}{META_SEPARATOR}{}", row.machine, row.words);
         let label =
             SharedString::from(format!("{}, {way} {}, {}", row.name, row.machine, row.words));

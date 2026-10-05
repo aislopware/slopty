@@ -16,7 +16,7 @@ use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 
 /// A piece of a Markdown text: prose for gpui-kit's `TextView`, or a fenced block drawn as
 /// its own element so it can carry buttons.
@@ -298,7 +298,7 @@ pub fn task_row(
         // zeron's are: green would make a done task read as a status, not a choice.
         .when(done, |b| {
             crate::kit::solid(b, theme).child(
-                crate::icons::icon(theme, IconName::Check, IconSize::Inline, hsla(s.solid_ink))
+                crate::icons::icon(theme, Symbol::Checkmark, IconSize::Inline, hsla(s.solid_ink))
                     .size(px((side - TASK_CHECK_INSET).max(1.0))),
             )
         });

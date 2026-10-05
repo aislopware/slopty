@@ -23,7 +23,7 @@ use super::WorkspaceView;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 
 /// The cache and the writes under way.
 #[derive(Default)]
@@ -116,7 +116,7 @@ impl WorkspaceView {
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
             .when(!shapes, |el| {
-                el.child(crate::palette::status_slot(theme, IconName::Server, None, ink, k))
+                el.child(crate::palette::status_slot(theme, Symbol::ServerRack, None, ink, k))
                     .child(name.clone())
             });
         let pill = (!shapes).then(|| self.render_state_pill(tile, &state, true, chrome, cx));

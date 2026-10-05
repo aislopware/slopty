@@ -34,7 +34,7 @@ use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconName, IconSize, icon};
+use crate::icons::{IconSize, Symbol, icon};
 use crate::kit;
 
 /// A checkout: a repository's working tree on one worker (or a directory outside one).
@@ -176,7 +176,7 @@ impl WorkspaceView {
             }
             .gap(px(spacing.xs))
             .child(
-                icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
+                icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted))
                     .size(px(theme.typography.icon())),
             )
             .child(SharedString::from(worker))
@@ -206,7 +206,7 @@ impl WorkspaceView {
                 .words("crumb-branch", SharedString::from(format!("branch {branch}")))
                 .gap(px(spacing.xs))
                 .child(
-                    icon(theme, IconName::GitBranch, IconSize::Inline, hsla(s.text_muted))
+                    icon(theme, Symbol::ArrowTriangleBranch, IconSize::Inline, hsla(s.text_muted))
                         .size(px(theme.typography.icon())),
                 )
                 .child(branch)
@@ -302,9 +302,9 @@ impl WorkspaceView {
     }
 
     /// The chevron of a segment that opens a menu.
-    fn chevron(&self) -> gpui::Svg {
+    fn chevron(&self) -> gpui::Div {
         let theme = &self.theme;
-        icon(theme, IconName::ChevronDown, IconSize::Inline, hsla(theme.surfaces.text_muted))
+        icon(theme, Symbol::ChevronDown, IconSize::Inline, hsla(theme.surfaces.text_muted))
             .size(px(theme.typography.caption()))
     }
 

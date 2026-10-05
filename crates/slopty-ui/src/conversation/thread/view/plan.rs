@@ -17,7 +17,7 @@ use slopty_theme::{Rgb, Surfaces, Typography};
 
 use super::ThreadView;
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// Lines of a long plan shown before it opens.
@@ -77,7 +77,7 @@ impl ThreadView {
             let words = whole.clone();
             self.icon_button(
                 format!("plan-copy-{}", id.0),
-                if copied { IconName::Check } else { IconName::Copy },
+                if copied { Symbol::Checkmark } else { Symbol::DocOnDoc },
                 if copied { "Copied" } else { "Copy plan" },
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| {

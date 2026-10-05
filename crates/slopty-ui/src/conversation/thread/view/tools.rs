@@ -25,7 +25,7 @@ use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
-use crate::icons::{FileType, Glyph, IconName};
+use crate::icons::{FileType, Symbol};
 use crate::kit;
 
 /// `text` with the paths in it as a person reads them: under the agent's folder `cwd` relative
@@ -160,10 +160,10 @@ impl ThreadView {
             ToolState::Streaming | ToolState::Running => self.spinner(false),
             ToolState::Pending { .. } => self.needs_you(),
             _ => {
-                let kind = Glyph::Icon(tool_icon(&call.kind));
-                let glyph = call_path(call).and_then(FileType::of).map_or(kind, Glyph::File);
+                let kind = tool_icon(&call.kind);
+                let glyph = call_path(call).and_then(FileType::of).map_or(kind, FileType::symbol);
                 let tone = if failed(&call.state) { s.error } else { s.text_muted };
-                crate::icons::glyph(glyph, self.z(theme.typography.icon()), hsla(tone))
+                crate::icons::symbol(theme, glyph, self.z(theme.typography.icon()), hsla(tone))
             }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
@@ -234,11 +234,11 @@ impl ThreadView {
                 .child(SharedString::from(title.clone())),
         };
         let disclosure = if child.is_some() {
-            IconName::ChevronRight
+            Symbol::ChevronRight
         } else if open {
-            IconName::ChevronDown
+            Symbol::ChevronDown
         } else {
-            IconName::ChevronRight
+            Symbol::ChevronRight
         };
         let called = title;
         let toggle = id.clone();

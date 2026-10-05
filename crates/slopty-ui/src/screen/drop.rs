@@ -27,7 +27,7 @@ use slopty_proto::screen::ScreenInput;
 
 use super::{ScreenView, ScreenViewEvent};
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize, Status, icon, status_icon};
+use crate::icons::{IconSize, Status, Symbol, icon, status_icon};
 use crate::kit;
 
 /// A drag over the tile.
@@ -213,10 +213,10 @@ impl ScreenView {
         let ink = hsla(theme.surfaces.text_muted);
         let shown = taking.items.iter().take(ICONS).map(|item| {
             let name = match &item.file {
-                Some(file) if file.folder => IconName::Folder,
-                Some(_) => IconName::File,
-                None if item.promised.is_some() => IconName::File,
-                None => IconName::FileText,
+                Some(file) if file.folder => Symbol::Folder,
+                Some(_) => Symbol::Doc,
+                None if item.promised.is_some() => Symbol::Doc,
+                None => Symbol::DocText,
             };
             kit::elevate(div(), theme)
                 .size(px(side))

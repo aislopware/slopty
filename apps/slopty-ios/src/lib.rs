@@ -187,7 +187,7 @@ fn run() {
         // the sheet a held ⌘ brings up.
         slopty_app::set_app_menus(cx, || slopty_app::menus::menus(Vec::new(), true));
     }));
-    ffi::run_app_with_assets(slopty_ui::icons::Assets);
+    ffi::run_app_with_assets(gpui_kit::assets::Assets);
 }
 
 /// Logs go to stderr, which `simctl launch --console-pty` and `devicectl --console` stream.

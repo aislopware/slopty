@@ -44,7 +44,7 @@ use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
 use crate::conversation::attach::{self, Attach, Attachment};
 use crate::conversation::menu::{self, Token};
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::ButtonKind;
 
 /// Rows the menu shows before it scrolls.
@@ -707,7 +707,7 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .children(description.map(|d| SharedString::from(d.to_owned()))),
             )
-            .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
+            .when(current, |el| el.child(self.icon(Symbol::Checkmark, s.text_secondary)))
             .into_any_element()
     }
 
@@ -755,7 +755,7 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .children(provider.map(SharedString::from)),
             )
-            .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
+            .when(current, |el| el.child(self.icon(Symbol::Checkmark, s.text_secondary)))
             .into_any_element()
     }
 
@@ -767,7 +767,7 @@ impl ThreadView {
         let (dir, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
         let name = if folder { format!("{name}/") } else { name.to_owned() };
         self.menu_row(ix, path.to_owned(), cx)
-            .child(self.icon(if folder { IconName::Folder } else { IconName::File }, s.text_muted))
+            .child(self.icon(if folder { Symbol::Folder } else { Symbol::Doc }, s.text_muted))
             .child(
                 div()
                     .flex_none()
@@ -933,7 +933,7 @@ impl ThreadView {
                 .child(if waiting {
                     self.spinner(true)
                 } else {
-                    self.icon(IconName::Info, s.text_muted)
+                    self.icon(Symbol::InfoCircle, s.text_muted)
                 })
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
                 .into_any_element(),
@@ -1075,7 +1075,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
-                .child(self.icon(IconName::Pencil, s.text_muted))
+                .child(self.icon(Symbol::Pencil, s.text_muted))
                 .child(div().flex_1().child("Editing a queued message"))
                 .child(self.button("thread-edit-cancel", "Cancel", ButtonKind::Ghost).on_click(
                     cx.listener(|this, _ev, window, cx| {

@@ -14,7 +14,7 @@ use slopty_theme::Typography;
 
 use super::ThreadView;
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// A thread above the subagent's on show, as the reader left it.
@@ -123,12 +123,12 @@ impl ThreadView {
                 .min_h(self.z(kit::Row::One.height(theme)))
                 .border_b(kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
-                .child(self.icon_button("thread-back", IconName::ChevronLeft, "Back").on_click(
+                .child(self.icon_button("thread-back", Symbol::ChevronLeft, "Back").on_click(
                     cx.listener(|this, _ev, window, cx| {
                         let _was = this.leave_subagent(window, cx);
                     }),
                 ))
-                .child(self.icon(IconName::Sparkles, s.text_muted))
+                .child(self.icon(crate::icons::AGENT, s.text_muted))
                 .child(
                     div()
                         .min_w_0()

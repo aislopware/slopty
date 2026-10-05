@@ -42,7 +42,7 @@ use slopty_proto::transfer::TunnelRefusal;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Tally};
 use crate::kit::{self, ButtonKind, FindBar};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
@@ -1307,9 +1307,9 @@ impl BrowserView {
             .map(|row| {
                 let id = row.id;
                 let (icon, tone) = match row.state {
-                    DownloadState::Receiving { .. } => (IconName::Download, s.text_muted),
-                    DownloadState::Saved => (IconName::Check, s.success),
-                    DownloadState::Failed(_) => (IconName::CircleAlert, s.error),
+                    DownloadState::Receiving { .. } => (Symbol::ArrowDownToLine, s.text_muted),
+                    DownloadState::Saved => (Symbol::Checkmark, s.success),
+                    DownloadState::Failed(_) => (Symbol::ExclamationmarkTriangle, s.error),
                 };
                 let receiving = matches!(row.state, DownloadState::Receiving { .. });
                 let name = SharedString::from(row.name());
@@ -1342,7 +1342,7 @@ impl BrowserView {
                         )
                     })
                     .child(
-                        kit::icon_button(theme, "page-download-close", IconName::X, close)
+                        kit::icon_button(theme, "page-download-close", Symbol::Xmark, close)
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.dismiss_download(id, cx);
                             })),

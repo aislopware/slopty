@@ -27,7 +27,7 @@ use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
 use crate::conversation::thread::hub::Refusal;
 use crate::conversation::thread::questions;
 use crate::conversation::thread::rows::Row;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::{self, ButtonKind};
 
 /// The widest an answer's reach is drawn on its button, in ems of its text.
@@ -214,7 +214,7 @@ impl ThreadView {
                                 .child(NEW_TAIL),
                         )
                     })
-                    .child(self.icon(IconName::ChevronDown, s.text_secondary))
+                    .child(self.icon(Symbol::ChevronDown, s.text_secondary))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.list.scroll_to_end();
                         this.list.set_follow_mode(FollowMode::Tail);
@@ -445,7 +445,7 @@ impl ThreadView {
             .child(self.slot())
             .child(div().flex_none().child("In the background"))
             .child(div().flex_1())
-            .child(self.icon(IconName::ChevronDown, s.text_muted))
+            .child(self.icon(Symbol::ChevronDown, s.text_muted))
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 this.tasks_open = false;
                 cx.notify();
@@ -464,7 +464,7 @@ impl ThreadView {
             .role(Role::Alert)
             .aria_label(SharedString::from(refusal.words.clone()))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(IconName::CircleAlert, s.error)))
+            .child(self.slot().child(self.icon(Symbol::ExclamationmarkTriangle, s.error)))
             .child(
                 div()
                     .min_w_0()
@@ -496,7 +496,7 @@ impl ThreadView {
                 },
             )
             .child(
-                self.icon_button(format!("refused-dismiss-{id}"), IconName::X, "Dismiss")
+                self.icon_button(format!("refused-dismiss-{id}"), Symbol::Xmark, "Dismiss")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(id, cx))),
             )
             .into_any_element()
@@ -526,7 +526,7 @@ impl ThreadView {
         self.section()
             .debug_selector(move || format!("answered-{id}"))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.icon(IconName::Check, s.text_muted)))
+            .child(self.slot().child(self.icon(Symbol::Checkmark, s.text_muted)))
             .child(
                 div()
                     .min_w_0()
@@ -669,10 +669,9 @@ impl ThreadView {
                 .items_center()
                 .gap(self.z(theme.spacing.xxs))
                 .child(
-                    self.icon_button("asked-prev", IconName::ChevronUp, "Previous request")
-                        .on_click(
-                            cx.listener(move |this, _ev, _w, cx| this.step_asked(-1, of, cx)),
-                        ),
+                    self.icon_button("asked-prev", Symbol::ChevronUp, "Previous request").on_click(
+                        cx.listener(move |this, _ev, _w, cx| this.step_asked(-1, of, cx)),
+                    ),
                 )
                 .child(
                     kit::tabular(div())
@@ -681,7 +680,7 @@ impl ThreadView {
                         .child(SharedString::from(format!("{} of {of}", at.saturating_add(1)))),
                 )
                 .child(
-                    self.icon_button("asked-next", IconName::ChevronDown, "Next request")
+                    self.icon_button("asked-next", Symbol::ChevronDown, "Next request")
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.step_asked(1, of, cx))),
                 )
         });
@@ -788,38 +787,37 @@ impl ThreadView {
         let done = plan.steps.iter().filter(|st| st.status == STEP_DONE).count();
         let total = plan.steps.len();
         let open = self.plan_open;
-        let head =
-            self.section()
-                .id("thread-plan")
-                .debug_selector(|| "thread-plan".to_owned())
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("Plan, {done} of {total} done")))
-                .aria_expanded(open)
-                .cursor_pointer()
-                .text_color(hsla(s.text_secondary))
-                .child(self.slot().child(self.icon(IconName::ListTodo, s.text_muted)))
-                .child(div().flex_none().child("Plan"))
-                .child(
-                    kit::tabular(div())
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(format!("{done} of {total} done"))),
-                )
-                .child(div().flex_1())
-                .child(self.icon(
-                    if open { IconName::ChevronDown } else { IconName::ChevronUp },
-                    s.text_muted,
-                ))
-                .on_click(cx.listener(|this, _ev, _w, cx| {
-                    this.plan_open = !this.plan_open;
-                    cx.notify();
-                }));
+        let head = self
+            .section()
+            .id("thread-plan")
+            .debug_selector(|| "thread-plan".to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Plan, {done} of {total} done")))
+            .aria_expanded(open)
+            .cursor_pointer()
+            .text_color(hsla(s.text_secondary))
+            .child(self.slot().child(self.icon(Symbol::Checklist, s.text_muted)))
+            .child(div().flex_none().child("Plan"))
+            .child(
+                kit::tabular(div())
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(format!("{done} of {total} done"))),
+            )
+            .child(div().flex_1())
+            .child(
+                self.icon(if open { Symbol::ChevronDown } else { Symbol::ChevronUp }, s.text_muted),
+            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.plan_open = !this.plan_open;
+                cx.notify();
+            }));
         let steps = open.then(|| {
             div().w_full().flex().flex_col().pb(self.z(theme.spacing.xs)).children(
                 plan.steps.iter().map(|step| {
                     let (icon, tone) = match step.status.as_str() {
-                        STEP_DONE => (IconName::CircleCheck, s.text_muted),
-                        "in_progress" => (IconName::CircleDot, s.text),
-                        _ => (IconName::Circle, s.text_muted),
+                        STEP_DONE => (Symbol::CheckmarkCircle, s.text_muted),
+                        "in_progress" => (Symbol::CircleInsetFilled, s.text),
+                        _ => (Symbol::Circle, s.text_muted),
                     };
                     self.section()
                         .text_color(hsla(tone))
@@ -857,7 +855,7 @@ impl ThreadView {
             .role(Role::Group)
             .aria_label(SharedString::from(words.clone()))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(IconName::FilePen, s.text_muted)))
+            .child(self.slot().child(self.icon(Symbol::Pencil, s.text_muted)))
             .child(
                 div()
                     .min_w_0()
@@ -888,7 +886,7 @@ impl ThreadView {
             .aria_label(SharedString::from(words.replace('\u{b7}', ",")))
             .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.icon(IconName::CirclePause, s.text_muted)))
+            .child(self.slot().child(self.icon(Symbol::PauseCircle, s.text_muted)))
             .child(SharedString::from(words))
             .into_any_element()
     }
@@ -943,7 +941,7 @@ impl ThreadView {
             .role(Role::ListItem)
             .aria_label(SharedString::from(said))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(IconName::Clock, s.text_muted)))
+            .child(self.slot().child(self.icon(Symbol::Clock, s.text_muted)))
             .child(kit::fit_label(format!("queued-words-{pending}"), first, &self.theme))
             .when(files > 0 && with_words, |el| {
                 el.child(
@@ -955,7 +953,7 @@ impl ThreadView {
                         .gap(self.z(self.theme.spacing.xxs))
                         .text_size(self.z(self.theme.typography.small()))
                         .text_color(hsla(s.text_muted))
-                        .child(self.icon(IconName::Paperclip, s.text_muted))
+                        .child(self.icon(Symbol::Paperclip, s.text_muted))
                         .child(SharedString::from(files.to_string())),
                 )
             })
@@ -972,7 +970,7 @@ impl ThreadView {
             }))
             .when(editable, |el| {
                 el.child(
-                    self.icon_button(format!("edit-{pending}"), IconName::Pencil, "Edit").on_click(
+                    self.icon_button(format!("edit-{pending}"), Symbol::Pencil, "Edit").on_click(
                         cx.listener(move |this, _ev, window, cx| {
                             this.start_edit(pending, &words, window, cx);
                         }),
@@ -981,13 +979,13 @@ impl ThreadView {
             })
             .when_some(refused.map(|(intent, ..)| intent), |el, intent| {
                 el.child(
-                    self.icon_button(format!("edit-dismiss-{pending}"), IconName::X, "Dismiss")
+                    self.icon_button(format!("edit-dismiss-{pending}"), Symbol::Xmark, "Dismiss")
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(intent, cx))),
                 )
             })
             .when(open && (scheduled || queued.stopped) && can_promote && !queued.going, |el| {
                 el.child(
-                    self.icon_button(format!("promote-{pending}"), IconName::ArrowUp, "Send now")
+                    self.icon_button(format!("promote-{pending}"), Symbol::ArrowUp, "Send now")
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
                             let _id = this.intent(Intent::Promote { pending }, cx);
                         })),
@@ -995,7 +993,7 @@ impl ThreadView {
             })
             .when(open && queued.edit.is_none(), |el| {
                 el.child(
-                    self.icon_button(format!("withdraw-{pending}"), IconName::X, "Take back")
+                    self.icon_button(format!("withdraw-{pending}"), Symbol::Xmark, "Take back")
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
                             let _id = this.intent(Intent::Withdraw { pending }, cx);
                         })),
@@ -1032,7 +1030,7 @@ impl ThreadView {
                 .child(self.slot().child(if running {
                     self.spinner(true)
                 } else {
-                    self.icon(IconName::Terminal, s.text_muted)
+                    self.icon(Symbol::Terminal, s.text_muted)
                 }))
                 .child(
                     div()
@@ -1100,7 +1098,7 @@ impl ThreadView {
             .items_start()
             .py(self.z(self.theme.spacing.xs))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(IconName::Info, s.text_muted)))
+            .child(self.slot().child(self.icon(Symbol::InfoCircle, s.text_muted)))
             .child(
                 kit::tabular(div())
                     .flex_1()
@@ -1127,9 +1125,9 @@ impl ThreadView {
             self.spinner(true)
         } else {
             let icon = if task.kind == BackgroundTask::AGENT {
-                IconName::Workflow
+                Symbol::RectangleSplit3x1
             } else {
-                IconName::SquareTerminal
+                Symbol::Terminal
             };
             self.icon(icon, s.text_muted)
         };

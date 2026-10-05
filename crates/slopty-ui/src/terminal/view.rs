@@ -1782,7 +1782,7 @@ impl TerminalView {
         let more = crate::kit::icon_button_at(
             theme,
             "block-more",
-            crate::icons::IconName::Ellipsis,
+            crate::icons::Symbol::Ellipsis,
             "Block actions",
             (line / button).min(1.0),
         )
@@ -2797,7 +2797,7 @@ impl TerminalView {
             if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
         let pill = FootPill {
             id: "lines-below",
-            icon: crate::icons::IconName::ArrowDown,
+            icon: crate::icons::Symbol::ArrowDown,
             words: count,
             act: BACK_TO_LIVE,
         };
@@ -4321,7 +4321,7 @@ impl SelectionText {
 struct FootPill {
     /// Its element id and debug selector.
     id: &'static str,
-    icon: crate::icons::IconName,
+    icon: crate::icons::Symbol,
     /// What is so.
     words: SharedString,
     /// What a click does, in the accent.

@@ -29,7 +29,7 @@ use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
 use super::faces::ThreadPlace;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 
 /// Tiles and the groups they fell into.
 #[derive(Debug, Default)]
@@ -144,15 +144,15 @@ pub(super) fn listing_group(projects: &Grouping, claims: &[Claim], facts: &Facts
 
 /// What a group of `fact` is drawn with: a repository's glyph, a folder's, a declared
 /// project's, a machine's, a branch's, else a grid for any other grouping.
-pub(super) fn group_glyph(fact: &str) -> IconName {
+pub(super) fn group_glyph(fact: &str) -> Symbol {
     match fact {
-        fact::REPO => IconName::FolderGit2,
-        fact::FOLDER => IconName::Folder,
-        fact::PROJECT => IconName::Workflow,
-        fact::MACHINE => IconName::Server,
-        fact::BRANCH => IconName::GitBranch,
-        fact::AGENT => IconName::Sparkles,
-        _ => IconName::LayoutGrid,
+        fact::REPO => Symbol::PlusForwardslashMinus,
+        fact::FOLDER => Symbol::Folder,
+        fact::PROJECT => Symbol::RectangleSplit3x1,
+        fact::MACHINE => Symbol::ServerRack,
+        fact::BRANCH => Symbol::ArrowTriangleBranch,
+        fact::AGENT => crate::icons::AGENT,
+        _ => Symbol::SquareGrid2x2,
     }
 }
 
@@ -534,6 +534,6 @@ mod tests {
             let name = section_name(fact);
             assert!(name.chars().next().is_some_and(char::is_uppercase), "{name}");
         }
-        assert_eq!(group_glyph("labels.team"), IconName::LayoutGrid);
+        assert_eq!(group_glyph("labels.team"), Symbol::SquareGrid2x2);
     }
 }

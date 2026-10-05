@@ -378,6 +378,9 @@ pub enum Command {
     Render {
         /// Where to write the PNG (absolute).
         path: String,
+        /// Device pixels per point to draw at, when not the window's own: a Retina picture of
+        /// a window on a 1x display, drawn offscreen afresh at that scale.
+        scale: Option<f32>,
     },
     /// Quit the app.
     Quit,

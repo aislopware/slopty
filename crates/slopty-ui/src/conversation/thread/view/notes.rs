@@ -15,7 +15,7 @@ use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn};
 use super::{TOOL_ROW, ThreadView, composer, tokens};
 use crate::colors::hsla;
 use crate::conversation::figures::{model_name, spoken_model};
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit;
 
 /// A compaction in words: "Compacted 120k → 18k tokens".
@@ -85,20 +85,22 @@ impl ThreadView {
         let (icon, words, under, more) = match &item.body {
             ItemBody::Compaction(c) => {
                 let summary = c.summary.as_ref().map(|t| t.text.clone()).filter(|t| !t.is_empty());
-                (IconName::Scissors, compacted(c), None, summary)
+                (Symbol::Scissors, compacted(c), None, summary)
             }
             ItemBody::Notice(n) => {
                 let (shown, rest) = notice_lines(&n.text.text);
                 cut = rest && !self.whole.contains(id);
                 let words = if cut { shown } else { n.text.text.trim().to_owned() };
-                (IconName::Info, words, n.retry.as_ref().map(retrying), None)
+                (Symbol::InfoCircle, words, n.retry.as_ref().map(retrying), None)
             }
             // Codex's reviewer begins here; what it found follows as its answer.
             ItemBody::Review { entered } => {
                 let words = if *entered { "Reviewed the changes" } else { "Review ended" };
-                (IconName::ListChecks, words.to_owned(), None, None)
+                (Symbol::Checklist, words.to_owned(), None, None)
             }
-            ItemBody::Extra { kind, .. } => (IconName::Info, composer::sentence(kind), None, None),
+            ItemBody::Extra { kind, .. } => {
+                (Symbol::InfoCircle, composer::sentence(kind), None, None)
+            }
             _ => return div().into_any_element(),
         };
         let opens = more.is_some();

@@ -45,7 +45,7 @@ use slopty_settings::schema::{Choice, Kind};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::palette::PaletteItem;
 
 #[path = "settings_form_schema.rs"]
@@ -732,7 +732,7 @@ impl SettingsForm {
             }))
             .child(crate::icons::icon(
                 theme,
-                IconName::Search,
+                Symbol::Magnifyingglass,
                 IconSize::Inline,
                 hsla(s.text_muted),
             ))
@@ -1031,7 +1031,7 @@ impl SettingsForm {
             crate::kit::icon_button(
                 theme,
                 format!("settings-key-reset-{ix}"),
-                IconName::Undo2,
+                Symbol::ArrowUturnBackward,
                 RESET_KEYS,
             )
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reset_keys(ix, cx)))
@@ -1161,7 +1161,7 @@ impl SettingsForm {
                 .child(words)
                 .child(crate::icons::icon(
                     theme,
-                    IconName::ExternalLink,
+                    Symbol::ArrowUpRight,
                     IconSize::Inline,
                     hsla(s.text_muted),
                 ));
@@ -1497,7 +1497,7 @@ impl SettingsForm {
         let button = |up: bool| {
             let live = if up { value < max } else { value > min };
             let (icon, label) =
-                if up { (IconName::Plus, "Increase") } else { (IconName::Minus, "Decrease") };
+                if up { (Symbol::Plus, "Increase") } else { (Symbol::Minus, "Decrease") };
             let ink = if live { s.text_secondary } else { s.text_muted };
             div()
                 .id(if up { "increase" } else { "decrease" })
@@ -1578,7 +1578,7 @@ impl SettingsForm {
             )
             .child(crate::icons::icon(
                 theme,
-                IconName::ChevronDown,
+                Symbol::ChevronDown,
                 IconSize::Inline,
                 hsla(s.text_muted),
             ));
@@ -1619,7 +1619,7 @@ impl SettingsForm {
                 .when(on, |el| {
                     el.child(crate::icons::icon(
                         theme,
-                        IconName::Check,
+                        Symbol::Checkmark,
                         IconSize::Inline,
                         hsla(s.text),
                     ))

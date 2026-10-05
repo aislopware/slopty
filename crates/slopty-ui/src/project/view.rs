@@ -42,7 +42,7 @@ use super::{
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize, Status, icon, status_icon};
+use crate::icons::{IconSize, Status, Symbol, icon, status_icon};
 use crate::kit::progress::Progress;
 use crate::palette::{Plate, age_label, dotted};
 
@@ -490,9 +490,9 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let (glyph, tone) = match place.how {
-            PlaceHow::Runs => (IconName::Server, s.text_secondary),
-            PlaceHow::Ran => (IconName::Server, s.text_muted),
-            PlaceHow::Pinned => (IconName::Lock, s.text_muted),
+            PlaceHow::Runs => (Symbol::ServerRack, s.text_secondary),
+            PlaceHow::Ran => (Symbol::ServerRack, s.text_muted),
+            PlaceHow::Pinned => (Symbol::Lock, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
         let id = format!("{prefix}-{}-where", node_key(node));
@@ -747,15 +747,21 @@ impl ProjectView {
                 .child(SharedString::from(text))
         };
         let push = project.push;
-        let push_toggle =
-            crate::kit::icon_toggle(theme, "project-push", IconName::Upload, PUSH, push, self.zoom)
-                .on_click(cx.listener(move |_this, _ev, _w, cx| {
-                    cx.emit(ProjectEvent::SetPush(!push));
-                }));
+        let push_toggle = crate::kit::icon_toggle(
+            theme,
+            "project-push",
+            Symbol::ArrowUpToLine,
+            PUSH,
+            push,
+            self.zoom,
+        )
+        .on_click(cx.listener(move |_this, _ev, _w, cx| {
+            cx.emit(ProjectEvent::SetPush(!push));
+        }));
         let terminal = crate::kit::icon_button_at(
             theme,
             "project-terminal",
-            IconName::SquareTerminal,
+            Symbol::Terminal,
             SHOW_TERMINAL,
             self.zoom,
         )
@@ -764,7 +770,7 @@ impl ProjectView {
         let checks_toggle = crate::kit::icon_toggle(
             theme,
             "project-checks",
-            IconName::ListChecks,
+            Symbol::Checklist,
             CHECKS,
             checks_open,
             self.zoom,
@@ -782,7 +788,7 @@ impl ProjectView {
             .gap(self.z(sp.xs))
             .min_w_0()
             .child(
-                icon(theme, IconName::Workflow, IconSize::Inline, hsla(s.text_secondary))
+                icon(theme, Symbol::RectangleSplit3x1, IconSize::Inline, hsla(s.text_secondary))
                     .size(self.z(theme.typography.icon())),
             )
             .child(
@@ -1062,7 +1068,7 @@ impl ProjectView {
         let close = crate::kit::icon_button_at(
             theme,
             "project-recap-close",
-            IconName::X,
+            Symbol::Xmark,
             CLOSE_RECAP,
             self.zoom,
         )
@@ -1118,7 +1124,7 @@ impl ProjectView {
         let (glyph, tone) = match kind {
             Some(kind) if kind.needs_you() => (recap_icon(kind), s.warn),
             Some(kind) => (recap_icon(kind), s.text_muted),
-            None => (IconName::Clock, s.text_muted),
+            None => (Symbol::Clock, s.text_muted),
         };
         let key = id.to_owned();
         div()
@@ -1185,7 +1191,7 @@ impl ProjectView {
             None => slot.child(
                 icon(
                     theme,
-                    IconName::Sparkles,
+                    crate::icons::AGENT,
                     IconSize::Inline,
                     hsla(theme.surfaces.text_secondary),
                 )
@@ -1295,17 +1301,17 @@ impl ProjectView {
         let (glyph, tone, word, detail, tail) = match check {
             Check::Running { line, .. } => {
                 let status = Status::Working;
-                (status.icon(), board_tone(theme, status), "Verifying", line.clone(), Vec::new())
+                (None, board_tone(theme, status), "Verifying", line.clone(), Vec::new())
             }
             Check::Verdict { run, .. } if run.passed => (
-                IconName::CircleCheck,
+                Some(Symbol::CheckmarkCircle),
                 s.text_secondary,
                 "Verifier passed",
                 verdict_detail(run),
                 Vec::new(),
             ),
             Check::Verdict { run, .. } => (
-                IconName::CircleX,
+                Some(Symbol::XmarkCircle),
                 s.error,
                 "Verifier failed",
                 verdict_detail(run),
@@ -1330,7 +1336,7 @@ impl ProjectView {
                 .text_color(hsla(s.text_muted))
                 .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
                 .child(
-                    icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.text_muted))
+                    icon(theme, Symbol::Terminal, IconSize::Inline, hsla(s.text_muted))
                         .size(self.z(theme.typography.icon())),
                 )
                 .child("Output");
@@ -1344,10 +1350,14 @@ impl ProjectView {
             .items_center()
             .gap(self.z(sp.xs))
             .min_w_0()
-            .child(
-                icon(theme, glyph, IconSize::Inline, hsla(tone))
-                    .size(self.z(theme.typography.icon())),
-            )
+            .child(match glyph {
+                Some(glyph) => icon(theme, glyph, IconSize::Inline, hsla(tone))
+                    .size(self.z(theme.typography.icon()))
+                    .into_any_element(),
+                None => {
+                    status_icon(theme, Status::Working, self.z(theme.typography.icon()), hsla(tone))
+                }
+            })
             .child(div().flex_none().text_color(hsla(tone)).child(word))
             .child(
                 crate::kit::tabular(div())
@@ -1809,7 +1819,7 @@ impl ProjectView {
             theme,
             self.zoom,
             "project-send",
-            IconName::ArrowUp,
+            Symbol::ArrowUp,
             SEND,
         )
         .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
@@ -1922,7 +1932,7 @@ impl ProjectView {
                     .hover(move |el| el.bg(hsla(s.selected)))
                     .child(div().flex_none().size(self.z(theme.typography.icon())).children(
                         on.then(|| {
-                            icon(theme, IconName::Check, IconSize::Inline, hsla(s.text))
+                            icon(theme, Symbol::Checkmark, IconSize::Inline, hsla(s.text))
                                 .size(self.z(theme.typography.icon()))
                         }),
                     ))
@@ -1949,7 +1959,7 @@ impl ProjectView {
             };
         let close_id = format!("{key}-close");
         let close =
-            crate::kit::icon_button_at(theme, close_id, IconName::X, CLOSE_RUN_ON, self.zoom)
+            crate::kit::icon_button_at(theme, close_id, Symbol::Xmark, CLOSE_RUN_ON, self.zoom)
                 .on_click(cx.listener(|_this, _ev, _w, cx| {
                     cx.stop_propagation();
                     cx.emit(ProjectEvent::CloseRunOn);
@@ -2079,16 +2089,16 @@ const fn recap_word(kind: RecapKind) -> &'static str {
 }
 
 /// A recap line's mark: the one its timeline entries draw.
-const fn recap_icon(kind: RecapKind) -> IconName {
+const fn recap_icon(kind: RecapKind) -> Symbol {
     match kind {
-        RecapKind::VerifyFailed | RecapKind::StepFailed => IconName::CircleX,
-        RecapKind::Conflicts => IconName::GitBranch,
-        RecapKind::ChecksFailed => IconName::GitPullRequest,
-        RecapKind::AgentEnded => IconName::Power,
-        RecapKind::Merged => IconName::GitMerge,
-        RecapKind::Verified => IconName::CircleCheck,
-        RecapKind::Started => IconName::SquareTerminal,
-        RecapKind::Created => IconName::Plus,
+        RecapKind::VerifyFailed | RecapKind::StepFailed => Symbol::XmarkCircle,
+        RecapKind::Conflicts => Symbol::ArrowTriangleBranch,
+        RecapKind::ChecksFailed => Symbol::ArrowTrianglePull,
+        RecapKind::AgentEnded => Symbol::Power,
+        RecapKind::Merged => Symbol::ArrowTriangleMerge,
+        RecapKind::Verified => Symbol::CheckmarkCircle,
+        RecapKind::Started => Symbol::Terminal,
+        RecapKind::Created => Symbol::Plus,
     }
 }
 

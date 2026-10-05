@@ -34,7 +34,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{Glyph, IconName, IconSize, Status};
+use crate::icons::{IconSize, Status, Symbol};
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -510,18 +510,17 @@ impl WorkspaceView {
 /// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
 /// agent runs in (`agent`) and a thread show the one neutral agent glyph, whichever agent it
 /// is, and the agent is named in words.
-pub(super) fn kind_icon(item: &Item, agent: bool) -> Glyph {
+pub(super) fn kind_icon(item: &Item, agent: bool) -> Symbol {
     match &item.kind {
-        ItemKind::Terminal { .. } if agent => Glyph::AGENT,
-        ItemKind::Terminal { .. } => Glyph::Icon(IconName::SquareTerminal),
-        ItemKind::Thread { .. } => Glyph::AGENT,
-        ItemKind::Window { .. } => Glyph::Icon(IconName::AppWindow),
-        ItemKind::Display { .. } => Glyph::Icon(IconName::Monitor),
-        ItemKind::File { path } => Glyph::file(path),
-        ItemKind::Folder { .. } => Glyph::Icon(IconName::Folder),
-        ItemKind::Browser { .. } => Glyph::Icon(IconName::Globe),
-        ItemKind::Review { .. } => Glyph::Icon(IconName::FileDiff),
-        ItemKind::Changes { .. } => Glyph::Icon(IconName::FolderGit2),
+        ItemKind::Terminal { .. } if agent => crate::icons::AGENT,
+        ItemKind::Terminal { .. } => Symbol::Terminal,
+        ItemKind::Thread { .. } => crate::icons::AGENT,
+        ItemKind::Window { .. } => Symbol::Macwindow,
+        ItemKind::Display { .. } => Symbol::Display,
+        ItemKind::File { path } => crate::icons::file_symbol(path),
+        ItemKind::Folder { .. } => Symbol::Folder,
+        ItemKind::Browser { .. } => Symbol::Globe,
+        ItemKind::Review { .. } | ItemKind::Changes { .. } => Symbol::PlusForwardslashMinus,
     }
 }
 
@@ -1254,7 +1253,7 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs * k))
                 .text_color(muted)
                 .child(
-                    crate::icons::icon(theme, IconName::Server, IconSize::Inline, muted)
+                    crate::icons::icon(theme, Symbol::ServerRack, IconSize::Inline, muted)
                         .size(px(theme.typography.small() * k)),
                 )
                 .child(
@@ -1509,7 +1508,7 @@ impl WorkspaceView {
             let close = kit::icon_button_at(
                 theme,
                 format!("tab-close-{}", id.as_uuid()),
-                IconName::X,
+                Symbol::Xmark,
                 CLOSE_TILE,
                 k,
             )
@@ -1660,10 +1659,10 @@ impl WorkspaceView {
         let hint_theme = std::rc::Rc::new(theme.clone());
         let pr = branch.pr.as_ref().map(|pr| {
             let (tone, icon) = match pr.review {
-                Some(Review::Approved) => (s.success, IconName::GitPullRequest),
-                Some(Review::ChangesRequested) => (s.error, IconName::GitPullRequest),
-                Some(Review::Draft) => (s.text_muted, IconName::GitPullRequestDraft),
-                Some(Review::Pending) | None => (s.text_secondary, IconName::GitPullRequest),
+                Some(Review::Approved) => (s.success, Symbol::ArrowTrianglePull),
+                Some(Review::ChangesRequested) => (s.error, Symbol::ArrowTrianglePull),
+                Some(Review::Draft) => (s.text_muted, Symbol::ArrowTrianglePull),
+                Some(Review::Pending) | None => (s.text_secondary, Symbol::ArrowTrianglePull),
             };
             let url = pr.url.clone();
             let chip = kit::pill_frame(theme, k)
@@ -1716,7 +1715,7 @@ impl WorkspaceView {
                     cx.new(|_| kit::Hint::new(hint, path, theme)).into()
                 })
                 .child(
-                    crate::icons::icon(theme, IconName::GitBranch, IconSize::Inline, muted)
+                    crate::icons::icon(theme, Symbol::ArrowTriangleBranch, IconSize::Inline, muted)
                         .size(px(theme.typography.small() * k)),
                 )
                 .child(
@@ -1751,7 +1750,7 @@ impl WorkspaceView {
             return None;
         }
         let theme = &self.theme;
-        let icon = if muted { IconName::VolumeX } else { IconName::Volume2 };
+        let icon = if muted { Symbol::SpeakerSlash } else { Symbol::SpeakerWave2 };
         let label = SharedString::from(mute_label(&self.worker_name(tile.worker)));
         let hint_theme = std::rc::Rc::new(theme.clone());
         let hint = label.clone();
@@ -1837,7 +1836,7 @@ impl WorkspaceView {
                     let toggle = kit::icon_toggle(
                         theme,
                         format!("system-keys-{}", id.as_uuid()),
-                        IconName::Command,
+                        Symbol::Command,
                         super::desktop::SEND_SYSTEM_KEYS,
                         true,
                         chrome.k,
@@ -1865,9 +1864,9 @@ impl WorkspaceView {
                     let (back, forward) = self
                         .page_facts(id)
                         .map_or((false, false), |p| (p.can_go_back, p.can_go_forward));
-                    let ways: [(bool, &str, IconName, &str, Go); 2] = [
-                        (back, "back", IconName::ArrowLeft, "Back", BrowserView::back),
-                        (forward, "forward", IconName::ArrowRight, "Forward", BrowserView::forward),
+                    let ways: [(bool, &str, Symbol, &str, Go); 2] = [
+                        (back, "back", Symbol::ChevronLeft, "Back", BrowserView::back),
+                        (forward, "forward", Symbol::ArrowRight, "Forward", BrowserView::forward),
                     ];
                     for (shown, key, icon, label, go) in ways {
                         if !shown {
@@ -1884,7 +1883,7 @@ impl WorkspaceView {
                         kit::icon_button_at(
                             theme,
                             format!("reload-{uuid}"),
-                            IconName::RotateCw,
+                            Symbol::ArrowClockwise,
                             "Reload",
                             k,
                         )
@@ -1902,7 +1901,7 @@ impl WorkspaceView {
                         kit::icon_button_at(
                             theme,
                             format!("up-{}", id.as_uuid()),
-                            IconName::ArrowUp,
+                            Symbol::ArrowUp,
                             crate::folder::ENCLOSING_FOLDER,
                             chrome.k,
                         )
@@ -1948,9 +1947,9 @@ impl WorkspaceView {
         let board = self.board_shown(session);
         if self.projects().of_orchestrator(session).is_some() {
             let (icon, label) = if board {
-                (IconName::SquareTerminal, SHOW_TERMINAL)
+                (Symbol::Terminal, SHOW_TERMINAL)
             } else {
-                (IconName::Workflow, super::projects::SHOW_BOARD)
+                (Symbol::RectangleSplit3x1, super::projects::SHOW_BOARD)
             };
             let id = format!("board-{}", tile.item.as_uuid());
             out.push(
@@ -1983,9 +1982,9 @@ impl WorkspaceView {
         }
         let face = self.face_shown(session);
         let (icon, label) = if face {
-            (IconName::SquareTerminal, SHOW_TERMINAL)
+            (Symbol::Terminal, SHOW_TERMINAL)
         } else {
-            (IconName::MessageSquare, SHOW_CONVERSATION)
+            (Symbol::TextBubble, SHOW_CONVERSATION)
         };
         let id = format!("face-{}", tile.item.as_uuid());
         Some(
@@ -2010,9 +2009,9 @@ impl WorkspaceView {
         // of its caret's blinks.
         let previewing = self.file_facts(tile.item).preview?;
         let (icon, label) = if previewing {
-            (IconName::Pencil, crate::file::SHOW_SOURCE)
+            (Symbol::Pencil, crate::file::SHOW_SOURCE)
         } else {
-            (IconName::Eye, crate::file::SHOW_PREVIEW)
+            (Symbol::Eye, crate::file::SHOW_PREVIEW)
         };
         let id = format!("preview-{}", tile.item.as_uuid());
         Some(
@@ -2087,7 +2086,7 @@ impl WorkspaceView {
             kit::icon_button_at(
                 theme,
                 format!("fullscreen-{id}"),
-                IconName::Maximize2,
+                Symbol::ArrowUpLeftAndArrowDownRight,
                 FULLSCREEN_TILE,
                 k,
             )
@@ -2101,7 +2100,7 @@ impl WorkspaceView {
                 window.dispatch_action(Box::new(FullscreenTile), cx);
             }))
         });
-        let close = kit::icon_button_at(theme, format!("close-{id}"), IconName::X, CLOSE_TILE, k)
+        let close = kit::icon_button_at(theme, format!("close-{id}"), Symbol::Xmark, CLOSE_TILE, k)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.close_tile(tile, window, cx);
             }));
@@ -2355,13 +2354,7 @@ impl WorkspaceView {
             })
         });
         if centred {
-            let mark = crate::icons::icon(
-                theme,
-                status.icon(),
-                IconSize::Inline,
-                hsla(status.tone(theme)),
-            )
-            .size(px(theme.typography.icon() * k));
+            let mark = crate::icons::notice_status(theme, status, hsla(status.tone(theme)), k);
             let buttons = div()
                 .flex()
                 .flex_wrap()
@@ -2421,15 +2414,12 @@ impl WorkspaceView {
             .text_size(px(theme.typography.small() * k))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
-            .child(
-                crate::icons::icon(
-                    theme,
-                    status.icon(),
-                    IconSize::Inline,
-                    hsla(status.tone(theme)),
-                )
-                .size(px(theme.typography.icon() * k)),
-            )
+            .child(crate::icons::status_icon(
+                theme,
+                status,
+                px(theme.typography.icon() * k),
+                hsla(status.tone(theme)),
+            ))
             .child(ChromeText::new(text, px(theme.typography.small()), k).zooming(chrome.zooming))
             .when_some(detail, gpui::ParentElement::child)
             .when_some(restart, gpui::ParentElement::child)
@@ -2615,12 +2605,7 @@ impl WorkspaceView {
             None => format!("Opening {what}…"),
         });
         let block = (k >= SHAPES_BELOW).then(|| {
-            let mark = crate::icons::status_icon(
-                theme,
-                Status::Running,
-                px(theme.typography.icon() * k),
-                hsla(s.text_muted),
-            );
+            let mark = crate::icons::notice_status(theme, Status::Running, hsla(s.text_muted), k);
             let block = kit::notice(
                 theme,
                 k,
@@ -2690,7 +2675,7 @@ impl WorkspaceView {
                 .child(
                     crate::icons::icon(
                         theme,
-                        IconName::CircleAlert,
+                        Symbol::ExclamationmarkTriangle,
                         IconSize::Inline,
                         hsla(s.error),
                     )

@@ -20,7 +20,7 @@ use slopty_proto::thread::detail::{Hunk, heading};
 use super::FileView;
 use crate::conversation::diff::{self, Block};
 use crate::conversation::lines::{self, Ink};
-use crate::icons::IconName;
+use crate::icons::Symbol;
 
 /// Lines of context around each change, as `git diff` gives.
 const CONTEXT: usize = 3;
@@ -194,10 +194,10 @@ impl FileView {
     pub(super) fn render_compare(&self, comparing: &Comparing) -> AnyElement {
         let id = self.id.as_uuid();
         let Some(shown) = &comparing.shown else {
-            return self.notice(IconName::FileDiff, COMPARING, None, None);
+            return self.notice(Symbol::PlusForwardslashMinus, COMPARING, None, None);
         };
         if shown.blocks.is_empty() {
-            return self.notice(IconName::FileDiff, SAME_TEXT, None, None);
+            return self.notice(Symbol::PlusForwardslashMinus, SAME_TEXT, None, None);
         }
         let ink = Ink { theme: &self.theme, zoom: self.zoom, digits: lines::digits(&shown.blocks) };
         let mut left = SHOWN_LINES;

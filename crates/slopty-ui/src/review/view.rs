@@ -52,7 +52,7 @@ use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::commit::{CommitEvent, CommitSheet};
 use crate::conversation::thread::{HubEvent, ThreadHub};
 use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
 /// How wide the tile has to be, at rest, for its diff to show both sides.
@@ -1148,7 +1148,7 @@ impl ReviewView {
         self.theme.typography.mono_size
     }
 
-    fn icon(&self, name: IconName, tone: slopty_theme::Rgb) -> AnyElement {
+    fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(self.z(self.theme.typography.icon()))
             .into_any_element()
@@ -1243,7 +1243,7 @@ impl ReviewView {
             kit::icon_button_at(
                 &self.theme,
                 "review-refresh",
-                IconName::RotateCw,
+                Symbol::ArrowClockwise,
                 "Refresh",
                 self.zoom,
             )
@@ -1322,8 +1322,9 @@ impl ReviewView {
     /// agent it is, which its words name.
     fn agent_mark(&self) -> AnyElement {
         let theme = &self.theme;
-        crate::icons::glyph(
-            crate::icons::Glyph::AGENT,
+        crate::icons::symbol(
+            theme,
+            crate::icons::AGENT,
             self.z(theme.typography.icon()),
             hsla(theme.surfaces.text_secondary),
         )
@@ -1536,7 +1537,7 @@ impl ReviewView {
             .py(self.z(theme.spacing.xs))
             .border_t(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
-            .child(self.icon(IconName::MessageSquare, s.text_muted))
+            .child(self.icon(Symbol::TextBubble, s.text_muted))
             .child(
                 div()
                     .min_w_0()
@@ -1593,7 +1594,7 @@ impl ReviewView {
             .rounded(self.z(self.theme.radii.sm))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)))
-            .child(self.icon(IconName::X, s.text_muted))
+            .child(self.icon(Symbol::Xmark, s.text_muted))
             .on_click(then)
     }
 
@@ -1622,7 +1623,7 @@ impl ReviewView {
                 .cursor_pointer()
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(self.icon(IconName::GitPullRequest, tone))
+                .child(self.icon(Symbol::ArrowTrianglePull, tone))
                 .child(kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))))
                 .child(div().text_color(hsla(tone)).child(SharedString::from(words)))
                 .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
@@ -2003,7 +2004,7 @@ impl ReviewView {
             .debug_selector(move || format!("review-comment-{ix}"))
             .child(match &agent {
                 Some(_) => self.agent_mark(),
-                None => self.icon(IconName::MessageSquare, s.text_muted),
+                None => self.icon(Symbol::TextBubble, s.text_muted),
             })
             .when(ranged, |el| {
                 el.child(
@@ -2044,7 +2045,7 @@ impl ReviewView {
                     .role(Role::Button)
                     .aria_label("Remove comment")
                     .cursor_pointer()
-                    .child(self.icon(IconName::X, s.text_muted))
+                    .child(self.icon(Symbol::Xmark, s.text_muted))
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.uncomment(ix, cx))),
             )
             .into_any_element()
@@ -2054,7 +2055,7 @@ impl ReviewView {
         let s = self.theme.surfaces;
         self.note()
             .debug_selector(|| "review-draft".to_owned())
-            .child(self.icon(IconName::MessageSquare, s.text_muted))
+            .child(self.icon(Symbol::TextBubble, s.text_muted))
             .child(div().min_w_0().flex_1().child(Input::new(&self.draft).aria_label("Comment")))
             .into_any_element()
     }
@@ -2165,7 +2166,7 @@ impl ReviewView {
     /// "More" at the foot's end, and its menu while open: the foot's buttons that did not fit.
     fn foot_more(&self, comments: bool, mark: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
-        let button = kit::icon_button(theme, "review-more", IconName::Ellipsis, "More")
+        let button = kit::icon_button(theme, "review-more", Symbol::Ellipsis, "More")
             .aria_expanded(self.more_open)
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 this.more_open = !this.more_open;

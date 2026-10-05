@@ -99,7 +99,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Glyph, IconName, IconSize, Status, icon, status_mark};
+use crate::icons::{IconSize, Status, Symbol, icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -635,7 +635,7 @@ pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
 #[derive(Clone)]
 struct NavTile {
     tile: TileRef,
-    kind: Glyph,
+    kind: Symbol,
     mark: Option<Status>,
     /// The state's word, said in the row's accessible name (the row draws the state as its
     /// glyph): [`agent_status_word`] for an agent that waits ("Needs approval", "Has a
@@ -743,7 +743,7 @@ struct NavGroup {
     /// What it is kept by: folded, scoped, gone to.
     key: GroupKey,
     /// What its header leads with.
-    glyph: IconName,
+    glyph: Symbol,
     name: String,
     /// Where it is, when another group listed has the same name.
     parent: Option<String>,
@@ -773,7 +773,7 @@ struct NavThread {
     worker: WorkerKey,
     thread: ThreadId,
     /// Its agent's mark.
-    glyph: Glyph,
+    glyph: Symbol,
     status: Option<Status>,
     title: String,
     /// Its state in a word or two.
@@ -1783,7 +1783,7 @@ impl WorkspaceView {
             let row = NavThread {
                 worker: stand.worker,
                 thread,
-                glyph: Glyph::AGENT,
+                glyph: crate::icons::AGENT,
                 status: stand.status(),
                 title,
                 word,
@@ -1844,7 +1844,7 @@ impl WorkspaceView {
                 NavThread {
                     worker: stand.worker,
                     thread,
-                    glyph: Glyph::AGENT,
+                    glyph: crate::icons::AGENT,
                     status: None,
                     title: self.thread_title(thread),
                     word: None,
@@ -2132,7 +2132,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted)))
+                .child(icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted)))
                 .on_click(
                     cx.listener(|this, _ev, window, cx| this.clear_navigator_filter(window, cx)),
                 );
@@ -2508,7 +2508,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let side = kit::icon_button_side(theme);
-        let button = |id: String, label: String, glyph: IconName, ink, rollup: Rollup| {
+        let button = |id: String, label: String, glyph: Symbol, ink, rollup: Rollup| {
             let badge = rollup_slot(theme, format!("{id}-rollup"), rollup, true)
                 .absolute()
                 .right_0()
@@ -2580,8 +2580,8 @@ impl WorkspaceView {
                 return None;
             }
             let (glyph, ink) = match health {
-                Some((Status::Away, _)) => (IconName::Server, s.text_muted),
-                _ => (IconName::Server, s.text_secondary),
+                Some((Status::Away, _)) => (Symbol::ServerRack, s.text_muted),
+                _ => (Symbol::ServerRack, s.text_secondary),
             };
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
             let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup).on_click(
@@ -2810,7 +2810,7 @@ impl WorkspaceView {
             )
             .child(lead_slot(
                 theme,
-                icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
+                icon(theme, Symbol::RectangleStack, IconSize::Inline, hsla(s.text_muted)),
             ))
             .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
                 el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
@@ -2830,7 +2830,7 @@ impl WorkspaceView {
             .text_color(hsla(s.text_secondary))
             .child(lead_slot(
                 theme,
-                icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_muted)),
+                icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_muted)),
             ))
             .child(title(text, hsla(s.text_secondary)))
             .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -2857,22 +2857,20 @@ impl WorkspaceView {
             worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let lead = match worker.health {
-            None => lead_slot(
-                theme,
-                icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted)),
-            ),
-            Some((Status::Away, _)) => lead_slot(
-                theme,
-                div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(icon(
+        let lead =
+            match worker.health {
+                None => lead_slot(
                     theme,
-                    IconName::Server,
-                    IconSize::Inline,
-                    hsla(s.text_muted),
-                )),
-            ),
-            Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
-        };
+                    icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted)),
+                ),
+                Some((Status::Away, _)) => lead_slot(
+                    theme,
+                    div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(
+                        icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted)),
+                    ),
+                ),
+                Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
+            };
         let name = div()
             .debug_selector(move || format!("nav-worker-name-{key}"))
             .flex_1()
@@ -2902,32 +2900,36 @@ impl WorkspaceView {
         // before them what a folded worker's tiles add up to. They grow leftwards, so a rollup
         // coming or going moves nothing after it.
         let rollup = folded.then_some(worker.rollup).filter(|r| r.shown().is_some());
-        let rest = div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(theme.spacing.xs))
-            .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
-            .children(worker.health.map(|(_, word)| readout(theme, word)))
-            .children(worker.relay.clone().map(|relay| {
-                readout(theme, relay).debug_selector(move || format!("nav-path-{key}"))
-            }))
-            .children(
-                worker.rtt.clone().map(|rtt| {
+        let rest =
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(theme.spacing.xs))
+                .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
+                .children(worker.health.map(|(_, word)| readout(theme, word)))
+                .children(worker.relay.clone().map(|relay| {
+                    readout(theme, relay).debug_selector(move || format!("nav-path-{key}"))
+                }))
+                .children(worker.rtt.clone().map(|rtt| {
                     readout(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))
-                }),
-            )
-            .children((!self.clipboard_shared(key)).then(|| {
-                // Copy and paste stop at this machine: said where the machine is named.
-                div()
-                    .id(SharedString::from(format!("nav-clip-off-{key}")))
-                    .debug_selector(move || format!("nav-clip-off-{key}"))
-                    .role(Role::Image)
-                    .aria_label(CLIPBOARD_OFF)
-                    .flex_none()
-                    .child(icon(theme, IconName::Clipboard, IconSize::Inline, hsla(s.text_muted)))
-            }));
-        let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
+                }))
+                .children((!self.clipboard_shared(key)).then(|| {
+                    // Copy and paste stop at this machine: said where the machine is named.
+                    div()
+                        .id(SharedString::from(format!("nav-clip-off-{key}")))
+                        .debug_selector(move || format!("nav-clip-off-{key}"))
+                        .role(Role::Image)
+                        .aria_label(CLIPBOARD_OFF)
+                        .flex_none()
+                        .child(icon(
+                            theme,
+                            Symbol::DocOnClipboard,
+                            IconSize::Inline,
+                            hsla(s.text_muted),
+                        ))
+                }));
+        let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
         let side = theme.typography.icon_large();
         // A worker on another build: Update in place of its readouts, at rest too, since it
         // links again only once updated.
@@ -2967,7 +2969,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();
@@ -3007,7 +3009,7 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(measure)
-                .child(icon(theme, IconName::Ellipsis, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Ellipsis, IconSize::Inline, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     cx.stop_propagation();
@@ -3141,7 +3143,7 @@ impl WorkspaceView {
                     .text_ellipsis()
                     .child(SharedString::from(place))
             }));
-        let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
+        let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
         let side = theme.typography.icon_large();
         let add = group.new_shell.clone().map(|(worker, cwd)| {
             let add_key = key.clone();
@@ -3158,7 +3160,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();
@@ -3223,8 +3225,13 @@ impl WorkspaceView {
         let id = board.project.as_str().to_owned();
         let label = SharedString::from(format!("{BOARD}, {}", board.words));
         let glyph = board.status.filter(|m| *m != Status::Idle);
-        let lead =
-            crate::palette::status_slot(theme, IconName::Workflow, glyph, hsla(s.text_muted), 1.0);
+        let lead = crate::palette::status_slot(
+            theme,
+            Symbol::RectangleSplit3x1,
+            glyph,
+            hsla(s.text_muted),
+            1.0,
+        );
         let words_id = id.clone();
         let project = board.project.clone();
         row(
@@ -3406,7 +3413,7 @@ impl WorkspaceView {
         let close = kit::icon_button_at(
             theme,
             format!("nav-close-{id}"),
-            IconName::X,
+            Symbol::Xmark,
             super::tile::CLOSE_TILE,
             1.0,
         )

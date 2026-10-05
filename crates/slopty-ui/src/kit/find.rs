@@ -20,7 +20,7 @@ use regex::{Regex, RegexBuilder};
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 
 /// What a find bar says before anything is typed.
 pub const PLACEHOLDER: &str = "Find";
@@ -318,7 +318,7 @@ impl RenderOnce for FindBar {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs * k))
-            .child(lead(IconName::Search))
+            .child(lead(Symbol::Magnifyingglass))
             .child(
                 div()
                     .flex_1()
@@ -340,10 +340,10 @@ impl RenderOnce for FindBar {
                     .aria_value(value)
                     .child(SharedString::from(words)),
             )
-            .child(step("previous", IconName::ChevronUp, "Previous match", -1))
-            .child(step("next", IconName::ChevronDown, "Next match", 1))
+            .child(step("previous", Symbol::ChevronUp, "Previous match", -1))
+            .child(step("next", Symbol::ChevronDown, "Next match", 1))
             .children(on_close.map(|on_close| {
-                super::icon_button_at(&theme, part("close"), IconName::X, "Close find", k)
+                super::icon_button_at(&theme, part("close"), Symbol::Xmark, "Close find", k)
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(move |_ev, window, cx| on_close(window, cx))
             }));
@@ -381,7 +381,9 @@ impl RenderOnce for FindBar {
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs * k))
-                    .child(lead(IconName::Replace))
+                    // The replacement lines up under the query, past an empty lead: a word says
+                    // what the row does, and no symbol says replace.
+                    .child(div().flex_none().size(px(theme.typography.icon() * k)))
                     .child(div().flex_1().min_w_0().child(
                         Input::new(&field).appearance(false).aria_label(REPLACE_PLACEHOLDER),
                     ))

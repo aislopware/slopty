@@ -41,7 +41,7 @@ use slopty_proto::orchestration::FileKind;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{Glyph, IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::palette::Plate;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -660,8 +660,9 @@ impl FolderView {
                 .px(px(theme.spacing.inset() * k))
                 .border_b(crate::kit::hair(theme))
                 .border_color(hsla(theme.surfaces.border_subtle))
-                .child(crate::icons::glyph(
-                    Glyph::Icon(IconName::FolderPlus),
+                .child(crate::icons::symbol(
+                    theme,
+                    Symbol::FolderBadgePlus,
                     px(theme.typography.icon() * k),
                     hsla(theme.surfaces.text_secondary),
                 ))
@@ -687,8 +688,9 @@ impl FolderView {
             .h(px(theme.density.row * k))
             .px(px(theme.spacing.inset() * k))
             .opacity(ASKED)
-            .child(crate::icons::glyph(
-                Glyph::Icon(IconName::Folder),
+            .child(crate::icons::symbol(
+                theme,
+                Symbol::Folder,
                 px(theme.typography.icon() * k),
                 hsla(theme.surfaces.text_secondary),
             ))
@@ -795,7 +797,7 @@ impl FolderView {
     /// what is so and, where there is one, why.
     fn notice(
         &self,
-        icon: IconName,
+        icon: Symbol,
         title: impl Into<SharedString>,
         detail: Option<SharedString>,
     ) -> AnyElement {
@@ -867,7 +869,7 @@ impl FolderView {
                 trail = trail.child(
                     crate::icons::icon(
                         theme,
-                        IconName::ChevronRight,
+                        Symbol::ChevronRight,
                         IconSize::Inline,
                         crate::palette::separator_ink(theme),
                     )
@@ -930,7 +932,7 @@ impl FolderView {
                     crate::kit::icon_button_at(
                         theme,
                         format!("folder-upload-{id}"),
-                        IconName::Upload,
+                        Symbol::ArrowUpToLine,
                         UPLOAD_FROM_FILES,
                         k,
                     )
@@ -958,10 +960,10 @@ impl FolderView {
         let chosen = self.selected == Some(ix);
         let folder = entry.kind == FileKind::Dir;
         let icon = match entry.kind {
-            FileKind::Dir => Glyph::Icon(IconName::Folder),
-            FileKind::Symlink => Glyph::Icon(IconName::Link),
-            FileKind::File => Glyph::file(&entry.name),
-            FileKind::Other => Glyph::Icon(IconName::File),
+            FileKind::Dir => Symbol::Folder,
+            FileKind::Symlink => Symbol::Link,
+            FileKind::File => crate::icons::file_symbol(&entry.name),
+            FileKind::Other => Symbol::Doc,
         };
         let mut ink = RowInk::of(theme, entry, chosen);
         let fate = self.fate(&entry.name);
@@ -1000,7 +1002,7 @@ impl FolderView {
             crate::kit::icon_button_at(
                 theme,
                 format!("folder-save-{}", self.id.as_uuid()),
-                IconName::Download,
+                Symbol::ArrowDownToLine,
                 SAVE_TO_FILES,
                 k,
             )
@@ -1041,7 +1043,12 @@ impl FolderView {
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
                 this.clicked(ix, ev.click_count(), cx);
             }))
-            .child(crate::icons::glyph(icon, px(theme.typography.icon() * k), hsla(ink.icon)))
+            .child(crate::icons::symbol(
+                theme,
+                icon,
+                px(theme.typography.icon() * k),
+                hsla(ink.icon),
+            ))
             .child(self.renaming(&entry.name).unwrap_or_else(|| {
                 div()
                     .flex_1()
@@ -1058,7 +1065,7 @@ impl FolderView {
             }))
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
-                    crate::icons::icon(theme, IconName::Link, IconSize::Inline, hsla(s.text_muted))
+                    crate::icons::icon(theme, Symbol::Link, IconSize::Inline, hsla(s.text_muted))
                         .size(px(theme.typography.small() * k)),
                 )
             })
@@ -1174,10 +1181,10 @@ impl Render for FolderView {
         let body: Vec<AnyElement> = match self.listing() {
             // Blank while an answer in time would fill it; past the grace, a word.
             None if !crate::screen::past_grace("folder-reading", window, cx) => Vec::new(),
-            None => vec![self.notice(IconName::Folder, crate::file::READING, None)],
-            Some(Listing::NotFolder) => vec![self.notice(IconName::File, NOT_A_FOLDER, None)],
+            None => vec![self.notice(Symbol::Folder, crate::file::READING, None)],
+            Some(Listing::NotFolder) => vec![self.notice(Symbol::Doc, NOT_A_FOLDER, None)],
             Some(Listing::Missing { error }) => vec![self.notice(
-                IconName::FolderSearch,
+                Symbol::TextMagnifyingglass,
                 CANNOT_LIST,
                 Some(SharedString::from(error.clone())),
             )],
@@ -1188,7 +1195,7 @@ impl Render for FolderView {
                 let none_made = made.is_empty();
                 body.extend(made.into_iter().enumerate().map(|(n, name)| self.made_row(n, name)));
                 if entries.is_empty() && none_made {
-                    body.push(self.notice(IconName::FolderOpen, EMPTY_FOLDER, None));
+                    body.push(self.notice(Symbol::Folder, EMPTY_FOLDER, None));
                 } else {
                     body.push(self.list(entries.len(), cx));
                     body.extend(self.foot(entries.len(), *total));

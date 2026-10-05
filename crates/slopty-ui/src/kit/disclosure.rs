@@ -9,13 +9,13 @@
 use std::f32::consts::FRAC_PI_2;
 
 use gpui::{
-    AnimationExt as _, App, ElementId, Hsla, IntoElement, Pixels, RenderOnce, SharedString,
-    Styled as _, Transformation, Window, radians,
+    AnimationExt as _, App, ElementId, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 use slopty_theme::Theme;
 
 use super::Pace;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{Drawn, Symbol};
 
 /// A chevron for a row that opens, under `id`, pointing down while `open`.
 #[derive(IntoElement)]
@@ -50,11 +50,6 @@ impl Disclosure {
     }
 }
 
-/// How far the chevron has turned from pointing right, at `share` of its quarter turn.
-fn turned(share: f32) -> Transformation {
-    Transformation::rotate(radians(share * FRAC_PI_2))
-}
-
 impl RenderOnce for Disclosure {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self { id, open, color, side, theme } = self;
@@ -64,17 +59,24 @@ impl RenderOnce for Disclosure {
             window,
             cx,
         );
-        let chevron =
-            crate::icons::icon(&theme, IconName::ChevronRight, IconSize::Inline, color).size(side);
+        // At rest the chevron is the system's own, right or down, at exact pixels; only while
+        // it turns is the right one turned, a quarter over the fade.
+        let rest = if open { Symbol::ChevronDown } else { Symbol::ChevronRight };
         if turns == 0 || !super::motion(cx) {
-            return chevron
-                .with_transformation(turned(if open { 1.0 } else { 0.0 }))
-                .into_any_element();
+            return Drawn::disclosure(&theme, rest).slot(side, color).into_any_element();
         }
         let key = ElementId::Name(SharedString::from(format!("{id}-turn-{turns}")));
-        chevron
-            .with_animation(key, Pace::Fade.animation(), move |chevron, t| {
-                chevron.with_transformation(turned(if open { t } else { 1.0 - t }))
+        div()
+            .flex_none()
+            .size(side)
+            .with_animation(key, Pace::Fade.animation(), move |el, t| {
+                let share = if open { t } else { 1.0 - t };
+                let drawn = if t >= 1.0 {
+                    Drawn::disclosure(&theme, rest)
+                } else {
+                    Drawn::disclosure(&theme, Symbol::ChevronRight).turned(share * FRAC_PI_2)
+                };
+                el.child(drawn.slot(side, color))
             })
             .into_any_element()
     }

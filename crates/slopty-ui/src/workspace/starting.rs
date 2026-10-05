@@ -32,7 +32,7 @@ use super::projects::agent_label;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Glyph, Status};
+use crate::icons::Status;
 use crate::kit;
 
 /// The tick under the first message's field.
@@ -413,19 +413,15 @@ impl WorkspaceView {
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
             .when(!shapes, |el| {
-                el.child(crate::palette::status_slot(theme, Glyph::AGENT, status, ink, k))
+                el.child(crate::palette::status_slot(theme, crate::icons::AGENT, status, ink, k))
                     .child(title.clone())
             });
         let body = (!shapes).then(|| {
             if let Some(asked) = self.first_message(id, starting, &place, k, cx) {
                 asked.into_any_element()
             } else {
-                let mark = crate::icons::status_icon(
-                    theme,
-                    Status::Working,
-                    px(theme.typography.icon() * k),
-                    hsla(s.text_secondary),
-                );
+                let mark =
+                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary), k);
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));
                 kit::notice(theme, k, mark, format!("Starting {label}"), Some(place.into()))
                     .id("starting")

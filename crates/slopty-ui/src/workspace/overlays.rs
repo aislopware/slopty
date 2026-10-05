@@ -74,9 +74,9 @@ impl WorkspaceView {
             .into_iter()
             .map(|row| {
                 let icon = if self.session_agent(row.session).is_some() {
-                    crate::icons::Glyph::AGENT
+                    crate::icons::AGENT
                 } else {
-                    crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal)
+                    crate::icons::Symbol::Terminal
                 };
                 PaletteItem::session(&row.title, row.session)
                     .with_icon(icon)

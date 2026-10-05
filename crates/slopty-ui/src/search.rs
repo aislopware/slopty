@@ -45,7 +45,7 @@ use slopty_theme::{Theme, Typography, alpha};
 pub use tiles::{SearchScope, TileHit, TileOpen};
 
 use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconName, IconSize};
+use crate::icons::{IconSize, Symbol};
 use crate::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
 use crate::palette::{Layer, Plate};
 
@@ -593,9 +593,9 @@ impl ProjectSearch {
         let s = theme.surfaces;
         let (dir, name) = hits.path.rsplit_once('/').unwrap_or(("", hits.path.as_str()));
         let chevron = if self.folded.contains(&hits.path) {
-            IconName::ChevronRight
+            Symbol::ChevronRight
         } else {
-            IconName::ChevronDown
+            Symbol::ChevronDown
         };
         div()
             .flex_1()
@@ -742,7 +742,7 @@ impl ProjectSearch {
                     crate::kit::icon_toggle(
                         theme,
                         "search-context",
-                        IconName::UnfoldVertical,
+                        Symbol::ArrowUpAndDown,
                         CONTEXT_LINES,
                         self.context,
                         1.0,

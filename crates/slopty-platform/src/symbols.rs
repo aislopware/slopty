@@ -78,6 +78,8 @@ symbols! {
     CircleInsetFilled => "circle.inset.filled",
     Clock => "clock",
     ClockArrowCirclepath => "clock.arrow.circlepath",
+    /// The Command key, where a state is about the keyboard's shortcuts.
+    Command => "command",
     /// A file of data: JSON, TOML, YAML.
     Curlybraces => "curlybraces",
     Cursorarrow => "cursorarrow",

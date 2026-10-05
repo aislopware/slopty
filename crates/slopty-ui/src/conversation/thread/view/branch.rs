@@ -33,7 +33,7 @@ use slopty_proto::thread::{AgentId, Cap, ItemBody, ItemId, ThreadMeta, ThreadSta
 
 use super::{ThreadView, agent_label, message_group};
 use crate::colors::hsla;
-use crate::icons::IconName;
+use crate::icons::Symbol;
 use crate::kit::{self, ButtonKind};
 
 /// The panel open under a message: its settings.
@@ -237,7 +237,7 @@ impl ThreadView {
                     .when(!touch && !open, |el| {
                         el.invisible().group_hover(message_group(id), gpui::Styled::visible)
                     })
-                    .child(self.icon(IconName::GitBranch, s.text_muted))
+                    .child(self.icon(Symbol::ArrowTriangleBranch, s.text_muted))
                     .map(kit::hint_timing)
                     .tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::clone(&hint_theme);
