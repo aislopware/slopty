@@ -7,7 +7,8 @@ Status │ 1 new
 Button │ More
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ terminal Do these steps in order with the named tools, then reply "done". 1) Read…
-Label │ Claude Code · ~
+Image │ Claude Code
+Label │ ~
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread

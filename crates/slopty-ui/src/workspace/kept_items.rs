@@ -116,7 +116,7 @@ impl WorkspaceView {
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
             .when(!shapes, |el| {
-                el.child(crate::palette::status_slot(theme, Symbol::ServerRack, None, ink, k))
+                el.child(crate::palette::lead_slot(theme, Symbol::ServerRack, ink, k))
                     .child(name.clone())
             });
         let pill = (!shapes).then(|| self.render_state_pill(tile, &state, true, chrome, cx));

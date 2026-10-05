@@ -1,0 +1,94 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+Button │ Navigator
+TextInput │ Filter
+Heading │ Needs you
+Button │ Claude Code, Wants to run a command, Needs you
+Heading │ Projects
+Button │ atlas
+Button │ New shell in atlas
+Button │ Claude Code, Needs approval
+Image │ Claude Code
+Image │ Needs you
+Button │ Close tile
+Button │ Thread 3
+Button │ Close tile
+Button │ Thread 2
+Image │ pi
+Button │ Close tile
+Button │ Thread
+Image │ Codex
+Button │ Close tile
+Heading │ Machines
+Button │ studio
+Button │ New shell on studio
+Button │ Machine actions, studio
+Button │ Claude Code 2, Working
+Image │ Claude Code
+Image │ Working
+Button │ Close tile
+Group │ Where
+Button │ atlas
+Button │ New
+Button │ Needs you
+Status │ 1 new
+Button │ More
+Group │ Claude Code
+Heading │ terminal Claude Code
+Image │ Claude Code
+Label │ atlas
+Button │ Needs approval: Wants to run a command
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status
+MultilineTextInput │ Message
+Button │ Add to the message
+Button │ Model, Claude
+Button │ Commit
+Button │ Send
+Group │ Thread 3
+Heading │ thread Thread 3
+Label │ opencode
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status
+MultilineTextInput │ Message
+Button │ Add to the message
+Button │ Model, Canned
+Button │ Mode, build
+Button │ Commit
+Button │ Send
+Group │ Claude Code 2
+Heading │ terminal Claude Code 2
+Image │ Claude Code
+Image │ Working
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status
+MultilineTextInput │ Message (focused)
+Button │ Add to the message
+Button │ Model, Claude
+Button │ Send
+Group │ Thread 2
+Heading │ thread Thread 2
+Image │ pi
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status
+MultilineTextInput │ Message
+Button │ Add to the message
+Label │ Model, Canned
+Label │ Effort, Medium
+Button │ Commit
+Button │ Continue in the terminal
+Button │ Send
+Status │ atlas needs approval
+Image │ Needs you
+Button │ Go

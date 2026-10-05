@@ -24,10 +24,10 @@ pub const STEP: Duration = Duration::from_secs(20);
 const WINDOW: (f32, f32) = (900.0, 600.0);
 /// Where the pointer rests before a golden: the title bar's top-left corner, left of the window
 /// buttons, over nothing that answers a hover.
-const PARK: (f32, f32) = (1.0, 1.0);
+pub const PARK: (f32, f32) = (1.0, 1.0);
 /// Where a golden that shows a time pins the readouts ([`Command::PinClock`]): 2026-10-04 at
 /// 09:00 UTC, in Unix milliseconds.
-const PINNED_AT: u64 = 1_791_104_400_000;
+pub const PINNED_AT: u64 = 1_791_104_400_000;
 
 /// Wait until nothing moves, every link has its round trip and every shell at a prompt has its
 /// caret there: two dumps a frame apart place every tile alike, so a spring still running

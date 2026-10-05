@@ -65,7 +65,10 @@ impl WorkspaceView {
         let id = item.id;
         let muted = hsla(s.text_muted);
         let (mark, _) = self.tile_marks(placed.tile, item);
-        let lead = crate::palette::status_slot(theme, self.kind_glyph(item), mark, muted, 1.0);
+        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), muted, 1.0);
+        let state = mark
+            .filter(|m| *m != crate::icons::Status::Idle)
+            .map(|m| crate::icons::status_mark(theme, Some(m), 1.0));
         let name = div()
             .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
             .h(px(t.icon_large()))
@@ -83,7 +86,8 @@ impl WorkspaceView {
                     .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
                     .child(SharedString::from(self.tile_title(item))),
-            );
+            )
+            .children(state);
         let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
         let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
         let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);

@@ -7,6 +7,7 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ scenario:bash run echo hi
+Image │ Claude Code
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
@@ -15,7 +16,8 @@ Button │ Needs you
 Button │ More
 Group │ scenario:bash run echo hi
 Heading │ terminal scenario:bash run echo hi
-Label │ Claude Code · ~
+Image │ Claude Code
+Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

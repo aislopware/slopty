@@ -8,9 +8,11 @@ Button │ Ship the project board
 Button │ Board, 0 of 2 merged
 Image │ Working
 Button │ #1 Read a pull request's checks, Working
+Image │ Claude Code
 Image │ Working
 Button │ Close tile
 Button │ Orchestrator
+Image │ Claude Code
 Button │ Close tile
 Heading │ Machines
 Button │ studio
@@ -32,7 +34,7 @@ Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ terminal Orchestrator
-Label │ Claude Code
+Image │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -58,10 +60,10 @@ MultilineTextInput │ Message the orchestrator
 Button │ Send
 Group │ #1 Read a pull request's checks
 Heading │ terminal #1 Read a pull request's checks
-Image │ Working
-Label │ Claude Code
+Image │ Claude Code
 Link │ Pull request 42, changes requested
 Label │ Worktree slopty-board-1 on worktree-slopty-board-1
+Image │ Working
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

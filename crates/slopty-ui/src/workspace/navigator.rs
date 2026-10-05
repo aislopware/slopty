@@ -99,7 +99,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconSize, Status, Symbol, icon, status_mark};
+use crate::icons::{IconSize, Mark, Status, Symbol, icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -154,8 +154,7 @@ pub(super) const NEEDS_YOU: &str = "Needs you";
 pub(super) const TO_REVIEW: &str = "To review";
 
 /// A round trip the navigator names: above it typing starts to feel remote, below it the
-/// number is noise beside every worker. The status bar uses the same threshold (and shows it
-/// under the pointer); the hosts popover gives it always.
+/// number is noise beside every worker. The hosts popover gives it always.
 pub(super) const RTT_SHOWN_FROM: Duration = Duration::from_millis(20);
 
 /// How far past each edge of the view the list lays rows out, in points, so a scroll does not
@@ -368,7 +367,7 @@ impl std::fmt::Debug for NavState {
     }
 }
 
-/// A round trip as the navigator and the status bar print it: tenths under 10 ms, whole
+/// A round trip as the navigator prints it: tenths under 10 ms, whole
 /// milliseconds above, so a jittery link does not repaint the chrome on every sample.
 pub(super) fn rtt_label(rtt: Duration) -> String {
     let ms = rtt.as_secs_f64() * 1e3;
@@ -635,7 +634,8 @@ pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
 #[derive(Clone)]
 struct NavTile {
     tile: TileRef,
-    kind: Symbol,
+    /// What it is: its kind's symbol, or its agent's mark.
+    kind: Mark,
     mark: Option<Status>,
     /// The state's word, said in the row's accessible name (the row draws the state as its
     /// glyph): [`agent_status_word`] for an agent that waits ("Needs approval", "Has a
@@ -773,7 +773,7 @@ struct NavThread {
     worker: WorkerKey,
     thread: ThreadId,
     /// Its agent's mark.
-    glyph: Symbol,
+    glyph: Mark,
     status: Option<Status>,
     title: String,
     /// Its state in a word or two.
@@ -1783,7 +1783,7 @@ impl WorkspaceView {
             let row = NavThread {
                 worker: stand.worker,
                 thread,
-                glyph: crate::icons::AGENT,
+                glyph: self.thread_mark(thread),
                 status: stand.status(),
                 title,
                 word,
@@ -1844,7 +1844,7 @@ impl WorkspaceView {
                 NavThread {
                     worker: stand.worker,
                     thread,
-                    glyph: crate::icons::AGENT,
+                    glyph: self.thread_mark(thread),
                     status: None,
                     title: self.thread_title(thread),
                     word: None,
@@ -1853,6 +1853,11 @@ impl WorkspaceView {
             })
             .filter(|row| matches(&query.text, &[&row.title]))
             .collect()
+    }
+
+    /// The mark of `thread`'s agent, the neutral glyph while it is not known.
+    fn thread_mark(&self, thread: ThreadId) -> Mark {
+        self.thread_agent(thread).map_or_else(|| crate::icons::AGENT.into(), Mark::agent)
     }
 
     /// A declared project's title, else its name.
@@ -3224,14 +3229,9 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let id = board.project.as_str().to_owned();
         let label = SharedString::from(format!("{BOARD}, {}", board.words));
-        let glyph = board.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::status_slot(
-            theme,
-            Symbol::RectangleSplit3x1,
-            glyph,
-            hsla(s.text_muted),
-            1.0,
-        );
+        let state = board.status.filter(|m| *m != Status::Idle);
+        let lead =
+            crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(s.text_muted), 1.0);
         let words_id = id.clone();
         let project = board.project.clone();
         row(
@@ -3258,6 +3258,7 @@ impl WorkspaceView {
                 .child(board.words.clone())
                 .debug_selector(move || format!("nav-board-words-{words_id}")),
         )
+        .children(state.map(|st| status_mark(theme, Some(st), 1.0)))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
         .into_any_element()
     }
@@ -3275,8 +3276,9 @@ impl WorkspaceView {
             .join(", ");
         let strength = row_strength(theme, t.status.or(Some(Status::Working)), false);
         let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
-        let glyph = t.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::status_slot(theme, t.glyph, glyph, faded(s.text_muted), 1.0);
+        let state = t.status.filter(|m| *m != Status::Idle);
+        let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_muted), 1.0)
+            .debug_selector(move || format!("nav-thread-kind-{id}"));
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
         let (worker, thread) = (t.worker, t.thread);
@@ -3297,7 +3299,15 @@ impl WorkspaceView {
                 .group_hover(row_group, move |st| st.text_color(hsla(ink))),
         )
         .children(t.word.map(|word| readout(theme, word)))
-        .children(t.age.clone().map(|age| readout(theme, age)))
+        // One mark at the line's end: how it is doing, else how long it has rested.
+        .children(match state {
+            Some(st) => Some(
+                status_mark(theme, Some(st), 1.0)
+                    .debug_selector(move || format!("nav-thread-state-{id}"))
+                    .into_any_element(),
+            ),
+            None => t.age.clone().map(|age| readout(theme, age).into_any_element()),
+        })
         .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
         .into_any_element()
     }
@@ -3382,30 +3392,43 @@ impl WorkspaceView {
         let strength = row_strength(theme, t.mark, selected);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
         let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
-        // The status glyph, as Warp's agent rows lead with one: working, waiting on the person,
-        // done, failed, away; one at rest shows its kind. The state is the glyph and never a
-        // word on the title's line, where "Needs approval" took half a row's width from the
-        // title; the second line says what is asked.
-        let glyph = t.mark.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::status_slot(theme, t.kind, glyph, faded(s.text_muted), 1.0)
+        // What the row is leads it, and never changes while it lives: its kind, or its agent's
+        // own mark, so the eye finds the same agent in the same column.
+        let lead = crate::palette::lead_slot(theme, t.kind, faded(s.text_muted), 1.0)
             .debug_selector(move || format!("nav-kind-{id}"));
-        // One mark at the line's end: the unseen dot, else the clock of a command that runs,
-        // else the age.
-        let end = if t.unseen {
-            Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
-        } else if let Some(ran) = t.running.clone() {
-            Some(
-                readout(theme, ran)
-                    .debug_selector(move || format!("nav-running-{id}"))
-                    .text_color(hsla(s.text_secondary))
+        // One mark at the line's end, by precedence: needs you, failed, at work (a running
+        // command's clock beside it), away; else the unseen dot, else the age. The state is a
+        // mark and never a word on the title's line, where "Needs approval" took half a row's
+        // width from the title; the second line says what is asked.
+        let state = t.mark.filter(|m| !matches!(m, Status::Idle | Status::Done));
+        let clock = t.running.clone().map(|ran| {
+            readout(theme, ran)
+                .debug_selector(move || format!("nav-running-{id}"))
+                .text_color(hsla(s.text_secondary))
+        });
+        let end = match state {
+            Some(state) => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xxs))
+                    .children(clock.filter(|_| matches!(state, Status::Working | Status::Running)))
+                    .child(
+                        status_mark(theme, Some(state), 1.0)
+                            .debug_selector(move || format!("nav-state-{id}")),
+                    )
                     .into_any_element(),
-            )
-        } else {
-            t.age.clone().map(|age| {
-                readout(theme, age)
-                    .debug_selector(move || format!("nav-age-{id}"))
-                    .into_any_element()
-            })
+            ),
+            None if t.unseen => {
+                Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
+            }
+            None => clock.map(gpui::IntoElement::into_any_element).or_else(|| {
+                t.age.clone().map(|age| {
+                    readout(theme, age)
+                        .debug_selector(move || format!("nav-age-{id}"))
+                        .into_any_element()
+                })
+            }),
         };
         // Under the pointer the line's end gives way to the row's action, in the same place, so
         // nothing on the line moves.

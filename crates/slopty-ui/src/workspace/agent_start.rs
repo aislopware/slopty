@@ -142,11 +142,12 @@ impl WorkspaceView {
                     .into_iter()
                     .map(|agent| {
                         let label = agent_label(&agent);
+                        let mark = crate::icons::Mark::agent(&agent.0);
                         let action: Box<dyn gpui::Action> = match chosen {
                             Some(worker) => Box::new(NewAgentOn { agent, worker }),
                             None => Box::new(NewAgentOf { agent }),
                         };
-                        PaletteItem::new(&label, action, &[]).with_icon(crate::icons::AGENT)
+                        PaletteItem::new(&label, action, &[]).with_icon(mark)
                     })
                     .collect();
                 self.open_step(lines, PICK_AGENT, window, cx);
@@ -437,9 +438,10 @@ fn session_line(
     let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
     // A session a live agent holds elsewhere is marked running: taking it up is refused.
     let running = session.facts.contains_key(slopty_proto::thread::wire::PAST_RUNNING);
+    let mark = crate::icons::Mark::agent(&session.agent.0);
     let action = Box::new(ResumeSession { worker, session: Box::new(session) });
     PaletteItem::new(&label, action, &[])
-        .with_icon(crate::icons::AGENT)
+        .with_icon(mark)
         .with_status(running.then_some(Status::Running))
         .in_dir(cwd)
         .aged(age)

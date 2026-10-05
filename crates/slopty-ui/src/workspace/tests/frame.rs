@@ -488,9 +488,10 @@ fn a_workers_tiles_come_in_order_of_attention(cx: &mut TestAppContext) {
     assert_eq!(order, [3, 2, 1, 0, 4], "needs you, unseen, working, then idle in reading order");
 }
 
-/// A tile whose long command finished while the human looked elsewhere carries the unseen
-/// dot on its row's status lane. The dot stands aside while the tile is at work, and goes once
-/// the tile is looked at.
+/// A tile whose long command finished well while the human looked elsewhere carries the
+/// unseen dot at its row's end. The dot stands aside while the tile is at work, and goes once
+/// the tile is looked at. One that failed ends its row with the failure's mark instead, which
+/// comes first.
 #[gpui::test]
 fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -502,7 +503,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
     assert!(cx.debug_bounds(dot).is_none(), "nothing unseen yet");
     view.update_in(cx, |v, _w, cx| {
         let done =
-            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(40) };
+            Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
         v.command_finished(built, done, cx);
     });
     cx.run_until_parked();
@@ -511,6 +512,17 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
         cx.debug_bounds(dot).expect("the dot"),
     );
     assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l.starts_with("make, ") && l.ends_with(", unseen")), "{said:?}");
+    view.update_in(cx, |v, _w, cx| {
+        let failed =
+            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(40) };
+        v.command_finished(built, failed, cx);
+    });
+    cx.run_until_parked();
+    let failed = cx.debug_bounds(selector("nav-state", tile.item)).expect("the failure's mark");
+    assert!(cx.debug_bounds(dot).is_none(), "the failure comes first");
+    assert!(lane.right() >= failed.right() && failed.left() > lane.center().x, "{failed:?}");
     assert!(labels(&view, cx).iter().any(|l| l == "make, Failed, unseen"), "named by what it ran");
 
     view.update_in(cx, |v, _w, cx| {

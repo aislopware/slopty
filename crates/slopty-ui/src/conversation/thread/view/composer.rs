@@ -400,8 +400,19 @@ impl ThreadView {
         let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
         let name =
             model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
+        // The agent's own mark leads the model it runs, in the chip's ink; an agent with no mark
+        // of its own is named by the words alone.
+        let mark = match crate::icons::Mark::agent(&state.meta.agent.0) {
+            mark @ crate::icons::Mark::Agent(_) => Some(
+                crate::icons::icon(theme, mark, IconSize::Inline, hsla(s.text_secondary))
+                    .debug_selector(|| "thread-model-mark".to_owned())
+                    .size(self.z(theme.typography.icon())),
+            ),
+            crate::icons::Mark::Symbol(_) => None,
+        };
         let chip = self
             .chip("thread-model", format!("Model, {name}"))
+            .children(mark)
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(

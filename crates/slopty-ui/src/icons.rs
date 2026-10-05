@@ -2,9 +2,11 @@
 //! (`slopty_platform::symbols`), painted at exact device pixels in the ink of those words.
 //!
 //! A [`Symbol`] is one of a closed list. A file's type is one of nine of them
-//! ([`FileType::symbol`]), and every agent's thread is the one neutral [`AGENT`]. Nothing else
-//! is drawn by us but the working mark's twelve spokes and the dot of a finish not yet seen
-//! (`docs/decisions/ui.md`, "The chrome's icons are SF Symbols").
+//! ([`FileType::symbol`]). An agent wears its owner's mark ([`AgentMark`]), drawn by us from
+//! the owner's outline into the same kind of mask, and an agent with none the neutral
+//! [`AGENT`]. Nothing else is drawn by us but the working mark's twelve spokes and the dot of a
+//! finish not yet seen (`docs/decisions/ui.md`, "The chrome's icons are SF Symbols";
+//! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
 //!
 //! An icon takes its size from the type scale: [`IconSize::Inline`] sits in the slot
 //! [`slopty_theme::Typography::icon`] beside the chrome's secondary text and is drawn at that
@@ -32,10 +34,56 @@ use slopty_theme::{Rgb, Theme};
 use crate::colors::hsla;
 pub use crate::file_types::FileType;
 
-/// Every agent's thread, whichever agent it is: one neutral mark in the ink beside it, a
-/// conversation. Agents are told apart in words (`docs/decisions/ui.md`, "No agent wears a
-/// mark of its own").
+mod marks;
+
+pub use marks::AgentMark;
+
+/// The thread of an agent with no mark of its own ([`AgentMark::Neutral`]), an ACP agent's:
+/// one neutral mark in the ink beside it, a conversation, its agent named in words.
 pub const AGENT: Symbol = Symbol::TextBubble;
+
+/// What leads a row: a symbol for what a thing is, or the mark of the agent it runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    /// An SF Symbol.
+    Symbol(Symbol),
+    /// An agent's own mark; [`AgentMark::Neutral`] is drawn as [`AGENT`].
+    Agent(AgentMark),
+}
+
+impl From<Symbol> for Mark {
+    fn from(symbol: Symbol) -> Self {
+        Self::Symbol(symbol)
+    }
+}
+
+impl From<AgentMark> for Mark {
+    /// An agent with no mark of its own leads with [`AGENT`], so the two compare equal.
+    fn from(mark: AgentMark) -> Self {
+        match mark {
+            AgentMark::Neutral => Self::Symbol(AGENT),
+            mark => Self::Agent(mark),
+        }
+    }
+}
+
+impl Mark {
+    /// The mark of the agent named `agent` (an `AgentId`'s name).
+    #[must_use]
+    pub fn agent(agent: &str) -> Self {
+        AgentMark::of(agent).into()
+    }
+
+    /// What a screen reader calls it: the agent an agent's mark names, else nothing, as a
+    /// symbol beside its words says nothing they do not.
+    #[must_use]
+    pub const fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Agent(mark) => mark.label(),
+            Self::Symbol(_) => None,
+        }
+    }
+}
 
 /// The symbol for the file at `path`: its type's, or the plain document.
 #[must_use]
@@ -100,24 +148,28 @@ impl IconSize {
     }
 }
 
-/// How a symbol is drawn in a slot: at `ratio` of the slot's side in points, `weight` and
-/// `scale`, turned by `turn` radians.
+/// How a mark is drawn in a slot: a symbol at `ratio` of the slot's side in points, `weight`
+/// and `scale`, turned by `turn` radians; an agent's mark with its ink box `ink` of the side.
 #[derive(Clone, Copy, Debug)]
 pub struct Drawn {
-    symbol: Symbol,
+    mark: Mark,
     ratio: f32,
+    ink: f32,
     weight: Weight,
     scale: Scale,
     turn: f32,
 }
 
 impl Drawn {
-    /// `symbol` in a slot of `size`, regular and at the medium scale.
+    /// `mark` in a slot of `size`: a symbol regular and at the medium scale, an agent's mark
+    /// with its ink box [`slopty_theme::Spacing::xxs`] short of the slot.
     #[must_use]
-    pub fn new(theme: &Theme, symbol: Symbol, size: IconSize) -> Self {
+    pub fn new(theme: &Theme, mark: impl Into<Mark>, size: IconSize) -> Self {
+        let slot = size.slot(theme);
         Self {
-            symbol,
-            ratio: size.point(theme) / size.slot(theme),
+            mark: mark.into(),
+            ratio: size.point(theme) / slot,
+            ink: (slot - theme.spacing.xxs) / slot,
             weight: Weight::Regular,
             scale: Scale::Medium,
             turn: 0.0,
@@ -150,16 +202,25 @@ impl Drawn {
         }
     }
 
-    /// An empty state's mark: the page heading's size in [`crate::kit::NOTICE_MARK`], at the
-    /// light weight and the large scale.
+    /// An empty state's mark: a symbol at the page heading's size in
+    /// [`crate::kit::NOTICE_MARK`], at the light weight and the large scale; an agent's mark
+    /// with its ink box two [`slopty_theme::Spacing::xxs`] short of the slot.
     #[must_use]
-    pub fn notice(theme: &Theme, symbol: Symbol) -> Self {
+    pub fn notice(theme: &Theme, mark: impl Into<Mark>) -> Self {
+        let slot = crate::kit::NOTICE_MARK;
         Self {
-            ratio: theme.typography.heading() / crate::kit::NOTICE_MARK,
+            ratio: theme.typography.heading() / slot,
+            ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot,
             weight: Weight::Light,
             scale: Scale::Large,
-            ..Self::new(theme, symbol, IconSize::Large)
+            ..Self::new(theme, mark, IconSize::Large)
         }
+    }
+
+    /// The ink box an agent's mark is drawn with in a slot `side` points square, in points.
+    #[must_use]
+    pub fn ink(self, side: f32) -> f32 {
+        side * self.ink
     }
 
     /// The size it is drawn at in a slot `side` points square.
@@ -187,13 +248,52 @@ impl Drawn {
         )
     }
 
-    /// Paints the symbol centred in `bounds`: its box across, its alignment rectangle (the
-    /// baseline to the cap height) down, as the words beside it centre.
+    /// Paints the mark centred in `bounds`.
     fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
+        match self.mark {
+            Mark::Symbol(symbol) => self.paint_symbol(symbol, bounds, window),
+            Mark::Agent(AgentMark::Neutral) => self.paint_symbol(AGENT, bounds, window),
+            Mark::Agent(mark) => self.paint_agent(mark, bounds, window),
+        }
+    }
+
+    /// Paints an agent's mark centred on its ink in `bounds`, on the device's pixel grid: its
+    /// mask is its ink box, so the box is centred and its origin rounded to a whole pixel.
+    /// Never turned, never weighted: a filled silhouette, as the owner draws it.
+    fn paint_agent(self, mark: AgentMark, bounds: Bounds<Pixels>, window: &mut Window) {
+        let side = f32::from(bounds.size.width.min(bounds.size.height));
+        let device = window.scale_factor();
+        let Some((mask, key)) = marks::mask(mark, self.ink(side), device) else {
+            return;
+        };
+        let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height))
+        else {
+            return;
+        };
+        let centre = bounds.center().scale(device);
+        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
+        let (wide, high) = (mask.width as f32, mask.height as f32);
+        let snap =
+            |middle: ScaledPixels, extent: f32| px((middle.0 - extent / 2.0).round() / device);
+        let origin = point(snap(centre.x, wide), snap(centre.y, high));
+        let devices = gpui::size(DevicePixels(width), DevicePixels(height));
+        let ink = window.text_style().color;
+        let painted =
+            window.paint_mask(origin, devices, key, TransformationMatrix::unit(), ink, || {
+                Ok(Some(mask.alpha.clone()))
+            });
+        if let Err(error) = painted {
+            tracing::warn!(%error, ?mark, "an agent's mark was not painted");
+        }
+    }
+
+    /// Paints `symbol` centred in `bounds`: its box across, its alignment rectangle (the
+    /// baseline to the cap height) down, as the words beside it centre.
+    fn paint_symbol(self, symbol: Symbol, bounds: Bounds<Pixels>, window: &mut Window) {
         let side = f32::from(bounds.size.width.min(bounds.size.height));
         let device = window.scale_factor();
         let Some((mask, key)) =
-            fitted(self.symbol, self.size(side), f32::from(bounds.size.width) * device, device)
+            fitted(symbol, self.size(side), f32::from(bounds.size.width) * device, device)
         else {
             return;
         };
@@ -220,7 +320,7 @@ impl Drawn {
         let painted = window
             .paint_mask(origin, devices, key, transformation, ink, || Ok(Some(mask.alpha.clone())));
         if let Err(error) = painted {
-            tracing::warn!(%error, symbol = self.symbol.name(), "a symbol was not painted");
+            tracing::warn!(%error, symbol = symbol.name(), "a symbol was not painted");
         }
     }
 }
@@ -310,18 +410,34 @@ pub fn prewarm(theme: &Theme) {
             tracing::warn!(%error, "the symbols' prewarm did not start");
         }
     }
+    // The agents' marks at the row's, the chip's and the empty state's ink.
+    let inks = [
+        Drawn::new(theme, AGENT, IconSize::Large).ink(IconSize::Large.slot(theme)),
+        Drawn::new(theme, AGENT, IconSize::Inline).ink(inline),
+        Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
+    ];
+    let marks = std::thread::Builder::new().name("agent-marks".into()).spawn(move || {
+        for mark in AgentMark::OWNED {
+            for (&ink, &scale) in inks.iter().flat_map(|ink| SCALES.iter().map(move |s| (ink, s))) {
+                marks::mask(mark, ink, scale);
+            }
+        }
+    });
+    if let Err(error) = marks {
+        tracing::warn!(%error, "the agents' marks' prewarm did not start");
+    }
 }
 
 /// `symbol` at `size`, in `color`: a slot of the size's side.
 #[must_use]
-pub fn icon(theme: &Theme, symbol: Symbol, size: IconSize, color: Hsla) -> Div {
+pub fn icon(theme: &Theme, symbol: impl Into<Mark>, size: IconSize, color: Hsla) -> Div {
     Drawn::new(theme, symbol, size).slot(px(size.slot(theme)), color)
 }
 
 /// `symbol` in a slot `side` square, in `ink`, drawn at the inline icon's share of the slot:
 /// a row's lead at whatever zoom.
 #[must_use]
-pub fn symbol(theme: &Theme, symbol: Symbol, side: Pixels, ink: Hsla) -> AnyElement {
+pub fn symbol(theme: &Theme, symbol: impl Into<Mark>, side: Pixels, ink: Hsla) -> AnyElement {
     Drawn::new(theme, symbol, IconSize::Inline).slot(side, ink).into_any_element()
 }
 

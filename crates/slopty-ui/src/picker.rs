@@ -21,9 +21,9 @@ use slopty_theme::Theme;
 
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{Status, Symbol};
+use crate::icons::{Mark, Status, Symbol};
 use crate::palette::{
-    Plate, dotted, field_row, line_height, list_pad, quiet_line, section_heading, status_slot,
+    Plate, dotted, field_row, lead_slot, line_height, list_pad, quiet_line, section_heading,
 };
 
 /// What the field says before anything is typed: the picker's title, since the field heads the
@@ -66,7 +66,9 @@ pub struct SessionRow {
     pub status: Option<String>,
     /// The agent is waiting on the human.
     pub needs_you: bool,
-    /// How the agent is doing, for the row's status mark; `None` for a plain shell.
+    /// What leads its row: the mark of the agent seen in it, else a terminal's.
+    pub lead: Mark,
+    /// How the agent is doing, for the mark at the row's end; `None` for a plain shell.
     pub mark: Option<Status>,
     /// The worker it runs on, named only when more than one is known.
     pub worker: Option<String>,
@@ -80,7 +82,7 @@ pub struct SessionRow {
 /// human).
 #[derive(Clone)]
 struct Line {
-    icon: Symbol,
+    icon: Mark,
     primary: String,
     secondary: String,
     hot: bool,
@@ -90,6 +92,7 @@ struct Line {
 
 impl Line {
     const fn new(icon: Symbol, primary: String, secondary: String) -> Self {
+        let icon = Mark::Symbol(icon);
         Self { icon, primary, secondary, hot: false, mark: None, worker: None }
     }
 }
@@ -276,8 +279,7 @@ impl WindowPicker {
         let mut rows = Vec::new();
         for (i, s) in self.sessions.iter().enumerate() {
             let status = s.status.clone().unwrap_or_default();
-            // A session an agent was seen in is an agent's; the rest are shells.
-            let icon = if s.status.is_some() { crate::icons::AGENT } else { Symbol::Terminal };
+            let icon = s.lead;
             rows.push(Row {
                 id: ("session", i),
                 section: Section::Sessions,
@@ -466,7 +468,7 @@ impl WindowPicker {
             .cursor_pointer()
             .active(move |st| st.bg(hsla(pressed)))
             .on_mouse_move(cx.listener(move |this, _ev, _w, cx| this.point_at(ix, cx)))
-            .child(status_slot(theme, icon, mark, hsla(icon_ink), 1.0))
+            .child(lead_slot(theme, icon, hsla(icon_ink), 1.0))
             .child(
                 div()
                     .flex_none()
@@ -493,6 +495,11 @@ impl WindowPicker {
             )
             .children(worker.map(|worker| {
                 crate::kit::meta(div(), theme).flex_none().child(dotted(theme, worker))
+            }))
+            // How it is doing ends the line, never on its mark.
+            .children(mark.filter(|m| *m != Status::Idle).map(|status| {
+                crate::icons::status_mark(theme, Some(status), 1.0)
+                    .debug_selector(move || format!("picker-status-{}-{}", id.0, id.1))
             }));
         let row = if chosen { self.plate.mark(row, ix) } else { row };
         tab_stop(row, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
@@ -716,6 +723,7 @@ mod tests {
                 title: "fix the build".to_owned(),
                 status: Some("waiting on you".to_owned()),
                 needs_you: true,
+                lead: Mark::agent(slopty_proto::thread::AgentId::CLAUDE_CODE),
                 mark: Some(Status::NeedsYou),
                 worker: None,
                 cwd: None,
@@ -726,6 +734,7 @@ mod tests {
                 title: "zsh".to_owned(),
                 status: None,
                 needs_you: false,
+                lead: Mark::Symbol(Symbol::Terminal),
                 mark: None,
                 worker: None,
                 cwd: None,
@@ -839,6 +848,7 @@ mod tests {
             title: title.to_owned(),
             status: None,
             needs_you: false,
+            lead: Mark::Symbol(Symbol::Terminal),
             mark: None,
             worker: None,
             cwd: None,

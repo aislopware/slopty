@@ -336,7 +336,7 @@ impl WorkspaceView {
                     .closed
                     .iter()
                     .find(|c| c.seq == seq)
-                    .map_or(Symbol::Xmark, |c| self.kind_glyph(&c.item));
+                    .map_or_else(|| Symbol::Xmark.into(), |c| self.kind_glyph(&c.item));
                 let undo = action("toast-undo", "Undo")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
                 ("closed", Some(icon), vec![undo])
@@ -374,7 +374,7 @@ impl WorkspaceView {
                         cx.notify();
                     }));
                 body = Some(self.offer_body(offer));
-                ("offered", Some(Symbol::Globe), vec![open, dismiss])
+                ("offered", Some(Symbol::Globe.into()), vec![open, dismiss])
             }
             ToastKind::OldUnsaved(_) => {
                 let seq = shown.seq;
@@ -391,7 +391,7 @@ impl WorkspaceView {
                             cx.notify();
                         }
                     }));
-                ("old-unsaved", Some(Symbol::DocText), vec![discard, keep])
+                ("old-unsaved", Some(Symbol::DocText.into()), vec![discard, keep])
             }
             ToastKind::Trashed { worker, back, .. } => {
                 let (worker, back, seq) = (*worker, back.clone(), shown.seq);
@@ -402,7 +402,7 @@ impl WorkspaceView {
                         cx.notify();
                     },
                 ));
-                ("trashed", Some(Symbol::Trash), vec![put_back])
+                ("trashed", Some(Symbol::Trash.into()), vec![put_back])
             }
             ToastKind::Attention { tile, status, .. } => {
                 let tile = *tile;

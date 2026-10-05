@@ -100,6 +100,12 @@ fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-shift-t");
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["Claude Code", "Codex"], "which agent");
+    // Each agent's line carries its own mark beside its name: the name is the choice.
+    let marks: Option<Vec<_>> = view.read_with(cx, |v, cx| {
+        v.palette.clone().map(|p| p.read(cx).matches().iter().map(|l| l.icon).collect())
+    });
+    let (claude, codex) = (crate::icons::AgentMark::Claude, crate::icons::AgentMark::Blossom);
+    assert_eq!(marks, Some(vec![Some(claude.into()), Some(codex.into())]), "each its own mark");
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
     settle(cx);

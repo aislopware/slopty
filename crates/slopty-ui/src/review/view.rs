@@ -1259,7 +1259,7 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (_, name) = self.door_of(cx)?;
-        let mark = self.agent_mark();
+        let mark = self.agent_mark(cx);
         let roomy = self.width >= LIST_FROM;
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
@@ -1318,13 +1318,17 @@ impl ReviewView {
         Some(crate::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
     }
 
-    /// The one neutral agent glyph at the size of an icon: what an agent wrote or does, whichever
-    /// agent it is, which its words name.
-    fn agent_mark(&self) -> AnyElement {
+    /// The thread's agent's mark at the size of an icon, beside what it wrote or does: its
+    /// own, or the neutral glyph for an agent with none or not yet known.
+    fn agent_mark(&self, cx: &App) -> AnyElement {
         let theme = &self.theme;
+        let mark = self.door_of(cx).map_or_else(
+            || crate::icons::AGENT.into(),
+            |(agent, _)| crate::icons::Mark::agent(&agent.0),
+        );
         crate::icons::symbol(
             theme,
-            crate::icons::AGENT,
+            mark,
             self.z(theme.typography.icon()),
             hsla(theme.surfaces.text_secondary),
         )
@@ -1435,7 +1439,7 @@ impl ReviewView {
             .items_center()
             .gap(self.z(theme.spacing.xs))
             .cursor_pointer()
-            .child(self.agent_mark())
+            .child(self.agent_mark(cx))
             .child(
                 div()
                     .min_w_0()
@@ -1491,7 +1495,7 @@ impl ReviewView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.sm))
                 .py(self.z(theme.spacing.xs))
-                .children(agent.as_ref().map(|_| self.agent_mark()))
+                .children(agent.as_ref().map(|_| self.agent_mark(cx)))
                 .child(
                     div()
                         .id("review-came-words")
@@ -2003,7 +2007,7 @@ impl ReviewView {
         self.note()
             .debug_selector(move || format!("review-comment-{ix}"))
             .child(match &agent {
-                Some(_) => self.agent_mark(),
+                Some(_) => self.agent_mark(cx),
                 None => self.icon(Symbol::TextBubble, s.text_muted),
             })
             .when(ranged, |el| {

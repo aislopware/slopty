@@ -34,7 +34,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{IconSize, Status, Symbol};
+use crate::icons::{IconSize, Mark, Status, Symbol};
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -356,7 +356,7 @@ fn within(cwd: &str, repo: &str) -> Option<String> {
     }
 }
 
-/// Where a shell is, as the status bar and a header say it: inside a repository, the
+/// Where a shell is, as a header and its navigator row say it: inside a repository, the
 /// repository's name and the path within it (`slopty`, `slopty/crates/ui`); elsewhere the tail.
 #[must_use]
 pub(super) fn repo_place(cwd: &str, repo: Option<&str>, home: Option<&str>) -> String {
@@ -508,11 +508,14 @@ impl WorkspaceView {
 }
 
 /// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
-/// agent runs in (`agent`) and a thread show the one neutral agent glyph, whichever agent it
-/// is, and the agent is named in words.
-pub(super) fn kind_icon(item: &Item, agent: bool) -> Symbol {
-    match &item.kind {
-        ItemKind::Terminal { .. } if agent => crate::icons::AGENT,
+/// agent runs in and a thread show the mark of their agent (`agent`, an `AgentId`'s name), and
+/// a thread whose agent is not yet known the neutral glyph.
+pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Mark {
+    let runs = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::Thread { .. });
+    if let Some(agent) = agent.filter(|_| runs) {
+        return Mark::agent(agent);
+    }
+    let symbol = match &item.kind {
         ItemKind::Terminal { .. } => Symbol::Terminal,
         ItemKind::Thread { .. } => crate::icons::AGENT,
         ItemKind::Window { .. } => Symbol::Macwindow,
@@ -521,7 +524,8 @@ pub(super) fn kind_icon(item: &Item, agent: bool) -> Symbol {
         ItemKind::Folder { .. } => Symbol::Folder,
         ItemKind::Browser { .. } => Symbol::Globe,
         ItemKind::Review { .. } | ItemKind::Changes { .. } => Symbol::PlusForwardslashMinus,
-    }
+    };
+    symbol.into()
 }
 
 /// The word for what an item is: `terminal`, `window`, `display`, `file`, `folder`,
@@ -552,21 +556,18 @@ impl WorkspaceView {
         }
     }
 
-    /// [`Self::tile_place`] worked out, for an item whose derived title is `title`.
-    ///
-    /// An agent is named here in words, first, unless the title already is its name: no agent
-    /// wears a mark of its own, so this is where its row and its header say which it is.
+    /// [`Self::tile_place`] worked out, for an item whose derived title is `title`: where it
+    /// is. An agent with a mark of its own is not named here: the mark leads the title and
+    /// names it to a screen reader. One that wears the neutral glyph is named first, in words
+    /// ("opencode · code/atlas"), unless the title already is its name.
     fn derived_place(&self, item: &Item, title: &str) -> Option<String> {
-        let agent = match &item.kind {
-            ItemKind::Terminal { session } => self.session_agent(*session),
-            ItemKind::Thread { thread } => self.thread_agent(*thread),
-            _ => None,
-        };
-        let named = agent
+        let unmarked = self
+            .item_agent(item)
+            .filter(|agent| crate::icons::AgentMark::of(agent) == crate::icons::AgentMark::Neutral)
             .map(|agent| super::projects::agent_label(&AgentId::named(agent)))
             .filter(|name| name != title);
-        let place = self.derived_context(item, title);
-        match (named, place) {
+        let place = self.derived_where(item, title);
+        match (unmarked, place) {
             (Some(name), Some(place)) => {
                 Some(format!("{name}{}{place}", super::rollup::META_SEPARATOR))
             }
@@ -575,7 +576,7 @@ impl WorkspaceView {
     }
 
     /// Where the item is, for [`Self::derived_place`].
-    fn derived_context(&self, item: &Item, title: &str) -> Option<String> {
+    fn derived_where(&self, item: &Item, title: &str) -> Option<String> {
         match &item.kind {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
@@ -966,7 +967,7 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size * k))
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::palette::status_slot(theme, self.kind_glyph(item), None, muted, k))
+                .child(crate::palette::lead_slot(theme, self.kind_glyph(item), muted, k))
                 .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
@@ -1294,6 +1295,7 @@ impl WorkspaceView {
             header.border_b_0().child(tabs).child(rest)
         } else {
             let lead = self.leading_slot(tile, item, focused, k, cx);
+            let state = self.header_state(tile, item, k);
             let name = self.header_name(tile, id, title, chrome);
             // The title keeps its width and what is beside it gives way: the place first, then
             // the readouts at the end (an agent's pill), the title last. Each takes what it
@@ -1330,6 +1332,7 @@ impl WorkspaceView {
                 .when_some(worker, gpui::ParentElement::child)
                 .children(branch)
                 .when_some(upload, gpui::ParentElement::child)
+                .children(state)
                 .child(actions)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip)
@@ -1337,14 +1340,11 @@ impl WorkspaceView {
         header.into_any_element()
     }
 
-    /// The header's leading slot: the kind's icon at rest and the status mark once there is
-    /// one (working, failed, done, away), in one fixed square so every title starts on the
-    /// same edge, as the navigator's rows and the palette's do. An agent waiting on the human
-    /// keeps its kind's glyph: the state chip beside the title says it, and a warn mark in the
-    /// slot said it a second time. An idle agent keeps it too: rest shows the kind, and a
-    /// hollow ring beside a title read as an unticked radio button. The glyph sits a step under
-    /// the title's tone. On a Mac a file's slot is its proxy, dragged out as a document
-    /// window's title icon is.
+    /// The header's leading slot: what the tile is, its kind's symbol or its agent's own mark,
+    /// in one fixed square so every title starts on the same edge, as the navigator's rows and
+    /// the palette's do. It never changes while the tile lives; how the tile is doing ends the
+    /// header ([`Self::header_state`]). The mark sits a step under the title's tone. On a Mac
+    /// a file's slot is its proxy, dragged out as a document window's title icon is.
     fn leading_slot(
         &self,
         tile: TileRef,
@@ -1355,22 +1355,35 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let id = item.id;
         let s = &self.theme.surfaces;
+        let ink = if focused { s.text_secondary } else { s.text_muted };
+        let slot = crate::palette::lead_slot(&self.theme, self.kind_glyph(item), hsla(ink), k)
+            .debug_selector(move || format!("kind-{}", id.as_uuid()))
+            .into_any_element();
+        self.file_proxy(item, tile, slot, k, cx)
+    }
+
+    /// How the tile is doing, at the header's end before its controls (working, failed, done,
+    /// away), never on its lead. An agent waiting on the human shows none: the state chip
+    /// beside the title says it, and a warn mark said it a second time. Nor does one at rest:
+    /// a hollow ring read as an unticked radio button. A remote picture on its way turns its
+    /// mark in the body, which says what opens.
+    fn header_state(&self, tile: TileRef, item: &Item, k: f32) -> Option<gpui::AnyElement> {
+        let id = item.id;
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agent_state(session).is_some(),
             _ => false,
         };
-        // A remote picture on its way turns its mark in the body, which says what opens.
         let opening = self.opening(item);
         let status = self
             .tile_status(tile, item)
-            .filter(|st| !(agent && matches!(st, Status::NeedsYou | Status::Idle)))
-            .filter(|st| !(opening && *st == Status::Working));
-        let ink = if focused { s.text_secondary } else { s.text_muted };
-        let slot =
-            crate::palette::status_slot(&self.theme, self.kind_glyph(item), status, hsla(ink), k)
+            .filter(|st| *st != Status::Idle)
+            .filter(|st| !(agent && *st == Status::NeedsYou))
+            .filter(|st| !(opening && *st == Status::Working))?;
+        Some(
+            crate::icons::status_mark(&self.theme, Some(status), k)
                 .debug_selector(move || format!("status-{}", id.as_uuid()))
-                .into_any_element();
-        self.file_proxy(item, tile, slot, k, cx)
+                .into_any_element(),
+        )
     }
 
     /// The title, or the field that renames the tile in its place.
@@ -1498,10 +1511,13 @@ impl WorkspaceView {
             let id = item.id;
             let shown = tab == placed.tile;
             let ink = title_ink(theme, shown && placed.focused);
-            let status = self.tile_status(tab, item);
-            let slot =
-                crate::palette::status_slot(theme, self.kind_glyph(item), status, hsla(ink), k)
-                    .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
+            let slot = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(ink), k)
+                .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
+            // How it is doing ends the tab, before its close button.
+            let state = self.tile_status(tab, item).filter(|st| *st != Status::Idle).map(|st| {
+                crate::icons::status_mark(theme, Some(st), k)
+                    .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
+            });
             let title = self.tile_title(item);
             let label = SharedString::from(title.clone());
             let name = self.header_name(tab, id, title, chrome);
@@ -1558,6 +1574,7 @@ impl WorkspaceView {
                     )
                     .child(slot)
                     .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
+                    .children(state)
                     .child(close),
             )
         });
@@ -1621,7 +1638,7 @@ impl WorkspaceView {
     }
 
     /// How long `session`'s command has run, once that is past [`RUNNING_AFTER`]: what its
-    /// tile's header, its navigator row and the status bar count.
+    /// tile's header and its navigator row count.
     ///
     /// [`RUNNING_AFTER`]: super::RUNNING_AFTER
     pub(super) fn running_for(&self, session: SessionId) -> Option<Duration> {
@@ -2914,7 +2931,7 @@ impl WorkspaceView {
 }
 
 /// Where a shell is, beside a title that may already name the directory it stands in: then
-/// nothing, since the status bar has the whole path. The directory above it read as the cwd:
+/// nothing, since the title says it. The directory above it read as the cwd:
 /// "drop-here ~" beside a prompt in "~/drop-here".
 pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
     let last = place.trim_end_matches('/').rsplit('/').next().unwrap_or_default();

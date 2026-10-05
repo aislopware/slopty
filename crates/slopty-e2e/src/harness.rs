@@ -271,6 +271,33 @@ fn pinned(cache: &Path, runs: &Path, run: &str) -> Option<PathBuf> {
 /// without it, and that app never opens the test socket.
 pub const APP: &str = "slopty-app-e2e";
 
+/// A Claude Code hook a test plays: `event` in terminal `session`, with `fields` (more JSON
+/// members, each led by a comma).
+struct Hook<'a> {
+    session: &'a str,
+    event: &'a str,
+    fields: &'a str,
+}
+
+/// Write [`TRANSCRIPT`] to `transcript` and hand the worker at `socket` the payload for `hook`
+/// naming it, exactly what `slopty hook` relays from the agent's shell.
+async fn play_hook(socket: &Path, transcript: &Path, hook: Hook<'_>) -> Result<()> {
+    let Hook { session, event, fields } = hook;
+    std::fs::write(transcript, TRANSCRIPT)?;
+    let payload = format!(
+        r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
+        agent_session(session),
+        transcript.display()
+    );
+    let request = json!({ "cmd": "hook", "session": session, "payload": payload });
+    let reply = ctl(socket, &request).await?;
+    anyhow::ensure!(
+        reply.get("reply").and_then(Value::as_str) == Some("ok"),
+        "the worker refused the hook: {reply}"
+    );
+    Ok(())
+}
+
 /// The Claude Code session id a played hook in terminal `session` carries: one per test's
 /// terminal, so no two tests' agents share a session the worker keeps state for.
 #[must_use]
@@ -1318,20 +1345,8 @@ impl Stack {
     ///
     /// When the transcript cannot be written or the worker refuses the hook.
     pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        let transcript = self.transcript_path(session);
-        std::fs::write(&transcript, TRANSCRIPT)?;
-        let payload = format!(
-            r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
-            agent_session(session),
-            transcript.display()
-        );
-        let request = json!({ "cmd": "hook", "session": session, "payload": payload });
-        let reply = ctl(&self.path("worker.sock"), &request).await?;
-        anyhow::ensure!(
-            reply.get("reply").and_then(Value::as_str) == Some("ok"),
-            "the worker refused the hook: {reply}"
-        );
-        Ok(())
+        let hook = Hook { session, event, fields };
+        play_hook(&self.path("worker.sock"), &self.transcript_path(session), hook).await
     }
 
     /// Open a window on this machine that never draws, for the refresh-storm guard: the helper
@@ -2443,6 +2458,17 @@ impl ProjectStack {
     /// As [`slopty_json`].
     pub async fn slopty(&self, args: &[&str]) -> Result<Value> {
         slopty_json(self.server.address(), &self.path("cli"), args, b"").await
+    }
+
+    /// Play a Claude Code hook in `session` on the worker, as [`Stack::play_hook`] does.
+    ///
+    /// # Errors
+    ///
+    /// When the transcript cannot be written or the worker refuses the hook.
+    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
+        let transcript = self.path(&format!("{}.jsonl", agent_session(session)));
+        let hook = Hook { session, event, fields };
+        play_hook(&self.worker.ctl_socket(), &transcript, hook).await
     }
 
     /// Ask the app to quit, then kill it, the worker and the server.

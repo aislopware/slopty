@@ -341,11 +341,13 @@ fn an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again(cx: &mut Tes
     });
 }
 
-/// No agent wears a mark of its own: an agent's tile leads with the one neutral agent glyph,
-/// whichever agent it is, and its header and navigator row name the agent in words before
-/// where it runs. A plain shell keeps its own glyph and says only where it is.
+/// Identity leads, state trails: an agent's tile leads with its agent's own mark whether it
+/// works, needs the person or rests, in its header and its navigator row, and the mark names
+/// the agent to a screen reader; how it is doing takes the row's end, and goes at rest. The
+/// place no longer names the agent in words. A plain shell keeps its own glyph.
 #[gpui::test]
-fn an_agents_tile_names_it_in_words_beside_the_one_agent_glyph(cx: &mut TestAppContext) {
+fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppContext) {
+    use crate::icons::{AgentMark, Mark};
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let key = studio.key;
@@ -361,16 +363,61 @@ fn an_agents_tile_names_it_in_words_beside_the_one_agent_glyph(cx: &mut TestAppC
     let read = |cx: &mut VisualTestContext, tile: TileRef| {
         view.read_with(cx, |v, _| {
             let item = v.item(tile).expect("the tile");
-            (v.kind_glyph(item), v.tile_title(item), v.tile_place(item))
+            (v.kind_glyph(item), v.tile_place(item))
         })
     };
-    let (glyph, title, place) = read(cx, tile);
-    assert_eq!(glyph, crate::icons::AGENT, "the one agent glyph");
-    let place = place.expect("a place");
-    assert!(place.starts_with("Claude Code \u{b7} "), "the agent named first: {place}");
-    assert_ne!(title, "Claude Code", "named once: {title}");
+    let spark = Mark::Agent(AgentMark::Claude);
+    let ends = |cx: &mut VisualTestContext, what: &str| {
+        settle(cx);
+        let lead = cx.debug_bounds(selector("nav-kind", tile.item)).expect("the row's lead");
+        let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
+        let state = cx.debug_bounds(selector("nav-state", tile.item));
+        assert!(lead.right() < row.center().x, "{what}: the mark leads: {lead:?} {row:?}");
+        assert_eq!(read(cx, tile).0, spark, "{what}: the mark never changes");
+        state.map(|state| {
+            assert!(state.left() > row.center().x, "{what}: the state ends it: {state:?}");
+            assert!(state.right() <= row.right(), "{what}: {state:?} {row:?}");
+        })
+    };
+    let works = AgentEvent { status: AgentStatus::Working, ..blocked(session) };
+    view.update_in(cx, |v, _w, cx| v.agent_event(works, cx));
+    assert!(ends(cx, "working").is_some(), "a working agent ends its row with the spinner");
+    let place = read(cx, tile).1.unwrap_or_default();
+    assert!(!place.contains("Claude Code"), "the mark says which agent: {place}");
+    let header = cx.debug_bounds(selector("kind", tile.item)).expect("the header's lead");
+    let status = cx.debug_bounds(selector("status", tile.item)).expect("the header's state");
+    assert!(header.right() < status.left(), "the header's state ends it: {header:?} {status:?}");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Image", Some("Claude Code"))), "named: {nodes:#?}");
 
-    let (glyph, _, place) = read(cx, shell);
-    assert_eq!(glyph, crate::icons::Symbol::Terminal);
+    let asks = AgentEvent {
+        status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+        ..blocked(session)
+    };
+    view.update_in(cx, |v, _w, cx| v.agent_event(asks, cx));
+    assert!(ends(cx, "needs you").is_some(), "needing the person ends the row with its mark");
+    let rests = AgentEvent { status: AgentStatus::Idle, ..blocked(session) };
+    view.update_in(cx, |v, _w, cx| v.agent_event(rests, cx));
+    assert!(ends(cx, "at rest").is_none(), "at rest the row's end says no state");
+
+    let (glyph, place) = read(cx, shell);
+    assert_eq!(glyph, Mark::Symbol(crate::icons::Symbol::Terminal));
     assert!(!place.unwrap_or_default().contains("Claude Code"), "a shell names no agent");
+
+    // An agent with no mark of its own wears the neutral glyph and is named in words.
+    let other = SessionId::new();
+    let acp = opens(&view, cx, &studio, other, studio.me, 3);
+    agent_runs_in(&view, cx, key, other);
+    let mut opencode = crate::conversation::thread::fixtures::thread("plan");
+    opencode.meta.terminal = Some(other);
+    opencode.meta.agent = AgentId::acp("opencode");
+    table(&view, cx, key, 2, &[&claude, &opencode]);
+    let (glyph, place) = read(cx, acp);
+    assert_eq!(glyph, Mark::Symbol(crate::icons::AGENT), "the neutral glyph");
+    let title = view.read_with(cx, |v, _| v.tile_title(v.item(acp).expect("the tile")));
+    let place = place.unwrap_or_default();
+    assert!(
+        place.starts_with("opencode") || title.starts_with("opencode"),
+        "named in words: {title} / {place}"
+    );
 }

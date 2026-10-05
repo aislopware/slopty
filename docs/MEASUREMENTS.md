@@ -14974,3 +14974,38 @@ cargo xtask e2e app --filter 'test(a_relaunch_onto_twenty_tiles)'
 
 `SLOPTY_E2E_PER_WORKER` sets the shells on each worker, and `SLOPTY_E2E_REST_SECS` sets how
 long the rest is read.
+
+## 2026-10-05 — agent marks at 1x
+
+Each agent's mark is drawn by us (`slopty_platform::outline` for the Claude spark and the
+`OpenAI` Blossom, whole cells for pi) into the same alpha masks the SF Symbols are, and painted
+through `paint_mask` at the device's grid (`docs/decisions/brand.md`, "Each agent wears its
+owner's mark, in one colour"). Crisp is Σα²/Σα (1 when every inked pixel is whole), solid the
+share of inked pixels at α ≥ 0.9, at 1x through Core Graphics:
+
+| mark | 12 px | 13 px | 14 px (a row) | 16 px | 24 px (a notice) |
+| --- | --- | --- | --- | --- | --- |
+| Claude spark | 0.704 / 0.17 | 0.763 / 0.18 | **0.737 / 0.21** | 0.768 / 0.25 | 0.848 / 0.41 |
+| Blossom | 0.637 / 0.03 | 0.630 / 0.01 | **0.655 / 0.04** | 0.694 / 0.14 | 0.786 / 0.28 |
+| pi, 3 px cells | | | **1.000 / 1.00** (12 px) | | |
+| *SF Symbols regular, 13 pt* | | *0.731 / 0.24* | | | |
+
+- The spark at a row's size is as crisp as the SF Symbols beside it. The study's figures
+  (`.research/agent-marks-2026-10-05.md` §3.5) were an 8x box filter's, a little kinder than
+  Core Graphics' own coverage (0.768 then, 0.737 now at 14 px).
+- The Blossom is the softest, as predicted: its inner strokes are about 0.6 px at 14 px, so
+  almost no pixel is whole. It still reads as a ring, the Blossom's shape at favicon size, and
+  is never drawn under 12 px.
+- pi on whole cells is wholly solid at every scale (`pi_lands_on_whole_pixels`).
+
+What a mark costs (release, mac-studio M1 Max, the mean of 200 draws, load from other lanes):
+reading both outlines from their files 46 µs, once a process; the spark at 14 px 21–113 µs
+(the first context of a process is the dear one), at 28 px 22 µs; the Blossom at 14 and 28 px
+21 and 26 µs; pi at 24 px 3 µs. Each is drawn once a size and kept; the prewarm draws the three
+marks at the row's, the chip's and the notice's sizes at 1x and 2x on a thread of its own before
+the first window.
+
+```sh
+cargo test --release -p slopty-ui --lib the_marks_are_crisp_at_1x -- --nocapture
+cargo test --release -p slopty-ui --lib measure_mark_rasters -- --ignored --nocapture
+```

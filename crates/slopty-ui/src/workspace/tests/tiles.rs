@@ -250,16 +250,16 @@ fn no_body_is_veiled(cx: &mut TestAppContext) {
     }
 }
 
-/// The header leads with one fixed slot, where the tile's kind sits at rest and its status
-/// mark once there is one, on the header's inset.
+/// The header leads with one fixed slot on its inset, where the tile's kind always sits, and
+/// its status mark, once there is one, ends it.
 #[gpui::test]
-fn the_header_leads_with_one_slot_for_the_kind_or_the_status(cx: &mut TestAppContext) {
+fn the_header_leads_with_its_kind_and_ends_with_its_state(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = SessionId::new();
     let tile = opens(&view, cx, &fake, shell, fake.me, 1);
     let slot_at = |cx: &mut VisualTestContext| {
-        cx.debug_bounds(selector("status", tile.item)).expect("the slot is always drawn")
+        cx.debug_bounds(selector("kind", tile.item)).expect("the slot is always drawn")
     };
     let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
     let rest = slot_at(cx);
@@ -271,8 +271,11 @@ fn the_header_leads_with_one_slot_for_the_kind_or_the_status(cx: &mut TestAppCon
         let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
-    assert!(marks(cx).iter().any(|m| m == "Failed"), "the mark takes the slot");
-    assert_eq!(slot_at(cx), rest, "in the same square");
+    assert!(marks(cx).iter().any(|m| m == "Failed"), "the failure is marked");
+    assert_eq!(slot_at(cx), rest, "the kind stays in its square");
+    let state = cx.debug_bounds(selector("status", tile.item)).expect("the state's mark");
+    let title = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    assert!(state.left() > title.center().x, "at the header's end: {state:?} {title:?}");
 }
 
 /// A tile whose agent waits on the human says so once: the pill in its header, a button to
@@ -348,7 +351,8 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
     let chip = cx.debug_bounds(selector("agent", waiting.item)).expect("the state chip");
-    let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
+    let slot = cx.debug_bounds(selector("kind", waiting.item)).expect("the slot");
+    assert!(cx.debug_bounds(selector("status", waiting.item)).is_none(), "the chip says it");
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let inside = |q: &gpui::Quad, b: Bounds<Pixels>| {
         let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
@@ -778,7 +782,7 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     let single = f32::from(
-        cx.debug_bounds(selector("status", first.item)).expect("the slot").left()
+        cx.debug_bounds(selector("kind", first.item)).expect("the slot").left()
             - cx.debug_bounds(selector("title", first.item)).expect("the header").left(),
     );
     let inset = Theme::default().spacing.inset();
@@ -881,7 +885,8 @@ fn an_idle_agent_keeps_its_kind_in_the_slot(cx: &mut TestAppContext) {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(agent) }, cx);
     });
     cx.run_until_parked();
-    let slot = cx.debug_bounds(selector("status", tile.item)).expect("the slot");
+    let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
+    assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no state at rest");
     let idle = crate::icons::Status::Idle.label();
     let marked = tree(cx).into_iter().any(|n| {
         let [x, y, ..] = n.bounds;
@@ -1084,7 +1089,8 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
     cx.executor().advance_clock(crate::screen::LOADING_GRACE);
     cx.run_until_parked();
     let working = crate::icons::Status::Working.label();
-    let slot = cx.debug_bounds(selector("status", tile.item)).expect("the slot");
+    let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
+    assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no header state");
     let body = cx.debug_bounds(selector("waiting", tile.item)).expect("the body's block");
     let nodes = tree(cx);
     let in_slot = |n: &crate::a11y::Node| {

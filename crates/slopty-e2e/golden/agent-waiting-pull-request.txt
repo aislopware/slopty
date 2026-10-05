@@ -8,10 +8,11 @@ Button │ Needs you
 Button │ More
 Group │ Claude Code
 Heading │ terminal Claude Code
-Image │ Waiting
+Image │ Claude Code
 Label │ ~
 Link │ Pull request 1234, approved
 Label │ Worktree fix-build on worktree-fix-build
+Image │ Waiting
 Status │ Waiting on cargo test
 Button │ Show terminal
 Button │ Fullscreen tile

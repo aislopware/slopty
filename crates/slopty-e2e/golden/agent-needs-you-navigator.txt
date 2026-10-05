@@ -10,9 +10,11 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Claude Code, Needs approval
+Image │ Claude Code
 Image │ Needs you
 Button │ Close tile
 Button │ Fix the login redirect
+Image │ Claude Code
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
@@ -22,6 +24,7 @@ Status │ 1 new
 Button │ More
 Group │ Claude Code
 Heading │ terminal Claude Code
+Image │ Claude Code
 Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
@@ -36,7 +39,7 @@ Button │ Commit
 Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
-Label │ Claude Code
+Image │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

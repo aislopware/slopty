@@ -9,6 +9,7 @@ Status │ 1 new
 Button │ More
 Group │ Claude Code
 Heading │ terminal Claude Code
+Image │ Claude Code
 Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
@@ -23,7 +24,7 @@ Button │ Commit
 Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
-Label │ Claude Code
+Image │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

@@ -8,8 +8,10 @@ Button │ Ship the project board
 Button │ Board, 1 needs you · 1 of 6 merged
 Image │ Needs you
 Button │ Orchestrator
+Image │ Claude Code
 Button │ Close tile
 Button │ #1 Mirror the server's projects
+Image │ Claude Code
 Button │ Close tile
 Heading │ Machines
 Button │ studio
@@ -31,7 +33,7 @@ Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ terminal Orchestrator
-Label │ Claude Code
+Image │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -59,7 +61,7 @@ MultilineTextInput │ Message the orchestrator
 Button │ Send
 Group │ #1 Mirror the server's projects
 Heading │ terminal #1 Mirror the server's projects
-Label │ Claude Code
+Image │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

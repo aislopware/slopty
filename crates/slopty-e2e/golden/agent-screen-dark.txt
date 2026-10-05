@@ -7,6 +7,7 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Check the editor, Working
+Image │ Claude Code
 Image │ Working
 Button │ Close tile
 Button │ Terminal
@@ -25,8 +26,8 @@ Group
 Terminal │ shell │ ~ %
 Group │ Check the editor
 Heading │ terminal Check the editor
+Image │ Claude Code
 Image │ Working
-Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

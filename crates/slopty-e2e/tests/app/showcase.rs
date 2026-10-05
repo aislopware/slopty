@@ -2595,16 +2595,16 @@ async fn codex_serve(mut ws: Ws) {
 /// A project stack whose worker has Codex (its daemon played by the test), pi
 /// (`slopty-stub-pi`) and `opencode` (`slopty-stub-acp`) beside Claude Code, with a shell in a
 /// repository of the day's work.
-struct Threads {
-    stack: ProjectStack,
-    shell: String,
+pub struct Threads {
+    pub stack: ProjectStack,
+    pub shell: String,
     _codex_home: tempfile::TempDir,
     _tools: tempfile::TempDir,
     daemon: tokio::task::JoinHandle<()>,
 }
 
 impl Threads {
-    async fn begin() -> Self {
+    pub async fn begin() -> Self {
         // Short, as a Unix socket's path must be.
         let codex_home = tempfile::Builder::new().prefix("sc-").tempdir_in("/tmp").unwrap();
         let socket = codex_home.path().join("app-server-control/app-server-control.sock");
@@ -2653,7 +2653,7 @@ impl Threads {
         Self { stack, shell, _codex_home: codex_home, _tools: tools, daemon }
     }
 
-    async fn end(self) {
+    pub async fn end(self) {
         self.daemon.abort();
         self.stack.shutdown().await;
     }
@@ -2685,12 +2685,26 @@ fn threads(d: &Dump) -> Vec<String> {
 }
 
 /// Start `agent`'s thread from the palette in the shell's folder; its tile's id.
-async fn start_thread(t: &mut Threads, agent: &str) -> Option<String> {
+pub async fn start_thread(t: &mut Threads, agent: &str) -> Option<String> {
     let drv = &mut t.stack.driver;
     drv.reveal(&t.shell).await.unwrap();
     let before = threads(&look(drv).await);
-    let line = format!("New {agent} thread");
+    let line = format!("New {agent} agent");
     palette_with(drv, &line.to_lowercase(), &line).await;
+    drv.keys("enter").await.unwrap();
+    // The one machine is passed over; the folder step leads with the shell's folder, and ends
+    // with the way to a past session.
+    wait(drv, "the folder step", |d| offering(d, "Resume a past session")).await;
+    drv.keys("enter").await.unwrap();
+    // The new thread's tile asks for its first message; ↩ on it empty starts the agent bare.
+    wait(drv, "the first message's field", |d| {
+        d.a11y.iter().any(|n| {
+            n.role == "TextInput"
+                && n.focused
+                && n.label.as_deref().is_some_and(|l| l.starts_with("What should"))
+        })
+    })
+    .await;
     drv.keys("enter").await.unwrap();
     let dump =
         wait(drv, "the thread's tile", |d| threads(d).iter().any(|i| !before.contains(i))).await;
@@ -2755,18 +2769,18 @@ async fn agent_thread(t: &mut Threads, agent: &str, name: &str, turns: [(&str, &
     t.stack.driver.keys("cmd-shift-enter").await.unwrap();
 }
 
-/// The palette's "New … thread" lines for every agent the worker has, then a Codex thread
+/// The palette's "New … agent" lines for every agent the worker has, then a Codex thread
 /// started from it: a first turn answered with a table, a second waiting on a command.
 #[tokio::test]
 #[ignore = "showcase: cargo xtask e2e showcase"]
 async fn showcase_the_palette_starting_a_codex_thread() {
     let mut t = Threads::begin().await;
     let drv = &mut t.stack.driver;
-    palette_with(drv, "new", "New Codex thread").await;
+    palette_with(drv, "new", "New Codex agent").await;
     wait(drv, "every agent's line", |d| {
         ["Claude Code", "Codex", "pi", "opencode"]
             .iter()
-            .all(|a| offering(d, &format!("New {a} thread")))
+            .all(|a| offering(d, &format!("New {a} agent")))
     })
     .await;
     project_both(&mut t.stack, "palette-new-thread").await;

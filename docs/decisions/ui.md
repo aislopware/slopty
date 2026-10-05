@@ -6895,8 +6895,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "…" between the words and the answers. Test:
     `workspace::tests::nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`.
 
-- ✅ **No agent wears a mark of its own: status first, the agent in words** (2026-10-05,
-  `.research/icons-2026-10-05.md` §4.1, with the companions' deletion in `brand.md`). The
+- ❌ **No agent wears a mark of its own: status first, the agent in words** (2026-10-05,
+  `.research/icons-2026-10-05.md` §4.1, with the companions' deletion in `brand.md`;
+  superseded the same day by "Each agent wears its owner's mark, in one colour" in `brand.md`
+  and "Identity leads, state trails" below). The
   person saw a tiny orange figure in rows and headers and orange sparkles in the composer:
   one agent in two marks, neither readable at 1×.
   - **A row and a header lead with how they stand.** That is the status mark from
@@ -6987,9 +6989,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A file is one of nine kinds** (`FileType`), each a monochrome symbol in the row's ink:
     code, text, data, image, PDF, archive, audio, video, lock; anything else is the plain
     document. The 55 coloured drawings are deleted, with `assets/icons` and `assets/file-types`.
-  - **The agent glyph is a conversation, `text.bubble`** (`icons::AGENT`), not the sparkles:
-    those are the cliché mark of AI, and Claude's own is a starburst. The empty thread's notice
-    shows it.
+  - **The neutral agent glyph is a conversation, `text.bubble`** (`icons::AGENT`), not the
+    sparkles: those are the cliché mark of AI. It is worn by an agent with no mark of its own;
+    Claude Code, Codex and pi wear their owners' (`brand.md`, "Each agent wears its owner's
+    mark, in one colour").
   - **An empty state has no plate.** `kit::notice` puts its mark on its own, a light symbol at
     the page heading's size and the large scale, as the system's own empty states do; the
     raised 40-point disc under it is gone. A tile's state (away, opening, starting, a thread
@@ -7204,3 +7207,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   fifteen test backgrounds: 3.2 to 4.0:1, against 8.8 to 17.1:1 for the full ring. The keyboard
   ring on buttons and rows is unchanged. Test:
   `slopty_theme::tests::a_focused_field_says_so_quietly_and_still_clears_three_to_one`.
+
+- ✅ **Identity leads, state trails** (2026-10-05, `.research/agent-marks-2026-10-05.md` §3.4,
+  with "Each agent wears its owner's mark, in one colour" in `brand.md`). With real marks, the
+  old rule (the status in the lead slot, the kind only at rest) would have hidden the mark on
+  exactly the rows the person watches: a working agent showed a spinner, so marks would have
+  appeared on idle rows alone. The macOS source lists (Mail, Finder, Xcode) lead with the
+  item's icon and put its badge or count at the end, and T3 Code splits a row the same way.
+  - **A row's lead always says what it is** (`palette::lead_slot`): an agent's mark, else its
+    kind (a terminal, a file's type, a folder, a window). It never changes while the row lives,
+    so the eye finds the same agent in the same column. An agent's mark names its agent to a
+    screen reader ("Claude Code"); a kind's symbol says nothing its words do not.
+  - **How it is doing ends the row's first line, one mark by precedence:** needs you, failed,
+    at work (a running command's clock beside it), away; else the dot of a finish not yet
+    seen; else the age. Under the pointer the end still gives way to the close button. Never a
+    badge on the mark: no dot in a logo's corner, no ring round it, no tint. Amber is the one
+    warm colour in a list of one-colour marks, so a row that needs the person is still found at
+    a glance, and *Needs you* still gathers them first.
+  - **The same order everywhere:** navigator tile, thread and board rows; a tile's header and
+    its tabs, the status before the header's controls (an agent asking keeps saying so in its
+    chip alone, and none at rest); the palette, where the state's mark replaces its word; the
+    session picker; the overview's labels; a starting thread's header.
+  - **Words.** A tile's place no longer starts with the agent's name ("Claude Code · ~"): the
+    mark says it and the width goes back to the title. The name stays in the mark's
+    accessibility label, the agent picker's lines (mark and name, the name being the choice),
+    the composer's model chip (the mark before the model) and the empty thread's notice
+    ("New Codex thread" under the agent's mark at the notice's size).
+  - Tests: `workspace::tests::agent_tile::an_agents_tile_leads_with_its_mark_and_ends_with_its_state`,
+    `workspace::tests::tiles::the_header_leads_with_its_kind_and_ends_with_its_state`,
+    `workspace::tests::nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`,
+    `workspace::tests::frame::an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at`,
+    `workspace::tests::thread_start::new_agent_opens_the_picker_with_the_last_choices`.

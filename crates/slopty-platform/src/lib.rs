@@ -45,6 +45,8 @@ mod linux;
 pub mod motion;
 #[cfg(target_vendor = "apple")]
 pub mod notify;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod outline;
 #[cfg(target_os = "ios")]
 pub mod paste_control;
 #[cfg(target_vendor = "apple")]

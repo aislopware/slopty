@@ -413,8 +413,10 @@ impl WorkspaceView {
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
             .when(!shapes, |el| {
-                el.child(crate::palette::status_slot(theme, crate::icons::AGENT, status, ink, k))
-                    .child(title.clone())
+                let lead = crate::icons::Mark::agent(&starting.agent.0);
+                el.child(crate::palette::lead_slot(theme, lead, ink, k))
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(title.clone()))
+                    .children(status.map(|st| crate::icons::status_mark(theme, Some(st), k)))
             });
         let body = (!shapes).then(|| {
             if let Some(asked) = self.first_message(id, starting, &place, k, cx) {

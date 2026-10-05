@@ -13,7 +13,7 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Retry the refresh
-Image │ Done
+Image │ Claude Code
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
@@ -31,8 +31,8 @@ Group
 Terminal │ shell │ ~ %
 Group │ Retry the refresh
 Heading │ terminal Retry the refresh
+Image │ Claude Code
 Image │ Done
-Label │ Claude Code
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

@@ -23,7 +23,7 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::fuzzy::{Fuzzy, Rank, best_first};
-use crate::icons::{self, IconSize, Status, Symbol};
+use crate::icons::{self, IconSize, Mark, Status, Symbol};
 use crate::kit::Pace;
 
 /// What the list says when the query leaves nothing.
@@ -669,11 +669,12 @@ pub struct PaletteItem {
     pub keys: String,
     /// What runs.
     pub run: PaletteRun,
-    /// The icon in the leading slot: what a thing is (a tile, a machine, a file, an agent).
-    /// A command has none: it is its words (`docs/decisions/ui.md`, "A command is its words").
-    pub icon: Option<Symbol>,
-    /// How the tile or worker is doing: its mark takes the leading slot from the kind icon, and
-    /// a tile's word takes the right edge while it is not idle.
+    /// The mark in the leading slot: what a thing is (a tile, a machine, a file, an agent's own
+    /// mark). A command has none: it is its words (`docs/decisions/ui.md`, "A command is its
+    /// words").
+    pub icon: Option<Mark>,
+    /// How the tile or worker is doing: while it is not idle its mark ends the line, and its
+    /// word is read with the line.
     pub status: Option<Status>,
     /// The worker the tile is on, named only when more than one is known.
     pub worker: Option<String>,
@@ -696,7 +697,7 @@ impl PaletteItem {
         label: String,
         keys: String,
         run: PaletteRun,
-        icon: Option<Symbol>,
+        icon: Option<Mark>,
         section: Section,
     ) -> Self {
         Self {
@@ -735,7 +736,7 @@ impl PaletteItem {
             title.to_owned(),
             String::new(),
             PaletteRun::Session(session),
-            Some(Symbol::Terminal),
+            Some(Mark::Symbol(Symbol::Terminal)),
             Section::Tiles,
         )
     }
@@ -747,7 +748,7 @@ impl PaletteItem {
             name.to_owned(),
             detail.to_owned(),
             PaletteRun::Worker(worker),
-            Some(Symbol::ServerRack),
+            Some(Mark::Symbol(Symbol::ServerRack)),
             Section::Workers,
         )
     }
@@ -774,7 +775,7 @@ impl PaletteItem {
             title.to_owned(),
             String::new(),
             run,
-            Some(Symbol::RectangleSplit3x1),
+            Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
             Section::Tiles,
         )
     }
@@ -783,14 +784,14 @@ impl PaletteItem {
     #[must_use]
     pub fn group(name: &str, glyph: Symbol, group: slopty_client::layout::GroupKey) -> Self {
         let run = PaletteRun::Group(group);
-        Self::line(name.to_owned(), String::new(), run, Some(glyph), Section::Projects)
+        Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
     }
 
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
-    pub fn item(title: &str, icon: Symbol, item: slopty_core::ItemId) -> Self {
+    pub fn item(title: &str, icon: impl Into<Mark>, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
-        Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Tiles)
+        Self::line(title.to_owned(), String::new(), run, Some(icon.into()), Section::Tiles)
     }
 
     /// The same line, with what its tile's header places its title by.
@@ -820,7 +821,13 @@ impl PaletteItem {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
         let glyph = icons::file_symbol(&path);
         let run = PaletteRun::OpenFile { path, line: None, found: true };
-        Self::line(format!("Open {relative}"), String::new(), run, Some(glyph), Section::Files)
+        Self::line(
+            format!("Open {relative}"),
+            String::new(),
+            run,
+            Some(Mark::Symbol(glyph)),
+            Section::Files,
+        )
     }
 
     /// A directory the worker found under `root`: a shell and a conversation in it.
@@ -844,7 +851,7 @@ impl PaletteItem {
             format!("Open {path}"),
             keys,
             run,
-            Some(icons::file_symbol(path)),
+            Some(Mark::Symbol(icons::file_symbol(path))),
             Section::Files,
         )
     }
@@ -854,7 +861,7 @@ impl PaletteItem {
     pub fn open_folder(path: &str) -> Self {
         let run = PaletteRun::OpenFolder { path: path.to_owned() };
         let label = format!("Open folder {path}");
-        Self::line(label, String::new(), run, Some(Symbol::Folder), Section::Files)
+        Self::line(label, String::new(), run, Some(Mark::Symbol(Symbol::Folder)), Section::Files)
     }
 
     /// `New terminal in <dir>` for a directory typed into the field.
@@ -873,10 +880,10 @@ impl PaletteItem {
         Self::line(label, String::new(), run, None, Section::Files)
     }
 
-    /// The same line with another kind icon.
+    /// The same line with another kind icon, or an agent's mark.
     #[must_use]
-    pub const fn with_icon(mut self, icon: Symbol) -> Self {
-        self.icon = Some(icon);
+    pub fn with_icon(mut self, icon: impl Into<Mark>) -> Self {
+        self.icon = Some(icon.into());
         self
     }
 
@@ -1084,34 +1091,39 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
 }
 
 /// A row's leading slot, one fixed square for every list (the palette, the pickers, the
-/// inbox, the tile headers): the kind icon while there is nothing to say, the status mark once
-/// there is, so every title starts on one edge and a state reads in the same place on every
-/// row. `k` is the chrome's zoom (a tile header's in the overview); a list passes 1.
-pub(crate) fn status_slot(
+/// navigator, the tile headers): what the row is, its kind's symbol or its agent's own mark.
+/// It never changes while the row lives, so every title starts on one edge and the eye finds
+/// the same agent in the same column; how the row is doing is said at its line's end
+/// ([`icons::status_mark`]), never on the mark (`docs/decisions/brand.md`, "Each agent wears
+/// its owner's mark"). `k` is the chrome's zoom (a tile header's in the overview); a list
+/// passes 1.
+///
+/// A symbol is drawn in the inline icon's square, an agent's mark at a row title's size in
+/// the whole slot, so the two weigh alike. An agent's mark names its agent to a screen reader.
+pub(crate) fn lead_slot(
     theme: &Theme,
-    kind: impl Into<Symbol>,
-    status: Option<Status>,
+    mark: impl Into<Mark>,
     ink: gpui::Hsla,
     k: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    let side = px(theme.typography.icon() * k);
-    let mark = match status {
-        Some(status) => {
-            icons::status_icon(theme, status, side, hsla(status.tone(theme))).into_any_element()
-        }
-        None => icons::symbol(theme, kind.into(), side, ink),
+    let mark = mark.into();
+    let large = px(theme.typography.icon_large() * k);
+    let drawn = match mark {
+        Mark::Agent(_) => icons::Drawn::new(theme, mark, IconSize::Large).slot(large, ink),
+        Mark::Symbol(_) => icons::Drawn::new(theme, mark, IconSize::Inline)
+            .slot(px(theme.typography.icon() * k), ink),
     };
     div()
-        .id("status")
+        .id("lead")
         .flex_none()
-        .size(px(theme.typography.icon_large() * k))
+        .size(large)
         .flex()
         .items_center()
         .justify_center()
-        .when_some(status, |el, status| {
-            el.role(gpui::accesskit::Role::Image).aria_label(status.label())
+        .when_some(mark.label(), |el, label| {
+            el.role(gpui::accesskit::Role::Image).aria_label(label)
         })
-        .child(mark)
+        .child(drawn)
 }
 
 /// A status slot holding nothing: a command's, beside lines that lead with a mark.
@@ -1766,6 +1778,10 @@ impl CommandPalette {
         let pressed = s.pressed;
         let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
+        // How it is doing ends the line as its mark; its word, which the mark says, is read
+        // with the line and not printed beside it.
+        let state = item.status.filter(|status| *status != Status::Idle);
+        let trailing = trailing.filter(|(text, tone)| !tone.is_some_and(|t| t.label() == text));
         let places =
             [(item.worker.clone(), false), (item.cwd.clone(), true), (item.place.clone(), false)];
         let mut context = crate::kit::meta(div(), theme)
@@ -1812,15 +1828,12 @@ impl CommandPalette {
                     Self::choose(&item, cx);
                 }
             }))
-            // A thing leads with what it is, or how it is doing; a command is its words. While
-            // any line shown leads with a mark, a command keeps the empty slot, so every title
-            // starts on one edge.
-            .children(match (item.icon, item.status) {
-                (None, None) => self.marked.then(|| empty_slot(theme).into_any_element()),
-                (icon, status) => Some(
-                    status_slot(theme, icon.unwrap_or(icons::AGENT), status, hsla(icon_ink), 1.0)
-                        .into_any_element(),
-                ),
+            // A thing leads with what it is; a command is its words. While any line shown
+            // leads with a mark, a command keeps the empty slot, so every title starts on one
+            // edge.
+            .children(match item.icon {
+                None => self.marked.then(|| empty_slot(theme).into_any_element()),
+                Some(icon) => Some(lead_slot(theme, icon, hsla(icon_ink), 1.0).into_any_element()),
             })
             .child(
                 div()
@@ -1854,6 +1867,10 @@ impl CommandPalette {
                         .when_some(tone, |el, tone| el.text_color(hsla(tone.tone(theme))))
                         .child(SharedString::from(text))
                 }
+            }))
+            .children(state.map(|status| {
+                icons::status_mark(theme, Some(status), 1.0)
+                    .debug_selector(move || format!("palette-status-{ix}"))
             }));
         if chosen { self.plate.mark(row, ix) } else { row }
     }
@@ -1939,11 +1956,8 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let chosen = self.selected(self.matched.len());
-        self.marked = self
-            .matched
-            .iter()
-            .filter_map(|at| self.at(*at))
-            .any(|item| item.icon.is_some() || item.status.is_some());
+        self.marked =
+            self.matched.iter().filter_map(|at| self.at(*at)).any(|item| item.icon.is_some());
         if std::mem::take(&mut self.reveal)
             && let Some(line) = self.lines.iter().position(|l| *l == Line::Match(chosen))
         {
@@ -2786,14 +2800,14 @@ mod tests {
     #[test]
     fn every_thing_leads_with_what_it_is() {
         let session = SessionId::new();
-        assert_eq!(PaletteItem::session("zsh", session).icon, Some(Symbol::Terminal));
+        assert_eq!(PaletteItem::session("zsh", session).icon, Some(Mark::Symbol(Symbol::Terminal)));
         let worker = PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1));
-        assert_eq!(worker.icon, Some(Symbol::ServerRack));
+        assert_eq!(worker.icon, Some(Mark::Symbol(Symbol::ServerRack)));
         assert_eq!(
             PaletteItem::open_file("/w/a.rs", None).icon,
-            Some(icons::FileType::Code.symbol()),
+            Some(Mark::Symbol(icons::FileType::Code.symbol())),
             "a file line shows its kind"
         );
-        assert_eq!(PaletteItem::open_file("/w/notes", None).icon, Some(Symbol::Doc));
+        assert_eq!(PaletteItem::open_file("/w/notes", None).icon, Some(Mark::Symbol(Symbol::Doc)));
     }
 }

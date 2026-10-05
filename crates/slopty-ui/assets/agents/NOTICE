@@ -1,0 +1,18 @@
+Agent marks
+
+Claude and the Claude logo are trademarks of Anthropic, PBC. OpenAI, Codex and the OpenAI
+logo are trademarks of OpenAI. They are shown only to identify the agent a thread runs; no
+endorsement or affiliation is implied.
+
+claude.svg: the Claude spark, unmodified, as the Agent Client Protocol registry ships it
+(agentclientprotocol/registry, claude-acp/icon.svg; Apache-2.0, see LICENSE-acp-registry).
+It is the same polygon as Anthropic's press kit file "Claude Spark - Clay.svg".
+
+openai.svg: the OpenAI Blossom, unmodified, as the same registry ships it for Codex
+(codex-acp/icon.svg; Apache-2.0, see LICENSE-acp-registry).
+
+pi's mark is drawn from its 4 x 4 cell layout, the one pi's own one-colour badge
+(pi.dev/favicon.svg) and its source (packages/coding-agent/src/modes/interactive/components/
+pi-logo.ts) use. pi is MIT licensed, copyright 2025 Mario Zechner; see LICENSE-pi.
+
+Every mark is drawn in one colour, the ink of the words beside it.

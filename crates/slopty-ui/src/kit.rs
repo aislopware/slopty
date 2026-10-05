@@ -1410,7 +1410,7 @@ pub fn notice(
 /// A [`notice`]'s mark: a kind's symbol, light and large at the page heading's size, in
 /// `text_muted`.
 #[must_use]
-pub fn notice_mark(theme: &Theme, icon: crate::icons::Symbol, k: f32) -> Div {
+pub fn notice_mark(theme: &Theme, icon: impl Into<crate::icons::Mark>, k: f32) -> Div {
     let ink = hsla(theme.surfaces.text_muted);
     crate::icons::Drawn::notice(theme, icon).slot(px(NOTICE_MARK * k), ink)
 }
@@ -3401,9 +3401,12 @@ mod tests {
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line, text) in chrome_lines(dir) {
                 let code = text.split("//").next().unwrap_or_default();
-                // The app's mark is the one drawing of ours (`brand`), and `icons.rs` names the
-                // kit's drawings it stands symbols in for.
-                let mark = code.contains("assets/icon.svg") || file.ends_with("icons.rs");
+                // The app's mark is a drawing of ours (`brand`), `icons.rs` names the kit's
+                // drawings it stands symbols in for, and `icons/marks.rs` reads the agents'
+                // owners' outlines into masks as the symbols are.
+                let mark = code.contains("assets/icon.svg")
+                    || file.ends_with("icons.rs")
+                    || file.ends_with("icons/marks.rs");
                 if !mark
                     && ["svg()", ".svg\"", "IconName", "Glyph::"].iter().any(|b| code.contains(b))
                 {
@@ -3412,6 +3415,39 @@ mod tests {
             }
         }
         assert!(stray.is_empty(), "an icon not drawn as a symbol:\n{}", stray.join("\n"));
+    }
+
+    /// An agent's mark wears no colour of its own (`docs/decisions/brand.md`, "Each agent
+    /// wears its owner's mark"): it is drawn as coverage alone and painted in the ink of the
+    /// words beside it, never in a brand's clay, green or coral, so colour keeps meaning state.
+    #[test]
+    fn an_agents_mark_wears_no_colour_of_its_own() {
+        let marks = include_str!("icons/marks.rs");
+        let icons = include_str!("icons.rs");
+        let paint = icons
+            .split("fn paint_agent(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn paint_symbol(").next())
+            .unwrap_or_default();
+        assert!(paint.contains("window.text_style().color"), "painted in the words' ink");
+        for (name, code) in [("icons/marks.rs", marks), ("icons.rs paint_agent", paint)] {
+            for (n, line) in code.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                let tones = ["surfaces", "Rgb", "rgb(", "hsla(", "Hsla {", "0x", "\"#"];
+                assert!(
+                    !tones.iter().any(|t| code.contains(t)),
+                    "{name}:{}: a colour in an agent's mark: {}",
+                    n.saturating_add(1),
+                    line.trim()
+                );
+            }
+        }
+        for svg in [
+            include_str!("../assets/agents/claude.svg"),
+            include_str!("../assets/agents/openai.svg"),
+        ] {
+            assert!(svg.contains("fill=\"currentColor\""), "the outline carries no colour");
+        }
     }
 
     /// An icon takes its words' size: a symbol is sized only in `icons.rs`, from the type

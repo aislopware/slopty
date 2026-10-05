@@ -239,3 +239,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::companions` (no frame beyond the working mark's off, quiet or lively;
     the yard's order and click; the yard asleep while the person is away); `slopty-settings`
     `companions_values` and the schema's choice.
+
+- ✅ **Each agent wears its owner's mark, in one colour** (2026-10-05,
+  `.research/agent-marks-2026-10-05.md`, as ruled; supersedes "No agent wears a mark of its own"
+  in `ui.md`). With the agent named only in words and every agent's row leading with one
+  neutral glyph, the person could not find their Codex among their Claude Code threads at a
+  glance. Zed, T3 Code, Vibe Kanban and the ACP registry all mark the agent with its owner's
+  own mark.
+  - **The marks.** Claude Code wears the Claude spark, Codex the `OpenAI` Blossom and pi its
+    own ten cells on a 4 × 4 grid. Every other agent, an ACP agent among them, wears the neutral
+    `text.bubble` and its name. A specific ACP agent gets a mark only once it proves a daily
+    driver: 26 more owners' marks for agents rarely run would be clutter
+    (`feedback-prune-critically`).
+  - **The outlines are the owners' own, unmodified.** `crates/slopty-ui/assets/agents/`
+    keeps `claude.svg` (the Agent Client Protocol registry's `claude-acp/icon.svg`, the same
+    polygon as Anthropic's press kit file "Claude Spark - Clay.svg") and `openai.svg` (the
+    registry's `codex-acp/icon.svg`), both Apache-2.0 as the registry ships them. pi has no
+    file: its cells, as its MIT source and its one-colour favicon lay them, are a Rust
+    constant (`icons::marks::PI_CELLS`). `LICENSE-acp-registry`, `LICENSE-pi` and `NOTICE`
+    sit beside them; `NOTICE` names the trademarks' owners and says they are shown only to
+    identify the agent a thread runs, with no endorsement or affiliation implied.
+  - **One colour, never the brand's.** A mark is coverage alone, painted in the ink of the
+    words beside it: no clay, no coral, so a Claude row is no louder than a Codex row and
+    colour keeps meaning state. Light and dark need no variants.
+  - **The rights, as found on 2026-10-05.** Anthropic's trademark guidelines ask for approval
+    beforehand and forbid alterations to colour or proportion; its press kit publishes the
+    spark and one-colour lockups. OpenAI's brand page forbids adding colours to the Blossom
+    and using it as primary branding, and allows its logo only where it directly relates to
+    OpenAI's services, which a Codex thread does. Neither grants a self-serve badge. The use
+    is therefore tolerated rather than granted, as it is for the projects above; Slopty ships
+    to internal TestFlight only. pi is MIT with no trademark statement.
+  - **Guard rails.** The geometry exactly as published; one colour; only to say which agent a
+    thread runs, never in Slopty's own icon, mark, site or store artwork; the name in words
+    wherever an agent is chosen and in every tooltip and accessibility label. A drawing of our
+    own that looked like either mark is ruled out: it would still be their mark, and an
+    altered one.
+  - **The switch back to words.** `icons::marks::WORDS_ONLY` lists the marks shown as words
+    and the neutral glyph instead. Should an owner ask, its mark is added there in a one-line
+    change. Asking for permission is the person's correspondence to send, not ours.
+  - **Drawn by us at device pixels** (`slopty_platform::outline`). SVG path data is read
+    (move, line, cubic, arc and close, absolute and relative), arcs become cubics and the ink
+    box is worked out from the curves themselves. Core Graphics fills it with the non-zero
+    rule into an alpha byte per pixel, the ink box's size, as the SF Symbols beside it are
+    drawn; GPUI's own SVG path draws at twice the size and halves it, which cost the edges at
+    1x. pi is filled cell by cell on whole pixels.
+  - **Sized by the ink, centred on it.** A radial mark's ink box is its slot less the
+    smallest space (16 → 14 pt in a row's lead, 14 → 12 pt in the composer's chip, 28 → 24 pt
+    in an empty thread's notice). pi's square reads larger than a radial mark as wide, so it
+    takes 0.86 of that on whole cells of at least two pixels (3 px cells, 12 px, in a row at
+    1x). The mask is the ink box, so centring it centres the ink, and its origin is rounded to
+    the device's grid. No weight: a filled silhouette does not thicken with a selected row's
+    title.
+  - **Measured** (1x, crisp = Σα²/Σα, solid = share of inked pixels at α ≥ 0.9;
+    `icons::marks::tests::the_marks_are_crisp_at_1x`): the spark at 14 px 0.737 / 0.21, as
+    crisp as the SF Symbols at 13 pt (0.731); the Blossom at 14 px 0.655 / 0.04, its inner
+    strokes about 0.6 px; pi 1.0 / 1.0 (`docs/MEASUREMENTS.md`, "Agent marks at 1x").
+  - Tests: `icons::marks::tests::{every_agent_wears_a_mark, a_mark_is_drawn_at_its_optical_size,
+    a_mark_is_centred_on_its_ink, pi_lands_on_whole_pixels, the_marks_are_crisp_at_1x}`,
+    `kit::tests::an_agents_mark_wears_no_colour_of_its_own`,
+    `slopty-platform` `outline::tests::{path_data_reads_as_svg_reads_it,
+    an_outline_lands_on_the_pixels_it_covers}`, and the `agent-marks` golden, light and dark
+    (`slopty-e2e` `marks::each_agent_wears_its_mark_in_the_navigator`). Where the mark stands
+    in a row is `ui.md`, "Identity leads, state trails".

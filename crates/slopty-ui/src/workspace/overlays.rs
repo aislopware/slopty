@@ -73,13 +73,8 @@ impl WorkspaceView {
             .session_rows()
             .into_iter()
             .map(|row| {
-                let icon = if self.session_agent(row.session).is_some() {
-                    crate::icons::AGENT
-                } else {
-                    crate::icons::Symbol::Terminal
-                };
                 PaletteItem::session(&row.title, row.session)
-                    .with_icon(icon)
+                    .with_icon(row.lead)
                     .with_status(row.mark)
                     .on_worker(row.worker)
                     .in_dir(row.cwd)
@@ -565,6 +560,7 @@ impl WorkspaceView {
                     title: self.tile_title(item),
                     status: agent.map(agent_status_text),
                     needs_you,
+                    lead: self.kind_glyph(item),
                     mark: agent.map(agent_mark_of),
                     worker: self.worker_label(tile.worker),
                     cwd: self.session_tail(session),

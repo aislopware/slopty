@@ -155,10 +155,9 @@ fn a_row_shows_its_sessions_progress_and_that_it_was_restored(cx: &mut TestAppCo
 
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
 /// what its agent says, its directory below its project's root and its branch, in the order
-/// every second line keeps. Once
-/// the agent waits on the human, the state takes the age's place in a word and the second line
-/// says what it asks, not the state again; the row is not washed: the word is the one mark it
-/// needs. Folded away, *Needs you* lists it.
+/// every second line keeps. Once the agent waits on the human, the state's mark takes the age's
+/// place and the second line says what it asks, not the state again; the row is not washed:
+/// the mark is the one it needs. Folded away, *Needs you* lists it.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -219,11 +218,12 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         )),
         "what it asks, not its state again: {lines:#?}"
     );
-    // The state is the glyph that leads the row, not a word that takes the title's room: the
-    // line's end keeps the age, and the row's name still says the state.
-    let age = cx.debug_bounds(leak(format!("nav-age-{id}"))).expect("the age stays");
+    // The state is a mark at the line's end, not a word that takes the title's room: it takes
+    // the age's place, the agent's mark still leads, and the row's name still says the state.
+    let state = cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the state's mark");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(age.bottom() <= meta.top() + px(0.5), "on the first line: {age:?} {meta:?}");
+    assert!(state.bottom() <= meta.top() + px(0.5), "on the first line: {state:?} {meta:?}");
+    assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the age gives way");
     assert!(cx.debug_bounds(leak(format!("nav-status-{id}"))).is_none(), "no state word");
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Image", Some("Needs you"))), "the glyph: {nodes:#?}");
