@@ -254,7 +254,10 @@ fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
     let studio = connect(&view, cx, 1, "studio");
     let _sessions = crowd(&view, cx, &studio, 8, 4);
     view.update(cx, |v, _| v.set_animation(true));
-    let mut clock = Duration::ZERO;
+    // From where the layout's clock already stands: setting the workspace up ran on real time
+    // (the first symbol drawn in a test binary can take seconds), and a clock held behind it
+    // would spend frames catching up before anything moved.
+    let mut clock = view.read_with(cx, |v, _| v.now());
     let slow = overview_move(&view, cx, &mut clock, Duration::from_micros(16_667));
     let _closed = overview_move(&view, cx, &mut clock, Duration::from_micros(16_667));
     let fast = overview_move(&view, cx, &mut clock, Duration::from_micros(4_167));
@@ -283,7 +286,10 @@ fn measure_a_frame_of_motion_beside_the_chrome(cx: &mut TestAppContext) {
     let studio = connect(&view, cx, 1, "studio");
     let _sessions = crowd(&view, cx, &studio, 60, 60);
     assert!(cx.debug_bounds("navigator").is_some());
-    let mut clock = Duration::ZERO;
+    // From where the layout's clock already stands: setting the workspace up ran on real time
+    // (the first symbol drawn in a test binary can take seconds), and a clock held behind it
+    // would spend frames catching up before anything moved.
+    let mut clock = view.read_with(cx, |v, _| v.now());
     view.update(cx, |v, _| {
         v.set_animation(true);
         v.hold_clock(Some(clock));
