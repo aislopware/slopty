@@ -18,17 +18,15 @@ use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
     LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, TaskChange, TaskId, TaskState,
-    TimelineEntry,
 };
 use slopty_proto::thread::AgentId;
 
+use super::WorkspaceView;
 use super::actions::{MakeOrchestrator, ToggleProjectBoard};
 use super::agents::agent_ask_line;
-use super::attention::{About, ProjectNote, Route};
-use super::{WorkspaceEvent, WorkspaceView};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
-use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction, news_line};
+use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
@@ -81,8 +79,6 @@ pub(super) struct ProjectsState {
     pub opening: Option<(ProjectId, TermRef)>,
     /// The "New project" sheet, open over the workspace for the orchestrator it names.
     pub sheet: Option<Sheet>,
-    /// The projects' moments to note while the app is away, until the app takes them.
-    pub news: Vec<ProjectNote>,
     /// The "Run on" picker open on a task, per project.
     pub run_on: HashMap<ProjectId, RunOnPicker>,
     /// How far this client read each project's timeline, as its board last hid.
@@ -185,59 +181,9 @@ impl WorkspaceView {
     /// A project changed, as the server's event `seq` says; a change the snapshot holds is
     /// dropped.
     pub fn project_update(&mut self, seq: u64, update: ProjectUpdate, cx: &mut Context<Self>) {
-        let entry = update.entry.clone();
-        if let Some(project) = self.projects.mirror.apply_update(seq, update) {
-            if let Some(entry) = entry {
-                self.project_moment(&project, &entry, cx);
-            }
+        if self.projects.mirror.apply_update(seq, update).is_some() {
             self.projects_moved(cx);
         }
-    }
-
-    /// `entry` just landed on `project`'s timeline: one worth saying is a notice with the app
-    /// in front, unless the project's board has the person's eye, and a note while it is away.
-    fn project_moment(
-        &mut self,
-        project: &ProjectId,
-        entry: &TimelineEntry,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(board) = self.projects.mirror.get(project) else { return };
-        let Some(line) = news_line(board, entry) else { return };
-        let title = board.project.title.clone();
-        let orchestrator = board.project.orchestrator;
-        if self.app_active {
-            let watched = orchestrator.is_some_and(|t| {
-                self.focused_session() == Some(t.session)
-                    && self.projects.shown.contains(&t.session)
-            });
-            if !watched {
-                self.show_notice(format!("{title}: {line}"), cx);
-            }
-            return;
-        }
-        let Some(term) = orchestrator else { return };
-        let route = self.attention_route(term.session).map_or_else(
-            || Route {
-                worker: worker_key(term.worker),
-                item: None,
-                about: About::Session(term.session),
-            },
-            |(route, _)| route,
-        );
-        self.projects.news.push(ProjectNote {
-            route,
-            id: format!("project-{project}-{}", entry.seq),
-            project: project.as_str().to_owned(),
-            title,
-            body: line,
-        });
-        cx.emit(WorkspaceEvent::ProjectNews);
-    }
-
-    /// The projects' moments to note since the last take.
-    pub fn take_project_news(&mut self) -> Vec<ProjectNote> {
-        std::mem::take(&mut self.projects.news)
     }
 
     /// The server was let go: its projects go with it, and every board turns back to its

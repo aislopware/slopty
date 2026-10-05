@@ -12,6 +12,11 @@
 //! comes to the person when it is ready to merge and its orchestrator hears of the rest. It goes to
 //! no client when the thread's tile is on screen where the person is, to the desks they are at when
 //! they are at one, to the handhelds they hold when not, and to every client when they are at none.
+//!
+//! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
+//! request's checks failing, its verifier or a step for it failing (a rebase that conflicts
+//! among them), or the push after its merge not going. It is one notice per timeline entry,
+//! about the project, routed by the orchestrator's terminal as a thread's is by its own.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -19,19 +24,22 @@ use std::sync::Arc;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{AgentReport, SEAT_FACT};
+use slopty_proto::project::{
+    AgentReport, ChecksState, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep,
+    TimelineEntry,
+};
 use slopty_proto::server::FromServer;
 use slopty_proto::thread::attention::{
-    Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, ThreadAt,
-    Via,
+    Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, Subject,
+    ThreadAt, Via,
 };
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId, Wait};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use super::awake::{Awake, Hold, Policy as KeepAwake};
-use super::{Hub, WeakHub};
-use crate::project::Projects;
+use super::{Hub, State, WeakHub};
+use crate::project::{Kept, Projects};
 
 /// The rows every worker published, the ladder made of them, and the clients the person may
 /// be at.
@@ -439,15 +447,83 @@ impl Hub {
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
         for notice in notices {
-            for link in route(&state.board.seats, &notice) {
-                let Some(seat) = state.board.seats.get(&link) else { continue };
-                if seat.tx.try_send(FromServer::Notice(Box::new(notice.clone()))).is_err() {
-                    tracing::debug!(link, "a notice found its link full or gone");
-                }
-            }
+            send(&state.board.seats, &notice);
         }
         drop(guard);
     }
+}
+
+/// A project's change that holds its work up goes to the person as a notice, where they are.
+pub(super) fn tell_project(state: &State, kept: &Kept) {
+    if let Some(notice) = project_notice(&state.projects, kept) {
+        send(&state.board.seats, &notice);
+    }
+}
+
+/// Send `notice` to the links [`route`] picks among `seats`.
+fn send(seats: &BTreeMap<u64, Sitting>, notice: &Notice) {
+    for link in route(seats, notice) {
+        let Some(seat) = seats.get(&link) else { continue };
+        if seat.tx.try_send(FromServer::Notice(Box::new(notice.clone()))).is_err() {
+            tracing::debug!(link, "a notice found its link full or gone");
+        }
+    }
+}
+
+/// The notice `kept` makes: a timeline entry that holds a task's work up, named by the task, and
+/// said to wait on the person once the task's give-backs are spent.
+fn project_notice(projects: &Projects, kept: &Kept) -> Option<Notice> {
+    let entry = kept.entry.as_ref()?;
+    let project = projects.project(&kept.project).ok()?;
+    let task = kept.task.as_ref().filter(|t| Some(t.id) == entry.task);
+    let words = held_up(entry, task, &project.target)?;
+    let text = match (entry.task, task.map(|t| t.title.trim()).filter(|t| !t.is_empty())) {
+        (Some(id), Some(title)) => format!("#{id} {title}: {words}"),
+        (Some(id), None) => format!("#{id}: {words}"),
+        (None, _) => words,
+    };
+    let text = if task.is_some_and(|t| t.give_backs.held) {
+        format!("{text}. It waits on you")
+    } else {
+        text
+    };
+    Some(Notice {
+        kind: NoticeKind::Project,
+        about: Subject::Project { project: kept.project.clone(), entry: entry.seq },
+        tile: project.orchestrator,
+        title: project.title.clone(),
+        text,
+        worked_ms: None,
+        via: None,
+    })
+}
+
+/// What `entry` says when it holds `task`'s work up, the project's work merging into `target`;
+/// `None` for the rest, which the board shows where it is looked at.
+fn held_up(entry: &TimelineEntry, task: Option<&Task>, target: &str) -> Option<String> {
+    let first = |text: &str| text.lines().next().unwrap_or_default().trim().to_owned();
+    Some(match &entry.what {
+        Moment::Checks(checks) if checks.state == ChecksState::Failing => {
+            format!("its pull request's checks fail ({})", checks.failing.join(", "))
+        }
+        Moment::Verified(run) if !run.passed => "its verifier failed".to_owned(),
+        Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {
+            StepKind::Rebase => format!("its work conflicts with {target}: {}", first(why)),
+            StepKind::Clone => format!("the clone it needs failed: {}", first(why)),
+            StepKind::Home => format!("its branch did not come home: {}", first(why)),
+            StepKind::Verify => format!("its verifier did not run: {}", first(why)),
+            StepKind::Merge => format!("its merge stopped: {}", first(why)),
+        },
+        Moment::Step(TaskStep { kind: StepKind::Merge, state: StepState::Done { .. }, .. }) => {
+            match task.and_then(|t| t.merge.as_ref()) {
+                Some(Merge::Merged { target, push_failed: Some(why), .. }) => {
+                    format!("merged into {target}, but the push to origin failed: {}", first(why))
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// A thread that hangs from no other, standing as high as its subagents.
@@ -651,8 +727,8 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Notice>
         let via = (from.id != row.id).then(|| Via { thread: from.id, title: from.title.clone() });
         notices.push(Notice {
             kind,
-            thread: now.at,
-            tile: row.terminal,
+            about: Subject::Thread(now.at),
+            tile: row.terminal.map(|session| TermRef { worker: now.at.worker, session }),
             title: row.title.clone(),
             text: text(kind, from),
             worked_ms: (kind == NoticeKind::Finished).then_some(worked_ms).flatten(),
@@ -671,7 +747,7 @@ fn text(kind: NoticeKind, row: &ThreadRow) -> String {
         NoticeKind::NeedsYou => {
             row.requests.first().map(|r| r.title.clone()).or(wait).unwrap_or_default()
         }
-        NoticeKind::Failed | NoticeKind::Finished => {
+        NoticeKind::Failed | NoticeKind::Finished | NoticeKind::Project => {
             wait.or_else(|| row.last_line.clone()).unwrap_or_default()
         }
     }
@@ -679,7 +755,7 @@ fn text(kind: NoticeKind, row: &ThreadRow) -> String {
 
 /// The links `notice` goes to among `seats`.
 fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Vec<u64> {
-    let tile = notice.tile.map(|session| TermRef { worker: notice.thread.worker, session });
+    let tile = notice.tile;
     let at = |seat: Option<Seat>| {
         seats
             .iter()

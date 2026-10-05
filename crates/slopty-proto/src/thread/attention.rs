@@ -321,6 +321,24 @@ pub enum NoticeKind {
     /// A thread finished working. The client shows it only when it worked as long as its
     /// person's slow-command time.
     Finished,
+    /// A project's work is held up: its pull request's checks fail, its verifier failed, a step
+    /// for it failed (a rebase that conflicts among them), or the push after its merge did not
+    /// go. One notice per timeline entry.
+    Project,
+}
+
+/// What a notice is about.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Subject {
+    /// A thread, the one a subagent hangs from.
+    Thread(ThreadAt),
+    /// A project, at one entry of its timeline.
+    Project {
+        /// The project.
+        project: ProjectId,
+        /// The entry's sequence number: one notice per entry.
+        entry: u64,
+    },
 }
 
 /// A notice the server picked this client to show. A subagent's goes as its parent's.
@@ -328,11 +346,11 @@ pub enum NoticeKind {
 pub struct Notice {
     /// Why.
     pub kind: NoticeKind,
-    /// The thread, the one a subagent hangs from.
-    pub thread: ThreadAt,
-    /// The terminal to open for it.
-    pub tile: Option<SessionId>,
-    /// The thread's title.
+    /// What it is about.
+    pub about: Subject,
+    /// The terminal to open for it: the thread's, or the project's orchestrator's.
+    pub tile: Option<TermRef>,
+    /// The thread's title, or the project's.
     pub title: String,
     /// What it wants or said, in a line.
     pub text: String,

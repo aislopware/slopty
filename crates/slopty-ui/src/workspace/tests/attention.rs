@@ -146,6 +146,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
         kind: NoticeKind::NeedsYou,
         title: "Fix the build".into(),
         body: "Run cargo test".into(),
+        stack: None,
     };
     attention.notice(&heard);
     let posted = memory.posted();
@@ -408,18 +409,20 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
 /// came from, and is dropped for a turn shorter than the slow-command time.
 #[gpui::test]
 fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::TermRef;
     use slopty_proto::thread::ThreadId;
-    use slopty_proto::thread::attention::{ThreadAt, Via};
+    use slopty_proto::thread::attention::{Subject, ThreadAt, Via};
 
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let id = slopty_core::WorkerId::new();
     let key = crate::workspace::projects::worker_key(id);
     let (tiles, _link) = worker(&view, cx, key, "mini", &[session]);
+    let thread = ThreadId::new();
     let mut notice = Notice {
         kind: NoticeKind::NeedsYou,
-        thread: ThreadAt { worker: id, thread: ThreadId::new() },
-        tile: Some(session),
+        about: Subject::Thread(ThreadAt { worker: id, thread }),
+        tile: Some(TermRef { worker: id, session }),
         title: "Fix the build".into(),
         text: "Run cargo test".into(),
         worked_ms: None,
@@ -444,7 +447,6 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     // opens the thread.
     notice.tile = None;
     let heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a thread's note");
-    let thread = notice.thread.thread;
     assert_eq!(heard.route, Route { worker: key, item: None, about: About::Thread(thread) });
     let (mut attention, memory) = attention();
     attention.set_active(false);

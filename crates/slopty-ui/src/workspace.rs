@@ -291,9 +291,6 @@ pub enum WorkspaceEvent {
         /// Shared now, or not.
         share: bool,
     },
-    /// A project's moment is worth a note while the app is away: the app takes them with
-    /// [`WorkspaceView::take_project_news`].
-    ProjectNews,
     /// Every note's "Allow" or "Deny" tapped so far was sent, or was said to have found
     /// nothing: an app woken in the background to send one may be let go once it is out.
     TapsSettled,

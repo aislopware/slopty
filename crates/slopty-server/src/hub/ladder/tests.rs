@@ -225,8 +225,9 @@ async fn notices_go_where_the_person_is_and_a_subagent_speaks_through_its_parent
     let heard = mac.notices();
     assert_eq!(heard.len(), 1);
     let notice = &heard[0];
-    assert_eq!((notice.kind, notice.thread.thread), (NoticeKind::NeedsYou, parent.id));
-    assert_eq!((notice.tile, notice.text.as_str()), (Some(shell), "Run cargo test?"));
+    let parent_at = Subject::Thread(ThreadAt { worker, thread: parent.id });
+    assert_eq!((notice.kind, &notice.about), (NoticeKind::NeedsYou, &parent_at));
+    assert_eq!((notice.tile, notice.text.as_str()), (Some(tile), "Run cargo test?"));
     let via = notice.via.as_ref().map(|v| v.thread);
     assert_eq!(via, Some(child.id), "it says which subagent asks");
     assert!(phone.notices().is_empty(), "no push to the phone while at the desk");
@@ -330,4 +331,121 @@ async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
     rank(vec![moved(&orchestrator, Phase::Done, 5_000)]);
     let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
     assert_eq!(kinds, [NoticeKind::Finished], "the orchestrator's own still says so");
+}
+
+/// A project's held-up work is a notice about the project, one per timeline entry, routed by the
+/// orchestrator's terminal: a failed verifier says so, a pass says nothing, nothing goes while
+/// the orchestrator is on screen, and a conflict past the task's give-backs waits on the person.
+#[tokio::test]
+async fn a_project_s_held_up_work_is_a_notice_about_the_project() {
+    use slopty_proto::project::{StepKind, TaskChange, VerifierRun};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let _lease = hub
+        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let orchestrator = TermRef { worker, session: orchestrating };
+    create(&hub, Some(orchestrator)).await;
+    let build = task(&hub).await;
+    let mut desk = Client::sit(&hub, "mac");
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let verified = |passed: bool| Verb::TaskUpdate {
+        project: project(),
+        task: build,
+        change: Box::new(TaskChange {
+            verified: Some(VerifierRun {
+                passed,
+                summary: "1 failed".to_owned(),
+                head: "a".repeat(40),
+                base: "b".repeat(40),
+                exit: Some(u8::from(!passed).into()),
+                took_ms: 0,
+            }),
+            ..TaskChange::default()
+        }),
+    };
+    assert!(matches!(hub.dispatch(verified(true)).await, Outcome::Task(_)));
+    assert!(desk.notices().is_empty(), "a pass is the board's to show");
+    assert!(matches!(hub.dispatch(verified(false)).await, Outcome::Task(_)));
+    let heard = desk.notices();
+    let [notice] = heard.as_slice() else { panic!("one notice: {heard:?}") };
+    assert_eq!(notice.kind, NoticeKind::Project);
+    assert!(
+        matches!(&notice.about, Subject::Project { project: p, .. } if *p == project()),
+        "{notice:?}"
+    );
+    assert_eq!(notice.tile, Some(orchestrator), "it opens the orchestrator");
+    assert_eq!(notice.text, format!("#{build} Ladder: its verifier failed"));
+
+    desk.at(&hub, Seat::Desk, true, vec![orchestrator]);
+    assert!(matches!(hub.dispatch(verified(false)).await, Outcome::Task(_)));
+    assert!(desk.notices().is_empty(), "the orchestrator on screen says it already");
+
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let conflict = "CONFLICT (content): Merge conflict in src/lib.rs";
+    for _ in 0..=slopty_proto::project::GIVE_BACKS_MAX {
+        hub.give_back((&project(), build), StepKind::Rebase, Some(worker), conflict, None);
+    }
+    let said: Vec<String> = desk.notices().into_iter().map(|n| n.text).collect();
+    let back = format!("#{build} Ladder: its work conflicts with main: {conflict}");
+    let mut expected = vec![back.clone(); usize::from(slopty_proto::project::GIVE_BACKS_MAX)];
+    expected.push(format!("{back}. It waits on you"));
+    assert_eq!(said, expected, "each give-back, then the one held for the person");
+}
+
+/// What holds a task's work up, in words: failing checks name the failing ones, a failed step
+/// its first line, and a merge only when its push did not go. The rest is the board's.
+#[tokio::test]
+async fn held_up_work_is_said_by_what_held_it() {
+    use slopty_proto::project::{Checks, StepState, TaskStep, TimelineEntry};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    create(&hub, None).await;
+    let id = task(&hub).await;
+    let mut card = hub.inner.state.lock().projects.task(&project(), id).cloned().unwrap();
+    let entry = |what| TimelineEntry { seq: 7, at_ms: WallMs::ZERO, task: Some(id), what };
+    let step = |kind, state| {
+        Moment::Step(TaskStep {
+            kind,
+            worker: WorkerId::new(),
+            state,
+            since_ms: WallMs::ZERO,
+            term: None,
+            commits: None,
+        })
+    };
+    let say = |what, card: &Task| held_up(&entry(what), Some(card), "main");
+    let checks = |state| Checks {
+        state,
+        passed: 3,
+        failed: 2,
+        pending: 0,
+        skipped: 0,
+        failing: vec!["test".to_owned(), "lint".to_owned()],
+        why: None,
+        at_ms: WallMs::ZERO,
+    };
+    assert_eq!(
+        say(Moment::Checks(checks(ChecksState::Failing)), &card).as_deref(),
+        Some("its pull request's checks fail (test, lint)")
+    );
+    assert_eq!(say(Moment::Checks(checks(ChecksState::Passing)), &card), None);
+    let failed = StepState::Failed { why: "no space left\nmore".to_owned() };
+    assert_eq!(
+        say(step(StepKind::Clone, failed), &card).as_deref(),
+        Some("the clone it needs failed: no space left")
+    );
+    let merged = || step(StepKind::Merge, StepState::Done { detail: "main at abc".to_owned() });
+    assert_eq!(say(merged(), &card), None, "a merge that pushed is no news");
+    card.merge = Some(Merge::Merged {
+        target: "main".to_owned(),
+        head: "abc".to_owned(),
+        at_ms: WallMs::ZERO,
+        pushed: false,
+        push_failed: Some("rejected (non-fast-forward)".to_owned()),
+    });
+    assert_eq!(
+        say(merged(), &card).as_deref(),
+        Some("merged into main, but the push to origin failed: rejected (non-fast-forward)")
+    );
 }

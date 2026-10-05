@@ -1330,64 +1330,44 @@ fn a_board_sets_its_verifier(cx: &mut TestAppContext) {
     assert_eq!(sent(&mut queue, cx, done), [set("cargo gate")], "what the field holds");
 }
 
-/// A moment that holds a task up is said as it lands: a notice with the app in front, unless
-/// the project's board has the person's eye, and a note leading to the orchestrator while the
-/// app is away. A moment the board alone shows says nothing.
+/// The server's notice of a project's held-up work leads to its orchestrator's tile, and is a
+/// note of its own per timeline entry, stacked under its project; a project with no orchestrator
+/// has nowhere to lead.
 #[gpui::test]
-fn a_project_s_failure_is_said_as_it_lands(cx: &mut TestAppContext) {
-    use crate::project::fixtures::run;
+fn a_project_s_notice_leads_to_its_orchestrator_stacked_by_project(cx: &mut TestAppContext) {
+    use slopty_platform::notify::Memory;
+    use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
+
+    use crate::workspace::attention::{About, Attention};
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
-    let (agent_tile, _) = setup.agent;
-    let failed = |seq: u64, passed: bool| {
-        let entry = entry(seq, Some(1), Moment::Verified(run(passed, "abc1234")));
-        task_changed("board", card(1, "Wire the board", TaskState::Running), Some(entry))
+    let board = slopty_proto::project::ProjectId::new("board").unwrap();
+    let mut notice = Notice {
+        kind: NoticeKind::Project,
+        about: Subject::Project { project: board, entry: 7 },
+        tile: Some(TermRef { worker: WorkerId::new(), session: orchestrator }),
+        title: "Ship the project board".into(),
+        text: "#1 Wire the board: its verifier failed".into(),
+        worked_ms: None,
+        via: None,
     };
-    let events = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let heard = Rc::clone(&events);
-    cx.update(|_window, cx| {
-        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
-            heard.borrow_mut().push(*event);
-        })
-        .detach();
-    });
-    let toast = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_text());
-
-    view.update_in(cx, |v, _w, cx| {
-        v.focus_tile(agent_tile, cx);
-        v.project_update(20, failed(4, true), cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(toast(cx), None, "a pass is the board's to show");
-    view.update_in(cx, |v, _w, cx| v.project_update(21, failed(5, false), cx));
-    cx.run_until_parked();
+    let heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a note");
+    assert_eq!(heard.route.about, About::Session(orchestrator), "to the orchestrator");
+    assert_eq!(heard.route.item, Some(orchestrator_tile.item));
     assert_eq!(
-        toast(cx).as_deref(),
-        Some("Ship the project board: #1 Wire the board: its verifier failed")
+        (heard.title.as_str(), heard.body.as_str()),
+        (notice.title.as_str(), notice.text.as_str())
     );
+    let memory = Rc::new(Memory::default());
+    let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+    attention.set_active(false);
+    attention.notice(&heard);
+    let posted = memory.posted();
+    let [note] = posted.as_slice() else { panic!("one note: {posted:?}") };
+    assert_eq!(note.id, "project-board-7", "one per timeline entry");
+    assert_eq!(note.thread.as_deref(), Some("board"), "stacked under its project");
 
-    let said = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_texts().len());
-    let before = said(cx);
-    view.update_in(cx, |v, _w, cx| {
-        v.focus_tile(orchestrator_tile, cx);
-        v.show_board(orchestrator, true, cx);
-    });
-    cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| v.project_update(22, failed(6, false), cx));
-    cx.run_until_parked();
-    assert_eq!(said(cx), before, "the board in front says it already");
-
-    view.update_in(cx, |v, _w, cx| {
-        v.set_app_active(false, cx);
-        v.project_update(23, failed(7, false), cx);
-    });
-    cx.run_until_parked();
-    assert!(events.borrow().contains(&WorkspaceEvent::ProjectNews), "{:?}", events.borrow());
-    let news = view.update(cx, |v, _| v.take_project_news());
-    let [note] = news.as_slice() else { panic!("one note: {news:?}") };
-    assert_eq!(note.route.about, attention::About::Session(orchestrator), "to the orchestrator");
-    assert_eq!((note.title.as_str(), note.project.as_str()), ("Ship the project board", "board"));
-    assert_eq!(note.body, "#1 Wire the board: its verifier failed");
-    assert_eq!(view.update(cx, |v, _| v.take_project_news()), [], "taken once");
+    notice.tile = None;
+    assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "nowhere to lead");
 }

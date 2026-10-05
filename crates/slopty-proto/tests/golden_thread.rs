@@ -996,7 +996,7 @@ mod golden_thread {
         use slopty_proto::server::{FromServer, ToServer};
         use slopty_proto::thread::attention::{
             Counts, Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat,
-            Standing, ThreadAt, Via,
+            Standing, Subject, ThreadAt, Via,
         };
         let worker = WorkerId::from_uuid(Uuid::from_u128(0x3011));
         let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
@@ -1054,8 +1054,8 @@ mod golden_thread {
         ] {
             let notice = Notice {
                 kind,
-                thread: at,
-                tile: Some(session),
+                about: Subject::Thread(at),
+                tile: Some(tile),
                 title: "Fix the ladder".to_owned(),
                 text: "Wants to run cargo test".to_owned(),
                 worked_ms,
@@ -1066,6 +1066,19 @@ mod golden_thread {
             };
             snap(name, &FromServer::Notice(Box::new(notice)));
         }
+        let held = Notice {
+            kind: NoticeKind::Project,
+            about: Subject::Project {
+                project: ProjectId::new("slopty").expect("an id"),
+                entry: 41,
+            },
+            tile: Some(tile),
+            title: "slopty".to_owned(),
+            text: "#2 Fix the ladder: its pull request's checks fail (test)".to_owned(),
+            worked_ms: None,
+            via: None,
+        };
+        snap("attention_notice_project", &FromServer::Notice(Box::new(held)));
         let rows = vec![state().row(ms(2_500))];
         snap(
             "attention_threads",

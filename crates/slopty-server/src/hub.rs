@@ -1188,6 +1188,7 @@ impl Hub {
             return;
         }
         for change in changes {
+            ladder::tell_project(state, &change.kept);
             self.happen(Happening::Project(Box::new(state.projects.pushed(&change.kept))));
             if change.durable {
                 projects::keep(state, Keep::Project(Box::new(change.kept)));

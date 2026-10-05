@@ -16,7 +16,7 @@ mod tests {
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::attention::{
-        Ladder, Notice, NoticeKind, Presence, Present, Rung, Seat, ThreadAt,
+        Ladder, Notice, NoticeKind, Presence, Present, Rung, Seat, Subject, ThreadAt,
     };
     use slopty_proto::thread::wire::{RequestCard, TableFrame, ThreadRow};
     use slopty_proto::thread::{
@@ -221,8 +221,8 @@ mod tests {
         link.tx.send(&ToServer::Threads(delta(vec![asking]))).await.unwrap();
         let expected = Notice {
             kind: NoticeKind::NeedsYou,
-            thread: at,
-            tile: Some(shell),
+            about: Subject::Thread(at),
+            tile: Some(tile),
             title: "Rank the fleet".to_owned(),
             text: "Run cargo test?".to_owned(),
             worked_ms: None,

@@ -29,6 +29,10 @@
 //! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
 //! A shell's moments are this client's own and post as before.
 //!
+//! A project's held-up work comes only as the server's notice ([`Heard::stack`]): each is a
+//! note of its own, stacked with the project's others, leading to its orchestrator. With the
+//! app in front the app says it as a notice instead.
+//!
 //! With notifications turned off in the system's settings, a note is dropped where nobody sees
 //! it. So the first time one goes unsaid in a run, coming back to the app says notifications
 //! are off ([`Attention::unsaid_while_off`], [`NOTES_OFF`]), once.
@@ -45,7 +49,8 @@ use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, Tap};
 use slopty_proto::items::ItemKind;
-use slopty_proto::thread::attention::{Notice, NoticeKind};
+use slopty_proto::project::ProjectId;
+use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_proto::thread::{AskId, ThreadId};
 
 use super::agents::{agent_ask_line, agent_status_word};
@@ -216,22 +221,17 @@ pub struct Heard {
     pub title: String,
     /// What it wants or said, named by the subagent it came from.
     pub body: String,
+    /// A project's notice: a note of its own, stacked with the project's others.
+    pub stack: Option<Stack>,
 }
 
-/// A project's moment worth a note while the app is away ([`crate::project::model::news_line`]),
-/// leading to its orchestrator's terminal.
+/// Where a project's note sits: its own identifier, and the project its notes stack under.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ProjectNote {
-    /// Where a tap leads: the orchestrator's terminal.
-    pub route: Route,
+pub struct Stack {
     /// The note's identifier, one per timeline entry.
     pub id: String,
-    /// The project, which its notes stack under.
+    /// The project.
     pub project: String,
-    /// The project's title.
-    pub title: String,
-    /// What happened.
-    pub body: String,
 }
 
 /// Why a note is up.
@@ -371,6 +371,19 @@ impl Attention {
         if self.active {
             return;
         }
+        if let Some(stack) = &heard.stack {
+            tracing::debug!(id = stack.id, "project note");
+            self.project_notes.insert(stack.id.clone());
+            self.send(Note {
+                id: stack.id.clone(),
+                title: heard.title.clone(),
+                body: heard.body.clone(),
+                info: heard.route.info(),
+                thread: Some(stack.project.clone()),
+                ..Note::default()
+            });
+            return;
+        }
         let session = heard.route.about;
         let note = Note {
             id: session.note_id(),
@@ -381,7 +394,7 @@ impl Attention {
         };
         let why = match heard.kind {
             NoticeKind::NeedsYou => Why::Asks,
-            NoticeKind::Failed | NoticeKind::Finished => Why::Finished,
+            NoticeKind::Failed | NoticeKind::Finished | NoticeKind::Project => Why::Finished,
         };
         self.post(session, why, note);
         if why == Why::Asks {
@@ -494,24 +507,6 @@ impl Attention {
         let note =
             Note { id: route.about.note_id(), title, body, info: route.info(), ..Note::default() };
         self.post(route.about, Why::Program, note);
-    }
-
-    /// A project's moment (`news`): it notifies while the app is away, stacked with the
-    /// project's other notes.
-    pub fn project_news(&mut self, news: &ProjectNote) {
-        if !self.away() {
-            return;
-        }
-        tracing::debug!(id = news.id, "project note");
-        self.project_notes.insert(news.id.clone());
-        self.send(Note {
-            id: news.id.clone(),
-            title: news.title.clone(),
-            body: news.body.clone(),
-            info: news.route.info(),
-            thread: Some(news.project.clone()),
-            ..Note::default()
-        });
     }
 
     /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
@@ -632,12 +627,17 @@ impl WorkspaceView {
         {
             return None;
         }
-        let worker = super::projects::worker_key(notice.thread.worker);
-        let (about, item) = if let Some(session) = notice.tile {
-            (About::Session(session), self.tile_of_session(session).map(|t| t.item))
+        let at = match &notice.about {
+            Subject::Thread(at) => at,
+            Subject::Project { project, entry } => {
+                return self.heard_project(notice, project, *entry);
+            }
+        };
+        let worker = super::projects::worker_key(at.worker);
+        let (about, item) = if let Some(tile) = notice.tile {
+            (About::Session(tile.session), self.tile_of_session(tile.session).map(|t| t.item))
         } else {
-            let thread = notice.thread.thread;
-            (About::Thread(thread), self.tile_of_thread(thread).map(|t| t.item))
+            (About::Thread(at.thread), self.tile_of_thread(at.thread).map(|t| t.item))
         };
         let route = Route { worker, item, about };
         let title = Some(notice.title.trim())
@@ -648,7 +648,32 @@ impl WorkspaceView {
             Some(via) => via.title.clone(),
             None => notice.text.clone(),
         };
-        Some(Heard { route, kind: notice.kind, title, body })
+        Some(Heard { route, kind: notice.kind, title, body, stack: None })
+    }
+
+    /// A project's notice, at `entry` of `project`'s timeline: a note that leads to its
+    /// orchestrator's terminal, stacked with the project's others. `None` for a project with no
+    /// orchestrator to lead to.
+    fn heard_project(&self, notice: &Notice, project: &ProjectId, entry: u64) -> Option<Heard> {
+        let tile = notice.tile?;
+        let route = self.attention_route(tile.session).map_or_else(
+            || Route {
+                worker: super::projects::worker_key(tile.worker),
+                item: None,
+                about: About::Session(tile.session),
+            },
+            |(route, _)| route,
+        );
+        Some(Heard {
+            route,
+            kind: notice.kind,
+            title: notice.title.clone(),
+            body: notice.text.clone(),
+            stack: Some(Stack {
+                id: format!("project-{project}-{entry}"),
+                project: project.as_str().to_owned(),
+            }),
+        })
     }
 
     /// Where a note about `session` leads, and the name its title says; `None` for a session

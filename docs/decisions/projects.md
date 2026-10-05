@@ -1698,7 +1698,8 @@ stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
     that project's board is already in the focused tile. With the app away, it is a
     notification that opens on the orchestrator, and it is withdrawn with the rest.
   - Tests: `only_what_holds_a_task_up_is_news` (`project/tests.rs`),
-    `a_project_s_failure_is_said_as_it_lands` (`tests/projects.rs`).
+    `a_project_s_failure_is_said_as_it_lands` (`tests/projects.rs`). (Moved to the server on
+    2026-10-05: "A project's held-up work is the server's notice".)
 
 **Any agent's thread is read and answered alike.** ✅ 2026-10-04 (R10; the worker's thread
 door is wired in the agents lane)
@@ -1937,3 +1938,31 @@ follow-up)
     listed, then taken away.
   - The goldens `script_set`, `script_delete`, `script_run` and `run_script`, with a script
     on the golden project. The project snapshots changed.
+
+- ✅ **A project's held-up work is the server's notice** (2026-10-05, readiness G8). Each
+  client read the news from its own mirror of the boards (`news_line`) and posted its own note.
+  Every device the person had said the same thing, and the moments the mirror never saw went
+  unsaid: a push that failed after a merge, and a failure held for the person once the task's
+  give-backs were spent.
+  - **The wire.** A `Notice` is about a `Subject`: a thread, as before, or a project at one
+    timeline entry (`Subject::Project { project, entry }`), with `NoticeKind::Project`. Its
+    tile is a `TermRef`, since a project's orchestrator may run on another worker.
+  - **The server says it** (`hub::ladder::tell_project`, from `projects_moved`, which every
+    project change goes through). The moments are failing checks with their names, a failed
+    verifier, a step that failed with its first line (a rebase that conflicts reads "its work
+    conflicts with main"), and a merge whose push to origin failed. Once the task's
+    give-backs are spent, the line adds that it waits on the person. A notice is routed like
+    a thread's: nowhere while the orchestrator's tile is on screen where the person is, else
+    to the desk they are at, else to the handheld they hold, else everywhere.
+  - **The client shows it.** With the app in front it is a notice in the workspace ("Title:
+    #3 fix: its verifier failed"). Away, it is a note of its own per timeline entry
+    (`project-<project>-<entry>`), stacked under its project and opening the orchestrator,
+    and it is taken back with the rest when the app comes back. The client-side path
+    (`news_line`, `ProjectNote`, `WorkspaceEvent::ProjectNews`) is deleted.
+  - Tests: server `a_project_s_held_up_work_is_a_notice_about_the_project` (a pass says
+    nothing, a failure notices with the task's name, nothing while the orchestrator is on
+    screen, and the give-back past the cap waits on the person) and
+    `held_up_work_is_said_by_what_held_it`; ui
+    `a_project_s_notice_leads_to_its_orchestrator_stacked_by_project`; golden
+    `attention_notice_project`.
+

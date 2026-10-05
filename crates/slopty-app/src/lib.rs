@@ -648,11 +648,6 @@ impl Workspace {
             WorkspaceEvent::ClipboardShared { worker, share } => {
                 ws.keep_clipboard_shared(*worker, *share, cx);
             }
-            WorkspaceEvent::ProjectNews => {
-                for news in ws.view.update(cx, |view, _cx| view.take_project_news()) {
-                    ws.attention.project_news(&news);
-                }
-            }
             WorkspaceEvent::TapsSettled => ws.answers_out(cx),
         });
         // The key bar follows the focused tile: the app's own build is drawn again only when

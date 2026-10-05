@@ -16,7 +16,7 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::Review;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Checks, ChecksState, Fact, Merge, Moment, Native, NativeChange, NativeCounts, Natives, Project,
+    Checks, ChecksState, Fact, Merge, Native, NativeChange, NativeCounts, Natives, Project,
     ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId,
     TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
 };
@@ -946,39 +946,6 @@ impl Board {
         let entry = self.timeline.back().map_or(WallMs::ZERO, |e| e.at_ms);
         task.max(entry).max(self.project.created_ms)
     }
-}
-
-/// What `entry` says to the person when it lands, as a toast or a note.
-///
-/// That is a failure that holds a task up. `None` for the rest, which the board says where it
-/// shows.
-#[must_use]
-pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
-    let task = entry.task.map(|t| {
-        let title = board.tasks.get(&t).map_or("", |c| c.title.trim());
-        if title.is_empty() { format!("#{t}") } else { format!("#{t} {title}") }
-    });
-    let of = |words: String| match &task {
-        Some(task) => format!("{task}: {words}"),
-        None => words,
-    };
-    let first = |text: &str| crate::kit::first_line(text).trim().to_owned();
-    Some(match &entry.what {
-        Moment::Checks(checks) if checks.state == ChecksState::Failing => {
-            of(format!("its pull request's checks fail ({})", checks.failing.join(", ")))
-        }
-        Moment::Verified(run) if !run.passed => of("its verifier failed".to_owned()),
-        Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {
-            StepKind::Rebase => {
-                of(format!("its work does not rebase onto {}", board.project.target))
-            }
-            StepKind::Clone => of(format!("the clone it needs failed: {}", first(why))),
-            StepKind::Home => of(format!("its branch did not come home: {}", first(why))),
-            StepKind::Verify => of(format!("its verifier did not run: {}", first(why))),
-            StepKind::Merge => of(format!("its merge stopped: {}", first(why))),
-        },
-        _ => return None,
-    })
 }
 
 /// A step the server takes for a task, in words: what, where, and how it went.
