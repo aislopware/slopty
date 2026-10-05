@@ -43,6 +43,73 @@ fn a_remote_window_waits_blank_then_says_what_is_opening(cx: &mut TestAppContext
     assert!(said, "past the grace it says what opens where");
 }
 
+/// A remote window that did not open ends its wait in its own pane: the opening words go, the
+/// pane says what is so and why, the header turns nothing, and no notice repeats it far away.
+/// "Choose another window" asks the worker for its windows, and the one picked takes the
+/// failed pane's place.
+#[gpui::test]
+fn a_window_that_did_not_open_says_so_in_its_pane_and_gives_way_to_another(
+    cx: &mut TestAppContext,
+) {
+    use slopty_proto::screen::{CaptureTarget, OpenAsk, ScreenEvent, ScreenFailure, ScreenRequest};
+
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    let asked = fake.drain().into_iter().any(|m| {
+        matches!(m, ClientMsg::Screen(ScreenRequest::Open { target: CaptureTarget::Window(w), .. }) if w == window)
+    });
+    assert!(asked, "its stream was asked for");
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        let asked = OpenAsk::Target(CaptureTarget::Window(window));
+        v.screen_event(key, ScreenEvent::OpenFailed { asked, why: ScreenFailure::Gone }, cx);
+    });
+    cx.executor().advance_clock(LOADING_GRACE);
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds(selector("waiting", tile.item)).is_none(), "no longer opening");
+    let failed = bounds(cx, selector("failed", tile.item));
+    let body = bounds(cx, selector("item", tile.item));
+    near(f32::from(failed.center().x), f32::from(body.center().x));
+    let said = tree(cx).into_iter().any(|n| {
+        n.role == "Status"
+            && n.label.as_deref()
+                == Some("Window is no longer available. Window 7 is not open on studio any more.")
+    });
+    assert!(said, "what is so, and why");
+    let status = view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)));
+    assert_eq!(status, None, "the header waits on nothing");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "said once, in the pane");
+    assert!(
+        !fake.drain().iter().any(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Open { .. }))),
+        "not asked again on this link"
+    );
+
+    let at = bounds(cx, "choose-another").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let listed =
+        fake.drain().into_iter().any(|m| matches!(m, ClientMsg::Screen(ScreenRequest::List)));
+    assert!(listed, "the worker is asked for its windows");
+    view.update_in(cx, |v, _w, cx| v.pick_window(slopty_core::WindowId(9), "Notes".to_owned(), cx));
+    cx.run_until_parked();
+    let ops: Vec<ItemOp> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(op) => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ops.iter().any(|op| matches!(op, ItemOp::Add(i) if i.kind == ItemKind::Window { window: slopty_core::WindowId(9) })),
+        "{ops:?}"
+    );
+    assert!(ops.contains(&ItemOp::Remove(tile.item)), "the failed pane gives way: {ops:?}");
+}
+
 /// A file with an unsaved edit carries its dot right after its title's text, a half unit on,
 /// before the directory the file is in, and not at the far end of the header.
 #[gpui::test]

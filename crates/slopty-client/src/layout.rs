@@ -43,6 +43,11 @@ const OPEN_FOR: Duration = Duration::from_millis(150);
 const CLOSE_FOR: Duration = Duration::from_millis(150);
 /// Size changes no larger than this land at once rather than animate.
 const RESIZE_THRESHOLD: f32 = 10.0;
+/// The share of the working width a column holding wide work takes ([`Layout::suit`]).
+pub const WIDE_SHARE: f32 = 2.0 / 3.0;
+/// The least a column holding wide work is, in points, where the working width has it: a board
+/// shows two lanes and its header in it, and a review a diff with room beside its gutter.
+pub const WIDE_LEAST: f32 = 720.0;
 /// Gap between workspaces as a share of the viewport height.
 const WORKSPACE_GAP: f32 = 0.1;
 /// The overview's zoom, niri's, while every workspace fits the window at it.
@@ -1455,6 +1460,38 @@ impl Workspace {
         self.animate_view_to_column(ctx, None, self.active);
     }
 
+    /// Column `column` at the width its work asks for ([`Layout::suit`]), unless the person
+    /// chose its width: a preset, a drag, a reset, focus mode, fullscreen.
+    fn suit(&mut self, ctx: &Ctx, column: usize, wide: bool) {
+        let g = self.geom(&ctx.g);
+        let Some(col) = self.columns.get_mut(column) else { return };
+        let chosen = col.preset.is_some()
+            || col.full_width
+            || col.fullscreen
+            || matches!(col.width, ColumnWidth::Fixed(_));
+        if chosen {
+            return;
+        }
+        let width = if wide {
+            let least = (WIDE_LEAST / g.working_w()).min(1.0);
+            ColumnWidth::Proportion(WIDE_SHARE.max(least))
+        } else {
+            ctx.new_width
+        };
+        if col.width == width {
+            return;
+        }
+        let old = col.resolved_width(&g);
+        col.width = width;
+        let new = col.resolved_width(&g);
+        self.resize = None;
+        // The camera holds still over the focused column, as a resize of another one does.
+        if column < self.active {
+            self.view.offset(-(new - old));
+        }
+        self.animate_view_to_column(ctx, None, self.active);
+    }
+
     fn toggle_full_width(&mut self, ctx: &Ctx) {
         let Some(col) = self.columns.get_mut(self.active) else { return };
         col.full_width = !col.full_width;
@@ -2544,6 +2581,23 @@ impl Layout {
     /// The next (or previous) preset width for the active column.
     pub fn switch_preset_width(&mut self, forward: bool) {
         self.in_active(|ws, ctx| ws.toggle_width(ctx, forward));
+    }
+
+    /// `tile`'s column at the width its work reads best at: `wide` for a board or a review,
+    /// whose lanes and diff need room, two thirds of the working width and at least
+    /// [`WIDE_LEAST`] points where the strip has them; else the width a column opens at. A
+    /// width the person chose (a preset, a drag, a reset, focus mode) is theirs and stays, and
+    /// a phone's columns are its full width anyway.
+    pub fn suit(&mut self, tile: TileRef, wide: bool) {
+        if self.is_phone() {
+            return;
+        }
+        let Some(pos) = self.position(tile) else { return };
+        let ctx = self.ctx();
+        let Some(ws) = self.workspaces.get_mut(pos.workspace) else { return };
+        let before = ws.view_rects(&ctx);
+        ws.suit(&ctx, pos.column, wide);
+        ws.flip(&ctx, &before);
     }
 
     /// Maximise the active column to the working width, or back.

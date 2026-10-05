@@ -17,10 +17,7 @@ Group │ Safari
 Heading │ window Safari
 Button │ Fullscreen tile
 Button │ Close tile
-Status │ Opening Safari on e2e-worker…
+Status │ Window is no longer available. Safari is not open on e2e-worker any more.
+Button │ Choose another window
 Group │ Status
 Status │ e2e-worker
-Status │ Safari did not open. It is not there any more.
-Image │ Failed
-Button │ Copy
-Button │ Dismiss

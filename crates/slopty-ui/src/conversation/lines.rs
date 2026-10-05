@@ -74,7 +74,8 @@ impl Ink<'_> {
         }
     }
 
-    /// A line number in the gutter, right-aligned in the gutter's width.
+    /// A line number in the gutter, right-aligned in the gutter's width, at the chrome's small
+    /// size whatever size the code beside it is.
     #[must_use]
     pub fn number(&self, n: Option<u32>) -> Div {
         let s = self.theme.surfaces;
@@ -86,6 +87,7 @@ impl Ink<'_> {
             .w(self.z(width))
             .flex()
             .justify_end()
+            .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .children(n.map(|n| SharedString::from(n.to_string())))
     }

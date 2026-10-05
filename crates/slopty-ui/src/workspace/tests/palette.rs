@@ -599,7 +599,7 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
     };
     let has = |labels: &[String], label: &str| labels.iter().any(|l| l == label);
     let always = ["New terminal", "New note", "Overview", "Search in files"];
-    let of_a_tile = ["Close tile", "Name this tile", "Maximize column", "Move column left"];
+    let of_a_tile = ["Close tile", "Name this tile", "Focus mode", "Move column left"];
     let elsewhere = [
         "Page back",
         "Reload page",

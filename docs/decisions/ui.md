@@ -6809,9 +6809,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     never flashes and nothing jumps; `at_once` skips the wait where the bar is the thing
     looked at. Under Reduce Motion a share lands at once and `Busy` stands at
     `alpha::STRONG`. It is a `ProgressIndicator` with its value ("42%") and its name.
-  - **`Segments`** is the board's: one capsule per part (merged, live, up next), each with its
-    own round ends and proportional to its share of the room the gaps leave, the rest the
-    track. It holds still.
+  - **`Segments`**, a capsule per part, was the board's until it showed the merged share
+    alone as a `Bar`; deleted 2026-10-05.
   - **`ring`** is the same in a round slot: an arc with round caps on a `border` track. The
     composer's context, an attachment's upload and the upload pill in a tile header use it.
   - **Where each went.** The terminal draws nothing for a report: `TerminalView::progress`
@@ -6819,7 +6818,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     48 pt bar with its figure beside the title (`report-{session}`). The upload line under a
     tile's header became the pill's ring and figure. A navigator row says the figure, then a
     still 24 pt bar after it. A picture's upload, a goal's budget and a worker's install use
-    `Bar`. The project board takes `Segments` (lane D's `project/view.rs`).
+    `Bar`, and so does the project board, for its merged share.
   - Deleted: the terminal's sweep and its edge line, `tile::PROGRESS`, the navigator's
     `progress_line`, `add_worker`'s `SWEEP` and `SEGMENT`, the composer's own ring.
   - Lint: `kit::tests::a_progress_is_kit_progress` rejects a hand-drawn fraction width beside a
@@ -6827,7 +6826,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_progress_check_knows_a_bar_from_a_column`. The status bar's transfers and the board
     are waived until they move.
   - Tests: `kit::progress::tests::{a_share_is_its_figure_in_its_state_s_tone,
-    a_part_of_nothing_is_left_out_and_parts_never_pass_the_whole, an_unknown_share_breathes}`,
+    an_unknown_share_breathes}`,
     `terminal::progress::tests::a_report_shows_as_the_kits_progress`,
     `terminal::view::tests::a_progress_report_is_told_not_drawn_on_the_edge`,
     `add_worker::tests::a_busy_bar_breathes_on_the_spin_clock_unless_motion_is_reduced`,
@@ -6986,3 +6985,77 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `settings_editor::tests::a_chord_is_recorded_into_the_file`,
     `conversation::thread::view::tools::tests::a_tool_id_reads_as_words`,
     `conversation::thread::view::composer::tests::the_add_menu_begins_a_command_or_a_mention`.
+
+- ✅ **Type roles, and focus apart from the accent and success** (2026-10-05,
+  `.research/design-critique-astra-2026-10-05.md` §4 and finding 08). Earlier rulings that put
+  the focus ring in the accent are superseded by this one.
+  - **Type roles.** `slopty_theme::TypeRoles` (`Theme::roles`) names what a piece of text is,
+    each role with its size, line and weight. With a pointer they are caption 11/16, metadata
+    12/18, chrome 13/19, action 13/19 at 500, task title 14/20 at 500, section 13/18 at 600,
+    panel title 16/22 at 600, prose 15/24, page heading 22/28 at 600 and first run 26/32 at
+    600. On touch every role steps up (chrome 17/22, task title 17/22, panel title 20/25), so a
+    label has the presence its 44 pt row gives it. Each role follows the chrome size setting,
+    and prose follows its own. `kit::typed` sets a role. The request card (its question, what
+    it asks, the standing grants) and the Keyboard rows use them first; other surfaces move to
+    them as they are next touched.
+  - **Focus is neutral.** `Surfaces::focus` is the chrome's text, the ring every keyboard stop
+    wears at `alpha::STRONG`. It clears 3:1 on every ground on every background and at either
+    contrast. Green now means live and done only, never "this has the keyboard".
+  - **Success has its own seed** in the tone tables, apart from the accent's. Both are the
+    brand's green for now, so a done state and a live mark can part without touching every
+    use.
+  - Tests: `slopty_theme::tests::{the_focus_ring_is_neutral_and_seen_everywhere,
+    success_is_its_own_token, the_type_roles_are_the_scale_the_critique_set}`,
+    `a11y::tests::the_keyboard_rings_a_stop_and_the_pointer_does_not`,
+    `workspace::tests::bars::the_keyboard_reaches_a_machines_menu`.
+
+- ✅ **No focus plate: the focused pane is found without one** (2026-10-05,
+  `.research/design-critique-astra-2026-10-05.md` finding 10 and I6). The critique asked for a
+  restrained plate round the focused title in case two panes that are not terminals left focus
+  unfindable. Judged on the composed scenes `review-agent.png` (a thread beside a review) and
+  `project-lanes.png` (a shell beside the orchestrator's board), focus is found at a glance by
+  three cues that agree:
+  - the focused title in `text` at the medium weight, the others in `text_muted` at the
+    regular weight (`tile::title_ink`);
+  - the focused header alone shows its controls at rest (`tile.rs`, `focused && quiet`);
+  - the navigator's plate sits under the focused tile's row.
+  A plate would be a fourth signal, and chrome the person has to look past on every pane, so
+  there is none. Reopen this if a scene comes up where the focused header holds readouts (its
+  controls then hide) and the navigator is closed, so that tone and weight are the only cues.
+
+- ✅ **The review gives the change the tile; a failed remote open ends its wait in its pane**
+  (2026-10-05, `.research/design-critique-astra-2026-10-05.md` findings 04 and 23).
+  - *Review chrome steps back.* The switch, refresh, the agent's review and the git part share
+    one toolbar at the header's height (`density.header`, 40 pt). Its title stays in the tile's
+    own header, so the toolbar does not repeat it. A file's head holds its keep and put back.
+    A hunk holds its own only in a file of more than one hunk: in a file of one, the same choice
+    twice was noise. A hunk's buttons keep their place while hidden, so revealing them moves
+    nothing. They show while the pointer is on the hunk's head or lines, show for the one that
+    has the keyboard (a stop at no opacity until it is focused), and always show on a touch
+    screen, which has no hover.
+  - *Findings fold.* The band of the agent's findings with no line on show is measured before
+    it is drawn: its words in lines of the band's width at the foot's letter estimate. When it
+    would take more than a quarter of the diff's room (`FINDINGS_SHARE`; the room is the body
+    under the toolbar and over the foot, less the band), it folds to one row at the row height.
+    That row has the agent's mark, what came (in the error's tone if the review was turned
+    down), a disclosure that opens the findings and folds them again, and the ✕. The estimate
+    was chosen over measuring the drawn band, which settles a frame late and would flash the
+    findings open first. The tile now learns its body's height with its width
+    (`ReviewView::set_layout`).
+  - *Code reads at the code's size.* Diff lines are at the terminal's `mono_size` (13 by
+    default) on a 1.5 line, 13/19.5. Line numbers stay at the chrome's small size
+    (`lines::Ink::number` sets it, so they keep 12 pt beside any code size), and the gutters
+    keep their 8 pt gap.
+  - *A failed open is an end, not a wait.* A window or display the worker could not open
+    replaces "Opening Safari" in its pane with the error's mark (CircleAlert, large icon size,
+    error tone), what is so as a task title ("Window is no longer available"), why in the
+    chrome's words ("Safari is not open on studio any more."), and "Choose another window" as a
+    secondary button at the control height (44 pt on touch). Other failures say "… did not
+    open" with the failure's own words. The header's slot no longer turns. The status bar no
+    longer repeats it: a target's failure is said once, where it waited. A display made for
+    this device still says it in a notice, as no pane waits for it. The button opens the
+    picker on that machine, and the window picked takes the failed pane's place.
+  - Tests: `review::tests::{a_hunks_keep_shows_with_the_pointer_and_never_twice,
+    many_findings_fold_to_one_line_that_opens_them}`,
+    `workspace::tests::bodies::a_window_that_did_not_open_says_so_in_its_pane_and_gives_way_to_another`.
+    Goldens to retake: `review-agent*`, `remote-window`.

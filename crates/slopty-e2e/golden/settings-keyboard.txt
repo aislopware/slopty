@@ -97,6 +97,8 @@ ListItem │ Into the column on the left │ ⌘[
 Button │ Keys for Into the column on the left │ ⌘[
 ListItem │ Into the column on the right │ ⌘]
 Button │ Keys for Into the column on the right │ ⌘]
+ListItem │ Focus mode │ ⇧⌘↩
+Button │ Keys for Focus mode │ ⇧⌘↩
 ListItem │ Larger text │ ⌘=, ⇧⌘=
 Button │ Keys for Larger text │ ⌘=, ⇧⌘=
 ListItem │ Smaller text │ ⌘-
@@ -160,8 +162,6 @@ ListItem │ Workspace below │ ⌥⌘⇟
 Button │ Keys for Workspace below │ ⌥⌘⇟
 ListItem │ Next column width │ ⌘R
 Button │ Keys for Next column width │ ⌘R
-ListItem │ Maximize column │ ⇧⌘↩
-Button │ Keys for Maximize column │ ⇧⌘↩
 ListItem │ Fullscreen tile │ ⌃⌘F
 Button │ Keys for Fullscreen tile │ ⌃⌘F
 ListItem │ Center column │ ⌥⌘C
@@ -385,8 +385,8 @@ ListItem │ Stop the task's agent
 Button │ Keys for Stop the task's agent
 ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
-ListItem │ Tell the orchestrator… │ C
-Button │ Keys for Tell the orchestrator… │ C
+ListItem │ Message the orchestrator… │ C
+Button │ Keys for Message the orchestrator… │ C
 ListItem │ Run the task on… │ O
 Button │ Keys for Run the task on… │ O
 ListItem │ Push after each merge

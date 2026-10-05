@@ -215,6 +215,32 @@ impl WorkspaceView {
         self.projects.views.get(&board.project.id)
     }
 
+    /// Tell the layout which tiles hold wide work, as it changes: a board on show, a review, a
+    /// folder's changes. Their columns open out to two thirds of the strip, at least 720 pt
+    /// where it has them, and go back when the work leaves; a width the person chose stays
+    /// (`Layout::suit`).
+    pub(super) fn suit_wide_work(&mut self) {
+        let wide: HashSet<TileRef> = self
+            .layout
+            .tiles()
+            .filter(|t| match self.item(*t).map(|i| &i.kind) {
+                Some(ItemKind::Terminal { session }) => self.board_shown(*session),
+                Some(ItemKind::Review { .. } | ItemKind::Changes { .. }) => true,
+                _ => false,
+            })
+            .collect();
+        if wide == self.wide {
+            return;
+        }
+        for tile in wide.difference(&self.wide) {
+            self.layout.suit(*tile, true);
+        }
+        for tile in self.wide.difference(&wide) {
+            self.layout.suit(*tile, false);
+        }
+        self.wide = wide;
+    }
+
     /// Turn `session`'s tile to its project's board, or back to its terminal.
     pub fn show_board(&mut self, session: SessionId, board: bool, cx: &mut Context<Self>) {
         let Some(project) =

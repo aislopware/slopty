@@ -601,6 +601,15 @@ enum Field {
     Project,
 }
 
+/// What focus mode holds while it is on.
+#[derive(Clone, Copy)]
+struct FocusHold {
+    /// The tile whose column took the working width.
+    tile: TileRef,
+    /// The docked navigator was shown when it began.
+    navigator: bool,
+}
+
 /// The field open in a tile's header: its name, or a page's address.
 struct Rename {
     tile: TileRef,
@@ -841,6 +850,12 @@ pub struct WorkspaceView {
     park_pending: bool,
     /// A terminal to focus on the next frame.
     pending_focus: Option<SessionId>,
+    /// The tiles whose work reads wide (a board on show, a review), as the layout was last
+    /// told ([`Self::suit_wide_work`]).
+    wide: HashSet<TileRef>,
+    /// Focus mode, while it is on: the tile given the width, and whether the docked navigator
+    /// was shown before it, to put it back on the way out.
+    focus_mode: Option<FocusHold>,
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
     /// The server's projects and their boards.
@@ -1067,6 +1082,8 @@ impl WorkspaceView {
             width_inset: 0.0,
             park_pending: false,
             pending_focus: None,
+            wide: HashSet::new(),
+            focus_mode: None,
             faces: faces::Faces::default(),
             projects: projects::ProjectsState {
                 looked: saved
@@ -1837,6 +1854,8 @@ impl gpui::Render for WorkspaceView {
         self.settle_going(cx);
         self.settle_review_writers(cx);
         self.sync_projects(window, cx);
+        self.suit_wide_work();
+        self.keep_focus_mode(cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);
         // One clock for everything this frame draws: the bar's column marks and the strip,

@@ -350,7 +350,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "consume_or_expel_left", ws::ConsumeOrExpelLeft, &["cmd-["], W),
         c(Workspace, "consume_or_expel_right", ws::ConsumeOrExpelRight, &["cmd-]"], W),
         c(Workspace, "cycle_width", ws::CycleWidth, &["cmd-r"], W),
-        c(Workspace, "maximize_column", ws::MaximizeColumn, &["cmd-shift-enter"], W),
+        c(Workspace, "focus_mode", ws::FocusMode, &["cmd-shift-enter"], W),
         c(Workspace, "fullscreen_tile", ws::FullscreenTile, &["ctrl-cmd-f"], W),
         c(Workspace, "center_column", ws::CenterColumn, &["cmd-alt-c"], W),
         c(Workspace, "toggle_tabbed", ws::ToggleTabbed, &["cmd-alt-t"], W),

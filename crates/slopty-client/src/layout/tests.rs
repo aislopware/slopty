@@ -595,6 +595,42 @@ fn consume_into_and_expel_from_the_focused_column() {
 
 // ----- widths -------------------------------------------------------------------------------
 
+/// Wide work (a board, a review) takes two thirds of the working width, and at least 720 pt
+/// where the strip has them; usual work goes back to the width a column opens at. A width the
+/// person chose (a preset, a drag) stays theirs, and a phone's columns stay its full width.
+#[test]
+fn wide_work_takes_two_thirds_and_at_least_720_unless_the_person_sized_it() {
+    let mut l = columns(2);
+    l.suit(t(2), true);
+    near(stored_width_of(&l, t(2)), TWO_THIRDS);
+    l.suit(t(2), false);
+    near(stored_width_of(&l, t(2)), HALF);
+
+    l.set_viewport(1000.0, 800.0);
+    l.suit(t(2), true);
+    near(stored_width_of(&l, t(2)), WIDE_LEAST);
+    l.set_viewport(700.0, 800.0);
+    l.suit(t(1), true);
+    near(stored_width_of(&l, t(1)), 700.0);
+
+    let mut l = columns(2);
+    l.switch_preset_width(true);
+    let chosen = stored_width_of(&l, t(2));
+    l.suit(t(2), true);
+    near(stored_width_of(&l, t(2)), chosen);
+    let mut l = columns(2);
+    drag(&mut l, -100.0);
+    let dragged = stored_width_of(&l, t(1));
+    l.suit(t(1), true);
+    near(stored_width_of(&l, t(1)), dragged);
+
+    let mut l = columns(2);
+    l.set_viewport(COMPACT_WORKING, 800.0);
+    l.suit(t(2), true);
+    l.set_viewport(1280.0, 800.0);
+    near(stored_width_of(&l, t(2)), HALF);
+}
+
 #[test]
 fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
     let mut l = columns(1);

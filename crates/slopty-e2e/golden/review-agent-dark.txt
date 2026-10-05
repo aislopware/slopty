@@ -66,8 +66,8 @@ Status │ Claude Code raised 2 findings
 Button │ Dismiss
 ListItem │ The README still says refresh never retries. README.md:12
 Button │ Let the finding go
-Button │ Revert
-Button │ Keep
+List │ Files
+ListItem │ src/refresh.rs
 Button │ Revert
 Button │ Keep
 Button │ Remove comment

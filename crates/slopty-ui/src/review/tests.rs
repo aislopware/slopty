@@ -22,6 +22,9 @@ use crate::conversation::thread::{HubEvent, ThreadHub, fixtures};
 
 type Sent = Rc<RefCell<Vec<ClientMsg>>>;
 
+/// The tile's height in every test, in points.
+const HEIGHT: f32 = 700.0;
+
 fn file(path: &str, lines: &[&str], added: u32, removed: u32) -> FileDiff {
     FileDiff {
         path: path.to_owned(),
@@ -45,15 +48,25 @@ fn file(path: &str, lines: &[&str], added: u32, removed: u32) -> FileDiff {
     }
 }
 
-/// The recorded review: a source file, a lock and a test.
+/// The recorded review: a source file of two hunks, a lock and a test.
 fn review() -> Review {
+    let mut lib = file("src/lib.rs", &[" fn main() {", "-    old();", "+    new();", " }"], 1, 1);
+    lib.patch.hunks.push(Hunk {
+        old_start: 40,
+        old_lines: 1,
+        new_start: 40,
+        new_lines: 2,
+        heading: Some("fn tail() {".to_owned()),
+        lines: vec!["     done();".to_owned(), "+    log();".to_owned()],
+    });
+    lib.patch.added = 2;
     Review {
         scope: ReviewScope::Turn(TurnId(1)),
         from: None,
         to: None,
         files: vec![
             file("Cargo.lock", &[" a", "-b", "+c"], 1, 1),
-            file("src/lib.rs", &[" fn main() {", "-    old();", "+    new();", " }"], 1, 1),
+            lib,
             file("tests/e2e.rs", &["+fn t() {}"], 1, 0),
         ],
         absent: None,
@@ -86,10 +99,10 @@ fn tile(
     let held = hub.clone();
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = ReviewView::new(held, thread, Theme::default(), window, cx);
-        view.set_layout(1.0, width, cx);
+        view.set_layout(1.0, width, HEIGHT, cx);
         view
     });
-    cx.simulate_resize(size(px(width), px(700.0)));
+    cx.simulate_resize(size(px(width), px(HEIGHT)));
     let snapshot =
         ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 0 }, state: Box::new(state) };
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot, cx));
@@ -186,6 +199,24 @@ fn keeping_a_hunk_sends_its_pick_and_says_so_at_once(cx: &mut TestAppContext) {
         })]
     );
     assert!(cx.debug_bounds("review-keep-hunk-1-0").is_none(), "Keeping, in its place");
+}
+
+/// A file of one hunk keeps and puts back from its head alone. In a file of more, a hunk's
+/// own keep and put back show while the pointer is on its lines, and only that hunk's.
+#[gpui::test]
+fn a_hunks_keep_shows_with_the_pointer_and_never_twice(cx: &mut TestAppContext) {
+    let (view, _hub, _sent, cx) = tile(cx, 800.0);
+    assert!(cx.debug_bounds("review-keep-file-0").is_some(), "the lock's head keeps it");
+    assert!(cx.debug_bounds("review-keep-hunk-0-0").is_none(), "and nothing else does");
+    assert!(cx.debug_bounds("review-keep-hunk-1-0").is_some(), "in its place while hidden");
+    let shown = |cx: &mut VisualTestContext, hunk| view.read_with(cx, |v, _| v.hunk_shown(1, hunk));
+    assert!(!shown(cx, 0) && !shown(cx, 1), "out of the way of the code");
+
+    let on = cx.debug_bounds("review-line-1-0-1").expect("the hunk's line").center();
+    cx.simulate_mouse_move(on, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(shown(cx, 0), "the pointer on its line shows them");
+    assert!(!shown(cx, 1), "only that hunk's");
 }
 
 /// A click on a line opens a comment there; Return keeps it; the foot sends every comment as
@@ -500,6 +531,33 @@ fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppCon
     );
     answer_send(&hub, &sent, Outcome::Accepted, cx);
     assert!(cx.debug_bounds("review-findings").is_none(), "nothing waits after");
+}
+
+/// Findings that would take more than a quarter of the diff's room fold to one line that says
+/// what came; it opens them and folds them again, and the code keeps the tile meanwhile.
+#[gpui::test]
+fn many_findings_fold_to_one_line_that_opens_them(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = door_tile(cx);
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
+    click(cx, "review-by-agent");
+    let found: Vec<String> = (1..=6)
+        .map(|n| {
+            format!(
+                "- [P2] Say it in the guide, part {n} \u{2014} /w/docs/guide-{n}.md:3-3\n  The old \
+                 name is still there, and the example under it calls the call that went away."
+            )
+        })
+        .collect();
+    answered(&hub, cx, thread, &found.join("\n"));
+    assert!(cx.debug_bounds("review-findings-toggle").is_some(), "folded to its line");
+    assert!(cx.debug_bounds("review-note-0").is_none(), "the findings wait under it");
+    let heard = said(cx);
+    assert!(heard.iter().any(|l| l == "Claude Code raised 6 findings"), "{heard:?}");
+
+    click(cx, "review-findings-toggle");
+    assert!(cx.debug_bounds("review-note-5").is_some(), "open on demand");
+    click(cx, "review-findings-toggle");
+    assert!(cx.debug_bounds("review-note-0").is_none(), "and folded again");
 }
 
 /// A finding the person lets go is gone from what is sent; a review that raised nothing says

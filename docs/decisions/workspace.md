@@ -1580,3 +1580,25 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `workspace::tests::review_tile::a_folders_changes_open_as_a_tile_with_no_thread`; goldens
     `client_git_changes_head`, `client_git_changes_base`, `worker_git_changes`,
     `worker_git_changes_absent` and `worker_item_changes` (all new; no golden changed).
+
+- ✅ **Wide work opens wide, and one focus mode gives it the window** (2026-10-05, design
+  critique #01). A board or a review opened in a third of the strip read as cramped lanes and a
+  wrapped diff, and the person spent the first moments of every review resizing panes.
+  - *Wide work.* A tile showing a project's board, a review or a folder's changes asks the
+    layout for room (`Layout::suit`): its column takes two thirds of the working width, and at
+    least 720 pt where the strip has them (`WIDE_SHARE`, `WIDE_LEAST`). When the work leaves the
+    tile (the board turns back to its terminal) the column goes back to the width a column opens
+    at. The ask is made on the change only, so it never fights the person. A width the person
+    chose is theirs and stays: a preset, a drag, a reset, focus mode or fullscreen all mark it.
+    A neighbouring terminal stays one column away and the strip scrolls to it. A phone's columns
+    are its width already.
+  - *Focus mode.* "Maximize column" became "Focus mode" (⇧⌘↩, the Layout menu, the palette). On,
+    the focused column takes the working width and a docked navigator steps aside, so the work
+    has the whole window. Off, both come back as they were: the column's own width rule was
+    never replaced, only overridden. If the column stops taking the full width some other way
+    (a preset, fullscreen and back, the tile closing), the navigator comes back too. A navigator
+    the person had already put away stays away. An overlaid navigator takes no width, so it is
+    left alone. One reversible action was chosen over a second "maximise" beside fullscreen,
+    which would have left the person two ways to almost do the same thing.
+  - Tests: `slopty-client` `layout::tests::wide_work_takes_two_thirds_and_at_least_720_unless_the_person_sized_it`,
+    `workspace::tests::niri_keys::focus_mode_gives_the_work_the_width_and_puts_everything_back`.

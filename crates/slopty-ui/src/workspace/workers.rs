@@ -1237,8 +1237,8 @@ impl WorkspaceView {
     }
 
     /// An open the worker refused: the tile waiting on it stops asking until the next link,
-    /// and the person hears why. A display made for this device
-    /// that could not be made goes back to the physical one, as a closed one does.
+    /// and says why in its pane. A display made for this device that could not be made goes
+    /// back to the physical one, as a closed one does, and a notice says why.
     fn screen_refused(
         &mut self,
         key: WorkerKey,
@@ -1256,15 +1256,17 @@ impl WorkspaceView {
             return;
         };
         tracing::info!(%id, ?asked, ?why, "screen open refused");
-        let text = crate::screen::failure_text(&why, &w.name);
+        self.items_dirty = true;
+        // A tile that asked for a target says why in its own pane, where it waited.
         if matches!(asked, OpenAsk::Target(_)) {
             w.failed_opens.insert(id, why);
+            return;
         }
+        let text = crate::screen::failure_text(&why, &w.name);
         let item = w.doc.get(id).cloned();
         let title = item
             .map_or_else(String::new, |i| i.name.clone().unwrap_or_else(|| self.derived_title(&i)));
         self.show_failure(format!("{title} did not open. {text}"), cx);
-        self.items_dirty = true;
     }
 
     /// The views of `key`'s items that show `stream` on its current link, each with its item:

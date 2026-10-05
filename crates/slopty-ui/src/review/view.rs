@@ -64,10 +64,14 @@ const LIST_FROM: f32 = 720.0;
 /// The file list's width, in points at zoom 1.
 const LIST_WIDTH: f32 = 240.0;
 
-/// The most the band of the agent's findings above the diff takes before it scrolls.
 mod authors;
 
+/// The most the band of the agent's findings above the diff takes before it scrolls.
 const FINDINGS_HEIGHT: f32 = 240.0;
+
+/// The share of the diff's room the findings may take drawn whole; past it they fold to one
+/// line that opens on demand.
+const FINDINGS_SHARE: f32 = 0.25;
 
 /// How far past the viewport the diff lays rows out.
 const OVERDRAW: f32 = 2048.0;
@@ -205,6 +209,8 @@ pub struct ReviewView {
     theme: Theme,
     zoom: f32,
     width: f32,
+    /// The tile's body at rest, under its header, in points.
+    height: f32,
     scope: Scope,
     /// The scope asked for, and over which turn: asked again when the thread moves to a new
     /// turn.
@@ -252,6 +258,10 @@ pub struct ReviewView {
     writers: HashMap<ThreadId, Writer>,
     /// The row under the pointer, by its file, hunk and place: who wrote it shows there.
     hovered: Option<(usize, usize, usize)>,
+    /// The hunk whose head is under the pointer, by its file and place.
+    hunk_hovered: Option<(usize, usize)>,
+    /// The person opened the agent's findings while they are folded to their summary.
+    findings_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -332,6 +342,7 @@ impl ReviewView {
             theme,
             zoom: 1.0,
             width: 0.0,
+            height: 0.0,
             scope: if folder { Scope::Uncommitted } else { Scope::default() },
             asked: None,
             model: Model::default(),
@@ -357,6 +368,8 @@ impl ReviewView {
             authors_asked: HashSet::new(),
             writers: HashMap::new(),
             hovered: None,
+            hunk_hovered: None,
+            findings_open: false,
             _subscriptions: vec![writing, hearing, watching],
         };
         if let Some(thread) = view.own() {
@@ -399,11 +412,13 @@ impl ReviewView {
         self.scope
     }
 
-    /// Draw at the chrome's zoom `zoom`, in a tile `width` points wide at rest.
-    pub fn set_layout(&mut self, zoom: f32, width: f32, cx: &mut Context<Self>) {
+    /// Draw at the chrome's zoom `zoom`, in a tile `width` points wide at rest whose body is
+    /// `height` points tall.
+    pub fn set_layout(&mut self, zoom: f32, width: f32, height: f32, cx: &mut Context<Self>) {
         let split = self.split();
         self.zoom = zoom;
         self.width = width;
+        self.height = height;
         if split != self.split() {
             self.rebuild();
         }
@@ -1127,6 +1142,12 @@ impl ReviewView {
         Ink { theme: &self.theme, zoom: self.zoom, digits }
     }
 
+    /// The code's size: the terminal's, so code reads as it does where it was written; the
+    /// numbers beside it stay at the chrome's small size.
+    const fn code_size(&self) -> f32 {
+        self.theme.typography.mono_size
+    }
+
     fn icon(&self, name: IconName, tone: slopty_theme::Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(self.z(self.theme.typography.icon()))
@@ -1159,7 +1180,7 @@ impl ReviewView {
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
         };
-        crate::a11y::tab_stop(el, s.accent)
+        crate::a11y::tab_stop(el, s.focus)
     }
 
     fn scope_bar(&self, cx: &Context<Self>) -> AnyElement {
@@ -1174,7 +1195,7 @@ impl ReviewView {
             .items_center()
             .gap(self.z(theme.spacing.xxs))
             .px(self.z(theme.spacing.md))
-            .min_h(self.z(kit::Row::One.height(theme)))
+            .min_h(self.z(theme.density.header))
             .border_b(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
@@ -1294,7 +1315,7 @@ impl ReviewView {
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .child(mark)
             .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
-        Some(crate::a11y::tab_stop(hinted(el, label), s.accent).into_any_element())
+        Some(crate::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
     }
 
     /// The one neutral agent glyph at the size of an icon: what an agent wrote or does, whichever
@@ -1309,15 +1330,157 @@ impl ReviewView {
     }
 
     /// Above the diff: how the agent's own review came out, and its findings that have no line
-    /// on show, each with the way to let it go.
+    /// on show, each with the way to let it go. Drawn whole they would take more than
+    /// [`FINDINGS_SHARE`] of the diff's room, they fold to one line that says what came, and
+    /// open on demand: the change under review keeps the tile.
     fn findings_band(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if self.came.is_none() && self.model.notes().is_empty() {
             return None;
         }
         let theme = &self.theme;
+        let folds = self.findings_fold();
+        let open = !folds || self.findings_open;
+        let head = if folds { Some(self.findings_summary(open, cx)) } else { self.came_row(cx) };
+        let notes =
+            self.model.notes().iter().enumerate().map(|(ix, note)| self.note_row(ix, note, cx));
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .px(self.z(theme.spacing.md))
+                .pt(self.z(theme.spacing.sm))
+                .child(
+                    kit::card(theme)
+                        .id("review-findings")
+                        .debug_selector(|| "review-findings".to_owned())
+                        .role(Role::List)
+                        .aria_label("The agent's review")
+                        .w_full()
+                        .max_h(self.z(FINDINGS_HEIGHT))
+                        .overflow_y_scroll()
+                        .text_size(self.z(theme.typography.small()))
+                        .line_height(gpui::relative(theme.typography.markdown_line_height))
+                        .children(head)
+                        .when(open, |el| el.children(notes)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the findings, drawn whole, would take more than [`FINDINGS_SHARE`] of the diff's
+    /// room: the body under the switch and over the foot, less what the band itself takes.
+    fn findings_fold(&self) -> bool {
+        let theme = &self.theme;
+        let room = self.height - theme.density.header - kit::Row::Two.height(theme);
+        let band = self.findings_height().min(FINDINGS_HEIGHT) + theme.spacing.sm;
+        band > FINDINGS_SHARE * (room - band)
+    }
+
+    /// About how tall the findings are drawn whole, in points at rest: each piece of their
+    /// words in lines of the band's width at [`FOOT_LETTER`] of the small size a letter.
+    fn findings_height(&self) -> f32 {
+        let theme = &self.theme;
+        let (sp, size) = (theme.spacing, theme.typography.small());
+        let line = size * theme.typography.markdown_line_height;
+        // The band's pads, a row's, the icon and the ✕ either side of the words, and their gaps.
+        let inset = (sp.md + sp.sm + theme.typography.icon() + sp.xs) * 2.0;
+        let per_line = ((self.width - inset) / (size * FOOT_LETTER)).max(1.0);
+        let lines = |words: &str| {
+            let letters = f32::from(u16::try_from(words.chars().count()).unwrap_or(u16::MAX));
+            (letters / per_line).ceil().max(1.0)
+        };
+        let row = |pieces: f32, lines: f32| {
+            (pieces - 1.0).max(0.0).mul_add(sp.xxs, lines.mul_add(line, sp.xs * 2.0))
+        };
+        let head = self.came.as_ref().map_or(0.0, |came| row(1.0, lines(&came.words)));
+        let notes: f32 = self
+            .model
+            .notes()
+            .iter()
+            .map(|note| {
+                let f = &note.finding;
+                let place = f.place.as_ref().map(findings::Place::words);
+                let pieces = [place.as_deref(), Some(f.title.as_str()), Some(f.body.as_str())];
+                let said: Vec<&str> =
+                    pieces.into_iter().flatten().filter(|w| !w.is_empty()).collect();
+                let count = f32::from(u8::try_from(said.len()).unwrap_or(u8::MAX));
+                row(count, said.iter().map(|w| lines(w)).sum())
+            })
+            .sum();
+        head + notes
+    }
+
+    /// The folded findings' one line: what came, in the error's tone when the review was turned
+    /// down, the way to open or fold them, and the way to let the word go.
+    fn findings_summary(&self, open: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let notes = self.model.notes().len();
+        let (words, tone) = match &self.came {
+            Some(came) if came.refused.is_some() => (came.words.clone(), s.error),
+            Some(came) => (came.words.clone(), s.text_secondary),
+            None if notes == 1 => ("1 finding not in the diff".to_owned(), s.text_secondary),
+            None => (format!("{notes} findings not in the diff"), s.text_secondary),
+        };
+        let toggle = div()
+            .id("review-findings-toggle")
+            .debug_selector(|| "review-findings-toggle".to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(words.clone()))
+            .aria_expanded(open)
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .cursor_pointer()
+            .child(self.agent_mark())
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(tone))
+                    .child(SharedString::from(words)),
+            )
+            .child(kit::Disclosure::new(
+                "review-findings-chevron",
+                open,
+                theme,
+                self.z(theme.typography.icon()),
+                hsla(s.text_muted),
+            ))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.findings_open = !this.findings_open;
+                cx.notify();
+            }));
+        div()
+            .debug_selector(|| "review-came".to_owned())
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.sm))
+            .min_h(self.z(theme.density.row))
+            .hover(move |el| el.bg(hsla(s.hover)))
+            .child(crate::a11y::tab_stop(toggle, s.focus))
+            .children(self.came.as_ref().map(|_| {
+                self.close(
+                    "review-came-close",
+                    "Dismiss",
+                    cx.listener(|this, _ev, _w, cx| this.dismiss_came(cx)),
+                )
+            }))
+            .into_any_element()
+    }
+
+    /// How the agent's review came out, in full, with the way to let the word go.
+    fn came_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
         let s = theme.surfaces;
         let agent = self.door_of(cx).map(|(agent, _)| agent);
-        let head = self.came.as_ref().map(|came| {
+        self.came.as_ref().map(|came| {
             let tone = if came.refused.is_some() { s.error } else { s.text_secondary };
             div()
                 .debug_selector(|| "review-came".to_owned())
@@ -1344,86 +1507,71 @@ impl ReviewView {
                     "Dismiss",
                     cx.listener(|this, _ev, _w, cx| this.dismiss_came(cx)),
                 ))
-        });
-        let notes = self.model.notes().iter().enumerate().map(|(ix, note)| {
-            let finding = &note.finding;
-            let id = format!("review-note-{ix}");
-            let selector = id.clone();
-            let label = format!(
-                "{}. {}",
-                finding.title,
-                finding.place.as_ref().map(findings::Place::words).unwrap_or_default()
-            );
-            div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::ListItem)
-                .aria_label(SharedString::from(label))
-                .w_full()
-                .flex()
-                .items_start()
-                .gap(self.z(theme.spacing.xs))
-                .px(self.z(theme.spacing.sm))
-                .py(self.z(theme.spacing.xs))
-                .border_t(kit::hair(theme))
-                .border_color(hsla(s.border_subtle))
-                .child(self.icon(IconName::MessageSquare, s.text_muted))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap(self.z(theme.spacing.xxs))
-                        .children(finding.place.as_ref().map(|place| {
-                            div()
-                                .font_family(self.mono())
-                                .text_color(hsla(s.text_muted))
-                                .child(SharedString::from(place.words()))
-                        }))
-                        .child(
+                .into_any_element()
+        })
+    }
+
+    /// A finding with no line on show: where it is, what it says, and the way to let it go.
+    fn note_row(&self, ix: usize, note: &Note, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let finding = &note.finding;
+        let id = format!("review-note-{ix}");
+        let selector = id.clone();
+        let label = format!(
+            "{}. {}",
+            finding.title,
+            finding.place.as_ref().map(findings::Place::words).unwrap_or_default()
+        );
+        div()
+            .id(ElementId::Name(id.into()))
+            .debug_selector(move || selector)
+            .role(Role::ListItem)
+            .aria_label(SharedString::from(label))
+            .w_full()
+            .flex()
+            .items_start()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.sm))
+            .py(self.z(theme.spacing.xs))
+            .border_t(kit::hair(theme))
+            .border_color(hsla(s.border_subtle))
+            .child(self.icon(IconName::MessageSquare, s.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(theme.spacing.xxs))
+                    .children(finding.place.as_ref().map(|place| {
+                        div()
+                            .font_family(self.mono())
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(place.words()))
+                    }))
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(finding.title.clone())),
+                    )
+                    .when(!finding.body.is_empty(), |el| {
+                        el.child(
                             div()
                                 .whitespace_normal()
-                                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                                .text_color(hsla(s.text))
-                                .child(SharedString::from(finding.title.clone())),
+                                .text_color(hsla(s.text_secondary))
+                                .child(SharedString::from(finding.body.clone())),
                         )
-                        .when(!finding.body.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .whitespace_normal()
-                                    .text_color(hsla(s.text_secondary))
-                                    .child(SharedString::from(finding.body.clone())),
-                            )
-                        }),
-                )
-                .child(self.close(
-                    format!("review-unnote-{ix}"),
-                    "Let the finding go",
-                    cx.listener(move |this, _ev, _w, cx| this.unnote(ix, cx)),
-                ))
-        });
-        Some(
-            div()
-                .flex_none()
-                .w_full()
-                .px(self.z(theme.spacing.md))
-                .pt(self.z(theme.spacing.sm))
-                .child(
-                    kit::card(theme)
-                        .id("review-findings")
-                        .debug_selector(|| "review-findings".to_owned())
-                        .role(Role::List)
-                        .aria_label("The agent's review")
-                        .w_full()
-                        .max_h(self.z(FINDINGS_HEIGHT))
-                        .overflow_y_scroll()
-                        .text_size(self.z(theme.typography.small()))
-                        .children(head)
-                        .children(notes),
-                )
-                .into_any_element(),
-        )
+                    }),
+            )
+            .child(self.close(
+                format!("review-unnote-{ix}"),
+                "Let the finding go",
+                cx.listener(move |this, _ev, _w, cx| this.unnote(ix, cx)),
+            ))
+            .into_any_element()
     }
 
     /// A quiet ✕ that lets something go.
@@ -1614,20 +1762,32 @@ impl ReviewView {
                 .text_color(hsla(s.error))
                 .child(SharedString::from(words))
         });
+        // A hunk's stay in their place while hidden, so showing them moves nothing, and the
+        // keyboard still reaches them: one with the focus shows itself.
+        let shown = refused.is_some() || hunk.is_none_or(|h| self.hunk_shown(at, h));
+        let ring = s.focus;
+        let quiet = |el: gpui::Stateful<Div>| {
+            if shown {
+                el
+            } else {
+                el.opacity(0.0)
+                    .focus_visible(move |st| st.outline_ring(crate::a11y::ring(ring)).opacity(1.0))
+            }
+        };
         div()
             .min_w_0()
             .flex()
             .items_center()
             .gap(self.z(self.theme.spacing.xxs))
             .children(refused)
-            .child(
+            .child(quiet(
                 self.action(format!("review-revert-{what}-{tag}"), "Revert", false)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.pick(at, hunk, false, cx))),
-            )
-            .child(
+            ))
+            .child(quiet(
                 self.action(format!("review-keep-{what}-{tag}"), "Keep", false)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.pick(at, hunk, true, cx))),
-            )
+            ))
             .into_any_element()
     }
 
@@ -1714,17 +1874,44 @@ impl ReviewView {
             .into_any_element()
     }
 
+    /// A hunk's head. In a file of more than one hunk it holds the hunk's own keep and put
+    /// back, shown while the pointer is on the hunk or the keyboard on them; on a touch screen
+    /// always. A file of one hunk has only its head's: the same choice twice is noise.
     fn hunk_head(&self, at: usize, hunk: usize, cx: &Context<Self>) -> AnyElement {
-        let Some(block) = self.blocks.get(&at).and_then(|b| b.get(hunk)) else {
-            return div().into_any_element();
-        };
+        let Some(blocks) = self.blocks.get(&at) else { return div().into_any_element() };
+        let Some(block) = blocks.get(hunk) else { return div().into_any_element() };
         let ink = self.ink(at);
-        ink.hunk_head(block)
-            .flex()
-            .items_center()
-            .child(div().flex_1())
-            .child(self.picks(at, Some(hunk), "hunk", cx))
+        let head = ink.hunk_head(block).flex().items_center();
+        if blocks.len() < 2 {
+            return head.into_any_element();
+        }
+        let id = format!("review-hunk-{at}-{hunk}");
+        let selector = id.clone();
+        div()
+            .id(ElementId::Name(id.into()))
+            .debug_selector(move || selector)
+            .w_full()
+            .child(head.child(div().flex_1()).child(self.picks(at, Some(hunk), "hunk", cx)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                let was = this.hunk_hovered;
+                if *hovered {
+                    this.hunk_hovered = Some((at, hunk));
+                } else if was == Some((at, hunk)) {
+                    this.hunk_hovered = None;
+                }
+                if was != this.hunk_hovered {
+                    cx.notify();
+                }
+            }))
             .into_any_element()
+    }
+
+    /// Whether hunk `hunk` of the file at `at` shows its keep and put back: the pointer is on
+    /// its head or its lines, or a finger has no hover to show them by.
+    pub(super) fn hunk_shown(&self, at: usize, hunk: usize) -> bool {
+        self.theme.density == slopty_theme::Density::TOUCH
+            || self.hunk_hovered == Some((at, hunk))
+            || self.hovered.is_some_and(|(a, h, _)| (a, h) == (at, hunk))
     }
 
     fn line_row(&self, at: usize, hunk: usize, ix: usize, cx: &Context<Self>) -> AnyElement {
@@ -1776,7 +1963,8 @@ impl ReviewView {
             .w_full()
             .cursor_pointer()
             .font_family(self.mono())
-            .text_size(self.z(self.theme.typography.small()))
+            .text_size(self.z(self.code_size()))
+            .line_height(self.z(self.code_size() * self.theme.typography.markdown_line_height))
             .child(lines)
             .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
             .children(tag)

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_kit::component::input::{InputEvent, InputState};
-use slopty_client::layout::{DropTarget, TileRef, WorkerKey};
+use slopty_client::layout::{Column, DropTarget, Navigator, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, WallMs};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
@@ -15,12 +15,13 @@ use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
     AddWindow, Applies, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight,
-    CycleWidth, FocusColumn, FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FocusWorkspace,
-    FocusWorkspaceDown, FocusWorkspaceUp, FontLarger, FontReset, FontSmaller, FullscreenTile,
-    MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveColumnToFirst, MoveColumnToLast, MoveDown,
+    CycleWidth, FocusColumn, FocusColumnLeft, FocusColumnRight, FocusDown, FocusMode, FocusUp,
+    FocusWorkspace, FocusWorkspaceDown, FocusWorkspaceUp, FontLarger, FontReset, FontSmaller,
+    FullscreenTile, MoveColumnLeft, MoveColumnRight, MoveColumnToFirst, MoveColumnToLast, MoveDown,
     MoveUp, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
     ToggleTabbed, UndoClose,
 };
+use super::navigator::Mode;
 use super::toast::ToastKind;
 use super::{
     CLOSED_KEPT, ClosedTile, Field, IDLE_SHELL_KEPT, KeyTarget, Rename, Reshell, UNDO_CLOSE,
@@ -247,8 +248,8 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &CycleWidth, _w, cx| {
             this.width_action(cx, |l| l.switch_preset_width(true));
         }))
-        .on_action(cx.listener(|this, _: &MaximizeColumn, _w, cx| {
-            this.width_action(cx, Layout::toggle_full_width);
+        .on_action(cx.listener(|this, _: &FocusMode, window, cx| {
+            this.toggle_focus_mode(window, cx);
         }))
         .on_action(cx.listener(|this, _: &FullscreenTile, _w, cx| {
             this.width_action(cx, Layout::toggle_fullscreen);
@@ -265,6 +266,64 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
             this.layout_action(cx, Layout::toggle_tabbed);
         }))
+    }
+
+    /// Focus mode on or off for the focused tile. On: its column takes the working width and a
+    /// docked navigator steps aside, so the work has all the room the window has. Off: the column
+    /// takes back the width it had and the navigator comes back if it was there. The person's
+    /// own width for the column is its width rule, which full width overrides and keeps.
+    fn toggle_focus_mode(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(tile) = self.layout.focused() else { return };
+        let entering = !self.is_full_width(tile);
+        self.width_action(cx, slopty_client::layout::Layout::toggle_full_width);
+        if entering {
+            let docked = self.navigator_mode(window) == Mode::Docked;
+            let navigator = match self.focus_mode.take() {
+                Some(held) => held.navigator,
+                None => docked && self.layout.navigator().shown,
+            };
+            if docked && self.layout.navigator().shown {
+                self.show_navigator(false, cx);
+            }
+            self.focus_mode = Some(super::FocusHold { tile, navigator });
+        } else if self.focus_mode.is_some_and(|held| held.tile == tile) {
+            self.end_focus_mode(cx);
+        }
+    }
+
+    /// Focus mode ends on its own when its tile's column stops taking the working width some
+    /// other way (a width preset, a drag, fullscreen's way back) or its tile closes: the
+    /// navigator comes back then too.
+    pub(super) fn keep_focus_mode(&mut self, cx: &Context<Self>) {
+        let Some(held) = self.focus_mode else { return };
+        if !self.is_full_width(held.tile) {
+            self.end_focus_mode(cx);
+        }
+    }
+
+    fn end_focus_mode(&mut self, cx: &Context<Self>) {
+        if self.focus_mode.take().is_some_and(|held| held.navigator) {
+            self.show_navigator(true, cx);
+        }
+    }
+
+    /// Whether `tile`'s column takes the working width.
+    fn is_full_width(&self, tile: TileRef) -> bool {
+        self.layout.position(tile).is_some_and(|pos| {
+            self.layout
+                .workspaces()
+                .get(pos.workspace)
+                .and_then(|ws| ws.columns().get(pos.column))
+                .is_some_and(Column::is_full_width)
+        })
+    }
+
+    fn show_navigator(&mut self, shown: bool, cx: &Context<Self>) {
+        let nav = self.layout.navigator();
+        if nav.shown != shown {
+            self.layout.set_navigator(Navigator { shown, ..nav.clone() });
+            self.layout_touched(cx);
+        }
     }
 
     /// A width change: the layout's, then the remote windows of the column asked to take the
@@ -645,7 +704,15 @@ impl WorkspaceView {
         let item =
             Item { id: ItemId::new(), kind, name: None, facts: std::collections::BTreeMap::new() };
         self.titles.insert(item.id, title);
+        // Picked from a pane whose own did not open, the pick takes its place.
+        let failed = self.focused().filter(|t| {
+            t.worker == key
+                && self.workers.get(&key).is_some_and(|w| w.failed_opens.contains_key(&t.item))
+        });
         self.propose(key, ItemOp::Add(item), cx);
+        if let Some(failed) = failed {
+            self.propose(key, ItemOp::Remove(failed.item), cx);
+        }
     }
 
     /// A file tile for `path` on `key` (the context worker when `None`): an existing tile for

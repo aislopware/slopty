@@ -31,10 +31,10 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
         AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
-        FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller,
-        FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp,
-        NewAgent, NewNote, NewTerminal, NextAttention, OpenFile, OpenFolder, OpenPalette, OpenUrl,
-        SaveCopy, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed, UndoClose,
+        FocusColumnLeft, FocusColumnRight, FocusDown, FocusMode, FocusUp, FontLarger, FontReset,
+        FontSmaller, FullscreenTile, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp, NewAgent,
+        NewNote, NewTerminal, NextAttention, OpenFile, OpenFolder, OpenPalette, OpenUrl, SaveCopy,
+        ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed, UndoClose,
     };
 
     use crate::{Minimize, OpenHelp, ShowWindow, Zoom};
@@ -108,7 +108,7 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
             MenuItem::action("Consume or Expel Right", ConsumeOrExpelRight),
             MenuItem::separator(),
             MenuItem::action("Cycle Column Width", CycleWidth),
-            MenuItem::action("Maximize Column", MaximizeColumn),
+            MenuItem::action("Focus Mode", FocusMode),
             MenuItem::action("Fullscreen Tile", FullscreenTile),
             MenuItem::action("Center Column", CenterColumn),
             MenuItem::action("Tabbed Column", ToggleTabbed),

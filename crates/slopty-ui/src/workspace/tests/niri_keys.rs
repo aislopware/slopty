@@ -79,3 +79,58 @@ fn every_niri_op_has_a_palette_line_with_its_key() {
         assert!(!line.keys.is_empty(), "{label} shows no key");
     }
 }
+
+fn full_width(view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef) -> bool {
+    view.read_with(cx, |v, _| {
+        let layout = v.layout();
+        let pos = layout.position(tile).expect("placed");
+        layout.workspaces()[pos.workspace].columns()[pos.column].is_full_width()
+    })
+}
+
+fn navigator_shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> bool {
+    view.read_with(cx, |v, _| v.layout().navigator().shown)
+}
+
+/// ⇧⌘↩ is focus mode: the focused column takes the working width and the docked navigator
+/// steps aside; pressed again, both come back as they were. Ended some other way (the width
+/// key), the navigator still comes back, and a navigator the person had put away stays away.
+#[gpui::test]
+fn focus_mode_gives_the_work_the_width_and_puts_everything_back(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [_, _, (s3, third)] = three_shells(&view, cx, &fake);
+    assert!(terminal_focused(&view, cx, s3));
+    let before = view.read_with(cx, |v, _| {
+        let pos = v.layout().position(third).expect("placed");
+        v.layout().workspaces()[pos.workspace].columns()[pos.column].width()
+    });
+    assert!(navigator_shown(&view, cx), "docked beside the strip at this width");
+
+    press(cx, "cmd-shift-enter");
+    assert!(full_width(&view, cx, third), "the work takes the width");
+    assert!(!navigator_shown(&view, cx), "and the navigator steps aside");
+    press(cx, "cmd-shift-enter");
+    assert!(!full_width(&view, cx, third));
+    assert!(navigator_shown(&view, cx), "both come back");
+    let after = view.read_with(cx, |v, _| {
+        let pos = v.layout().position(third).expect("placed");
+        v.layout().workspaces()[pos.workspace].columns()[pos.column].width()
+    });
+    assert_eq!(after, before, "with the width the column had");
+
+    press(cx, "cmd-shift-enter");
+    assert!(!navigator_shown(&view, cx));
+    view.update_in(cx, |v, _w, cx| {
+        v.layout.toggle_full_width();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(navigator_shown(&view, cx), "ended another way, the navigator still comes back");
+
+    view.update_in(cx, |v, window, cx| v.toggle_navigator(&ToggleNavigator, window, cx));
+    cx.run_until_parked();
+    press(cx, "cmd-shift-enter");
+    press(cx, "cmd-shift-enter");
+    assert!(!navigator_shown(&view, cx), "put away by the person, it stays away");
+}

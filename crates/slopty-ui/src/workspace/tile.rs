@@ -23,7 +23,7 @@ use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_proto::thread::AgentId;
 use slopty_theme::{Theme, Typography};
 
-use super::actions::{CloseItem, FullscreenTile};
+use super::actions::{AddWindow, CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
 use super::faces::ThreadStand;
 use super::strip::Handed;
@@ -180,6 +180,32 @@ struct Edges {
     right: bool,
     /// A tile is stacked below it in its column: it draws the divider on its bottom edge.
     below: bool,
+}
+
+/// What a pane says of an open that failed: its title, why, and its way to pick another.
+/// A window or display that went is named for what it is, the rest by the failure's own words
+/// ([`crate::screen::failure_text`]).
+fn failed_words(
+    item: &Item,
+    what: &str,
+    why: &slopty_proto::screen::ScreenFailure,
+    machine: &str,
+) -> (String, String, &'static str) {
+    use slopty_proto::screen::ScreenFailure;
+    let display = matches!(item.kind, ItemKind::Display { .. });
+    let pick = if display { "Choose another display" } else { "Choose another window" };
+    let (title, detail) = match why {
+        ScreenFailure::Gone if display => (
+            "Display is no longer available".to_owned(),
+            format!("{what} is not connected to {machine} any more."),
+        ),
+        ScreenFailure::Gone => (
+            "Window is no longer available".to_owned(),
+            format!("{what} is not open on {machine} any more."),
+        ),
+        other => (format!("{what} did not open"), crate::screen::failure_text(other, machine)),
+    };
+    (title, detail, pick)
 }
 
 /// A file tile's title: the file's name.
@@ -1081,7 +1107,7 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label("Cancel upload")
                 .aria_value(SharedString::from(upload.label()));
-            tab_stop(kit::tabular(pill), s.accent)
+            tab_stop(kit::tabular(pill), s.focus)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element()
         });
@@ -1551,8 +1577,8 @@ impl WorkspaceView {
     }
 
     /// How the tile is doing, in the one status vocabulary: its agent's state (as its thread
-    /// knows it too, [`Self::agent_mark`]); else, out of reach; else a remote picture on its way;
-    /// else a shell's last command, failed or finished unwatched.
+    /// knows it too, [`Self::agent_mark`]); else, out of reach; else a remote picture on its way
+    /// (none once its open failed); else a shell's last command, failed or finished unwatched.
     pub(super) fn tile_status(&self, tile: TileRef, item: &Item) -> Option<Status> {
         let session = match item.kind {
             ItemKind::Terminal { session } => Some(session),
@@ -1568,8 +1594,12 @@ impl WorkspaceView {
         {
             return Some(status);
         }
-        if self.workers.get(&tile.worker).is_none_or(|w| w.link.is_none()) {
+        let Some(worker) = self.workers.get(&tile.worker).filter(|w| w.link.is_some()) else {
             return Some(Status::Away);
+        };
+        // An open that failed is over: its pane says so, and the header waits on nothing.
+        if worker.failed_opens.contains_key(&item.id) {
+            return None;
         }
         if self.opening(item) {
             return Some(Status::Working);
@@ -1657,7 +1687,7 @@ impl WorkspaceView {
                     ChromeText::new(super::handoffs::pr_label(pr), px(theme.typography.small()), k)
                         .zooming(chrome.zooming),
                 );
-            tab_stop(chip, s.accent)
+            tab_stop(chip, s.focus)
                 .on_click(move |_ev, _window, cx| cx.open_url(&url))
                 .into_any_element()
         });
@@ -1785,7 +1815,7 @@ impl WorkspaceView {
                         .role(Role::Button)
                         .aria_label(TAKE_OVER);
                     actions.push(
-                        tab_stop(pill, theme.surfaces.accent)
+                        tab_stop(pill, theme.surfaces.focus)
                             .on_click(
                                 cx.listener(move |this, _ev, _w, cx| this.take_over(tile, cx)),
                             )
@@ -2027,7 +2057,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(hover)))
             .child(ChromeText::new(took, px(theme.typography.small()), k).zooming(chrome.zooming));
-        tab_stop(el, s.accent)
+        tab_stop(el, s.focus)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()
     }
@@ -2239,7 +2269,7 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(ChromeText::new(label, px(theme.typography.small()), k));
-            tab_stop(el, s.accent)
+            tab_stop(el, s.focus)
         };
         let restart = match (state, session) {
             (BodyState::Exited(_), Some(session)) => Some(button("restart", "Restart").on_click(
@@ -2616,6 +2646,75 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    /// A remote window or display the worker could not open: an end, said where the wait was,
+    /// so nothing in the pane still looks like it waits. The error's mark, what is so as a task's
+    /// title, why under it in the chrome's words, and the way to pick another in its place
+    /// ([`Self::add_screen_item`] puts the pick where this one was).
+    fn failed_body(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        why: &slopty_proto::screen::ScreenFailure,
+        k: f32,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let ty = &theme.typography;
+        let roles = theme.roles();
+        let id = item.id;
+        let machine = self.workers.get(&tile.worker).map_or("The machine", |w| w.name.as_str());
+        let (title, detail, pick) = failed_words(item, &self.derived_title(item), why, machine);
+        let block = (k >= SHAPES_BELOW).then(|| {
+            let choose = kit::button(theme, "choose-another", pick, kit::ButtonKind::Secondary)
+                .h(px(theme.density.control * k))
+                .px(px(theme.spacing.md * k))
+                .text_size(px(ty.ui_size * k))
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.focus_tile(tile, cx);
+                    this.add_window(&AddWindow, window, cx);
+                }));
+            div()
+                .id("failed")
+                .debug_selector(move || format!("failed-{}", id.as_uuid()))
+                .role(Role::Status)
+                .aria_label(SharedString::from(format!("{title}. {detail}")))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(theme.spacing.xs * k))
+                .max_w_full()
+                .px(px(theme.spacing.inset() * k))
+                .font_family(ty.ui_family.clone())
+                .text_center()
+                .child(
+                    crate::icons::icon(
+                        theme,
+                        IconName::CircleAlert,
+                        IconSize::Inline,
+                        hsla(s.error),
+                    )
+                    .size(px(ty.icon_large() * k)),
+                )
+                .child(kit::typed(div(), roles.task_title, k).text_color(hsla(s.text)).child(title))
+                .child(
+                    kit::typed(div(), roles.chrome, k)
+                        .text_color(hsla(s.text_secondary))
+                        .child(detail),
+                )
+                .child(div().pt(px(theme.spacing.sm * k)).child(choose))
+        });
+        div()
+            .id(SharedString::from(format!("waiting-{}", id.as_uuid())))
+            .flex_1()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(block)
+            .into_any_element()
+    }
+
     /// What the body shows under any state pill: the view, or an empty well where the pill
     /// says why there is none. A terminal under a state pill leaves out its own lines-below
     /// pill, which would sit in the same place.
@@ -2709,7 +2808,7 @@ impl WorkspaceView {
                             .w_full()
                             .flex()
                             .child(self.waiting_body(item, wait, k));
-                        tab_stop(popped, self.theme.surfaces.accent)
+                        tab_stop(popped, self.theme.surfaces.focus)
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.raise_popped(id, cx);
                             }))
@@ -2728,7 +2827,14 @@ impl WorkspaceView {
                     None if self.parked.contains(&item.id) => {
                         self.waiting_body(item, Wait::Lasting(PAUSED.into()), k)
                     }
-                    None => self.opening_body(placed.tile, item, k),
+                    None => match self
+                        .workers
+                        .get(&placed.tile.worker)
+                        .and_then(|w| w.failed_opens.get(&item.id))
+                    {
+                        Some(why) => self.failed_body(placed.tile, item, why, k, cx),
+                        None => self.opening_body(placed.tile, item, k),
+                    },
                 }
             }
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
@@ -2782,9 +2888,11 @@ impl WorkspaceView {
             },
             ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
                 Some(view) => {
-                    let width = placed.target.w;
-                    let handed = Handed::Review { zoom: k, width };
-                    self.hand_over(cx, &view, handed, move |v, cx| v.set_layout(k, width, cx));
+                    let (width, height) = (placed.target.w, placed.target.h - theme.density.header);
+                    let handed = Handed::Review { zoom: k, width, height };
+                    self.hand_over(cx, &view, handed, move |v, cx| {
+                        v.set_layout(k, width, height, cx);
+                    });
                     fixed(self.body_view(&view, placed, cx))
                 }
                 None if !worker_up => well(),
@@ -2792,9 +2900,11 @@ impl WorkspaceView {
             },
             ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
                 Some(view) => {
-                    let width = placed.target.w;
-                    let handed = Handed::Review { zoom: k, width };
-                    self.hand_over(cx, &view, handed, move |v, cx| v.set_layout(k, width, cx));
+                    let (width, height) = (placed.target.w, placed.target.h - theme.density.header);
+                    let handed = Handed::Review { zoom: k, width, height };
+                    self.hand_over(cx, &view, handed, move |v, cx| {
+                        v.set_layout(k, width, height, cx);
+                    });
                     fixed(self.body_view(&view, placed, cx))
                 }
                 None if !worker_up => well(),

@@ -148,7 +148,7 @@ pub(super) enum Handed {
     Shell { zoom: f32, covered: bool, zooming: bool },
     Face { zoom: f32, width: f32 },
     Board { zoom: f32, width: f32 },
-    Review { zoom: f32, width: f32 },
+    Review { zoom: f32, width: f32, height: f32 },
     Stream { painted: f32 },
     Text { zoom: f32, pad: f32, size: f32 },
     Folder { zoom: f32 },
@@ -921,7 +921,7 @@ impl WorkspaceView {
                             .debug_selector(|| "overview-new-workspace-words".to_owned())
                             .child(NEW_WORKSPACE),
                     );
-                let new = crate::a11y::tab_stop(new, s.accent).on_click(cx.listener(
+                let new = crate::a11y::tab_stop(new, s.focus).on_click(cx.listener(
                     move |this, _ev, _w, cx| {
                         this.layout.set_overview(false);
                         this.go_to_workspace(ix, cx);
@@ -1187,7 +1187,7 @@ impl WorkspaceView {
                             let run = Rc::clone(&run);
                             cx.defer_in(window, move |_this, window, cx| run(window, cx));
                         }));
-                    crate::a11y::tab_stop(el, s.accent)
+                    crate::a11y::tab_stop(el, s.focus)
                 });
                 let label = match health {
                     Some((_, word)) => format!("New terminal on {}, {word}", w.name),
@@ -1223,7 +1223,7 @@ impl WorkspaceView {
                     }))
                     .children(update)
                     .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark), 1.0));
-                crate::a11y::tab_stop(row, s.accent)
+                crate::a11y::tab_stop(row, s.focus)
                     .on_click(
                         cx.listener(move |this, _ev, _window, cx| this.new_terminal_on(key, cx)),
                     )
@@ -1342,7 +1342,7 @@ impl WorkspaceView {
                         .child(SharedString::from(meta)),
                 )
             });
-        crate::a11y::tab_stop(row, s.accent)
+        crate::a11y::tab_stop(row, s.focus)
     }
 
     /// The worker a way to begin opens on: the one "+" chose, else the one in context.
@@ -1403,7 +1403,7 @@ impl WorkspaceView {
                         .child(SharedString::from(crate::palette::drawn_keys(keys))),
                 )
             });
-        crate::a11y::tab_stop(row, s.accent)
+        crate::a11y::tab_stop(row, s.focus)
     }
 }
 

@@ -115,8 +115,9 @@ actions!(
         ConsumeOrExpelRight,
         /// Give the focused column the next preset width.
         CycleWidth,
-        /// Toggle the focused column between its width and the whole workspace.
-        MaximizeColumn,
+        /// Give the work in the focused column the whole width, the navigator put away, or put
+        /// both back as they were.
+        FocusMode,
         /// Toggle the focused tile filling the whole view, without gaps or chrome around it.
         FullscreenTile,
         /// Scroll the strip so the focused column is in the middle.
@@ -372,7 +373,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Into the column on the left", Box::new(ConsumeOrExpelLeft)),
         w("Into the column on the right", Box::new(ConsumeOrExpelRight)),
         w("Next column width", Box::new(CycleWidth)),
-        w("Maximize column", Box::new(MaximizeColumn)),
+        w("Focus mode", Box::new(FocusMode)),
         w("Fullscreen tile", Box::new(FullscreenTile)),
         w("Center column", Box::new(CenterColumn)),
         w("Tabbed column", Box::new(ToggleTabbed)),
