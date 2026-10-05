@@ -684,6 +684,39 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
     assert_eq!(active, last, "the empty workspace kept last");
 }
 
+/// A phone's bar names the focused tile, so its drawer names the workspace: a heading in the
+/// drawer's top row, on the edge of the section headings below it, that follows the active
+/// workspace. A desktop's navigator leaves that row to the window's controls.
+#[gpui::test]
+fn a_phone_drawer_names_the_workspace(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert!(!shown(cx, "nav-workspace-title"), "the title bar names it on a desktop");
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let title = cx.debug_bounds("nav-workspace-title").expect("the drawer names the workspace");
+    let field = cx.debug_bounds("nav-filter-field").expect("the filter");
+    let section = cx.debug_bounds("nav-workspaces").expect("the section");
+    assert!(title.bottom() <= field.top(), "in the top row, over the filter");
+    let inset = px(Theme::default().spacing.inset());
+    let edge = section.left() + inset;
+    assert!((title.left() - edge).abs() < px(0.5), "on the headings' edge: {title:?} {edge:?}");
+    let name = view.read_with(cx, |v, _| v.workspace_name());
+    assert_eq!(name, "studio", "named for the work in it");
+    let headed = |cx: &mut VisualTestContext, name: &str| {
+        tree(cx).into_iter().any(|n| n.is("Heading", Some(name)))
+    };
+    assert!(headed(cx, "studio"), "a heading a screen reader reads");
+    click(cx, "nav-new-space");
+    assert!(!shown(cx, "nav-workspace-title"), "going there closed the drawer");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert!(headed(cx, NEW_WORKSPACE), "it follows the active workspace");
+}
+
 /// A shell whose directory is in `repo` on `branch`, as its worker reports it.
 pub(super) fn in_repo(
     view: &Entity<WorkspaceView>,

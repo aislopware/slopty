@@ -7502,3 +7502,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `slopty-platform` main-thread test
     `the_glass_lies_under_the_whole_window_through_any_resize` (the view's frame and
     autoresizing mask through resizes, its order under GPUI's view, its appearance).
+- ✅ **A phone's drawer names the workspace** (2026-10-06, `.research/ux-audit-2026-10-05.md`
+  P3, the rest of "a phone has one bar"). A phone's bar now names the focused tile, so the
+  workspace's name had nowhere left on screen but the tone of its row under *Workspaces*.
+  - **Where.** It goes in the drawer's top row. That row is the bar's height and stood empty
+    on a phone, since no traffic lights or toggle live there. The name sits beside the bar,
+    which still shows at the drawer's edge naming the tile, so opening the drawer reads as one
+    level up: the workspace, then its tiles. It takes the bar's title size and weight and
+    lines up with the section headings below it. As a Heading it is what a screen reader
+    meets first in the drawer.
+  - **Only a name.** Switching stays with *Workspaces* below it, and the counts stay on those
+    rows. A desktop's navigator leaves its top row to the window's controls, and there its
+    title bar names the workspace.
+  - Test: `workspace::tests::nav_rows::a_phone_drawer_names_the_workspace`. Golden:
+    `ios-phone-navigator`, retaken on the simulator.

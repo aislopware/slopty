@@ -3,9 +3,10 @@
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
-//! On a phone, where the title bar has no tabs, *Workspaces* heads the list: a row per
-//! workspace with its tile count, the active one in the text's tone at the medium weight (the
-//! focused tile's row below is the one selection), then "New workspace".
+//! On a phone that row names the active workspace, one level up from the bar beside it, which
+//! names the focused tile. There, where the title bar has no tabs, *Workspaces* heads the
+//! list: a row per workspace with its tile count, the active one in the text's tone at the
+//! medium weight (the focused tile's row below is the one selection), then "New workspace".
 //! *Needs you* appears only while an agent or a thread waits on the human, and *To review* only
 //! while an agent's turn ended unseen (its row says what it did, else how long it ran). They are
 //! what the bell counts, and the bell (⌘⇧U) shows the navigator at them. Each lists every one,
@@ -2193,7 +2194,8 @@ impl WorkspaceView {
     /// past them at the far leading edge, the navigator's toggle, where the title bar keeps it
     /// while the navigator is hidden: it never moves. Apple's sidebars, Things and zeron keep
     /// that corner to the window's controls; a white field crammed beside the lights was the
-    /// brightest, hardest-edged thing there.
+    /// brightest, hardest-edged thing there. A phone's drawer has neither, and its row names
+    /// the active workspace ([`Self::drawer_title`]).
     ///
     /// The filter is the panel's first row under it, as the HIG puts a sidebar's search at its
     /// top: the kit's search capsule ([`kit::search_field`]) in the panel's own wash, a row
@@ -2210,6 +2212,10 @@ impl WorkspaceView {
         });
         let toggle = (!self.workers.is_empty() && self.nav.drawn == Some(Mode::Docked))
             .then(|| self.navigator_toggle(cx));
+        let drawer = self.nav.drawn == Some(Mode::Drawer);
+        // On a section heading's edge, so the name stands over *Workspaces* below it.
+        let leading = if drawer { spacing.inset() } else { leading };
+        let title = drawer.then(|| self.drawer_title(theme));
         let filtering = !self.nav.filter.query.is_empty();
         let input = self.nav.filter.input.as_ref().map(|input| {
             div()
@@ -2285,9 +2291,32 @@ impl WorkspaceView {
                     .pr(px(spacing.sm))
                     .flex()
                     .items_center()
-                    .children(toggle),
+                    .children(toggle)
+                    .children(title),
             )
             .child(div().px(px(spacing.sm)).pb(px(spacing.xs)).child(field))
+    }
+
+    /// A phone's drawer's title: the active workspace's name, as the bar beside it names the
+    /// focused tile, at that bar's size and weight. The phone's bar gave the workspace's name up
+    /// to the tile, so opening the drawer is going one level up. Switching is *Workspaces*'s
+    /// job below it; this only says where the person is.
+    fn drawer_title(&self, theme: &Theme) -> Stateful<Div> {
+        let name = SharedString::from(self.workspace_name_at(self.layout.active_workspace()));
+        div()
+            .id("nav-workspace-title")
+            .debug_selector(|| "nav-workspace-title".to_owned())
+            .role(Role::Heading)
+            .aria_label(name.clone())
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_size(px(theme.typography.ui_size))
+            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+            .text_color(hsla(theme.surfaces.text))
+            .child(name)
     }
 
     /// Every row the list holds this frame: on a phone *Workspaces*, then *Needs you* while an
