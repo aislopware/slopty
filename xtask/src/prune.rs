@@ -9,12 +9,14 @@
 //! - **units nobody built or checked for the idle window**, with their artifacts;
 //! - **incremental caches untouched for the window**, which rustc rewrites on every compile of
 //!   their unit, so an old one only serves a crate nobody edited;
-//! - **the object files of a unit's earlier compiles.** On macOS a test or binary keeps its debug
-//!   info in the `.rcgu.o` files beside it, named by the rustc invocation that wrote them, and
-//!   nothing deletes the previous invocation's. They made up 99 782 of the 102 568 entries of the
-//!   tests lane's `deps/`, and every process that opens `VideoToolbox` or `CoreAudio` pays for the
-//!   entries in its executable's directory (`docs/decisions/tooling.md`, "A test binary's
-//!   directory, not the volume").
+//! - **the object files no link reads.** On macOS a test or binary keeps its debug info in the
+//!   `.rcgu.o` files beside it, named by the rustc invocation that wrote them, and nothing deletes
+//!   the previous invocation's. They made up 99 782 of the 102 568 entries of the tests lane's
+//!   `deps/`, and every process that opens `VideoToolbox` or `CoreAudio`, or draws an SF Symbol,
+//!   pays for the entries in its executable's directory (`docs/decisions/tooling.md`, "A test
+//!   binary's directory, not the volume" and "Prune deletes every object no link reads"). An
+//!   executable's debug map names the ones it reads; a library's are read by nobody once its rlib
+//!   is written.
 //!
 //! Then, when `target/` is over its byte budget or its volume is under the free-space floor, it
 //! deletes the least recently used units and caches, oldest first, until both hold again with a
@@ -874,7 +876,7 @@ fn sweep(dir: &Utf8Path, opts: Options, now: SystemTime) -> Result<(Freed, Vec<I
         }
         // Only a compile since the last pass can have left objects behind.
         if ledger.pass.is_none_or(|pass| written >= at(pass)) {
-            leftovers.extend(superseded_objects(&unit.objects));
+            leftovers.extend(unread_objects(&unit.objects, now));
         }
         reset.extend(unit.evidence.iter().cloned());
         // Untrusted times only order this pass's budget; the ledger starts every unit's clock
@@ -1003,11 +1005,14 @@ fn caches(dir: &Utf8Path) -> Vec<Item> {
     out
 }
 
-/// The sweep of a profile directory a build holds. Its units and object files stay, since the
-/// build may link any unit's rlib, and cargo's locks are what guard them. Its idle caches go
+/// The sweep of a profile directory a build holds. Its units stay, since the build may link any
+/// unit's rlib, and cargo's locks are what guard them. The objects no link reads go all the same
+/// ([`unread_objects`], sparing an hour of a compile's writes): `target/debug` is held almost all
+/// day by the agents' builds, which left 145 000 of them in one `deps/`
+/// (`docs/decisions/tooling.md`, "Prune deletes every object no link reads"). Its idle caches go
 /// session by session under rustc's own locks ([`sweep_sessions`]). Its units are read for the
-/// budget, which counts what the build held back, and nothing of theirs is written: no ledger,
-/// no access time.
+/// budget, which counts what the build held back, and nothing of theirs is written: no ledger, no
+/// access time.
 fn sweep_busy(dir: &Utf8Path, name: &str, opts: Options, now: SystemTime) -> Swept {
     let idle_since = now.checked_sub(opts.idle).unwrap_or(UNIX_EPOCH);
     let mut busy = Busy { dir: name.to_owned(), ..Busy::default() };
@@ -1021,13 +1026,26 @@ fn sweep_busy(dir: &Utf8Path, name: &str, opts: Options, now: SystemTime) -> Swe
         }
     }
     let ledger = Ledger::read(dir);
-    // Without a ledger no unit's idleness is known, so none is one the budget could have taken.
-    // A layout mid-write reads as an error here, and then only the count of what was held is
-    // lower; the sweep under the lock is where a layout it does not know stops the pass.
-    if ledger.since.is_some()
-        && let Ok((units, _)) = units(dir)
-    {
-        for unit in units {
+    // A layout mid-write reads as an error here, and then the pass only does less; the sweep
+    // under the lock is where a layout it does not know stops the pass.
+    let Ok((units, _)) = units(dir) else {
+        return Swept { freed: busy.swept, items, busy: Some(busy) };
+    };
+    let settled = now.checked_sub(GUARD).unwrap_or(UNIX_EPOCH);
+    for unit in units {
+        // Every unit is looked at, not only those compiled since the last pass: a busy pass
+        // writes no ledger, so the last pass may have left the objects of any of them.
+        for object in unread_objects(&unit.objects, settled) {
+            let bytes = size(&object);
+            // One a concurrent pass took first is gone all the same.
+            if opts.dry_run || remove(&object).is_ok() {
+                busy.swept.leftovers = busy.swept.leftovers.saturating_add(1);
+                busy.swept.bytes = busy.swept.bytes.saturating_add(bytes);
+            }
+        }
+        // Without a ledger no unit's idleness is known, so none is one the budget could have
+        // taken.
+        if ledger.since.is_some() {
             let (last_use, _) = unit.last_use(&ledger);
             let Found { paths, evidence, .. } = unit;
             items.push(Item { kind: Kind::Unit, paths, evidence, last_use });
@@ -1166,6 +1184,139 @@ fn remove_empty_packages(dir: &Utf8Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The object files of a unit that nothing reads: its earlier compiles' ([`superseded_objects`]),
+/// and where its executable or rlib is beside them, those that artifact does not read
+/// ([`unlinked_objects`]), with `settled` as that takes it.
+fn unread_objects(objects: &[Utf8PathBuf], settled: SystemTime) -> Vec<Utf8PathBuf> {
+    let mut by_stem: HashMap<(&Utf8Path, &str), Vec<Utf8PathBuf>> = HashMap::new();
+    for path in objects {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
+        let stem = name.split('.').next().unwrap_or(name);
+        by_stem.entry((dir, stem)).or_default().push(path.clone());
+    }
+    let mut unread = Vec::new();
+    for ((dir, stem), objects) in by_stem {
+        let superseded = superseded_objects(&objects);
+        let unlinked = unlinked_objects(dir, stem, &objects, settled).unwrap_or_default();
+        unread.extend(unlinked.into_iter().filter(|o| !superseded.contains(o)));
+        unread.extend(superseded);
+    }
+    unread
+}
+
+/// Whether `object`'s inode is unchanged since `written`: a compile that writes an object, or
+/// links a reused one under its own invocation's name, changes it.
+fn unchanged_since(object: &Utf8Path, written: SystemTime) -> bool {
+    std::fs::symlink_metadata(object).is_ok_and(|m| {
+        let secs = u64::try_from(m.ctime()).unwrap_or(0);
+        let nanos = u32::try_from(m.ctime_nsec()).unwrap_or(0);
+        UNIX_EPOCH.checked_add(Duration::new(secs, nanos)).is_some_and(|changed| changed <= written)
+    })
+}
+
+/// The objects of `stem` in `dir` that its artifact beside them does not read, or `None` when
+/// there is no artifact to ask or its debug map cannot be read.
+///
+/// The objects are kept for debug info alone (unpacked split debuginfo). An executable's debug
+/// map names each object it was linked from (`N_OSO`), and that is what `dsymutil`, lldb and a
+/// backtrace read. Each compile names its objects after its own invocation, and those it reused
+/// from the incremental cache are hard links of the earlier ones, so every invocation of a
+/// unit can share one modification time and only the debug map tells them apart. A library's
+/// objects are read by nobody once its rlib is written: an executable's debug map names the
+/// rlib's members (`libfoo-<hash>.rlib(foo-<hash>.<cgu>.rcgu.o)`), never the loose files.
+///
+/// In a directory a build holds, an object whose inode changed after both the artifact was
+/// written and `settled` stays: a compile may be writing it, its artifact not written yet. The
+/// artifact's time alone clears few objects, since rustc links each into its finished
+/// incremental session after the link, so `settled` is the hour the budget also spares. A pass
+/// under cargo's locks, where no compile runs, sets it to now.
+fn unlinked_objects(
+    dir: &Utf8Path,
+    stem: &str,
+    objects: &[Utf8PathBuf],
+    settled: SystemTime,
+) -> Option<Vec<Utf8PathBuf>> {
+    let executable = dir.join(stem);
+    let rlib = dir.join(format!("lib{stem}.rlib"));
+    let (written, read) = if executable.is_file() {
+        let written = std::fs::metadata(&executable).and_then(|m| m.modified()).ok()?;
+        (written, linked_objects(&executable).ok()?)
+    } else if rlib.is_file() {
+        (std::fs::metadata(&rlib).and_then(|m| m.modified()).ok()?, HashSet::new())
+    } else {
+        return None;
+    };
+    // By file name: the debug map holds the path the build was given, which may not be spelled
+    // as this pass spells it, and an invocation's names are unique in their directory.
+    let unread = objects.iter().filter(|o| {
+        o.file_name().is_some_and(|name| !read.contains(name))
+            && unchanged_since(o, written.max(settled))
+    });
+    Some(unread.cloned().collect())
+}
+
+/// The file names of the objects an arm64 Mach-O executable's debug map names (`N_OSO` stabs),
+/// read from its symbol table without reading the rest of the file. The layout is
+/// `<mach-o/loader.h>`'s: a `mach_header_64` of 32 bytes (`ncmds` at 16, `sizeofcmds` at 20),
+/// then the load commands, each `cmd` and `cmdsize` first; `LC_SYMTAB` (2) holds `symoff`,
+/// `nsyms`, `stroff` and `strsize`. Each `nlist_64` (`<mach-o/nlist.h>`) is 16 bytes, `n_strx`
+/// at 0 and `n_type` at 4; `N_OSO` is 0x66 (`<mach-o/stab.h>`).
+fn linked_objects(executable: &Utf8Path) -> Result<HashSet<String>> {
+    use std::os::unix::fs::FileExt as _;
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_SYMTAB: u32 = 2;
+    const N_OSO: u8 = 0x66;
+    let file = File::open(executable).with_context(|| format!("open {executable}"))?;
+    let read = |offset: u64, len: usize| -> Result<Vec<u8>> {
+        let mut buf = vec![0; len];
+        file.read_exact_at(&mut buf, offset).with_context(|| format!("read {executable}"))?;
+        Ok(buf)
+    };
+    let u32_at = |buf: &[u8], at: usize| -> Option<u32> {
+        buf.get(at..at.checked_add(4)?)?.try_into().ok().map(u32::from_le_bytes)
+    };
+    let header = read(0, 32)?;
+    let (Some(MH_MAGIC_64), Some(ncmds), Some(sizeofcmds)) =
+        (u32_at(&header, 0), u32_at(&header, 16), u32_at(&header, 20))
+    else {
+        bail!("{executable} is not a 64-bit Mach-O");
+    };
+    let commands = read(32, usize::try_from(sizeofcmds)?)?;
+    let mut at = 0_usize;
+    let mut symtab = None;
+    for _ in 0..ncmds {
+        let field = |n: usize| u32_at(&commands, at.saturating_add(n));
+        let (Some(cmd), Some(size)) = (field(0), field(4)) else {
+            bail!("{executable}: a load command runs past the header");
+        };
+        if cmd == LC_SYMTAB {
+            symtab = Some((field(8), field(12), field(16), field(20)));
+            break;
+        }
+        at = at.checked_add(usize::try_from(size)?).context("load commands overflow")?;
+    }
+    let Some((Some(symoff), Some(nsyms), Some(stroff), Some(strsize))) = symtab else {
+        bail!("{executable} has no symbol table");
+    };
+    let table = read(u64::from(symoff), usize::try_from(nsyms)?.saturating_mul(16))?;
+    let mut names = HashSet::new();
+    let (entries, _) = table.as_chunks::<16>();
+    for entry in entries {
+        if entry[4] != N_OSO {
+            continue;
+        }
+        let Some(strx) = u32_at(entry, 0).filter(|x| *x < strsize) else { continue };
+        let len = usize::try_from(strsize.saturating_sub(strx).min(4096))?;
+        let raw = read(u64::from(stroff).saturating_add(u64::from(strx)), len)?;
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        let path = std::str::from_utf8(raw.get(..end).unwrap_or_default()).map(Utf8Path::new);
+        if let Some(name) = path.ok().and_then(Utf8Path::file_name) {
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
 }
 
 /// The object files of a unit's earlier compiles. On macOS a binary keeps its debug info in its

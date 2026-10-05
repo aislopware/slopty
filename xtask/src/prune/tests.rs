@@ -264,6 +264,94 @@ fn objects_of_an_earlier_compile_go() {
     assert_eq!(report.idle.units, 0);
 }
 
+/// An arm64 Mach-O executable whose debug map names `objects`: a header, `LC_SYMTAB`, an
+/// `N_OSO` stab for each object beside an ordinary symbol of the same name, and the strings.
+fn macho(path: &Utf8Path, objects: &[&str]) {
+    let mut strings = vec![0_u8];
+    let mut symbols = Vec::new();
+    for name in objects {
+        let strx = u32::try_from(strings.len()).unwrap();
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+        symbols.extend([(strx, 0x66_u8), (strx, 0x0f_u8)]);
+    }
+    let symoff = 32 + 24;
+    let nsyms = u32::try_from(symbols.len()).unwrap();
+    let stroff = symoff + nsyms * 16;
+    let strsize = u32::try_from(strings.len()).unwrap();
+    let mut out = Vec::new();
+    // mach_header_64: magic, CPU_TYPE_ARM64, its subtype, MH_EXECUTE, one command of 24 bytes.
+    for word in [0xfeed_facf_u32, 0x0100_000c, 0, 2, 1, 24, 0, 0] {
+        out.extend(word.to_le_bytes());
+    }
+    for word in [2_u32, 24, symoff, nsyms, stroff, strsize] {
+        out.extend(word.to_le_bytes());
+    }
+    for (strx, kind) in symbols {
+        out.extend(strx.to_le_bytes());
+        out.extend([kind, 0]);
+        out.extend(0_u16.to_le_bytes());
+        out.extend(0_u64.to_le_bytes());
+    }
+    out.extend(strings);
+    std::fs::write(path, out).unwrap();
+}
+
+fn set_modified(path: &Utf8Path, modified: SystemTime) {
+    let times = FileTimes::new().set_modified(modified);
+    File::options().write(true).open(path).unwrap().set_times(times).unwrap();
+}
+
+/// Objects no link reads go. An executable's go unless its debug map names them, though every
+/// invocation's share one time (reused objects are hard links of the earlier ones). A library's
+/// go, even one changed after its rlib (rustc links each into its incremental session last),
+/// since no compile runs in a directory the pass holds. Those of an executable whose debug map
+/// cannot be read stay.
+#[test]
+fn objects_no_link_reads_go() {
+    let fx = Fixture::new("unlinked");
+    let debug = fx.profile("debug");
+    fx.ledger(&debug, 2 * HOUR);
+    for (name, hash) in [("ptyd", A), ("core", B), ("late", C), ("odd", D)] {
+        fx.old_unit(&debug, name, hash, HOUR, HOUR);
+    }
+    let deps = debug.join("deps");
+    let object = |name: String| {
+        write(&deps.join(&name), 64, fx.now, fx.now);
+        deps.join(name)
+    };
+    let linked = object(format!("ptyd-{A}.cgu1.inv3.rcgu.o"));
+    let gone = [
+        object(format!("ptyd-{A}.cgu2.inv3.rcgu.o")),
+        object(format!("ptyd-{A}.cgu1.inv1.rcgu.o")),
+        object(format!("ptyd-{A}.cgu1.inv2.rcgu.o")),
+        object(format!("core-{B}.cgu1.inv1.rcgu.o")),
+        object(format!("late-{C}.cgu1.inv1.rcgu.o")),
+    ];
+    let odd = object(format!("odd-{D}.cgu1.inv1.rcgu.o"));
+    // The debug map spells the directory as the build was given it, not as the pass does.
+    let spelled = format!("/elsewhere/target/debug/deps/ptyd-{A}.cgu1.inv3.rcgu.o");
+    let ptyd = deps.join(format!("ptyd-{A}"));
+    macho(&ptyd, &[&spelled, "/toolchain/libstd.rlib(std.std-cgu.0.rcgu.o)"]);
+    let not_macho = deps.join(format!("odd-{D}"));
+    write(&not_macho, 64, fx.now, fx.now);
+    let after = SystemTime::now() + Duration::from_secs(60);
+    for artifact in [ptyd, deps.join(format!("libcore-{B}.rlib")), not_macho] {
+        set_modified(&artifact, after);
+    }
+
+    // A pass runs after what it reads was written; the fixture's clock started before.
+    let report = prune(&fx.root, Fixture::opts(), SystemTime::now(), &|_| Ok(u64::MAX / 2));
+    let report = report.unwrap();
+
+    assert!(gone.iter().all(|p| !p.exists()), "{gone:?}");
+    for kept in [&linked, &odd] {
+        assert!(kept.exists(), "{kept}");
+    }
+    assert_eq!(report.idle.leftovers, gone.len());
+    assert_eq!(report.idle.units, 0);
+}
+
 /// Cargo 1.100's layout: a unit is `build/<package>/<hash>/`, which goes whole, and a package
 /// whose last unit went goes too; the earlier compile's objects inside a kept unit go.
 #[test]
@@ -423,6 +511,47 @@ fn a_directory_a_build_holds_keeps_its_units() {
         assert_eq!(report.idle.units, 1, "{lock}");
         assert!(report.busy.is_empty(), "{lock}");
     }
+}
+
+/// A directory a build holds still sheds the objects of its units' earlier compiles, which no
+/// link reads, ledger or none. The unit stays, and so do its newest compile's objects: changed
+/// within the hour and after its rlib, they may be a compile's under way.
+#[test]
+fn a_directory_a_build_holds_sheds_its_earlier_objects() {
+    let fx = Fixture::new("busy-objects");
+    let debug = fx.profile("debug");
+    fx.old_unit(&debug, "ui", A, HOUR, HOUR);
+    let deps = debug.join("deps");
+    let object = |name: &str, age: u64| {
+        write(&deps.join(name), 64, fx.ago(age), fx.ago(age));
+        deps.join(name)
+    };
+    let old = [
+        object(&format!("ui-{A}.cgu1.inv1.rcgu.o"), 5 * HOUR),
+        object(&format!("ui-{A}.cgu2.inv1.rcgu.o"), 5 * HOUR),
+    ];
+    let kept = [
+        object(&format!("ui-{A}.cgu1.inv2.rcgu.o"), 5 * HOUR),
+        object(&format!("ui-{A}.cgu2.inv2.rcgu.o"), HOUR),
+    ];
+    let held = File::options().write(true).open(debug.join(".cargo-lock")).unwrap();
+    held.lock_shared().unwrap();
+
+    let dry = fx.prune(Options { dry_run: true, ..Fixture::opts() });
+    assert_eq!(dry.busy[0].swept.leftovers, 2);
+    assert!(old.iter().all(|p| p.exists()), "a dry run deletes nothing");
+
+    let report = fx.prune(Fixture::opts());
+
+    let [busy] = report.busy.as_slice() else { panic!("{:?}", report.busy) };
+    assert_eq!(busy.swept.leftovers, 2);
+    assert!(busy.swept.bytes >= 128, "{busy:?}");
+    assert_eq!(report.idle.leftovers, 2);
+    assert!(old.iter().all(|p| !p.exists()), "the earlier compile's objects go");
+    assert!(kept.iter().all(|p| p.exists()), "the newest compile's stay");
+    assert!(alive(&debug, "ui", A));
+    assert!(!debug.join(".xtask-prune").exists(), "a busy pass writes no ledger");
+    drop(held);
 }
 
 /// A child process holding a session's lock as rustc 1.98 does on macOS: `fcntl(F_SETLK)`, a

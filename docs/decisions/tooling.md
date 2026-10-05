@@ -708,6 +708,39 @@ more full-window layer.
     where it is.
   - `sudo diskutil enableOwnership` is no longer the advice: it would not have helped.
 
+- ✅ **Prune deletes every object no link reads, even in a held `target/debug`** (2026-10-06).
+  A `slopty-ui` test took 15.7 s of wall time against 1.5 s of CPU, and a chrome motion test
+  failed on it. `sample` put the wait in the first SF Symbol a process draws: AppKit reads the
+  main bundle, which for a bare test binary is its own directory, and CoreFoundation lists that
+  whole directory (`_CFBundleReadDirectory`). The shared `target/debug/deps` held 177 559
+  entries, 144 926 of them `.rcgu.o` files, against 5 862 in a fresh target. That is the same
+  cost as the entry above, through AppKit this time, not `VideoToolbox`.
+  - Prune deleted only the objects of a unit's earlier compiles, told apart by time. That missed
+    most of them. A compile reuses objects from the incremental cache as hard links under its
+    own invocation's name, so six invocations of one test binary shared one inode and one time,
+    and the rule kept all six. It also never ran while a build held the directory, and the
+    agents build in `target/debug` almost all day.
+  - What a link reads is now asked of the link. An executable's debug map (`N_OSO`) names each
+    object it was linked from, read from its symbol table alone (2.1 s for all 386 test binaries,
+    and only units compiled since the last pass are read). A library's loose objects are read by
+    nobody once its rlib is written: an executable's debug map names the rlib's members. Every
+    other object of the unit goes, matched by file name, since the debug map spells the path as
+    the build was given it.
+  - While a build holds the directory, an object goes only if its inode is unchanged since its
+    artifact was written or for the hour the budget also spares, since a compile may be writing
+    it. The artifact's time alone clears few: rustc links each object into its finished
+    incremental session after the link. A pass under cargo's locks, where nothing compiles,
+    takes them all. Units still stay while a build holds the directory, since it may link any
+    unit's rlib.
+  - Measured: `target/debug/deps` went from 177 559 entries to 51 018 (43 275 objects, all named
+    by a live executable's debug map), and 13 GB went. The stalled test now takes 2.8 s cold and
+    0.7 s warm, run from `deps/` without the runner (it took 15.7 s).
+  - A test run outside the gate can still go through the gate's runner until Cargo 1.100 gives
+    each test binary its own directory:
+    `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/target/xtask/debug/xtask-runner test-runner"`.
+  - Tests: `prune::tests::objects_no_link_reads_go`,
+    `prune::tests::a_directory_a_build_holds_sheds_its_earlier_objects`.
+
 - ✅ **`XProtect`: `cargo xtask doctor` measures the first-launch scan, and only the user can
   switch it off** (2026-09-30). macOS scans each new executable on its first launch, and
   `XprotectService` runs "in a single thread, so if you try to launch 10 new binaries at once,
