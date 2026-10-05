@@ -516,3 +516,81 @@ fn a_shell_opened_from_a_thread_or_its_review_starts_where_the_agent_works(
     view.update_in(cx, |v, _w, cx| v.focus_tile(at, cx));
     assert_eq!(cwd_of_new_shell(cx, &mut studio).as_deref(), Some("/w/app"), "from its review");
 }
+
+/// The files added on `fake`'s machine since the last drain, by their paths.
+fn files_added(fake: &mut Fake) -> Vec<String> {
+    fake.drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::File { path }, .. })) => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A codex thread on `fake`'s machine in its own tile, and that tile.
+fn thread_tile(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+) -> (slopty_proto::thread::ThreadId, TileRef) {
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX);
+    let thread = state.meta.id;
+    let key = fake.key;
+    table_of(view, cx, key, 1, &state);
+    view.update_in(cx, |v, _w, cx| v.open_thread(key, thread, cx));
+    frames(cx);
+    let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
+    (thread, tile)
+}
+
+/// A file's Open, from its menu in a review, opens the file in a tile on the review's machine:
+/// from a thread's review and from a folder's alike.
+#[gpui::test]
+fn a_reviews_open_file_opens_it_on_its_machine(cx: &mut TestAppContext) {
+    use crate::review::ReviewEvent;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (thread, tile) = thread_tile(&view, cx, &studio);
+    let own = view.read_with(cx, |v, _| v.thread_item(tile.item).cloned()).expect("its view");
+    let review = review_from(&view, cx, &own, thread);
+    studio.drain();
+    let path = "/w/src/lib.rs".to_owned();
+    review.update(cx, |_, cx| cx.emit(ReviewEvent::OpenFile { path: path.clone() }));
+    frames(cx);
+    assert_eq!(files_added(&mut studio), [path], "a thread's review");
+
+    let changes = arrives(&view, cx, &studio, ItemKind::Changes { path: "/w".into() }, 20);
+    frames(cx);
+    let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
+    let folder = folder.expect("the folder's review");
+    studio.drain();
+    let path = "/w/README.md".to_owned();
+    folder.update(cx, |_, cx| cx.emit(ReviewEvent::OpenFile { path: path.clone() }));
+    frames(cx);
+    assert_eq!(files_added(&mut studio), [path], "a folder's review");
+}
+
+/// A folder's review is heard as a thread's is: a press on who wrote a line opens that
+/// thread, where before it went nowhere.
+#[gpui::test]
+fn a_folders_review_opens_the_thread_that_wrote_a_line(cx: &mut TestAppContext) {
+    use crate::authorship::Opens;
+    use crate::review::ReviewEvent;
+
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (thread, tile) = thread_tile(&view, cx, &studio);
+    let changes = arrives(&view, cx, &studio, ItemKind::Changes { path: "/w".into() }, 20);
+    frames(cx);
+    let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
+    let folder = folder.expect("the folder's review");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(changes, cx));
+    frames(cx);
+    assert_eq!(focused(&view, cx), Some(changes), "on the folder's review");
+    folder.update(cx, |_, cx| cx.emit(ReviewEvent::OpenThread(Opens { thread, turn: None })));
+    frames(cx);
+    assert_eq!(focused(&view, cx), Some(tile), "the thread that wrote it");
+}

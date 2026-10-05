@@ -12,7 +12,9 @@
 //! back to the agent's tile, where the answer shows; comments added to the message land at the
 //! end of a draft of the thread, with the keyboard, to go with more words: its terminal's tile
 //! turned to its thread, its own tile, or one opened for it. Either way the review lets them go
-//! only once the worker or a composer took them.
+//! only once the worker or a composer took them. A file's Open, from its own menu, opens it in a
+//! tile on the review's machine, and a line's author opens its thread, from a thread's review
+//! and a folder's alike.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,8 +40,8 @@ pub(super) struct Reviews {
     opening: HashSet<ThreadId>,
     /// Each hosted review view's events, heard while its tile is there.
     hearing: HashMap<ThreadId, Subscription>,
-    /// The view of each folder's changes tile, kept while its tile is there.
-    changes: HashMap<ItemId, Entity<ReviewView>>,
+    /// The view of each folder's changes tile, kept and heard while its tile is there.
+    changes: HashMap<ItemId, (Entity<ReviewView>, Subscription)>,
 }
 
 impl WorkspaceView {
@@ -47,7 +49,7 @@ impl WorkspaceView {
     /// open, else add one on the worker whose agent runs the thread.
     pub(super) fn settle_reviews(&mut self, cx: &mut Context<Self>) {
         let Some((key, thread, view)) = self.take_review() else { return };
-        self.hear_review(thread, &view, cx);
+        self.hear_review(key, thread, &view, cx);
         if let Some(id) = self.review_item(thread) {
             self.go_to(id, cx);
             return;
@@ -118,25 +120,46 @@ impl WorkspaceView {
             .find(|s| self.thread_face(*s).is_some_and(|v| v.read(cx).thread() == thread))
     }
 
-    /// Hear the review of `thread`: comments sent take the keyboard to the thread's tile, and
-    /// comments added to the message go to a composer of the thread, the review told whether
-    /// one took them.
-    fn hear_review(&mut self, thread: ThreadId, view: &Entity<ReviewView>, cx: &mut Context<Self>) {
-        let hearing = cx.subscribe(view, |this, view, event: &ReviewEvent, cx| match event {
+    /// Hear the review of `thread` on `key`'s machine ([`Self::heard_review`]).
+    fn hear_review(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        view: &Entity<ReviewView>,
+        cx: &mut Context<Self>,
+    ) {
+        let hearing = cx.subscribe(view, move |this, view, event: &ReviewEvent, cx| {
+            this.heard_review(key, &view, event, cx);
+        });
+        self.reviews.hearing.insert(thread, hearing);
+    }
+
+    /// What a review on `key`'s machine said. Comments sent take the keyboard to the thread's
+    /// tile, and comments added to the message go to a composer of the thread, the review told
+    /// whether one took them. A line's author opens its thread at its turn, and a file's Open
+    /// opens it in a tile on the review's machine.
+    fn heard_review(
+        &mut self,
+        key: WorkerKey,
+        view: &Entity<ReviewView>,
+        event: &ReviewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
             ReviewEvent::CommentsSent { thread } => {
-                if let Some(tile) = this.tile_of_thread(*thread) {
-                    this.go_to(tile.item, cx);
+                if let Some(tile) = self.tile_of_thread(*thread) {
+                    self.go_to(tile.item, cx);
                 }
             }
             ReviewEvent::AddToMessage { thread, text, id } => {
                 let (review, id) = (view.downgrade(), *id);
-                this.quote_to_thread(*thread, text.clone(), cx, move |taken, cx| {
+                self.quote_to_thread(*thread, text.clone(), cx, move |taken, cx| {
                     let _gone = review.update(cx, |v, cx| v.added(id, taken, cx));
                 });
             }
-            ReviewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
-        });
-        self.reviews.hearing.insert(thread, hearing);
+            ReviewEvent::OpenThread(opens) => self.open_thread_at(*opens, cx),
+            ReviewEvent::OpenFile { path } => self.open_file_on(Some(key), path, None, cx),
+        }
     }
 
     /// The folder whose changes "Review changes" opens from the focus: a folder tile's, or the
@@ -198,7 +221,11 @@ impl WorkspaceView {
             let theme = self.theme.clone();
             let path = path.clone();
             let view = cx.new(|cx| ReviewView::folder(hub, path, theme, window, cx));
-            self.reviews.changes.insert(*item, view);
+            let key = *key;
+            let hearing = cx.subscribe(&view, move |this, view, event: &ReviewEvent, cx| {
+                this.heard_review(key, &view, event, cx);
+            });
+            self.reviews.changes.insert(*item, (view, hearing));
         }
         self.reviews.changes.retain(|item, _| tiled.iter().any(|(i, ..)| i == item));
     }
@@ -206,11 +233,11 @@ impl WorkspaceView {
     /// The view of the folder's changes tile `item`, once made.
     #[must_use]
     pub fn changes_view(&self, item: ItemId) -> Option<&Entity<ReviewView>> {
-        self.reviews.changes.get(&item)
+        self.reviews.changes.get(&item).map(|(view, _)| view)
     }
 
     /// Every folder's changes tile's view.
     pub(super) fn changes_views(&self) -> impl Iterator<Item = &Entity<ReviewView>> {
-        self.reviews.changes.values()
+        self.reviews.changes.values().map(|(view, _)| view)
     }
 }

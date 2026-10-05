@@ -79,6 +79,15 @@ fn tile(
     cx: &mut TestAppContext,
     width: f32,
 ) -> (Entity<ReviewView>, Entity<ThreadHub>, Sent, &mut VisualTestContext) {
+    tile_in(cx, width, None)
+}
+
+/// [`tile`], its thread working in `cwd` where given.
+fn tile_in<'a>(
+    cx: &'a mut TestAppContext,
+    width: f32,
+    cwd: Option<&str>,
+) -> (Entity<ReviewView>, Entity<ThreadHub>, Sent, &'a mut VisualTestContext) {
     let sent: Sent = Rc::default();
     let into = Rc::clone(&sent);
     let hub = cx.update(|cx| {
@@ -93,7 +102,10 @@ fn tile(
         .detach();
         hub
     });
-    let state = fixtures::thread("edit");
+    let mut state = fixtures::thread("edit");
+    if let Some(cwd) = cwd {
+        cwd.clone_into(&mut state.meta.cwd);
+    }
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let held = hub.clone();
@@ -721,4 +733,101 @@ fn an_empty_review_names_its_span(cx: &mut TestAppContext) {
         let rest: String = text.chars().skip(1).collect();
         assert!(!rest.chars().any(char::is_uppercase), "sentence case: {text:?}");
     }
+}
+
+/// A file's own menu, by a right click on its row in the list or on its head: Keep, Open and
+/// Copy path, then Revert set apart, saying the file and the point it goes back to, since
+/// nothing undoes it. The review's paths start at the repository's root, which the tile reads
+/// as it opens: until that is known nothing opens, and the copy says it copies the path in the
+/// repository.
+#[gpui::test]
+fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppContext) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome, GitStatus};
+
+    use super::view::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
+    use crate::review::model::Scope;
+
+    let (view, hub, sent, cx) = tile_in(cx, 1200.0, Some("/r/crates"));
+    let heard: Rc<RefCell<Vec<ReviewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    let right_click = |cx: &mut VisualTestContext, selector: &'static str| {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} drawn")).center();
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    };
+    let rows = |cx: &mut VisualTestContext| -> Vec<String> {
+        cx.update(|window, _cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _cx| crate::a11y::tree(window))
+            .into_iter()
+            .filter(|n| n.role == "MenuItem")
+            .filter_map(|n| n.label)
+            .collect()
+    };
+    let copied = |cx: &mut VisualTestContext| {
+        cx.update(|_w, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+    };
+    let revert = revert_words("lib.rs", Scope::LastTurn);
+    assert_eq!(revert, "Revert lib.rs to before the last turn");
+
+    // `src/lib.rs` is the review's second file.
+    right_click(cx, "review-file-1");
+    assert!(cx.debug_bounds("review-file-menu").is_some(), "the menu hangs at the press");
+    assert_eq!(rows(cx), ["Keep", COPY_PATH_IN_REPOSITORY, revert.as_str()], "no root yet");
+    click(cx, "review-file-menu-copy-path");
+    assert!(cx.debug_bounds("review-file-menu").is_none(), "a pick closes it");
+    assert_eq!(copied(cx).as_deref(), Some("src/lib.rs"));
+
+    let status: Vec<u64> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Git { request, op: GitOp::Status, .. } => Some(*request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(status.len(), 1, "the root is asked once, as the tile opens");
+    let root = GitStatus {
+        root: "/r".to_owned(),
+        branch: Some("main".to_owned()),
+        head: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        files: Vec::new(),
+        more: 0,
+    };
+    let done = GitOutcome::Done(GitDone::Status(Box::new(root)));
+    hub.update(cx, |hub, cx| hub.git_done(status[0], done, cx));
+    cx.run_until_parked();
+
+    right_click(cx, "review-head-row-1");
+    assert_eq!(rows(cx), ["Keep", "Open", COPY_PATH, revert.as_str()]);
+    click(cx, "review-file-menu-open");
+    let opened = ReviewEvent::OpenFile { path: "/r/src/lib.rs".to_owned() };
+    assert_eq!(*heard.borrow(), [opened], "from the root, not the thread's folder");
+    right_click(cx, "review-file-1");
+    click(cx, "review-file-menu-copy-path");
+    assert_eq!(copied(cx).as_deref(), Some("/r/src/lib.rs"));
+
+    right_click(cx, "review-file-1");
+    click(cx, "review-file-menu-revert");
+    let reverted: Vec<Intent> =
+        intents(&sent).into_iter().filter(|i| matches!(i, Intent::Revert(_))).collect();
+    assert!(
+        matches!(&*reverted, [Intent::Revert(p)] if p.path == "src/lib.rs" && p.hunks.is_empty()),
+        "the whole file goes back: {reverted:?}"
+    );
+    right_click(cx, "review-file-1");
+    assert_eq!(rows(cx), ["Open", COPY_PATH], "no keep or revert while one is on its way");
 }

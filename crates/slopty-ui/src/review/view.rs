@@ -65,6 +65,9 @@ const LIST_FROM: f32 = 720.0;
 const LIST_WIDTH: f32 = 240.0;
 
 mod authors;
+mod file_menu;
+
+pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
 
 /// The most the band of the agent's findings above the diff takes before it scrolls.
 const FINDINGS_HEIGHT: f32 = 240.0;
@@ -112,6 +115,12 @@ pub enum ReviewEvent {
     },
     /// The person pressed who wrote a line: open the thread that did, at its turn.
     OpenThread(Opens),
+    /// The person chose Open in a file's menu: open the file, whole, in a tile of its own on
+    /// the review's machine.
+    OpenFile {
+        /// Its whole path on the machine.
+        path: String,
+    },
 }
 
 /// One row of the diff.
@@ -262,6 +271,8 @@ pub struct ReviewView {
     hunk_hovered: Option<(usize, usize)>,
     /// The person opened the agent's findings while they are folded to their summary.
     findings_open: bool,
+    /// A file's own menu, while it is open.
+    file_menu: Option<file_menu::FileMenu>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -370,6 +381,7 @@ impl ReviewView {
             hovered: None,
             hunk_hovered: None,
             findings_open: false,
+            file_menu: None,
             _subscriptions: vec![writing, hearing, watching],
         };
         if let Some(thread) = view.own() {
@@ -516,13 +528,29 @@ impl ReviewView {
     }
 
     /// Ask the branch's pull request once the folder is known: the tile shows where it stands.
+    /// The repository's root is asked with it, once, where it is not known: the review names
+    /// its files from there.
     fn ask_pull(&mut self, cx: &mut Context<Self>) {
         if self.pull_asked {
             return;
         }
         let Some(repo) = self.repo(cx) else { return };
         self.pull_asked = true;
-        let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&repo, GitOp::PullStatus, cx));
+        let rooted = self.root(cx).is_some();
+        let _asked = self.hub.update(cx, |hub, cx| {
+            if !rooted {
+                let _status = hub.git_op(&repo, GitOp::Status, cx);
+            }
+            hub.git_op(&repo, GitOp::PullStatus, cx)
+        });
+    }
+
+    /// The root of the repository the reviewed folder is in, as its status last said: where
+    /// the review's paths start.
+    fn root(&self, cx: &App) -> Option<String> {
+        let repo = self.repo(cx)?;
+        let git = self.hub.read(cx).git().repo(&repo)?;
+        git.status.as_ref().map(|status| status.root.clone())
     }
 
     /// Open the commit sheet over the tile.
@@ -1671,32 +1699,31 @@ impl ReviewView {
                 let tone = if listed.quiet { s.text_muted } else { s.text };
                 let id = format!("review-file-{at}");
                 let selector = id.clone();
-                Some(
-                    div()
-                        .id(ElementId::Name(id.into()))
-                        .debug_selector(move || selector)
-                        .role(Role::ListItem)
-                        .aria_label(SharedString::from(file.path.clone()))
-                        .flex()
-                        .items_center()
-                        .gap(self.z(theme.spacing.xs))
-                        .px(self.z(theme.spacing.md))
-                        .min_h(self.z(kit::Row::One.height(theme)))
-                        .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.hover)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_color(hsla(tone))
-                                .child(SharedString::from(name)),
-                        )
-                        .children(kit::changes(theme, file.patch.added, file.patch.removed))
-                        .on_click(cx.listener(move |this, _ev, _w, _cx| this.reveal(at))),
-                )
+                let row = div()
+                    .id(ElementId::Name(id.into()))
+                    .debug_selector(move || selector)
+                    .role(Role::ListItem)
+                    .aria_label(SharedString::from(file.path.clone()))
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.xs))
+                    .px(self.z(theme.spacing.md))
+                    .min_h(self.z(kit::Row::One.height(theme)))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(tone))
+                            .child(SharedString::from(name)),
+                    )
+                    .children(kit::changes(theme, file.patch.added, file.patch.removed))
+                    .on_click(cx.listener(move |this, _ev, _w, _cx| this.reveal(at)));
+                Some(Self::file_menu_press(row, at, cx))
             }))
             .into_any_element()
     }
@@ -1809,47 +1836,45 @@ impl ReviewView {
             _ => None,
         };
         let radius = self.z(theme.radii.sm);
+        let head = div()
+            .debug_selector(move || format!("review-head-row-{at}"))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .px(self.z(theme.spacing.xs))
+            .min_h(self.z(kit::Row::One.height(theme)))
+            .text_size(self.z(theme.typography.small()))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.6))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text))
+                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                    .child(SharedString::from(name.to_owned())),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(dir.to_owned())),
+            )
+            .children(status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)))
+            .children(kit::changes(theme, file.patch.added, file.patch.removed))
+            .child(div().flex_1())
+            .child(self.picks(at, None, "file", cx));
         div()
             .debug_selector(move || format!("review-head-{at}"))
             .w_full()
             .px(self.z(theme.spacing.md))
             .pt(self.z(theme.spacing.lg))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.sm))
-                    .px(self.z(theme.spacing.xs))
-                    .min_h(self.z(kit::Row::One.height(theme)))
-                    .text_size(self.z(theme.typography.small()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(gpui::relative(0.6))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(hsla(s.text))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                            .child(SharedString::from(name.to_owned())),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(dir.to_owned())),
-                    )
-                    .children(
-                        status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)),
-                    )
-                    .children(kit::changes(theme, file.patch.added, file.patch.removed))
-                    .child(div().flex_1())
-                    .child(self.picks(at, None, "file", cx)),
-            )
+            .child(Self::file_menu_press(head, at, cx))
             .child(
                 div()
                     .w_full()
@@ -2342,5 +2367,6 @@ impl Render for ReviewView {
             .child(body)
             .children(foot)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
+            .children(self.file_menu_panel(cx))
     }
 }

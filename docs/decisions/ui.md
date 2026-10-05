@@ -7516,3 +7516,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     title bar names the workspace.
   - Test: `workspace::tests::nav_rows::a_phone_drawer_names_the_workspace`. Golden:
     `ios-phone-navigator`, retaken on the simulator.
+- ✅ **A review file has its own menu** (2026-10-06, `.research/ux-audit-2026-10-05.md` I1,
+  the last of "context menus everywhere"). A right click, or a long press under a finger, on a
+  file's row in the list or on its head in the diff opens the file's menu where the press
+  landed: Keep, Open, Open in the person's editor, Copy path, then Revert set apart last.
+  - **Revert says what it does.** The review path has no undo for a put-back: the file goes back
+    on the worker and leaves the review. So the row names the file and the point it goes back to
+    ("Revert lib.rs to before the last turn"), and that is all the warning it needs before it
+    acts. The head's own Revert sits in the file's head, whose name is beside it. Keep and Revert
+    show only on a thread's own review, and only while nothing is already on its way for that
+    file.
+  - **Paths from the root.** A review names its files from the repository's root, which need not
+    be the thread's folder. The tile asks the repository's status once as it opens, beside its
+    pull request, and takes the root from it. Until the root is known, Open and the editor are
+    left out, and the copy row says "Copy path in the repository" and copies just that. Open
+    opens the file in a tile on the review's machine (`ReviewEvent::OpenFile`).
+  - **A folder's review is heard.** A folder's changes tile was never subscribed, so a press on
+    who wrote one of its lines went nowhere. Its events now go through the same handler as a
+    thread's review.
+  - Tests: `review::tests::a_files_menu_keeps_opens_copies_and_says_what_revert_does`,
+    `workspace::tests::review_tile::a_reviews_open_file_opens_it_on_its_machine`,
+    `workspace::tests::review_tile::a_folders_review_opens_the_thread_that_wrote_a_line` (fails
+    without the subscription).
