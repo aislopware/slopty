@@ -112,6 +112,11 @@ const FIELD_ROW_FROM: f32 = 600.0;
 const LISTS_TAILNET: bool = !cfg!(target_os = "ios");
 /// What the panel says where it cannot look on the tailnet, so its absence has a reason.
 const UNLISTED: &str = "This device cannot list your tailnet, so type an address.";
+/// The machine panel's line where this device can add none (an iPhone, an iPad).
+const FROM_A_MAC: &str = "Machines are added from a Mac.";
+/// How, under it.
+const FROM_A_MAC_HOW: &str = "On a Mac, Use this Mac shares it, and Install over SSH adds a Mac or \
+                              Linux machine you reach. They show here once your server lists them.";
 /// The address field's height, and its button's beside it: T3 Code's field (`h-9`) under a
 /// pointer, a finger's target on glass.
 const FIELD_H: f32 = if TOUCH { Density::TOUCH.hit } else { 36.0 };
@@ -2311,6 +2316,16 @@ impl Workspace {
         let flow = adding.this_mac.as_ref();
         let sheet = adding.ssh.as_ref();
         let asking = adding.asking;
+        let in_flow = flow.is_some() || sheet.is_some() || asking.is_some();
+        // A machine's panel with no way to add one here: no Mac to share, no SSH and no tailnet
+        // to list. It says where machines are added instead of offering an address it has no
+        // field for.
+        let from_a_mac = adding.mode == Panel::Worker
+            && !in_flow
+            && (self.this_mac.is_none() || self.this_mac_listed_here())
+            && self.deployer.is_none()
+            && adding.search.is_none();
+        let blurb = if from_a_mac { FROM_A_MAC } else { blurb };
         // The checklist, the SSH sheet and the question have headings of their own, and their
         // link goes back to the panel they came from.
         let back = match adding.mode {
@@ -2346,7 +2361,7 @@ impl Workspace {
         let tailnet =
             adding.search.as_ref().map(|search| self.tailnet_list(search, adding.mode, cx));
         let field_label = address_label(adding.search.as_ref());
-        let unlisted = (!LISTS_TAILNET).then(|| {
+        let unlisted = (!LISTS_TAILNET && adding.mode == Panel::Server).then(|| {
             kit::meta(div(), theme)
                 .debug_selector(|| "add-worker-unlisted".to_owned())
                 .child(UNLISTED)
@@ -2416,7 +2431,6 @@ impl Workspace {
             });
         // At the body's size, as Cancel beside it is: one size for what can be pressed. Only a
         // flow has somewhere to go back to.
-        let in_flow = flow.is_some() || sheet.is_some() || asking.is_some();
         let switch = in_flow.then(|| {
             button("panel-switch", back, ButtonKind::Link).on_click(cx.listener(
                 |this, _ev, _window, cx| {
@@ -2490,6 +2504,24 @@ impl Workspace {
                 sections.push(entry.into_any_element());
             }
             sections.extend(set_up_server.map(IntoElement::into_any_element));
+        }
+        if from_a_mac {
+            let how = kit::meta(div(), theme)
+                .debug_selector(|| "add-worker-from-a-mac".to_owned())
+                .child(FROM_A_MAC_HOW);
+            let other = entry_row(
+                theme,
+                "connect-another-server",
+                slopty_ui::icons::IconName::Link,
+                "Connect to another server",
+                "One that lists other machines",
+            )
+            .on_click(cx.listener(|this, _ev, window, cx| {
+                this.show_add_worker(Panel::Server, window, cx);
+            }));
+            let rows = kit::card(theme).flex().flex_col().p(px(spacing.xxs)).child(other);
+            sections.push(how.into_any_element());
+            sections.push(rows.into_any_element());
         }
         let checklist = flow.map(|flow| self.this_mac_checklist(flow, cx));
         let ssh_sheet = sheet.map(|sheet| self.ssh_sheet(sheet, cx));
@@ -4342,6 +4374,40 @@ mod tests {
         cx.run_until_parked();
         let sheet = ws.read_with(cx, |ws, _cx| ws.adding.as_ref().is_some_and(|a| a.ssh.is_some()));
         assert!(sheet && cx.debug_bounds("ssh-form").is_some(), "the sheet, drawn");
+    }
+
+    /// Where no machine can be added (an iPhone or iPad: no Mac to share, no SSH, no tailnet to
+    /// list), the machine's panel says machines are added from a Mac, with no line about an
+    /// address it has no field for, and offers another server instead, whose panel takes one.
+    #[gpui::test]
+    fn a_device_that_adds_no_machine_says_they_are_added_from_a_mac(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(402.0), px(800.0)));
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                // As on iOS: no Mac to share, no SSH, and nothing lists the tailnet.
+                ws.this_mac = None;
+                ws.deployer = None;
+                ws.show_add_worker(Panel::Worker, window, cx);
+                if let Some(adding) = &mut ws.adding {
+                    adding.search = None;
+                }
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("add-worker-from-a-mac").is_some(), "where machines are added");
+        assert!(cx.debug_bounds("add-worker-unlisted").is_none(), "no address to type here");
+        assert!(cx.debug_bounds("add-worker-field").is_none());
+        let other = cx.debug_bounds("connect-another-server").expect("another server");
+        cx.simulate_click(other.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let mode = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.mode));
+        assert_eq!(mode, Some(Panel::Server), "the server's panel");
+        assert!(cx.debug_bounds("add-worker-field").is_some(), "with its address");
+        assert!(cx.debug_bounds("add-worker-from-a-mac").is_none());
     }
 
     /// Both panels lead with this Mac, the likeliest first step; the server's panel then takes

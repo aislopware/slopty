@@ -1175,3 +1175,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   is resilience for the store in general, not a migration: nothing is converted. Tests:
   `slopty-worker` `an_item_that_does_not_decode_is_dropped_and_the_rest_kept`,
   `a_registry_that_does_not_parse_is_moved_aside`, `an_unreadable_path_is_refused`.
+
+- ✅ **An iPhone or iPad says machines are added from a Mac** (2026-10-05, readiness G4). On
+  iOS the machine panel had nothing to offer. It had no This Mac row, no SSH row and no tailnet
+  list, and no address field either, since a machine joins through the server. Yet it said
+  "type an address". Now a machine panel with no way to add one here (no Mac to share, no
+  deployer, no tailnet look) says machines are added from a Mac, and how: Use this Mac on
+  it, or Install over SSH from it. It offers "Connect to another server" as a row, which
+  opens the server's panel and its address field. The "cannot list your tailnet" line shows
+  only on the server's panel, where there is a field to type into. The state is chosen from
+  what the device has, not from the platform, so a headless test on the Mac holds it.
+  Test: `slopty-app` `a_device_that_adds_no_machine_says_they_are_added_from_a_mac`.
