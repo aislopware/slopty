@@ -457,17 +457,13 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
     }
     assert!(!drawn(cx, "project-card-5-tail"), "a run under way has no last lines");
 
-    let link = cx.debug_bounds("project-card-4-output").expect("drawn").center();
-    cx.simulate_click(link, Modifiers::none());
-    cx.run_until_parked();
+    click(cx, "project-card-4-output");
     assert_eq!(focused(&view, cx), Some(kept_tile), "the verifier's terminal, not the agent's");
     assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "the card's own click held back");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();
-    let link = cx.debug_bounds("project-card-5-output").expect("drawn").center();
-    cx.simulate_click(link, Modifiers::none());
-    cx.run_until_parked();
+    click(cx, "project-card-5-output");
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
         Some("The verifier's terminal has closed")
@@ -553,9 +549,43 @@ fn done(_: &Verb) -> Outcome {
 }
 
 fn click(cx: &mut VisualTestContext, selector: &str) {
-    let at = cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str())).expect(selector);
+    let at = reveal(cx, selector);
     cx.simulate_click(at.center(), Modifiers::none());
     cx.run_until_parked();
+}
+
+/// Scroll the board's body until what `selector` names stands inside it, as a person scrolls to
+/// a card below the fold before clicking it, and say where it is then. What the body does not
+/// hold (the header, the message) does not move with it, and is clicked where it stands.
+fn reveal(cx: &mut VisualTestContext, selector: &str) -> Bounds<Pixels> {
+    let name: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    let at = cx.debug_bounds(name).expect(selector);
+    let Some(body) = cx.debug_bounds("project-body") else { return at };
+    let by = if at.bottom() > body.bottom() {
+        body.bottom() - at.bottom() - px(8.0)
+    } else if at.top() < body.top() {
+        body.top() - at.top() + px(8.0)
+    } else {
+        return at;
+    };
+    let scroll = |cx: &mut VisualTestContext, by: Pixels| {
+        cx.simulate_event(ScrollWheelEvent {
+            position: body.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), by)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+            momentum_phase: None,
+        });
+        cx.run_until_parked();
+    };
+    scroll(cx, by);
+    let now = cx.debug_bounds(name).expect(selector);
+    if now == at {
+        // Not the body's: put back whatever the wheel moved.
+        scroll(cx, -by);
+        return cx.debug_bounds(name).expect(selector);
+    }
+    now
 }
 
 /// The board's actions reach the server as the person's word. A finished task's Merge and a
@@ -1278,11 +1308,12 @@ fn every_card_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut Tes
     );
     assert!(said.iter().any(|l| l.starts_with("Pinned to studio, macOS")), "{said:?}");
 
-    click(cx, "project-card-project-node-1-where");
-    assert_eq!(sent(&mut queue, cx, done), [], "a running one's place stays");
     click(cx, "project-card-project-node-3-where");
     let verbs = sent(&mut queue, cx, |_| Outcome::Facts(Vec::new()));
     assert_eq!(verbs, [Verb::WorkerFacts { worker: None }], "a place still to come moves");
+    // Last: the click falls through to its card, which opens its agent and moves the strip.
+    click(cx, "project-card-project-node-1-where");
+    assert_eq!(sent(&mut queue, cx, done), [], "a running one's place stays");
 }
 
 /// The board sets how its project's work is checked: the header's toggle opens a panel holding
@@ -1373,4 +1404,65 @@ fn a_project_s_notice_leads_to_its_orchestrator_stacked_by_project(cx: &mut Test
 
     notice.tile = None;
     assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "nowhere to lead");
+}
+
+/// The bar under the header fills only with what merged: empty while nothing has, though every
+/// task stands in a lane, then the merged tasks' share of them all, its value said as a
+/// percentage. How the rest stands is the lanes' counts, not the bar's.
+#[gpui::test]
+fn the_bar_fills_only_with_what_merged(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+    let track = cx.debug_bounds("project-bar").expect("drawn");
+    let fill = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("project-bar-share-fill").map_or(px(0.0), |b| b.size.width)
+    };
+    assert!(fill(cx) < px(0.5), "nothing merged: an empty track, {:?}", fill(cx));
+
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (_, agent) = setup.agent;
+    let merged = on(card(1, "Wire the board", TaskState::Merged), worker, agent);
+    view.update_in(cx, |v, _w, cx| v.project_update(11, task_changed("board", merged, None), cx));
+    cx.run_until_parked();
+    // The fill glides to its share; past the glide it stands at a third of the track.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let third = track.size.width / 3.0;
+    assert!((fill(cx) - third).abs() < px(1.0), "one of three merged: {:?} of {track:?}", fill(cx));
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "1 of 3 merged"), "{said:?}");
+}
+
+/// The message to the orchestrator has its own send control: a click sends what is written, as
+/// ↵ does, and clears it; ⇧↵ starts a new line instead of sending.
+#[gpui::test]
+fn the_message_to_the_orchestrator_sends_from_its_control(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let b = board(&view, cx, orchestrator);
+    let line = |cx: &mut VisualTestContext| b.read_with(cx, ProjectView::composing);
+
+    cx.simulate_keystrokes("c");
+    cx.simulate_input("split #2");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("then merge");
+    assert_eq!(line(cx).as_deref(), Some("split #2\nthen merge"), "a new line, not a send");
+    assert_eq!(sent(&mut queue, cx, done), []);
+
+    click(cx, "project-send");
+    let verbs = sent(&mut queue, cx, done);
+    let [Verb::TaskTell { task: None, text, .. }] = verbs.as_slice() else { panic!("{verbs:?}") };
+    assert_eq!(text, "split #2\nthen merge");
+    assert_eq!(line(cx).as_deref(), Some(""), "cleared once sent");
 }

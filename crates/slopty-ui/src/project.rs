@@ -55,7 +55,7 @@ gpui::actions!(
         ShowTerminal,
         /// Let the project go: its tasks, its queue, its timeline.
         DeleteProject,
-        /// Put the keyboard on the line to the orchestrator.
+        /// Put the keyboard on the message to the orchestrator.
         TellOrchestrator,
         /// Set the project's verifier command.
         EditChecks,
@@ -114,7 +114,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Run the task on\u{2026}", Box::new(RunTaskOn)),
         line("Push after each merge", Box::new(TogglePush)),
         line("Show the orchestrator's terminal", Box::new(ShowTerminal)),
-        line("Tell the orchestrator\u{2026}", Box::new(TellOrchestrator)),
+        line("Message the orchestrator\u{2026}", Box::new(TellOrchestrator)),
         line("Verifier\u{2026}", Box::new(EditChecks)),
         line("Delete the project", Box::new(DeleteProject)),
     ]

@@ -26,6 +26,7 @@ mod disclosure;
 pub mod find;
 mod fit;
 pub mod menu;
+pub mod message;
 pub mod progress;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
@@ -1013,7 +1014,7 @@ pub fn button(
             .active(move |el| el.bg(hsla(s.pressed))),
         ButtonKind::Link => el.text_color(hsla(s.text)).hover(Styled::underline),
     };
-    crate::a11y::tab_stop(el, s.accent)
+    crate::a11y::tab_stop(el, s.focus)
 }
 
 /// The side of an [`icon_button`] at zoom 1: the large icon size and a small pad round it.
@@ -1150,6 +1151,14 @@ pub fn inset_x<E: Styled>(el: E, theme: &Theme) -> E {
     el.px(px(theme.spacing.inset()))
 }
 
+/// `el` set in a type role ([`Theme::roles`]): its size, its line and its weight, at zoom `k`.
+#[must_use]
+pub fn typed<E: Styled>(el: E, role: slopty_theme::TypeRole, k: f32) -> E {
+    el.text_size(px(role.size * k))
+        .line_height(px(role.line * k))
+        .font_weight(FontWeight(role.weight))
+}
+
 /// `el` set as meta text: a row's second line, a bar's readout, a status word. The meta size
 /// in `text_muted`; a status word then takes its tone's colour over it.
 #[must_use]
@@ -1230,7 +1239,7 @@ fn square_icon(
             crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(ink))
                 .size(px(theme.typography.icon() * k)),
         );
-    crate::a11y::tab_stop(el, s.accent)
+    crate::a11y::tab_stop(el, s.focus)
 }
 
 /// [`icon_button_at`] that stays on until pressed again: a tile's trackpad mode.
@@ -1302,7 +1311,7 @@ pub fn text_toggle(
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(face);
-    let el = crate::a11y::tab_stop(el, s.accent);
+    let el = crate::a11y::tab_stop(el, s.focus);
     if on {
         el.bg(hsla(s.selected))
     } else {
@@ -2555,7 +2564,7 @@ mod tests {
     fn a_floating_surface_is_rounded_lg() {
         const SHEETS: [(&str, &str); 6] = [
             ("slopty-ui/src/kit.rs", "pub fn dialog("),
-            ("slopty-ui/src/conversation/thread/view/composer.rs", "fn shell<"),
+            ("slopty-ui/src/kit/message.rs", "pub fn shell<"),
             ("slopty-ui/src/kit/find.rs", "super::elevate(div(), &theme)"),
             ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
             ("slopty-ui/src/kit/menu.rs", "super::elevate(div(), &theme)"),
@@ -2923,7 +2932,7 @@ mod tests {
                             })
                             .into()
                         }),
-                    s.accent,
+                    s.focus,
                 ))
             }
         }

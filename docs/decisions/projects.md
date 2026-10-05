@@ -1058,7 +1058,8 @@ Tests:
 - The bar's hover says what each segment counts.
 
 **Short lanes stack; the board never wraps a row of lanes under another.** ✅ 2026-10-03
-(design review `.research/design-review-2026-10-03.md` #1, #4)
+(design review `.research/design-review-2026-10-03.md` #1, #4; superseded 2026-10-05 by **The
+board reads in one direction**, below)
 - Before: the lanes stood in equal columns, as many as fit at 232 pt, and wrapped onto a new
   row. Six lanes in a 1030 pt tile made a row of four and a row of two. The second row started
   under the tallest lane, so the short lanes stood over an empty gap, and Ready to merge (the
@@ -1976,3 +1977,37 @@ follow-up)
   - Tests: `slopty_settings` `worker_labels_and_probes_are_unknown`, `slopty-worker`
     `this_mac_reports_its_toolchains`, `server_link` `the_server_hears_the_workers_facts`, and
     `slopty-cli` `a_worker_s_own_facts_are_listed_and_a_command_task_runs_where_it_says`.
+
+- ✅ **The board reads in one direction; its bar says only what merged; its message is a
+  thread's** (2026-10-05, design critique `.research/design-critique-astra-2026-10-05.md` #02,
+  #11, #12, #13; readiness 10-06 #17).
+  - **Lanes keep their places.** Stacking short lanes down a column balanced the columns'
+    heights, but a lane's place moved as its neighbours grew, and the reader had to find
+    whether the next state was below or across. Now the lanes stand in their order, left to
+    right and then down, as many across as fit at 280 pt (`LANE_W`), and a lane keeps its cell
+    however tall the others grow. Under two lanes' width they are sections down one column.
+    `stack_lanes` and the line count it balanced by (`card_lines`) are deleted.
+  - **A card reads as a task.** It is inset 12 pt. Its title runs up to two lines at the task's
+    size (14) and the medium weight, with the mark and the number on its first line. The facts
+    stand 8 pt below in the secondary ink: the second line, where it runs, its way to the
+    target, its check, its buttons. The way to the target is one line of plain words parted by
+    the quiet dot, with the stage that holds the merge in the text ink. They are no longer
+    bordered chips, because none of them is a control. A failed verifier's last lines are
+    mono at the facts' size on a reading line, not at the caption's.
+  - **The bar is the merged share.** Every task used to be a segment in its lane's tone, so a
+    full bar could sit over "0 of 5 merged". Now the bar is the shared progress bar
+    (`kit::progress::Bar`): the merged tasks' share of them all in the success fill, an empty
+    track before any has merged, and "N of M merged" to a screen reader. How the rest stands
+    is the lanes' counts.
+  - **The message to the orchestrator is a thread's.** The board's flat field became the frame
+    a thread's composer has (`kit::message::shell`): the resting elevation inside one
+    hairline, the floating radius, the prose's size, and the edge in the accent while the
+    keyboard is in it. It grows to six lines, sends on ↵ or its own control
+    (`kit::message::send_control`, a control's side, a touch target's on a phone), and takes a
+    new line on ⇧↵. It says "Message the orchestrator…", as the palette now does.
+  - The header's "N live" says what is live: "3 agents running".
+  - Tests: `the_bar_fills_only_with_what_merged`,
+    `the_message_to_the_orchestrator_sends_from_its_control`, and
+    `as_many_lanes_stand_across_as_fit_at_the_zoom` (280 pt). The board tests click through a
+    `reveal` that scrolls a card into the body first, as a person would, because cards are
+    taller now.

@@ -1,9 +1,10 @@
 //! The board: one project drawn in its orchestrator's tile.
 //!
-//! A header names the project and where its work lands, over a bar that is every task at once,
-//! each a segment in its lane's tone. Under it, the orchestrator while it waits on the person,
-//! then the lanes, each task in the one its state puts it in, what needs the person first.
-//! Every card whose agent runs somewhere opens that agent's tile with a click or ↩.
+//! A header names the project and where its work lands, over a bar of how much of it has
+//! merged. Under it, the orchestrator while it waits on the person, then the lanes in their
+//! order, each task in the one its state puts it in, what needs the person first; at its foot,
+//! the message to the orchestrator, in the frame a thread's composer has. Every card whose
+//! agent runs somewhere opens that agent's tile with a click or ↩.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -17,7 +18,8 @@ use gpui::{
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px, relative,
 };
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
@@ -39,8 +41,9 @@ use super::{
     StopTaskAgent, TellOrchestrator, TogglePush,
 };
 use crate::a11y::tab_stop;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
+use crate::kit::progress::Progress;
 use crate::palette::{Plate, age_label, dotted};
 
 /// The key context of a board; its keys are bound in it.
@@ -68,8 +71,9 @@ pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
 /// The "Run on" picker's close button.
 pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
-/// The least a lane is wide at zoom 1: the tile takes as many across as fit.
-const LANE_W: f32 = 232.0;
+/// The least a lane is wide at zoom 1: the tile takes as many across as fit. Wide enough that
+/// a card's title reads on two lines beside its mark rather than as an ellipsis.
+const LANE_W: f32 = 280.0;
 /// How far a card that arrives travels up into its place, at zoom 1.
 const ARRIVE: f32 = 4.0;
 /// How often the board moves its time at work on while agents work: often enough that a
@@ -78,8 +82,6 @@ const ARRIVE: f32 = 4.0;
 const AT_WORK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 /// The most facts a row's or a card's second line holds: two separators.
 const META_PARTS: usize = 3;
-/// The progress bar's height, at zoom 1.
-const BAR_H: f32 = 3.0;
 
 pub use super::model::Node;
 
@@ -113,10 +115,14 @@ pub enum ProjectEvent {
     CloseRecap,
 }
 
-/// What the line to the orchestrator says while it is empty.
-const COMPOSE_PLACEHOLDER: &str = "Tell the orchestrator what to do next";
+/// What the message to the orchestrator says while it is empty.
+const COMPOSE_PLACEHOLDER: &str = "Message the orchestrator\u{2026}";
 /// What it is called to a screen reader.
-const COMPOSE_LABEL: &str = "Tell the orchestrator";
+const COMPOSE_LABEL: &str = "Message the orchestrator";
+/// What its send control is called.
+const SEND: &str = "Send";
+/// The most lines the message grows to before it scrolls.
+const COMPOSE_ROWS: usize = 6;
 
 /// How long a first "Delete the project" waits for the second that does it.
 const DELETE_CONFIRM: std::time::Duration = std::time::Duration::from_secs(5);
@@ -221,9 +227,9 @@ pub struct ProjectView {
     tick: Option<Task<()>>,
     /// When "Delete the project" was asked once, waiting for the second ask that does it.
     delete_asked: Option<std::time::Instant>,
-    /// The line to the orchestrator, made with the first frame (it needs the window), and
+    /// The message to the orchestrator, made with the first frame (it needs the window), and
     /// what watches it.
-    composer: Option<(Entity<InputState>, [Subscription; 2])>,
+    composer: Option<(Entity<TextareaState>, [Subscription; 2])>,
     /// Words the server refused, to put back on the line once it is empty.
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
@@ -524,7 +530,7 @@ impl ProjectView {
         let Some(task) = movable else { return Some(el) };
         let el =
             el.cursor_pointer().hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)));
-        Some(tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
+        Some(tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
             cx.stop_propagation();
             this.picked = Some(node);
             cx.emit(ProjectEvent::Act(task, TaskAction::RunOn));
@@ -578,54 +584,11 @@ impl ProjectView {
 // ----- drawing ---------------------------------------------------------------------------------
 
 /// How many lanes a tile `width` points wide, drawn at `zoom`, sets side by side: as many as
-/// fit, one at the least. They share the width equally; past it, short lanes stack
-/// ([`stack_lanes`]).
+/// fit at [`LANE_W`], one at the least. They share the width equally and keep their order,
+/// left to right and then down.
 pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
     let lanes = u16::try_from(Lane::ALL.len()).unwrap_or(u16::MAX);
     (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
-}
-
-/// How many of a card's lines a lane's heading stands for in [`stack_lanes`]'s balance, the
-/// space under it counted.
-const LANE_HEAD_LINES: u32 = 2;
-
-/// How many lanes each of `columns` columns holds, left to right, for lanes about `weights`
-/// lines tall in their order: every column holds at least one, the lanes keep their order down
-/// each column and then across, and the tallest column is as short as it can be. Among splits
-/// as short, the most even wins, so a short lane joins a short neighbour rather than a tall
-/// one. More columns than lanes leave a lane each.
-pub(super) fn stack_lanes(weights: &[u32], columns: usize) -> Vec<usize> {
-    let n = weights.len();
-    let columns = columns.clamp(1, n.max(1));
-    if columns >= n {
-        return vec![1; n];
-    }
-    // A cut after lane `i` is bit `i`; at most seven lanes make 64 ways to cut.
-    let gaps = n.saturating_sub(1);
-    let mut best: Option<((u64, u64), Vec<usize>)> = None;
-    for cuts in 0_u32..(1_u32 << gaps) {
-        if usize::try_from(cuts.count_ones()).ok() != Some(columns.saturating_sub(1)) {
-            continue;
-        }
-        let mut sizes = Vec::with_capacity(columns);
-        let (mut tallest, mut squares, mut height, mut held) = (0_u64, 0_u64, 0_u64, 0_usize);
-        for (i, weight) in weights.iter().enumerate() {
-            height = height.saturating_add(u64::from(*weight));
-            held = held.saturating_add(1);
-            let cut = u32::try_from(i).is_ok_and(|i| i < 31 && cuts & (1 << i) != 0);
-            if cut || i.saturating_add(1) == n {
-                tallest = tallest.max(height);
-                squares = squares.saturating_add(height.saturating_mul(height));
-                sizes.push(held);
-                (height, held) = (0, 0);
-            }
-        }
-        let score = (tallest, squares);
-        if best.as_ref().is_none_or(|(b, _)| score < *b) {
-            best = Some((score, sizes));
-        }
-    }
-    best.map_or_else(|| vec![1; n], |(_, sizes)| sizes)
 }
 
 /// A lane's tone: colour for the two lanes that need the person, and for the rest the ink
@@ -710,7 +673,7 @@ pub(super) fn switch(
                 .rounded_full()
                 .bg(hsla(ink)),
         );
-    tab_stop(el, s.accent)
+    tab_stop(el, s.focus)
 }
 
 /// What an action does, as "nothing to …" and "stand on a task to …" say it.
@@ -768,7 +731,11 @@ impl ProjectView {
         let project = &board.project;
         let (merged, total) = board.progress();
         let progress = (total > 0).then(|| format!("{merged} of {total} merged"));
-        let live = format!("{} live", board.live());
+        // What is live: the agents running for it, its orchestrator's among them.
+        let live = match board.live() {
+            1 => "1 agent running".to_owned(),
+            n => format!("{n} agents running"),
+        };
         let place = place_line(project);
         let readout = |id: &'static str, text: String| {
             crate::kit::tabular(div())
@@ -973,7 +940,7 @@ impl ProjectView {
             } else {
                 crate::kit::secondary(el, theme)
             };
-            tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+            tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
                 cx.emit(ProjectEvent::Act(task, action));
             }))
@@ -981,50 +948,25 @@ impl ProjectView {
         Some(div().flex_none().flex().items_center().gap(self.z(sp.xxs)).children(buttons))
     }
 
-    /// Every task at once: a segment each, in its own lane's tone, left to right as the lanes
-    /// run. The bar is the board seen from across the room.
-    fn bar(&self, board: &Board) -> Div {
+    /// How much of the work has merged: the merged tasks' share of them all, in the success
+    /// tone on the quiet track, an empty track before any has. Only what is done fills it, so a
+    /// full bar means the work is in; how the rest stands is the lanes' counts.
+    fn bar(&self, board: &Board) -> Stateful<Div> {
         let theme = &self.theme;
-        let total = board.tasks.len();
-        // The bar's legend: what each segment counts, in the lanes' own words.
-        let legend = self.summary();
-        let hint_theme = Rc::clone(&self.hint_theme);
-        let track = div()
+        let (merged, total) = board.progress();
+        #[expect(clippy::cast_precision_loss, reason = "task counts are small")]
+        let share = if total == 0 { 0.0 } else { merged as f32 / total as f32 };
+        let bar =
+            crate::kit::progress::Bar::new(theme, "project-bar-share", Progress::Share(share))
+                .label(SharedString::from(format!("{merged} of {total} merged")))
+                .tone(theme.surfaces.success_fill)
+                .height(self.z(theme.spacing.xs))
+                .at_once();
+        div()
             .id("project-bar")
             .debug_selector(|| "project-bar".to_owned())
-            .role(Role::ProgressIndicator)
-            .aria_label(SharedString::from(self.summary()))
             .mt(self.z(theme.spacing.xs))
-            .h(self.z(BAR_H))
-            .w_full()
-            .flex()
-            .gap(self.z(1.0))
-            .rounded(self.z(BAR_H))
-            .overflow_hidden()
-            .bg(hsla(theme.surfaces.border_subtle))
-            .map(crate::kit::hint_timing)
-            .tooltip(move |_window, cx| {
-                let theme = Rc::clone(&hint_theme);
-                let legend = legend.clone();
-                cx.new(|_| crate::kit::Hint::new(legend, "", theme)).into()
-            });
-        if total == 0 {
-            return div().child(track);
-        }
-        let mut by_lane: BTreeMap<Lane, usize> = BTreeMap::new();
-        for card in board.tasks.values() {
-            let n = by_lane.entry(Lane::of(card.state)).or_default();
-            *n = n.saturating_add(1);
-        }
-        #[expect(clippy::cast_precision_loss, reason = "task counts are small")]
-        let share = |n: usize| n as f32 / total as f32;
-        let segments = by_lane.into_iter().map(|(lane, n)| {
-            let tone = lane_tone(theme, lane);
-            let fill =
-                if lane == Lane::Merged { hsla(tone) } else { hsla_alpha(tone, alpha::STRONG) };
-            div().h_full().w(relative(share(n))).bg(fill)
-        });
-        div().child(track.children(segments))
+            .child(bar)
     }
 
     /// The orchestrator while it waits on the person, over the lanes: never below a fold. Each
@@ -1083,7 +1025,7 @@ impl ProjectView {
                             .child(SharedString::from(asks)),
                     ),
             );
-        let row = tab_stop(row, s.accent).on_click(cx.listener(|_this, _ev, _w, cx| {
+        let row = tab_stop(row, s.focus).on_click(cx.listener(|_this, _ev, _w, cx| {
             cx.emit(ProjectEvent::Open(None));
         }));
         Some(
@@ -1392,7 +1334,7 @@ impl ProjectView {
                         .size(self.z(theme.typography.icon())),
                 )
                 .child("Output");
-            tab_stop(link, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+            tab_stop(link, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
                 cx.emit(ProjectEvent::Output(term));
             }))
@@ -1431,10 +1373,11 @@ impl ProjectView {
                 .py(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
                 .bg(hsla(s.panel))
-                // What the program printed, in the face a terminal and a tool's output use; it
-                // reads a size larger than the chrome's at the same points.
+                // What the program printed, in the face a terminal and a tool's output use, at
+                // the facts' size and a reading line, so why it failed is read, not squinted at.
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
-                .text_size(self.z(theme.typography.caption()))
+                .text_size(self.z(theme.typography.small()))
+                .line_height(relative(theme.typography.markdown_line_height))
                 .text_color(hsla(s.text_secondary))
                 .children(tail.into_iter().map(|line| {
                     div()
@@ -1458,54 +1401,27 @@ impl ProjectView {
             .children(tail)
     }
 
-    /// The lanes in as many columns as the tile fits at [`LANE_W`] ([`lanes_across`]),
-    /// sharing its width. With more lanes than columns, neighbouring short lanes stack in one
-    /// column ([`stack_lanes`]), so every lane stands in the first screenful in its left-to-right
-    /// order and none waits under a gap on a second row. The board never scrolls sideways: a
-    /// sideways swipe moves the strip.
+    /// The lanes in their order, left to right and then down, as many across as the tile fits
+    /// at [`LANE_W`] ([`lanes_across`]), sharing its width. A lane keeps its place however tall
+    /// its neighbours grow, so the work reads in one direction; narrower than two lanes, they
+    /// are sections down one column. The board never scrolls sideways: a sideways swipe moves
+    /// the strip.
     fn board(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let lanes = board.lanes();
         if lanes.is_empty() {
             return vec![self.empty(NO_TASKS, NO_TASKS_HINT)];
         }
         let sp = self.theme.spacing;
-        let across = usize::from(lanes_across(self.width, self.zoom)).min(lanes.len());
-        let weights: Vec<u32> = lanes
-            .iter()
-            .map(|(_, tasks)| {
-                tasks
-                    .iter()
-                    .filter_map(|task| board.tasks.get(task))
-                    .map(|card| self.card_lines(board, card))
-                    .fold(LANE_HEAD_LINES, u32::saturating_add)
-            })
-            .collect();
-        let mut lanes = lanes.into_iter();
-        let columns: Vec<AnyElement> = stack_lanes(&weights, across)
-            .into_iter()
-            .map(|n| {
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(self.z(sp.lg))
-                    .children(
-                        lanes
-                            .by_ref()
-                            .take(n)
-                            .map(|(lane, tasks)| self.lane(board, lane, tasks, cx)),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let across = usize::from(lanes_across(self.width, self.zoom)).clamp(1, lanes.len());
         let grid = div()
             .grid()
-            .grid_cols(u16::try_from(columns.len()).unwrap_or(1))
+            .grid_cols(u16::try_from(across).unwrap_or(1))
             .items_start()
             .gap_x(self.z(sp.sm))
+            .gap_y(self.z(sp.lg))
             .px(self.z(sp.inset() - sp.xs))
             .pt(self.z(sp.sm))
-            .children(columns);
+            .children(lanes.into_iter().map(|(lane, tasks)| self.lane(board, lane, tasks, cx)));
         vec![grid.into_any_element()]
     }
 
@@ -1519,28 +1435,6 @@ impl ProjectView {
         }
         let meta = self.node_meta(board, Some(card), check.as_ref(), !stages.is_empty());
         CardFacts { check, stages, meta }
-    }
-
-    /// About how many lines `card` stands in `lane`, its padding counted as one: what
-    /// [`stack_lanes`] balances the columns by. Only the balance rests on it, so it counts the
-    /// card's parts as [`Self::card`] draws them without measuring a glyph.
-    fn card_lines(&self, board: &Board, card: &TaskCard) -> u32 {
-        let CardFacts { check, stages, meta } = self.card_facts(board, card);
-        let check_lines = match &check {
-            None => 0,
-            Some(Check::Verdict { run, .. }) if !run.passed => {
-                // The head, then the tail in its well, which pads by about a line.
-                2_usize.saturating_add(verdict_tail(run, TAIL_LINES).len())
-            }
-            Some(_) => 1,
-        };
-        let lines = 2_usize
-            .saturating_add(usize::from(!meta.is_empty()))
-            .saturating_add(usize::from(self.where_words(board, Some(card.id)).is_some()))
-            .saturating_add(usize::from(!stages.is_empty()))
-            .saturating_add(check_lines)
-            .saturating_add(if board.actions(card.id).is_empty() { 0 } else { 2 });
-        u32::try_from(lines).unwrap_or(u32::MAX)
     }
 
     /// One lane: its heading with its count, then its cards.
@@ -1590,7 +1484,10 @@ impl ProjectView {
             .into_any_element()
     }
 
-    /// One task on the board: its number and title, where it runs, and what it waits on.
+    /// One task on the board: its number and its title on up to two lines, then, a step
+    /// below, what moves it on, where it runs, its way to the target, its check and what the
+    /// person can do. The title is the text ink at the task's size; the facts are the
+    /// secondary ink, so what the task is reads before how it stands.
     fn card(&self, board: &Board, card: &TaskCard, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1642,6 +1539,55 @@ impl ProjectView {
                         .child(SharedString::from(why))
                 }))
         });
+        // The title's line: the mark and the number stand on its first.
+        let roles = theme.roles();
+        let line = self.z(roles.task_title.line);
+        let first_line = |el: Div| el.flex_none().h(line).flex().items_center();
+        let title = div()
+            .flex()
+            .items_start()
+            .gap(self.z(sp.xs))
+            .min_w_0()
+            .child(first_line(div()).child(self.mark(status)))
+            .child(
+                first_line(crate::kit::tabular(div()))
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(format!("#{}", card.id))),
+            )
+            .child(
+                crate::kit::typed(div(), roles.task_title, self.zoom)
+                    .flex_1()
+                    .min_w_0()
+                    .line_clamp(2)
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(card.title.clone())),
+            );
+        let meta = (!meta.is_empty()).then(|| {
+            crate::kit::typed(div(), roles.metadata, self.zoom)
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(hsla(s.text_secondary))
+                .child(dotted(theme, meta))
+                .into_any_element()
+        });
+        let facts: Vec<AnyElement> = meta
+            .into_iter()
+            .chain(where_line.map(IntoElement::into_any_element))
+            .chain(pipeline.map(IntoElement::into_any_element))
+            .chain(block.map(IntoElement::into_any_element))
+            .chain(
+                self.run_on_block(card.id, "project-card", cx).map(IntoElement::into_any_element),
+            )
+            // Last, on a line of their own: a lane is too narrow for a title and its buttons.
+            .chain(
+                self.actions(board, card.id, "project-card", cx).map(IntoElement::into_any_element),
+            )
+            .collect();
+        let facts = (!facts.is_empty())
+            .then(|| div().flex().flex_col().gap(self.z(sp.xs)).min_w_0().children(facts));
         let el = crate::kit::card(theme)
             .id(SharedString::from(key))
             .debug_selector(move || selector)
@@ -1649,57 +1595,16 @@ impl ProjectView {
             .aria_label(label)
             .flex()
             .flex_col()
-            .gap(self.z(sp.xxs))
-            .p(self.z(sp.sm))
+            .gap(self.z(sp.sm))
+            .p(self.z(sp.md))
             .rounded(self.z(theme.radii.md))
             .cursor_pointer()
             .when(picked, |el| crate::kit::selected(el, theme, true))
             .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.selected))))
             .when(own == Lane::Merged, |el| el.opacity(alpha::STRONG))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(sp.xs))
-                    .min_w_0()
-                    .child(self.mark(status))
-                    .child(
-                        crate::kit::tabular(div())
-                            .flex_none()
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(format!("#{}", card.id))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(hsla(s.text))
-                            .child(SharedString::from(card.title.clone())),
-                    ),
-            )
-            .children((!meta.is_empty()).then(|| {
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(dotted(theme, meta))
-            }))
-            .children(where_line)
-            .children(pipeline)
-            .children(block)
-            .children(self.run_on_block(card.id, "project-card", cx))
-            // Last, on a line of their own: a lane is too narrow for a title and its buttons.
-            .children(
-                self.actions(board, card.id, "project-card", cx)
-                    .map(|actions| actions.pt(self.z(sp.xxs))),
-            );
-        let el = tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
+            .child(title)
+            .children(facts);
+        let el = tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
             this.picked = Some(node);
             cx.emit(ProjectEvent::Open(node));
             cx.notify();
@@ -1707,13 +1612,18 @@ impl ProjectView {
         crate::kit::slide_fade(el, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
     }
 
-    /// Make the line to the orchestrator once there is a window, and put refused words back
-    /// on it while it is empty.
+    /// Make the message to the orchestrator once there is a window, and put refused words back
+    /// on it while it is empty. ↵ sends it and ⇧↵ starts a new line, as in a thread.
     fn composer_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.composer.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(COMPOSE_PLACEHOLDER));
+            let input = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(COMPOSE_PLACEHOLDER)
+                    .auto_grow(1, COMPOSE_ROWS)
+                    .submit_on_enter(true)
+            });
             let sending = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
+                if let InputEvent::PressEnter { shift: false, .. } = event {
                     this.send_composed(window, cx);
                 }
             });
@@ -1838,10 +1748,10 @@ impl ProjectView {
         let cancel = button("project-checks-cancel", "Cancel")
             .text_color(hsla(s.text_secondary))
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
-        let cancel = tab_stop(cancel, s.accent)
+        let cancel = tab_stop(cancel, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.close_checks(window, cx)));
         let save = crate::kit::solid_pressable(button("project-checks-save", "Save"), theme);
-        let save = tab_stop(save, s.accent)
+        let save = tab_stop(save, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.save_checks(window, cx)));
         let panel = div()
             .id("project-checks-panel")
@@ -1872,11 +1782,52 @@ impl ProjectView {
         Some(panel)
     }
 
-    /// The line at the board's foot that talks to the orchestrator, while it has one.
-    fn composer_row(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
+    /// The message to the orchestrator at the board's foot, while it has one: a thread's
+    /// composer's frame ([`crate::kit::message`]) with the field in the prose's size over its
+    /// send control, the frame's edge in the accent while the keyboard is in it.
+    fn composer_row(
+        &self,
+        board: &Board,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<Stateful<Div>> {
         board.project.orchestrator?;
         let (input, _) = self.composer.as_ref()?;
-        let sp = self.theme.spacing;
+        let theme = &self.theme;
+        let sp = theme.spacing;
+        let focused = input.read(cx).focus_handle(cx).contains_focused(window, cx);
+        let field = div().px(self.z(sp.md)).pt(self.z(sp.sm)).child(
+            Textarea::new(input)
+                .with_size(Size::XSmall)
+                .appearance(false)
+                .bordered(false)
+                .text_size(self.z(theme.typography.prose()))
+                .line_height(relative(theme.typography.prose_line_height))
+                .aria_label(COMPOSE_LABEL),
+        );
+        let send = crate::kit::message::send_control(
+            theme,
+            self.zoom,
+            "project-send",
+            IconName::ArrowUp,
+            SEND,
+        )
+        .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
+        let foot = div()
+            .flex()
+            .justify_end()
+            .px(self.z(sp.sm))
+            .pb(self.z(sp.sm))
+            .child(tab_stop(send, theme.surfaces.focus));
+        let frame = crate::kit::message::shell(
+            div().flex().flex_col().gap(self.z(sp.xs)),
+            theme,
+            self.zoom,
+            false,
+            focused,
+        )
+        .child(field)
+        .child(foot);
         let row = div()
             .id("project-composer")
             .debug_selector(|| "project-composer".to_owned())
@@ -1888,12 +1839,13 @@ impl ProjectView {
                 window.focus(&this.focus, cx);
                 cx.notify();
             }))
-            .child(Input::new(input).aria_label(COMPOSE_LABEL));
+            .child(frame);
         Some(row)
     }
 
-    /// A task's way to its target on one row of quiet chips, a stage holding the merge back in
-    /// a stronger ink: no colour, since none of it is an alarm until someone has to act.
+    /// A task's way to its target as one line of plain words parted by the quiet dot, wrapping
+    /// when it must, a stage holding the merge back in the text ink: none of it is a control, so
+    /// none of it wears a button's edge, and none of it is coloured until someone has to act.
     fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<Div> {
         if stages.is_empty() {
             return None;
@@ -1901,28 +1853,34 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let chips = stages.iter().map(|stage| {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x(self.z(sp.xs))
+            .min_w_0()
+            .text_size(self.z(theme.typography.small()));
+        for (ix, stage) in stages.iter().enumerate() {
+            if ix > 0 {
+                row = row.child(crate::kit::separator(theme));
+            }
             let id = format!("{key}-{}", stage.kind.word());
             let selector = id.clone();
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::Label)
-                .aria_label(SharedString::from(stage.words.clone()))
-                .flex_none()
-                .max_w_full()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .px(self.z(sp.xs))
-                .rounded(self.z(theme.radii.sm))
-                .border(crate::kit::hair(theme))
-                .border_color(hsla(s.border_subtle))
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(if stage.holds { s.text } else { s.text_muted }))
-                .child(SharedString::from(stage.words.clone()))
-        });
-        Some(div().flex().flex_wrap().gap(self.z(sp.xxs)).pt(self.z(sp.xxs)).children(chips))
+            row = row.child(
+                div()
+                    .id(SharedString::from(id))
+                    .debug_selector(move || selector)
+                    .role(Role::Label)
+                    .aria_label(SharedString::from(stage.words.clone()))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(hsla(if stage.holds { s.text } else { s.text_secondary }))
+                    .child(SharedString::from(stage.words.clone())),
+            );
+        }
+        Some(row)
     }
 
     /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
@@ -1984,7 +1942,7 @@ impl ProjectView {
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(why)),
                     );
-                tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
                     cx.stop_propagation();
                     cx.emit(ProjectEvent::Pin(task, choice));
                 }))
@@ -2214,7 +2172,7 @@ impl Render for ProjectView {
             );
         };
         let body = self.board(&board, cx);
-        let composer = self.composer_row(&board, cx);
+        let composer = self.composer_row(&board, window, cx);
         let keys =
             keys.children(self.recap(&board, cx)).children(self.needs_you(&board, cx)).child(
                 self.scroll_fade(

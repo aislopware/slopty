@@ -262,42 +262,18 @@ fn a_row_names_a_state_as_its_lane_does() {
     assert_eq!(state_word(TaskState::Waiting), "Waiting");
 }
 
-/// As many lanes stand side by side as fit at the zoom they are drawn at, one at the least and
-/// never more than there are lanes.
+/// As many lanes stand side by side as fit at 280 pt each at the zoom they are drawn at, one at
+/// the least and never more than there are lanes.
 #[test]
 fn as_many_lanes_stand_across_as_fit_at_the_zoom() {
     use super::view::lanes_across;
-    assert_eq!(lanes_across(480.0, 1.0), 2);
-    assert_eq!(lanes_across(400.0, 1.0), 1);
+    assert_eq!(lanes_across(560.0, 1.0), 2);
+    assert_eq!(lanes_across(559.0, 1.0), 1, "narrower than two: sections down one column");
     assert_eq!(lanes_across(0.0, 1.0), 1, "before the first layout");
-    assert_eq!(lanes_across(480.0, 2.0), 1, "a zoomed board's lanes are wider");
-    assert_eq!(lanes_across(960.0, 2.0), 2);
-    assert_eq!(lanes_across(1200.0, 1.0), 5);
+    assert_eq!(lanes_across(560.0, 2.0), 1, "a zoomed board's lanes are wider");
+    assert_eq!(lanes_across(1120.0, 2.0), 2);
+    assert_eq!(lanes_across(1200.0, 1.0), 4);
     assert_eq!(lanes_across(10_000.0, 1.0), 7, "one column per lane at most");
-}
-
-/// More lanes than columns: neighbouring short lanes share a column, in their order, so the
-/// tallest column is as short as it can be and the split is as even as that allows; fewer
-/// lanes than columns stand one a column.
-#[test]
-fn short_lanes_stack_so_every_lane_stands_in_the_first_screenful() {
-    use super::view::stack_lanes;
-    // The showcase's board: needs you, failed, working, up next, ready to merge, merged.
-    let showcase = [8, 3, 9, 19, 10, 3];
-    assert_eq!(stack_lanes(&showcase, 4), [2, 1, 1, 2], "the short ones join their neighbours");
-    assert_eq!(stack_lanes(&showcase, 6), [1; 6]);
-    assert_eq!(stack_lanes(&showcase, 9), [1; 6], "no more columns than lanes");
-    assert_eq!(stack_lanes(&showcase, 1), [6], "one column holds them all");
-    assert_eq!(stack_lanes(&showcase, 0), [6], "before the first layout");
-    assert_eq!(stack_lanes(&[5, 5, 5], 2), [1, 2], "a tie keeps the first split");
-    assert_eq!(stack_lanes(&[1, 1, 30], 2), [2, 1], "the tall one stands alone");
-    assert_eq!(stack_lanes(&[], 3), Vec::<usize>::new());
-    for columns in 1..=7 {
-        let sizes = stack_lanes(&[4, 2, 7, 1, 9, 3, 5], columns);
-        assert_eq!(sizes.len(), columns);
-        assert_eq!(sizes.iter().sum::<usize>(), 7, "every lane once: {sizes:?}");
-        assert!(sizes.iter().all(|n| *n > 0), "no empty column: {sizes:?}");
-    }
 }
 
 /// A board unchanged by an update keeps its address, so handing it over again costs a pointer.
