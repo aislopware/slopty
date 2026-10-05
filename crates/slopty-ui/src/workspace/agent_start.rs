@@ -6,7 +6,8 @@
 //! What a machine can start comes from its own link: the agents its capabilities found
 //! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
 //! offers all it has. The folders are the focused shell's on that machine, then the last start's
-//! there, then where its shells stand, most recent first, then its home.
+//! there, then where its shells stand, most recent first, then its home; after them, a new
+//! worktree of each repository they are in, so agents can work one repository side by side.
 //!
 //! The folder step ends with "Resume a past session…": the machine lists the agent's sessions
 //! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
@@ -40,6 +41,9 @@ const PICK_MACHINE: &str = "On which machine";
 
 /// What the folder step's field says.
 const PICK_FOLDER: &str = "In which folder";
+
+/// The folder step's line for a new worktree of a repository there, its name after it.
+pub(super) const NEW_WORKTREE: &str = "New worktree of";
 
 /// The folder step's last line.
 pub(super) const RESUME_PAST: &str = "Resume a past session\u{2026}";
@@ -207,8 +211,15 @@ impl WorkspaceView {
         }
     }
 
+    /// The repository `cwd` is in on `worker`, as a shell standing there reported it.
+    fn repo_at(&self, worker: WorkerKey, cwd: &str) -> Option<String> {
+        let w = self.workers.get(&worker)?;
+        w.sessions.values().find(|s| s.cwd.as_deref() == Some(cwd)).and_then(|s| s.repo.clone())
+    }
+
     /// The folders `agent` may start in on `worker`, each once: the focused shell's there, the
-    /// last start's there, where its shells stand (the most recent first), then its home.
+    /// last start's there, where its shells stand (the most recent first), then its home. A new
+    /// worktree of each repository among them follows, then "Resume a past session…".
     fn pick_folder(
         &mut self,
         agent: &AgentId,
@@ -229,14 +240,31 @@ impl WorkspaceView {
         if !folders.iter().any(|f| *f == home || Some(f.as_str()) == self.home_of(worker)) {
             folders.push(home);
         }
+        let home = self.home_of(worker);
+        // One new worktree for each repository the folders are in, from the first folder in
+        // it: the worker makes it from that repository's clone, and the agent stands there.
+        let mut repos: Vec<String> = Vec::new();
+        let mut worktrees: Vec<PaletteItem> = Vec::new();
+        for cwd in &folders {
+            let Some(repo) = self.repo_at(worker, cwd).filter(|r| !repos.contains(r)) else {
+                continue;
+            };
+            let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
+            let action =
+                StartThread { worker, agent: agent.clone(), cwd: cwd.clone(), worktree: true };
+            let shown = format!("{NEW_WORKTREE} {name}");
+            worktrees.push(PaletteItem::new(&shown, IconName::GitBranch, Box::new(action), &[]));
+            repos.push(repo);
+        }
         let mut lines: Vec<PaletteItem> = folders
             .into_iter()
             .map(|cwd| {
-                let shown = super::tile::cwd_tail(&cwd, self.home_of(worker));
-                let action = Box::new(StartThread { worker, agent: agent.clone(), cwd });
-                PaletteItem::new(&shown, IconName::Folder, action, &[])
+                let shown = super::tile::cwd_tail(&cwd, home);
+                let action = StartThread { worker, agent: agent.clone(), cwd, worktree: false };
+                PaletteItem::new(&shown, IconName::Folder, Box::new(action), &[])
             })
             .collect();
+        lines.extend(worktrees);
         let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
         lines.push(PaletteItem::new(RESUME_PAST, IconName::RotateCcwClock, past, &[]));
         self.open_step(lines, PICK_FOLDER, window, cx);

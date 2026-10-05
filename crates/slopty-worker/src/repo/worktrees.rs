@@ -11,6 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
+use slopty_proto::agent::Worktree;
+use slopty_proto::thread::wire::Start;
+
 use super::bundle::{self, branch_ref};
 use super::{common_dir, git_dir};
 
@@ -126,6 +129,67 @@ pub async fn make(git: &Path, clone: &Path, name: &str) -> Result<Made, Failed> 
     bundle::run(git, &clone, &args).await?;
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     Ok(Made { path, branch, clone, clone_branch })
+}
+
+/// Move `start` into the worktree it names ([`Start::worktree`]), made or reopened by [`make`]
+/// from the clone its `cwd` is in, and say where it is. A start that names none is left as it
+/// is.
+///
+/// The clone is the main checkout of the repository `cwd` is in, so a start from inside another
+/// worktree makes one beside it, never one nested in it. The agent starts where `cwd` stood in
+/// the clone when that folder is in the worktree too, else at its root. The worktree is trusted
+/// for the agent as the clones the server makes are ([`super::cloning::trust`]), which passes
+/// over one outside them.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a `cwd` in no repository or a name that is no plain name, and
+/// [`Failed::Other`] for a machine with no git or a git that failed.
+pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
+    let Some(name) = start.worktree.take() else { return Ok(None) };
+    let git =
+        crate::changes::git().ok_or_else(|| Failed::Other("this machine has no git".to_owned()))?;
+    let cwd = crate::file::expand_home(Path::new(&start.cwd));
+    let (clone, within) = {
+        let cwd = cwd.clone();
+        tokio::task::spawn_blocking(move || clone_of(&cwd))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))??
+    };
+    let made = make(git, &clone, &name).await?;
+    let home = slopty_platform::dirs::home();
+    let (at, path) = (made.path.join(&within), made.path.clone());
+    let at = tokio::task::spawn_blocking(move || {
+        super::cloning::trust(&home, &path);
+        if at.is_dir() { at } else { path }
+    })
+    .await
+    .map_err(|e| Failed::Other(e.to_string()))?;
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    start.cwd = text(&at);
+    Ok(Some(Worktree {
+        name,
+        path: text(&made.path),
+        branch: Some(made.branch),
+        original_cwd: text(&made.clone),
+        original_branch: made.clone_branch,
+    }))
+}
+
+/// The main checkout of the repository `cwd` is in, and where `cwd` stands in its own
+/// checkout. A worktree's main checkout is the one its git directory is shared from; a
+/// submodule's, whose shared directory is no checkout's `.git`, is its own.
+fn clone_of(cwd: &Path) -> Result<(PathBuf, PathBuf), Failed> {
+    let root = super::root_of(cwd)
+        .ok_or_else(|| Failed::NotOne(format!("{} is in no git repository", cwd.display())))?;
+    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let within = resolved.strip_prefix(&root).map(Path::to_path_buf).unwrap_or_default();
+    let linked = std::fs::symlink_metadata(root.join(".git")).is_ok_and(|m| m.is_file());
+    let main = linked
+        .then(|| common_dir(&root).and_then(|c| std::fs::canonicalize(c).ok()))
+        .flatten()
+        .filter(|common| common.file_name().is_some_and(|name| name == ".git"))
+        .and_then(|common| common.parent().map(Path::to_path_buf));
+    Ok((main.unwrap_or(root), within))
 }
 
 /// Remove the worktree at `worktree` from its clone.
@@ -343,6 +407,65 @@ mod tests {
         }
         let inside = make(git, &clone.join(".claude"), "slopty-p-3").await;
         assert!(matches!(inside, Err(Failed::NotOne(_))), "{inside:?}");
+    }
+
+    /// A start naming a worktree moves into it, made from the main checkout of the repository
+    /// its folder is in, and stands where the folder stood; one started from inside another
+    /// worktree gets one beside it. A start naming none is left as it is, and one whose folder
+    /// is in no repository makes nothing.
+    #[tokio::test]
+    async fn a_start_enters_its_worktree_where_its_folder_stood() {
+        use slopty_proto::thread::AgentId;
+        if crate::changes::git().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(clone.join("web/src")).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        std::fs::write(clone.join("web/src/app.ts"), "app").expect("write");
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", "c0"]);
+        let root = std::fs::canonicalize(&clone).expect("canonical");
+        let start = |cwd: &Path, worktree: Option<&str>| Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: cwd.to_string_lossy().into_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            args: Vec::new(),
+            worktree: worktree.map(str::to_owned),
+        };
+
+        let mut plain = start(&clone, None);
+        assert_eq!(enter(&mut plain).await.expect("nothing to make"), None);
+        assert_eq!(plain, start(&clone, None), "left as it is");
+
+        let mut deep = start(&clone.join("web"), Some("claude-1"));
+        let made = enter(&mut deep).await.expect("made").expect("a worktree");
+        let tree = root.join(".claude/worktrees/claude-1");
+        assert_eq!(made.path, tree.to_string_lossy());
+        assert_eq!(made.original_cwd, root.to_string_lossy());
+        assert_eq!(
+            (made.branch.as_deref(), made.original_branch.as_deref()),
+            (Some("worktree-claude-1"), Some("main"))
+        );
+        assert_eq!(deep.cwd, tree.join("web").to_string_lossy(), "where the folder stood");
+        assert_eq!(deep.worktree, None, "taken by the worker");
+
+        let mut beside = start(&tree.join("web/src"), Some("claude-2"));
+        let made = enter(&mut beside).await.expect("made").expect("a worktree");
+        let sibling = root.join(".claude/worktrees/claude-2");
+        assert_eq!(made.path, sibling.to_string_lossy(), "beside it, not inside it");
+        assert_eq!(beside.cwd, sibling.join("web/src").to_string_lossy());
+
+        let elsewhere = tmp.path().join("notes");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        let refused = enter(&mut start(&elsewhere, Some("claude-3"))).await;
+        assert!(
+            matches!(&refused, Err(Failed::NotOne(why)) if why.contains("no git repository")),
+            "{refused:?}"
+        );
     }
 
     /// A worktree with a terminal in it, or anything not committed, is kept; the checkout

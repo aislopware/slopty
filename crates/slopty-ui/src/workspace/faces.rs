@@ -256,7 +256,7 @@ impl WorkspaceView {
             prompt,
             model: None,
             args: starting.agent_args(),
-            worktree: None,
+            worktree: starting.worktree.clone(),
         };
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));

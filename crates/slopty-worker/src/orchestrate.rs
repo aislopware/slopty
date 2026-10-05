@@ -516,13 +516,15 @@ impl Orchestrator {
                     Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
                 })?;
                 let mut start = *start;
-                let made = match start.worktree.take() {
-                    Some(name) => Some(self.worktree_for(&start.cwd, &name).await?),
-                    None => None,
-                };
-                if let Some(made) = &made {
-                    start.cwd = made.path.clone();
-                }
+                let made = crate::repo::worktrees::enter(&mut start).await.map_err(|failed| {
+                    use crate::repo::worktrees::Failed;
+                    let code = match &failed {
+                        Failed::NotOne(_) => ErrorCode::Invalid,
+                        Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
+                        Failed::Other(_) => ErrorCode::Failed,
+                    };
+                    Failure::new(code, failed.to_string())
+                })?;
                 let thread = threads.start(TaskThread { start, seat, env, role }).await?;
                 Ok(Outcome::ThreadStarted { thread, worktree: made.map(Box::new) })
             }
@@ -1004,42 +1006,6 @@ impl Orchestrator {
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }
-    }
-
-    /// The worktree `name` of the clone at `clone`, made or found there
-    /// ([`crate::repo::worktrees::make`]), trusted as the clones the server asked for are.
-    async fn worktree_for(
-        &self,
-        clone: &str,
-        name: &str,
-    ) -> Result<slopty_proto::agent::Worktree, Failure> {
-        let git = crate::changes::git()
-            .ok_or_else(|| Failure::new(ErrorCode::Unsupported, "this worker has no git"))?;
-        let clone = crate::file::expand_home(Path::new(clone));
-        let made = crate::repo::worktrees::make(git, &clone, name).await.map_err(|failed| {
-            use crate::repo::worktrees::Failed;
-            let code = match &failed {
-                Failed::NotOne(_) => ErrorCode::Invalid,
-                Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
-                Failed::Other(_) => ErrorCode::Failed,
-            };
-            Failure::new(code, failed.to_string())
-        })?;
-        let home = slopty_platform::dirs::home();
-        let at = made.path.clone();
-        blocking(move || {
-            crate::repo::cloning::trust(&home, &at);
-            Ok(())
-        })
-        .await?;
-        let text = |p: &Path| p.to_string_lossy().into_owned();
-        Ok(slopty_proto::agent::Worktree {
-            name: name.to_owned(),
-            path: text(&made.path),
-            branch: Some(made.branch),
-            original_cwd: text(&made.clone),
-            original_branch: made.clone_branch,
-        })
     }
 
     /// How the clones the server asked for go, as they move: the server's number for each,

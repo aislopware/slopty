@@ -27,6 +27,7 @@ use slopty_core::ItemId;
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
+use super::actions::StartThread;
 use super::projects::agent_label;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
@@ -93,6 +94,8 @@ pub(super) struct Starting {
     pub args: Vec<String>,
     /// It starts in plan mode.
     pub plan: bool,
+    /// The worktree of its own it starts in, by name, made from the clone `cwd` is in.
+    pub worktree: Option<String>,
     /// The first message's field, until the start is sent.
     pub field: Option<StartField>,
     /// Whether the start went to the machine.
@@ -108,7 +111,27 @@ impl Starting {
         cwd: String,
         field: Option<StartField>,
     ) -> Self {
-        Self { worker, agent, cwd, args: Vec::new(), plan: false, field, sent: false }
+        Self {
+            worker,
+            agent,
+            cwd,
+            args: Vec::new(),
+            plan: false,
+            worktree: None,
+            field,
+            sent: false,
+        }
+    }
+
+    /// The same start, in a new worktree of its own when `worktree`, named after its agent and
+    /// `item`, the tile it opens in.
+    pub(super) fn in_worktree(self, worktree: bool, item: ItemId) -> Self {
+        let name = worktree.then(|| {
+            // The id's end: its start is the clock, the same for starts close together.
+            let id = item.as_uuid().simple().to_string();
+            format!("{}-{}", self.agent.0, id.get(id.len().saturating_sub(6)..).unwrap_or(&id))
+        });
+        Self { worktree: name, ..self }
     }
 
     /// The same start, with `args` for its agent.
@@ -147,16 +170,15 @@ pub(crate) fn asks(agent: &AgentId) -> String {
 }
 
 impl WorkspaceView {
-    /// Open the tile of a thread of `agent` on `worker` in `cwd`, focused, its field for the
-    /// first message taking the keyboard: nothing goes to the machine until ↵.
+    /// Open the tile of the thread `start` asks for, focused, its field for the first message
+    /// taking the keyboard: nothing goes to the machine until ↵.
     pub(super) fn begin_start(
         &mut self,
-        worker: WorkerKey,
-        agent: AgentId,
-        cwd: String,
+        start: StartThread,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let StartThread { worker, agent, cwd, worktree } = start;
         let item = ItemId::new();
         let label = SharedString::from(asks(&agent));
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(label.clone()));
@@ -167,7 +189,8 @@ impl WorkspaceView {
         });
         let view = cx.new(|_| FieldView { input: input.clone(), label });
         let field = StartField { input, view, _events: events };
-        self.open_starting(item, Starting::new(worker, agent, cwd, Some(field)), cx);
+        let starting = Starting::new(worker, agent, cwd, Some(field)).in_worktree(worktree, item);
+        self.open_starting(item, starting, cx);
         self.starting.focus = Some(item);
     }
 
@@ -190,7 +213,7 @@ impl WorkspaceView {
         };
         let latest = self.recent_places().into_iter().find(|p| p.worker == key);
         let cwd = latest.map_or_else(|| "~".to_owned(), |p| p.cwd);
-        self.begin_start(key, agent, cwd, window, cx);
+        self.begin_start(StartThread { worker: key, agent, cwd, worktree: false }, window, cx);
     }
 
     /// Open the tile of `starting`, focused.
@@ -355,11 +378,13 @@ impl WorkspaceView {
         let id = tile.item;
         let label = agent_label(&starting.agent);
         let title = SharedString::from(format!("New {label} thread"));
-        let place = format!(
-            "on {} in {}",
-            self.worker_name(starting.worker),
-            super::tile::cwd_tail(&starting.cwd, self.home_of(starting.worker))
-        );
+        let folder = super::tile::cwd_tail(&starting.cwd, self.home_of(starting.worker));
+        let place = match starting.worktree {
+            Some(_) => {
+                format!("on {} in a new worktree of {folder}", self.worker_name(starting.worker))
+            }
+            None => format!("on {} in {folder}", self.worker_name(starting.worker)),
+        };
         let shapes = k < SHAPES_BELOW;
         let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);

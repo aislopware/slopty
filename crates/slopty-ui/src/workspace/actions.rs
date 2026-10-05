@@ -190,6 +190,8 @@ pub struct StartThread {
     pub agent: slopty_proto::thread::AgentId,
     /// In which folder, as the worker spells it (`~` its home).
     pub cwd: String,
+    /// In a new worktree of its own, made from the clone the folder is in.
+    pub worktree: bool,
 }
 
 /// "Resume a past session…", the last line of "New agent…"'s folder step: `agent`'s past

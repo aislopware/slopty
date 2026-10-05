@@ -198,10 +198,9 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let StartThread { worker, agent, cwd } = start.clone();
-        let last = super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone() };
-        self.last_start = Some(last);
-        self.begin_start(worker, agent, cwd, window, cx);
+        let StartThread { worker, agent, cwd, .. } = start.clone();
+        self.last_start = Some(super::agent_start::LastStart { agent, worker, cwd });
+        self.begin_start(start.clone(), window, cx);
     }
 
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is

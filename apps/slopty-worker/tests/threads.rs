@@ -1191,6 +1191,68 @@ mod threads {
         assert_eq!(a.state().meta.native, native);
     }
 
+    /// A start naming a worktree opens its agent in it: the worker makes it from the clone the
+    /// start's folder is in, where Claude Code would, and the agent starts there. A start in a
+    /// folder that is in no repository is refused in words, and nothing opens.
+    #[tokio::test]
+    async fn a_start_in_a_worktree_opens_its_agent_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (daemons, record) = with_claude(&root).await;
+        let clone = root.join("atlas");
+        std::fs::create_dir_all(&clone).unwrap();
+        for args in
+            [&["init", "-q", "-b", "main"][..], &["commit", "-q", "--allow-empty", "-m", "c0"]]
+        {
+            let done = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(done.success(), "git {args:?}");
+        }
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let start = |cwd: &Path| Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: cwd.to_string_lossy().into_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            args: Vec::new(),
+            worktree: Some("claude-c0ffee".to_owned()),
+        };
+        let answer = async |a: &mut Client, start: Start| {
+            let id = IntentId::new();
+            a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+            a.heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await
+        };
+
+        let notes = root.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let refused = answer(&mut a, start(&notes)).await;
+        assert!(
+            matches!(&refused, Outcome::Refused { reason } if reason.contains("no git repository")),
+            "{refused:?}"
+        );
+
+        let outcome = answer(&mut a, start(&clone)).await;
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let tree = clone.join(".claude/worktrees/claude-c0ffee");
+        assert!(tree.join(".git").is_file(), "a worktree of the clone");
+        let seen = recorded(&record).await;
+        assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
+    }
+
     /// The palette's start: no first message and a folder under the worker's home spelled
     /// with `~`, as a client that knows no home writes it. Claude Code opens in the home with
     /// nothing on its command line after its own flags, waiting for the person.

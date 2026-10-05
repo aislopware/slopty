@@ -28,6 +28,7 @@ use slopty_proto::thread::{
 use slopty_worker::conversation::{ORCHESTRATION, Seen};
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
+use slopty_worker::repo::worktrees;
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
 use slopty_worker::thread::authors::Authorship;
@@ -510,12 +511,16 @@ impl Following {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
-            // An agent is looked for and starts, in a terminal or not: on a task of its own.
-            ThreadRequest::Start { id, start } => {
+            // An agent is looked for and starts, in a terminal or not, in the worktree it
+            // names once that is made: on a task of its own.
+            ThreadRequest::Start { id, mut start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
                 let out = at.out.clone();
                 at.tasks.spawn(async move {
-                    let outcome = begin(&threads, id, start).await;
+                    let outcome = match worktrees::enter(&mut start).await {
+                        Ok(_) => begin(&threads, id, start).await,
+                        Err(failed) => refused(failed.to_string()),
+                    };
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }

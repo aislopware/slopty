@@ -4,10 +4,10 @@
 //! answers with opened as a tile of its own.
 
 use slopty_core::WorkerId;
-use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
+use slopty_proto::thread::wire::{IntentDone, Outcome, Start, ThreadRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 
-use super::super::actions::{NewAgent, NewAgentOf, ResumeSession};
+use super::super::actions::{NewAgent, NewAgentOf, ResumeSession, StartThread};
 use super::super::agent_start::{READING_SESSIONS, RESUME_PAST};
 use super::super::projects::worker_key;
 use super::*;
@@ -361,7 +361,13 @@ fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
     studio.drain();
     let codex = AgentId::named(AgentId::CODEX);
     view.update_in(cx, |v, window, cx| {
-        v.begin_start(key, codex.clone(), "/src/app".into(), window, cx);
+        let start = StartThread {
+            worker: key,
+            agent: codex.clone(),
+            cwd: "/src/app".into(),
+            worktree: false,
+        };
+        v.begin_start(start, window, cx);
     });
     settle(cx);
     let waiting = starting_tile(&view, cx).expect("the start's tile, waiting for its message");
@@ -372,7 +378,13 @@ fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
     assert!(starts(&mut studio).is_empty(), "and started nothing");
 
     view.update_in(cx, |v, window, cx| {
-        v.begin_start(key, codex.clone(), "/src/app".into(), window, cx);
+        let start = StartThread {
+            worker: key,
+            agent: codex.clone(),
+            cwd: "/src/app".into(),
+            worktree: false,
+        };
+        v.begin_start(start, window, cx);
     });
     settle(cx);
     let unsent = starting_tile(&view, cx).expect("a tile waiting for its message");
@@ -578,4 +590,64 @@ fn a_claude_code_start_can_plan_first(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     settle(cx);
     assert_eq!(args(&mut studio), [vec!["--permission-mode".to_owned(), "plan".to_owned()]]);
+}
+
+/// The folder step offers a new worktree of each repository its folders are in, once each,
+/// after the folders; picking it starts the agent in that folder with a worktree of its own,
+/// named after the agent, which the machine makes from the folder's clone.
+#[gpui::test]
+fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
+    use super::super::agent_start::NEW_WORKTREE;
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    for (version, cwd) in [(2, "/w/atlas/web"), (3, "/w/atlas")] {
+        let session = SessionId::new();
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            name: None,
+            facts: BTreeMap::new(),
+        };
+        let summary =
+            SessionSummary { repo: Some("/w/atlas".to_owned()), ..summary(session, Some(cwd)) };
+        let (key, by) = (studio.key, studio.me);
+        view.update_in(cx, |v, _window, cx| {
+            v.session_opened(key, summary, cx);
+            v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Add(item) }, cx);
+        });
+    }
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let lines = step_lines(&view, cx);
+    let worktree = format!("{NEW_WORKTREE} atlas");
+    let at = |line: &str| lines.iter().position(|l| l == line);
+    assert_eq!(lines.iter().filter(|l| l.starts_with(NEW_WORKTREE)).count(), 1, "{lines:?}");
+    assert!(at(&worktree) > at("~") && at(&worktree) < at(RESUME_PAST), "{lines:?}");
+
+    cx.simulate_input("new worktree");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("try the other layout");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<Start> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
+            _ => None,
+        })
+        .collect();
+    let [start] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    let name = start.worktree.as_deref().expect("a worktree");
+    let suffix = name.strip_prefix("codex-").expect("named after its agent");
+    assert!(suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+    assert_eq!(start.cwd, "/w/atlas", "the first folder in it, the most recent shell's");
 }

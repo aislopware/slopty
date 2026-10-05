@@ -1525,3 +1525,28 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::thread_waits::threads_at_rest_wait_under_the_earlier_fold`,
     `a_closed_agent_tile_comes_back_as_its_thread_taken_up_again`;
     `workspace::tests::thread_start::a_past_session_is_found_and_taken_up_again`.
+
+- ✅ **A new agent can start in a worktree of its own** (2026-10-05, readiness 10-05 G9). Several
+  agents on one repository at once is a daily pattern, and only a project's tasks could have a
+  worktree made for them. `Start` now carries `worktree`, a name, and the worker makes it for any
+  start, a client's or a task's, through the one path the tasks used (`repo::worktrees::enter`
+  over `make`): `.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s default
+  branch else `HEAD`, reopened as it is when it is there, as Claude Code's own `--worktree`
+  would. `Verb::StartThread` lost its own `worktree` field, which this replaces.
+  - *From the folder, not the root.* The clone is the main checkout of the repository the
+    start's folder is in, so a start from inside another worktree makes one beside it rather
+    than one nested in it. The agent stands where the folder stood in the clone, when that
+    folder is in the new worktree too, so a start in a monorepo's `web/` stays in `web/`.
+  - *In "New agent…".* After the folders, the folder step offers "New worktree of <repo>" once
+    for each repository its folders are in, as a shell standing there reported it, from the most
+    recent folder in it. The tile says "in a new worktree of …" while it asks for the first
+    message. The client names the worktree after the agent and the last six hex digits of its
+    tile's id, the random end of a v7 id, so two starts a moment apart never share one.
+  - *Not freed here.* A project task's worktree is removed once its work is merged and clean.
+    A person's own has no such point, so it stays until the person removes it, as Claude Code
+    leaves one that holds work.
+  - A folder in no repository is refused in words before any agent opens.
+  - Tests: `slopty-worker` `repo::worktrees::tests::a_start_enters_its_worktree_where_its_folder_stood`,
+    `slopty-workerd` `threads::a_start_in_a_worktree_opens_its_agent_there`,
+    `workspace::tests::thread_start::a_start_can_take_a_new_worktree_of_a_repository`; goldens
+    `client_start` (changed), `client_start_in_worktree` (new), `start_thread` (changed).
