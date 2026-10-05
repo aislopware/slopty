@@ -168,7 +168,7 @@ reed-solomon-simd = "3.1.0"
 
 # Apple frameworks (objc2 family, pinned exact; see the note above). Feature lists are trimmed
 # to the headers each crate needs so the generated surface stays small.
-objc2 = "=0.6.4"
+objc2 = "=0.6.5"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSArray",
@@ -415,11 +415,6 @@ noq-proto = { path = "vendor/noq-proto" }
 # reported, not dropped (quinn#2748), and `SO_SNDBUF` keeps clear of macOS's `EWOULDBLOCK`
 # (quinn#2727). `vendor/noq-udp/SLOPTY.md` lists them.
 noq-udp = { path = "vendor/noq-udp" }
-# objc2 0.6.4 with the unreleased fix for a use-after-free in `Retained::retain_autoreleased`
-# (objc2#861, fixed by #862); `vendor/objc2/SLOPTY.md` says why and when it goes.
-objc2 = { path = "vendor/objc2" }
-# The same fix backported to the objc2 0.5.2 that accesskit_macos still uses.
-objc2_05 = { package = "objc2", path = "vendor/objc2-0.5" }
 # block 0.1.6 with its extern statics of an uninhabited type made inhabited (rust#74840, a future
 # hard error); `vendor/block/SLOPTY.md`.
 block = { path = "vendor/block" }

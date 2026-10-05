@@ -101,13 +101,3 @@ upstream = "https://github.com/n0-computer/noq.git"
 upstream_branch = "main"
 vendored = "vendor/noq-proto"
 base = "c1f411562e6078852749b8bcf1190523096a107f"
-
-# objc2 is vendored while a fix waits for a release: `vendor/objc2` is the published 0.6.4 with
-# upstream's use-after-free fix (#862) and `vendor/objc2-0.5` the same for 0.5.2 (their
-# `SLOPTY.md`). `cargo xtask upstream watch` reports its head and pull requests; once 0.6.5 ships
-# with the fix, both copies and their `[patch.crates-io]` lines go.
-[objc2]
-upstream = "https://github.com/madsmtm/objc2.git"
-upstream_branch = "main"
-vendored = "vendor/objc2"
-base = "8852b424193ca41602281b3d7540d7c8ed51e49a"

@@ -128,7 +128,7 @@ miniz_oxide = { version = "0.8", features = ["simd"] }
 noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
 notify = { version = "8" }
-objc2 = { path = "../vendor/objc2" }
+objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFNotificationCenter", "CFPlugInCOM", "CFSet", "CFStream", "CFUUID", "objc2"] }
@@ -165,7 +165,7 @@ libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 notify = { version = "8" }
-objc2 = { path = "../vendor/objc2" }
+objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGFont", "CGPath", "objc2"] }
@@ -195,7 +195,7 @@ libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 notify = { version = "8" }
-objc2 = { path = "../vendor/objc2" }
+objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGFont", "CGPath", "objc2"] }

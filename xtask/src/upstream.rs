@@ -72,7 +72,7 @@ pub enum UpstreamCmd {
         no_push: bool,
     },
     /// Print a line for each change upstream as it happens: a head that moved, a pull request
-    /// opened, updated, merged or closed. Watches the forks' upstreams, noq and objc2; never syncs.
+    /// opened, updated, merged or closed. Watches the forks' upstreams and noq; never syncs.
     Watch {
         /// Seconds between looks.
         #[arg(long, default_value_t = 300)]
@@ -181,7 +181,6 @@ struct Config {
     #[serde(rename = "libghostty-rs")]
     libghostty_rs: Fork,
     noq: Vendored,
-    objc2: Vendored,
 }
 
 impl Config {

@@ -53,8 +53,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ No mold/lld on macOS (Apple's ld-prime is competitive; mold's Mach-O port is commercial).
 
-- ✅ objc2 0.6.4 / objc2-* 0.3.2 / block2 0.6.2 / dispatch2 0.3.1, pinned exact, `CFRetained`
+- ✅ objc2 0.6.5 / objc2-* 0.3.2 / block2 0.6.2 / dispatch2 0.3.1, pinned exact, `CFRetained`
   ownership in the type system; one counted `from_raw`/`retain` admission per wrapper crate.
+  - **No vendored objc2** (2026-10-06). objc2 0.6.5 and 0.5.3 shipped on 2026-10-05 with the
+    fix for a use-after-free in `Retained::retain_autoreleased` (objc2#861, fixed by #862):
+    once optimised, the call could be a tail call, and arm64's
+    `objc_retainAutoreleasedReturnValue` then retained the wrong object. `vendor/objc2` and
+    `vendor/objc2-0.5` carried that fix by hand until the release, and their
+    `[patch.crates-io]` lines and the upstream watch's `[objc2]` entry went with them. 0.5.3 is
+    what accesskit_macos still asks for.
 
 - ✅ **The gate checks a snapshot, in parallel lanes** (2026-09-12, at the user's request that
   the gate be as fast as possible and never waited on). Two costs were paid every cycle: the
