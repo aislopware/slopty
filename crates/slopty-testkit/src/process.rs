@@ -9,6 +9,10 @@
 //!   wall time moves by tens, so they are what a measurement's budget holds.
 //! - The footprint (`ri_phys_footprint`) is the dirty memory Activity Monitor and jetsam count, not
 //!   the resident set; `ri_lifetime_max_phys_footprint` is its peak.
+//! - Energy (`ri_energy_nj`, `rusage_info_v6`) is what the process's threads spent on the CPU, not
+//!   the GPU's or the media engines' (those take `powermetrics`, which needs root). Wakeups are the
+//!   package-idle and interrupt wakeups (`ri_pkg_idle_wkups`, `ri_interrupt_wkups`) Activity
+//!   Monitor's "Idle Wake Ups" counts: what an app at rest costs a battery.
 
 /// One reading of a process's counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,6 +25,10 @@ pub struct Usage {
     pub footprint: u64,
     /// The largest footprint the process has had, in bytes.
     pub peak_footprint: u64,
+    /// Energy its threads spent on the CPU since it started, in nanojoules.
+    pub energy_nj: u64,
+    /// Times it woke the CPU from idle or was woken by an interrupt since it started.
+    pub wakeups: u64,
 }
 
 /// The counters of `pid`; `None` when it is gone or not ours to read.
@@ -62,28 +70,50 @@ mod imp {
     use std::mem::MaybeUninit;
 
     use libc::{
-        PROC_PIDLISTFDS, PROC_PIDTASKINFO, RUSAGE_INFO_V4, c_int, c_void, proc_fdinfo,
-        proc_pid_rusage, proc_pidinfo, proc_taskinfo, rusage_info_v4,
+        PROC_PIDLISTFDS, PROC_PIDTASKINFO, c_int, c_void, proc_fdinfo, proc_pid_rusage,
+        proc_pidinfo, proc_taskinfo,
     };
 
     use super::Usage;
 
+    /// `struct rusage_info_v6` (`<sys/resource.h>`), which the `libc` crate does not declare:
+    /// a UUID, then 56 `uint64_t` counters in the header's order.
+    #[repr(C)]
+    struct RusageV6 {
+        uuid: [u8; 16],
+        counters: [u64; 56],
+    }
+
+    /// `RUSAGE_INFO_V6` (`<sys/resource.h>`).
+    const RUSAGE_INFO_V6: c_int = 6;
+    /// The counters' places in [`RusageV6`], as `<sys/resource.h>` orders the fields.
+    const PKG_IDLE_WKUPS: usize = 2;
+    const INTERRUPT_WKUPS: usize = 3;
+    const PHYS_FOOTPRINT: usize = 7;
+    const LIFETIME_MAX_PHYS_FOOTPRINT: usize = 28;
+    const INSTRUCTIONS: usize = 29;
+    const CYCLES: usize = 30;
+    const ENERGY_NJ: usize = 40;
+
     pub(super) fn usage(pid: i32) -> Option<Usage> {
-        let mut info = MaybeUninit::<rusage_info_v4>::zeroed();
-        // SAFETY: `proc_pid_rusage` (libproc.h) writes one `rusage_info_v4` for the flavor
-        // `RUSAGE_INFO_V4` into the buffer it is given, which is one of exactly that type. The
+        let mut info = MaybeUninit::<RusageV6>::zeroed();
+        // SAFETY: `proc_pid_rusage` (libproc.h) writes one `rusage_info_v6` for the flavor
+        // `RUSAGE_INFO_V6` into the buffer it is given, whose layout `RusageV6` mirrors. The
         // SDK declares the parameter `rusage_info_t *`, a pointer to the struct passed as that.
-        let done = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V4, info.as_mut_ptr().cast()) };
+        let done = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, info.as_mut_ptr().cast()) };
         if done != 0 {
             return None;
         }
-        // SAFETY: zeroed is a valid `rusage_info_v4` (plain integers), and the call succeeded.
+        // SAFETY: zeroed is a valid `RusageV6` (plain integers), and the call succeeded.
         let info = unsafe { info.assume_init() };
+        let at = |i: usize| info.counters.get(i).copied().unwrap_or_default();
         Some(Usage {
-            instructions: info.ri_instructions,
-            cycles: info.ri_cycles,
-            footprint: info.ri_phys_footprint,
-            peak_footprint: info.ri_lifetime_max_phys_footprint,
+            instructions: at(INSTRUCTIONS),
+            cycles: at(CYCLES),
+            footprint: at(PHYS_FOOTPRINT),
+            peak_footprint: at(LIFETIME_MAX_PHYS_FOOTPRINT),
+            energy_nj: at(ENERGY_NJ),
+            wakeups: at(PKG_IDLE_WKUPS).saturating_add(at(INTERRUPT_WKUPS)),
         })
     }
 
@@ -171,6 +201,8 @@ mod tests {
             "a million additions retire at least a million instructions: {before:?} {after:?}"
         );
         assert!(after.footprint > 0 && after.peak_footprint >= after.footprint, "{after:?}");
+        assert!(after.energy_nj > before.energy_nj, "the additions cost energy: {after:?}");
+        assert!(after.cycles > before.cycles, "and cycles: {after:?}");
         let fds = open_fds(me).unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(open_fds(me).unwrap(), fds + 1, "one more file, one more descriptor");

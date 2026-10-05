@@ -14909,3 +14909,68 @@ runs, load average about 6 from other lanes:
 ```sh
 cargo test --release -p slopty-platform --test symbols measure_symbol_rasters -- --ignored --nocapture
 ```
+
+## 2026-10-05 — the daily budgets: a relaunch onto 20 tiles, and the app at rest
+
+An app that stays open all day pays two costs no other figure here covered: coming back onto
+a day's layout after a crash or an update, and what it costs while nothing happens. Mac Studio
+M1 Max, macOS 27.0.1, a plain copy of HEAD 980b7662 plus this test (`git archive`, its own
+target dir in `/tmp`, so no lane's work in progress was in it), release build. Other lanes
+were building, load about 6 to 10.
+
+The test (`a_relaunch_onto_twenty_tiles_and_the_app_at_rest_are_within_budget`,
+`crates/slopty-e2e/tests/app/start.rs`):
+- Ten shells on each of two workers. The second runs under a root of its own, reached through
+  a relay as another Mac is (`SecondWorker`, clear link).
+- The app is killed with SIGKILL and started again five times. Each run is timed from the
+  spawn until all 20 tiles draw a frame their worker sent, with both links up. The dump is
+  read every 10 ms, not at the driver's 100 ms poll.
+- After 10 s to settle, the app's own counters are read over 60 s (`proc_pid_rusage`,
+  `RUSAGE_INFO_V6`, `slopty_testkit::process::Usage`):
+  - CPU energy (`ri_energy_nj`; the GPU's is not in it);
+  - package-idle plus interrupt wakeups;
+  - cycles.
+
+| run | relaunch, 20 tiles live: median (slowest) of 5 | CPU at rest | wakeups/s | Mcycles/s | footprint |
+| --- | --- | --- | --- | --- | --- |
+| release 1 | 312 ms (332) | 4.06 mW | 71.5 | 14.2 | 54 MB |
+| release 2 | 312 ms (313) | 6.21 mW | 70.7 | 16.7 | 54 MB |
+| release 3 | 313 ms (313) | 4.71 mW | 70.9 | 14.6 | 55 MB |
+| release 4 (10 ms reads) | 313 ms (327) | 1.89 mW | 71.5 | 12.3 | 58 MB |
+| release 5 (10 ms reads) | 313 ms (328) | 2.20 mW | 71.9 | 12.0 | 55 MB |
+| release, 2 tiles | 313 ms (314) | 1.41 mW | 72.1 | 12.2 | 49 MB |
+| debug (lane A's suite runs) | 299–329 ms (332–348) | 2.03–6.34 mW | 70.6–71.9 | 14.7–19.2 | 88–99 MB |
+
+- **The relaunch is about 0.31 s whether 2 tiles come back or 20**: the process, its window and
+  its two links, with every shell's screen arriving inside that. Nothing in it grows with the
+  layout.
+- **At rest the app's CPU costs 1.4 to 6 mW**, a few millionths of the machine's.
+- **The wakeups are about 71 a second, whatever the layout.** A 5 s `sample` of the idle app
+  shows the cause. Its `CVDisplayLink` thread runs gpui-fast's `step` at the display's rate,
+  and each tick posts to the main queue. That is about 60 of the 71. gpui-fast starts the
+  display link whenever the window is on screen (`gpui_macos/src/window.rs`,
+  `start_display_link`), and nothing stops it while nothing draws: once in 5 s, a frame was
+  drawn. No pull request on gpui-fast or Zed pauses it. Pausing the link after a few idle
+  ticks, and starting it again on the next invalidation, would take an idle window's wakeups
+  to about 10 a second. That is the next measurement-led change, in the fork.
+- **Budgets** (the test asserts them; the idle ones only on a release build):
+  - a relaunch under 1 s;
+  - under 20 mW of CPU at rest;
+  - under 100 wakeups a second at rest. This holds the display link's 60 from growing, and
+    comes down once the link pauses at rest.
+
+```sh
+git archive HEAD | tar -x -C /tmp/h11   # vendor/ghostty linked in; the test's files copied over
+cd /tmp/h11 && nice cargo build --release -p slopty-ptyd -p slopty-workerd -p slopty-serverd \
+  -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e \
+  --features slopty-e2e/live
+nice cargo test --release -p slopty-e2e --test app --features slopty-e2e/live --no-run
+SLOPTY_E2E_BIN_DIR=/tmp/h11/target/release SLOPTY_BINS_FRESH=1 SLOPTY_DATA_DIR=… \
+  target/release/deps/app-<hash> --ignored --nocapture --exact \
+  start::a_relaunch_onto_twenty_tiles_and_the_app_at_rest_are_within_budget
+# debug, in the checkout:
+cargo xtask e2e app --filter 'test(a_relaunch_onto_twenty_tiles)'
+```
+
+`SLOPTY_E2E_PER_WORKER` sets the shells on each worker, and `SLOPTY_E2E_REST_SECS` sets how
+long the rest is read.
