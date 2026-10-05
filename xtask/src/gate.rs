@@ -1277,7 +1277,9 @@ fn lint_linux_xtask(sh: &Shell) -> Result<()> {
 }
 
 /// Clippy on the host with every target (tests, benches, examples) in one pass, the live
-/// `slopty-e2e` targets the tests lane leaves out among them; then on the fuzz crate, a
+/// `slopty-e2e` targets the tests lane leaves out among them, `--locked` as CI fetches, so a
+/// lock written from a manifest left out of the index fails here and not on the `gate` branch;
+/// then on the fuzz crate, a
 /// workspace of its own that no other lane builds, in its own target dir (`fuzz/target`, where
 /// `cargo xtask fuzz --replay` builds it too).
 pub fn lint_host(sh: &Shell) -> Result<()> {
@@ -1287,7 +1289,7 @@ pub fn lint_host(sh: &Shell) -> Result<()> {
         &format!("clippy {host}"),
         cmd!(
             sh,
-            "cargo clippy --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
+            "cargo clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
         ),
     );
     let fuzz = if sh.path_exists("fuzz/Cargo.toml") {
