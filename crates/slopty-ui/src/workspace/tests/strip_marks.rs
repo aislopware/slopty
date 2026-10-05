@@ -217,11 +217,13 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         .expect("a pane in the first block");
     near(f32::from(pane.left() - first.left()), pad);
 
-    // The name and the place for the next one start where the panes' glyphs do.
+    // The name and the place for the next one start where the panes' glyphs do: a summary
+    // pads its glyph by `inset`.
+    let inset = theme.spacing.md;
     let new = bounds(cx, "overview-new-workspace");
     let name = bounds(cx, "overview-name-1");
-    near(f32::from(name.left()), pad.mul_add(2.0, f32::from(second.left())));
-    near(f32::from(new.left()), f32::from(second.left()) + pad);
+    near(f32::from(name.left()), f32::from(second.left()) + pad + inset);
+    near(f32::from(new.left()), f32::from(second.left()) + inset);
     assert!(new.top() >= second.bottom() - px(0.5), "under the last block");
     near(f32::from(new.size.height), theme.density.row);
     assert!(new.size.width < second.size.width, "a button, not a block: {new:?}");

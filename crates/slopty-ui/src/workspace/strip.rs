@@ -204,7 +204,7 @@ impl WorkspaceView {
             self.tick();
             self.layout.focus(tile);
             if overview {
-                self.layout.set_overview(false);
+                self.close_overview();
             }
             self.after_focus_moved(cx);
             // A click lands in the terminal itself; the keyboard goes with it now.
@@ -480,6 +480,7 @@ impl WorkspaceView {
             self.gesture.pinch = 0.0;
             self.tick();
             self.layout.set_overview(!open);
+            self.overview_flipped(cx);
             cx.notify();
         }
     }
@@ -890,7 +891,9 @@ impl WorkspaceView {
     /// (`radii.lg`, the radius of what floats) clear theirs, with a hairline. Only the active
     /// one floats: it takes the one elevation and a 1.5 pt accent edge flush with it, as a
     /// selected thumbnail has. A shadow under every block would say they all float. Each name
-    /// sits above its block at the medium weight, its count in the meta size. The empty
+    /// sits above its block at the medium weight, then in the meta size the machines it is on
+    /// (where they are not its name) and the next thing in it that needs the person, so a
+    /// glance says which workspace deserves attention before it is opened. The empty
     /// workspace kept at the end is where the next one goes: a ghost "New workspace" button
     /// under the last block, on its left edge, which opens it.
     fn overview_blocks(&self, frame: &Frame, cx: &Draw<'_, Self>) -> Vec<gpui::AnyElement> {
@@ -902,7 +905,8 @@ impl WorkspaceView {
         let active = self.layout.active_workspace();
         let fade = frame.overview;
         let (opening, moves) = (self.layout.overview_open(), self.chrome_moves(cx));
-        // The words start on the panes' glyphs' edge: a miniature's label pads its glyph by `pad`.
+        // The words start on the panes' glyphs' edge: a miniature pads its glyph by `inset`.
+        let inset = theme.spacing.md;
         let glyph_slot = theme.typography.icon_large();
         let mut left = None;
         let mut out = Vec::new();
@@ -923,7 +927,7 @@ impl WorkspaceView {
                     .aria_label(NEW_WORKSPACE)
                     .absolute()
                     // Its glyph where the panes' glyphs and the names above the blocks start.
-                    .left(px(x))
+                    .left(px(x + inset - pad))
                     .top(px(r.y - pad))
                     .h(px(theme.density.row))
                     .px(px(pad))
@@ -955,7 +959,7 @@ impl WorkspaceView {
                     );
                 let new = crate::a11y::tab_stop(new, s.focus).on_click(cx.listener(
                     move |this, _ev, _w, cx| {
-                        this.layout.set_overview(false);
+                        this.close_overview();
                         this.go_to_workspace(ix, cx);
                     },
                 ));
@@ -990,12 +994,12 @@ impl WorkspaceView {
                 // The panes' own surface, lifted or not: the block is what they sit on.
                 .bg(hsla(theme.content()));
             let ink = if here { s.text } else { s.text_secondary };
-            let count = if tiles == 1 { "1 tile".to_owned() } else { format!("{tiles} tiles") };
+            let glance = self.workspace_glance(ix);
             let label = div()
                 .absolute()
-                .left(px(r.x + pad))
+                .left(px(r.x + inset))
                 .top(px(label_top))
-                .w(px(r.w - pad))
+                .w(px(r.w - inset))
                 .h(px(theme.spacing.xl))
                 .flex()
                 .items_center()
@@ -1014,19 +1018,22 @@ impl WorkspaceView {
                         .text_color(hsla(ink))
                         .child(SharedString::from(self.workspace_name_at(ix))),
                 )
-                .child(
-                    kit::tabular(div())
-                        .flex_none()
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(count)),
-                )
                 .child(super::rollup::rollup_slot(
                     theme,
                     format!("overview-rollup-{ix}"),
                     self.workspace_rollup(ix).0,
                     true,
-                ));
+                ))
+                .children((!glance.is_empty()).then(|| {
+                    div()
+                        .debug_selector(move || format!("overview-glance-{ix}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_secondary))
+                        .child(SharedString::from(glance))
+                }));
             out.push(block.into_any_element());
             let words = SharedString::from(format!("overview-words-{ix}"));
             out.extend(overview_words(label, words, opening, moves));

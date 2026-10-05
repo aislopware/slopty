@@ -141,6 +141,16 @@ mod tests {
         );
     }
 
+    /// The most frames a resting overview may draw in [`RUN`] while shells stream under their
+    /// summaries: their output is not drawn there at all (`docs/decisions/workspace.md`, "The
+    /// overview is a map of work"), so only a stray readout's frame may come.
+    const COVERED_FRAMES: u64 = 5;
+
+    /// A resting overview drew next to nothing for the output its summaries cover.
+    fn assert_covered_output_draws_nothing(frames: &FrameInfo) {
+        assert!(frames.frames <= COVERED_FRAMES, "covered output drew frames: {frames:?}");
+    }
+
     /// How often the strip is stepped: faster than a column's ease settles, so the view is
     /// always moving.
     const STRIP_STEP: Duration = Duration::from_millis(150);
@@ -532,10 +542,10 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         (before, drv.dump().await.unwrap())
     }
 
-    /// Six shells streaming in view at once (the overview) while nothing moves, then typing
-    /// into a seventh with the six streaming beside it; then one streaming shell beside five
-    /// still ones. A frame should redraw the terminals whose output changed, not every tile,
-    /// so these numbers are the view cache's.
+    /// Six shells streaming under the resting overview's summaries, then typing into a seventh
+    /// with the six streaming beside it; then one streaming shell beside five still ones under
+    /// the overview. Output a summary covers draws no frame at all; the typing numbers are the
+    /// view cache's, a frame redrawing the terminals whose output changed, not every tile.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn six_streaming_shells_in_view_on_the_mac() {
@@ -555,7 +565,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         println!("MEASURE (h) mac: typing beside {BUSY} streaming shells: {}", latency.row());
         println!("MEASURE (h) mac hops: {}", latency.hops());
         stack.shutdown().await;
-        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
+        assert_covered_output_draws_nothing(&after.frames);
         assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
 
         let mut stack = Stack::launch_with("e2e-smooth-still", &[MOVING]).await.unwrap();
@@ -582,7 +592,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
             &after.frames,
         );
         stack.shutdown().await;
-        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
+        assert_covered_output_draws_nothing(&after.frames);
     }
 
     /// Springs of the overview timed each way in the mixed scenario.
@@ -700,7 +710,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         assert_floods_advanced(&before, &after);
         measure(&format!("(m) mac: {label}, overview held open"), &after.frames);
         stack.shutdown().await;
-        assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
+        assert_covered_output_draws_nothing(&after.frames);
     }
 
     #[tokio::test]

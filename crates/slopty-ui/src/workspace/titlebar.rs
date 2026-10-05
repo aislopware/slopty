@@ -38,7 +38,7 @@ use gpui::{
     div, px,
 };
 use slopty_client::groups::Group;
-use slopty_client::layout::{Column, Tile, WorkerKey};
+use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
 use slopty_theme::Typography;
 
 use super::actions::{
@@ -50,7 +50,7 @@ use super::strip::NEW_WORKSPACE;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::Symbol;
+use crate::icons::{Status, Symbol};
 use crate::kit;
 
 /// The bar's height under the safe area, with a pointer.
@@ -219,6 +219,33 @@ impl WorkspaceView {
             }
         }
         (rollup, count)
+    }
+
+    /// What the overview says beside workspace `ix`'s name, in one meta line: the machines its
+    /// tiles are on, unless that is its name already, then the next thing in it that needs the
+    /// person ("Claude Code · Needs approval"), the first in reading order. Empty when there is
+    /// nothing to add.
+    pub(super) fn workspace_glance(&self, ix: usize) -> String {
+        let name = self.workspace_name_at(ix);
+        let Some(ws) = self.layout.workspaces().get(ix) else { return String::new() };
+        let tiles: Vec<TileRef> =
+            ws.columns().iter().flat_map(Column::tiles).map(Tile::tile).collect();
+        let mut machines: Vec<String> = Vec::new();
+        for tile in &tiles {
+            let machine = self.worker_name(tile.worker);
+            if !machines.contains(&machine) {
+                machines.push(machine);
+            }
+        }
+        let machines = machines.join(", ");
+        let machines = (machines != name).then_some(machines);
+        let need = tiles.iter().find_map(|&tile| {
+            let item = self.item(tile)?;
+            let (mark, _) = self.tile_marks(tile, item);
+            let word = self.tile_word(item, mark.filter(|m| *m == Status::NeedsYou))?;
+            Some(format!("{}{}{word}", self.tile_title(item), super::rollup::META_SEPARATOR))
+        });
+        super::rollup::meta_line([machines.as_deref(), need.as_deref()])
     }
 
     pub(super) fn toggle_menu(
@@ -593,6 +620,7 @@ impl WorkspaceView {
                     action("Overview", &super::actions::ToggleOverview, |this, _w, cx| {
                         this.tick();
                         this.layout.toggle_overview();
+                        this.overview_flipped(cx);
                         cx.notify();
                     }),
                     action("Stream stats", &ToggleStats, |this, w, cx| {

@@ -187,6 +187,7 @@ impl WorkspaceView {
         }))
         .on_action(cx.listener(|this, _: &ToggleOverview, _w, cx| {
             this.layout_action(cx, Layout::toggle_overview);
+            this.overview_flipped(cx);
         }))
         // A focused page zooms; everywhere else the text size moves.
         .on_action(cx.listener(|this, _: &FontLarger, _w, cx| {

@@ -1606,6 +1606,10 @@ impl WorkspaceView {
         self.follow_secure_input(cx);
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
         let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.strip_host.entity_id());
+        // A command that starts or ends is the overview's moment to read the shell's rows again.
+        if self.retake_shell_digest(session, cx) {
+            App::notify(cx, strip);
+        }
         if was.running != now.running {
             self.number_twins();
             App::notify(cx, navigator);

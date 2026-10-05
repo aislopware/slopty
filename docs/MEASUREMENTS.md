@@ -15078,3 +15078,58 @@ target/release-fast/examples/frame_latency animate   # renders/s and render gaps
 FRAME_LATENCY_REST_SECS=12 target/release-fast/examples/frame_latency rest
 # while `rest` runs: the process's wakeups and energy from proc_pid_rusage (RUSAGE_INFO_V6)
 ```
+
+## 2026-10-06 — the overview as a map of work
+
+A resting overview now sums a tile of words up over its body and does not draw the body under
+the summary (`docs/decisions/workspace.md`, "The overview is a map of work"). Two arms from one
+binary: **A** the miniatures as they were (a temporary `SLOPTY_MEASURE_OLD_MINIATURES` switch
+in `miniature.rs`, deleted after these runs), **B** the summaries. The smooth probe's overview
+scenarios: (m) twenty mixed tiles, five of them flooding shells, the overview springing six
+times each way then held open for 5 s; (g) six flooding shells under the overview, held 5 s;
+(i) one flooding shell beside five still ones. Draw is the frame probe's `begin` → `end` in ms
+(p50 / p95 / p99 / max). Dev profile e2e build, mac-studio at 60 Hz, 1280 × 800, other
+lanes' load. Runs went B A B A.
+
+| arm | run | (m) opening | (m) closing | (m) held open | (g) held open |
+| --- | --- | --- | --- | --- | --- |
+| B | 1 | 0.2 / 3.3 / 3.3 / 3.3 (67 frames) | 0.9 / 1.9 / 2.1 / 2.1 | no frame | |
+| A | 1 | 1.3 / 2.9 / 5.8 / 5.8 (194) | 0.9 / 2.1 / 2.3 / 2.3 | 1.3 / 1.5 / 1.6 / 1.7 (300 frames) | |
+| B | 2 | 0.2 / 3.2 / 3.2 / 3.2 (66) | 0.9 / 1.9 / 2.1 / 2.1 | no frame | no frame |
+| A | 2 | 1.3 / 2.8 / 5.6 / 5.6 (194) | 0.9 / 2.1 / 2.2 / 2.2 | 1.3 / 1.5 / 1.6 / 1.7 (300) | 1.5 / 1.6 / 1.7 / 1.8 (301) |
+
+- **A resting overview over floods draws nothing.** Before, every flood dirtied the window,
+  so the overview drew every frame of the display (300 in 5 s) at 1.3–1.5 ms each, for text
+  nobody could read. Now it draws only when a summary's words change. (i) is likewise no frame.
+- **The opening spring ends sooner.** Its frames fell from about 32 a spring to 11, because
+  once it lands nothing under a summary asks for another. Closing is unchanged: the bodies are
+  drawn again as the tiles grow.
+- Typing beside six floods with the overview closed, (h), is unchanged by this (echo p50
+  17.4 ms in B).
+
+The B rows above are a first cut whose summaries said a name and at most two facts. A review
+found the cards said less than the miniatures they replaced, so each now says three facts and
+quotes a few lines of the tile's own text, copied when the overview opens and again when a
+command starts or ends. The quote is plain text from the model, so a resting overview still
+draws nothing. Its cost lands on the frame the summaries first appear in, which now shapes
+every card's text anew. Same probe, (m) only:
+
+| summaries | (m) opening | (m) held open | (g), (i) held open |
+| --- | --- | --- | --- |
+| name and two facts (the first cut) | 0.2 / 3.2–3.3 max | no frame | no frame |
+| three facts, no quote | 0.2 / 5.6 max | no frame | |
+| three facts, a 12-line quote | 0.2 / 8.2 max | no frame | no frame |
+| three facts, a 6-line quote (kept), three runs | 0.2 / 7.1–7.5 max | no frame | |
+
+- **The worst opening frame is the landing's, 7.1–7.5 ms**, against 5.6–5.8 ms for the old
+  miniatures. It is still under a 120 Hz frame and none of the opening's frames is over
+  16.7 ms. The quote keeps 6 lines, as many as a card shows at the overview's usual zoom: 12
+  cost 0.7 ms more for lines the card clipped.
+- Drawing the quote one frame after the facts did not split the cost (7.1 ms): both join on
+  the landing frame. Shaping the cards' text before the zoom lands is the next step if the
+  landing frame needs to be cheaper.
+
+```sh
+cargo xtask e2e smooth --filter 'test(twenty_mixed) | test(six_streaming)'
+# the A arm was the same with SLOPTY_MEASURE_OLD_MINIATURES=1 before the switch was deleted
+```

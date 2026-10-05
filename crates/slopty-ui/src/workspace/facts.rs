@@ -38,6 +38,8 @@ pub(super) struct ShellFacts {
     pub last: Option<String>,
     /// How the command before the newest prompt ended.
     pub exit: Option<u8>,
+    /// It has drawn a prompt: a shell that marks its prompts, not a program run bare.
+    pub prompted: bool,
     /// That command failed and its block shows in the grid ([`TerminalView::failure_in_view`]).
     pub failure_in_view: bool,
     /// This client's size rules the PTY.
@@ -47,15 +49,15 @@ pub(super) struct ShellFacts {
 impl ShellFacts {
     pub(super) fn of(view: &TerminalView) -> Self {
         let state = view.state();
-        let exit = state
-            .prompt_before(slopty_grid::LineIndex(u64::MAX))
-            .and_then(|prompt| state.line(prompt)?.mark.exit());
+        let prompt = state.prompt_before(slopty_grid::LineIndex(u64::MAX));
+        let exit = prompt.and_then(|prompt| state.line(prompt)?.mark.exit());
         Self {
             title: view.title().map(str::to_owned),
             running: state.running_command().map(str::to_owned),
             started: view.command_started(),
             last: state.last_command(),
             exit,
+            prompted: prompt.is_some(),
             failure_in_view: view.failure_in_view(),
             driving: view.driving(),
         }
@@ -106,6 +108,10 @@ pub(super) struct FileFacts {
     /// A Markdown file's text is in: whether its preview shows (else its source). `None` for
     /// any other file, or one with no text yet.
     pub preview: Option<bool>,
+    /// Its text is in the editor: the overview can say what it holds.
+    pub has_text: bool,
+    /// It changed on disk under an unsaved edit.
+    pub conflict: bool,
 }
 
 impl FileFacts {
@@ -113,6 +119,8 @@ impl FileFacts {
         Self {
             unsaved: view.dirty() || view.saving(),
             preview: (view.has_preview() && view.shows_text()).then(|| view.previewing()),
+            has_text: view.shows_text(),
+            conflict: matches!(view.trouble(), Some(crate::file::Trouble::Conflict)),
         }
     }
 }
@@ -209,11 +217,13 @@ impl WorkspaceView {
         self.facts.folders.get(&id).copied().unwrap_or_default()
     }
 
-    /// Copy item `id`'s file again. Its dot is its header's news, and only when it changed.
+    /// Copy item `id`'s file again. Its dot is its header's news, and only when it changed;
+    /// the overview, while it shows, copies what the file holds again then too.
     pub(super) fn file_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(view) = self.files.get(&id) else { return };
         let now = FileFacts::of(view.read(cx));
         if self.facts.files.insert(id, now) != Some(now) {
+            let _changed = self.retake_digest(id, cx);
             App::notify(cx, self.strip_host.entity_id());
         }
     }
@@ -303,6 +313,8 @@ impl WorkspaceView {
 
     /// Forget the facts of bodies no longer kept.
     pub(super) fn prune_facts(&mut self) {
+        let items: std::collections::HashSet<ItemId> = self.items().map(|(_, i)| i.id).collect();
+        self.facts.digests.retain(|id, _| items.contains(id));
         let Self { facts, terminals, screens, files, browsers, folders, .. } = self;
         facts.shells.retain(|session, _| terminals.contains_key(session));
         facts.screens.retain(|id, _| screens.contains_key(id));
@@ -321,6 +333,8 @@ pub(super) struct Facts {
     files: std::collections::HashMap<ItemId, FileFacts>,
     pages: std::collections::HashMap<ItemId, PageFacts>,
     folders: std::collections::HashMap<ItemId, FolderFacts>,
+    /// What the overview shows of each tile of words ([`super::miniature::Digest`]).
+    digests: std::collections::HashMap<ItemId, super::miniature::Digest>,
     /// The readouts' last tick ([`WorkspaceView::keep_time`]): the monotonic clock, and the
     /// wall clock in Unix milliseconds for what a worker stamped.
     ticked: Option<(Instant, u64)>,
@@ -329,15 +343,34 @@ pub(super) struct Facts {
 }
 
 impl Facts {
+    /// What the overview shows of item `id`, as last copied.
+    pub(super) fn digest(&self, id: ItemId) -> Option<&super::miniature::Digest> {
+        self.digests.get(&id)
+    }
+
+    /// Every tile of words' digest, copied as the overview opens.
+    pub(super) fn set_digests(
+        &mut self,
+        digests: std::collections::HashMap<ItemId, super::miniature::Digest>,
+    ) {
+        self.digests = digests;
+    }
+
+    /// Item `id`'s digest, copied again.
+    pub(super) fn put_digest(&mut self, id: ItemId, digest: super::miniature::Digest) {
+        self.digests.insert(id, digest);
+    }
+
     /// How many facts are kept of each kind, for the footprint.
     #[cfg(test)]
-    pub(super) fn lens(&self) -> [(&'static str, usize); 5] {
+    pub(super) fn lens(&self) -> [(&'static str, usize); 6] {
         [
             ("facts.shells", self.shells.len()),
             ("facts.screens", self.screens.len()),
             ("facts.files", self.files.len()),
             ("facts.pages", self.pages.len()),
             ("facts.folders", self.folders.len()),
+            ("facts.digests", self.digests.len()),
         ]
     }
 }

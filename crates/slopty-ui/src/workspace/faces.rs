@@ -941,6 +941,8 @@ impl WorkspaceView {
             App::notify(cx, self.chrome.titlebar.entity_id());
         }
         self.settle_thread_tiles(cx);
+        // The overview's agents say their newest words as the table brings them.
+        self.retake_agent_digests(cx);
         cx.notify();
     }
 
@@ -1481,6 +1483,22 @@ impl WorkspaceView {
     /// plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
         self.thread_line(self.session_thread(session)?).map(crate::markdown::plain_line)
+    }
+
+    /// The last words `thread`'s agent wrote, as Markdown: its newest message where a hub
+    /// follows the thread, else the last line its worker's table carries. Read out of the hub,
+    /// so only where nothing draws: the overview copies it ([`super::miniature::Digest`]).
+    pub(super) fn last_words(&self, thread: ThreadId, cx: &App) -> Option<String> {
+        let followed = self.faces.threads.hubs.values().find_map(|hub| {
+            let state = hub.read(cx).threads().mirror(thread)?.state()?;
+            state.items.iter().rev().find_map(|item| match &item.body {
+                thread::ItemBody::Text(text) if !text.text.trim().is_empty() => {
+                    Some(text.text.clone())
+                }
+                _ => None,
+            })
+        });
+        followed.or_else(|| self.thread_line(thread).map(str::to_owned))
     }
 }
 

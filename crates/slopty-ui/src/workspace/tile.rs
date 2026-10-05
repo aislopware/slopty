@@ -2526,6 +2526,13 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let bare = chrome.k < SHAPES_BELOW;
+        // Once the overview rests, a tile of words is wholly under its summary: its body is not
+        // drawn at all, so a flood in a shell nobody can read costs no frame. The focused one
+        // is, as it keeps the keyboard.
+        if bare && self.summed_up(placed, item) {
+            let hidden = div().flex_1().min_h_0().into_any_element();
+            return self.render_miniature(placed, item, hidden, cx);
+        }
         let state = self.body_state(placed.tile, item).filter(|_| !bare);
         let empty = std::cell::Cell::new(false);
         let content = self.render_content(placed, item, chrome, &empty, window, cx);

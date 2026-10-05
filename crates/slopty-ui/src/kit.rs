@@ -2626,8 +2626,9 @@ mod tests {
     }
 
     /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a
-    /// row's second line) is in the UI face. The mono face is for the settings file and an
-    /// address read to judge it (a held-back page's hint), and nothing else calls for it.
+    /// row's second line) is in the UI face. The mono face is for the settings file, an
+    /// address read to judge it (a held-back page's hint), and a body's own text where the
+    /// overview quotes it (a summary's tail), and nothing else calls for it.
     #[test]
     fn the_mono_face_is_for_the_settings_file_and_addresses() {
         let uses: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
@@ -2639,12 +2640,16 @@ mod tests {
             .map(|(file, line_no, _)| format!("{file}:{line_no}"))
             .collect();
         let allowed = |at: &String| {
-            ["slopty-ui/src/settings_editor.rs", "slopty-ui/src/kit.rs"]
-                .iter()
-                .any(|file| at.contains(file))
+            [
+                "slopty-ui/src/settings_editor.rs",
+                "slopty-ui/src/kit.rs",
+                "slopty-ui/src/workspace/miniature.rs",
+            ]
+            .iter()
+            .any(|file| at.contains(file))
         };
         assert!(uses.iter().all(allowed), "mono outside the settings and addresses: {uses:#?}");
-        assert_eq!(uses.len(), 2, "the settings field, the address: {uses:#?}");
+        assert_eq!(uses.len(), 3, "the settings field, the address, the tail: {uses:#?}");
     }
 
     /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that

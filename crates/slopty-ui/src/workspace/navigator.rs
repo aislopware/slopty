@@ -1168,7 +1168,7 @@ impl WorkspaceView {
         self.menu = None;
         self.nav.open = false;
         if self.layout.overview_open() {
-            self.layout.set_overview(false);
+            self.close_overview();
         }
     }
 
@@ -1280,7 +1280,7 @@ impl WorkspaceView {
     /// What a shell's second line says it is doing (its agent's words, else its command) and
     /// when its age runs from (Unix milliseconds): an agent at rest counts from its last turn,
     /// anything else from its spawn.
-    fn shell_doing(&self, session: slopty_core::SessionId) -> (Option<String>, u64) {
+    pub(super) fn shell_doing(&self, session: slopty_core::SessionId) -> (Option<String>, u64) {
         let summary = self.summary(session);
         let state = self.agent_state(session);
         // The thread says more than a word: the call the agent is on, or the gist of its last
@@ -1451,14 +1451,7 @@ impl WorkspaceView {
                 }
                 _ => None,
             };
-            let shell_runs = running.is_some();
-            let word =
-                status_word(mark).filter(|_| !shell_runs).map(|word| match (word, &item.kind) {
-                    (Status::NeedsYou, ItemKind::Terminal { session }) => self
-                        .agent_state(*session)
-                        .map_or_else(|| word.label().to_owned(), agent_status_word),
-                    _ => word.label().to_owned(),
-                });
+            let word = self.tile_word(item, mark).filter(|_| running.is_none());
             let row = NavTile {
                 tile,
                 kind,
@@ -1853,6 +1846,18 @@ impl WorkspaceView {
             })
             .filter(|row| matches(&query.text, &[&row.title]))
             .collect()
+    }
+
+    /// How `item`'s tile stands, in a word or two, while it has something to say (`mark`
+    /// being its status): what an agent waiting on the person asks for ("Needs approval",
+    /// "Has a question"), else the status's own name.
+    pub(super) fn tile_word(&self, item: &Item, mark: Option<Status>) -> Option<String> {
+        status_word(mark).map(|word| match (word, &item.kind) {
+            (Status::NeedsYou, ItemKind::Terminal { session }) => self
+                .agent_state(*session)
+                .map_or_else(|| word.label().to_owned(), agent_status_word),
+            _ => word.label().to_owned(),
+        })
     }
 
     /// The mark of `thread`'s agent, the neutral glyph while it is not known.

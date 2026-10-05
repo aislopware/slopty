@@ -561,7 +561,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     (headless workspace; the test platform's save panel is answered with a path, and nothing
     is shown).
 
-- ✅ **The overview draws miniatures** (2026-09-28, design critique round 3 #16). Below zoom
+- ✅ **The overview draws miniatures** (2026-09-28, design critique round 3 #16; for tiles of
+  words, superseded 2026-10-06 by "The overview is a map of work" below). Below zoom
   0.5 the overview laid each shell's, file's and note's own surface over its body and wrote a
   cover on it: glyph, title, one meta line and a few of its last lines at chrome size. The
   overview read as a list of words, and no pane looked like the tile it stood for. niri and
@@ -1705,3 +1706,62 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `workspace::tests::worktrees::a_worktree_is_removed_from_a_folder_in_it_once_no_agent_works_there`,
     `workspace::worktrees::tests::a_worktrees_root_is_read_from_any_folder_in_it`; goldens
     `client_git_remove_worktree`, `worker_git_worktree_removed`.
+
+- ✅ **The overview is a map of work** (2026-10-06, `.research/design-critique-astra-2026-10-05.md`
+  finding 19 and bold idea 3). The miniatures made each tile look like itself, but a shell's
+  or a conversation's text a few points high is texture, so the overview could not say why a
+  workspace deserved opening. It now shows what each tile is doing and keeps the arrangement.
+  - **A tile of words is summed up** (a shell, a conversation, a file, a folder, a review, a
+    change set). Once the overview has landed, a well set into the block covers the tile's
+    body: its kind's symbol or its agent's mark and its title at the task-title size (14 pt,
+    medium), then three lines of facts (12/18 pt) and a quote of its own text. The well is the
+    band, a hair off the block's surface in both variants, inset a hairline-width gap from its
+    neighbours, so each tile reads as its own place with no outline round it. The block keeps
+    its one ring.
+  - **Three facts, never a blank.** A first cut said a name and at most two facts, and a review
+    found its cards emptier than the miniatures they replaced: a shell said "Terminal" in a tall
+    grey box. Each line now always says something, a quieter fact standing in where the first
+    choice has nothing. How it stands comes first (in `text` when it needs the person or
+    failed, else `text_secondary`), then what it did last, then where it is (`text_muted`).
+    - A shell: at its prompt, running a command with its clock, or exited with its code; the
+      command it ran last and how that ended ("cargo test · Exit 1"), else "No commands yet";
+      its directory and branch with its working tree's changes, else its machine. A program
+      run bare says "Running cat", then its arguments or its size.
+    - An agent: its state by the rows' precedence (its question, failed, working, idle); its
+      newest step or last line, else the agent's name; where it works.
+    - A file: its kind and length ("Markdown · 5 lines"); its task list's progress ("1 of 3
+      done"), else whether its edit is on disk ("Unsaved", "Changed on disk", "Saved"); its
+      folder.
+  - **The quote gives the card weight.** Under a hairline, in the mono face at the caption
+    size and `text_muted`, clipped to the card: a shell's last rows, an agent's last words, a
+    file's first lines, up to six. A shell's or agent's longer text stands on the card's foot
+    so the newest line is never clipped; a short one hangs from the top as a fresh screen's
+    does. It is the one chrome use of the mono face besides the settings file and an address,
+    since it quotes a body whose own face is mono (`kit.rs`'s lint lists it).
+  - **Copied, never read while drawing.** The quote and what only the text says (a file's
+    length, kind and task list) are copied out of the body when the overview opens, and again
+    while it shows when that body's facts change: a command starts or ends, a file's edit is
+    saved or conflicts, an agent's table row moves. A line of output changes no fact, so a
+    flood under a resting overview still draws no frame; what is quoted is as of the last
+    command boundary. Closed, the overview lets the copies go.
+  - **A tile known by sight keeps its picture:** a remote window or display, a page, a picture,
+    a PDF, a film. It stays its live miniature with the thin label at its foot.
+  - **Each workspace says what it holds** beside its name: the machines its tiles are on,
+    unless that is its name already, then the first thing in it that needs the person ("Claude
+    Code · Has a question"), after its rollup mark. The tile count is gone; the block shows the
+    tiles.
+  - **Covered output costs nothing.** While the zoom moves, each tile is its own body at the
+    zoom, so the tile is seen shrinking into place. Once the overview rests, a body under its
+    summary is not drawn at all; only the focused one is, as it keeps the keyboard. Held open
+    over five floods, the overview drew 300 frames in five seconds at 1.3 ms p50 and now draws
+    none (`docs/MEASUREMENTS.md`, "the overview as a map of work"). The price is the landing
+    frame, which shapes every card's text anew: 7.1–7.5 ms at worst with twenty tiles, against
+    5.6–5.8 ms for the old miniatures, still under a 120 Hz frame.
+  - The words line up as before: a summary pads its glyph by `spacing.md`, and the workspace's
+    name and "New workspace" start on that edge.
+  - Tests: `workspace::tests::miniatures::an_open_overview_draws_a_miniature_per_tile_and_none_while_closed`,
+    `workspace::tests::miniatures::a_summary_says_three_facts_and_quotes_its_text`,
+    `workspace::tests::facts::overview_labels_say_state_place_and_worker`,
+    `workspace::tests::strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one`; in
+    `slopty-e2e`'s `smooth`, the overview scenarios (g), (i) and (m) now hold that a resting
+    overview draws no frame for the output it covers. Goldens: `overview`, `overview-dark`.
