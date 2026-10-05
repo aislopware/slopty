@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
 use crate::RequestId;
-use crate::agent::AgentEvent;
 use crate::orchestration::{HubEvent, IdempotencyKey, Outcome, Verb};
 use crate::screen::{DisplayInfo, VideoCodec};
 use crate::terminal::{CloseReason, SessionSummary};
@@ -235,8 +234,6 @@ pub enum ToServer {
         /// Why.
         reason: CloseReason,
     },
-    /// A worker's agent changed status.
-    Agent(AgentEvent),
     /// A worker's one-minute load average moved.
     Load(f32),
     /// What a worker's agent did beyond its status: where its work lands, Claude Code's own
@@ -301,9 +298,6 @@ pub enum FromServer {
     /// For a client or agent: something happened on a worker, numbered in the log
     /// [`Verb::Events`] reads.
     Event(HubEvent),
-    /// For a client or agent: every terminal on every worker, each with its agent, sent after
-    /// the directory. What the client showed of terminals and agents before is replaced.
-    Terminals(Vec<(WorkerId, SessionSummary)>),
     /// For a client or agent: a worker's load moved. Its own message, so a tick of it resends
     /// nothing else and changes nothing that is saved.
     Load {

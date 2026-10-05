@@ -442,12 +442,12 @@ impl Workspace {
                     self.view.update(cx, |v, cx| v.project_update(seq, *update, cx));
                 }
                 // The directory carries liveness, a worker's own link its terminals, and the
-                // ladder where every agent's thread stands.
+                // ladder where every agent's thread stands, its rungs among them.
                 Happening::Worker { .. }
                 | Happening::WorkerRemoved { .. }
                 | Happening::SessionOpened { .. }
                 | Happening::SessionClosed { .. }
-                | Happening::Agent { .. }
+                | Happening::Rung { .. }
                 | Happening::SessionExited { .. } => {}
             },
             Change::Present(present) => self.heard_present(&present),
@@ -455,7 +455,6 @@ impl Workspace {
             // What speaks for the agents and threads of the workers this client reaches only
             // through the server.
             Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),
-            Change::Terminals(_) => {}
         }
     }
 

@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::AgentStatus;
 use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::{SessionInfo, socket_path};
@@ -112,7 +111,7 @@ struct Inner {
     port_hints: mpsc::UnboundedSender<SessionId>,
     /// Sessions whose place changed ([`SessionStart::moves`]).
     moves: mpsc::UnboundedSender<SessionId>,
-    /// The coding agents seen in the sessions, which every summary carries.
+    /// The coding agents seen in the sessions, as their hooks and the daemon's poll say.
     agents: Arc<dyn Agents>,
     /// Each repository's changes against `HEAD`, which every summary in it carries.
     changes: crate::changes::Changes,
@@ -172,7 +171,7 @@ pub struct Reports {
 
 impl Worker {
     /// Connect to ptyd (default socket or `$SLOPTY_PTYD_SOCKET`) and adopt every session it
-    /// already holds. `agents` is the daemon's agent table, read into every summary. `kept` is
+    /// already holds. `agents` is the daemon's agent table. `kept` is
     /// where sessions are kept on disk ([`crate::restore`]); the ones ptyd no longer holds wait
     /// for [`Self::restore`].
     pub async fn connect(
@@ -647,7 +646,7 @@ impl Worker {
         }
     }
 
-    /// Summaries for the session list, each with the agent running in it now.
+    /// Summaries for the session list.
     pub async fn summaries(&self) -> Vec<SessionSummary> {
         let entries: Vec<Listed> =
             self.inner.sessions.lock().iter().map(|(id, e)| Listed::of(*id, e)).collect();
@@ -673,7 +672,6 @@ impl Worker {
             Some(status) => SessionState::Exited { status },
             None => SessionState::Running,
         };
-        let agent = self.inner.agents.status(id).filter(|a| a.status != AgentStatus::None);
         Some(SessionSummary {
             id,
             title: snap
@@ -691,7 +689,6 @@ impl Worker {
             state,
             viewers: snap.viewers,
             command,
-            agent,
             progress: snap.progress,
             restored: snap.restored,
         })

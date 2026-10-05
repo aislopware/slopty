@@ -245,7 +245,6 @@ mod tests {
             state: SessionState::Running,
             viewers: 1,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,

@@ -113,11 +113,6 @@ mod tests {
         assert_eq!(directory[0].worker, id);
         assert_eq!(directory[0].liveness, Liveness::Online);
         assert_eq!(directory[0].address, "127.0.0.1:45999", "the seen IP, the registered port");
-        assert_eq!(
-            next(&mut client).await,
-            FromServer::Terminals(Vec::new()),
-            "then the terminals"
-        );
         let FromServer::Projects(part) = next(&mut client).await else {
             panic!("then the projects")
         };
@@ -238,7 +233,6 @@ mod tests {
             connect(&endpoint, &HostAddr::from(relay_addr), worker_role(id)).await.unwrap();
         let mut client = dial(&server, client_role()).await.unwrap();
         let _directory = next(&mut client).await;
-        let _terminals = next(&mut client).await;
         let _projects = next(&mut client).await;
         let _ladder = next(&mut client).await;
         let _present = next(&mut client).await;

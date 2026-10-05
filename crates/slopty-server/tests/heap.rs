@@ -1,6 +1,7 @@
 //! What the hub keeps on the heap however long it runs: its bounded event log, and nothing
-//! more. A soak cycle as the hub sees it (a terminal opens, its agent works and goes idle, it
-//! closes) logs four events, so the log fills at `EVENT_LOG / 4` cycles.
+//! more. A soak cycle as the hub sees it (a terminal opens, its agent's thread works and goes
+//! idle, the thread leaves the table and the terminal closes) logs four events, so the log
+//! fills at `EVENT_LOG / 4` cycles.
 //!
 //! The binary counts the bytes each thread holds (allocated less freed), and the hub is driven
 //! on the test's own thread with no runtime, so every block it keeps is counted here.
@@ -9,13 +10,17 @@
 mod tests {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
+    use std::collections::BTreeMap;
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
     use slopty_core::{SessionId, WallMs, WorkerId};
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::orchestration::HubEvent;
     use slopty_proto::server::{Os, Registration, ToServer, WorkerCaps};
     use slopty_proto::terminal::{CloseReason, SessionState, SessionSummary};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRow};
+    use slopty_proto::thread::{
+        AgentId, Changed, Cursor, Drive, Liveness, Meters, Phase, Status, ThreadId,
+    };
     use slopty_server::Hub;
     use slopty_server::hub::EVENT_LOG;
 
@@ -106,25 +111,38 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: ["/bin/bash", "--noprofile", "--norc", "-i"].map(str::to_owned).to_vec(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,
         }
     }
 
-    fn agent(session: SessionId, status: AgentStatus) -> ToServer {
-        ToServer::Agent(AgentEvent {
-            session,
-            kind: AgentKind::ClaudeCode,
-            status,
-            agent_session: None,
-            detail: None,
-            attention: false,
-            source: AgentSource::Hook,
-            since_ms: WallMs::now(),
-            mode: None,
-        })
+    /// The worker's table moving `thread`, the agent's in `session`, to `phase`.
+    fn agent(thread: ThreadId, session: SessionId, phase: Phase) -> ToServer {
+        let now = WallMs::now();
+        let row = ThreadRow {
+            id: thread,
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: "Soak".to_owned(),
+            status: Status { phase, wait: None, liveness: Liveness::Live, since_ms: now },
+            requests: Vec::new(),
+            last_line: None,
+            doing: None,
+            changed: Changed::default(),
+            terminal: Some(session),
+            parent: None,
+            drive: Drive::named(Drive::OBSERVED),
+            caps: Vec::new(),
+            facts: BTreeMap::new(),
+            to_review: false,
+            meters: Meters::default(),
+            updated_ms: now,
+            cwd: None,
+            repo: None,
+            repo_id: None,
+        };
+        let cursor = Cursor::default();
+        ToServer::Threads(TableFrame::Delta { cursor, rows: vec![row], removed: Vec::new() })
     }
 
     /// However long terminals open, their agents work and they close, the hub holds no more
@@ -149,10 +167,14 @@ mod tests {
         let empty = held();
         let cycles = |n: usize| {
             for _ in 0..n {
-                let session = SessionId::new();
+                let (session, thread) = (SessionId::new(), ThreadId::new());
                 lease.handle(ToServer::SessionChanged(bash(session)));
-                lease.handle(agent(session, AgentStatus::Working));
-                lease.handle(agent(session, AgentStatus::Idle));
+                lease.handle(agent(thread, session, Phase::Working));
+                lease.handle(agent(thread, session, Phase::Idle));
+                let removed = vec![thread];
+                let cursor = Cursor::default();
+                let gone = TableFrame::Delta { cursor, rows: Vec::new(), removed };
+                lease.handle(ToServer::Threads(gone));
                 lease.handle(ToServer::SessionClosed { session, reason: CloseReason::Requested });
             }
         };

@@ -46,7 +46,7 @@ use parking_lot::Mutex;
 use slopty_agent::vouch::SessionKey;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::RequestId;
-use slopty_proto::agent::{AgentBranch, AgentStatus, SessionAgent};
+use slopty_proto::agent::AgentBranch;
 use slopty_proto::lan::{LanPort, MacAddr};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
@@ -302,8 +302,6 @@ pub struct Snapshot {
     pub seq: u64,
     /// Every worker, by name.
     pub directory: Vec<WorkerInfo>,
-    /// Every terminal with its agent.
-    pub terminals: Vec<(WorkerId, SessionSummary)>,
     /// Every project whole, with its timeline's latest entries.
     pub projects: Vec<ProjectStatus>,
 }
@@ -471,23 +469,17 @@ impl Hub {
         projects::parts(snapshot.seq, std::mem::take(&mut snapshot.projects))
     }
 
-    /// The directory, every terminal with its agent and every project, read together.
+    /// The directory and every project, read together.
     #[must_use]
     pub fn state(&self) -> Snapshot {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         let directory = listing(state);
-        let mut terminals: Vec<(WorkerId, SessionSummary)> = state
-            .workers
-            .values()
-            .flat_map(|e| e.sessions.iter().map(|s| (e.info.worker, s.clone())))
-            .collect();
         let projects = Self::projects_snapshot(state);
         // Events are logged under the state lock, so none falls between this and the read.
         let seq = self.inner.log.lock().next.saturating_sub(1);
         drop(guard);
-        terminals.sort_by_key(|(worker, s)| (*worker, s.id));
-        Snapshot { seq, directory, terminals, projects }
+        Snapshot { seq, directory, projects }
     }
 
     /// How many [`Verb::Events`] are waiting.
@@ -689,11 +681,7 @@ impl Hub {
     /// allows it per project (`[server.projects] permission_flags`).
     fn types_into_shell(&self, from: Option<SessionId>, term: TermRef) -> Result<(), Outcome> {
         let state = self.inner.state.lock();
-        let agent = state
-            .workers
-            .get(&term.worker)
-            .and_then(|e| e.sessions.iter().find(|s| s.id == term.session))
-            .is_some_and(|s| s.agent.is_some());
+        let agent = state.board.agent_at(term).is_some();
         let project = projects::project_of(&state, term);
         let allowed = projects::allowance(&state, Caller::Agent, from, project.as_ref());
         drop(state);
@@ -744,11 +732,8 @@ impl Hub {
             Speaker::Agent | Speaker::Proven(_) => Caller::Agent,
             Speaker::Shell(session) | Speaker::ProvenShell(session) => {
                 let state = self.inner.state.lock();
-                let agent_here = state
-                    .workers
-                    .values()
-                    .flat_map(|e| e.sessions.iter())
-                    .any(|s| s.id == session && s.agent.is_some());
+                let agent_here = term_of(&state, session)
+                    .is_some_and(|term| state.board.agent_at(term).is_some());
                 let working = term_of(&state, session)
                     .is_none_or(|term| state.projects.working_on(term).is_some());
                 let driven = projects::driven(&state, session);
@@ -1069,15 +1054,22 @@ impl Hub {
         {
             return unknown_worker(worker);
         }
-        let mut out: Vec<(WorkerId, SessionSummary)> = state
+        let mut terminals: Vec<(WorkerId, SessionSummary)> = state
             .workers
             .values()
             .filter(|e| only.is_none_or(|w| w == e.info.worker))
             .flat_map(|e| e.sessions.iter().map(|s| (e.info.worker, s.clone())))
             .collect();
+        terminals.sort_by_key(|(worker, s)| (*worker, s.id));
+        let agents = terminals
+            .iter()
+            .filter_map(|(worker, s)| {
+                let term = TermRef { worker: *worker, session: s.id };
+                Some((term, state.board.agent_at(term)?))
+            })
+            .collect();
         drop(state);
-        out.sort_by_key(|(worker, s)| (*worker, s.id));
-        Outcome::Terminals(out)
+        Outcome::Terminals { terminals, agents }
     }
 
     async fn forward(&self, key: Option<IdempotencyKey>, mut verb: Verb) -> Outcome {
@@ -1396,28 +1388,6 @@ impl Lease {
                 entry.sessions.retain(|s| s.id != session);
                 hub.session_closed(&mut state, TermRef { worker, session });
             }
-            ToServer::Agent(event) => {
-                let listed = entry.sessions.iter_mut().find(|s| s.id == event.session);
-                let before =
-                    listed.as_ref().map(|s| s.agent.as_ref().map(|a| (&a.status, a.source)));
-                // A report of the status already known (the same tool again, a new detail) is
-                // no change: the log would fill with them, and a link's own worker says it.
-                let same = before.is_some_and(|before| {
-                    before.map_or(event.status == AgentStatus::None, |(status, source)| {
-                        *status == event.status && source == event.source
-                    })
-                });
-                if let Some(summary) = listed {
-                    summary.agent =
-                        (event.status != AgentStatus::None).then(|| SessionAgent::from(&event));
-                }
-                if !same {
-                    let term = TermRef { worker, session: event.session };
-                    let moved = state.projects.agent_status(term, &event.status, WallMs::now());
-                    hub.happen(Happening::Agent { worker, event });
-                    hub.projects_moved(&mut state, moved);
-                }
-            }
             ToServer::Facts(facts) => entry.facts = crate::placement::bounded(facts),
             ToServer::Cloning { clone, phase, percent } => {
                 hub.clone_moved(&mut state, clone, phase, percent);
@@ -1458,6 +1428,9 @@ impl Lease {
                 for (term, status) in state.board.seat_moves(worker) {
                     hub.adopt(&mut state, term);
                     moved.extend(state.projects.agent_status(term, &status, now));
+                }
+                for (terminal, agent) in state.board.rung_moves(worker) {
+                    hub.happen(Happening::Rung { worker, terminal, agent });
                 }
                 // A subagent of an agent with no hooks is a native as one a hook reports.
                 for report in state.board.native_moves(worker) {
@@ -1772,10 +1745,10 @@ mod thread_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason};
     use slopty_proto::orchestration::{Screen, TermRef};
     use slopty_proto::server::{Os, WorkerCaps};
     use slopty_proto::terminal::CloseReason;
+    use slopty_proto::thread::{Phase, ThreadId};
 
     use super::*;
 
@@ -1814,7 +1787,6 @@ pub(crate) mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,
@@ -1999,13 +1971,13 @@ pub(crate) mod tests {
         let key = IdempotencyKey::new("once").unwrap();
         let verbs = [
             Verb::ReadThread {
-                of: ThreadOf::On { worker, thread: slopty_proto::thread::ThreadId::new() },
+                of: ThreadOf::On { worker, thread: ThreadId::new() },
                 view: ThreadView::Activity,
                 after: None,
                 hold: true,
             },
             Verb::AnswerRequest {
-                of: ThreadOf::On { worker, thread: slopty_proto::thread::ThreadId::new() },
+                of: ThreadOf::On { worker, thread: ThreadId::new() },
                 ask: slopty_proto::thread::AskId("3".to_owned()),
                 choice: "allow".to_owned(),
                 message: None,
@@ -2091,7 +2063,8 @@ pub(crate) mod tests {
         let mut events = hub.subscribe();
         lease.handle(ToServer::SessionChanged(summary(second)));
         lease.handle(ToServer::SessionClosed { session: first, reason: CloseReason::Exited });
-        let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
+        let Outcome::Terminals { terminals: list, .. } =
+            hub.dispatch(Verb::ListTerminals { worker: None }).await
         else {
             panic!("terminals")
         };
@@ -2117,54 +2090,39 @@ pub(crate) mod tests {
         );
     }
 
-    /// `ListTerminals` answers with each agent as the worker last reported it, with the signal
-    /// it was read from, and an agent that left leaves its terminal without one.
+    /// `ListTerminals` answers with each terminal's agent as its thread's row says, kept
+    /// current; an agent that ended leaves its terminal without one, and a thread in a terminal
+    /// the worker does not list adds nothing.
     #[tokio::test]
-    async fn listed_terminals_carry_the_agent_as_last_reported() {
+    async fn listed_terminals_carry_the_agent_as_its_row_says() {
         let hub = Hub::new("server".to_owned(), Vec::new());
         let worker = WorkerId::new();
         let session = SessionId::new();
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
-        let report = |session: SessionId, status: AgentStatus, source: AgentSource| {
-            ToServer::Agent(AgentEvent {
-                session,
-                kind: AgentKind::ClaudeCode,
-                status,
-                agent_session: None,
-                detail: None,
-                attention: false,
-                source,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            })
-        };
-        let agent = |status, source| {
-            Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
-                status,
-                source,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            })
-        };
         let listed = async || {
-            let Outcome::Terminals(list) = hub.dispatch(Verb::ListTerminals { worker: None }).await
+            let Outcome::Terminals { terminals, agents } =
+                hub.dispatch(Verb::ListTerminals { worker: None }).await
             else {
                 panic!("terminals")
             };
-            list.into_iter().map(|(_worker, s)| s.agent).collect::<Vec<_>>()
+            assert_eq!(terminals.len(), 1, "the one terminal");
+            agents.into_iter().map(|(term, a)| (term.session, a.phase, a.asks)).collect::<Vec<_>>()
         };
-        assert_eq!(listed().await, [None], "no agent yet");
-        lease.handle(report(session, AgentStatus::Working, AgentSource::Title));
-        assert_eq!(listed().await, [agent(AgentStatus::Working, AgentSource::Title)]);
-        let blocked = AgentStatus::Blocked(BlockReason::Question);
-        lease.handle(report(session, blocked.clone(), AgentSource::Hook));
-        assert_eq!(listed().await, [agent(blocked, AgentSource::Hook)], "kept current");
-        lease.handle(report(session, AgentStatus::None, AgentSource::Hook));
-        assert_eq!(listed().await, [None], "the agent left");
-        lease.handle(report(SessionId::new(), AgentStatus::Idle, AgentSource::Hook));
-        assert_eq!(listed().await, [None], "a report for a session not listed changes nothing");
+        assert_eq!(listed().await, [], "no agent yet");
+        let thread = ThreadId::new();
+        lease.handle(agent_report(thread, session, Phase::Working));
+        assert_eq!(listed().await, [(session, Phase::Working, None)]);
+        lease.handle(agent_report(thread, session, Phase::NeedsYou));
+        let asks = Some("Which branch?".to_owned());
+        assert_eq!(listed().await, [(session, Phase::NeedsYou, asks)], "kept current");
+        let mut ended = ladder::tests::row(Phase::Idle, 2, Some(session));
+        ended.id = thread;
+        ended.status.liveness = slopty_proto::thread::Liveness::Exited { resumable: true };
+        lease.handle(ladder::tests::snapshot(vec![ended]));
+        assert_eq!(listed().await, [], "the agent ended");
+        lease.handle(agent_report(ThreadId::new(), SessionId::new(), Phase::Idle));
+        assert_eq!(listed().await, [], "a thread in a terminal not listed adds nothing");
     }
 
     #[tokio::test]
@@ -2205,18 +2163,29 @@ pub(crate) mod tests {
         assert_eq!(hub.directory(), vec![WorkerInfo { liveness: Liveness::Gone, ..info }]);
     }
 
-    fn agent_report(session: SessionId, status: AgentStatus) -> ToServer {
-        ToServer::Agent(AgentEvent {
-            session,
-            kind: AgentKind::ClaudeCode,
-            status,
-            agent_session: None,
-            detail: None,
-            attention: false,
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        })
+    /// The worker's table with its one thread, `thread`, in `session` at `phase`.
+    fn agent_report(thread: ThreadId, session: SessionId, phase: Phase) -> ToServer {
+        table(&[(thread, session, phase)])
+    }
+
+    /// The worker's whole table: each thread in its session at its phase; one that needs the
+    /// person asks which branch.
+    pub(crate) fn table(threads: &[(ThreadId, SessionId, Phase)]) -> ToServer {
+        let rows = threads.iter().map(|&(thread, session, phase)| {
+            let mut row = ladder::tests::row(phase, 1, Some(session));
+            row.id = thread;
+            if phase == Phase::NeedsYou {
+                row = ladder::tests::asking(row, "Which branch?");
+            }
+            row
+        });
+        ladder::tests::snapshot(rows.collect())
+    }
+
+    /// Whether `what` is the rung of the agent in `term`, at `phase`.
+    fn rung_at(what: &Happening, term: TermRef, phase: Phase) -> bool {
+        matches!(what, Happening::Rung { worker, terminal, agent }
+            if *worker == term.worker && *terminal == Some(term.session) && agent.phase == phase)
     }
 
     async fn events(hub: &Hub, since: Option<u64>, timeout_ms: u32) -> (Vec<HubEvent>, u64, u64) {
@@ -2271,16 +2240,15 @@ pub(crate) mod tests {
         });
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert!(!waiting.is_finished(), "nothing new yet");
-        let blocked = AgentStatus::Blocked(BlockReason::Question);
-        lease.handle(agent_report(session, blocked.clone()));
+        let thread = ThreadId::new();
+        lease.handle(agent_report(thread, session, Phase::NeedsYou));
         let (woke, after, _) = waiting.await.unwrap();
         let term = TermRef { worker, session };
         assert!(
-            matches!(woke.as_slice(), [HubEvent { what: Happening::Agent { worker: w, event }, .. }]
-                if TermRef { worker: *w, session: event.session } == term && event.status == blocked),
+            matches!(woke.as_slice(), [HubEvent { what, .. }] if rung_at(what, term, Phase::NeedsYou)),
             "{woke:?}"
         );
-        lease.handle(agent_report(session, blocked));
+        lease.handle(agent_report(thread, session, Phase::NeedsYou));
         let started = tokio::time::Instant::now();
         let (none, same, _) = events(&hub, Some(after), 1_000).await;
         assert!(none.is_empty(), "the same status again is no event");
@@ -2288,28 +2256,19 @@ pub(crate) mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(1), "gave up at the timeout");
 
         // Filtered: only an agent that needs a human or went idle, the cursor past the rest.
-        lease.handle(agent_report(session, AgentStatus::Working));
+        lease.handle(agent_report(thread, session, Phase::Working));
         lease.handle(ToServer::SessionClosed {
             session: SessionId::new(),
             reason: CloseReason::Exited,
         });
-        lease.handle(agent_report(session, AgentStatus::Idle));
+        lease.handle(agent_report(thread, session, Phase::Idle));
         let filter = EventFilter::AgentNeedsInput;
         let asked = Verb::Events { since: Some(after), timeout_ms: 0, filter };
         let Outcome::Events { events: needs, next, .. } = hub.dispatch(asked).await else {
             panic!("events")
         };
         assert!(
-            matches!(
-                needs.as_slice(),
-                [HubEvent {
-                    what: Happening::Agent {
-                        event: AgentEvent { status: AgentStatus::Idle, .. },
-                        ..
-                    },
-                    ..
-                }]
-            ),
+            matches!(needs.as_slice(), [HubEvent { what, .. }] if rung_at(what, term, Phase::Idle)),
             "{needs:?}"
         );
         assert_eq!(next, after + 3);
@@ -2336,9 +2295,10 @@ pub(crate) mod tests {
         let (tx, _rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
         let extra = 10;
+        let thread = ThreadId::new();
         for i in 0..EVENT_LOG + extra {
-            let status = if i % 2 == 0 { AgentStatus::Working } else { AgentStatus::Idle };
-            lease.handle(agent_report(session, status));
+            let phase = if i % 2 == 0 { Phase::Working } else { Phase::Idle };
+            lease.handle(agent_report(thread, session, phase));
         }
         // The worker coming online and its terminal opening, then the agent's flips.
         let logged = u64::try_from(EVENT_LOG + extra + 2).unwrap();
@@ -2365,9 +2325,10 @@ pub(crate) mod tests {
             let (tx, _rx) = mpsc::channel(8);
             let lease =
                 hub.register(registration(worker, vec![summary(session)]), ip(), tx).unwrap();
+            let thread = ThreadId::new();
             for i in 0..n {
-                let status = if i % 2 == 0 { AgentStatus::Working } else { AgentStatus::Idle };
-                lease.handle(agent_report(session, status));
+                let phase = if i % 2 == 0 { Phase::Working } else { Phase::Idle };
+                lease.handle(agent_report(thread, session, phase));
             }
             lease
         };
@@ -2407,29 +2368,18 @@ pub(crate) mod tests {
         assert!(!waiting.is_finished(), "nothing it wants yet");
         // Past the log's size in one go, none of it what the wait wants, then one it does.
         let extra = 10;
+        let thread = ThreadId::new();
         for i in 0..EVENT_LOG + extra {
-            let status = if i % 2 == 0 {
-                AgentStatus::Working
-            } else {
-                AgentStatus::Tool { tool: "Bash".to_owned() }
-            };
-            lease.handle(agent_report(session, status));
+            let phase = if i % 2 == 0 { Phase::Working } else { Phase::Waiting };
+            lease.handle(agent_report(thread, session, phase));
         }
-        lease.handle(agent_report(session, AgentStatus::Idle));
+        lease.handle(agent_report(thread, session, Phase::Idle));
         let Outcome::Events { events, missed, .. } = waiting.await.unwrap() else {
             panic!("events")
         };
+        let term = TermRef { worker, session };
         assert!(
-            matches!(
-                events.as_slice(),
-                [HubEvent {
-                    what: Happening::Agent {
-                        event: AgentEvent { status: AgentStatus::Idle, .. },
-                        ..
-                    },
-                    ..
-                }]
-            ),
+            matches!(events.as_slice(), [HubEvent { what, .. }] if rung_at(what, term, Phase::Idle)),
             "{events:?}"
         );
         assert_eq!(missed, u64::try_from(extra + 1).unwrap(), "the events dropped mid-wait");

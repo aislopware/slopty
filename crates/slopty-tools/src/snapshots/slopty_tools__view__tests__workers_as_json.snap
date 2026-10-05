@@ -22,9 +22,8 @@ expression: overview().json()
     "waiting": [
       {
         "term": "0199a000-0000-7000-8000-000000000001/0199a1b2-c3d4-7000-8000-00000000abcd",
-        "agent": "claude_code",
-        "reason": "permission",
-        "tool": "Bash"
+        "agent": "claude-code",
+        "asks": "Run cargo test"
       }
     ]
   },

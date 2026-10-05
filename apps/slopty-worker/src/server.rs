@@ -16,13 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use slopty_agent::status::SessionAgent;
 use slopty_core::SessionId;
 use slopty_net::framed::FramedSend;
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink};
 use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::SessionAgent;
 use slopty_proto::codec::CodecError;
 use slopty_proto::ctl::{LinkState, ServerHealth};
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
@@ -315,7 +315,6 @@ async fn session(
                         }));
                         ToServer::SessionClosed { session, reason }
                     }
-                    Ok(WorkerMsg::Agent(event)) => ToServer::Agent(event),
                     Ok(WorkerMsg::Load(load)) => ToServer::Load(load),
                     Ok(WorkerMsg::AgentBranch(branch)) => {
                         ToServer::Report(AgentReport::Branch(branch))

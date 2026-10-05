@@ -16,7 +16,8 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use slopty_proto::agent::{AgentStatus, BlockReason};
+
+use crate::status::{AgentStatus, BlockReason};
 
 /// One session as its registry file says it.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

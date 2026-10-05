@@ -9,7 +9,7 @@ mod tests {
     use std::process::Stdio;
     use std::time::Duration;
 
-    use slopty_core::{ClientId, WorkerId};
+    use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::framed::{FramedRecv, FramedSend};
@@ -22,6 +22,7 @@ mod tests {
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
     use slopty_proto::terminal::{CloseReason, SessionState};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
@@ -154,6 +155,17 @@ mod tests {
         }
     }
 
+    /// Whether `m` is a table frame with a row of a thread in terminal `session` that `pred`
+    /// holds of.
+    fn row_at(m: &ToServer, session: SessionId, pred: impl Fn(&ThreadRow) -> bool) -> bool {
+        let ToServer::Threads(TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. }) =
+            m
+        else {
+            return false;
+        };
+        rows.iter().any(|r| r.terminal == Some(session) && pred(r))
+    }
+
     /// A quiet interactive bash in `cwd`.
     fn open(worker: WorkerId, cwd: &Path) -> Verb {
         Verb::OpenTerminal {
@@ -187,7 +199,7 @@ mod tests {
     }
 
     /// A hook fired in `session`, told to the worker as `slopty hook` tells it.
-    async fn hook(dir: &Path, session: slopty_core::SessionId, payload: serde_json::Value) {
+    async fn hook(dir: &Path, session: SessionId, payload: serde_json::Value) {
         let req = slopty_proto::ctl::CtlRequest::Hook { session, payload: payload.to_string() };
         let reply = ctl(dir, &req).await;
         assert!(matches!(reply, slopty_proto::ctl::CtlReply::Ok { .. }), "{reply:?}");
@@ -510,7 +522,8 @@ mod tests {
     /// settings.
     #[tokio::test]
     async fn a_spawned_agent_reports_through_the_relay_it_was_handed() {
-        use slopty_proto::agent::{AgentKind, AgentSource};
+        use slopty_proto::agent::AgentKind;
+        use slopty_proto::thread::{AgentId, Cap};
 
         let dir = tempfile::tempdir().unwrap();
         let programs = dir.path().join("programs");
@@ -573,7 +586,7 @@ mod tests {
         assert_eq!((flag.as_str(), rest), ("--settings", &["--verbose".to_owned()][..]));
         assert_eq!(pin, "--session-id", "the conversation's id is chosen before it starts");
         // Any UUID parses as a session id.
-        assert!(conversation.parse::<slopty_core::SessionId>().is_ok(), "{conversation}");
+        assert!(conversation.parse::<SessionId>().is_ok(), "{conversation}");
         // Slopty's tools, through the same `slopty` beside the worker.
         let mcp: serde_json::Value =
             serde_json::from_str(mcp.strip_prefix("--mcp-config=").expect(mcp)).unwrap();
@@ -615,9 +628,12 @@ mod tests {
             .await
             .unwrap();
         assert!(tokio::time::timeout(STEP, hook.wait()).await.unwrap().unwrap().success());
+        // A hook spoke for the agent's thread: it holds its prompts from now on.
+        let approvals = Cap::named(Cap::APPROVALS);
         peer.heard(|m| {
-            matches!(m, ToServer::Agent(ev) if ev.session == term.session
-                && ev.kind == AgentKind::ClaudeCode && ev.source == AgentSource::Hook)
+            row_at(m, term.session, |r| {
+                r.agent == AgentId::named(AgentId::CLAUDE_CODE) && r.caps.contains(&approvals)
+            })
         })
         .await;
     }
@@ -630,7 +646,7 @@ mod tests {
     #[tokio::test]
     async fn a_spawned_agent_is_typed_into_only_when_it_can_take_it() {
         use serde_json::json;
-        use slopty_proto::agent::{AgentKind, AgentSource};
+        use slopty_proto::agent::AgentKind;
         use slopty_proto::project::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
@@ -647,7 +663,7 @@ mod tests {
         let (mut peer, reg) = Peer::welcome(link).await;
 
         let record = dir.path().join("record.json");
-        let chosen = slopty_core::SessionId::new();
+        let chosen = SessionId::new();
         let env = [
             ("STUB_RECORD", record.to_string_lossy().into_owned()),
             ("STUB_HOOKS", "[]".to_owned()),
@@ -676,17 +692,14 @@ mod tests {
             started["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
         let after = |flag: &str| argv.iter().position(|a| *a == flag).map(|at| argv[at + 1]);
         let conversation = after("--session-id").expect("pinned");
-        assert!(conversation.parse::<slopty_core::SessionId>().is_ok(), "{conversation}");
+        assert!(conversation.parse::<SessionId>().is_ok(), "{conversation}");
         let settings: serde_json::Value =
             serde_json::from_str(after("--settings").expect("settings")).unwrap();
         assert_eq!(settings["permissions"]["disableBypassPermissionsMode"], "disable");
 
         // Its title says it is at its prompt before any hook has spoken: a dialog of its own
         // may be up, so nothing goes in.
-        peer.heard(|m| {
-            matches!(m, ToServer::Agent(ev) if ev.session == chosen && ev.source == AgentSource::Title)
-        })
-        .await;
+        peer.heard(|m| row_at(m, chosen, |_| true)).await;
         let early = peer.ask(Verb::SendInput { term, input: text("hello\n") }).await;
         assert!(
             matches!(early, Outcome::Error { code: ErrorCode::AgentNotReady, .. }),
@@ -812,7 +825,7 @@ mod tests {
         let (mut peer, reg) = Peer::welcome(link).await;
 
         let (record, gate) = (dir.path().join("record.json"), dir.path().join("prompted"));
-        let session = slopty_core::SessionId::new();
+        let session = SessionId::new();
         let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
         let env = [
             ("STUB_RECORD", record.to_string_lossy().into_owned()),
@@ -875,7 +888,7 @@ mod tests {
     async fn resting_agent_with_an_inbox(
         dir: &Path,
         more: &[(&str, String)],
-    ) -> (Peer, slopty_core::SessionId, PathBuf, PathBuf, PathBuf, Daemons) {
+    ) -> (Peer, SessionId, PathBuf, PathBuf, PathBuf, Daemons) {
         use slopty_proto::agent::AgentKind;
 
         let programs = dir.join("programs");
@@ -890,7 +903,7 @@ mod tests {
 
         let (record, posted) = (dir.join("record.json"), dir.join("inbox.jsonl"));
         let transcript = dir.join("transcript.jsonl");
-        let session = slopty_core::SessionId::new();
+        let session = SessionId::new();
         let mut env = vec![
             ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
             ("STUB_INBOX".to_owned(), posted.to_string_lossy().into_owned()),
@@ -1036,7 +1049,7 @@ mod tests {
     }
 
     /// The batch kept for `session` in `kept` once it is `batch`.
-    async fn kept_batch(kept: &Path, session: slopty_core::SessionId, batch: u64) {
+    async fn kept_batch(kept: &Path, session: SessionId, batch: u64) {
         let looking = async {
             while slopty_agent::reports::peek(kept, session).ok().flatten().map(|b| b.batch)
                 != Some(batch)
@@ -1087,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn reports_wait_for_the_person_after_they_stop_the_agent() {
         use serde_json::json;
-        use slopty_proto::agent::AgentStatus;
+        use slopty_proto::thread::Phase;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut peer, session, _record, posted, kept, _daemons) =
@@ -1099,6 +1112,8 @@ mod tests {
             "transcript_path": transcript,
         });
         hook(dir.path(), session, prompt.clone()).await;
+        peer.heard(|m| row_at(m, session, |r| r.status.phase == Phase::Working)).await;
+        peer.heard.clear();
         let stop = json!({
             "type": "user", "uuid": "esc", "timestamp": "2026-10-04T07:00:00.000Z",
             "message": { "role": "user", "content": "[Request interrupted by user]" },
@@ -1106,13 +1121,8 @@ mod tests {
         let mut file =
             std::fs::OpenOptions::new().create(true).append(true).open(&transcript).unwrap();
         std::io::Write::write_all(&mut file, format!("{stop}\n").as_bytes()).unwrap();
-        peer.heard(|m| {
-            matches!(m, ToServer::Agent(e)
-                if e.session == session
-                    && e.status == AgentStatus::Idle
-                    && e.detail.as_deref() == Some("interrupted"))
-        })
-        .await;
+        // The thread rests once the transcript says the person stopped it.
+        peer.heard(|m| row_at(m, session, |r| r.status.phase == Phase::Idle)).await;
         // A minute on, Claude Code says it waits at its prompt: a hook, but not the person.
         let waiting = json!({
             "hook_event_name": "Notification",
@@ -1159,7 +1169,7 @@ mod tests {
         kept_batch(&kept, session, 3).await;
 
         let key = slopty_agent::vouch::SessionKey::load_or_make(&dir.path().join("data")).unwrap();
-        let (own, other) = (key.token(session), key.token(slopty_core::SessionId::new()));
+        let (own, other) = (key.token(session), key.token(SessionId::new()));
         let payload = json!({ "hook_event_name": "UserPromptSubmit", "prompt": "go on" });
         let ask = |token: &str| {
             CtlRequest::Reports(ReportsAsk {

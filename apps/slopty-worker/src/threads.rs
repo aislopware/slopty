@@ -19,7 +19,7 @@ use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Start, TableFrame,
-    ThreadFrame, ThreadHits, ThreadRequest,
+    ThreadFrame, ThreadHits, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, Liveness,
@@ -69,7 +69,7 @@ struct Typing {
 }
 
 impl Agents for Typing {
-    fn status(&self, session: SessionId) -> Option<slopty_proto::agent::SessionAgent> {
+    fn status(&self, session: SessionId) -> Option<slopty_agent::status::SessionAgent> {
         self.agents.status(session)
     }
 
@@ -300,7 +300,8 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     drop(Screens::new(threads.host.clone()).spawn());
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
-    drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks.claude));
+    let (events, heard) = (daemon.events.subscribe(), daemon.heard.subscribe());
+    drop(claude::spawn(threads.host.clone(), events, heard, sources, asks.claude));
     let terminals: Arc<dyn AgentTerminalsTrait> =
         Arc::new(Announced { terminals: asks.terminals, daemon: daemon.clone() });
     drop(claude::start::spawn(
@@ -935,6 +936,10 @@ impl orchestrate::ThreadReads for Reads {
         let who = Who { daemon: &self.daemon, link: ORCHESTRATION, client: ClientId::nil() };
         tracing::info!(%thread, %id, "an intent from orchestration");
         act_as(&who, &self.threads, thread, id, &intent)
+    }
+
+    fn at_terminal(&self, session: SessionId) -> Option<ThreadRow> {
+        self.threads.host.at_terminal(session)
     }
 }
 

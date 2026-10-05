@@ -14,7 +14,8 @@ use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
-use slopty_proto::agent::AgentStatus;
+
+use crate::status::AgentStatus;
 
 /// How much of the file's end is scanned; one assistant record with a long thinking block can
 /// run to tens of kilobytes.

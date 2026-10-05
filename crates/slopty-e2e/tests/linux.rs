@@ -22,7 +22,6 @@ mod tests {
     use slopty_client::{Effect, LinkEvent, TermState, WorkerLink};
     use slopty_core::{ClientId, SessionId, XferId};
     use slopty_net::client::{bind_client, connect_addr};
-    use slopty_proto::agent::AgentStatus;
     use slopty_proto::file::FileRead;
     use slopty_proto::folder::{FsOp, FsOutcome, Listing};
     use slopty_proto::handshake::{Hello, HelloAck};
@@ -30,6 +29,8 @@ mod tests {
     use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
     use slopty_proto::server::Os;
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
+    use slopty_proto::thread::{AgentId, Phase};
     use slopty_proto::transfer::{
         ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, XferMsg,
     };
@@ -525,7 +526,10 @@ mod tests {
         assert!(text.contains("\nDeletionDate="), "{text}");
 
         // 4. An agent's status: a hook played through the Linux `slopty hook` inside the container,
-        //    finding the worker by the platform's socket rule, reaches this client.
+        //    finding the worker by the platform's socket rule, reaches this client in its thread's
+        //    row.
+        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
+        shell.link.send(table).await.unwrap();
         let session = shell.session.to_string();
         let relay = format!("{}/slopty", linux.bin_dir);
         let mut hook = exec(&linux, &[("SLOPTY_SESSION", &session)], &[&relay, "hook"])
@@ -542,13 +546,16 @@ mod tests {
         let id = shell.session;
         let agent = shell
             .until_control("the agent's status", |msg| match msg {
-                WorkerMsg::Agent(event) if event.session == id => Some(event),
+                WorkerMsg::Threads(
+                    TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+                ) => rows
+                    .into_iter()
+                    .find(|r| r.terminal == Some(id) && r.status.phase == Phase::Working),
                 _other => None,
             })
             .await
             .unwrap();
-        assert_eq!(agent.status, AgentStatus::Working, "{agent:?}");
-        assert_eq!(agent.detail.as_deref(), Some("tidy the linux box"), "{agent:?}");
+        assert_eq!(agent.agent, AgentId::named(AgentId::CLAUDE_CODE), "{agent:?}");
 
         shell.close().await;
     }

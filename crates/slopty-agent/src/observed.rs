@@ -38,7 +38,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use slopty_core::{ClientId, SessionId, WallMs};
-use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 use slopty_proto::conversation::{
     self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
     PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
@@ -52,6 +51,7 @@ use slopty_proto::thread::{
 };
 
 use crate::live;
+use crate::status::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 
 /// What the threads observed need done.
 #[derive(Clone, Debug, PartialEq, Eq)]

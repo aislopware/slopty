@@ -6,8 +6,8 @@
 //! are read again until then: the row with the agent's final line may come after the status
 //! that ended the turn.
 
+use slopty_agent::status::BlockReason;
 use slopty_core::WallMs;
-use slopty_proto::agent::BlockReason;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::TaskId;
 

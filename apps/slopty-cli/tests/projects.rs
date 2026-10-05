@@ -1228,7 +1228,7 @@ mod tests {
         );
         let verifier_left = until("the passed verifier's terminal closes", async || {
             match hub.dispatch(Verb::ListTerminals { worker: Some(*studio) }).await {
-                Outcome::Terminals(list) => {
+                Outcome::Terminals { terminals: list, .. } => {
                     list.iter().all(|(_, s)| !s.title.starts_with("Verifier")).then_some(list)
                 }
                 _ => None,
@@ -1459,7 +1459,7 @@ mod tests {
         assert_eq!(step.kind, StepKind::Verify);
         let kept = step.term.expect("the failed run's terminal");
         let listed = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
-            Outcome::Terminals(list) => list,
+            Outcome::Terminals { terminals: list, .. } => list,
             other => panic!("{other:?}"),
         };
         assert!(listed.iter().any(|(_, s)| s.id == kept.session), "kept to be read");
@@ -1514,7 +1514,9 @@ mod tests {
         let clean = git_out(&place, &["status", "--porcelain"]);
         assert!(clean.is_empty(), "no rebase left stopped: {clean}");
         let gone = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
-            Outcome::Terminals(list) => list.iter().all(|(_, s)| s.id != kept.session),
+            Outcome::Terminals { terminals: list, .. } => {
+                list.iter().all(|(_, s)| s.id != kept.session)
+            }
             other => panic!("{other:?}"),
         };
         assert!(gone, "the kept terminal closed once it was verified again");

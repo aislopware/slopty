@@ -9,8 +9,8 @@ mod agent_open {
     use std::time::Duration;
 
     use serde_json::Value;
+    use slopty_agent::status::SessionAgent;
     use slopty_core::SessionId;
-    use slopty_proto::agent::SessionAgent;
     use slopty_proto::terminal::{OpenSession, TermSize};
     use slopty_worker::Worker;
     use slopty_worker::orchestrate::Agents;

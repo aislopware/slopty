@@ -150,6 +150,10 @@ pub(crate) struct Daemon {
     pub name: String,
     /// Events every connected client should hear (session opened/closed, item deltas).
     pub events: broadcast::Sender<slopty_proto::WorkerMsg>,
+    /// What the agents' hooks and [`agents::watch`] report, once [`Self::agents`] took it: the
+    /// daemon's own, which feeds the observed threads and orchestration's waits. Clients and
+    /// the server read an agent from its thread's row instead.
+    pub heard: broadcast::Sender<slopty_agent::status::AgentEvent>,
     /// The item registry.
     pub items: ItemStore,
     /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
@@ -369,7 +373,7 @@ fn join_server(
         daemon.id,
         daemon.worker.clone(),
         daemon.items.clone(),
-        daemon.events.clone(),
+        (daemon.events.clone(), daemon.heard.clone()),
         launch,
         Arc::new(threads::hold::Orchestrated(daemon.clone())),
     );
@@ -752,6 +756,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         id,
         name: paths::worker_name(),
         events,
+        heard: broadcast::Sender::new(EVENT_BUFFER),
         items,
         agents,
         clip: Arc::new(slopty_worker::clip::Clipboard::new(

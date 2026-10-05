@@ -11,15 +11,14 @@ mod tests {
     use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_net::admission::Admission;
     use slopty_net::server::ServerListener;
-    use slopty_proto::agent::{
-        AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
-    };
     use slopty_proto::orchestration::{
-        ErrorCode, Happening, HubEvent, Input, Outcome, TermRef, Verb,
+        ErrorCode, Happening, HubEvent, Input, Outcome, TermAgent, TermRef, Verb,
     };
     use slopty_proto::project::TaskId;
     use slopty_proto::server::{FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
+    use slopty_proto::thread::attention::Rung;
+    use slopty_proto::thread::{AgentId, Phase, ThreadId};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, ChildStdin, ChildStdout, Command};
     use tokio::sync::{broadcast, mpsc};
@@ -81,22 +80,29 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,
         }
     }
 
-    /// A Claude Code waiting on a permission, as its hook said.
-    fn blocked() -> SessionAgent {
-        SessionAgent {
-            kind: AgentKind::ClaudeCode,
-            status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
-            source: AgentSource::Hook,
+    /// A Claude Code that asks the person `asks`, as its thread's row says.
+    fn asking(asks: &str) -> TermAgent {
+        TermAgent {
+            thread: ThreadId::from_uuid(*agent().as_uuid()),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: "Fix the build".to_owned(),
+            rung: Rung::NeedsYou,
+            phase: Phase::NeedsYou,
+            wait: None,
+            asks: Some(asks.to_owned()),
             since_ms: WallMs::ZERO,
-            mode: None,
         }
+    }
+
+    /// A Claude Code waiting on a permission.
+    fn blocked() -> TermAgent {
+        asking("Run Bash?")
     }
 
     /// What the fake answers: one online worker with a shell and a Claude Code waiting on a
@@ -104,12 +110,15 @@ mod tests {
     fn answer(verb: &Verb) -> Outcome {
         match verb {
             Verb::ListWorkers => Outcome::Workers(directory()),
-            Verb::ListTerminals { .. } => Outcome::Terminals(vec![
-                (studio(), summary(shell(), "zsh")),
-                (studio(), SessionSummary { agent: Some(blocked()), ..summary(agent(), "claude") }),
-            ]),
+            Verb::ListTerminals { .. } => Outcome::Terminals {
+                terminals: vec![
+                    (studio(), summary(shell(), "zsh")),
+                    (studio(), summary(agent(), "claude")),
+                ],
+                agents: vec![(TermRef { worker: studio(), session: agent() }, blocked())],
+            },
             Verb::AgentStatus { term } if term.session == agent() => {
-                Outcome::Agent(Some(blocked()))
+                Outcome::Agent(Some(Box::new(blocked())))
             }
             Verb::AgentStatus { .. } => Outcome::Agent(None),
             Verb::Close { term } if term.session != shell() => Outcome::Error {
@@ -253,9 +262,7 @@ mod tests {
                 "can_inject": true,
                 "last_seen_ms": 1,
                 "terminals": 2,
-                "waiting": [{
-                    "term": term, "agent": "claude_code", "reason": "permission", "tool": "Bash"
-                }],
+                "waiting": [{ "term": term, "agent": "claude-code", "asks": "Run Bash?" }],
             }])
         );
         // The directory, the facts and the terminals, each carrying its agent: no status
@@ -318,7 +325,7 @@ mod tests {
         assert!(ran.ok, "{}", ran.stderr);
         assert!(ran.stdout.starts_with("TERM "), "{}", ran.stdout);
         assert!(ran.stdout.contains("mac-studio/0199a1b2  running"), "{}", ran.stdout);
-        assert!(ran.stdout.contains("waiting: permission for Bash (hooks)"), "{}", ran.stdout);
+        assert!(ran.stdout.contains("needs you: Run Bash?"), "{}", ran.stdout);
     }
 
     #[tokio::test]
@@ -423,28 +430,21 @@ mod tests {
         assert!(name.starts_with("slopty mcp @ "), "{name}");
 
         // An agent that comes to need a human is announced unasked.
-        let event = AgentEvent {
-            session: shell(),
-            kind: AgentKind::ClaudeCode,
-            status: AgentStatus::Blocked(BlockReason::Question),
-            agent_session: None,
-            detail: Some("Which branch?".to_owned()),
-            attention: true,
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        };
         let pushed = FromServer::Event(HubEvent {
             seq: 1,
             at_ms: WallMs::ZERO,
-            what: Happening::Agent { worker: studio(), event },
+            what: Happening::Rung {
+                worker: studio(),
+                terminal: Some(shell()),
+                agent: asking("Which branch?"),
+            },
         });
         fake.push.send(Some(pushed)).unwrap();
         let note = mcp.next().await;
         assert_eq!(note["method"], "notifications/message", "{note}");
         assert_eq!(note["params"]["level"], "warning");
         assert_eq!(note["params"]["data"]["term"], format!("{}/{}", studio(), shell()));
-        assert_eq!(note["params"]["data"]["agent"]["reason"], "question");
+        assert_eq!(note["params"]["data"]["agent"]["asks"], "Which branch?");
         assert!(
             note["params"]["data"]["message"].as_str().unwrap().contains("mac-studio"),
             "{note}"

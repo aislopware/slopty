@@ -1,9 +1,8 @@
 ---
 source: crates/slopty-proto/tests/golden_thread.rs
-assertion_line: 44
 expression: hex(&bytes)
 ---
-6f 00 00 00 19 01 05 63 6f 64 65 78 01 05 2f 77
+6f 00 00 00 18 01 05 63 6f 64 65 78 01 05 2f 77
 6f 72 6b 00 01 05 63 6f 64 65 78 09 30 31 39 61
 2d 63 30 64 65 01 05 2f 77 6f 72 6b 01 0d 46 69
 78 20 74 68 65 20 62 75 69 6c 64 01 a0 e1 67 01

@@ -838,7 +838,7 @@ impl WorkspaceView {
     /// Whether `session` is the login shell and no agent: one that, once ended, a new shell in
     /// its directory stands in for.
     fn plain_shell(&self, session: SessionId) -> bool {
-        self.summary(session).is_some_and(|s| s.command.is_empty() && s.agent.is_none())
+        self.summary(session).is_some_and(|s| s.command.is_empty())
             && self.session_agent(session).is_none()
     }
 

@@ -20,9 +20,8 @@
 
 use std::collections::HashMap;
 
-use slopty_proto::agent::{AgentStatus, BlockReason};
+use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::Spent;
 
 use super::{ProjectId, Projects, TaskId, open_term};
 use crate::deliver::Kind;
@@ -107,7 +106,7 @@ enum Step {
 }
 
 fn step(status: &AgentStatus) -> Step {
-    if Spent::works(status) {
+    if status.works() {
         return Step::Busy;
     }
     match status {

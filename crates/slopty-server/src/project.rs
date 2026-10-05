@@ -14,8 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
+use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
+use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, CHECK_NAME_MAX, CHECKS_NAMED,
@@ -1634,7 +1635,7 @@ impl Projects {
         now: WallMs,
     ) -> Vec<Change> {
         let to = follows(status);
-        let works = Spent::works(status);
+        let works = status.works();
         let mut updates = Vec::new();
         for record in self.records.values_mut() {
             if record.project.orchestrator == Some(term)

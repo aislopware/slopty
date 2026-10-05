@@ -1,6 +1,5 @@
 ---
 source: crates/slopty-proto/tests/golden_folder.rs
-assertion_line: 23
 expression: hex(&bytes)
 ---
-04 00 00 00 1b 08 01 07
+04 00 00 00 1a 08 01 07

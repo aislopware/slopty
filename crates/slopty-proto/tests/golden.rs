@@ -235,82 +235,10 @@ mod golden {
         insta::assert_snapshot!("worker_frame_copy", hex(&bytes));
     }
 
+    /// The pull request and worktree an agent's status line names.
     #[test]
-    fn agent() {
-        use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
-        snap(
-            "worker_agent_hook",
-            &WorkerMsg::Agent(AgentEvent {
-                session: session(),
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
-                agent_session: Some("6f1b".to_owned()),
-                detail: Some("$ cargo test".to_owned()),
-                attention: true,
-                source: AgentSource::Hook,
-                since_ms: WallMs::from_millis(1_790_000_060_000),
-                mode: Some(slopty_proto::agent::HeardMode {
-                    name: "plan".to_owned(),
-                    heard_ms: WallMs::from_millis(1_790_000_050_000),
-                }),
-            }),
-        );
-        // The same session attributed without hooks: the pill is the same, the source is not.
-        snap(
-            "worker_agent_process",
-            &WorkerMsg::Agent(AgentEvent {
-                session: session(),
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Idle,
-                agent_session: None,
-                detail: None,
-                attention: false,
-                source: AgentSource::Process,
-                since_ms: WallMs::from_millis(1_790_000_060_000),
-                mode: None,
-            }),
-        );
-    }
-
-    /// A turn paused on background work, one a usage limit stopped, and the pull request and
-    /// worktree its status line names.
-    #[test]
-    fn agent_waiting_and_branch() {
-        use slopty_proto::agent::{
-            AgentBranch, AgentEvent, AgentKind, AgentSource, AgentStatus, PullRequest, Review,
-            Worktree,
-        };
-        snap(
-            "worker_agent_waiting",
-            &WorkerMsg::Agent(AgentEvent {
-                session: session(),
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Waiting { tasks: 2, crons: 1 },
-                agent_session: Some("6f1b".to_owned()),
-                detail: Some("Sleep then print a marker".to_owned()),
-                attention: false,
-                source: AgentSource::Hook,
-                since_ms: WallMs::from_millis(1_790_000_060_000),
-                mode: None,
-            }),
-        );
-        snap(
-            "worker_agent_failed",
-            &WorkerMsg::Agent(AgentEvent {
-                session: session(),
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Failed {
-                    error: AgentStatus::RATE_LIMIT.to_owned(),
-                    until_ms: Some(WallMs::from_millis(1_790_018_000_000)),
-                },
-                agent_session: Some("6f1b".to_owned()),
-                detail: Some("You've hit your limit".to_owned()),
-                attention: true,
-                source: AgentSource::Hook,
-                since_ms: WallMs::from_millis(1_790_000_060_000),
-                mode: None,
-            }),
-        );
+    fn agent_branch() {
+        use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
         snap(
             "worker_agent_branch",
             &WorkerMsg::AgentBranch(AgentBranch {
@@ -481,16 +409,6 @@ mod golden {
             state: SessionState::Running,
             viewers: 1,
             command: vec!["/bin/zsh".to_owned(), "-l".to_owned()],
-            agent: Some(slopty_proto::agent::SessionAgent {
-                kind: slopty_proto::agent::AgentKind::ClaudeCode,
-                status: slopty_proto::agent::AgentStatus::Working,
-                source: slopty_proto::agent::AgentSource::Hook,
-                since_ms: WallMs::from_millis(1_790_000_060_000),
-                mode: Some(slopty_proto::agent::HeardMode {
-                    name: "acceptEdits".to_owned(),
-                    heard_ms: WallMs::from_millis(1_790_000_050_000),
-                }),
-            }),
             progress: Some(slopty_proto::terminal::Progress {
                 state: slopty_proto::terminal::ProgressState::Set,
                 percent: Some(42),
@@ -1899,13 +1817,11 @@ mod golden {
             state: slopty_proto::terminal::SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,
         };
-        snap("server_session_changed", &ToServer::SessionChanged(summary.clone()));
-        snap("server_terminals", &FromServer::Terminals(vec![(worker, summary)]));
+        snap("server_session_changed", &ToServer::SessionChanged(summary));
         snap("server_worker_load", &FromServer::Load { worker, load: 0.75 });
     }
 
@@ -1991,12 +1907,12 @@ mod golden {
 #[cfg(test)]
 mod orchestration {
     use slopty_core::{DisplayId, ItemId, SessionId, WallMs, WindowId, WorkerId};
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::codec;
     use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
         DirEntry, ErrorCode, EventFilter, FileKind, FileStat, Happening, HubEvent, IdempotencyKey,
-        Input, ItemRef, Outcome, Size, TermRef, Verb,
+        Input, ItemRef, Outcome, Size, TermAgent, TermRef, Verb,
     };
     use slopty_proto::screen::{DisplayInfo, WindowInfo};
     use slopty_proto::server::{FromServer, ToServer};
@@ -2023,6 +1939,34 @@ mod orchestration {
                 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10,
             )),
         }
+    }
+
+    /// Claude Code in [`term`], asking the person which branch, as its thread's row says.
+    fn asking() -> TermAgent {
+        use slopty_proto::thread::attention::Rung;
+        use slopty_proto::thread::{AgentId, Phase, ThreadId, Wait};
+        TermAgent {
+            thread: ThreadId::from_uuid(Uuid::from_u128(0x7417)),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: "Fix the login redirect".to_owned(),
+            rung: Rung::NeedsYou,
+            phase: Phase::NeedsYou,
+            wait: Some(Wait { kind: "question".to_owned(), text: "Which branch?".to_owned() }),
+            asks: Some("Which branch?".to_owned()),
+            since_ms: WallMs::from_millis(1_789_999_990_000),
+        }
+    }
+
+    /// A status query's answer and a listing, each agent as its thread's row says.
+    #[test]
+    fn an_agent_as_its_row_says() {
+        snap(
+            "server_reply_agent",
+            &FromServer::Reply { id: 11, outcome: Outcome::Agent(Some(Box::new(asking()))) },
+        );
+        let terminals =
+            Outcome::Terminals { terminals: Vec::new(), agents: vec![(term(), asking())] };
+        snap("server_reply_terminals", &FromServer::Reply { id: 12, outcome: terminals });
     }
 
     fn request(verb: Verb) -> FromServer {
@@ -2133,19 +2077,10 @@ mod orchestration {
         let event = HubEvent {
             seq: 41,
             at_ms: WallMs::from_millis(1_790_000_000_000),
-            what: Happening::Agent {
+            what: Happening::Rung {
                 worker: term().worker,
-                event: AgentEvent {
-                    session: term().session,
-                    kind: AgentKind::ClaudeCode,
-                    status: AgentStatus::Blocked(BlockReason::Question),
-                    agent_session: None,
-                    detail: Some("Which branch?".to_owned()),
-                    attention: true,
-                    source: AgentSource::Hook,
-                    since_ms: WallMs::from_millis(1_789_999_990_000),
-                    mode: None,
-                },
+                terminal: Some(term().session),
+                agent: asking(),
             },
         };
         // Pushed to a client link as it happens, the same event the log answers with.
@@ -2493,7 +2428,6 @@ mod ctl {
                     state: SessionState::Exited { status: 1 },
                     viewers: 0,
                     command: vec!["/bin/zsh".to_owned()],
-                    agent: None,
                     progress: None,
                     restored: None,
                     repo_id: None,

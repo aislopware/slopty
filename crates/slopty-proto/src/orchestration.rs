@@ -31,7 +31,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
-use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
+use crate::agent::AgentKind;
 use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
 use crate::project::{
@@ -42,7 +42,9 @@ use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
-use crate::thread::{AgentId, AskId, Choice, Phase, ToolState, TurnId, TurnState};
+use crate::thread::attention::Rung;
+use crate::thread::wire::ThreadRow;
+use crate::thread::{AgentId, AskId, Choice, Phase, ThreadId, ToolState, TurnId, TurnState, Wait};
 use crate::transfer::Hash;
 
 /// How long after its answer a key is still honoured: longer than any caller keeps retrying
@@ -150,6 +152,52 @@ impl std::str::FromStr for IdempotencyKey {
 impl std::fmt::Display for IdempotencyKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// The agent at work in a terminal, as its thread's row says: what a listing and a status
+/// query answer, and what [`Happening::Rung`] carries.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TermAgent {
+    /// Its thread.
+    pub thread: ThreadId,
+    /// Which agent.
+    pub agent: AgentId,
+    /// The thread's title.
+    pub title: String,
+    /// Where it stands among the fleet's threads.
+    pub rung: Rung,
+    /// Its phase.
+    pub phase: Phase,
+    /// What it waits on, while it waits.
+    pub wait: Option<Wait>,
+    /// What it asks the person: its first open request's title.
+    pub asks: Option<String>,
+    /// When it entered its phase, by its worker's clock.
+    pub since_ms: WallMs,
+}
+
+impl TermAgent {
+    /// Where `row`'s thread stands.
+    #[must_use]
+    pub fn of(row: &ThreadRow) -> Self {
+        Self {
+            thread: row.id,
+            agent: row.agent.clone(),
+            title: row.title.clone(),
+            rung: Rung::of(row),
+            phase: row.status.phase,
+            wait: row.status.wait.clone(),
+            asks: row.requests.first().map(|r| r.title.clone()),
+            since_ms: row.status.since_ms,
+        }
+    }
+
+    /// Whether it waits on the person or rests: what [`WaitUntil::AgentNeedsInput`] waits for.
+    #[must_use]
+    pub const fn needs_input(&self) -> bool {
+        matches!(self.rung, Rung::NeedsYou)
+            || matches!(self.phase, Phase::Idle | Phase::Done | Phase::Failed | Phase::Stopped)
     }
 }
 
@@ -306,7 +354,7 @@ pub enum Verb {
         /// Give up after this long. The server caps it below the MCP client's idle abort.
         timeout_ms: u32,
     },
-    /// The agent status of a terminal.
+    /// Where the agent at work in a terminal stands, as its thread's row says.
     AgentStatus {
         /// Which.
         term: TermRef,
@@ -1017,17 +1065,9 @@ impl EventFilter {
     pub const fn admits(self, what: &Happening) -> bool {
         match self {
             Self::All => true,
-            Self::AgentNeedsInput => matches!(
-                what,
-                Happening::Agent { event, .. }
-                    if matches!(
-                        event.status,
-                        AgentStatus::Blocked(_)
-                            | AgentStatus::Idle
-                            | AgentStatus::Done
-                            | AgentStatus::Failed { .. }
-                    )
-            ),
+            Self::AgentNeedsInput => {
+                matches!(what, Happening::Rung { agent, .. } if agent.needs_input())
+            }
         }
     }
 }
@@ -1076,13 +1116,15 @@ pub enum Happening {
         /// Which.
         term: TermRef,
     },
-    /// An agent's status changed, or where its status came from did; its status is
-    /// [`AgentStatus::None`] when it left.
-    Agent {
+    /// A thread that hangs from no other moved on the ladder, or what it asks changed: its
+    /// phase, its rung, or its first open request, as its worker's table says.
+    Rung {
         /// Where.
         worker: WorkerId,
-        /// What, as the worker reported it.
-        event: AgentEvent,
+        /// The terminal its TUI runs in, when one does.
+        terminal: Option<SessionId>,
+        /// Where it stands now.
+        agent: TermAgent,
     },
     /// A terminal's program exited; the terminal stays, its last screen readable, until it is
     /// closed.
@@ -1255,8 +1297,13 @@ pub enum ErrorCode {
 pub enum Outcome {
     /// For [`Verb::ListWorkers`].
     Workers(Vec<WorkerInfo>),
-    /// For [`Verb::ListTerminals`].
-    Terminals(Vec<(WorkerId, SessionSummary)>),
+    /// For [`Verb::ListTerminals`]: the terminals, and the agent at work in each that has one.
+    Terminals {
+        /// The terminals, by worker.
+        terminals: Vec<(WorkerId, SessionSummary)>,
+        /// The agent in each terminal that has one, as its thread's row says.
+        agents: Vec<(TermRef, TermAgent)>,
+    },
     /// For [`Verb::OpenTerminal`] and [`Verb::SpawnAgent`].
     Opened(TermRef),
     /// For [`Verb::ReadScreen`].
@@ -1272,8 +1319,9 @@ pub enum Outcome {
     Commands(Vec<Command>),
     /// For [`Verb::WaitFor`].
     Waited(Waited),
-    /// For [`Verb::AgentStatus`]: the agent, if one runs, its status and where that came from.
-    Agent(Option<SessionAgent>),
+    /// For [`Verb::AgentStatus`]: the agent at work in the terminal, if one is. Boxed: it is
+    /// several times the size of every other outcome.
+    Agent(Option<Box<TermAgent>>),
     /// For [`Verb::ReadFile`]: the bytes from `offset` on, and the file's whole size.
     File {
         /// What was read.
@@ -1427,7 +1475,7 @@ pub enum Outcome {
     /// For [`Verb::StartThread`]: the thread runs.
     ThreadStarted {
         /// The thread.
-        thread: crate::thread::ThreadId,
+        thread: ThreadId,
         /// The worktree it works in, when it was given one.
         worktree: Option<Box<crate::agent::Worktree>>,
     },
@@ -1452,13 +1500,13 @@ pub enum ThreadOf {
     /// The thread of the agent in a terminal, or of a task's thread seated there.
     Term(TermRef),
     /// A thread by its id, a subagent's too, on whichever worker holds it.
-    Thread(crate::thread::ThreadId),
+    Thread(ThreadId),
     /// A thread on a worker: what the server sends that worker once it found the thread.
     On {
         /// The worker that holds it.
         worker: WorkerId,
         /// The thread.
-        thread: crate::thread::ThreadId,
+        thread: ThreadId,
     },
 }
 
@@ -1479,13 +1527,13 @@ pub struct ThreadRead {
     /// The worker that holds it.
     pub worker: WorkerId,
     /// The thread.
-    pub thread: crate::thread::ThreadId,
+    pub thread: ThreadId,
     /// Its agent.
     pub agent: AgentId,
     /// What it is about.
     pub title: String,
     /// For a subagent's thread: its parent's.
-    pub parent: Option<crate::thread::ThreadId>,
+    pub parent: Option<ThreadId>,
     /// Where it is.
     pub phase: Phase,
     /// What it waits on, in words, when it waits.
@@ -1542,7 +1590,7 @@ pub enum ReadEntry {
         /// The end of what it printed or returned.
         output: Option<String>,
         /// The thread of the subagent it started, to read in turn.
-        child: Option<crate::thread::ThreadId>,
+        child: Option<ThreadId>,
     },
     /// Something the agent itself said ([`ThreadView::Activity`]): an API error, a hook's word.
     Notice {

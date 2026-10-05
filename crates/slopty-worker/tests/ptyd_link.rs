@@ -7,8 +7,8 @@ mod ptyd_link {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use slopty_agent::status::SessionAgent;
     use slopty_core::{ClientId, SessionId};
-    use slopty_proto::agent::SessionAgent;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_pty::{PtydClient, SpawnSpec};
     use slopty_worker::Worker;

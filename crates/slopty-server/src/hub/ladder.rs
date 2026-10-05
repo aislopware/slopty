@@ -21,9 +21,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::{AgentStatus, BlockReason};
-use slopty_proto::orchestration::TermRef;
+use slopty_proto::orchestration::{TermAgent, TermRef};
 use slopty_proto::project::{
     AgentReport, ChecksState, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep,
     TimelineEntry,
@@ -58,9 +58,11 @@ pub(super) struct Board {
     next_link: u64,
     /// Wakes [`Hub::publish_ladder`] when rows came.
     wake: Arc<Notify>,
-    /// What each task's thread with no terminal of its own was last said to be doing, by its
-    /// seat ([`Self::seat_moves`]).
+    /// What the agent at each seat was last said to be doing, by its seat: the terminal its
+    /// TUI runs in, or the seat a task's thread was started at ([`Self::seat_moves`]).
     seat_said: HashMap<TermRef, AgentStatus>,
+    /// Where each thread hanging from no other was last said to stand ([`Self::rung_moves`]).
+    rungs_said: HashMap<(WorkerId, ThreadId), TermAgent>,
     /// Every task's thread a table has shown, by its worker: one gone from it since ended.
     seen: std::collections::HashSet<(WorkerId, ThreadId)>,
     /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
@@ -190,36 +192,77 @@ impl Board {
         self.seen.contains(&(worker, thread))
     }
 
-    /// What the agent of the task's thread seated at `term`, with no terminal of its own, is
-    /// doing, as an agent's status reads: what a terminal's agent says through its hooks.
+    /// What the agent seated at `term` is doing, as an agent's status reads; `None` with no
+    /// thread there, and [`AgentStatus::None`] once its agent ended.
     pub(super) fn seat_status(&self, term: TermRef) -> Option<AgentStatus> {
-        let row = self.thread_in(term).filter(|r| r.terminal.is_none())?;
-        Some(status_of(row))
+        self.thread_in(term).map(status_of)
     }
 
-    /// Each task's thread on `worker` with no terminal of its own whose status moved since
-    /// last asked, with its status now; one gone is forgotten.
+    /// The agent at work or seated at `term`, as its thread's row says; `None` with none there
+    /// or once its agent ended.
+    pub(super) fn agent_at(&self, term: TermRef) -> Option<TermAgent> {
+        self.thread_in(term).filter(|r| there(r)).map(TermAgent::of)
+    }
+
+    /// Each seat on `worker` whose agent's status moved since last asked, with its status now:
+    /// a terminal its TUI runs in, or the seat a task's thread was started at. A seat whose
+    /// thread left the table says [`AgentStatus::None`] once, and is forgotten.
     pub(super) fn seat_moves(&mut self, worker: WorkerId) -> Vec<(TermRef, AgentStatus)> {
-        let now: Vec<(TermRef, AgentStatus)> = self
-            .tables
-            .get(&worker)
-            .map(|table| {
-                table
-                    .values()
-                    .filter(|r| r.terminal.is_none() && root_of(table, r) == r.id)
-                    .filter_map(|r| {
-                        Some((TermRef { worker, session: seat_fact(r)? }, status_of(r)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.seat_said
-            .retain(|term, _| term.worker != worker || now.iter().any(|(seat, _)| seat == term));
-        now.into_iter()
-            .filter(|(term, status)| {
-                self.seat_said.insert(*term, status.clone()).as_ref() != Some(status)
-            })
-            .collect()
+        let mut now: HashMap<TermRef, (WallMs, ThreadId, AgentStatus)> = HashMap::new();
+        if let Some(table) = self.tables.get(&worker) {
+            for r in table.values().filter(|r| root_of(table, r) == r.id) {
+                let Some(session) = seat_of(r) else { continue };
+                let latest = (r.updated_ms, r.id, status_of(r));
+                let term = TermRef { worker, session };
+                // Several threads at one seat: the latest to change speaks for it.
+                if now.get(&term).is_none_or(|(at, id, _)| (*at, *id) < (latest.0, latest.1)) {
+                    now.insert(term, latest);
+                }
+            }
+        }
+        let mut moves = Vec::new();
+        self.seat_said.retain(|term, said| {
+            if term.worker != worker || now.contains_key(term) {
+                return true;
+            }
+            if *said != AgentStatus::None {
+                moves.push((*term, AgentStatus::None));
+            }
+            false
+        });
+        let mut now: Vec<_> = now.into_iter().collect();
+        now.sort_by_key(|(term, _)| (term.worker, term.session));
+        for (term, (_, _, status)) in now {
+            if self.seat_said.insert(term, status.clone()).as_ref() != Some(&status) {
+                moves.push((term, status));
+            }
+        }
+        moves
+    }
+
+    /// Each thread on `worker` hanging from no other whose rung, phase or ask moved since last
+    /// asked, with the terminal its TUI runs in: what [`Happening::Rung`] tells. One gone from
+    /// the table is forgotten.
+    ///
+    /// [`Happening::Rung`]: slopty_proto::orchestration::Happening::Rung
+    pub(super) fn rung_moves(&mut self, worker: WorkerId) -> Vec<(Option<SessionId>, TermAgent)> {
+        let Some(table) = self.tables.get(&worker) else { return Vec::new() };
+        let roots: Vec<&ThreadRow> = table.values().filter(|r| root_of(table, r) == r.id).collect();
+        self.rungs_said.retain(|(w, id), _| *w != worker || roots.iter().any(|r| r.id == *id));
+        let mut moves = Vec::new();
+        for row in roots {
+            let now = TermAgent::of(row);
+            let said = self.rungs_said.get(&(worker, row.id));
+            let moved = said.is_none_or(|was| {
+                (was.rung, was.phase, &was.asks, was.wait.as_ref().map(|w| &w.kind))
+                    != (now.rung, now.phase, &now.asks, now.wait.as_ref().map(|w| &w.kind))
+            });
+            if moved {
+                self.rungs_said.insert((worker, row.id), now.clone());
+                moves.push((row.terminal, now));
+            }
+        }
+        moves
     }
 
     /// Each subagent thread on `worker` that started or stopped since last asked, as the
@@ -433,7 +476,7 @@ impl Hub {
     }
 
     /// Rank every thread now, and publish the ladder and its notices when it moved.
-    pub(super) fn rank_ladder(&self) {
+    pub(crate) fn rank_ladder(&self) {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         let live = &state.workers;
@@ -549,9 +592,13 @@ const fn there(row: &ThreadRow) -> bool {
     !matches!(row.status.liveness, Liveness::Exited { .. })
 }
 
-/// `row`'s phase as an agent's status reads, for a task's thread with no hooks: a request
-/// open is a block on the person, by what it asks.
+/// `row`'s phase as an agent's status reads, what the projects follow: a request open is a
+/// block on the person, by what it asks, and an agent that ended is none.
 fn status_of(row: &ThreadRow) -> AgentStatus {
+    if !there(row) {
+        return AgentStatus::None;
+    }
+    let limited = row.status.wait.as_ref().is_some_and(|w| w.kind == Wait::LIMIT);
     match row.status.phase {
         Phase::Working => AgentStatus::Working,
         Phase::Waiting => AgentStatus::Waiting { tasks: 1, crons: 0 },
@@ -563,7 +610,10 @@ fn status_of(row: &ThreadRow) -> AgentStatus {
             _ => BlockReason::Question,
         }),
         Phase::Done => AgentStatus::Done,
-        // The row names no error; the turn it ended is said by the outcome notice.
+        Phase::Failed if limited => {
+            AgentStatus::Failed { error: AgentStatus::RATE_LIMIT.to_owned(), until_ms: None }
+        }
+        // The row names no other error; the turn it ended is said by the outcome notice.
         Phase::Failed => AgentStatus::Failed { error: "unknown".to_owned(), until_ms: None },
         Phase::Idle | Phase::Stopped => AgentStatus::Idle,
     }

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
-use crate::agent::{AgentBranch, AgentStatus, PullRequest};
+use crate::agent::{AgentBranch, PullRequest};
 use crate::orchestration::{Size, TermRef};
 use crate::terminal::RepoId;
 
@@ -971,8 +971,8 @@ impl Script {
 }
 /// How long an agent worked: the stretches it was at work, the waits between left out.
 ///
-/// The server follows the agent's status ([`Spent::works`]): a stretch begins when it starts
-/// working and ends when it stops, so a wait at the prompt or on the person is not counted.
+/// The server follows the agent's thread: a stretch begins when it starts working and ends
+/// when it stops, so a wait at the prompt or on the person is not counted.
 /// The stretch under way is counted by whoever reads it ([`Spent::at`]), so a running clock
 /// needs no message per second.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -1054,22 +1054,6 @@ pub enum Stretch {
 }
 
 impl Spent {
-    /// Whether an agent with `status` is at work: thinking, running a tool, or waiting on
-    /// background work it started. Idle at its prompt, done, blocked on the person, or holding
-    /// only scheduled prompts, it is not.
-    #[must_use]
-    pub const fn works(status: &AgentStatus) -> bool {
-        match status {
-            AgentStatus::Working | AgentStatus::Tool { .. } => true,
-            AgentStatus::Waiting { tasks, .. } => *tasks > 0,
-            AgentStatus::None
-            | AgentStatus::Idle
-            | AgentStatus::Blocked(_)
-            | AgentStatus::Done
-            | AgentStatus::Failed { .. } => false,
-        }
-    }
-
     /// Its agent is at work now or not: a stretch begins, or the one under way ends.
     pub const fn follow(&mut self, works: bool, now: WallMs) -> Option<Stretch> {
         match (self.since_ms, works) {
@@ -1871,30 +1855,12 @@ mod tests {
         assert!(!TaskState::Merged.holds_paths() && !TaskState::Failed.holds_paths());
     }
 
-    /// Time spent counts the stretches an agent was at work and leaves out its waits: idle at
-    /// its prompt, blocked on the person, or holding only a scheduled prompt. A stretch under
-    /// way counts up to the moment it is read, and a status that does not change the stretch
-    /// changes nothing.
+    /// Time spent counts the stretches an agent was at work and leaves out the rest. A stretch
+    /// under way counts up to the moment it is read, and a word that does not change the
+    /// stretch changes nothing.
     #[test]
     fn spent_counts_the_stretches_at_work() {
-        use crate::agent::BlockReason;
         let at = |s: u64| WallMs::from_millis(1_000_000 + s * 1_000);
-        let tool = AgentStatus::Tool { tool: "Bash".to_owned() };
-        let background = AgentStatus::Waiting { tasks: 1, crons: 0 };
-        let scheduled = AgentStatus::Waiting { tasks: 0, crons: 1 };
-        let blocked = AgentStatus::Blocked(BlockReason::Question);
-        for (status, works) in [
-            (&AgentStatus::Working, true),
-            (&tool, true),
-            (&background, true),
-            (&scheduled, false),
-            (&blocked, false),
-            (&AgentStatus::Idle, false),
-            (&AgentStatus::Done, false),
-            (&AgentStatus::None, false),
-        ] {
-            assert_eq!(Spent::works(status), works, "{status:?}");
-        }
         let mut spent = Spent::default();
         assert_eq!(spent.follow(true, at(0)), Some(Stretch::Began));
         assert_eq!(spent.follow(true, at(5)), None, "still the same stretch");

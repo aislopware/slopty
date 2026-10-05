@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use slopty_agent::status::{AgentSource, AgentStatus, BlockReason};
 use slopty_core::SessionId;
-use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Input};
 use slopty_proto::thread::wire::{Intent, Outcome};
 use slopty_proto::thread::{

@@ -14,11 +14,11 @@ use anyhow::{Context as _, Result};
 use rmcp::model::{Implementation, ServerCapabilities};
 use rmcp::{Peer, RoleServer, ServiceExt as _};
 use serde_json::{Value, json};
-use slopty_core::WorkerId;
+use slopty_core::{SessionId, WorkerId};
 use slopty_net::client::bind_client;
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
-use slopty_proto::orchestration::{Happening, HubEvent, TermRef};
+use slopty_proto::orchestration::{Happening, HubEvent, TermAgent, TermRef};
 use slopty_proto::server::{FromServer, Role};
+use slopty_proto::thread::attention::{Rung, ThreadAt};
 use slopty_tools::mcp::Handler;
 use slopty_tools::view;
 use tokio::sync::broadcast;
@@ -67,15 +67,19 @@ fn handler(link: Link) -> Handler<Link> {
     Handler::new(link, info, capabilities).with_progress()
 }
 
-/// Announce each agent that comes to need a human, once per episode, until the client leaves.
+/// Announce each agent that comes to need a human, once each time it does, until the client
+/// leaves.
 async fn forward_needs(mut pushed: broadcast::Receiver<FromServer>, peer: Peer<RoleServer>) {
     let mut names: HashMap<WorkerId, String> = HashMap::new();
-    let mut last: HashMap<TermRef, AgentStatus> = HashMap::new();
+    let mut last: HashMap<ThreadAt, Rung> = HashMap::new();
+    // The ladder to take the state from: the first, and the next after a lag.
+    let mut from_ladder = true;
     loop {
         let msg = match pushed.recv().await {
             Ok(msg) => msg,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
                 tracing::warn!(missed, "server events dropped");
+                from_ladder = true;
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => return,
@@ -87,23 +91,18 @@ async fn forward_needs(mut pushed: broadcast::Receiver<FromServer>, peer: Peer<R
             FromServer::Worker(w) => {
                 names.insert(w.worker, w.name);
             }
-            // The state after a lag: what it shows needs no note, only a change after it does.
-            FromServer::Terminals(terminals) => {
-                last = terminals
-                    .into_iter()
-                    .filter_map(|(worker, s)| {
-                        Some((TermRef { worker, session: s.id }, s.agent?.status))
-                    })
-                    .collect();
+            // The state: what it shows needs no note, only a change after it does.
+            FromServer::Ladder(ladder) if from_ladder => {
+                from_ladder = false;
+                last = ladder.threads.iter().map(|r| (r.at, r.rung)).collect();
             }
-            FromServer::Event(HubEvent { what: Happening::SessionClosed { term }, .. }) => {
-                last.remove(&term);
-            }
-            FromServer::Event(HubEvent { what: Happening::Agent { worker, event }, .. }) => {
-                let term = TermRef { worker, session: event.session };
-                let before = last.insert(term, event.status.clone());
+            FromServer::Event(HubEvent {
+                what: Happening::Rung { worker, terminal, agent },
+                ..
+            }) => {
+                let before = last.insert(ThreadAt { worker, thread: agent.thread }, agent.rung);
                 let name = names.get(&worker).map(String::as_str);
-                if let Some(note) = needs_human(term, name, &event, before.as_ref())
+                if let Some(note) = needs_human((worker, terminal), name, &agent, before)
                     && let Err(e) = notify(&peer, note).await
                 {
                     tracing::debug!(error = %e, "the MCP client is gone");
@@ -116,102 +115,71 @@ async fn forward_needs(mut pushed: broadcast::Receiver<FromServer>, peer: Peer<R
 }
 
 #[expect(deprecated, reason = "see `handler`: logging is how a stdio client hears of it")]
-async fn notify(peer: &Peer<RoleServer>, (level, data): (Level, Value)) -> Result<()> {
+async fn notify(peer: &Peer<RoleServer>, data: Value) -> Result<()> {
     use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam};
-    let level = match level {
-        Level::Warning => LoggingLevel::Warning,
-        Level::Notice => LoggingLevel::Notice,
-    };
-    let note = LoggingMessageNotificationParam::new(level, data).with_logger("slopty");
+    let note =
+        LoggingMessageNotificationParam::new(LoggingLevel::Warning, data).with_logger("slopty");
     peer.notify_logging_message(note).await?;
     Ok(())
 }
 
-/// How loudly to say it: a question or a permission blocks work, an idle prompt only waits.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Level {
-    Warning,
-    Notice,
-}
-
-/// The note for an agent status that newly needs a human; `None` for one that does not, or
-/// that already did the same way before.
+/// The note for an agent on `worker`, in `terminal` when it runs in one, that newly needs a
+/// human; `None` for one that does not, or that already did before.
 fn needs_human(
-    term: TermRef,
+    (worker, terminal): (WorkerId, Option<SessionId>),
     worker_name: Option<&str>,
-    event: &AgentEvent,
-    before: Option<&AgentStatus>,
-) -> Option<(Level, Value)> {
-    let reason = view::blocked(&event.status)?;
-    if before == Some(&event.status) {
+    agent: &TermAgent,
+    before: Option<Rung>,
+) -> Option<Value> {
+    if agent.rung != Rung::NeedsYou || before == Some(Rung::NeedsYou) {
         return None;
     }
-    let level = match reason {
-        BlockReason::IdlePrompt => Level::Notice,
-        BlockReason::Permission { .. } | BlockReason::Question | BlockReason::Elicitation => {
-            Level::Warning
-        }
-    };
-    let reported = SessionAgent::from(event);
-    let agent = view::agent(Some(&reported));
-    let where_ = worker_name.map_or_else(|| term.worker.to_string(), str::to_owned);
-    let what = view::agent_text(Some(&reported));
-    let message = event.detail.as_ref().map_or_else(
-        || format!("{what} (on {where_})"),
-        |detail| format!("{what} (on {where_}): {detail}"),
-    );
-    Some((
-        level,
-        json!({
-            "message": message,
-            "term": view::term_string(term),
-            "worker_name": worker_name,
-            "agent": agent,
-            "detail": event.detail,
-        }),
-    ))
+    let where_ = worker_name.map_or_else(|| worker.to_string(), str::to_owned);
+    let what = view::agent_text(Some(agent));
+    let term = terminal.map(|session| view::term_string(TermRef { worker, session }));
+    Some(json!({
+        "message": format!("{what} (on {where_})"),
+        "term": term,
+        "worker_name": worker_name,
+        "agent": view::agent(Some(agent)),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::SessionId;
-    use slopty_proto::agent::{AgentKind, AgentSource};
+    use slopty_core::WallMs;
+    use slopty_proto::thread::{AgentId, Phase, ThreadId};
 
     use super::*;
 
-    fn event(status: AgentStatus) -> AgentEvent {
-        AgentEvent {
-            session: SessionId::nil(),
-            kind: AgentKind::ClaudeCode,
-            status,
-            agent_session: None,
-            detail: Some("Waiting for permission: Bash".to_owned()),
-            attention: true,
-            source: AgentSource::Hook,
-            since_ms: slopty_core::WallMs::ZERO,
-            mode: None,
+    fn agent(rung: Rung, phase: Phase, asks: Option<&str>) -> TermAgent {
+        TermAgent {
+            thread: ThreadId::new(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: "Fix the build".to_owned(),
+            rung,
+            phase,
+            wait: None,
+            asks: asks.map(str::to_owned),
+            since_ms: WallMs::ZERO,
         }
     }
 
+    /// An agent that comes to need the person is announced once, with what it asks, until it
+    /// stops needing them.
     #[test]
-    fn a_blocked_agent_is_announced_once() {
-        let term = TermRef { worker: WorkerId::nil(), session: SessionId::nil() };
-        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-        let (level, data) =
-            needs_human(term, Some("mac-studio"), &event(blocked.clone()), None).unwrap();
-        assert_eq!(level, Level::Warning);
-        assert_eq!(data["agent"]["reason"], "permission");
-        assert_eq!(data["agent"]["tool"], "Bash");
+    fn an_agent_that_needs_the_person_is_announced_once() {
+        let at = (WorkerId::nil(), Some(SessionId::nil()));
+        let asking = agent(Rung::NeedsYou, Phase::NeedsYou, Some("Run cargo test?"));
+        let data = needs_human(at, Some("mac-studio"), &asking, Some(Rung::Working)).unwrap();
+        assert_eq!(data["agent"]["needs_human"], true);
+        assert_eq!(data["agent"]["asks"], "Run cargo test?");
         assert_eq!(data["worker_name"], "mac-studio");
         let message = data["message"].as_str().unwrap();
-        assert!(
-            message.contains("permission for Bash") && message.contains("mac-studio"),
-            "{message}"
-        );
-        assert_eq!(needs_human(term, None, &event(blocked.clone()), Some(&blocked)), None);
-        assert_eq!(needs_human(term, None, &event(AgentStatus::Working), None), None);
-        let idle = AgentStatus::Blocked(BlockReason::IdlePrompt);
-        let (level, _) = needs_human(term, None, &event(idle), Some(&blocked)).unwrap();
-        assert_eq!(level, Level::Notice, "an idle prompt waits, it does not block");
+        assert!(message.contains("Run cargo test?") && message.contains("mac-studio"), "{message}");
+        assert_eq!(needs_human(at, None, &asking, Some(Rung::NeedsYou)), None, "said already");
+        let working = agent(Rung::Working, Phase::Working, None);
+        assert_eq!(needs_human(at, None, &working, Some(Rung::NeedsYou)), None);
+        assert!(needs_human(at, None, &asking, None).is_some(), "news to a fresh link");
     }
 }

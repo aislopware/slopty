@@ -40,7 +40,6 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,

@@ -651,11 +651,12 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
         }
         VerbCmd::Wake { worker } => wake(&mut res, &worker, json).await?,
         VerbCmd::Terminals { worker } => {
-            let (workers, terminals) = ops::terminals(&mut res, worker.as_deref()).await?;
+            let ops::Listing { workers, terminals, agents } =
+                ops::terminals(&mut res, worker.as_deref()).await?;
             if json {
-                print_json(&view::terminals_json(&workers, &terminals))?;
+                print_json(&view::terminals_json(&workers, &terminals, &agents))?;
             } else {
-                print!("{}", view::terminals_text(&workers, &terminals));
+                print!("{}", view::terminals_text(&workers, &terminals, &agents));
             }
         }
         VerbCmd::Open { worker, cwd, name, size, command } => {

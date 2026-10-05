@@ -41,22 +41,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use conversation::{Conversations, Sources};
+use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
-    Line, Outcome, Screen, Size, TermRef, ThreadOf, Verb, WaitUntil,
+    Line, Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb, WaitUntil,
 };
 use slopty_proto::project::VERIFY_PLACES;
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{
     CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
 };
-use slopty_proto::thread::wire::{self, Intent};
+use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{IntentId, ThreadId, ThreadState};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
@@ -183,6 +184,10 @@ pub trait ThreadReads: Send + Sync {
     /// Do `intent` on `thread` once under `id`, as a client's would be done, by orchestration:
     /// a prompt held in a terminal is answered as [`crate::conversation::ORCHESTRATION`].
     fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> wire::Outcome;
+
+    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
+    /// the latest to change, when several did.
+    fn at_terminal(&self, session: SessionId) -> Option<ThreadRow>;
 }
 
 /// A boxed future a [`TaskThreads`] answers with.
@@ -250,6 +255,8 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
+    /// What the agents' hooks and the daemon's poll report, as the daemon's agent table took it.
+    heard: broadcast::Sender<AgentEvent>,
     launch: Launch,
     conversations: Arc<dyn Conversations>,
     once: idempotency::Ledger,
@@ -288,14 +295,14 @@ impl std::fmt::Debug for Orchestrator {
 
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
-    /// client broadcast and followed conversations. The agents it starts get what `launch`
-    /// says.
+    /// client broadcast, agent reports and followed conversations. The agents it starts get
+    /// what `launch` says.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
-        events: broadcast::Sender<WorkerMsg>,
+        (events, heard): (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
         launch: Launch,
         conversations: Arc<dyn Conversations>,
     ) -> Self {
@@ -304,6 +311,7 @@ impl Orchestrator {
             worker,
             items,
             events,
+            heard,
             launch,
             conversations,
             once: idempotency::Ledger::default(),
@@ -473,7 +481,7 @@ impl Orchestrator {
             Verb::WaitFor { term, until, timeout_ms } => {
                 let handle = self.session(term)?;
                 let feed = matches!(until, WaitUntil::AgentNeedsInput).then(|| AgentFeed {
-                    events: inner.events.subscribe(),
+                    heard: inner.heard.subscribe(),
                     agents: inner.worker.shared_agents(),
                 });
                 let timeout = Duration::from_millis(u64::from(timeout_ms));
@@ -481,7 +489,9 @@ impl Orchestrator {
             }
             Verb::AgentStatus { term } => {
                 self.session(term)?;
-                Ok(Outcome::Agent(inner.worker.agents().status(term.session)))
+                let row =
+                    inner.thread_reads.get().and_then(|reads| reads.at_terminal(term.session));
+                Ok(Outcome::Agent(row.as_ref().map(|r| Box::new(TermAgent::of(r)))))
             }
             Verb::Close { term } => {
                 self.mine(term.worker)?;
@@ -761,7 +771,7 @@ impl Orchestrator {
         };
         // Subscribed before the spawn: the agent may report itself ready before the open
         // returns.
-        let events = self.inner.events.subscribe();
+        let heard = self.inner.heard.subscribe();
         let Spawn { cwd, args, env, size, permission_flags } = spawn;
         let launch = &self.inner.launch;
         let (args, conversation) = slopty_agent::resume::with_session_id(args);
@@ -807,7 +817,7 @@ impl Orchestrator {
         tracing::info!(%session, conversation = ?conversation, "agent started");
         if let Some(prompt) = prompt {
             let agents = self.inner.worker.shared_agents();
-            tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, agents }));
+            tokio::spawn(type_when_ready(handle, prompt, AgentFeed { heard, agents }));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
     }
@@ -1243,8 +1253,8 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
         }
         let reported = async {
             loop {
-                match feed.events.recv().await {
-                    Ok(WorkerMsg::Agent(ev)) if ev.session == session => return true,
+                match feed.heard.recv().await {
+                    Ok(ev) if ev.session == session => return true,
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => return true,
                     Err(broadcast::error::RecvError::Closed) => return false,

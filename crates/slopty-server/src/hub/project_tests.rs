@@ -5,8 +5,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_agent::vouch::SessionKey;
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason, PullRequest, Worktree};
+use slopty_proto::agent::{AgentKind, PullRequest, Worktree};
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
     Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV, TaskCard,
@@ -137,20 +138,8 @@ pub(super) async fn request(rx: &mut mpsc::Receiver<FromServer>) -> (RequestId, 
 /// in it, and answers.
 pub(super) fn opened(lease: &Lease, (id, verb): &(RequestId, Verb)) -> TermRef {
     let (worker, session) = chosen(verb);
-    let started = AgentEvent {
-        session,
-        kind: AgentKind::ClaudeCode,
-        status: AgentStatus::Working,
-        agent_session: None,
-        detail: None,
-        attention: false,
-        source: AgentSource::Hook,
-        since_ms: WallMs::ZERO,
-        mode: None,
-    };
-    let with_agent =
-        SessionSummary { agent: Some(SessionAgent::from(&started)), ..summary(session) };
-    lease.handle(ToServer::SessionChanged(with_agent));
+    lease.handle(ToServer::SessionChanged(summary(session)));
+    lease.handle(agent(session, &AgentStatus::Working));
     let term = TermRef { worker, session };
     lease.handle(ToServer::Reply { id: *id, outcome: Outcome::Opened(term) });
     term
@@ -519,18 +508,44 @@ async fn a_worker_s_reported_facts_are_shown_under_the_server_s() {
     assert!(facts.contains_key("labels") && facts.contains_key("cpus"));
 }
 
-pub(super) fn agent(session: SessionId, status: AgentStatus) -> ToServer {
-    ToServer::Agent(AgentEvent {
-        session,
-        kind: AgentKind::ClaudeCode,
-        status,
-        agent_session: None,
-        detail: None,
-        attention: true,
-        source: AgentSource::Hook,
-        since_ms: WallMs::ZERO,
-        mode: None,
-    })
+/// The worker's table moving the thread of the agent in `session` to where `status` says, as
+/// its codec maps a hook's word into the row: an agent gone takes its row with it.
+pub(super) fn agent(session: SessionId, status: &AgentStatus) -> ToServer {
+    use slopty_proto::thread::wire::TableFrame;
+    use slopty_proto::thread::{Cursor, Phase, Request, ThreadId, Wait};
+    let thread = ThreadId::from_uuid(*session.as_uuid());
+    let cursor = Cursor::default();
+    let phase = match status {
+        AgentStatus::None => {
+            let removed = vec![thread];
+            return ToServer::Threads(TableFrame::Delta { cursor, rows: Vec::new(), removed });
+        }
+        AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => Phase::Idle,
+        AgentStatus::Working | AgentStatus::Tool { .. } => Phase::Working,
+        AgentStatus::Blocked(_) => Phase::NeedsYou,
+        AgentStatus::Done => Phase::Done,
+        AgentStatus::Failed { .. } => Phase::Failed,
+        AgentStatus::Waiting { .. } => Phase::Waiting,
+    };
+    let mut row = ladder::tests::row(phase, 1, Some(session));
+    row.id = thread;
+    let asked = match status {
+        AgentStatus::Blocked(BlockReason::Permission { tool }) => Some((Request::APPROVAL, tool)),
+        AgentStatus::Blocked(BlockReason::Elicitation) => Some((Request::ELICITATION, &row.title)),
+        AgentStatus::Blocked(BlockReason::Question) => Some((Request::QUESTION, &row.title)),
+        _ => None,
+    };
+    if let Some((kind, title)) = asked {
+        let title = title.clone();
+        row = ladder::tests::asking(row, &title);
+        row.requests[0].kind = kind.to_owned();
+    }
+    if let AgentStatus::Failed { error, .. } = status
+        && error == AgentStatus::RATE_LIMIT
+    {
+        row.status.wait = Some(Wait { kind: Wait::LIMIT.to_owned(), text: String::new() });
+    }
+    ToServer::Threads(TableFrame::Delta { cursor, rows: vec![row], removed: Vec::new() })
 }
 
 /// What the worker's link says of an agent reaches its task: the worktree its status line
@@ -571,7 +586,7 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
         kind: "Explore".to_owned(),
     }));
     let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-    lease.handle(agent(session, blocked));
+    lease.handle(agent(session, &blocked));
     let s = status(&hub).await;
     let t = s.tasks.first().unwrap();
     assert_eq!(t.pr.as_ref().map(|p| p.number), Some(9));
@@ -661,20 +676,11 @@ async fn a_client_is_told_the_projects_with_the_fleet_as_of_one_event() {
 }
 
 /// A terminal the worker says it opened, with or without an agent in it.
-pub(super) fn announce(lease: &Lease, session: SessionId, agent: bool) {
-    let running = AgentEvent {
-        session,
-        kind: AgentKind::ClaudeCode,
-        status: AgentStatus::Working,
-        agent_session: None,
-        detail: None,
-        attention: false,
-        source: AgentSource::Hook,
-        since_ms: WallMs::ZERO,
-        mode: None,
-    };
-    let agent = agent.then(|| SessionAgent::from(&running));
-    lease.handle(ToServer::SessionChanged(SessionSummary { agent, ..summary(session) }));
+pub(super) fn announce(lease: &Lease, session: SessionId, with_agent: bool) {
+    lease.handle(ToServer::SessionChanged(summary(session)));
+    if with_agent {
+        lease.handle(agent(session, &AgentStatus::Working));
+    }
 }
 
 /// A start whose answer was lost may still have opened: it counts on, a second start of its

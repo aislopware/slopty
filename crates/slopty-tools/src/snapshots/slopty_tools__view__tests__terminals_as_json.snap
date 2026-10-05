@@ -1,6 +1,6 @@
 ---
 source: crates/slopty-tools/src/view.rs
-expression: "terminals_json(&o.workers, &o.terminals)"
+expression: "terminals_json(&o.workers, &o.terminals, &o.agents)"
 ---
 [
   {
@@ -20,12 +20,12 @@ expression: "terminals_json(&o.workers, &o.terminals)"
       "zsh"
     ],
     "agent": {
-      "agent": "claude_code",
+      "agent": "claude-code",
+      "thread": "0199a000-0000-7000-8000-000000007101",
       "status": "working",
-      "tool": null,
-      "reason": null,
-      "needs_human": false,
-      "source": "title"
+      "waits": null,
+      "asks": null,
+      "needs_human": false
     }
   },
   {
@@ -45,12 +45,12 @@ expression: "terminals_json(&o.workers, &o.terminals)"
       "zsh"
     ],
     "agent": {
-      "agent": "claude_code",
-      "status": "blocked",
-      "tool": "Bash",
-      "reason": "permission",
-      "needs_human": true,
-      "source": "hook"
+      "agent": "claude-code",
+      "thread": "0199a000-0000-7000-8000-000000007102",
+      "status": "needs_you",
+      "waits": null,
+      "asks": "Run cargo test",
+      "needs_human": true
     }
   },
   {
@@ -70,12 +70,12 @@ expression: "terminals_json(&o.workers, &o.terminals)"
       "zsh"
     ],
     "agent": {
-      "agent": "claude_code",
-      "status": "blocked",
-      "tool": null,
-      "reason": "question",
-      "needs_human": true,
-      "source": "hook"
+      "agent": "claude-code",
+      "thread": "0199a000-0000-7000-8000-000000007103",
+      "status": "needs_you",
+      "waits": null,
+      "asks": "Which branch?",
+      "needs_human": true
     }
   }
 ]

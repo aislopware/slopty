@@ -1271,7 +1271,8 @@ the agent wants: the tool call awaiting permission, the question it asked, the e
 message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload).
 A question or elicitation that arrives without its text, as a notification does, makes the
 daemon read the JSONL tail (`slopty_agent::transcript`) off the blocking pool to fill it in. The daemon
-broadcasts each change as `WorkerMsg::Agent` and replays the table to joining clients. The workspace shows the status
+hands each change to the observed Claude Code thread (`Daemon::heard`), whose row in the thread
+table is the one account of the agent that clients and the server read. The workspace shows the status
 as a pill in the terminal tile's header and outlines the tile when the agent needs the human.
 A blocked badge (permission, question or elicitation) is itself the button: a click reveals
 and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never

@@ -61,6 +61,7 @@ pub mod pi;
 pub mod reports;
 pub mod resume;
 pub mod roster;
+pub mod status;
 pub mod statusline;
 pub mod title;
 pub mod transcript;
@@ -73,13 +74,11 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::{
-    AgentBranch, AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, PullRequest,
-    Worktree,
-};
+use slopty_proto::agent::{AgentBranch, AgentKind, PullRequest, Worktree};
 use slopty_proto::project::{AgentReport, NativeTask};
 
 use crate::detect::Program;
+use crate::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, HeardMode};
 use crate::title::TitleSignal;
 use crate::transcript::Progress;
 
@@ -788,7 +787,7 @@ impl Tracker {
             mode: self
                 .permission_mode
                 .clone()
-                .map(|name| slopty_proto::agent::HeardMode { name, heard_ms: self.mode_ms }),
+                .map(|name| HeardMode { name, heard_ms: self.mode_ms }),
         }
     }
 
@@ -1748,8 +1747,8 @@ mod tests {
         let e = t.apply(sid, &hook(r#"{"hook_event_name":"Stop"}"#)).expect("done");
         assert!(e.since_ms >= before, "done is a new phase");
         assert_eq!(t.event(sid).since_ms, e.since_ms, "a joining client reads the same stamp");
-        let agent = slopty_proto::agent::SessionAgent::from(&t.event(sid));
-        assert_eq!(agent.since_ms, e.since_ms, "and so does a summary");
+        let agent = status::SessionAgent::from(&t.event(sid));
+        assert_eq!(agent.since_ms, e.since_ms, "and so does orchestration");
         let e = t.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd"}"#)).expect("gone");
         assert_eq!(e.since_ms, WallMs::ZERO, "an ended agent has no stamp");
     }

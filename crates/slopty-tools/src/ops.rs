@@ -4,13 +4,13 @@
 //! A verb that changes something takes the caller's [`IdempotencyKey`], if it gave one.
 
 use slopty_core::WorkerId;
-use slopty_proto::agent::{AgentKind, SessionAgent};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
     Command, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef,
-    Line, Outcome, Port, Screen, Size, TermRef, ThreadOf, ThreadRead, ThreadView, Verb, WaitUntil,
-    Waited,
+    Line, Outcome, Port, Screen, Size, TermAgent, TermRef, ThreadOf, ThreadRead, ThreadView, Verb,
+    WaitUntil, Waited,
 };
 use slopty_proto::project::{
     BadProjectId, LimitsChange, Moment, NodeDetail, Project, ProjectId, ProjectStatus, Report,
@@ -48,8 +48,8 @@ pub async fn overview<D: Dispatch>(dispatch: &D) -> Result<Overview, ToolError> 
         Outcome::Workers(list) => list,
         other => return Err(ToolError::unexpected(other)),
     };
-    let terminals = match terminals {
-        Outcome::Terminals(list) => list,
+    let (terminals, agents) = match terminals {
+        Outcome::Terminals { terminals, agents } => (terminals, agents),
         other => return Err(ToolError::unexpected(other)),
     };
     // A worker reached on its own has no server to know the facts.
@@ -57,23 +57,35 @@ pub async fn overview<D: Dispatch>(dispatch: &D) -> Result<Overview, ToolError> 
         Outcome::Facts(facts) => facts,
         _ => Vec::new(),
     };
-    Ok(Overview { workers, terminals, facts })
+    Ok(Overview { workers, terminals, agents, facts })
 }
 
-/// Terminals on one worker or all, with the directory to name their workers.
+/// Terminals as [`terminals`] lists them.
+#[derive(Debug)]
+pub struct Listing {
+    /// The directory, to name the terminals' workers.
+    pub workers: Vec<WorkerInfo>,
+    /// The terminals, by worker.
+    pub terminals: Vec<(WorkerId, SessionSummary)>,
+    /// The agent at work in each terminal that has one.
+    pub agents: Vec<(TermRef, TermAgent)>,
+}
+
+/// Terminals on one worker or all, the agent at work in each that has one, and the directory
+/// to name their workers.
 pub async fn terminals<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     worker: Option<&str>,
-) -> Result<(Vec<WorkerInfo>, Vec<(WorkerId, SessionSummary)>), ToolError> {
+) -> Result<Listing, ToolError> {
     let worker = res.some_worker(worker).await?;
     let dispatch = res.dispatch();
     let (workers, terminals) =
         tokio::join!(res.workers(), dispatch.call(Verb::ListTerminals { worker }));
-    let terminals = match terminals {
-        Outcome::Terminals(list) => list,
+    let (terminals, agents) = match terminals {
+        Outcome::Terminals { terminals, agents } => (terminals, agents),
         other => return Err(ToolError::unexpected(other)),
     };
-    Ok((workers?.to_vec(), terminals))
+    Ok(Listing { workers: workers?.to_vec(), terminals, agents })
 }
 
 async fn opened<D: Dispatch>(
@@ -241,14 +253,14 @@ pub async fn wait<D: Dispatch>(
     }
 }
 
-/// The agent in a terminal and its status.
+/// The agent at work in a terminal, as its thread's row says.
 pub async fn agent_status<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     term: &str,
-) -> Result<Option<SessionAgent>, ToolError> {
+) -> Result<Option<TermAgent>, ToolError> {
     let term = res.term(term).await?;
     match res.dispatch().call(Verb::AgentStatus { term }).await {
-        Outcome::Agent(agent) => Ok(agent),
+        Outcome::Agent(agent) => Ok(agent.map(|a| *a)),
         other => Err(ToolError::unexpected(other)),
     }
 }

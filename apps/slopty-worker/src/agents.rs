@@ -34,11 +34,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use slopty_agent::detect::Program;
+use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_agent::transcript::{self, Tail};
 use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
-use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentEvent, AgentStatus};
 use slopty_worker::session::Probe;
 
 use crate::Daemon;
@@ -224,7 +223,7 @@ fn broadcast(daemon: &Daemon, agents: &slopty_agent::AgentTable, events: Vec<Age
             source = ?event.source,
             "agent (no hooks)"
         );
-        let _sent = daemon.events.send(WorkerMsg::Agent(event));
+        let _sent = daemon.heard.send(event);
     }
 }
 
@@ -355,7 +354,7 @@ mod tests {
             agent_session: None,
             detail: None,
             attention: false,
-            source: slopty_proto::agent::AgentSource::Transcript,
+            source: slopty_agent::status::AgentSource::Transcript,
             since_ms: slopty_core::WallMs::ZERO,
             mode: None,
         };

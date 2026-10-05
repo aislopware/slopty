@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
+use slopty_proto::thread::wire::{Outcome, Page, TableFrame, ThreadRow};
 use slopty_proto::thread::{
     Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Pending,
     PendingState, Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
@@ -605,6 +605,13 @@ impl Host {
     #[must_use]
     pub fn state(&self, thread: ThreadId) -> Option<(ThreadState, Cursor)> {
         self.inner.lock().threads.get(&thread).map(|h| (h.log.state().clone(), h.log.cursor()))
+    }
+
+    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
+    /// the latest to change, when several did.
+    #[must_use]
+    pub fn at_terminal(&self, session: SessionId) -> Option<ThreadRow> {
+        self.inner.lock().table.at_terminal(session).cloned()
     }
 
     /// The table rows a client holding `have` lacks.

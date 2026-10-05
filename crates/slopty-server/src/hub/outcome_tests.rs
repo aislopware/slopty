@@ -4,7 +4,8 @@
 
 use std::time::Duration;
 
-use slopty_proto::agent::{AgentBranch, BlockReason, Worktree};
+use slopty_agent::status::{AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::project::{Moment, Report, TaskChange, TaskState, TimelineEntry};
 use slopty_proto::server::Os;
 use slopty_proto::thread::Phase;
@@ -70,11 +71,19 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
 
     let mut thread = row(Phase::Idle, 1, Some(working));
+    thread.id = slopty_proto::thread::ThreadId::from_uuid(*working.as_uuid());
     thread.last_line = Some("Tests take 4 s; they pass.".to_owned());
-    lease.handle(agent(working, AgentStatus::Working));
-    lease.handle(agent(working, AgentStatus::Idle));
-    // The row with its final line comes after the status that ended the turn.
-    lease.handle(snapshot(vec![thread.clone()]));
+    // The thread's row as it moves: at `phase`, asking to run the tests while it needs you.
+    let at = |phase: Phase| {
+        let mut moved = thread.clone();
+        moved.status.phase = phase;
+        if phase == Phase::NeedsYou {
+            moved = asking(moved, "Run cargo test?");
+        }
+        snapshot(vec![moved])
+    };
+    lease.handle(at(Phase::Working));
+    lease.handle(at(Phase::Idle));
     let rested = next_batch(&mut rx).await;
     assert_eq!(rested.0, orchestrating);
     assert!(rested.2.contains("task 1 ended its turn without a task_report"), "{}", rested.2);
@@ -90,21 +99,17 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     };
     assert_eq!(rests().await, 1, "the timeline says the turn ended unreported");
 
-    let bash = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-    lease.handle(agent(working, AgentStatus::Working));
-    lease.handle(agent(working, bash.clone()));
-    lease.handle(agent(working, AgentStatus::Working));
+    lease.handle(at(Phase::Working));
+    lease.handle(at(Phase::NeedsYou));
+    lease.handle(at(Phase::Working));
     assert_eq!(a_batch_within(&mut rx, Duration::from_mins(5)).await, None, "answered at once");
-    lease.handle(agent(working, bash));
-    // The request's card comes after the status that says it waits.
-    lease.handle(snapshot(vec![asking(thread.clone(), "Run cargo test?")]));
+    lease.handle(at(Phase::NeedsYou));
     let waits = next_batch(&mut rx).await;
     assert!(waits.2.contains("task 1 waits on the person: Run cargo test?"), "{}", waits.2);
     assert!(waits.2.contains("Only the person answers it"), "{}", waits.2);
     ack(&waits);
 
-    lease.handle(snapshot(vec![thread]));
-    lease.handle(agent(working, AgentStatus::Working));
+    lease.handle(at(Phase::Working));
     let report = Report {
         note: "The store keeps every project.".to_owned(),
         artifacts: Vec::new(),
@@ -114,7 +119,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     let verb = Verb::TaskReport { project: project(), task, report };
     let said = hub.dispatch_as(Speaker::Proven(working), None, verb).await;
     assert!(matches!(said, Outcome::Task(_)), "{said:?}");
-    lease.handle(agent(working, AgentStatus::Idle));
+    lease.handle(at(Phase::Idle));
     let own = next_batch(&mut rx).await;
     assert!(own.2.contains("task 1: done\n  The store keeps every project."), "{}", own.2);
     assert!(!own.2.contains("waits on the person"), "taken back: {}", own.2);
@@ -149,7 +154,7 @@ async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() 
     let task = new_task(&hub, None).await;
     let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: working });
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
-    lease.handle(agent(working, AgentStatus::Working));
+    lease.handle(agent(working, &AgentStatus::Working));
 
     let (file, known) = (hub.projects_file(0), hub.directory());
     delivering.abort();
@@ -160,7 +165,7 @@ async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() 
     let sessions = vec![summary(orchestrating), summary(working)];
     let (_, lease, mut rx) = worker_again(&hub, worker, "studio", Os::MacOs, sessions);
     announce(&lease, orchestrating, true);
-    lease.handle(agent(working, AgentStatus::Idle));
+    lease.handle(agent(working, &AgentStatus::Idle));
     let rested = next_batch(&mut rx).await;
     assert_eq!(rested.0, orchestrating);
     assert!(rested.2.contains("task 1 ended its turn without a task_report"), "{}", rested.2);
@@ -181,8 +186,8 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
-    lease.handle(agent(term.session, AgentStatus::Idle));
-    lease.handle(agent(term.session, AgentStatus::Working));
+    lease.handle(agent(term.session, &AgentStatus::Idle));
+    lease.handle(agent(term.session, &AgentStatus::Working));
     for state in [TaskState::Done, TaskState::Merged] {
         let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
         let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
@@ -194,7 +199,7 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     let mut resting = HashMap::new();
     assert_eq!(hub.settle_due(&mut resting, later(t0)), []);
 
-    lease.handle(agent(term.session, AgentStatus::Idle));
+    lease.handle(agent(term.session, &AgentStatus::Idle));
     assert_eq!(status(&hub).await.live.project, 0, "at rest, it counts no more");
     let desk = Client::sit(&hub, "mac");
     desk.at(&hub, Seat::Desk, false, vec![term]);
@@ -234,7 +239,7 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
         let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
         assert!(matches!(moved, Outcome::Task(_)), "{moved:?}");
     }
-    lease.handle(agent(term.session, AgentStatus::Waiting { tasks: 1, crons: 0 }));
+    lease.handle(agent(term.session, &AgentStatus::Waiting { tasks: 1, crons: 0 }));
     let waiting = |kind: &str| {
         let mut thread = row(Phase::Waiting, 1, Some(term.session));
         thread.status.wait = Some(slopty_proto::thread::Wait {
@@ -308,7 +313,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
             let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
             assert!(matches!(moved, Outcome::Task(_)), "{moved:?}");
         }
-        lease.handle(agent(term.session, AgentStatus::Idle));
+        lease.handle(agent(term.session, &AgentStatus::Idle));
         let mut resting = HashMap::new();
         let t0 = tokio::time::Instant::now();
         assert_eq!(hub.settle_due(&mut resting, t0), []);
@@ -397,7 +402,7 @@ async fn only_the_orchestrator_tells_a_task_in_its_own_words() {
         refused(&said, ErrorCode::Forbidden);
         assert!(matches!(said, Outcome::Error { .. }), "{why}");
     }
-    lease.handle(agent(two, AgentStatus::Blocked(BlockReason::Question)));
+    lease.handle(agent(two, &AgentStatus::Blocked(BlockReason::Question)));
     let said = tell(Speaker::Proven(orchestrating), Some(second), "Pick the first.").await;
     assert!(refused(&said, ErrorCode::Conflict).contains("waits on the person"), "{said:?}");
 

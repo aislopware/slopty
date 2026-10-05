@@ -15,11 +15,12 @@ mod handoff {
     use slopty_core::{ClientId, SessionId};
     use slopty_net::client::{WorkerConn, bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
-    use slopty_proto::agent::AgentStatus;
     use slopty_proto::ctl::{Awake, CtlReply, CtlRequest};
     use slopty_proto::handoff::{EditOutcome, HandoffEvent, HandoffReply, OfferReason, Wary};
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
+    use slopty_proto::thread::{Phase, Wait};
     use slopty_worker::handoff::TYPED_RECENTLY;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -681,8 +682,9 @@ mod handoff {
         })
     }
 
-    /// The recorded turn that ended with a background command out pauses the agent with no
-    /// attention; the recorded one that ended with nothing out is done, announced.
+    /// The recorded turn that ended with a background command out leaves the agent's thread
+    /// waiting on it, which asks nobody's attention; the recorded one that ended with nothing
+    /// out is done.
     #[tokio::test]
     async fn a_paused_turn_raises_no_done() {
         let dir = tempfile::tempdir().unwrap();
@@ -694,22 +696,29 @@ mod handoff {
             stops.iter().find(|s| s.contains("\"status\":\"running\"")).unwrap(),
             stops.last().unwrap(),
         );
+        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
+        client.tx.send(&table).await.unwrap();
         d.hook(shell, r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#).await;
         d.hook(shell, paused).await;
-        let event = next_msg(&mut client, |m| match m {
-            WorkerMsg::Agent(e) if matches!(e.status, AgentStatus::Waiting { .. }) => Some(e),
-            _ => None,
-        })
-        .await;
-        assert_eq!(event.status, AgentStatus::Waiting { tasks: 1, crons: 0 });
-        assert!(!event.attention, "no done notification");
+        let at = |phase: Phase| {
+            move |m: WorkerMsg| {
+                let WorkerMsg::Threads(
+                    TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+                ) = m
+                else {
+                    return None;
+                };
+                rows.into_iter().find(|r| r.terminal == Some(shell) && r.status.phase == phase)
+            }
+        };
+        let waits = next_msg(&mut client, at(Phase::Waiting)).await;
+        let wait = waits.status.wait.expect("what it waits on");
+        assert_eq!(
+            (wait.kind.as_str(), wait.text.as_str()),
+            (Wait::TASK, "Sleep then print a marker")
+        );
         d.hook(shell, finished).await;
-        let event = next_msg(&mut client, |m| match m {
-            WorkerMsg::Agent(e) if e.status == AgentStatus::Done => Some(e),
-            _ => None,
-        })
-        .await;
-        assert!(event.attention);
+        next_msg(&mut client, at(Phase::Done)).await;
     }
 
     /// The `Stop` payloads of the recorded `background` scenario, in order.

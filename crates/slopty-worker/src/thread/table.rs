@@ -12,6 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
+use slopty_core::SessionId;
 use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{Cursor, ThreadId};
@@ -75,6 +76,17 @@ impl Table {
             changed: watch::Sender::new(cursor),
             places: Places::default(),
         }
+    }
+
+    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
+    /// the latest to change, when several did.
+    #[must_use]
+    pub fn at_terminal(&self, session: SessionId) -> Option<&ThreadRow> {
+        self.rows
+            .values()
+            .map(|(row, _)| row)
+            .filter(|row| row.parent.is_none() && row.terminal == Some(session))
+            .max_by_key(|row| (row.updated_ms, row.id))
     }
 
     /// Where it stands.

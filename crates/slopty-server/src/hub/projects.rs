@@ -62,7 +62,7 @@ pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
             terminals.insert(term);
             // A terminal an agent opened or typed into counts as an agent's whatever runs in
             // it now: the agent may start one there at any moment, past every count.
-            if s.agent.is_some() || driven(state, s.id) {
+            if state.board.agent_at(term).is_some() || driven(state, s.id) {
                 agents.insert(term);
             }
         }
@@ -2043,7 +2043,6 @@ mod tests {
             state: slopty_proto::terminal::SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
         }

@@ -6,11 +6,9 @@
 mod orchestrate {
     use std::time::Duration;
 
+    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_core::{SessionId, WallMs};
-    use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::{
-        AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent,
-    };
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::orchestration::{Command, ErrorCode, Input, Screen, WaitUntil, Waited};
     use slopty_proto::terminal::TermSize;
@@ -105,8 +103,8 @@ mod orchestrate {
         }
     }
 
-    fn agent_event(session: SessionId, status: AgentStatus) -> WorkerMsg {
-        WorkerMsg::Agent(AgentEvent {
+    fn agent_event(session: SessionId, status: AgentStatus) -> AgentEvent {
+        AgentEvent {
             session,
             kind: AgentKind::ClaudeCode,
             status,
@@ -116,7 +114,7 @@ mod orchestrate {
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
             mode: None,
-        })
+        }
     }
 
     struct Shell {
@@ -352,7 +350,7 @@ mod orchestrate {
         let sh = shell().await;
         let h = &sh.handle;
         let (events, rx) = broadcast::channel(8);
-        let feed = AgentFeed { events: rx, agents: Table::with(AgentStatus::Working) };
+        let feed = AgentFeed { heard: rx, agents: Table::with(AgentStatus::Working) };
         let waiting = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed));
         let event = agent_event;
         let report = async {
@@ -365,9 +363,9 @@ mod orchestrate {
         let (waited, ()) = tokio::join!(waiting, report);
         assert_eq!(waited.unwrap(), Waited::Met { line: None });
 
-        let (_events, rx) = broadcast::channel::<WorkerMsg>(8);
+        let (_events, rx) = broadcast::channel::<AgentEvent>(8);
         let blocked = AgentStatus::Blocked(BlockReason::Question);
-        let feed = AgentFeed { events: rx, agents: Table::with(blocked) };
+        let feed = AgentFeed { heard: rx, agents: Table::with(blocked) };
         let at_once = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed)).await;
         assert_eq!(at_once.unwrap(), Waited::Met { line: None }, "already blocked");
     }
@@ -380,7 +378,7 @@ mod orchestrate {
         let h = &sh.handle;
         let (events, rx) = broadcast::channel(2);
         let table = Table::with(AgentStatus::Working);
-        let feed = AgentFeed { events: rx, agents: std::sync::Arc::<Table>::clone(&table) };
+        let feed = AgentFeed { heard: rx, agents: std::sync::Arc::<Table>::clone(&table) };
         // The agent finished its turn; the report is pushed out by other sessions' reports
         // before the wait reads any.
         *table.0.lock() = Some(AgentStatus::Idle);
@@ -392,7 +390,7 @@ mod orchestrate {
         assert_eq!(waited.await.unwrap(), Waited::Met { line: None });
 
         let (events, rx) = broadcast::channel(2);
-        let feed = AgentFeed { events: rx, agents: Table::with(AgentStatus::Working) };
+        let feed = AgentFeed { heard: rx, agents: Table::with(AgentStatus::Working) };
         for _ in 0..3 {
             events.send(agent_event(SessionId::new(), AgentStatus::Idle)).unwrap();
         }

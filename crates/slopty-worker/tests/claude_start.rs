@@ -11,9 +11,10 @@ mod claude_start {
     use std::time::Duration;
 
     use slopty_agent::observed::thread_of;
+    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus};
     use slopty_core::SessionId;
     use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Drive, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta, ThreadState,
@@ -105,7 +106,8 @@ mod claude_start {
         terminals: Arc<Kept>,
         sources: Arc<Fake>,
         starter: claude::start::Starter,
-        events: broadcast::Sender<WorkerMsg>,
+        /// The daemon's broadcast, kept open while the rig lives, and its agent reports.
+        events: (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
     }
 
     impl Rig {
@@ -122,10 +124,11 @@ mod claude_start {
                 main: watch::Sender::new(None),
                 seen: watch::Sender::new(Seen::default()),
             });
-            let events = broadcast::Sender::new(64);
+            let events = (broadcast::Sender::new(64), broadcast::Sender::new(64));
             let (driver, asks) = claude::Driver::channel();
             let observed: Arc<dyn Sources> = Arc::<Fake>::clone(&sources);
-            drop(claude::spawn(host.clone(), events.subscribe(), observed, asks));
+            let (told, heard) = (events.0.subscribe(), events.1.subscribe());
+            drop(claude::spawn(host.clone(), told, heard, observed, asks));
             let terminals = Arc::new(Kept::default());
             let (starter, asks) = claude::start::Starter::channel();
             let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(&terminals);
@@ -334,7 +337,7 @@ mod claude_start {
             since_ms: slopty_core::WallMs::ZERO,
             mode: None,
         };
-        rig.events.send(WorkerMsg::Agent(event)).unwrap();
+        rig.events.1.send(event).unwrap();
     }
 
     /// An exited thread is taken up again by a start of its own session: the person's `claude`

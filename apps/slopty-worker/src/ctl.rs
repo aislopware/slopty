@@ -275,7 +275,7 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
     let changed = event.is_some();
     if let Some(event) = event {
         tracing::debug!(%session, status = ?event.status, detail = ?event.detail, "agent");
-        let _sent = daemon.events.send(WorkerMsg::Agent(event));
+        let _sent = daemon.heard.send(event);
     }
     Ok((hook, changed))
 }

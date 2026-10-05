@@ -10,8 +10,9 @@ mod compose {
     use std::time::Duration;
 
     use slopty_agent::observed::{Observed, Out};
+    use slopty_agent::status::{AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_core::{ClientId, SessionId, WallMs};
-    use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::terminal::{TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};

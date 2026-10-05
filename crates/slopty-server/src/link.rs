@@ -269,13 +269,12 @@ async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<
     Ok(())
 }
 
-/// The fleet's state: the directory, then every terminal and the agent in it, then every
-/// project, the attention ladder, and where the person is.
+/// The fleet's state: the directory, then every project, the attention ladder, which says
+/// where every agent's thread stands, and where the person is.
 fn state(hub: &Hub) -> Vec<FromServer> {
     let mut snapshot = hub.state();
     let parts = Hub::project_parts(&mut snapshot);
-    let mut msgs =
-        vec![FromServer::Directory(snapshot.directory), FromServer::Terminals(snapshot.terminals)];
+    let mut msgs = vec![FromServer::Directory(snapshot.directory)];
     msgs.extend(parts.into_iter().map(|part| FromServer::Projects(Box::new(part))));
     msgs.push(FromServer::Ladder(Box::new(hub.ladder())));
     msgs.push(FromServer::Present(hub.present()));
@@ -287,18 +286,19 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use slopty_core::{SessionId, WallMs, WorkerId};
+    use slopty_core::{SessionId, WorkerId};
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
     use slopty_net::client::bind_client;
     use slopty_net::server::connect;
-    use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_proto::orchestration::{EventFilter, Happening, HubEvent, Verb};
     use slopty_proto::terminal::CloseReason;
+    use slopty_proto::thread::attention::Rung;
+    use slopty_proto::thread::{Phase, ThreadId};
 
     use super::*;
     use crate::WAIT_CAP_MS;
-    use crate::hub::tests::{registration, summary};
+    use crate::hub::tests::{registration, summary, table};
 
     /// A worker on every interface of the server's own machine dials over loopback and is
     /// published at the machine's tailnet address; any other worker at the address it dialed
@@ -329,36 +329,21 @@ mod tests {
         assert_eq!(published(ip("127.0.0.1"), every, Some(&broken)).await, ip("127.0.0.1"));
     }
 
-    fn report(session: SessionId, status: AgentStatus) -> ToServer {
-        let agent = SessionAgent {
-            kind: AgentKind::ClaudeCode,
-            status,
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        };
-        ToServer::Agent(agent.quiet_event(session))
-    }
-
-    /// What a client shows of the agents the server reports, as the app keeps it: the status
-    /// of each session with one, all of them replaced by a snapshot of the terminals, taken
-    /// off when the agent leaves or the terminal closes.
-    fn apply(shown: &mut HashMap<SessionId, AgentStatus>, msgs: Vec<FromServer>) {
+    /// What a client shows of the agents, as the app keeps it: each terminal's agent's phase,
+    /// all of them replaced by the ladder of a state, moved by the pushed rungs, and taken off
+    /// when the terminal closes.
+    fn apply(shown: &mut HashMap<SessionId, Rung>, msgs: Vec<FromServer>) {
         for msg in msgs {
             match msg {
-                FromServer::Terminals(terminals) => {
+                FromServer::Ladder(ladder) => {
                     shown.clear();
-                    shown.extend(
-                        terminals.into_iter().filter_map(|(_, s)| Some((s.id, s.agent?.status))),
-                    );
+                    shown.extend(ladder.tiles.iter().map(|(term, s)| (term.session, s.rung)));
                 }
-                FromServer::Event(HubEvent { what: Happening::Agent { event, .. }, .. })
-                    if event.status == AgentStatus::None =>
-                {
-                    shown.remove(&event.session);
-                }
-                FromServer::Event(HubEvent { what: Happening::Agent { event, .. }, .. }) => {
-                    shown.insert(event.session, event.status);
+                FromServer::Event(HubEvent {
+                    what: Happening::Rung { terminal: Some(session), agent, .. },
+                    ..
+                }) => {
+                    shown.insert(session, agent.rung);
                 }
                 FromServer::Event(HubEvent { what: Happening::SessionClosed { term }, .. }) => {
                     shown.remove(&term.session);
@@ -368,45 +353,43 @@ mod tests {
         }
     }
 
-    /// A client gets every agent's status when it connects, and after it fell behind the
-    /// changes the state again replaces all it was shown: an agent that left, a terminal that
-    /// closed, one that opened, a status that moved. A client that kept up reads the same from
-    /// the pushed events, which are the log's own.
+    /// A client reads every agent from the ladder in the state it gets when it connects, and
+    /// after it fell behind the changes the state again replaces all it was shown: a terminal
+    /// that closed, one that opened, an agent that moved. A client that kept up reads the same
+    /// from the pushed rungs, which are the log's own.
     #[tokio::test]
     async fn a_client_gets_the_agents_on_connect_and_again_after_it_lagged() {
         let hub = Hub::new("server".to_owned(), Vec::new());
         let mut pushed = hub.subscribe();
         let worker = WorkerId::new();
-        let [left, closed, moved, opened] = [(); 4].map(|()| SessionId::new());
+        let [closed, moved, opened] = [(); 3].map(|()| SessionId::new());
+        let [on_closed, on_moved, on_opened] = [(); 3].map(|()| ThreadId::new());
         let (tx, _rx) = mpsc::channel(8);
-        let listed = vec![summary(left), summary(closed), summary(moved)];
+        let listed = vec![summary(closed), summary(moved)];
         let lease =
             hub.register(registration(worker, listed), IpAddr::from([100, 64, 0, 7]), tx).unwrap();
-        let blocked = AgentStatus::Blocked(BlockReason::Question);
-        for session in [left, closed, moved] {
-            lease.handle(report(session, blocked.clone()));
-        }
+        let asking = Phase::NeedsYou;
+        lease.handle(table(&[(on_closed, closed, asking), (on_moved, moved, asking)]));
+        hub.rank_ladder();
 
         let mut shown = HashMap::new();
         let first = state(&hub);
         assert!(matches!(first.first(), Some(FromServer::Directory(list)) if list.len() == 1));
         apply(&mut shown, first);
-        let all_blocked: HashMap<_, _> =
-            [left, closed, moved].into_iter().map(|s| (s, blocked.clone())).collect();
-        assert_eq!(shown, all_blocked, "on connect");
+        let all_asking: HashMap<_, _> = [(closed, Rung::NeedsYou), (moved, Rung::NeedsYou)].into();
+        assert_eq!(shown, all_asking, "on connect");
         let mut kept_up = shown.clone();
         while pushed.try_recv().is_ok() {}
         let cursor = read_log(&hub, None).await.1;
 
         // Changes the lagging client never hears.
-        lease.handle(report(left, AgentStatus::None));
         lease.handle(ToServer::SessionClosed { session: closed, reason: CloseReason::Exited });
-        lease.handle(report(moved, AgentStatus::Working));
         lease.handle(ToServer::SessionChanged(summary(opened)));
-        lease.handle(report(opened, blocked.clone()));
+        lease.handle(table(&[(on_moved, moved, Phase::Working), (on_opened, opened, asking)]));
+        hub.rank_ladder();
 
         apply(&mut shown, state(&hub));
-        let now: HashMap<_, _> = [(moved, AgentStatus::Working), (opened, blocked)].into();
+        let now: HashMap<_, _> = [(moved, Rung::Working), (opened, Rung::NeedsYou)].into();
         assert_eq!(shown, now, "after the lag");
 
         let mut events = Vec::new();
@@ -420,7 +403,7 @@ mod tests {
                 _other => None,
             })
             .collect();
-        assert_eq!(pushed_events.len(), 5, "every change pushed once: {pushed_events:?}");
+        assert_eq!(pushed_events.len(), 4, "every change pushed once: {pushed_events:?}");
         assert_eq!(read_log(&hub, Some(cursor)).await.0, pushed_events, "the log's own events");
         apply(&mut kept_up, events);
         assert_eq!(kept_up, now, "the pushed events say the same");

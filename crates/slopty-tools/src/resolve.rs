@@ -50,7 +50,7 @@ impl<'a, D: Dispatch> Resolver<'a, D> {
         worker: Option<WorkerId>,
     ) -> Result<Vec<(WorkerId, SessionSummary)>, ToolError> {
         match self.dispatch.call(Verb::ListTerminals { worker }).await {
-            Outcome::Terminals(list) => Ok(list),
+            Outcome::Terminals { terminals, .. } => Ok(terminals),
             other => Err(ToolError::unexpected(other)),
         }
     }
@@ -334,7 +334,6 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,

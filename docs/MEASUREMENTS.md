@@ -14804,8 +14804,11 @@ carried the matching phase. Mac Studio M1 Max, load average 14–22, release bui
 cargo build --release --bin slopty-ptyd --bin slopty-worker --bin slopty-server --bin slopty \
   --bin slopty-stub-claude --bin slopty-stub-managed-claude --bin slopty-stub-pi --bin slopty-stub-acp
 SLOPTY_BINS_FRESH=1 cargo test -p slopty-workerd --release --test threads \
-  a_hooks_status_reaches_a_client_by_both_paths -- --ignored --nocapture
+  a_hooks_status_reaches_a_client_in_its_row -- --ignored --nocapture
 ```
+
+The event has since left the wire (`docs/decisions/agents.md`, step 2), so the test now times
+the row alone.
 
 ## 2026-10-05 — a pseudo-terminal with no slave wedged `grantpt`
 

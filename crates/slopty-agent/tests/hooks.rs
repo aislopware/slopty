@@ -11,9 +11,9 @@ mod hooks {
     use serde::Deserialize as _;
     use serde_json::{Value, json};
     use slopty_agent::permission::hook_output;
+    use slopty_agent::status::AgentStatus;
     use slopty_agent::{AgentTable, HOOK_EVENTS, HOOK_JSON_BUDGET, Hook, HookEvent, roster};
     use slopty_core::SessionId;
-    use slopty_proto::agent::AgentStatus;
     use slopty_proto::ctl::Decision;
 
     fn fixture(scenario: &str, file: &str) -> String {

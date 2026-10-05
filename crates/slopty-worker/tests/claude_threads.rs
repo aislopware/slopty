@@ -13,10 +13,11 @@ mod claude_threads {
     use slopty_agent::conversation::{Conversation, ThreadId as ConvThread};
     use slopty_agent::live::{Batch, Board, ModEvent};
     use slopty_agent::observed::{terminal_thread, thread_of};
+    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus};
     use slopty_agent::transcript::Tail;
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
+    use slopty_proto::agent::AgentKind;
     use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState};
@@ -61,6 +62,7 @@ mod claude_threads {
         main: PathBuf,
         terminal: SessionId,
         events: broadcast::Sender<WorkerMsg>,
+        heard: broadcast::Sender<AgentEvent>,
         seen: Arc<Fake>,
     }
 
@@ -74,7 +76,8 @@ mod claude_threads {
                 main: watch::Sender::new(Some(main.clone())),
                 seen: watch::Sender::new(Seen::default()),
             });
-            Self { dir, main, terminal: SessionId::new(), events: broadcast::Sender::new(64), seen }
+            let (events, heard) = (broadcast::Sender::new(64), broadcast::Sender::new(64));
+            Self { dir, main, terminal: SessionId::new(), events, heard, seen }
         }
 
         fn host(&self) -> Host {
@@ -84,7 +87,8 @@ mod claude_threads {
         fn observe(&self, host: &Host) -> (tokio::task::JoinHandle<()>, claude::Driver) {
             let sources: Arc<dyn Sources> = Arc::<Fake>::clone(&self.seen);
             let (driver, asks) = claude::Driver::channel();
-            (claude::spawn(host.clone(), self.events.subscribe(), sources, asks), driver)
+            let (events, heard) = (self.events.subscribe(), self.heard.subscribe());
+            (claude::spawn(host.clone(), events, heard, sources, asks), driver)
         }
 
         /// A hook says the status of session [`NATIVE`].
@@ -105,7 +109,7 @@ mod claude_threads {
                 since_ms: WallMs::from_millis(1),
                 mode: None,
             };
-            self.events.send(WorkerMsg::Agent(event)).unwrap();
+            self.heard.send(event).unwrap();
         }
 
         /// The agent writes `scenario`'s transcripts, and a hook fires.
@@ -149,7 +153,6 @@ mod claude_threads {
                 state: SessionState::Running,
                 viewers: 0,
                 command: Vec::new(),
-                agent: None,
                 progress: None,
                 restored: None,
             };
@@ -257,7 +260,7 @@ mod claude_threads {
             until_ms: WallMs::from_millis(2),
         };
         driver.permission(PermissionEvent::Asked(Box::new(prompt)));
-        rig.status(AgentStatus::Blocked(slopty_proto::agent::BlockReason::Permission {
+        rig.status(AgentStatus::Blocked(slopty_agent::status::BlockReason::Permission {
             tool: "Bash".to_owned(),
         }));
         let state = until(&host, thread, |s| {

@@ -3,13 +3,14 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use slopty_proto::agent::{AgentKind, AgentSource};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::thread::{ThreadState, Wait};
 
 use super::*;
 use crate::Hook;
 use crate::conversation::{Conversation, Transcripts};
 use crate::live::{Board, ModEvent};
+use crate::status::AgentSource;
 use crate::transcript::Tail;
 
 const CONVERSATIONS: [&str; 6] =

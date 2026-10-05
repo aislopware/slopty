@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::WallMs;
-use slopty_proto::agent::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::terminal::SessionState;
@@ -133,20 +133,19 @@ impl Hub {
 /// or the terminal's program ended. Busy, waiting on the person, or holding work or prompts
 /// it scheduled, it does not.
 fn rests(state: &State, term: TermRef) -> bool {
-    if let Some(status) = state.board.seat_status(term) {
-        return resting(&status);
-    }
-    let Some(session) = state
+    let session = state
         .workers
         .get(&term.worker)
-        .and_then(|e| e.sessions.iter().find(|s| s.id == term.session))
-    else {
-        return false;
-    };
-    if matches!(session.state, SessionState::Exited { .. }) {
+        .and_then(|e| e.sessions.iter().find(|s| s.id == term.session));
+    if session.is_some_and(|s| matches!(s.state, SessionState::Exited { .. })) {
         return true;
     }
-    session.agent.as_ref().is_none_or(|agent| resting(&agent.status))
+    match state.board.seat_status(term) {
+        Some(status) => resting(&status),
+        // No thread there: a terminal with no agent rests, one the server does not know is
+        // nobody's to say.
+        None => session.is_some(),
+    }
 }
 
 /// Whether an agent with `status` rests at its prompt.

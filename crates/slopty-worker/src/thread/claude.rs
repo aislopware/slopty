@@ -38,9 +38,10 @@ use std::time::{Duration, Instant};
 
 use slopty_agent::conversation::{Part, Transcripts};
 use slopty_agent::observed::{self, Observed, Out};
+use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentStatus};
+use slopty_proto::agent::AgentKind;
 use slopty_proto::conversation::{PermissionEvent, PermissionPrompt};
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadId, ThreadState};
@@ -131,11 +132,12 @@ impl Driver {
     }
 }
 
-/// Observe every Claude Code session the daemon's `events` speak of, into `host`, and answer
-/// the `asks` of its [`Driver`].
+/// Observe every Claude Code session the daemon's agent reports (`heard`) speak of, into
+/// `host`, its title and folder as its `events` say, and answer the `asks` of its [`Driver`].
 pub fn spawn(
     host: Host,
     mut events: broadcast::Receiver<WorkerMsg>,
+    mut heard: broadcast::Receiver<AgentEvent>,
     sources: Arc<dyn Sources>,
     Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
@@ -146,10 +148,19 @@ pub fn spawn(
         let claims = Claims::default();
         loop {
             let (session, input) = tokio::select! {
-                heard = events.recv() => match heard {
-                    Ok(WorkerMsg::Agent(event)) if event.kind == AgentKind::ClaudeCode => {
+                report = heard.recv() => match report {
+                    Ok(event) if event.kind == AgentKind::ClaudeCode => {
                         (event.session, Input::Status(Box::new(event)))
                     }
+                    Ok(_) => continue,
+                    // A status missed is told again with the next change.
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(missed, "the observed sessions missed agent reports");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                heard_of = events.recv() => match heard_of {
                     Ok(WorkerMsg::SessionClosed { session, .. }) => {
                         sessions.remove(&session);
                         cwds.remove(&session);
@@ -171,7 +182,7 @@ pub fn spawn(
                         continue;
                     }
                     Ok(_) => continue,
-                    // A status missed is told again with the next change.
+                    // A title or folder missed is told again with the next change.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::debug!(missed, "the observed sessions missed events");
                         continue;

@@ -2068,3 +2068,29 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     row (`workspace::tests::played::Agents`), so every agent test now goes the row's way;
     `workspace::agents::tests` for the words; the `slopty-agent` observed status test for the
     limit's wait; the e2e dump says the mark (`idle`, `working`, `needs-you`, …).
+  - Step 2, the wire (same day). The event left the wire whole: `WorkerMsg::Agent`,
+    `ToServer::Agent`, `SessionSummary.agent`, `FromServer::Terminals` (and the directory's
+    `Change::Terminals`), and `Happening::Agent` are gone. The tracker's types (`AgentEvent`,
+    `AgentStatus`, `BlockReason`, `AgentSource`, `SessionAgent`) moved out of `slopty-proto`
+    into `slopty_agent::status`, with no serde, because only the worker holds them now.
+    - On the worker the tracker's changes go out on a broadcast of the daemon's own
+      (`Daemon::heard`). The observed Claude Code threads and orchestration's waits and first
+      prompt listen on it, and the thread rows carry the result to everyone else.
+    - The server reads every agent from the workers' tables (`hub/ladder.rs`). A thread whose
+      rung, phase or ask moved is logged as `Happening::Rung { worker, terminal, agent }`, where
+      `agent` is a `TermAgent`, the row's account of the agent: thread, agent, title, rung,
+      phase, wait, ask and since. `EventFilter::AgentNeedsInput` reads that event.
+      `ListTerminals` answers `Outcome::Terminals { terminals, agents }`, and `AgentStatus`
+      answers a `TermAgent`, on the worker too (`ThreadReads::at_terminal`). The project
+      engine's seat statuses, its settling and its spend come from the rows, and `Spent::works`
+      went with the event.
+    - A client gets the agents on connect and after a lag from the ladder in the state. The
+      server's terminal list in that state is gone.
+    - `slopty terminals`, `slopty workers` and the MCP tools say an agent as its row does:
+      phase, wait and ask (`waiting: [{term, agent, asks}]`). `slopty mcp` announces an agent
+      once each time its rung becomes needs-you, as a warning. The idle-prompt notice went with
+      the event, because a row at rest does not need the person.
+    - Tests: `slopty-proto` golden `an_agent_as_its_row_says`; the hub's
+      `listed_terminals_carry_the_agent_as_its_row_says` and its rung event tests; the link's
+      `a_client_gets_the_agents_on_connect_and_again_after_it_lagged`, over the ladder; the
+      worker's relay, managed-launcher, hook and interrupt tests, which now wait on the row.

@@ -138,8 +138,6 @@ pub struct SessionSummary {
     pub viewers: u16,
     /// Command line the session was started with.
     pub command: Vec<String>,
-    /// The coding agent running in it and what it is doing, when one is.
-    pub agent: Option<crate::agent::SessionAgent>,
     /// The program's progress report (`OSC 9;4`) while one stands, as
     /// [`TermEvent::Progress`] says it to the viewers: a client that does not view the session
     /// still shows it. `None` once the report is removed or the program has exited.

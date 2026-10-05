@@ -256,12 +256,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         ..Heard::default()
     };
     let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
-    // Collected first: the locks must not be held across the sends.
-    let (agents, branches) = {
-        let table = daemon.agents.lock();
-        (table.snapshot(), table.branches())
-    };
-    greeting.extend(agents.into_iter().map(WorkerMsg::Agent));
+    // Collected first: the lock must not be held across the sends.
+    let branches = daemon.agents.lock().branches();
     greeting.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let known = daemon.ports.lock().known();
     greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
@@ -678,12 +674,8 @@ async fn resync(
     msgs.extend(summaries.into_iter().map(WorkerMsg::SessionChanged));
     msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
     msgs.push(WorkerMsg::Caps(daemon.caps.borrow().clone()));
-    // Collected first: the locks must not be held across the sends.
-    let (agents, branches) = {
-        let table = daemon.agents.lock();
-        (table.snapshot(), table.branches())
-    };
-    msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
+    // Collected first: the lock must not be held across the sends.
+    let branches = daemon.agents.lock().branches();
     msgs.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let ports = daemon.ports.lock().known();
     msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
@@ -1591,7 +1583,6 @@ mod tests {
             state: SessionState::Running,
             viewers: 0,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,

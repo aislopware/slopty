@@ -244,8 +244,6 @@ pub enum WorkerMsg {
     Items(items::ItemSync),
     /// Remote window event.
     Screen(screen::ScreenEvent),
-    /// Agent state change.
-    Agent(agent::AgentEvent),
     /// Reply to `Ping`.
     Pong {
         /// The client's timestamp from the ping.
@@ -371,7 +369,6 @@ impl WorkerMsg {
             Self::Term { .. } => "Term",
             Self::Items(_) => "Items",
             Self::Screen(_) => "Screen",
-            Self::Agent(_) => "Agent",
             Self::Pong { .. } => "Pong",
             Self::File { .. } => "File",
             Self::Written { .. } => "Written",

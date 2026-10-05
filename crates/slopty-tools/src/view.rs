@@ -11,17 +11,18 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
     Command, DirEntry, FileKind, FileStat, Happening, HubEvent, ItemRef, Line, Port, Screen,
-    TermRef, Waited,
+    TermAgent, TermRef, Waited,
 };
 use slopty_proto::project::WorkerFacts;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchSummary};
 use slopty_proto::server::{Liveness, Os, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
+use slopty_proto::thread::attention::Rung;
+use slopty_proto::thread::{AgentId, ThreadId};
 
 use crate::ops::{Chunk, EventPage};
 
@@ -54,6 +55,8 @@ pub struct Overview {
     pub workers: Vec<WorkerInfo>,
     /// Every terminal on every worker.
     pub terminals: Vec<(WorkerId, SessionSummary)>,
+    /// The agent at work in each terminal that has one, as its thread's row says.
+    pub agents: Vec<(TermRef, TermAgent)>,
     /// What each worker is and has; none from a worker reached without a server.
     pub facts: Vec<WorkerFacts>,
 }
@@ -85,9 +88,10 @@ pub struct WorkerView<'a> {
 #[derive(Debug, Serialize)]
 pub struct WaitingView {
     term: String,
-    agent: &'static str,
-    reason: &'static str,
-    tool: Option<String>,
+    /// The agent, by its id (`claude-code`, `codex`, `pi`, `acp:<name>`).
+    agent: String,
+    /// What it asks.
+    asks: Option<String>,
 }
 
 /// A terminal, for JSON.
@@ -110,19 +114,21 @@ pub struct TerminalView {
     agent: Option<AgentView>,
 }
 
-/// An agent's status, for JSON.
+/// An agent's status, as its thread's row says, for JSON.
 #[derive(Debug, Serialize)]
 pub struct AgentView {
-    agent: Option<&'static str>,
+    /// The agent, by its id (`claude-code`, `codex`, `pi`, `acp:<name>`); none with no agent.
+    agent: Option<String>,
+    /// Its thread, the handle the thread verbs take.
+    thread: Option<ThreadId>,
+    /// Its phase: `idle`, `working`, `waiting`, `needs_you`, `done`, `failed`, `stopped`, or
+    /// `none` with no agent.
     status: &'static str,
-    tool: Option<String>,
-    reason: Option<&'static str>,
+    /// What it waits on, while it waits: its adapter's words.
+    waits: Option<String>,
+    /// What it asks the person, while it asks.
+    asks: Option<String>,
     needs_human: bool,
-    /// The signal the worker read it from; `hook` is the only one that says what an agent is
-    /// blocked on, so anything else means the hooks are not installed. Absent where the report
-    /// does not say (an event).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<&'static str>,
 }
 
 /// A line, for JSON.
@@ -370,165 +376,70 @@ const fn os_name(os: Os) -> &'static str {
     }
 }
 
-const fn agent_key(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::ClaudeCode => "claude_code",
+/// An agent's name, for a person.
+fn agent_name(agent: &AgentId) -> String {
+    match agent.0.as_str() {
+        AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
+        AgentId::CODEX => "Codex".to_owned(),
+        AgentId::PI => "pi".to_owned(),
+        _ => agent.acp_name().unwrap_or(&agent.0).to_owned(),
     }
 }
 
-const fn agent_name(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::ClaudeCode => "Claude Code",
-    }
-}
-
-const fn source_key(source: AgentSource) -> &'static str {
-    match source {
-        AgentSource::Process => "process",
-        AgentSource::Title => "title",
-        AgentSource::Transcript => "transcript",
-        AgentSource::Hook => "hook",
-    }
-}
-
-const fn source_name(source: AgentSource) -> &'static str {
-    match source {
-        AgentSource::Process => "process",
-        AgentSource::Title => "title",
-        AgentSource::Transcript => "transcript",
-        AgentSource::Hook => "hooks",
-    }
-}
-
-const fn reason_key(reason: &BlockReason) -> &'static str {
-    match reason {
-        BlockReason::Permission { .. } => "permission",
-        BlockReason::Question => "question",
-        BlockReason::Elicitation => "elicitation",
-        BlockReason::IdlePrompt => "idle_prompt",
-    }
-}
-
-/// The reason an agent is blocked, when it is.
-pub const fn blocked(status: &AgentStatus) -> Option<&BlockReason> {
-    match status {
-        AgentStatus::Blocked(reason) => Some(reason),
-        _ => None,
+/// What an agent is doing, for a person: its phase, and what it waits on or asks.
+fn status_text(agent: &TermAgent) -> String {
+    let phase = phase_key(agent.phase).replace('_', " ");
+    let said = agent.asks.as_ref().or_else(|| agent.wait.as_ref().map(|w| &w.text));
+    match said {
+        Some(said) => format!("{phase}: {said}"),
+        None => phase,
     }
 }
 
 /// An agent's status, for JSON.
-pub fn agent(agent: Option<&SessionAgent>) -> AgentView {
+pub fn agent(agent: Option<&TermAgent>) -> AgentView {
     let Some(a) = agent else {
         return AgentView {
             agent: None,
+            thread: None,
             status: "none",
-            tool: None,
-            reason: None,
+            waits: None,
+            asks: None,
             needs_human: false,
-            source: None,
         };
     };
-    reported(a.kind, &a.status, Some(a.source))
-}
-
-/// An agent's status as a report gave it, for JSON; `source` where the report names one.
-fn reported(kind: AgentKind, status: &AgentStatus, source: Option<AgentSource>) -> AgentView {
-    let (status_key, tool, reason) = match status {
-        AgentStatus::None => ("none", None, None),
-        AgentStatus::Idle => ("idle", None, None),
-        AgentStatus::Working => ("working", None, None),
-        AgentStatus::Tool { tool } => ("tool", Some(tool.clone()), None),
-        AgentStatus::Blocked(reason) => {
-            let tool = match reason {
-                BlockReason::Permission { tool } => Some(tool.clone()),
-                BlockReason::Question | BlockReason::Elicitation | BlockReason::IdlePrompt => None,
-            };
-            ("blocked", tool, Some(reason_key(reason)))
-        }
-        AgentStatus::Done => ("done", None, None),
-        AgentStatus::Failed { .. } => ("failed", None, None),
-        AgentStatus::Waiting { .. } => ("paused", None, None),
-    };
     AgentView {
-        agent: Some(agent_key(kind)),
-        status: status_key,
-        tool,
-        reason,
-        needs_human: blocked(status).is_some(),
-        source: source.map(source_key),
+        agent: Some(a.agent.0.clone()),
+        thread: Some(a.thread),
+        status: phase_key(a.phase),
+        waits: a.wait.as_ref().map(|w| w.text.clone()),
+        asks: a.asks.clone(),
+        needs_human: a.rung == Rung::NeedsYou,
     }
 }
 
-/// An agent's status, for a person: "Claude Code  working (hooks)".
-pub fn agent_text(agent: Option<&SessionAgent>) -> String {
+/// An agent's status, for a person: "Claude Code  needs you: Which branch?".
+pub fn agent_text(agent: Option<&TermAgent>) -> String {
     let Some(a) = agent else { return "no agent".to_owned() };
-    format!("{}  {}", agent_name(a.kind), status_text(&a.status, Some(a.source)))
-}
-
-/// What an agent is doing, for a person, and the signal that said so when it is known.
-fn status_text(status: &AgentStatus, source: Option<AgentSource>) -> String {
-    let what = match status {
-        AgentStatus::None => "not detected".to_owned(),
-        AgentStatus::Idle => "idle".to_owned(),
-        AgentStatus::Working => "working".to_owned(),
-        AgentStatus::Tool { tool } => format!("running {tool}"),
-        AgentStatus::Blocked(reason) => format!("waiting: {}", reason_text(reason)),
-        AgentStatus::Done => "done".to_owned(),
-        AgentStatus::Failed { error, .. } => format!("failed: {}", error.replace('_', " ")),
-        AgentStatus::Waiting { tasks, crons } => {
-            format!("paused: {}", pending_text(*tasks, *crons))
-        }
-    };
-    match source {
-        Some(source) => format!("{what} ({})", source_name(source)),
-        None => what,
-    }
-}
-
-/// The work a paused agent waits on: "2 background tasks, 1 scheduled prompt".
-fn pending_text(tasks: u32, crons: u32) -> String {
-    let count = |n: u32, one: &str| match n {
-        0 => None,
-        1 => Some(format!("1 {one}")),
-        n => Some(format!("{n} {one}s")),
-    };
-    [count(tasks, "background task"), count(crons, "scheduled prompt")]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn reason_text(reason: &BlockReason) -> String {
-    match reason {
-        BlockReason::Permission { tool } => format!("permission for {tool}"),
-        BlockReason::Question => "a question".to_owned(),
-        BlockReason::Elicitation => "an answer to a form".to_owned(),
-        BlockReason::IdlePrompt => "the next prompt".to_owned(),
-    }
+    format!("{}  {}", agent_name(&a.agent), status_text(a))
 }
 
 impl Overview {
-    /// The agents on `worker` blocked on a human. A worker that is not online has none: what
+    /// The agents on `worker` waiting on a human. A worker that is not online has none: what
     /// it last reported may have been answered since.
-    fn waiting(&self, worker: WorkerId) -> Vec<(TermRef, AgentKind, &BlockReason)> {
+    fn waiting(&self, worker: WorkerId) -> Vec<(TermRef, &TermAgent)> {
         let online =
             self.workers.iter().any(|w| w.worker == worker && w.liveness == Liveness::Online);
         if !online {
             return Vec::new();
         }
         let mut waiting: Vec<_> = self
-            .terminals
+            .agents
             .iter()
-            .filter(|(w, _)| *w == worker)
-            .filter_map(|(w, s)| {
-                let term = TermRef { worker: *w, session: s.id };
-                let a = s.agent.as_ref()?;
-                blocked(&a.status).map(|reason| (term, a.kind, reason))
-            })
+            .filter(|(term, a)| term.worker == worker && a.rung == Rung::NeedsYou)
+            .map(|(term, a)| (*term, a))
             .collect();
-        waiting.sort_by_key(|(term, ..)| term.session);
+        waiting.sort_by_key(|(term, _)| term.session);
         waiting
     }
 
@@ -565,14 +476,10 @@ impl Overview {
                 waiting: self
                     .waiting(w.worker)
                     .into_iter()
-                    .map(|(term, kind, reason)| WaitingView {
+                    .map(|(term, a)| WaitingView {
                         term: term_string(term),
-                        agent: agent_key(kind),
-                        reason: reason_key(reason),
-                        tool: match reason {
-                            BlockReason::Permission { tool } => Some(tool.clone()),
-                            _ => None,
-                        },
+                        agent: a.agent.0.clone(),
+                        asks: a.asks.clone().or_else(|| a.wait.as_ref().map(|w| w.text.clone())),
                     })
                     .collect(),
             })
@@ -605,14 +512,14 @@ impl Overview {
             .workers
             .iter()
             .flat_map(|w| self.waiting(w.worker))
-            .map(|(term, kind, reason)| {
-                let title = self
-                    .terminals
-                    .iter()
-                    .find(|(_, s)| s.id == term.session)
-                    .map(|(_, s)| s.title.clone())
-                    .unwrap_or_default();
-                vec![short.get(term), agent_name(kind).to_owned(), reason_text(reason), title]
+            .map(|(term, a)| {
+                let asks = a.asks.clone().or_else(|| a.wait.as_ref().map(|w| w.text.clone()));
+                vec![
+                    short.get(term),
+                    agent_name(&a.agent),
+                    asks.unwrap_or_default(),
+                    a.title.clone(),
+                ]
             })
             .collect();
         if !waiting.is_empty() {
@@ -625,10 +532,16 @@ impl Overview {
     }
 }
 
-/// Terminals, for JSON.
+/// The agent at work in `term`, among `agents`.
+fn agent_in(agents: &[(TermRef, TermAgent)], term: TermRef) -> Option<&TermAgent> {
+    agents.iter().find(|(t, _)| *t == term).map(|(_, a)| a)
+}
+
+/// Terminals, for JSON, each with its agent from `agents`.
 pub fn terminals_json(
     workers: &[WorkerInfo],
     terminals: &[(WorkerId, SessionSummary)],
+    agents: &[(TermRef, TermAgent)],
 ) -> Vec<TerminalView> {
     terminals
         .iter()
@@ -651,14 +564,19 @@ pub fn terminals_json(
                 exit_status,
                 viewers: s.viewers,
                 command: s.command.clone(),
-                agent: s.agent.as_ref().map(|a| agent(Some(a))),
+                agent: agent_in(agents, TermRef { worker: *worker, session: s.id })
+                    .map(|a| agent(Some(a))),
             }
         })
         .collect()
 }
 
-/// Terminals, for a person.
-pub fn terminals_text(workers: &[WorkerInfo], terminals: &[(WorkerId, SessionSummary)]) -> String {
+/// Terminals, for a person, each with its agent from `agents`.
+pub fn terminals_text(
+    workers: &[WorkerInfo],
+    terminals: &[(WorkerId, SessionSummary)],
+    agents: &[(TermRef, TermAgent)],
+) -> String {
     if terminals.is_empty() {
         return "no terminals\n".to_owned();
     }
@@ -677,9 +595,8 @@ pub fn terminals_text(workers: &[WorkerInfo], terminals: &[(WorkerId, SessionSum
                 s.viewers.to_string(),
                 s.title.clone(),
                 s.cwd.clone().unwrap_or_default(),
-                s.agent
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |a| status_text(&a.status, Some(a.source))),
+                agent_in(agents, TermRef { worker: *worker, session: s.id })
+                    .map_or_else(|| "-".to_owned(), status_text),
             ]
         })
         .collect();
@@ -1006,12 +923,12 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.term = Some(term_string(*term));
             view.exit_status = Some(*status);
         }
-        Happening::Agent { worker, event } => {
+        Happening::Rung { worker, terminal, agent: a } => {
             view.kind = "agent";
             view.worker = *worker;
-            view.term = Some(term_string(TermRef { worker: *worker, session: event.session }));
-            view.agent = Some(reported(event.kind, &event.status, None));
-            view.detail = event.detail.as_deref().map(Cow::Borrowed);
+            view.term = terminal.map(|session| term_string(TermRef { worker: *worker, session }));
+            view.agent = Some(agent(Some(a)));
+            view.title = Some(&a.title);
         }
         Happening::Project(update) => {
             view.kind = "project";
@@ -1054,13 +971,12 @@ pub fn event_text<S: std::hash::BuildHasher>(
         }
         Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
         Happening::SessionExited { term: t, status } => format!("exited  {}  {status}", term(t)),
-        Happening::Agent { worker: w, event } => {
-            let t = TermRef { worker: *w, session: event.session };
-            let said = format!("{}  {}", agent_name(event.kind), status_text(&event.status, None));
-            match &event.detail {
-                Some(detail) => format!("agent   {}  {said}: {detail}", term(&t)),
-                None => format!("agent   {}  {said}", term(&t)),
-            }
+        Happening::Rung { worker: w, terminal, agent: a } => {
+            let at = terminal.map_or_else(
+                || format!("{}/{}", worker(w), a.thread),
+                |session| term(&TermRef { worker: *w, session }),
+            );
+            format!("agent   {at}  {}", agent_text(Some(a)))
         }
         Happening::Project(update) => {
             let task = update
@@ -1367,8 +1283,8 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::agent::{AgentEvent, AgentKind};
     use slopty_proto::server::WorkerCaps;
+    use slopty_proto::thread::{Phase, Wait};
 
     use super::*;
 
@@ -1416,10 +1332,23 @@ mod tests {
             state,
             viewers: 1,
             command: vec!["zsh".to_owned()],
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,
+        }
+    }
+
+    /// Claude Code in thread `n`, in `phase`, asking `asks`.
+    fn at(n: u8, phase: Phase, asks: Option<&str>) -> TermAgent {
+        TermAgent {
+            thread: format!("0199a000-0000-7000-8000-0000000071{n:02x}").parse().unwrap(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: format!("Thread {n}"),
+            rung: if asks.is_some() { Rung::NeedsYou } else { Rung::Working },
+            phase,
+            wait: None,
+            asks: asks.map(str::to_owned),
+            since_ms: WallMs::ZERO,
         }
     }
 
@@ -1444,40 +1373,26 @@ mod tests {
                 last_seen_ms: WallMs::from_millis(1_789_999_990_000),
             },
         ];
-        let with_agent = |mut summary: SessionSummary, status: AgentStatus| {
-            let source =
-                if blocked(&status).is_some() { AgentSource::Hook } else { AgentSource::Title };
-            summary.agent = Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
-                status,
-                source,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            });
-            summary
-        };
-        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
         let terminals = vec![
-            (
-                worker(1),
-                with_agent(
-                    summary(1, "zsh", "~/src/slopty", SessionState::Running),
-                    AgentStatus::Working,
-                ),
-            ),
-            (
-                worker(1),
-                with_agent(summary(2, "claude", "~/src/slopty", SessionState::Running), blocked),
-            ),
+            (worker(1), summary(1, "zsh", "~/src/slopty", SessionState::Running)),
+            (worker(1), summary(2, "claude", "~/src/slopty", SessionState::Running)),
             (
                 worker(2),
-                with_agent(
-                    summary(3, "cargo test", "~/src/web", SessionState::Exited { status: 101 }),
-                    AgentStatus::Blocked(BlockReason::Question),
-                ),
+                summary(3, "cargo test", "~/src/web", SessionState::Exited { status: 101 }),
             ),
         ];
-        Overview { workers, terminals, facts: Vec::new() }
+        let agents = vec![
+            (TermRef { worker: worker(1), session: session(1) }, at(1, Phase::Working, None)),
+            (
+                TermRef { worker: worker(1), session: session(2) },
+                at(2, Phase::NeedsYou, Some("Run cargo test")),
+            ),
+            (
+                TermRef { worker: worker(2), session: session(3) },
+                at(3, Phase::NeedsYou, Some("Which branch?")),
+            ),
+        ];
+        Overview { workers, terminals, agents, facts: Vec::new() }
     }
 
     #[test]
@@ -1493,19 +1408,19 @@ mod tests {
     #[test]
     fn terminals_as_text() {
         let o = overview();
-        insta::assert_snapshot!(terminals_text(&o.workers, &o.terminals));
+        insta::assert_snapshot!(terminals_text(&o.workers, &o.terminals, &o.agents));
     }
 
     #[test]
     fn terminals_as_json() {
         let o = overview();
-        insta::assert_json_snapshot!(terminals_json(&o.workers, &o.terminals));
+        insta::assert_json_snapshot!(terminals_json(&o.workers, &o.terminals, &o.agents));
     }
 
     #[test]
     fn nothing_to_list_reads_as_such() {
         assert_eq!(Overview::default().text(), "no workers have registered with the server\n");
-        assert_eq!(terminals_text(&[], &[]), "no terminals\n");
+        assert_eq!(terminals_text(&[], &[], &[]), "no terminals\n");
     }
 
     #[test]
@@ -1536,30 +1451,25 @@ mod tests {
         assert_eq!(short.get(t), "mac-studio/0199a1b2-c3d5");
     }
 
-    /// Each agent says the signal it was read from, so a reader can tell a hooked agent from
-    /// one the hooks would tell more about.
+    /// An agent reads as its thread's row says, alike in JSON and in text: its phase, and what
+    /// it asks or waits on.
     #[test]
     fn an_agent_reads_the_same_in_json_and_text() {
-        let blocked = SessionAgent {
-            kind: AgentKind::ClaudeCode,
-            status: AgentStatus::Blocked(BlockReason::Question),
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        };
-        let json = serde_json::to_value(agent(Some(&blocked))).unwrap();
+        let asking = at(1, Phase::NeedsYou, Some("Which branch?"));
+        let json = serde_json::to_value(agent(Some(&asking))).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
-                "agent": "claude_code", "status": "blocked", "tool": null,
-                "reason": "question", "needs_human": true, "source": "hook"
+                "agent": "claude-code", "thread": asking.thread, "status": "needs_you",
+                "waits": null, "asks": "Which branch?", "needs_human": true
             })
         );
-        assert_eq!(agent_text(Some(&blocked)), "Claude Code  waiting: a question (hooks)");
-        let titled =
-            SessionAgent { status: AgentStatus::Working, source: AgentSource::Title, ..blocked };
-        assert_eq!(serde_json::to_value(agent(Some(&titled))).unwrap()["source"], "title");
-        assert_eq!(agent_text(Some(&titled)), "Claude Code  working (title)");
+        assert_eq!(agent_text(Some(&asking)), "Claude Code  needs you: Which branch?");
+        let paused = TermAgent {
+            wait: Some(Wait { kind: Wait::TASK.to_owned(), text: "2 background tasks".to_owned() }),
+            ..at(1, Phase::Waiting, None)
+        };
+        assert_eq!(agent_text(Some(&paused)), "Claude Code  waiting: 2 background tasks");
         let none = serde_json::to_value(agent(None)).unwrap();
         assert_eq!(none["status"], "none");
         assert_eq!(none["needs_human"], false);
@@ -1650,19 +1560,10 @@ mod tests {
                 HubEvent {
                     seq: 8,
                     at_ms: WallMs::from_millis(101),
-                    what: Happening::Agent {
+                    what: Happening::Rung {
                         worker: term.worker,
-                        event: AgentEvent {
-                            session: term.session,
-                            kind: AgentKind::ClaudeCode,
-                            status: AgentStatus::Blocked(BlockReason::Question),
-                            agent_session: None,
-                            detail: Some("Which branch?".to_owned()),
-                            attention: true,
-                            source: AgentSource::Hook,
-                            since_ms: WallMs::ZERO,
-                            mode: None,
-                        },
+                        terminal: Some(term.session),
+                        agent: at(1, Phase::NeedsYou, Some("Which branch?")),
                     },
                 },
             ],
@@ -1675,7 +1576,7 @@ mod tests {
         assert_eq!(
             event_text(&page.events[1], &names),
             format!(
-                "     8  agent   mac-studio/{}  Claude Code  waiting: a question: Which branch?",
+                "     8  agent   mac-studio/{}  Claude Code  needs you: Which branch?",
                 session(1)
             )
         );

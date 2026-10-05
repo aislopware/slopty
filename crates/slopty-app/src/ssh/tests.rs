@@ -563,7 +563,6 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
             state: SessionState::Running,
             viewers: 1,
             command: Vec::new(),
-            agent: None,
             progress: None,
             restored: None,
             repo_id: None,

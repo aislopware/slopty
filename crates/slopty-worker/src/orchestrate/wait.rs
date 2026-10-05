@@ -25,9 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_engine::ghostty::Position;
-use slopty_proto::WorkerMsg;
-use slopty_proto::agent::AgentStatus;
 use slopty_proto::orchestration::{ErrorCode, Line, WaitUntil, Waited};
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
@@ -35,10 +34,10 @@ use tokio::time::Instant;
 use super::{Agents, Failure};
 use crate::session::{Activity, Read, SessionHandle, Text};
 
-/// The agent side of a wait: the events after the call started, and the table they come from.
+/// The agent side of a wait: the reports after the call started, and the table they come from.
 pub struct AgentFeed {
-    /// The daemon's broadcast, subscribed when the call started.
-    pub events: broadcast::Receiver<WorkerMsg>,
+    /// The daemon's agent reports, subscribed when the call started.
+    pub heard: broadcast::Receiver<AgentEvent>,
     /// The daemon's agent table: the status when the call starts, and again whenever the
     /// broadcast lagged past events the wait may have needed.
     pub agents: Arc<dyn Agents>,
@@ -46,7 +45,7 @@ pub struct AgentFeed {
 
 impl std::fmt::Debug for AgentFeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentFeed").field("events", &self.events).finish_non_exhaustive()
+        f.debug_struct("AgentFeed").field("heard", &self.heard).finish_non_exhaustive()
     }
 }
 
@@ -238,8 +237,8 @@ async fn agent_input(
     }
     loop {
         tokio::select! {
-            ev = feed.events.recv() => match ev {
-                Ok(WorkerMsg::Agent(ev)) if ev.session == session && needs_input(&ev.status) => {
+            ev = feed.heard.recv() => match ev {
+                Ok(ev) if ev.session == session && needs_input(&ev.status) => {
                     return Ok(Waited::Met { line: None });
                 }
                 Ok(_) => {}

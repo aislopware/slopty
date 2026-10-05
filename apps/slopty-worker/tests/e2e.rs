@@ -19,6 +19,7 @@ mod tests {
     use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRequest, ThreadRow};
     use slopty_proto::transfer::{
         ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep, TunnelHost,
         TunnelOpen, TunnelRefusal,
@@ -3677,6 +3678,24 @@ mod tests {
     }
 
     /// The first control message `pick` takes within a step, skipping the others.
+    /// The row of the thread in terminal `session` that `pred` holds of, once the worker's
+    /// table, asked for now, has one.
+    async fn row_at(
+        worker: &mut WorkerConn,
+        session: SessionId,
+        pred: impl Fn(&ThreadRow) -> bool,
+    ) -> ThreadRow {
+        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
+        worker.tx.send(&table).await.unwrap();
+        next_msg(worker, |m| match m {
+            WorkerMsg::Threads(
+                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+            ) => rows.into_iter().find(|r| r.terminal == Some(session) && pred(r)),
+            _ => None,
+        })
+        .await
+    }
+
     async fn next_msg<T>(
         worker: &mut WorkerConn,
         mut pick: impl FnMut(WorkerMsg) -> Option<T>,
@@ -4915,9 +4934,8 @@ mod tests {
     /// the launcher's child, not the terminal's foreground process.
     #[tokio::test]
     async fn a_managed_claude_is_followed_through_its_launcher() {
-        use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason};
         use slopty_proto::ctl::{CtlReply, CtlRequest};
-        use slopty_proto::thread::AgentId;
+        use slopty_proto::thread::{AgentId, Cap, Phase};
 
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
@@ -4993,14 +5011,10 @@ mod tests {
         });
         let hook = CtlRequest::Hook { session, payload: start.to_string() };
         assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
-        let agent_of = async |sock: &std::path::Path| match ctl(sock, &CtlRequest::Status).await {
-            CtlReply::Status { sessions, .. } => {
-                sessions.into_iter().find(|s| s.id == session).and_then(|s| s.agent)
-            }
-            other => panic!("{other:?}"),
-        };
-        let heard = agent_of(&sock).await.expect("the hook gave the tile an agent");
-        assert_eq!((heard.kind, heard.source), (AgentKind::ClaudeCode, AgentSource::Hook));
+        // The hook gave the tile an agent's thread, one a hook speaks for.
+        let approvals = Cap::named(Cap::APPROVALS);
+        let heard = row_at(&mut worker, session, |r| r.caps.contains(&approvals)).await;
+        assert_eq!(heard.agent, AgentId::named(AgentId::CLAUDE_CODE));
 
         // Claude Code's registry names the client, the launcher's child, as waiting on a
         // permission prompt: what a restarted worker can only learn from it.
@@ -5017,19 +5031,16 @@ mod tests {
         old.start_kill().unwrap();
         old.wait().await.unwrap();
         drop(worker);
-        let (next, _addr) = spawn_worker_with(&dir, &env).await;
+        let (next, addr) = spawn_worker_with(&dir, &env).await;
         guard.0.push(next);
-        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: String::new() });
-        tokio::time::timeout(STEP, async {
-            loop {
-                if agent_of(&sock).await.is_some_and(|a| a.status == blocked) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        // The restarted worker recovered the status the registry gives the child.
+        row_at(&mut worker, session, |r| {
+            r.status.phase == Phase::NeedsYou
+                && r.status.wait.as_ref().is_some_and(|w| w.kind == "permission")
         })
-        .await
-        .expect("the restarted worker recovered the status the registry gives the child");
+        .await;
 
         for line in launcher_log(&log) {
             let argv: Vec<&str> =
@@ -5162,40 +5173,25 @@ mod tests {
         .await;
     }
 
-    /// A session's summary carries the agent a hook reported in it, and that a hook said so,
-    /// for every later listing.
+    /// A hook in a shell gives its terminal an agent's thread, one a hook speaks for, at work
+    /// since the turn began.
     #[tokio::test]
-    async fn a_summary_carries_the_agent_a_hook_reported() {
-        use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, SessionAgent};
+    async fn a_hook_gives_a_shell_an_agents_thread() {
         use slopty_proto::ctl::{CtlReply, CtlRequest};
+        use slopty_proto::thread::{AgentId, Cap, Phase};
 
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
         let session = open_shell(&mut worker, dir.path()).await;
         let sock = dir.path().join("worker.sock");
-        let agent_of = async |sock: &std::path::Path| match ctl(sock, &CtlRequest::Status).await {
-            CtlReply::Status { sessions, .. } => {
-                sessions.into_iter().find(|s| s.id == session).map(|s| s.agent)
-            }
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(agent_of(&sock).await, Some(None), "a shell has no agent");
         let payload = r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the build"}"#;
         let hook = CtlRequest::Hook { session, payload: payload.to_owned() };
         assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
-        let agent = agent_of(&sock).await.flatten().expect("the hook gave the shell an agent");
-        let since_ms = agent.since_ms;
-        assert!(!since_ms.is_zero(), "stamped when the turn began");
-        assert_eq!(
-            agent,
-            SessionAgent {
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Working,
-                source: AgentSource::Hook,
-                since_ms,
-                mode: None,
-            }
-        );
+        let approvals = Cap::named(Cap::APPROVALS);
+        let row = row_at(&mut worker, session, |r| r.status.phase == Phase::Working).await;
+        assert_eq!(row.agent, AgentId::named(AgentId::CLAUDE_CODE));
+        assert!(row.caps.contains(&approvals), "a hook speaks for it: {:?}", row.caps);
+        assert!(!row.status.since_ms.is_zero(), "stamped when the turn began");
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();
     }
