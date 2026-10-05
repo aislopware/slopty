@@ -2157,6 +2157,20 @@ mod tests {
     fn open_at_login_is_the_systems_switch(cx: &mut TestAppContext) {
         use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+        /// A form open on its Network page.
+        fn open<'a>(
+            cx: &'a mut TestAppContext,
+            network: &'static str,
+        ) -> (Entity<SettingsForm>, &'a mut VisualTestContext) {
+            let (form, cx) = cx
+                .add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+            cx.simulate_resize(size(px(900.0), px(1400.0)));
+            cx.run_until_parked();
+            let tab = cx.debug_bounds(network).expect("the Network tab");
+            cx.simulate_click(tab.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            (form, cx)
+        }
         /// How the stand-in login item stands, as a number: off, on, blocked, refusing.
         static STATE: AtomicU8 = AtomicU8::new(0);
         static SETS: AtomicUsize = AtomicUsize::new(0);
@@ -2173,19 +2187,6 @@ mod tests {
         let network = format!("settings-section-{}", Section::Network.index());
         let network: &'static str = Box::leak(network.into_boxed_str());
         let switch: &'static str = Box::leak(format!("settings-switch-{ix}").into_boxed_str());
-        fn open<'a>(
-            cx: &'a mut TestAppContext,
-            network: &'static str,
-        ) -> (Entity<SettingsForm>, &'a mut VisualTestContext) {
-            let (form, cx) = cx
-                .add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
-            cx.simulate_resize(size(px(900.0), px(1400.0)));
-            cx.run_until_parked();
-            let tab = cx.debug_bounds(network).expect("the Network tab");
-            cx.simulate_click(tab.center(), gpui::Modifiers::none());
-            cx.run_until_parked();
-            (form, cx)
-        }
         let (_form, bare) = open(cx, network);
         assert!(bare.debug_bounds(switch).is_none(), "no way to the login item: no row");
 
@@ -2205,7 +2206,7 @@ mod tests {
                         }
                     }
                 }),
-                open_settings: Rc::new(move || seen.set(seen.get() + 1)),
+                open_settings: Rc::new(move || seen.set(seen.get().saturating_add(1))),
             });
         });
         let (form, cx) = open(cx, network);
