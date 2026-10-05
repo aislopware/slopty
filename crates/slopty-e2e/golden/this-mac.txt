@@ -15,6 +15,9 @@ ListItem │ Reachable on your tailnet
 Image │ Done
 ListItem │ Notifications
 Image │ Done
+ListItem │ Open at login
+Image │ Needs you
+Button │ Turn on
 ListItem │ Finder
 Image │ Idle
 Button │ Show details

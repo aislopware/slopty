@@ -798,3 +798,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     JMango's, an environment value stands over it, and `files::TEAM`, `files::GROUP`, xtask's
     `sign::TEAM` and the bundle's group are all read from it at compile time (`env!`).
     `sign`'s tests are written against whatever team was built in, and they pass under another.
+
+- ✅ **Slopty opens at login, and the system holds that** (readiness N4, 2026-10-06). After a
+  restart the Mac app wasn't running until someone opened it. Its server then had no seat to
+  tell the person that an agent needed them. Slopty is now its own login item
+  (`SMAppService.mainApp`, `slopty_platform::login`).
+  - **Set when "Use this Mac" finishes.** A Mac that shares itself should be up to say so.
+    It is set only when the item is off. One the person turned off in System Settings, under
+    Login Items (`requiresApproval`), stays off, because registering it again would not allow
+    it anyway.
+  - **A checklist line and a settings switch, both reading the system.** This Mac's checklist
+    has an "Open at login" line among the app's own lines, with "Turn on" when the item is off
+    and "Open settings" at Login Items when it was turned off there. The settings form has a
+    switch in "This app". No key in `settings.toml` holds it. Login Items changes it as well,
+    so a copy in the file would drift from it, and the app would end up fighting the person's
+    choice made there. The form reads the system as it opens and again each time the window
+    comes back to the front, and it sets the item off the main thread, turning the switch at
+    once. A build outside an app bundle has no login item (`Login::Unavailable`): the line
+    says so and the switch isn't shown.
+  - **The add panel's body scrolls.** With the checklist's eighth line, the panel ran past a
+    700 pt window and its way back went out of view. The panel now gives up height to the
+    window, and only its body scrolls.
+  - Registering posts the system's "Login item added" note, so no test registers: the app's
+    and the self-test's hosts stand in for it, and the form takes its way to the item as a
+    global the app installs. Tests: `slopty-platform` `tests/login.rs` (status only),
+    `slopty-app` `this_mac::tests::the_apps_own_lines_say_what_it_lacks`,
+    `this_mac_runs_the_server_then_waits_for_it_to_list_the_worker`,
+    `this_mac_checks_what_the_app_lacks_and_reads_it_again`,
+    `a_failed_install_offers_another_try`; `slopty-ui`
+    `settings_form::tests::open_at_login_is_the_systems_switch`; the `this-mac` golden's new
+    line.

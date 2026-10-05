@@ -154,6 +154,12 @@ objc2-file-provider = { workspace = true, features = [
 objc2-finder-sync.workspace = true
 # The signing team, which the shared container is named for (`files`).
 objc2-security = { workspace = true, features = [ "CSCommon", "SecCode" ] }
+# The app as its own login item, opened at login (`login`).
+objc2-service-management = { workspace = true, features = [
+    "SMAppService",
+    "objc2",
+    "objc2-foundation",
+] }
 serde_json.workspace = true
 slopty-core.workspace = true
 thiserror.workspace = true

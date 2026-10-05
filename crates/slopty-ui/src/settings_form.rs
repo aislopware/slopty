@@ -27,6 +27,11 @@
 //! command the file sets has a way back to its default. About says which build this is and
 //! where the project lives. A query finds commands too, by their words, keys or name in the
 //! file.
+//!
+//! One row is the system's, not the file's: "Open at login", on a Mac. The app installs its way
+//! to the login item ([`LoginItem`]); the row reads it as the form opens and sets it off the main
+//! thread, showing the switch turned at once. Turned off in System Settings, under Login Items,
+//! the row says so, and turning it on opens them, the one place it is allowed again.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,6 +45,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, MoveUp};
+use slopty_platform::login::Login;
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::{Choice, Kind};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
@@ -51,7 +57,7 @@ use crate::palette::PaletteItem;
 #[path = "settings_form_schema.rs"]
 pub mod schema;
 
-use schema::{KeyRow, Row, Section, rows};
+use schema::{KeyRow, Row, Section, System, rows};
 
 /// How much of a row's width its description may take: Zed's two thirds, so the words read as
 /// one column down the page whatever the control beside them.
@@ -131,6 +137,30 @@ const PAGE_ROWS: f32 = 13.0;
 /// How many families the font list shows before it scrolls.
 const FONT_ROWS: f32 = 6.0;
 
+/// The app's way to its login item, which the "Open at login" row reads and sets: the system's
+/// own state, kept in no key of the file. A form with none installed does not show the row.
+#[derive(Clone)]
+pub struct LoginItem {
+    /// How it stands now.
+    pub read: Arc<dyn Fn() -> Login + Send + Sync>,
+    /// Turn it on or off, and say how it stands after.
+    pub set: Arc<dyn Fn(bool) -> Result<Login, String> + Send + Sync>,
+    /// Open System Settings at Login Items, where one turned off there is allowed again.
+    pub open_settings: Rc<dyn Fn()>,
+}
+
+impl gpui::Global for LoginItem {}
+
+impl std::fmt::Debug for LoginItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginItem").finish_non_exhaustive()
+    }
+}
+
+/// What the "Open at login" row says while Login Items in System Settings holds it off.
+pub const LOGIN_BLOCKED: &str =
+    "Turned off in Login Items in System Settings. Turning it on opens them";
+
 /// What the form asks of the dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsFormEvent {
@@ -189,6 +219,9 @@ pub struct SettingsForm {
     recording: Option<Recording>,
     scroll: ScrollHandle,
     font_scroll: ScrollHandle,
+    /// Whether the app opens at login, as the system said or as just turned; `None` until read,
+    /// and with no [`LoginItem`] installed.
+    login: Option<Login>,
     /// Each segmented row's thumb, by row, which slides to the option chosen.
     thumbs: std::cell::RefCell<std::collections::HashMap<usize, crate::palette::Plate>>,
     _subscriptions: Vec<Subscription>,
@@ -239,6 +272,13 @@ impl SettingsForm {
             }));
             fields.push(Some(state));
         }
+        // Back from System Settings, the login item may stand otherwise.
+        subscriptions.push(cx.observe_window_activation(window, |_this, window, cx| {
+            if window.is_window_active() {
+                Self::read_login(cx);
+            }
+        }));
+        Self::read_login(cx);
         let handle = |cx: &mut Context<Self>| cx.focus_handle().tab_index(0).tab_stop(true);
         Self {
             theme,
@@ -265,10 +305,26 @@ impl SettingsForm {
             key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
             recording: None,
             thumbs: std::cell::RefCell::default(),
+            login: None,
             scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Read how the login item stands, off the main thread, when the app installed its way to it.
+    fn read_login(cx: &Context<Self>) {
+        let Some(read) = cx.try_global::<LoginItem>().map(|item| Arc::clone(&item.read)) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let now = cx.background_spawn(async move { read() }).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.login = Some(now);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The file's text as the form holds it.
@@ -382,6 +438,9 @@ impl SettingsForm {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
+                if r.system.is_some() && matches!(self.login, None | Some(Login::Unavailable)) {
+                    return false;
+                }
                 if self.query.trim().is_empty() {
                     self.narrow || r.section == self.section
                 } else {
@@ -400,6 +459,9 @@ impl SettingsForm {
     }
 
     fn switch_on(&self, row: &Row) -> bool {
+        if row.system.is_some() {
+            return self.login.is_some_and(Login::on);
+        }
         match (self.value(row), &row.field.default) {
             (Value::Bool(on), _) | (_, &Value::Bool(on)) => on,
             _ => false,
@@ -498,11 +560,65 @@ impl SettingsForm {
 
     fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(row) = rows().get(ix) else { return };
+        if row.system == Some(System::OpenAtLogin) {
+            self.toggle_login(ix, cx);
+            return;
+        }
         let on = !self.switch_on(row);
         self.moved = Some((ix, self.turns));
         self.turns = self.turns.wrapping_add(1);
         self.write(ix, if on { "true" } else { "false" });
         self.apply(cx);
+    }
+
+    /// Turn the login item on or off: the switch at once, the system off the main thread, and
+    /// the row as the system has it after, or why it would not. One turned off in Login Items
+    /// is allowed again only there, so turning it on opens them.
+    fn toggle_login(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(item) = cx.try_global::<LoginItem>().cloned() else { return };
+        let on = !self.login.is_some_and(Login::on);
+        if on && self.login == Some(Login::Blocked) {
+            (item.open_settings)();
+            return;
+        }
+        self.moved = Some((ix, self.turns));
+        self.turns = self.turns.wrapping_add(1);
+        let was = self.login;
+        self.login = Some(if on { Login::On } else { Login::Off });
+        if let Some(error) = self.errors.get_mut(ix) {
+            *error = None;
+        }
+        cx.notify();
+        let set = item.set;
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_spawn(async move { set(on) }).await;
+            let _gone = this.update(cx, |this, cx| {
+                match done {
+                    Ok(now) => {
+                        this.login = Some(now);
+                        if on && now == Login::Blocked {
+                            (item.open_settings)();
+                        }
+                    }
+                    Err(why) => {
+                        this.login = was;
+                        if let Some(error) = this.errors.get_mut(ix) {
+                            *error = Some(why);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// What row `row` does, under its label: the login item's says where it is held off.
+    fn meta(&self, row: &Row) -> &'static str {
+        match row.system {
+            Some(System::OpenAtLogin) if self.login == Some(Login::Blocked) => LOGIN_BLOCKED,
+            _ => row.meta(),
+        }
     }
 
     fn choose(&mut self, ix: usize, value: &str, cx: &mut Context<Self>) {
@@ -1339,7 +1455,7 @@ impl SettingsForm {
             under
                 .id(("settings-row-meta", ix))
                 .debug_selector(move || format!("settings-row-meta-{ix}"))
-                .child(row.meta())
+                .child(self.meta(row))
         };
         div()
             .id(("settings-row", ix))
@@ -1385,7 +1501,7 @@ impl SettingsForm {
             Some(handle) => el.track_focus(handle),
             None => el,
         };
-        let described = self.error(ix).unwrap_or_else(|| row.meta()).to_owned();
+        let described = self.error(ix).unwrap_or_else(|| self.meta(row)).to_owned();
         let el = el.aria_label(row.label()).aria_description(described).on_key_down(cx.listener(
             move |this, ev, window, cx| {
                 this.control_key(ix, ev, window, cx);
@@ -2032,5 +2148,99 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(faded(cx), (true, false), "at the end, only what is above");
+    }
+
+    /// The login item's row is the system's: absent with no way to it installed, read as the
+    /// form opens, turned at once and set off the main thread. Turned off in Login Items, it
+    /// says so and turning it on opens them, setting nothing; a refusal is its row's error.
+    #[gpui::test]
+    fn open_at_login_is_the_systems_switch(cx: &mut TestAppContext) {
+        use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+        /// How the stand-in login item stands, as a number: off, on, blocked, refusing.
+        static STATE: AtomicU8 = AtomicU8::new(0);
+        static SETS: AtomicUsize = AtomicUsize::new(0);
+        const fn login(n: u8) -> Login {
+            match n {
+                1 => Login::On,
+                2 => Login::Blocked,
+                _ => Login::Off,
+            }
+        }
+        cx.update(gpui_kit::init);
+        let ix = rows().iter().position(|r| r.system == Some(System::OpenAtLogin));
+        let Some(ix) = ix else { return };
+        let network = format!("settings-section-{}", Section::Network.index());
+        let network: &'static str = Box::leak(network.into_boxed_str());
+        let switch: &'static str = Box::leak(format!("settings-switch-{ix}").into_boxed_str());
+        fn open<'a>(
+            cx: &'a mut TestAppContext,
+            network: &'static str,
+        ) -> (Entity<SettingsForm>, &'a mut VisualTestContext) {
+            let (form, cx) = cx
+                .add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+            cx.simulate_resize(size(px(900.0), px(1400.0)));
+            cx.run_until_parked();
+            let tab = cx.debug_bounds(network).expect("the Network tab");
+            cx.simulate_click(tab.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            (form, cx)
+        }
+        let (_form, bare) = open(cx, network);
+        assert!(bare.debug_bounds(switch).is_none(), "no way to the login item: no row");
+
+        let opened = Rc::new(std::cell::Cell::new(0_usize));
+        let seen = Rc::clone(&opened);
+        cx.update(|cx| {
+            cx.set_global(LoginItem {
+                read: Arc::new(|| login(STATE.load(Ordering::SeqCst))),
+                set: Arc::new(|on| {
+                    SETS.fetch_add(1, Ordering::SeqCst);
+                    match STATE.load(Ordering::SeqCst) {
+                        3 => Err("Operation not permitted".to_owned()),
+                        2 if on => Ok(Login::Blocked),
+                        _ => {
+                            STATE.store(u8::from(on), Ordering::SeqCst);
+                            Ok(login(u8::from(on)))
+                        }
+                    }
+                }),
+                open_settings: Rc::new(move || seen.set(seen.get() + 1)),
+            });
+        });
+        let (form, cx) = open(cx, network);
+        let on = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.login);
+        assert_eq!(on(cx), Some(Login::Off), "read as the form opened");
+        let press = |cx: &mut VisualTestContext| {
+            let at = cx.debug_bounds(switch).expect("the switch");
+            cx.simulate_click(at.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        };
+        press(cx);
+        assert_eq!((on(cx), STATE.load(Ordering::SeqCst)), (Some(Login::On), 1), "turned on");
+
+        // Turned off in Login Items: turning it on again is the system's to refuse.
+        press(cx);
+        STATE.store(2, Ordering::SeqCst);
+        press(cx);
+        assert_eq!(on(cx), Some(Login::Blocked));
+        assert_eq!(opened.get(), 1, "Login Items, where it is allowed again");
+        let meta: &'static str = Box::leak(format!("settings-row-meta-{ix}").into_boxed_str());
+        assert!(cx.debug_bounds(meta).is_some());
+        let said = form.read_with(cx, |f, _| rows().get(ix).map(|row| f.meta(row)));
+        assert_eq!(said, Some(LOGIN_BLOCKED), "the row says where it is held off");
+        let sets = SETS.load(Ordering::SeqCst);
+        press(cx);
+        assert_eq!((opened.get(), SETS.load(Ordering::SeqCst)), (2, sets), "only opened");
+
+        // The system refuses: the switch goes back and the row says why.
+        STATE.store(3, Ordering::SeqCst);
+        form.update(cx, |f, _| f.login = Some(Login::Off));
+        press(cx);
+        assert_eq!(on(cx), Some(Login::Off), "back as it was");
+        assert_eq!(
+            form.read_with(cx, |f, _| f.error(ix).map(str::to_owned)).as_deref(),
+            Some("Operation not permitted")
+        );
     }
 }

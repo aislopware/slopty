@@ -41,6 +41,7 @@ pub mod input_source;
 pub mod keyboard;
 #[cfg(target_os = "linux")]
 mod linux;
+pub mod login;
 #[cfg(target_vendor = "apple")]
 pub mod motion;
 #[cfg(target_vendor = "apple")]

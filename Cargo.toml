@@ -346,6 +346,9 @@ objc2-uniform-type-identifiers = { version = "=0.3.2", default-features = false,
 # Whether this build is signed by the team its shared container is named for, before it is
 # touched (`slopty_platform::files::container`). Features are per crate.
 objc2-security = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+# Opening the app at login, as its own login item (`slopty_platform::login`). Features are per
+# crate.
+objc2-service-management = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 

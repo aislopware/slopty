@@ -6,6 +6,9 @@
 //! table's page (`home`) under the table's own title, so a setting added to the file shows up
 //! before anyone places it.
 //!
+//! One row is the system's rather than the file's ([`System`]): whether the app opens at login,
+//! which System Settings changes too, so the form reads and sets it there and keeps no copy.
+//!
 //! Two pages hold no key of a table of their own: Keyboard lists the keymap's commands
 //! ([`key_rows`]), each set in `[keys]` when a chord is recorded for it, and About says which
 //! build this is ([`about`]).
@@ -120,7 +123,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
     ),
     (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps"]),
-    (Section::Network, "This app", &["client.server", "client.editor"]),
+    (Section::Network, THIS_APP, &["client.server", "client.editor"]),
     (
         Section::Network,
         "Share this Mac's shells and windows",
@@ -134,6 +137,9 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (Section::Network, "This Mac as a server", &["server.allow"]),
 ];
+
+/// The group of the app's own keys, which the system's [`System::OpenAtLogin`] closes.
+const THIS_APP: &str = "This app";
 
 /// The page a key of `table` that [`LAYOUT`] does not name goes on: a nested table's
 /// (`server.projects`) is its root table's.
@@ -157,6 +163,16 @@ pub struct Row {
     pub section: Section,
     /// The quiet label over the rows it belongs with.
     pub group: &'static str,
+    /// The system holds it rather than the file: the app reads and sets it ([`System`]).
+    pub system: Option<System>,
+}
+
+/// A row the system holds rather than the file. The app answers for it through a global it
+/// installs (`settings_form::LoginItem`), and a form with none installed does not show it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum System {
+    /// Whether the app opens at login, which System Settings' Login Items changes too.
+    OpenAtLogin,
 }
 
 impl Row {
@@ -188,6 +204,15 @@ impl Row {
     /// file spells it.
     #[must_use]
     pub fn haystack(&self) -> String {
+        if self.system.is_some() {
+            return format!(
+                "{} {} {} {}",
+                self.label(),
+                self.meta(),
+                self.group,
+                self.section.label()
+            );
+        }
         format!(
             "{} {} {} {} {}.{}",
             self.label(),
@@ -206,10 +231,33 @@ pub fn rows() -> &'static [Row] {
     static ROWS: LazyLock<Vec<Row>> = LazyLock::new(|| {
         let fields: Vec<&Field> =
             schema::fields().iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table)).collect();
-        rows_of(&fields)
+        let mut rows = rows_of(&fields);
+        if LOGIN_ITEMS {
+            let at = rows.iter().rposition(|r| r.group == THIS_APP).map_or(rows.len(), |i| i + 1);
+            let field = &*OPEN_AT_LOGIN;
+            let section = Section::Network;
+            let row = Row { field, section, group: THIS_APP, system: Some(System::OpenAtLogin) };
+            rows.insert(at, row);
+        }
+        rows
     });
     &ROWS
 }
+
+/// Whether this platform has login items: a Mac does; an iPhone or an iPad opens apps itself.
+const LOGIN_ITEMS: bool = cfg!(target_os = "macos");
+
+/// [`System::OpenAtLogin`]'s words and control: a switch, off until the system says.
+static OPEN_AT_LOGIN: LazyLock<Field> = LazyLock::new(|| Field {
+    table: String::new(),
+    table_title: THIS_APP.to_owned(),
+    key: String::new(),
+    title: "Open at login".to_owned(),
+    summary: "Opens Slopty when you log in, so agents can reach you after a restart".to_owned(),
+    kind: schema::Kind::Switch,
+    default: slopty_settings::edit::Value::Bool(false),
+    example: None,
+});
 
 /// Whether this platform runs `slopty-worker` and `slopty-server`: an iPhone or an iPad runs
 /// neither, so their tables would set nothing there.
@@ -243,17 +291,19 @@ fn rows_of(fields: &[&'static Field]) -> Vec<Row> {
                 field,
                 section,
                 group,
+                system: None,
             }));
             rows.extend(unplaced().filter(|f| f.table_title == group).map(|field| Row {
                 field,
                 section,
                 group,
+                system: None,
             }));
         }
         rows.extend(
             unplaced()
                 .filter(|f| groups.iter().all(|(g, _)| f.table_title != *g))
-                .map(|field| Row { field, section, group: &field.table_title }),
+                .map(|field| Row { field, section, group: &field.table_title, system: None }),
         );
     }
     rows
@@ -507,12 +557,20 @@ mod tests {
     }
 
     /// Every key of the file is one row, every key the layout names is one of the file's, and
-    /// every section has rows.
+    /// every section has rows. Beside them, on a Mac, the system's one row closes "This app".
     #[test]
     fn every_key_is_a_row_once() {
         let fields = schema::fields();
         let shown = fields.iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table));
-        assert_eq!(rows().len(), shown.clone().count(), "a row per key");
+        let (system, file): (Vec<&Row>, Vec<&Row>) =
+            rows().iter().partition(|r| r.system.is_some());
+        assert_eq!(file.len(), shown.clone().count(), "a row per key");
+        let login: Vec<_> = system.iter().map(|r| (r.system, r.group)).collect();
+        let expected =
+            if LOGIN_ITEMS { vec![(Some(System::OpenAtLogin), THIS_APP)] } else { vec![] };
+        assert_eq!(login, expected);
+        let app: Vec<_> = rows().iter().filter(|r| r.group == THIS_APP).map(Row::label).collect();
+        assert_eq!(app.last().copied(), Some(if LOGIN_ITEMS { "Open at login" } else { "Editor" }));
         for f in shown {
             let n = rows().iter().filter(|r| std::ptr::eq(r.field, f)).count();
             assert_eq!(n, 1, "{}.{}", f.table, f.key);

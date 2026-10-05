@@ -16,10 +16,13 @@
 //! stand-in under test, so no test installs an agent, raises a permission prompt or opens System
 //! Settings (`docs/decisions/platform.md`, "This Mac as a worker").
 //!
-//! Two lines are the app's own rather than the worker's ([`app_lines`]): whether notifications
-//! reach the person, and whether Slopty's place in Finder is switched on. Neither is in the way
-//! of adding this Mac. The flow ends on its checklist, ready, with the way to bring in a phone,
-//! until the person says Done; the add panel's row brings it back later.
+//! Three lines are the app's own rather than the worker's ([`app_lines`]): whether notifications
+//! reach the person, whether Slopty opens at login, and whether Slopty's place in Finder is
+//! switched on. None is in the way of adding this Mac. Finishing the flow opens Slopty at login,
+//! unless the person turned that off in System Settings: a Mac that shares itself should have
+//! the app up to say when an agent needs them, after a restart too. The flow ends on its checklist,
+//! ready, with the way to bring in a phone, until the person says Done; the add panel's row brings
+//! it back later.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -27,6 +30,7 @@ use std::rc::Rc;
 
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
+pub use slopty_platform::login::Login;
 pub use slopty_platform::notify::Alerts;
 pub use slopty_platform::privacy::Pane;
 use slopty_proto::ctl::LinkState;
@@ -136,6 +140,10 @@ pub trait Host: std::fmt::Debug {
     /// What showing the machines in Finder would take now: whether Slopty's place there is
     /// switched on.
     fn finder(&self) -> Pending<crate::finder::Step>;
+    /// Whether Slopty opens at login, as the system has it. Nothing prompts.
+    fn login(&self) -> Pending<Login>;
+    /// Open Slopty at login, and say how it stands after.
+    fn open_at_login(&self) -> Pending<Result<Login, String>>;
     /// Copy Slopty into Applications ([`applications`]), the copy there before it to the
     /// Trash, and say where it now is, to be opened from there.
     fn move_to_applications(&self) -> Pending<Result<PathBuf, String>>;
@@ -286,6 +294,8 @@ pub struct Flow {
     pub error: Option<String>,
     /// Whether this app's notifications reach the person; `None` until read.
     pub notes: Option<Alerts>,
+    /// Whether Slopty opens at login; `None` until read.
+    pub login: Option<Login>,
     /// Slopty's place in Finder, as showing the machines there would find it; `None` until
     /// read.
     pub finder: Option<crate::finder::Step>,
@@ -309,6 +319,7 @@ impl Flow {
             listing: false,
             error: None,
             notes: None,
+            login: None,
             finder: None,
             listed: false,
             details: false,
@@ -366,6 +377,8 @@ pub enum Check {
     Tailnet,
     /// This app's notifications reach the person.
     Notifications,
+    /// Slopty opens at login.
+    Login,
     /// Slopty's place in Finder is switched on.
     Finder,
 }
@@ -380,6 +393,7 @@ impl Check {
             Self::Accessibility => "Accessibility",
             Self::Tailnet => "Reachable on your tailnet",
             Self::Notifications => "Notifications",
+            Self::Login => "Open at login",
             Self::Finder => "Finder",
         }
     }
@@ -393,6 +407,7 @@ impl Check {
             Self::Accessibility => "accessibility",
             Self::Tailnet => "tailnet",
             Self::Notifications => "notifications",
+            Self::Login => "login",
             Self::Finder => "finder",
         }
     }
@@ -406,6 +421,7 @@ impl Check {
             Self::Accessibility => "this-mac-fix-accessibility",
             Self::Tailnet => "this-mac-fix-tailnet",
             Self::Notifications => "this-mac-fix-notifications",
+            Self::Login => "this-mac-fix-login",
             Self::Finder => "this-mac-fix-finder",
         }
     }
@@ -435,6 +451,8 @@ pub enum Place {
     Notifications,
     /// The File Provider extensions, where Slopty's place in Finder is switched on.
     FileProviders,
+    /// Login Items, where Slopty is allowed to open at login again.
+    LoginItems,
 }
 
 /// What a missing line's button does.
@@ -444,6 +462,8 @@ pub enum Fix {
     Open(Place),
     /// Ask for notifications now.
     AllowNotes,
+    /// Open Slopty at login now.
+    OpenAtLogin,
     /// Install again.
     Retry,
     /// Install again, ending the sessions the last try said it would.
@@ -458,6 +478,7 @@ impl Fix {
         match self {
             Self::Open(_) => "Open settings",
             Self::AllowNotes => "Allow",
+            Self::OpenAtLogin => "Turn on",
             Self::Retry => "Try again",
             Self::EndSessions => "Update anyway",
             Self::MoveToApplications => "Move to Applications",
@@ -487,9 +508,10 @@ impl Line {
         use slopty_ui::icons::Status;
         match (self.mark, self.fix) {
             (Mark::Ok, _) => Status::Done,
-            (Mark::Missing | Mark::Advisory, Some(Fix::Open(_) | Fix::AllowNotes)) => {
-                Status::NeedsYou
-            }
+            (
+                Mark::Missing | Mark::Advisory,
+                Some(Fix::Open(_) | Fix::AllowNotes | Fix::OpenAtLogin),
+            ) => Status::NeedsYou,
             (Mark::Missing, _) => Status::Failed,
             (Mark::Busy, _) => Status::Running,
             (Mark::Advisory | Mark::Unknown, _) => Status::Idle,
@@ -585,9 +607,10 @@ pub fn checklist(flow: &Flow, logs: &str, server_logs: &str) -> [Line; 5] {
     [running, server, screen, accessibility, tailnet]
 }
 
-/// The app's own lines under the worker's: notifications, then Finder. Neither is in the way of
-/// adding this Mac; one the person can fix carries its button, in the waiting tone.
-pub fn app_lines(flow: &Flow) -> [Line; 2] {
+/// The app's own lines under the worker's: notifications, opening at login, then Finder. None
+/// is in the way of adding this Mac; one the person can fix carries its button, in the waiting
+/// tone.
+pub fn app_lines(flow: &Flow) -> [Line; 3] {
     let line =
         |check, mark, detail: &str, fix| Line { check, mark, detail: detail.to_owned(), fix };
     let purpose = "Tells you when an agent needs you while Slopty is away.";
@@ -607,6 +630,24 @@ pub fn app_lines(flow: &Flow) -> [Line; 2] {
             Check::Notifications,
             Mark::Advisory,
             "This build is not an app bundle, so it posts none.",
+            None,
+        ),
+    };
+    let purpose = "Back after a restart, so agents can still reach you.";
+    let login = match flow.login {
+        None => line(Check::Login, Mark::Unknown, purpose, None),
+        Some(Login::On) => line(Check::Login, Mark::Ok, purpose, None),
+        Some(Login::Off) => line(Check::Login, Mark::Advisory, purpose, Some(Fix::OpenAtLogin)),
+        Some(Login::Blocked) => line(
+            Check::Login,
+            Mark::Advisory,
+            "Off in Login Items, so Slopty stays closed after a restart.",
+            Some(Fix::Open(Place::LoginItems)),
+        ),
+        Some(Login::Unavailable) => line(
+            Check::Login,
+            Mark::Advisory,
+            "This build is not an app bundle, so it opens only when you open it.",
             None,
         ),
     };
@@ -634,7 +675,7 @@ pub fn app_lines(flow: &Flow) -> [Line; 2] {
         ),
         Some(crate::finder::Step::Failed(why)) => line(Check::Finder, Mark::Advisory, why, None),
     };
-    [notes, finder]
+    [notes, login, finder]
 }
 
 /// The Server line: where the server comes from, then how the worker's link to it stands.
@@ -730,7 +771,8 @@ fn stand_in() -> Option<Rc<dyn Host>> {
         .inspect_err(|e| tracing::warn!(error = %e, "this Mac's stand-in report"))
         .ok()?;
     let here = health.server.as_ref().and_then(|s| s.address.parse().ok());
-    Some(Rc::new(StandIn { doctor: Doctor::of(health, false), here }))
+    let login = std::cell::Cell::new(Login::Off);
+    Some(Rc::new(StandIn { doctor: Doctor::of(health, false), here, login }))
 }
 
 /// The self-test's host outside the e2e build: none, so there is no entry to press.
@@ -746,6 +788,8 @@ struct StandIn {
     doctor: Doctor,
     /// The server the report names, which a [`Serve::Here`] reaches.
     here: Option<HostAddr>,
+    /// Whether it opens at login: off until the flow turns it on, in memory only.
+    login: std::cell::Cell<Login>,
 }
 
 #[cfg(all(target_os = "macos", feature = "e2e"))]
@@ -783,6 +827,15 @@ impl Host for StandIn {
         Box::pin(std::future::ready(crate::finder::Step::Unsigned))
     }
 
+    fn login(&self) -> Pending<Login> {
+        Box::pin(std::future::ready(self.login.get()))
+    }
+
+    fn open_at_login(&self) -> Pending<Result<Login, String>> {
+        self.login.set(Login::On);
+        Box::pin(std::future::ready(Ok(Login::On)))
+    }
+
     fn move_to_applications(&self) -> Pending<Result<PathBuf, String>> {
         Box::pin(std::future::ready(Err("the self-test moves nothing".to_owned())))
     }
@@ -808,7 +861,7 @@ mod mac {
     use slopty_platform::service::{self, Layout, SERVER, Session, WORKER, WorkerOpts};
     use slopty_proto::ctl::{CtlReply, CtlRequest};
 
-    use super::{Alerts, Doctor, Host, Pending, Place, Serve, Stopped};
+    use super::{Alerts, Doctor, Host, Login, Pending, Place, Serve, Stopped};
     use crate::net;
 
     /// How long a server started here has to answer on loopback, as the CLI waits.
@@ -932,6 +985,7 @@ mod mac {
                 Place::Privacy(pane) => pane,
                 Place::Notifications => return slopty_platform::notify::open_settings(),
                 Place::FileProviders => return slopty_platform::files::switch_on(),
+                Place::LoginItems => return slopty_platform::login::open_settings(),
             };
             slopty_platform::privacy::open(pane);
             // A `LaunchAgent`'s request often raises no prompt, so the worker is not in the
@@ -956,6 +1010,16 @@ mod mac {
                 crate::finder::next_step(),
                 crate::finder::Step::Failed("unanswered".to_owned()),
             )
+        }
+
+        fn login(&self) -> Pending<Login> {
+            let read = self.runtime.spawn_blocking(slopty_platform::login::status);
+            Box::pin(async move { read.await.unwrap_or(Login::Unavailable) })
+        }
+
+        fn open_at_login(&self) -> Pending<Result<Login, String>> {
+            let set = self.runtime.spawn_blocking(|| slopty_platform::login::set(true));
+            Box::pin(async move { set.await.map_err(|e| e.to_string())? })
         }
 
         fn move_to_applications(&self) -> Pending<Result<PathBuf, String>> {
@@ -1122,33 +1186,46 @@ mod tests {
     }
 
     /// The app's own lines: unread they say what they are for; notifications never asked offer
-    /// "Allow", turned off open their settings, and a build with no bundle or no extension says
-    /// so with nothing to press.
+    /// "Allow", a login item merely off offers "Turn on", turned off in System Settings they
+    /// open their settings, and a build with no bundle or no extension says so with nothing to
+    /// press.
     #[test]
     fn the_apps_own_lines_say_what_it_lacks() {
         use crate::finder::Step;
-        let flow = |notes, finder| Flow { notes, finder, ..Flow::installing(1, Serve::Here) };
-        let lines = |notes, finder| app_lines(&flow(notes, finder)).map(|l| (l.mark, l.fix));
+        let flow = |notes, login, finder| Flow {
+            notes,
+            login,
+            finder,
+            ..Flow::installing(1, Serve::Here)
+        };
+        let lines =
+            |notes, login, finder| app_lines(&flow(notes, login, finder)).map(|l| (l.mark, l.fix));
         let open = Some(Step::Open(PathBuf::from("/Users/me/Library/CloudStorage/Slopty-studio")));
-        assert_eq!(lines(None, None), [(Mark::Unknown, None), (Mark::Unknown, None)]);
-        assert_eq!(lines(Some(Alerts::Allowed), open), [(Mark::Ok, None), (Mark::Ok, None)]);
-        let asked = lines(Some(Alerts::Unasked), Some(Step::SwitchOn));
+        assert_eq!(lines(None, None, None), [(Mark::Unknown, None); 3]);
+        let on = lines(Some(Alerts::Allowed), Some(Login::On), open);
+        assert_eq!(on, [(Mark::Ok, None); 3]);
+        let asked = lines(Some(Alerts::Unasked), Some(Login::Off), Some(Step::SwitchOn));
         assert_eq!(
             asked,
             [
                 (Mark::Advisory, Some(Fix::AllowNotes)),
+                (Mark::Advisory, Some(Fix::OpenAtLogin)),
                 (Mark::Advisory, Some(Fix::Open(Place::FileProviders))),
             ]
         );
-        let off = app_lines(&flow(Some(Alerts::Denied), Some(Step::NoWorkers)));
+        let off =
+            app_lines(&flow(Some(Alerts::Denied), Some(Login::Blocked), Some(Step::NoWorkers)));
         assert_eq!(off[0].fix, Some(Fix::Open(Place::Notifications)));
         assert_eq!(off[0].status(), slopty_ui::icons::Status::NeedsYou, "the person's to do");
-        assert_eq!((off[1].mark, off[1].fix), (Mark::Unknown, None), "no machine to show yet");
+        assert_eq!(off[1].fix, Some(Fix::Open(Place::LoginItems)), "only Login Items allows it");
+        assert_eq!(off[1].status(), slopty_ui::icons::Status::NeedsYou);
+        assert_eq!((off[2].mark, off[2].fix), (Mark::Unknown, None), "no machine to show yet");
         let failed = Some(Step::Failed("the system would not say".to_owned()));
-        let bare = app_lines(&flow(Some(Alerts::Unavailable), failed));
-        assert_eq!(bare.each_ref().map(|l| (l.mark, l.fix)), [(Mark::Advisory, None); 2]);
-        assert_eq!(bare[1].detail, "the system would not say", "the reason, as it came");
+        let bare = app_lines(&flow(Some(Alerts::Unavailable), Some(Login::Unavailable), failed));
+        assert_eq!(bare.each_ref().map(|l| (l.mark, l.fix)), [(Mark::Advisory, None); 3]);
+        assert_eq!(bare[2].detail, "the system would not say", "the reason, as it came");
         assert_eq!(bare[0].status(), slopty_ui::icons::Status::Idle, "nothing to press: quiet");
+        assert!(bare[1].detail.contains("not an app bundle"), "{}", bare[1].detail);
     }
 
     /// The Server line says where the server comes from while it is looked for and installed,

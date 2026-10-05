@@ -1967,16 +1967,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Read the app's own lines of run `run`'s checklist: its notifications and its place in
-    /// Finder.
+    /// Read the app's own lines of run `run`'s checklist: its notifications, whether it opens at
+    /// login and its place in Finder.
     fn read_this_app(&self, run: u64, cx: &Context<Self>) {
         let Some(host) = self.this_mac.clone() else { return };
-        let (notes, finder) = (host.notes(), host.finder());
+        let (notes, login, finder) = (host.notes(), host.login(), host.finder());
         cx.spawn(async move |this, cx| {
-            let (notes, finder) = (notes.await, finder.await);
+            let (notes, login, finder) = (notes.await, login.await, finder.await);
             let _gone = this.update(cx, |ws, cx| {
                 if let Some(flow) = ws.this_mac_flow(run) {
                     flow.notes = Some(notes);
+                    flow.login = Some(login);
                     flow.finder = Some(finder);
                     cx.notify();
                 }
@@ -2125,6 +2126,9 @@ impl Workspace {
     /// The server lists this Mac: the panel closes onto its workspace, with a word when the
     /// tailnet does not reach it yet; or, while the app's own lines still have something for
     /// the person, it stays open on them, ready, until they are done.
+    ///
+    /// Slopty opens at login from then on, so it is up to say when an agent needs the person
+    /// after a restart; unless the person turned that off in System Settings, which it leaves.
     fn this_mac_listed(&mut self, run: u64, cx: &mut Context<Self>) {
         let Some(flow) = self.this_mac_flow(run) else { return };
         flow.listing = false;
@@ -2132,6 +2136,7 @@ impl Workspace {
         if let this_mac::Worker::Up(d) = &flow.worker {
             self.this_mac_worker = Some(d.worker);
         }
+        self.open_at_login(run, true, cx);
         cx.notify();
     }
 
@@ -2157,10 +2162,40 @@ impl Workspace {
                 }
             }
             this_mac::Fix::AllowNotes => self.allow_notes(cx),
+            this_mac::Fix::OpenAtLogin => {
+                let run = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.run);
+                if let Some(run) = run {
+                    self.open_at_login(run, false, cx);
+                }
+            }
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
         }
+    }
+
+    /// Open Slopty at login, and say on run `run`'s line how it stands after; `if_off` only when
+    /// it is off, so a login item the person turned off in System Settings stays off.
+    fn open_at_login(&self, run: u64, if_off: bool, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let was = if if_off { host.login().await } else { this_mac::Login::Off };
+            let now = match was {
+                this_mac::Login::Off => host.open_at_login().await,
+                other => Ok(other),
+            };
+            let _gone = this.update(cx, |ws, cx| {
+                let now = now.unwrap_or_else(|why| {
+                    ws.show_notice(format!("Slopty could not open at login: {why}"), cx);
+                    this_mac::Login::Off
+                });
+                if let Some(flow) = ws.this_mac_flow(run) {
+                    flow.login = Some(now);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The Notifications line's "Allow": the system asks the person, and the line says how they
@@ -2605,7 +2640,9 @@ impl Workspace {
             .debug_selector(|| "add-worker".to_owned())
             .track_focus(&adding.focus)
             .occlude()
-            .flex_none()
+            // It gives up height to a short window rather than run past it: its body scrolls,
+            // and its intro and its way back stay in view.
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(apart))
@@ -2615,6 +2652,7 @@ impl Workspace {
             .when(!welcome, |el| {
                 kit::elevate(el, theme)
                     .p(px(spacing.xl))
+                    .mb(px(spacing.xl))
                     .rounded(px(radii.lg))
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .capture_action(cx.listener(|this, _: &Escape, window, cx| {
@@ -2645,9 +2683,18 @@ impl Workspace {
             )
             // Where the tailnet cannot be listed, the line saying so stands in the list's place;
             // this Mac's checklist stands in for both and the address.
-            .when_some(checklist, gpui::ParentElement::child)
-            .when_some(ssh_sheet, gpui::ParentElement::child)
-            .children(sections)
+            .child(
+                div()
+                    .id("add-worker-body")
+                    .flex()
+                    .flex_col()
+                    .gap(px(apart))
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when_some(checklist, gpui::ParentElement::child)
+                    .when_some(ssh_sheet, gpui::ParentElement::child)
+                    .children(sections),
+            )
             .child(aside);
         if !welcome {
             // The scrim dims in as the dialog fades in where it stands (the palette and the
@@ -4078,6 +4125,15 @@ pub fn open_workspace(
     if !self_test() {
         update::watch(&workspace, cx);
     }
+    // Settings' "Open at login" is the system's login item; a self-test leaves it alone.
+    #[cfg(target_os = "macos")]
+    if !self_test() {
+        cx.set_global(slopty_ui::settings_form::LoginItem {
+            read: std::sync::Arc::new(slopty_platform::login::status),
+            set: std::sync::Arc::new(slopty_platform::login::set),
+            open_settings: Rc::new(slopty_platform::login::open_settings),
+        });
+    }
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
     // that launched the app waited for `taps` above and arrives first, once the window is up.
@@ -5171,6 +5227,8 @@ mod tests {
         notes: std::cell::Cell<Option<this_mac::Alerts>>,
         /// Slopty's place in Finder; a build with no extension when unset.
         finder: std::cell::RefCell<Option<finder::Step>>,
+        /// Whether Slopty opens at login; off when unset.
+        login: std::cell::Cell<Option<this_mac::Login>>,
     }
 
     impl StandIn {
@@ -5231,6 +5289,21 @@ mod tests {
         fn finder(&self) -> this_mac::Pending<finder::Step> {
             let step = self.finder.borrow().clone().unwrap_or(finder::Step::Unsigned);
             Box::pin(async move { step })
+        }
+
+        fn login(&self) -> this_mac::Pending<this_mac::Login> {
+            let login = self.login.get().unwrap_or(this_mac::Login::Off);
+            Box::pin(async move { login })
+        }
+
+        fn open_at_login(&self) -> this_mac::Pending<Result<this_mac::Login, String>> {
+            self.ask("open at login".to_owned());
+            let now = match self.login.get() {
+                Some(this_mac::Login::Blocked) => this_mac::Login::Blocked,
+                _ => this_mac::Login::On,
+            };
+            self.login.set(Some(now));
+            Box::pin(async move { Ok(now) })
         }
 
         fn move_to_applications(&self) -> this_mac::Pending<Result<std::path::PathBuf, String>> {
@@ -5318,6 +5391,8 @@ mod tests {
         list(&ws, cx, worker, "mac-studio");
         cx.executor().advance_clock(this_mac::RETRY);
         cx.run_until_parked();
+        assert!(host.asked().contains(&"open at login".to_owned()), "finished: open at login");
+        assert_eq!(flow(&ws, cx).and_then(|f| f.login), Some(this_mac::Login::On));
         let status = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.this_mac.is_some()));
         assert_eq!(status, Some(true), "the flow ends on its checklist");
         assert_eq!(flow(&ws, cx).map(|f| f.ready_words()), Some(this_mac::READY));
@@ -5378,10 +5453,11 @@ mod tests {
         assert!(cx.debug_bounds("this-mac-facts").is_none(), "and closed again");
     }
 
-    /// The app's own lines: with notifications off and Slopty's place in Finder switched off,
-    /// each line's button opens its place in System Settings, and back from there with both
-    /// turned on, both lines say so. Notifications never asked for are asked for from the
-    /// line's "Allow".
+    /// The app's own lines: with notifications, opening at login and Slopty's place in Finder
+    /// all switched off in System Settings, finishing leaves the login item off, and each line's
+    /// button opens its place there; back from there with all turned on, every line says so.
+    /// Notifications never asked for are asked for from the line's "Allow", and a login item
+    /// merely off is turned on from its line's "Turn on".
     #[gpui::test]
     fn this_mac_checks_what_the_app_lacks_and_reads_it_again(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -5392,6 +5468,7 @@ mod tests {
         let host = StandIn::answering(Some(ready.clone()));
         host.notes.set(Some(this_mac::Alerts::Denied));
         *host.finder.borrow_mut() = Some(finder::Step::SwitchOn);
+        host.login.set(Some(this_mac::Login::Blocked));
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, cx| {
             ws.this_mac = Some(shared);
@@ -5408,24 +5485,29 @@ mod tests {
         cx.executor().advance_clock(this_mac::RETRY);
         cx.run_until_parked();
         assert_eq!(flow(&ws, cx).map(|f| f.listed), Some(true), "listed, the flow's end");
-        let _listing = host.asked();
+        let listing = host.asked();
+        assert!(!listing.contains(&"open at login".to_owned()), "turned off there, it stays off");
 
         let notes = cx.debug_bounds("this-mac-fix-notifications").expect("notifications' button");
         cx.simulate_click(notes.center(), gpui::Modifiers::none());
+        let login = cx.debug_bounds("this-mac-fix-login").expect("Login Items' button");
+        cx.simulate_click(login.center(), gpui::Modifiers::none());
         let switch = cx.debug_bounds("this-mac-fix-finder").expect("Finder's button");
         cx.simulate_click(switch.center(), gpui::Modifiers::none());
-        assert_eq!(host.asked(), ["open Notifications", "open FileProviders"], "their places");
+        let places = ["open Notifications", "open LoginItems", "open FileProviders"];
+        assert_eq!(host.asked(), places, "their places");
 
         // Turned on in System Settings; the app comes back to the front.
         host.notes.set(Some(this_mac::Alerts::Allowed));
         *host.finder.borrow_mut() = Some(finder::Step::Open(dir.path().to_path_buf()));
+        host.login.set(Some(this_mac::Login::On));
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
         cx.run_until_parked();
         let marks = |cx: &mut VisualTestContext| {
             flow(&ws, cx).map(|f| this_mac::app_lines(&f).map(|l| (l.mark, l.fix)))
         };
         let on = (this_mac::Mark::Ok, None);
-        assert_eq!(marks(cx), Some([on, on]), "read again: both on");
+        assert_eq!(marks(cx), Some([on, on, on]), "read again: all on");
 
         // Never asked: "Allow" asks, and the answer is the line's.
         let done = cx.debug_bounds("this-mac-done").expect("Done");
@@ -5437,6 +5519,17 @@ mod tests {
         cx.run_until_parked();
         assert!(host.asked().contains(&"ask notes".to_owned()), "the system asks the person");
         assert_eq!(flow(&ws, cx).and_then(|f| f.notes), Some(this_mac::Alerts::Allowed));
+
+        // Off, but not refused: "Turn on" opens Slopty at login.
+        host.login.set(Some(this_mac::Login::Off));
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
+        cx.run_until_parked();
+        let _read = host.asked();
+        let turn_on = cx.debug_bounds("this-mac-fix-login").expect("Turn on");
+        cx.simulate_click(turn_on.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["open at login"], "registered");
+        assert_eq!(flow(&ws, cx).and_then(|f| f.login), Some(this_mac::Login::On));
     }
 
     /// "Add a machine…", then its row `row`.
@@ -5511,7 +5604,8 @@ mod tests {
     }
 
     /// A failed install is the checklist's first line, red with a way to try again; back to
-    /// the panel leaves the checklist for the panel's rows.
+    /// the panel leaves the checklist for the panel's rows. The checklist is taller than a
+    /// short window has room for, so it scrolls and the way back stays in view.
     #[gpui::test]
     fn a_failed_install_offers_another_try(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -5532,6 +5626,7 @@ mod tests {
         );
         assert!(cx.debug_bounds("this-mac-fix-running").is_some(), "a way to try again");
         let back = cx.debug_bounds("panel-switch").expect("the way back");
+        assert!(back.bottom() <= px(700.0), "the checklist scrolls; the way back stays: {back:?}");
         cx.simulate_click(back.center(), gpui::Modifiers::none());
         assert!(cx.debug_bounds("this-mac-checklist").is_none(), "left");
         assert!(cx.debug_bounds("use-this-mac").is_some(), "the rows are back");
