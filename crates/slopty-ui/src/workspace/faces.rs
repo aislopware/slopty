@@ -341,6 +341,24 @@ impl WorkspaceView {
         self.faces.threads.places.get(&thread)
     }
 
+    /// The threads on `worker` whose agent has not exited and works in `root` or under it, as
+    /// their worker's table last said.
+    pub(super) fn threads_working_in(&self, worker: WorkerKey, root: &str) -> Vec<ThreadId> {
+        let threads = &self.faces.threads;
+        let inside = |cwd: &str| {
+            cwd.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        threads
+            .stands
+            .iter()
+            .filter(|(_, stand)| stand.worker == worker && !stand.exited)
+            .filter(|(t, _)| {
+                threads.places.get(t).and_then(|p| p.cwd.as_deref()).is_some_and(inside)
+            })
+            .map(|(t, _)| *t)
+            .collect()
+    }
+
     /// Where each of `worker`'s threads works, as its table last said.
     pub(super) fn places_on(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadPlace> {
         let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
@@ -457,6 +475,7 @@ impl WorkspaceView {
             HubEvent::Authors => this.author_files(key, cx),
             // An aside's fork stays in the sheet of the view that asked it.
             HubEvent::Started { thread, aside: false, .. } => this.open_thread(key, *thread, cx),
+            HubEvent::Git(repo) => this.worktree_heard(key, repo, cx),
             _ => {}
         });
         self.faces.threads.hearing.insert(key, hearing);

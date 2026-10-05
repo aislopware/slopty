@@ -146,6 +146,7 @@ pub enum Save {
 /// sent is taken. One at a time: a second save of a file never overtakes the first.
 pub async fn save_in_order(
     handoffs: Handoffs,
+    worker: slopty_worker::Worker,
     client: ClientId,
     out: mpsc::Sender<WorkerMsg>,
     mut saves: mpsc::UnboundedReceiver<Save>,
@@ -157,22 +158,38 @@ pub async fn save_in_order(
             }
             Save::Edited(reply) => handoffs.lock().replied(client, reply),
             Save::Fs { request, op } => fs_op(client, &out, request, op).await,
-            // A status, a commit or a review of the changes is the disk's, in order with the
-            // saves around it; a push or a pull request waits on the network, so it runs beside
-            // them, after what came before.
+            // A status, a commit, a review of the changes or a worktree's removal is the
+            // disk's, in order with the saves around it; a push or a pull request waits on the
+            // network, so it runs beside them, after what came before.
             Save::Git {
                 request,
                 repo,
-                op: op @ (GitOp::Status | GitOp::Commit { .. } | GitOp::Changes { .. }),
+                op:
+                    op @ (GitOp::Status
+                    | GitOp::Commit { .. }
+                    | GitOp::Changes { .. }
+                    | GitOp::RemoveWorktree),
             } => {
-                git_op(client, &out, request, repo, op).await;
+                git_op(&worker, client, &out, request, repo, op).await;
             }
             Save::Git { request, repo, op } => {
-                let out = out.clone();
-                tokio::spawn(async move { git_op(client, &out, request, repo, op).await });
+                let (out, worker) = (out.clone(), worker.clone());
+                tokio::spawn(async move { git_op(&worker, client, &out, request, repo, op).await });
             }
         }
     }
+}
+
+/// The directory of every terminal running on `worker`.
+async fn terminal_dirs(worker: &slopty_worker::Worker) -> Vec<std::path::PathBuf> {
+    worker
+        .summaries()
+        .await
+        .into_iter()
+        .filter(|s| matches!(s.state, slopty_proto::terminal::SessionState::Running))
+        .filter_map(|s| s.cwd)
+        .map(|cwd| slopty_worker::file::expand_home(std::path::Path::new(&cwd)))
+        .collect()
 }
 
 /// Make, move or trash an entry for a folder tile and answer how it went. The folder tiles that
@@ -187,7 +204,9 @@ pub async fn fs_op(client: ClientId, out: &mpsc::Sender<WorkerMsg>, request: Req
 }
 
 /// Do a git op in a folder's repository for the person's commit sheet and answer how it went.
+/// A worktree's removal is told where `worker`'s live terminals are, so none loses its folder.
 pub async fn git_op(
+    worker: &slopty_worker::Worker,
     client: ClientId,
     out: &mpsc::Sender<WorkerMsg>,
     request: RequestId,
@@ -202,11 +221,15 @@ pub async fn git_op(
         GitOp::PullStatus => "pull request status",
         GitOp::Merge { .. } => "merge",
         GitOp::Changes { .. } => "changes",
+        GitOp::RemoveWorktree => "remove worktree",
     };
+    let terminals =
+        if matches!(op, GitOp::RemoveWorktree) { terminal_dirs(worker).await } else { Vec::new() };
     let outcome = slopty_worker::repo::commit::apply(
         &slopty_worker::repo::commit::Programs::here(),
         &repo,
         op,
+        &terminals,
     )
     .await;
     let done = matches!(outcome, GitOutcome::Done(_));

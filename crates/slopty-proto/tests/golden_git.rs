@@ -100,6 +100,12 @@ mod golden_git {
         snap("client_git_pull_request", &ask(6, pull_request()));
         snap("client_git_pull_status", &ask(7, GitOp::PullStatus));
         snap("client_git_merge", &ask(8, merge()));
+        let free = ClientMsg::Git {
+            request: 9,
+            repo: "~/src/demo/.claude/worktrees/fix-login".to_owned(),
+            op: GitOp::RemoveWorktree,
+        };
+        snap("client_git_remove_worktree", &free);
     }
 
     #[test]
@@ -129,6 +135,11 @@ mod golden_git {
             pull: Some(Box::new(PullStatus { state: "MERGED".to_owned(), ..pull() })),
         };
         snap("worker_git_merged", &done(8, GitOutcome::Done(merged)));
+        let removed = GitDone::WorktreeRemoved {
+            branch: Some("worktree-fix-login".to_owned()),
+            branch_removed: false,
+        };
+        snap("worker_git_worktree_removed", &done(9, GitOutcome::Done(removed)));
         let refused = GitOutcome::Refused { why: "choose the files to commit".to_owned() };
         snap("worker_git_refused", &done(4, refused));
         let unavailable = GitOutcome::Unavailable {

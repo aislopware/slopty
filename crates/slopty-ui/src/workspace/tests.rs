@@ -1615,6 +1615,7 @@ mod tiles;
 mod toasts;
 mod touch;
 mod unsaved;
+mod worktrees;
 
 /// A worker that comes up with nothing on it is given a shell beside the rest, and the focus
 /// stays where the human is typing: keys meant for one machine never land on another. The

@@ -71,6 +71,12 @@ pub enum GitOp {
         /// What the working tree is compared with.
         against: Against,
     },
+    /// Free the worktree the folder is, one an agent works in under its clone's
+    /// `.claude/worktrees/` ([`GitDone::WorktreeRemoved`]). Refused in words while anything in
+    /// it is not committed or a terminal works in it. Its branch goes too once every commit on
+    /// it has landed in the clone's default branch, or its pull request merged at its tip; a
+    /// branch with work not landed stays, so nothing committed is lost.
+    RemoveWorktree,
 }
 
 /// What a [`GitOp`] did.
@@ -116,6 +122,13 @@ pub enum GitDone {
     /// [`ReviewScope::WorkingTree`](crate::thread::wire::ReviewScope::WorkingTree); why there is
     /// nothing to compare in [`Review::absent`].
     Changes(Box<Review>),
+    /// The worktree removed.
+    WorktreeRemoved {
+        /// The branch it had checked out, if one.
+        branch: Option<String>,
+        /// Whether that branch went too: it stays while it holds work not landed.
+        branch_removed: bool,
+    },
 }
 
 /// A pull request as its forge reports it through gh. The forge's words are kept as it spells

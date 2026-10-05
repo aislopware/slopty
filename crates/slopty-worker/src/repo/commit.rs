@@ -42,7 +42,14 @@ impl Programs {
 }
 
 /// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs`.
-pub async fn apply(programs: &Programs, repo: &str, op: GitOp) -> GitOutcome {
+/// `terminals` holds the directory of every terminal live on the worker, which a worktree's
+/// removal never pulls out from under.
+pub async fn apply(
+    programs: &Programs,
+    repo: &str,
+    op: GitOp,
+    terminals: &[PathBuf],
+) -> GitOutcome {
     let gh = programs.gh.as_deref();
     let Some(git) = programs.git.as_deref() else {
         return GitOutcome::Unavailable {
@@ -72,6 +79,16 @@ pub async fn apply(programs: &Programs, repo: &str, op: GitOp) -> GitOutcome {
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::RemoveWorktree => {
+            use super::worktrees::{Failed, Removed, free};
+            match free(git, gh, &root, terminals).await {
+                Ok(Removed { branch, branch_removed }) => {
+                    Ok(GitDone::WorktreeRemoved { branch, branch_removed })
+                }
+                Err(Failed::Other(said)) => Err(GitOutcome::Failed { said }),
+                Err(refused) => Err(GitOutcome::Refused { why: refused.to_string() }),
+            }
+        }
     };
     done.map_or_else(|o| o, GitOutcome::Done)
 }

@@ -71,6 +71,7 @@ mod toast;
 mod turns;
 mod unsaved;
 mod workers;
+mod worktrees;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -870,6 +871,8 @@ pub struct WorkspaceView {
     pending_focus_review: Option<slopty_proto::thread::ThreadId>,
     /// The review tiles: which are open, which this client asked for.
     reviews: reviews::Reviews,
+    /// The worktrees asked to go and not yet answered.
+    worktrees: worktrees::Asked,
     /// Text on its way to a composer not made yet.
     quotes: workers::Quotes,
     pending_focus_picker: bool,
@@ -1101,6 +1104,7 @@ impl WorkspaceView {
             pending_focus_folder: None,
             pending_focus_review: None,
             reviews: reviews::Reviews::default(),
+            worktrees: worktrees::Asked::default(),
             quotes: workers::Quotes::default(),
             pending_focus_picker: false,
             pending_focus_self: false,
@@ -1955,6 +1959,7 @@ impl gpui::Render for WorkspaceView {
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.plan, |el| el.on_action(cx.listener(Self::toggle_plan_first)))
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
+            .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
             .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
             .when(applies.screen, |el| {

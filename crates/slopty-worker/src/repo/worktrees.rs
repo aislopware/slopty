@@ -251,6 +251,49 @@ pub async fn remove(
     Ok(Removed { branch, branch_removed })
 }
 
+/// Free the worktree at `worktree` for the person, as [`remove`] does for a task.
+///
+/// What counts as landed is read from its clone: `origin`'s default branch and the branch the
+/// clone has checked out. A squash or a rebase merge leaves no commit `git cherry` matches, so a
+/// branch whose pull request merged at the commit it ends at, as the person's own `gh` says, counts
+/// as landed too. gh is asked only when the commits alone do not say so; without it the branch
+/// stays.
+///
+/// # Errors
+/// As [`remove`].
+pub async fn free(
+    git: &Path,
+    gh: Option<&Path>,
+    worktree: &Path,
+    terminals: &[PathBuf],
+) -> Result<Removed, Failed> {
+    let (tree, clone, branch) = {
+        let worktree = worktree.to_path_buf();
+        tokio::task::spawn_blocking(move || agent_worktree(&worktree))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))??
+    };
+    let mut landed = vec![DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+    if let Some(branch) = branch.filter(|_| gh.is_some())
+        && !landed_in(git, &clone, &branch, &landed).await
+        && merged_at_tip(git, gh, &tree).await
+    {
+        landed.push(branch);
+    }
+    remove(git, &tree, &landed, terminals).await
+}
+
+/// How `origin`'s default branch is named in a clone.
+const DEFAULT_BRANCH: &str = "origin/HEAD";
+
+/// Whether the pull request of the branch checked out at `tree` merged at the commit the
+/// branch ends at, as `gh` reads it. Anything gh cannot say is a no.
+async fn merged_at_tip(git: &Path, gh: Option<&Path>, tree: &Path) -> bool {
+    let Ok(tip) = bundle::run(git, tree, &["rev-parse", "HEAD"]).await else { return false };
+    let Ok(Some(pull)) = super::pull::status(gh, tree).await else { return false };
+    pull.state == "MERGED" && pull.head_commit == tip.trim()
+}
+
 /// `worktree`, resolved, if it is a linked worktree under its clone's `.claude/worktrees/`:
 /// itself, the clone's root, and the branch it has checked out.
 fn agent_worktree(worktree: &Path) -> Result<(PathBuf, PathBuf, Option<String>), Failed> {
@@ -504,5 +547,109 @@ mod tests {
         let refused = remove(git, &elsewhere, &landed, &[]).await;
         assert!(matches!(refused, Err(Failed::NotOne(_))), "the person's own: {refused:?}");
         assert!(elsewhere.exists());
+    }
+
+    /// A stand-in for gh in `dir`, as gh 2.102 answers from inside a linked worktree: `pr merge`
+    /// merges, deletes the remote branch, and skips the local one checked out there with a
+    /// warning; `pr view` says the pull request ends at the commit in `dir/tip` and stands as
+    /// `dir/state` says, `MERGED` once merged. It writes where it ran and what it was asked to
+    /// `dir/asked`. No real gh runs, so no one's GitHub sign-in is reached.
+    fn stand_in_gh(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let gh = dir.join("gh");
+        std::fs::write(dir.join("state"), "OPEN").expect("written");
+        let script = format!(
+            "#!/bin/sh\nd=\"{dir}\"\nprintf '%s: %s\\n' \"$(pwd -P)\" \"$*\" >> \"$d/asked\"\n\
+             case \"$1 $2\" in\n\
+             'pr merge') echo MERGED > \"$d/state\"\n\
+               echo \"! Branch is checked out in the current worktree ($(pwd -P)); skipping local delete\" >&2\n\
+               echo '✓ Squashed and merged pull request #7' ;;\n\
+             'pr view') printf '{{\"number\":7,\"state\":\"%s\",\"headRefOid\":\"%s\"}}\\n' \
+               \"$(cat \"$d/state\")\" \"$(cat \"$d/tip\")\" ;;\n\
+             *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+             esac\n",
+            dir = dir.display()
+        );
+        std::fs::write(&gh, script).expect("written");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        gh
+    }
+
+    /// The person's own worktree, made by "New worktree of", goes the way it would by hand:
+    /// refused in words while a terminal works in it or anything in it is not committed; its
+    /// pull request merged with `--delete-branch` from inside it, where gh leaves the local
+    /// branch checked out there; then freed, and its branch with it because gh says its pull
+    /// request merged at its tip, though the squash left no commit `git cherry` would match. A
+    /// worktree whose work has not landed goes and leaves its branch, so no commit is lost.
+    #[tokio::test]
+    async fn a_persons_worktree_is_freed_after_its_pull_request_merges_from_inside_it() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+
+        use crate::repo::commit::{Programs, apply};
+
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let made = make(git, &clone, "fix-login").await.expect("made");
+        let tree = made.path.clone();
+        for step in ["one", "two"] {
+            std::fs::write(tree.join(format!("{step}.txt")), step).expect("write");
+            git_in(&tree, &["add", "."]);
+            git_in(&tree, &["commit", "-q", "-m", step]);
+        }
+        std::fs::write(tmp.path().join("tip"), git_in(&tree, &["rev-parse", "HEAD"]))
+            .expect("write");
+        let programs = Programs { git: Some(git.to_path_buf()), gh: Some(stand_in_gh(tmp.path())) };
+        let at = tree.to_string_lossy().into_owned();
+        let free = |terminals: Vec<PathBuf>| {
+            let (programs, at) = (programs.clone(), at.clone());
+            async move { apply(&programs, &at, GitOp::RemoveWorktree, &terminals).await }
+        };
+
+        let busy = free(vec![tree.join("src")]).await;
+        assert!(
+            matches!(&busy, GitOutcome::Refused { why } if why.contains("a terminal works in")),
+            "{busy:?}"
+        );
+        std::fs::write(tree.join("draft.txt"), "half done").expect("write");
+        let dirty = free(Vec::new()).await;
+        assert!(
+            matches!(&dirty, GitOutcome::Refused { why } if why.contains("draft.txt")),
+            "{dirty:?}"
+        );
+        std::fs::remove_file(tree.join("draft.txt")).expect("removed");
+
+        let merge = GitOp::Merge { method: "squash".to_owned(), head: None, delete_branch: true };
+        let merged = apply(&programs, &at, merge, &[]).await;
+        assert!(matches!(&merged, GitOutcome::Done(GitDone::Merged { .. })), "{merged:?}");
+        let asked = std::fs::read_to_string(tmp.path().join("asked")).expect("asked");
+        assert!(
+            asked.lines().any(|l| l == format!("{at}: pr merge --squash --delete-branch")),
+            "gh merged from inside the worktree: {asked}"
+        );
+        // The forge squashes the branch into `main`: one new commit, neither of the branch's.
+        git_in(&clone, &["merge", "-q", "--squash", &made.branch]);
+        git_in(&clone, &["commit", "-q", "-m", "Fix the login (#7)"]);
+
+        let freed = free(Vec::new()).await;
+        let GitOutcome::Done(GitDone::WorktreeRemoved { branch, branch_removed }) = freed else {
+            panic!("not freed: {freed:?}")
+        };
+        assert_eq!((branch.as_deref(), branch_removed), (Some(made.branch.as_str()), true));
+        assert!(!tree.exists());
+        assert!(!has_branch(&clone, &made.branch));
+
+        let (open, open_branch) = agent_tree(&clone, "half-done");
+        let alone = Programs { git: Some(git.to_path_buf()), gh: None };
+        let kept = apply(&alone, &open.to_string_lossy(), GitOp::RemoveWorktree, &[]).await;
+        let GitOutcome::Done(GitDone::WorktreeRemoved { branch_removed, .. }) = kept else {
+            panic!("not freed: {kept:?}")
+        };
+        assert!(!branch_removed);
+        assert!(!open.exists());
+        assert!(has_branch(&clone, &open_branch), "its commit is on its branch alone");
     }
 }

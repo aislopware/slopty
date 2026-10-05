@@ -33,6 +33,9 @@ actions!(
         /// Review the changes of the focused folder's repository, or of the focused shell's,
         /// with no thread: what is not committed, and the whole branch.
         ReviewChanges,
+        /// Free the worktree the focused work is in: a folder's, or a thread's whose agent
+        /// has exited.
+        RemoveWorktree,
         /// Open the page a shell last asked to open that was held back in a notice.
         OpenLastOffer,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
@@ -334,6 +337,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Open file…", Box::new(OpenFile)),
         w("Open folder…", Box::new(OpenFolder)),
         w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
+        w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
         w("Enclosing folder", Box::new(crate::folder::OpenParent)),
         w("Save file", Box::new(crate::file::SaveFile)),
         w("Done with this file", Box::new(crate::file::FinishEdit)),
@@ -465,6 +469,8 @@ pub(super) struct Applies {
     pub plan: bool,
     /// A folder, or a shell in a repository: its changes can be reviewed.
     pub changes: bool,
+    /// Work in an agent's worktree, which can be removed.
+    pub worktree: bool,
 }
 
 impl super::WorkspaceView {
@@ -504,6 +510,7 @@ impl super::WorkspaceView {
             offer: self.has_offer(),
             plan: focused.is_some_and(|t| self.starting.plans(t.item)),
             changes: self.changes_here().is_some(),
+            worktree: self.worktree_here().is_some(),
         }
     }
 }

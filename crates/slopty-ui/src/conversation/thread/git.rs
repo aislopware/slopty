@@ -67,6 +67,11 @@ pub enum Said {
         /// What gh said.
         said: String,
     },
+    /// The worktree removed, and its branch with it unless that holds work not landed.
+    Freed {
+        /// What went and what stayed, in words.
+        said: String,
+    },
     /// Not tried, in Slopty's words, or a program it needs is missing.
     Refused {
         /// Why.
@@ -200,7 +205,8 @@ impl GitBook {
                 missed(repo, request, &asked.op, why, refused);
             }
         }
-        if !read {
+        // A worktree asked to go has no status to read again, whether it went or stayed.
+        if !read && asked.op != GitOp::RemoveWorktree {
             then.push(Then::Status);
         }
         let name = asked.repo;
@@ -276,6 +282,20 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             if let ReviewScope::WorkingTree(against) = review.scope {
                 repo.changes.insert(against, Arc::from(review));
             }
+        }
+        GitDone::WorktreeRemoved { branch, branch_removed } => {
+            let said = match branch {
+                Some(branch) if branch_removed => {
+                    format!("Removed the worktree and its branch {branch}")
+                }
+                Some(branch) => {
+                    format!(
+                        "Removed the worktree; kept its branch {branch}, which holds work not merged"
+                    )
+                }
+                None => "Removed the worktree".to_owned(),
+            };
+            repo.said = Some((request, Said::Freed { said }));
         }
     }
 }

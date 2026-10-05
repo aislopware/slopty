@@ -317,11 +317,17 @@ mod review {
         let index = std::fs::read(repo.join(".git/index")).unwrap();
         let programs = Programs { git: Some(git()), gh: None };
         let folder = repo.to_string_lossy().into_owned();
-        let changes =
-            async |against| match apply(&programs, &folder, GitOp::Changes { against }).await {
-                GitOutcome::Done(GitDone::Changes(review)) => *review,
-                other => panic!("{other:?}"),
-            };
+        let changes = async |against| match apply(
+            &programs,
+            &folder,
+            GitOp::Changes { against },
+            &[],
+        )
+        .await
+        {
+            GitOutcome::Done(GitDone::Changes(review)) => *review,
+            other => panic!("{other:?}"),
+        };
         let paths =
             |review: &Review| review.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
 
@@ -356,16 +362,17 @@ mod review {
         );
         std::fs::write(alone.join("draft.txt"), "draft\n").unwrap();
         let folder = alone.to_string_lossy().into_owned();
-        let none = match apply(&programs, &folder, GitOp::Changes { against: Against::Base }).await
-        {
-            GitOutcome::Done(GitDone::Changes(review)) => *review,
-            other => panic!("{other:?}"),
-        };
+        let none =
+            match apply(&programs, &folder, GitOp::Changes { against: Against::Base }, &[]).await {
+                GitOutcome::Done(GitDone::Changes(review)) => *review,
+                other => panic!("{other:?}"),
+            };
         assert_eq!(none.absent.as_deref(), Some(NO_BASE), "no main, no master, no origin");
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         let folder = outside.to_string_lossy().into_owned();
-        let refused = apply(&programs, &folder, GitOp::Changes { against: Against::Head }).await;
+        let refused =
+            apply(&programs, &folder, GitOp::Changes { against: Against::Head }, &[]).await;
         assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
     }
 

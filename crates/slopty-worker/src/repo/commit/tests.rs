@@ -45,7 +45,7 @@ fn git_only() -> Programs {
 }
 
 async fn done(repo: &Path, op: GitOp) -> GitDone {
-    match apply(&git_only(), &repo.to_string_lossy(), op).await {
+    match apply(&git_only(), &repo.to_string_lossy(), op, &[]).await {
         GitOutcome::Done(done) => done,
         other => panic!("{other:?}"),
     }
@@ -161,33 +161,41 @@ async fn a_refusal_is_said_in_git_s_own_words() {
     };
     let at = work.to_string_lossy().into_owned();
     std::fs::write(work.join("kept.txt"), "changed\n").expect("written");
-    assert!(refused(apply(git, &at, commit(&[], "m")).await).contains("choose the files"));
+    assert!(refused(apply(git, &at, commit(&[], "m"), &[]).await).contains("choose the files"));
     assert!(
-        refused(apply(git, &at, commit(&["kept.txt"], "  ")).await).contains("none is made up")
+        refused(apply(git, &at, commit(&["kept.txt"], "  "), &[]).await)
+            .contains("none is made up")
     );
-    assert!(refused(apply(git, &at, commit(&["../x"], "m")).await).contains("not a path inside"));
+    assert!(
+        refused(apply(git, &at, commit(&["../x"], "m"), &[]).await).contains("not a path inside")
+    );
     let nowhere = dir.path().to_string_lossy().into_owned();
-    assert!(refused(apply(git, &nowhere, GitOp::Status).await).contains("in no git repository"));
-    assert!(refused(apply(git, &at, GitOp::Push).await).contains("no remote"));
+    assert!(
+        refused(apply(git, &nowhere, GitOp::Status, &[]).await).contains("in no git repository")
+    );
+    assert!(refused(apply(git, &at, GitOp::Push, &[]).await).contains("no remote"));
 
     let hook = work.join(".git/hooks/pre-commit");
     std::fs::write(&hook, "#!/bin/sh\necho 'lint: kept.txt is not formatted' >&2\nexit 1\n")
         .expect("written");
     std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("executable");
-    let said = failed(apply(git, &at, commit(&["kept.txt"], "Change it")).await);
+    let said = failed(apply(git, &at, commit(&["kept.txt"], "Change it"), &[]).await);
     assert!(said.contains("lint: kept.txt is not formatted"), "{said}");
     std::fs::remove_file(&hook).expect("removed");
 
     git_in(&work, &["remote", "add", "origin", &bare.to_string_lossy()]);
-    assert!(matches!(apply(git, &at, GitOp::Push).await, GitOutcome::Done(_)));
+    assert!(matches!(apply(git, &at, GitOp::Push, &[]).await, GitOutcome::Done(_)));
     let other = dir.path().join("other");
     git_in(dir.path(), &["clone", "--quiet", &bare.to_string_lossy(), "other"]);
     std::fs::write(other.join("theirs.txt"), "theirs\n").expect("written");
     git_in(&other, &["add", "."]);
     git_in(&other, &["commit", "--quiet", "-m", "theirs"]);
     git_in(&other, &["push", "--quiet"]);
-    assert!(matches!(apply(git, &at, commit(&["kept.txt"], "Ours")).await, GitOutcome::Done(_)));
-    let said = failed(apply(git, &at, GitOp::Push).await);
+    assert!(matches!(
+        apply(git, &at, commit(&["kept.txt"], "Ours"), &[]).await,
+        GitOutcome::Done(_)
+    ));
+    let said = failed(apply(git, &at, GitOp::Push, &[]).await);
     assert!(said.contains("rejected"), "{said}");
 }

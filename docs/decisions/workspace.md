@@ -1542,9 +1542,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     recent folder in it. The tile says "in a new worktree of …" while it asks for the first
     message. The client names the worktree after the agent and the last six hex digits of its
     tile's id, the random end of a v7 id, so two starts a moment apart never share one.
-  - *Not freed here.* A project task's worktree is removed once its work is merged and clean.
-    A person's own has no such point, so it stays until the person removes it, as Claude Code
-    leaves one that holds work.
+  - *Freed by the person.* A project task's worktree is removed once its work is merged and
+    clean. A person's own has no such point, so it stays until the person removes it with
+    "Remove this worktree" (the entry "A person's worktree is freed on their word" below).
   - A folder in no repository is refused in words before any agent opens.
   - Tests: `slopty-worker` `repo::worktrees::tests::a_start_enters_its_worktree_where_its_folder_stood`,
     `slopty-workerd` `threads::a_start_in_a_worktree_opens_its_agent_there`,
@@ -1656,3 +1656,39 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     waited on a terminal's face by its session (`quote_to_agent`, `QuoteFor`) is deleted.
   - Test: `workspace::tests::attach_block::{a_block_from_a_shell_lands_in_the_last_agents_draft,
     a_block_goes_to_a_thread_tile_whatever_its_agent}`.
+
+- ✅ **A person's worktree is freed on their word** (2026-10-05, readiness 10-06 N13).
+  - *Why.* A worktree started from "New agent…" stayed forever: the removal existed only for a
+    project's tasks, and nothing on screen asked for it. A few parallel agents a day piled up
+    `.claude/worktrees/*` and their `worktree-*` branches.
+  - *Where.* "Remove this worktree" is offered while the focus works in an agent's worktree
+    under its clone's `.claude/worktrees/`: a folder or changes tile in it, or a thread's or a
+    review's tile whose agent works there. It asks `GitOp::RemoveWorktree` of the worktree's
+    root, read from any folder in it. A shell is not a way in: one standing there is what keeps
+    the worktree. A button on the thread's tray and on a folder tile come later; they sit in
+    files mid-change in another lane.
+  - *Refused in words while it holds work.* Here, while an agent that has not exited works in
+    it: an agent driven over its protocol has no terminal the worker could see. On the worker,
+    as for a task (`repo::worktrees::remove`), while a terminal works in it or anything in it is
+    not committed, with git's own lines. `git worktree remove` runs without `--force`, so git
+    refuses whatever this missed. Ignored files go with the folder, as they do by hand.
+  - *The branch.* It goes once every commit on it is in `origin`'s default branch or in the
+    branch the clone has checked out (`git cherry`, so a rebase counts). A squash merge leaves
+    no commit `git cherry` matches, so the branch also goes when the person's own `gh` says its
+    pull request merged at the commit the branch ends at; gh is asked only when the commits do
+    not settle it. Otherwise the branch stays and the notice says so, so no commit is lost.
+    Refusing the removal while the branch holds unmerged commits was the other choice. It was
+    turned down because the folder holds nothing the branch does not.
+  - *Merge from inside the worktree.* The commit sheet's merge runs gh in the worktree. gh
+    (2.102) merges, deletes the remote branch with `--delete-branch`, and skips the local branch
+    checked out there with a warning, so the merge never fails on it; the removal then takes
+    the branch, gh saying its pull request merged.
+  - *After.* What went and what stayed is said in a notice ("Removed the worktree; kept its
+    branch …, which holds work not merged"), and the folder and changes tiles in it close. A
+    removal answered either way asks no new status of a folder that may be gone.
+  - Tests: `slopty-worker`
+    `repo::worktrees::tests::a_persons_worktree_is_freed_after_its_pull_request_merges_from_inside_it`;
+    `slopty-ui`
+    `workspace::tests::worktrees::a_worktree_is_removed_from_a_folder_in_it_once_no_agent_works_there`,
+    `workspace::worktrees::tests::a_worktrees_root_is_read_from_any_folder_in_it`; goldens
+    `client_git_remove_worktree`, `worker_git_worktree_removed`.

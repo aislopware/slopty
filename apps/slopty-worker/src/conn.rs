@@ -300,6 +300,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     // heard after the connection drops, so a waiting program still gets its answer.
     tokio::spawn(crate::files::save_in_order(
         Arc::clone(&daemon.handoffs),
+        daemon.worker.clone(),
         hello.client,
         out.clone(),
         saved,

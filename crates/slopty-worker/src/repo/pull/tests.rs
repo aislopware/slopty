@@ -73,7 +73,7 @@ async fn a_pull_request_s_status_is_read_in_the_forge_s_words() {
     };
     let work = repo(dir.path());
     let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
-        apply(&programs, &work.to_string_lossy(), GitOp::PullStatus).await
+        apply(&programs, &work.to_string_lossy(), GitOp::PullStatus, &[]).await
     else {
         panic!("no pull request read")
     };
@@ -106,10 +106,10 @@ async fn a_branch_with_no_pull_request_reads_as_none() {
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
     let none = Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "none")) };
-    let read = apply(&none, &work, GitOp::PullStatus).await;
+    let read = apply(&none, &work, GitOp::PullStatus, &[]).await;
     assert_eq!(read, GitOutcome::Done(GitDone::PullStatus(None)));
     let without = Programs { git, gh: None };
-    let missing = apply(&without, &work, GitOp::PullStatus).await;
+    let missing = apply(&without, &work, GitOp::PullStatus, &[]).await;
     assert!(
         matches!(&missing, GitOutcome::Unavailable { program, .. } if program == "gh"),
         "{missing:?}"
@@ -131,7 +131,7 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
         delete_branch: true,
     };
     let GitOutcome::Done(GitDone::Merged { said, pull }) =
-        apply(&programs, &work, merge("Squash")).await
+        apply(&programs, &work, merge("Squash"), &[]).await
     else {
         panic!("not merged")
     };
@@ -143,7 +143,7 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
         Some("pr merge --squash --match-head-commit 0123abcd --delete-branch")
     );
 
-    let refused = apply(&programs, &work, merge("fast-forward")).await;
+    let refused = apply(&programs, &work, merge("fast-forward"), &[]).await;
     assert!(
         matches!(&refused, GitOutcome::Refused { why } if why.contains("merge, squash, rebase")),
         "{refused:?}"
@@ -151,7 +151,7 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
     assert_eq!(asked(dir.path()).len(), calls.len(), "gh not asked");
 
     let strict = Programs { git, gh: Some(stand_in(dir.path(), "refuse")) };
-    let said = apply(&strict, &work, merge("merge")).await;
+    let said = apply(&strict, &work, merge("merge"), &[]).await;
     assert!(
         matches!(&said, GitOutcome::Failed { said } if said.contains("base branch policy")),
         "{said:?}"
