@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -18,7 +18,9 @@ Group │ scenario:bash run echo hi
 Heading │ terminal scenario:bash run echo hi
 Image │ Claude Code
 Label │ ~
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

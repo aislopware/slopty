@@ -758,7 +758,7 @@ pub struct WorkspaceView {
     _keys: Subscription,
     /// Window titles the picker or a listing gave (the registry stores ids).
     titles: HashMap<ItemId, String>,
-    /// The quiet line about the server in the titlebar ("server unreachable"), if any.
+    /// The quiet line about the server in the titlebar ("server offline"), if any.
     server_status: Option<SharedString>,
     /// Long shell commands that finished unwatched, by session.
     finished: HashMap<SessionId, Finished>,
@@ -828,6 +828,8 @@ pub struct WorkspaceView {
     turns: turns::Turns,
     /// The app's rows in the "…" menu.
     more_entries: Vec<MenuEntry>,
+    /// The app's rows in the server readout's menu.
+    server_entries: Vec<MenuEntry>,
     show_stats: bool,
     /// The remote desktops' own state: this device's display key, the wait of a display
     /// following its tile, the system shortcuts.
@@ -901,6 +903,8 @@ pub struct WorkspaceView {
     app_active: bool,
     /// Remote tiles shown in windows of their own.
     popouts: popout::PopOuts,
+    /// The window's title as last set: the workspace on show ([`Self::retitle_window`]).
+    window_title: String,
     /// Workers told this client wants their clipboard.
     watching: HashSet<WorkerKey>,
     /// Which workers the clipboard is shared with, as the settings say.
@@ -1069,6 +1073,7 @@ impl WorkspaceView {
             approvals: approvals::Approvals::default(),
             turns: turns::Turns::default(),
             more_entries: Vec::new(),
+            server_entries: Vec::new(),
             show_stats: false,
             desktop: desktop::Desktop::default(),
             toast: None,
@@ -1116,6 +1121,7 @@ impl WorkspaceView {
             clip: None,
             app_active: true,
             popouts: popout::PopOuts::default(),
+            window_title: String::new(),
             watching: HashSet::new(),
             clip_sharing: slopty_settings::ClipboardSettings::default(),
             clip_unshared: Rc::default(),
@@ -1311,6 +1317,12 @@ impl WorkspaceView {
     pub fn set_more_menu(&mut self, entries: Vec<MenuEntry>, cx: &mut Context<Self>) {
         self.more_entries = entries;
         cx.notify();
+    }
+
+    /// The app's rows in the server readout's menu, while the server is offline: try it again
+    /// now, connect to another.
+    pub fn set_server_menu(&mut self, entries: Vec<MenuEntry>) {
+        self.server_entries = entries;
     }
 
     /// Save the layout to `path` whenever it changes (debounced).
@@ -1795,6 +1807,20 @@ impl WorkspaceView {
     }
 }
 
+impl WorkspaceView {
+    /// The window is called by the workspace on show, as a document window is by its
+    /// document: the Window menu, Mission Control, cycling the windows by key and the screen
+    /// reader tell two windows apart by it, where every one was the app's name. Set only when it
+    /// changes.
+    fn retitle_window(&mut self, window: &mut Window) {
+        let title = self.workspace_name();
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+    }
+}
+
 impl gpui::Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         use gpui::prelude::FluentBuilder as _;
@@ -1820,6 +1846,7 @@ impl gpui::Render for WorkspaceView {
             self.renders = self.renders.saturating_add(1);
         }
         self.frame_projects.hold(true, cx);
+        self.retitle_window(window);
         self.reduced = cx.reduce_motion();
         let animate = self.animate && !self.reduced;
         if self.layout.config().animate != animate {

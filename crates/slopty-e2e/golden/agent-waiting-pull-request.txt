@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
 Group │ Where
@@ -14,7 +14,9 @@ Link │ Pull request 1234, approved
 Label │ Worktree fix-build on worktree-fix-build
 Image │ Waiting
 Status │ Waiting on cargo test
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

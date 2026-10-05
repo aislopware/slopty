@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Button │ Navigator
 Group │ Where
 Button │ e2e-worker

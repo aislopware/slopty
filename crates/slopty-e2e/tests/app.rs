@@ -784,7 +784,7 @@ mod tests {
     }
 
     fn server_unreachable(d: &slopty_e2e::Dump) -> bool {
-        d.a11y_node("Status", Some("Server unreachable")).is_some()
+        d.a11y_node("Button", Some("Server offline")).is_some()
     }
 
     /// The app finds its worker through the server, opens a terminal on it directly, keeps

@@ -107,7 +107,7 @@ async fn the_first_run_offers_one_way_in() {
     // The look on the tailnet (the harness's empty one) has ended, so the golden does not
     // depend on which side of it the frame landed.
     drv.wait_for("the connect panel, done looking", STEP, |d| {
-        d.adding && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
+        d.adding && d.a11y_node("Status", Some("No Slopty server found yet")).is_some()
     })
     .await
     .unwrap();
@@ -144,7 +144,7 @@ async fn the_first_run_offers_one_way_in() {
     let dump = drv
         .wait_for("the add-a-machine dialog, done looking", STEP, |d| {
             d.a11y_node("Heading", Some("Add a machine")).is_some()
-                && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
+                && d.a11y_node("Status", Some("No machine found yet")).is_some()
         })
         .await
         .unwrap();
@@ -214,7 +214,7 @@ async fn this_mac_walks_its_checklist() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let dump = drv
         .wait_for("the connect panel, done looking", STEP, |d| {
-            d.adding && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
+            d.adding && d.a11y_node("Status", Some("No Slopty server found yet")).is_some()
         })
         .await
         .unwrap();

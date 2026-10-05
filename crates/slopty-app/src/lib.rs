@@ -432,11 +432,14 @@ impl Search {
             Self::Answered { running: false, .. } => {
                 self.offers(mode).is_empty().then_some(NOT_RUNNING)
             }
-            Self::Answered { .. } => self.offers(mode).is_empty().then_some(NOTHING_ANSWERED),
+            Self::Answered { .. } => self.offers(mode).is_empty().then_some(match mode {
+                Panel::Server => NO_SERVER_FOUND,
+                Panel::Worker => NO_MACHINE_FOUND,
+            }),
         }
     }
 
-    /// What follows [`Self::words`] on its line: what to do about it. Nothing while it looks.
+    /// What the line under the scan's row says: what to do about it. Nothing while it looks.
     const fn next_step(&self, mode: Panel) -> Option<&'static str> {
         match (self, mode) {
             (Self::Looking, _) => None,
@@ -444,17 +447,25 @@ impl Search {
                 Some("Start it, or type an address on your VPN.")
             }
             (Self::Answered { .. }, Panel::Server) => {
-                Some("Start the Slopty server on a machine there.")
+                Some("Run the Slopty server on any machine there, then scan again.")
             }
-            (Self::Answered { .. }, Panel::Worker) => Some("Install Slopty on a machine there."),
+            (Self::Answered { .. }, Panel::Worker) => {
+                Some("Install Slopty on a machine there, then scan again.")
+            }
         }
     }
 }
 
 /// The panel's word while it probes the tailnet.
 const LOOKING: &str = "Looking on your tailnet\u{2026}";
-/// The panel's word when nothing on the tailnet answered as a server or a worker.
-const NOTHING_ANSWERED: &str = "Nothing answered on your tailnet";
+/// The scan's row when no server on the tailnet answered.
+const NO_SERVER_FOUND: &str = "No Slopty server found yet";
+/// The scan's row when no machine on the tailnet answered.
+const NO_MACHINE_FOUND: &str = "No machine found yet";
+/// The scan's way to look again.
+const SCAN_AGAIN: &str = "Scan again";
+/// The scan's section, as its label says it.
+const ON_TAILNET: &str = "On your tailnet";
 /// The panel's word when this Mac has no tailnet to look on: Tailscale is off or absent.
 const NOT_RUNNING: &str = "Tailscale is not running on this Mac";
 /// The first run's foot: why there is no pairing code, key or password to find.
@@ -1213,7 +1224,35 @@ impl Workspace {
             }),
         });
         self.view.update(cx, |v, cx| v.set_more_menu(entries, cx));
+        let server_menu = Self::server_menu(cx);
+        self.view.update(cx, |v, _cx| v.set_server_menu(server_menu));
         self.refresh_hosts(cx);
+    }
+
+    /// What the server's readout offers while the server is offline: try it now, or connect
+    /// to another.
+    fn server_menu(cx: &Context<Self>) -> Vec<MenuEntry> {
+        let this = cx.entity().downgrade();
+        let again = this.clone();
+        vec![
+            MenuEntry {
+                group: MenuGroup::Connections,
+                label: "Retry now".into(),
+                detail: SharedString::default(),
+                run: Rc::new(move |_window, cx| {
+                    let _gone = again.update(cx, |ws, _cx| ws.resume_server());
+                }),
+            },
+            MenuEntry {
+                group: MenuGroup::Connections,
+                label: "Connect to another server".into(),
+                detail: SharedString::default(),
+                run: Rc::new(move |window, cx| {
+                    let _gone =
+                        this.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+                }),
+            },
+        ]
     }
 
     /// What a machine's menu in the navigator can do to each worker: dial it now, wake one the
@@ -1626,6 +1665,17 @@ impl Workspace {
         } else {
             window.focus(&adding.focus, cx);
         }
+    }
+
+    /// "Scan again": look on the tailnet once more, the section saying so meanwhile.
+    fn scan_again(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(adding) = &mut self.adding else { return };
+        if adding.search.is_none() || adding.search == Some(Search::Looking) {
+            return;
+        }
+        adding.search = Some(Search::Looking);
+        self.look_on_tailnet(window, cx);
+        cx.notify();
     }
 
     /// Look for servers and workers on the tailnet, saying so, and offer those that answer.
@@ -2682,34 +2732,51 @@ impl Workspace {
         let theme = &self.theme;
         let (s, spacing, ty) = (theme.surfaces, theme.spacing, &theme.typography);
         let section = div().id("add-worker-tailnet").flex().flex_col().gap(px(spacing.sm));
+        let label = panel_label(theme, "add-worker-tailnet-label", ON_TAILNET);
+        // Nothing to offer: the section still stands, its one row saying what the scan found
+        // and offering to look again, a line under it on what to do about it.
         if let Some(words) = search.words(mode) {
-            let mark = px(ty.small());
+            let size = px(ty.small());
             let mark = match search {
                 Search::Looking => {
-                    Some(status_icon(theme, Status::Running, mark, hsla(s.text_muted)))
+                    status_icon(theme, Status::Running, size, hsla(s.text_muted)).into_any_element()
                 }
-                Search::Answered { running: false, .. } => Some(
+                Search::Answered { running: false, .. } => {
                     icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted))
-                        .size(mark)
-                        .into_any_element(),
-                ),
-                Search::Answered { .. } => None,
+                        .size(size)
+                        .into_any_element()
+                }
+                Search::Answered { .. } => {
+                    icon(theme, Symbol::Magnifyingglass, IconSize::Inline, hsla(s.text_muted))
+                        .size(size)
+                        .into_any_element()
+                }
             };
             let step = search.next_step(mode);
-            let said = step.map_or_else(|| words.to_owned(), |step| format!("{words}. {step}"));
-            // Announced as the words, the step its description, shown as one run of text.
-            let line = kit::meta(div(), theme)
+            let again = (*search != Search::Looking).then(|| {
+                kit::button(theme, "add-worker-scan", SCAN_AGAIN, ButtonKind::Secondary)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.scan_again(window, cx)))
+            });
+            let row = kit::row(theme, kit::Row::One)
                 .id("add-worker-search")
                 .debug_selector(|| "add-worker-search".to_owned())
                 .role(Role::Status)
                 .aria_label(words)
                 .when_some(step, gpui::StatefulInteractiveElement::aria_description)
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .children(mark)
-                .child(div().flex_1().min_w_0().child(said));
-            return section.child(line).into_any_element();
+                .gap(px(spacing.sm))
+                .child(div().flex_none().child(mark))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(ty.ui_size))
+                        .text_color(hsla(s.text_secondary))
+                        .child(words),
+                )
+                .children(again);
+            let frame = kit::card(theme).flex().flex_col().p(px(spacing.xxs)).child(row);
+            let step = step.map(|step| kit::meta(div(), theme).child(step));
+            return section.child(label).child(frame).children(step).into_any_element();
         }
         let rows = search.offers(mode).into_iter().enumerate().map(|(ix, (host, offer))| {
             let pressed = offer.clone();
@@ -2719,7 +2786,6 @@ impl Workspace {
         });
         // A card: the rows' radius plus the pad round them, so the corners nest.
         let frame = kit::card(theme).flex().flex_col().p(px(spacing.xxs)).children(rows);
-        let label = panel_label(theme, "add-worker-tailnet-label", "On your tailnet");
         section.child(label).child(frame).into_any_element()
     }
 
@@ -4892,7 +4958,20 @@ mod tests {
             let empty = net::Tailnet { running: true, ..net::Tailnet::default() };
             ws.update(cx, |ws, cx| ws.offer_found(empty, window, cx));
         });
-        assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
+        assert_eq!(words(cx).as_deref(), Some(NO_SERVER_FOUND));
+        cx.run_until_parked();
+        let row = cx.debug_bounds("add-worker-search").expect("the scan's row");
+        let again = cx.debug_bounds("add-worker-scan").expect("its way to look again");
+        assert!(row.contains(&again.center()), "at the row's end: {row:?} {again:?}");
+        let label = cx.debug_bounds("add-worker-tailnet-label").expect("the section's label");
+        assert!(label.bottom() <= row.top(), "a section, headed");
+        cx.simulate_click(again.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(words(cx).as_deref(), Some(LOOKING), "looking again");
+        cx.update(|window, cx| {
+            let empty = net::Tailnet { running: true, ..net::Tailnet::default() };
+            ws.update(cx, |ws, cx| ws.offer_found(empty, window, cx));
+        });
         let label =
             ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| address_label(a.search.as_ref())));
         assert_eq!(label, Some("Server address"), "no \"or\" with nothing before it");

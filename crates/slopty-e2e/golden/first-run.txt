@@ -1,8 +1,9 @@
-Window │ Slopty
+Window │ New workspace
 Label │ Slopty
 Heading │ Choose where to work
 Button │ Use this Mac
 Heading │ Connect to an existing server
-Status │ Nothing answered on your tailnet
+Status │ No Slopty server found yet
+Button │ Scan again
 TextInput │ Server address (focused)
 Button │ Connect

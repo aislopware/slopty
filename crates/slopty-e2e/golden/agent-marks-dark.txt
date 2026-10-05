@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ atlas
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -38,7 +38,9 @@ Group │ Claude Code
 Heading │ terminal Claude Code
 Image │ Claude Code
 Label │ atlas
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
@@ -65,7 +67,9 @@ Group │ Claude Code 2
 Heading │ terminal Claude Code 2
 Image │ Claude Code
 Image │ Working
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

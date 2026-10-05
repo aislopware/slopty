@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -35,7 +35,10 @@ Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ terminal Orchestrator
 Image │ Claude Code
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
+RadioButton │ Board
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Project board │ Working 1, Up next 1 (focused)
@@ -64,7 +67,9 @@ Image │ Claude Code
 Link │ Pull request 42, changes requested
 Label │ Worktree slopty-board-1 on worktree-slopty-board-1
 Image │ Working
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

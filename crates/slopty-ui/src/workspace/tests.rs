@@ -1491,14 +1491,14 @@ fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
         v.disconnect_worker(key, WorkerStatus::Unreachable, cx);
-        v.set_server_status(Some("server unreachable".into()), cx);
+        v.set_server_status(Some("server offline".into()), cx);
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("readout-server").is_some());
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let labels: Vec<&str> = tree.iter().filter_map(|n| n.label.as_deref()).collect();
     assert!(labels.contains(&"studio, unreachable"), "{labels:#?}");
-    assert!(labels.contains(&"Server unreachable"), "{labels:#?}");
+    assert!(labels.contains(&"Server offline"), "{labels:#?}");
     let (server, bar) = (
         cx.debug_bounds("readout-server").expect("drawn"),
         cx.debug_bounds("titlebar").expect("drawn"),
@@ -1506,6 +1506,24 @@ fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
     assert!(bar.contains(&server.center()), "in the title bar: {server:?} {bar:?}");
     let readouts = cx.debug_bounds("readouts").expect("drawn");
     assert!(server.left() - readouts.left() < px(1.0), "first among them: {server:?}");
+    // Pressed, it offers what can be done, the app's rows, ending on its own right edge.
+    let retried = Rc::new(std::cell::Cell::new(false));
+    let seen = Rc::clone(&retried);
+    view.update(cx, |v, _cx| {
+        v.set_server_menu(vec![MenuEntry {
+            group: MenuGroup::Connections,
+            label: "Retry now".into(),
+            detail: SharedString::default(),
+            run: Rc::new(move |_window, _cx| seen.set(true)),
+        }]);
+    });
+    cx.simulate_click(server.center(), Modifiers::none());
+    cx.run_until_parked();
+    let retry = cx.debug_bounds("menu-Retry now").expect("its menu");
+    assert!(retry.right() <= server.right() + px(1.0), "under the readout: {retry:?}");
+    cx.simulate_click(retry.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(retried.get(), "the row runs");
 
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();

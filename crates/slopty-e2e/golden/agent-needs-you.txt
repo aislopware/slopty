@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
 Group │ Where
@@ -11,7 +11,9 @@ Group │ Claude Code
 Heading │ terminal Claude Code
 Image │ Claude Code
 Label │ ~
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
@@ -25,7 +27,9 @@ Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
 Image │ Claude Code
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

@@ -1,4 +1,4 @@
-Window │ Slopty (focused)
+Window │ e2e-worker (focused)
 Group │ Workspace
 Button │ Navigator
 Group │ Where
@@ -15,7 +15,8 @@ Group
 Terminal │ shell │ ~ %
 Heading │ Add a machine
 Button │ Use this Mac
-Status │ Nothing answered on your tailnet
+Status │ No machine found yet
+Button │ Scan again
 Button │ Connect a phone or iPad
 Button │ Cancel
 Status │ Connected to e2e-server

@@ -417,7 +417,7 @@ impl WorkspaceView {
         }
     }
 
-    /// The quiet line about the server in the titlebar ("server unreachable"); `None` hides
+    /// The quiet line about the server in the titlebar ("server offline"); `None` hides
     /// it.
     pub fn set_server_status(&mut self, text: Option<String>, cx: &mut Context<Self>) {
         let text = text.map(gpui::SharedString::from);

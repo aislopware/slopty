@@ -94,6 +94,8 @@ pub(super) enum MenuKind {
     More,
     /// A machine's "…" in the navigator: what it says of itself, and what can be done to it.
     Machine(WorkerKey),
+    /// The server's readout while it is offline: try it now, or another server.
+    Server,
 }
 
 /// What the title bar's empty span asks of the window, as a native title bar does.
@@ -603,6 +605,7 @@ impl WorkspaceView {
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Machine(key) => self.machine_entries(key, &entity, cx),
             MenuKind::Workspaces => self.workspace_entries(&entity),
+            MenuKind::Server => self.server_entries.clone(),
             MenuKind::Checkouts => self.checkout_entries(&entity),
             // The palette's names for the same actions, which the rows run as the keys do.
             MenuKind::New => {
@@ -682,6 +685,12 @@ impl WorkspaceView {
                             MenuKind::New | MenuKind::Workspaces | MenuKind::Checkouts => {
                                 left(el.top(under_bar))
                             }
+                            // The server's readout sits among the trailing ones: its menu ends
+                            // on the readout's right edge.
+                            MenuKind::Server => el.top(under_bar).right(at.map_or_else(
+                                || px(spacing.inset()) + safe.right,
+                                |b| window.viewport_size().width - b.right(),
+                            )),
                             MenuKind::Machine(_) => {
                                 left(el.top(at.map_or(under_bar, |b| b.bottom() + px(gap))))
                             }
@@ -740,5 +749,6 @@ const fn menu_name(which: MenuKind) -> &'static str {
         MenuKind::Machine(_) => "Machine",
         MenuKind::Workspaces => "Workspaces",
         MenuKind::Checkouts => "Checkouts",
+        MenuKind::Server => "Server",
     }
 }

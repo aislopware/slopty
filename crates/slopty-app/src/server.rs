@@ -26,7 +26,7 @@ use crate::workers::{WorkerSlot, worker_key};
 use crate::{Workspace, net};
 
 /// The title bar's word while the server does not answer.
-pub(crate) const UNREACHABLE: &str = "Server unreachable";
+pub(crate) const UNREACHABLE: &str = "Server offline";
 /// The title bar's word while the server answers on a different build.
 pub(crate) const OTHER_BUILD: &str = "Server runs a different build";
 /// The palette's line that brings the server to this build.

@@ -1,4 +1,4 @@
-Window │ Slopty (focused)
+Window │ New workspace (focused)
 Label │ Slopty
 Heading │ Use this Mac
 List │ Use this Mac

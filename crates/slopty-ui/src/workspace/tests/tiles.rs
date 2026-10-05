@@ -1042,16 +1042,17 @@ fn the_overview_words_wait_for_the_zoom() {
     assert!(overview_words(gpui::div(), "w", false, true).is_none(), "closing: gone");
 }
 
-/// The server's word says what it costs, to a screen reader and under the pointer.
+/// The server's word says what it costs, to a screen reader and under the pointer, and is a
+/// button: pressed, it offers what can be done.
 #[gpui::test]
 fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update_in(cx, |v, _w, cx| v.set_server_status(Some("server unreachable".into()), cx));
+    view.update_in(cx, |v, _w, cx| v.set_server_status(Some("server offline".into()), cx));
     cx.run_until_parked();
-    let server = tree(cx).into_iter().find(|n| n.is("Status", Some("Server unreachable")));
+    let server = tree(cx).into_iter().find(|n| n.is("Button", Some("Server offline")));
     let server = server.expect("the server's word");
     assert_eq!(server.description.as_deref(), Some("Machines you reach directly still work"));
     assert!(cx.debug_bounds("readout-server").is_some(), "drawn");

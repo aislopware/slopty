@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -18,7 +18,9 @@ Group │ The header clips its chips on a narrow window, as here.
 Heading │ terminal The header clips its chips on a narrow window, as here.
 Image │ Claude Code
 Label │ ~
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

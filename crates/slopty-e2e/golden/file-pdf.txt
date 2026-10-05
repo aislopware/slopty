@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ project
 Group │ Workspace
 Button │ Navigator
 Group │ Where

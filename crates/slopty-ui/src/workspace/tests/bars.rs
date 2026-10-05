@@ -100,6 +100,9 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
         cx.notify();
     });
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
+    cx.run_until_parked();
+    let titled = tree(cx).into_iter().any(|n| n.is("Window", Some("release")));
+    assert!(titled, "the window is called by the workspace on show, not the app's name");
 }
 
 /// The title bar's readouts count the ports forwarded here, which list them, before the bell;

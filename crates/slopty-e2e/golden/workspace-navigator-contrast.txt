@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator

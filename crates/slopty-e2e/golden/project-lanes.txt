@@ -1,4 +1,4 @@
-Window │ Slopty
+Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -34,7 +34,10 @@ Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ terminal Orchestrator
 Image │ Claude Code
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
+RadioButton │ Board
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
@@ -62,7 +65,9 @@ Button │ Send
 Group │ #1 Mirror the server's projects
 Heading │ terminal #1 Mirror the server's projects
 Image │ Claude Code
-Button │ Show terminal
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread

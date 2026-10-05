@@ -266,23 +266,36 @@ impl WorkspaceView {
         let spacing = theme.spacing;
 
         // A state is a dot of its fill beside its words. Out of reach is muted, since `warn`
-        // means "needs you" alone; what it costs is said under the pointer.
+        // means "needs you" alone; what it costs is said under the pointer. Pressed, it offers
+        // what can be done: try the server now, or connect to another.
         let server = self.server_status.clone().map(|text| {
             let text = SharedString::from(sentence(&text));
             let hint_theme = Rc::new(theme.clone());
-            readout("readout-server", text.clone())
+            let at = Rc::clone(&self.anchors.at);
+            let measure = gpui::canvas(
+                move |bounds, _window, _cx| {
+                    at.borrow_mut().insert(super::titlebar::MenuKind::Server, bounds);
+                },
+                |_bounds, (), _window, _cx| {},
+            )
+            .absolute()
+            .inset_0();
+            let el = button("readout-server", text.clone(), theme)
+                .relative()
                 .aria_description(SERVER_DOWN_MEANS)
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
+                .aria_expanded(self.menu == Some(super::titlebar::MenuKind::Server))
                 .text_color(hsla(s.text_secondary))
+                .child(measure)
                 .child(state_dot(theme, s.text_muted))
                 .child(text)
                 .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let theme = Rc::clone(&hint_theme);
                     cx.new(|_| kit::Hint::new(SERVER_DOWN_MEANS, "", theme)).into()
-                })
+                });
+            tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
+                this.toggle_menu(super::titlebar::MenuKind::Server, window, cx);
+            }))
         });
         // The focused machine's link on a DERP relay that has held: in words, quiet, with its
         // fix under the pointer. The navigator's row names the relay; this says what to do.
