@@ -73,7 +73,6 @@ mod turns;
 mod unsaved;
 mod workers;
 mod worktrees;
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -105,6 +104,7 @@ pub(crate) use tile::{
     SESSION_ENDED, TAKE, TAKE_OVER,
 };
 pub use tile::{COPY_COMMAND, cwd_tail, file_title};
+pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
 
 /// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
 /// badge's description and what "+" is called.

@@ -4,7 +4,7 @@
 use slopty_proto::RequestId;
 use slopty_proto::git::{GitDone, GitOp, GitOutcome};
 use slopty_proto::thread::Cursor;
-use slopty_proto::thread::wire::TableFrame;
+use slopty_proto::thread::wire::{TableFrame, ThreadFrame};
 
 use super::*;
 use crate::workspace::actions::RemoveWorktree;
@@ -110,4 +110,77 @@ fn a_worktree_is_removed_from_a_folder_in_it_once_no_agent_works_there(cx: &mut 
         })
         .collect();
     assert_eq!(closed, [ItemOp::Remove(folder.item)], "the folder in it closes, the other stays");
+}
+
+/// The exited agent's thread offers "Remove worktree" beside its way back, and the folder tile
+/// in the worktree "Remove this worktree" in its path bar, an icon named for it. Either asks the
+/// worktree's root of its worker, and the worker's refusal of work not committed is said in
+/// words, the worktree kept. A live agent's thread offers no button.
+#[gpui::test]
+fn the_exited_thread_and_the_folder_in_a_worktree_offer_its_removal(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.cwd = format!("{ROOT}/src");
+    state.meta.terminal = None;
+    let thread = state.meta.id;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    let show = |state: &slopty_proto::thread::ThreadState, seq, cx: &mut VisualTestContext| {
+        let rows = TableFrame::Snapshot {
+            cursor: Cursor { epoch: 1, seq },
+            rows: vec![state.row(WallMs::ZERO)],
+        };
+        view.update_in(cx, |v, _w, cx| v.thread_table(key, &rows, cx));
+        let frame = ThreadFrame::Snapshot {
+            cursor: Cursor { epoch: 1, seq },
+            state: Box::new(state.clone()),
+        };
+        view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame, cx));
+        cx.run_until_parked();
+    };
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    show(&state, 1, cx);
+    assert!(cx.debug_bounds("thread-remove-worktree").is_none(), "not while its agent runs");
+
+    state.status.liveness = slopty_proto::thread::Liveness::Exited { resumable: true };
+    show(&state, 2, cx);
+    studio.drain();
+    let at = cx.debug_bounds("thread-remove-worktree").expect("beside the way back");
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+    let asked = removals(&mut studio);
+    let [(request, repo)] = asked.as_slice() else { panic!("one removal: {asked:?}") };
+    assert_eq!(repo, ROOT, "the worktree's root, from the folder the agent worked in");
+    let why = "/w/atlas/.claude/worktrees/fix-login has changes not committed: M src/lib.rs";
+    let refused = GitOutcome::Refused { why: why.to_owned() };
+    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, refused, cx));
+    cx.run_until_parked();
+    let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert!(told.starts_with("Kept the worktree: ") && told.contains("not committed"), "{told}");
+
+    let folder = arrives(&view, cx, &studio, ItemKind::Folder { path: ROOT.to_owned() }, 2);
+    let listed = slopty_proto::folder::Listing::Listed {
+        dir: ROOT.to_owned(),
+        entries: Vec::new(),
+        total: 0,
+    };
+    view.update_in(cx, |v, _w, cx| v.folder_listed(key, ROOT, &listed, cx));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Button", Some(REMOVE_WORKTREE))), "named: {nodes:#?}");
+    let button = leak(format!("folder-remove-worktree-{}", folder.item.as_uuid()));
+    let at = cx.debug_bounds(button).expect("in the folder's path bar");
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+    let asked = removals(&mut studio);
+    let [(_, repo)] = asked.as_slice() else { panic!("one removal: {asked:?}") };
+    assert_eq!(repo, ROOT);
+}
+
+fn leak(selector: String) -> &'static str {
+    Box::leak(selector.into_boxed_str())
 }

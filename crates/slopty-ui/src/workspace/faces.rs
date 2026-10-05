@@ -1205,6 +1205,7 @@ impl WorkspaceView {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
                 }
             }
+            ThreadViewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, &root, cx),
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
@@ -1269,6 +1270,11 @@ impl WorkspaceView {
             ThreadViewEvent::PickFiles => {
                 if let Some(tile) = self.tile_of_session(session) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
+            ThreadViewEvent::RemoveWorktree(root) => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.remove_worktree_at(key, &root, cx);
                 }
             }
             ThreadViewEvent::FindFiles { root, query } => {

@@ -1679,8 +1679,14 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     under its clone's `.claude/worktrees/`: a folder or changes tile in it, or a thread's or a
     review's tile whose agent works there. It asks `GitOp::RemoveWorktree` of the worktree's
     root, read from any folder in it. A shell is not a way in: one standing there is what keeps
-    the worktree. A button on the thread's tray and on a folder tile come later; they sit in
-    files mid-change in another lane.
+    the worktree.
+  - *Buttons* (2026-10-06). Where it is wanted at a glance, the removal is a button too, and it
+    takes no shortcut of its own. A thread whose agent exited offers "Remove worktree" beside
+    its way back (the exited strip, or the line over a composer that starts the agent again),
+    once its agent worked in a worktree. A folder tile in one carries an icon in its path bar,
+    named "Remove this worktree" for its tooltip and for VoiceOver. Both go the palette line's
+    way, refusals included. A live agent's thread offers none, because nothing could free the
+    worktree while it runs.
   - *Refused in words while it holds work.* Here, while an agent that has not exited works in
     it: an agent driven over its protocol has no terminal the worker could see. On the worker,
     as for a task (`repo::worktrees::remove`), while a terminal works in it or anything in it is
@@ -1704,6 +1710,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `repo::worktrees::tests::a_persons_worktree_is_freed_after_its_pull_request_merges_from_inside_it`;
     `slopty-ui`
     `workspace::tests::worktrees::a_worktree_is_removed_from_a_folder_in_it_once_no_agent_works_there`,
+    `workspace::tests::worktrees::the_exited_thread_and_the_folder_in_a_worktree_offer_its_removal`,
     `workspace::worktrees::tests::a_worktrees_root_is_read_from_any_folder_in_it`; goldens
     `client_git_remove_worktree`, `worker_git_worktree_removed`.
 

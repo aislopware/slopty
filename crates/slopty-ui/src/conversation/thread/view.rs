@@ -158,6 +158,8 @@ pub enum ThreadViewEvent {
     },
     /// Show the system's picker; the files picked are attached as a drop on the tile is.
     PickFiles,
+    /// Free the worktree the thread's exited agent worked in, at this root.
+    RemoveWorktree(String),
     /// Open the screen the agent drives beside the thread, to watch it and take control.
     Watch {
         /// The thread.

@@ -9,6 +9,10 @@
 //!   the same thread, `resume <thread>` in Codex's own words, which brings the person's app-server
 //!   up with Codex's published command and takes the thread up again there.
 //! - **An agent that cannot load its sessions** has nothing to go on with ([`Gone::Over`]).
+//!
+//! An exited agent that worked in a worktree of its own (under its clone's `.claude/worktrees/`)
+//! offers to free it beside: "Remove worktree", which the workspace asks of the worker and which
+//! is refused in words while anything there is not committed or another agent works in it.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -19,10 +23,13 @@ use gpui::{
 use slopty_proto::thread::wire::Start;
 use slopty_proto::thread::{AgentId, Drive, Liveness, ThreadState};
 
-use super::{ThreadView, agent_name};
+use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
 use crate::icons::Symbol;
 use crate::kit::ButtonKind;
+
+/// The button that frees an exited agent's worktree.
+pub const REMOVE_WORKTREE: &str = "Remove worktree";
 
 /// What `claude` takes to go on with a session: `--resume <id>`
 /// (`slopty_agent::resume::RESUME_FLAG`, which the app does not link).
@@ -88,6 +95,18 @@ impl ThreadView {
         let _id = self.hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
     }
 
+    /// "Remove worktree" for the exited agent's worktree, when it worked in one.
+    fn worktree_button(&self, state: &ThreadState, cx: &Context<Self>) -> Option<AnyElement> {
+        let root = crate::workspace::worktree_root(&state.meta.cwd)?;
+        Some(
+            self.button("thread-remove-worktree", REMOVE_WORKTREE, ButtonKind::Ghost)
+                .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(ThreadViewEvent::RemoveWorktree(root.clone()));
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The line at the composer's head while the next message is what starts the agent again.
     pub(super) fn exited_line(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let state = self.state(cx)?;
@@ -111,6 +130,7 @@ impl ThreadView {
                 .text_color(hsla(s.text_secondary))
                 .child(self.icon(Symbol::Power, s.text_muted))
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
+                .children(self.worktree_button(state, cx))
                 .into_any_element(),
         )
     }
@@ -163,6 +183,7 @@ impl ThreadView {
                     self.icon(Symbol::Power, s.text_muted)
                 })
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
+                .children(self.worktree_button(state, cx))
                 .children(button)
                 .into_any_element(),
         )

@@ -140,6 +140,8 @@ pub enum FolderViewEvent {
     DragOut(String),
     /// Files picked in the Files app are to go up into this folder.
     UploadHere,
+    /// The agent's worktree the folder is in, at this root, is to go.
+    RemoveWorktree(String),
     /// This entry is to be brought down and saved with the Files app.
     SaveToFiles {
         /// Its path on the worker.
@@ -932,6 +934,28 @@ impl FolderView {
                     .text_size(px(theme.typography.small() * k))
                     .child(count_label(total)),
             )
+            .when_some(crate::workspace::worktree_root(dir), |bar, root| {
+                bar.child(
+                    crate::kit::icon_button_at(
+                        theme,
+                        format!("folder-remove-worktree-{id}"),
+                        Symbol::Trash,
+                        crate::workspace::REMOVE_WORKTREE,
+                        k,
+                    )
+                    .map(|el| {
+                        let theme = Rc::new(theme.clone());
+                        crate::kit::hint_timing(el).tooltip(move |_window, cx| {
+                            let hint = crate::workspace::REMOVE_WORKTREE;
+                            cx.new(|_| crate::kit::Hint::new(hint, "", Rc::clone(&theme))).into()
+                        })
+                    })
+                    .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        cx.emit(FolderViewEvent::RemoveWorktree(root.clone()));
+                    })),
+                )
+            })
             .when(FILES_PICKER, |bar| {
                 bar.child(
                     crate::kit::icon_button_at(

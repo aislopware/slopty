@@ -248,6 +248,9 @@ impl WorkspaceView {
                         this.ask_files(&FilesAsk::Import(tile), cx);
                     }
                 }
+                FolderViewEvent::RemoveWorktree(root) => {
+                    this.remove_worktree_at(worker, root, cx);
+                }
                 FolderViewEvent::SaveToFiles { path, folder } => {
                     let ask = FilesAsk::Export { worker, path: path.clone(), folder: *folder };
                     this.ask_files(&ask, cx);

@@ -2,10 +2,12 @@
 //!
 //! "Remove this worktree" offers itself where the focus works in an agent's worktree under its
 //! clone's `.claude/worktrees/`: a folder tile or a changes tile in it, or a thread's or a
-//! review's tile whose agent works there. It is refused here while an agent that has not exited
-//! works in it, since an agent driven over its protocol has no terminal for the worker to see,
-//! and on the worker while a terminal works in it or anything in it is not committed. What went
-//! and what stayed is said in a notice, and the folder tiles left showing it close.
+//! review's tile whose agent works there. The same removal is a button where it is wanted at a
+//! glance: on a thread whose agent has exited, and in the path bar of a folder tile in one. It is
+//! refused here while an agent that has not exited works in it, since an agent driven over its
+//! protocol has no terminal for the worker to see, and on the worker while a terminal works in it
+//! or anything in it is not committed. What went and what stayed is said in a notice, and the
+//! folder tiles left showing it close.
 
 use std::collections::HashSet;
 
@@ -19,7 +21,7 @@ use super::actions::RemoveWorktree;
 use crate::conversation::thread::git::Said;
 
 /// The palette's line.
-pub(super) const REMOVE_WORKTREE: &str = "Remove this worktree";
+pub(crate) const REMOVE_WORKTREE: &str = "Remove this worktree";
 
 /// Where an agent's worktrees are, under their clone's root.
 const UNDER: &str = "/.claude/worktrees/";
@@ -31,7 +33,7 @@ pub(super) struct Asked(HashSet<(WorkerKey, String)>);
 /// The root of the agent's worktree `path` is in or at, under its clone's
 /// `.claude/worktrees/`; `None` for a path in none.
 #[must_use]
-pub(super) fn worktree_root(path: &str) -> Option<String> {
+pub(crate) fn worktree_root(path: &str) -> Option<String> {
     let (clone, rest) = path.split_once(UNDER)?;
     let name = rest.split('/').next().filter(|name| !name.is_empty())?;
     Some(format!("{clone}{UNDER}{name}"))
@@ -67,15 +69,25 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some((key, root)) = self.worktree_here() else { return };
-        if let Some(thread) = self.threads_working_in(key, &root).first() {
+        self.remove_worktree_at(key, &root, cx);
+    }
+
+    /// The worktree at `root` on `key` asked to go, unless an agent still works in it.
+    pub(super) fn remove_worktree_at(
+        &mut self,
+        key: WorkerKey,
+        root: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread) = self.threads_working_in(key, root).first() {
             let who = self.thread_named(*thread).unwrap_or_else(|| "An agent".to_owned());
             self.show_notice(format!("{who} still works in this worktree; end it first"), cx);
             return;
         }
         tracing::info!(%key, %root, "remove worktree");
-        self.worktrees.0.insert((key, root.clone()));
+        self.worktrees.0.insert((key, root.to_owned()));
         let hub = self.thread_hub(key, cx);
-        let _asked = hub.update(cx, |hub, cx| hub.git_op(&root, GitOp::RemoveWorktree, cx));
+        let _asked = hub.update(cx, |hub, cx| hub.git_op(root, GitOp::RemoveWorktree, cx));
     }
 
     /// `key`'s repository `repo` moved: a removal asked of it that has its answer is said, and
