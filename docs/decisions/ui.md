@@ -7538,3 +7538,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::review_tile::a_reviews_open_file_opens_it_on_its_machine`,
     `workspace::tests::review_tile::a_folders_review_opens_the_thread_that_wrote_a_line` (fails
     without the subscription).
+- ✅ **The drawer's title takes the panel title role** (2026-10-06, amends "A phone's drawer
+  names the workspace"). On a simulator review it read as one more row. Set at the bar's
+  13 pt medium, it was smaller than the drawer's own rows, which a finger's roles set a step
+  larger. It now takes `TypeRoles::panel_title` (the strong weight, a step above the rows), so
+  it stands as the drawer's heading. Test: `a_phone_drawer_names_the_workspace` checks its
+  line height. Golden: `ios-phone-navigator`, retaken on the simulator.

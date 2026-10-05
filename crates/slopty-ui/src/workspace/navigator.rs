@@ -2298,12 +2298,13 @@ impl WorkspaceView {
     }
 
     /// A phone's drawer's title: the active workspace's name, as the bar beside it names the
-    /// focused tile, at that bar's size and weight. The phone's bar gave the workspace's name up
+    /// focused tile, in the panel title's role, so it reads as the drawer's heading and not as
+    /// one more row under the finger's larger type. The phone's bar gave the workspace's name up
     /// to the tile, so opening the drawer is going one level up. Switching is *Workspaces*'s
     /// job below it; this only says where the person is.
     fn drawer_title(&self, theme: &Theme) -> Stateful<Div> {
         let name = SharedString::from(self.workspace_name_at(self.layout.active_workspace()));
-        div()
+        kit::typed(div(), theme.roles().panel_title, 1.0)
             .id("nav-workspace-title")
             .debug_selector(|| "nav-workspace-title".to_owned())
             .role(Role::Heading)
@@ -2313,8 +2314,6 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_size(px(theme.typography.ui_size))
-            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(theme.surfaces.text))
             .child(name)
     }
