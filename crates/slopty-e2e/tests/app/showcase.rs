@@ -2598,6 +2598,12 @@ async fn codex_serve(mut ws: Ws) {
 pub struct Threads {
     pub stack: ProjectStack,
     pub shell: String,
+    /// What the agents stand on until [`Self::end`].
+    pub held: Held,
+}
+
+/// [`Threads`]' Codex home and daemon and the tools' directory, kept until it ends.
+pub struct Held {
     _codex_home: tempfile::TempDir,
     _tools: tempfile::TempDir,
     daemon: tokio::task::JoinHandle<()>,
@@ -2650,11 +2656,11 @@ impl Threads {
             assert!(started.elapsed() < STEP, "the agents on the worker: {workers}");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Self { stack, shell, _codex_home: codex_home, _tools: tools, daemon }
+        Self { stack, shell, held: Held { _codex_home: codex_home, _tools: tools, daemon } }
     }
 
     pub async fn end(self) {
-        self.daemon.abort();
+        self.held.daemon.abort();
         self.stack.shutdown().await;
     }
 }
