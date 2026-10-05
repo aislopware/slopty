@@ -6747,3 +6747,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     self-test
     `a_palette_start_opens_the_agents_terminal_on_its_thread` (renamed from
     `a_palette_start_opens_a_thread_tile`).
+
+- ✅ **No focus line: the focused tile is said by its title's tone alone** (2026-10-05,
+  the person's review). The person found the line along the focused tile's top was what made
+  the workspace read as generated. It was a 1.5 pt bar in the text's tone, inset at both
+  ends, drawn while two or more tiles showed. Across a strip it stopped at the tile's edge and
+  read as a stray separator, not as a sign of focus. The tools held up as the bar mark focus
+  without one: Zed by its active tab's tone, Ghostty and iTerm2 by a hollow cursor in the
+  panes without focus. Slopty already does both. The focused title leads in the primary tone
+  and the others step back to muted (`tile::title_ink`), and a terminal without focus draws a
+  steady, muted hollow block (`terminal::element`).
+  - Deleted: the line (`tile::focus_line`) and its call on the header and on a column's shown
+    tab, `Chrome::focus_line` and the strip's count of tiles in view, the theme's
+    `Surfaces::focus` with `alpha::FOCUS` and `SEEN_LC`, and their tests. This supersedes
+    the focus-line parts of the earlier entries above (§4b's numbers, "A quieter focus line
+    and overview ring", "The focus line is derived, not a fixed share"). The overview's ring is
+    unchanged.
+  - Test: `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_alone`. With
+    two tiles in view, both headers sit on the content with nothing drawn along their tops.
+    The focused title is in the primary tone and the other is muted, and the tone follows the
+    focus.

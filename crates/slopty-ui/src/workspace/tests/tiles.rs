@@ -154,9 +154,8 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 }
 
 /// Panes sit flush: no tile is rounded or framed, the focused one included. Every header is
-/// its body's surface with nothing under it, focused or not: focus is the title's tone and a
-/// line along the header's top
-/// (`focus_line::the_focused_header_carries_a_text_line_while_two_tiles_show`).
+/// its body's surface with nothing under it, focused or not: focus is the title's tone
+/// (`focus::the_focused_tile_is_said_by_its_titles_tone_alone`).
 #[gpui::test]
 fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

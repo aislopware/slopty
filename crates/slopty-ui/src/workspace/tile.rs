@@ -140,8 +140,6 @@ pub const CHANGES: &str = "Changes";
 pub(super) struct Chrome {
     pub k: f32,
     pub zooming: bool,
-    /// Two or more tiles are in view, so the focused one's header carries its line.
-    pub focus_line: bool,
 }
 
 /// What a body with nothing to show yet says, and when.
@@ -1006,7 +1004,6 @@ impl WorkspaceView {
         if shapes {
             return header.into_any_element();
         }
-        let header = header.when(focused && chrome.focus_line, |el| el.child(focus_line(theme, k)));
         // The face's approval card is the tile's statement while it shows: a pill over it would
         // say the same thing a few hundred points higher.
         let badge = agent
@@ -1480,9 +1477,6 @@ impl WorkspaceView {
                             cx.stop_propagation();
                         }),
                     )
-                    .when(shown && placed.focused && chrome.focus_line, |el| {
-                        el.relative().child(focus_line(theme, k))
-                    })
                     .child(slot)
                     .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
                     .child(close),
@@ -2746,30 +2740,10 @@ fn pill(
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
-/// A header's title tone: focus is said by it and the focus line. The focused tile's title
+/// A header's title tone: focus is said by it alone. The focused tile's title
 /// leads in primary text (at the medium weight), every other steps back to the muted tone, so
 /// a wall of tiles reads as titles still and one of them as the one in hand. A tab row's tabs
 /// follow it too.
 pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb {
     if focused { theme.surfaces.text } else { theme.surfaces.text_muted }
-}
-
-/// The line along the top of the focused tile's header (or its column's shown tab) while
-/// several tiles are in view: a title's tone alone is too faint a sign across a strip of
-/// columns, so a line in the text's tone says which one has the keyboard. It is a marker, not a
-/// rule: `stroke::MARK` (1.5 pt) in `Surfaces::focus` (the text set back to `alpha::FOCUS`, or
-/// less where the content needs it to be seen), inset by `radii.sm` at both ends with round
-/// caps, and whole under Increase Contrast. No ring, no frame, no dimming of the others; a lone
-/// tile and the overview draw none.
-fn focus_line(theme: &Theme, k: f32) -> Div {
-    let inset = px(theme.radii.sm * k);
-    div()
-        .debug_selector(|| "focus-line".to_owned())
-        .absolute()
-        .top_0()
-        .left(inset)
-        .right(inset)
-        .h(px(slopty_theme::stroke::MARK * k))
-        .rounded(px(theme.radii.full))
-        .bg(hsla(theme.surfaces.focus))
 }

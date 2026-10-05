@@ -754,19 +754,7 @@ impl WorkspaceView {
             }
         }
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
-        // Which of several tiles has the keyboard is said by its title's tone and a line along
-        // its header's top; a lone tile's needs nothing, nor does the overview, which rings its
-        // workspace instead.
-        let (w, h) = self.layout.viewport();
-        let screen = Rect { x: 0.0, y: 0.0, w, h };
-        let focus_line = frame.overview <= 0.0
-            && frame
-                .tiles
-                .iter()
-                .filter(|p| !p.hidden && p.rect.intersects(&screen))
-                .nth(1)
-                .is_some();
-        let chrome = Chrome { k: frame.zoom, zooming, focus_line };
+        let chrome = Chrome { k: frame.zoom, zooming };
         drawn.zoom.set(frame.zoom);
         self.track_visibility(&frame, cx);
         let origin = drawn.viewport.get().origin;

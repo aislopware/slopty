@@ -765,10 +765,6 @@ pub mod alpha {
     /// point and a half it read as the old heavy outline of a chosen card; Geist and Radix
     /// draw theirs at about 15 to 30 %.
     pub const RING: f32 = 0.3;
-    /// The focus line: the text's tone set back far enough that it is not the brightest
-    /// stroke on screen; `Surfaces::focus` lays it on thicker where the content needs it to
-    /// clear 3:1 and APCA's Lc 30.
-    pub const FOCUS: f32 = 0.45;
     /// The edge of a card whose thing failed, in the error tone: there to be found on a second
     /// look, never louder than the words in it (`HeroUI` Pro's tool card, error at 30 %).
     pub const FAILED_EDGE: f32 = 0.30;
@@ -817,9 +813,6 @@ const SECONDARY_LC: f32 = 55.0;
 /// APCA's floor for muted text: a level under [`SECONDARY_LC`], still past its 45 for large or
 /// heavy text, which hints and ages read beside.
 const MUTED_LC: f32 = 45.0;
-
-/// APCA's least for a mark that means something and is seen rather than read: the focus line.
-const SEEN_LC: f32 = 30.0;
 
 /// How far apart two text levels stay: each reads at least a quarter again the contrast of the
 /// level under it, on the surface where both read worst. Past it, muted and secondary text
@@ -871,11 +864,6 @@ pub struct Surfaces {
     /// every surface it can sit on, WCAG's least for a control's edge (1.4.11), where a
     /// dividing hairline is only seen.
     pub control: Tint,
-    /// The focus line: the text's ink set back to [`alpha::FOCUS`], or only as much less as it
-    /// takes over the content to clear both WCAG's 3:1 and APCA's Lc 30 for a mark that is
-    /// seen and means something (on black, and on white, 0.45 fell short of one or the other).
-    /// Whole under Increase Contrast.
-    pub focus: Tint,
     /// Primary text.
     pub text: Rgb,
     /// Labels, tool summaries, counts.
@@ -1256,13 +1244,6 @@ impl Surfaces {
             band,
             border: hairline(t.border, NON_TEXT),
             border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
-            focus: match contrast {
-                Contrast::Standard => thicken_until(Tint::of(text, alpha::FOCUS), |line| {
-                    let seen = line.over(content);
-                    seen.contrast(content) >= NON_TEXT && seen.apca(content).abs() >= SEEN_LC
-                }),
-                Contrast::Increased => Tint::of(text, 1.0),
-            },
             control: thicken(
                 Tint::of(t.text, t.border.share),
                 &crossed,
@@ -2313,23 +2294,6 @@ mod tests {
                     assert!(lc >= least || fg == pole, "{name} {contrast:?}: {ink} Lc {lc:.1}");
                 }
             }
-        }
-    }
-
-    /// The focus line is seen, not read, and clears APCA's Lc 30 for a mark that means something
-    /// over the content as well as WCAG's 3:1, at [`alpha::FOCUS`] where that is enough and a
-    /// little more where it is not (black, and the light grounds); whole at more contrast.
-    #[test]
-    fn the_focus_line_clears_apca_for_what_is_seen() {
-        for (name, bg) in BACKGROUNDS {
-            let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content, Contrast::Standard);
-            let seen = s.focus.over(content);
-            let (lc, ratio) = (seen.apca(content).abs(), seen.contrast(content));
-            assert!(lc >= SEEN_LC && ratio >= NON_TEXT, "{name}: Lc {lc:.1}, {ratio:.2}:1");
-            assert!(s.focus.opacity() >= alpha::FOCUS - 0.005, "{name}: never quieter than set");
-            let more = Surfaces::derive(content, Contrast::Increased);
-            assert!((more.focus.opacity() - 1.0).abs() < 0.005, "{name}: whole at more contrast");
         }
     }
 

@@ -1020,7 +1020,7 @@ pub fn row(theme: &Theme, lines: Row) -> Div {
 /// Every border chrome draws is this wide: a sheet's edge, a pane's divider, a rule under a bar,
 /// a ring just inside a button. A full point was two device pixels on a Retina screen, so the
 /// chrome read ruled; the hairline shares are set for this width. A line that marks something
-/// (the focus line, a failed block's bar) is a stroke of its own, not a hairline.
+/// (a failed block's bar) is a stroke of its own, not a hairline.
 #[must_use]
 pub const fn hair(theme: &Theme) -> gpui::Pixels {
     px(theme.hair())
