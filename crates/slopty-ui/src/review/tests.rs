@@ -244,6 +244,32 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-comment-0").is_none());
 }
 
+/// With comments waiting, the foot shows its three buttons where they fit. In a narrow tile
+/// the send stays whole inside the tile and the other two go behind "More", never cut at the
+/// tile's edge.
+#[gpui::test]
+fn a_narrow_foot_keeps_the_send_and_folds_the_rest(cx: &mut TestAppContext) {
+    for (width, fits) in [(800.0, true), (360.0, false)] {
+        let (_view, _hub, _sent, cx) = tile(cx, width);
+        click(cx, "review-line-1-0-2");
+        cx.simulate_input("Why new?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let drawn = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s);
+        let send = drawn(cx, "review-send").expect("the send always shows");
+        assert!(f32::from(send.right()) <= width, "{width}: the send inside the tile {send:?}");
+        for part in ["review-add", "review-mark"] {
+            assert_eq!(drawn(cx, part).is_some(), fits, "{width}: {part}");
+        }
+        assert_eq!(drawn(cx, "review-more").is_some(), !fits, "{width}: More");
+        for part in ["review-add", "review-mark", "review-more"] {
+            if let Some(b) = drawn(cx, part) {
+                assert!(f32::from(b.right()) <= width, "{width}: {part} inside the tile {b:?}");
+            }
+        }
+    }
+}
+
 /// A send of the comments the worker turns down loses none of them: they stay on their lines,
 /// the band says why, and the foot sends them again.
 #[gpui::test]
