@@ -504,6 +504,9 @@ async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Chil
     let mut ptyd = scrubbed(bin("slopty-ptyd")?, &root.join("home"))
         .arg("--socket")
         .arg(&ptyd_sock)
+        // zsh, whatever the account's shell: every wait and golden here is written against the
+        // zsh above, and a CI runner's account shell is bash.
+        .env("SHELL", "/bin/zsh")
         .env(zdotdir, zsh)
         .envs(env.iter().copied())
         .envs(terminfo_env(root))
