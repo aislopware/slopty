@@ -37,9 +37,12 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      # The account runs five macOS jobs at once, and these take hours: two at a time leaves three
-      # for the gate's lanes, which pushes through the night would otherwise wait on for hours.
-      max-parallel: 2
+      # The account runs five macOS jobs at once, and these take hours. Two at a time left three
+      # for the gate's five macOS jobs, and gate runs queued 10 to 20 minutes during the Deep
+      # window (.research/dev-speed-2026-10-05.md). One at a time leaves four, and the night
+      # holds the six hours this takes. A job that waited for the gate inside itself would hold
+      # its Mac while it waited.
+      max-parallel: 1
       matrix:
         include:
           - { check: sanitize address, run: deep sanitize address, slug: asan }

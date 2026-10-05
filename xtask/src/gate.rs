@@ -1517,7 +1517,7 @@ mod tests {
                 jobs.matches("sccache-action@v0.0.11\n        with:\n          version: v").count();
             assert_eq!(named, sccache, "every sccache setup names its version, or asks the API");
         }
-        assert!(deep.contains("max-parallel: 2"), "the deep checks leave the gate macOS runners");
+        assert!(deep.contains("max-parallel: 1"), "the deep checks leave the gate macOS runners");
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));

@@ -1066,3 +1066,14 @@ more full-window layer.
     10 GB quota went back to sccache.
   - `fuzz/Cargo.lock` was one binding revision behind main against the same vendored ghostty.
     `upstream sync` now moves it with the root lock.
+
+- ✅ **The Deep checks take one Mac at a time** (2026-10-05, `.research/dev-speed-2026-10-05.md`
+  item 3). With two at a time, the gate kept three of the five macOS slots for its five macOS
+  jobs, and runs queued 10 to 20 minutes during the Deep window. Now it keeps four, and the
+  night holds the six hours the checks take one after another. Two other ideas don't work:
+  - Moving the checks that don't need macOS to Linux would drop their coverage of the macOS
+    crates.
+  - A job that waited inside itself for the gate to finish would hold its Mac while it waited.
+- ❌ **Not taken: caching the xtask binary across CI jobs** (2026-10-05, the same study's item 7).
+  `target/xtask` is 1.3 GB, and the Actions cache's 10 GB holds sccache's units, which save more
+  per byte than the about 50 s each job spends compiling xtask.
