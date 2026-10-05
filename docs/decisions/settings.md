@@ -320,3 +320,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `new_stream_settings_are_asked_of_a_live_stream` (full chroma asked);
     `slopty-client` `a_workers_streams_share_one_sound_and_its_mute`.
 
+
+- ✅ **"Open in `<editor>`" on the file, folder and review tiles** (2026-10-05, readiness G7,
+  built on `[client] editor` above).
+  - **What opens.** A file opens at the caret's line, or at the line in view when the tile
+    shows no text. A folder opens its selected entry, or itself while none is selected, as
+    Finder's "Open With" takes the selection. A review opens the folder it reviews. Each
+    path is written out whole under the machine's home first, since an editor's remote link
+    takes no `~`.
+  - **Which machine.** `{host}` is how SSH reached the machine when it was installed from
+    here (`[user@]host[:port]`, kept by the deployer), else the machine's name, which the
+    tailnet resolves.
+  - **No link set.** A Mac opens the file with the system's handler for its type: this Mac's
+    own path for a tile of this Mac, or the machine's place in Finder (its File Provider
+    domain) for a path in its home. An iPhone or iPad opens links only, so it offers
+    nothing.
+  - **Where it is.** One palette line, named for the editor the link's scheme names ("Open
+    in Zed", "Open in VS Code", "Open in your editor" for another, "Open with default app"
+    with none). A tile answers the action only
+    while it would open something, so the line shows on these three tiles alone and never
+    as a dead row. No button carries it. The tiles have no menus of their own: the header's
+    buttons are the tile's, and its other actions are the palette's.
+  - **How it is wired.** The app tells a global (`slopty_ui::file::open_with::Editors`)
+    the link from the settings and what it knows of each machine: its name and home from
+    its link, its SSH name, its place in Finder and whether it is this Mac from the
+    directory. A tile asks the global when the action runs. Asking whether to offer it
+    writes nothing out, since a tile asks every time it draws.
+  - Tests: `slopty-ui` `file::open_with::tests` (the link, the system handler's fallback,
+    the label, and the offer agreeing with the open) and `file::tests::open_with` (each
+    tile opening through the action, and a tile offering nothing before its machine is
+    known); `slopty-app` `editors::tests`.

@@ -233,7 +233,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> gpui::Entity<FolderView> {
         let theme = self.theme.clone();
-        let view = cx.new(|cx| FolderView::new(id, path, theme, cx));
+        let view = cx.new(|cx| FolderView::new(id, worker, path, theme, cx));
         cx.subscribe(&view, move |this, _view, event, cx| {
             match event {
                 FolderViewEvent::Ask(msg) => this.send(worker, msg.clone()),

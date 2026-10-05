@@ -24,6 +24,7 @@ pub mod decode;
 pub mod edit;
 mod editing;
 pub mod find;
+pub mod open_with;
 mod preview;
 mod reading;
 mod search;
@@ -679,6 +680,15 @@ impl FileView {
     pub fn caret(&self, cx: &gpui::App) -> (u32, u32) {
         let at = self.editor.read(cx).cursor_position();
         (at.line.saturating_add(1), at.character.saturating_add(1))
+    }
+
+    /// Open the file in the person's own editor at the caret's line, or the line in view while
+    /// the body shows no text ([`open_with`]).
+    fn open_in_editor(&self, cx: &gpui::App) {
+        let line = if self.shows_text() { self.reading_line(cx) } else { self.focus_line_number() };
+        if let Some(opening) = open_with::opening(self.worker, &self.path, line, cx) {
+            open_with::open(&opening, cx);
+        }
     }
 
     /// The caret's line, 1-based.
@@ -1694,6 +1704,11 @@ impl Render for FileView {
                 }))
             })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
+            .when(open_with::offers(self.worker, &self.path, cx), |el| {
+                el.on_action(cx.listener(|this, _: &open_with::OpenInEditor, _w, cx| {
+                    this.open_in_editor(cx);
+                }))
+            })
             .when(self.has_preview(), |el| {
                 el.on_action(cx.listener(|this, _: &TogglePreview, window, cx| {
                     this.toggle_preview(window, cx);

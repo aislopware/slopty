@@ -332,6 +332,7 @@ impl Workspace {
                 }
                 if listing {
                     self.directory_caps(cx);
+                    self.tell_editor_machines(cx);
                     self.save_directory();
                 }
             }

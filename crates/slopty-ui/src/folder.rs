@@ -33,6 +33,7 @@ use gpui::{
 use gpui_kit::component::input::{self as input, Input, InputEvent, InputState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::folders::FolderPages;
+use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
 use slopty_proto::ClientMsg;
 use slopty_proto::folder::{After, FolderEntry, FsOp, Listing};
@@ -151,6 +152,8 @@ impl EventEmitter<FolderViewEvent> for FolderView {}
 /// The view of one folder item.
 pub struct FolderView {
     id: ItemId,
+    /// The machine the folder is on.
+    worker: WorkerKey,
     /// The directory the tile is at, as the item names it.
     path: String,
     /// What the worker last said, its pages joined, for `listed`; kept while the next listing
@@ -195,10 +198,17 @@ impl std::fmt::Debug for FolderView {
 }
 
 impl FolderView {
-    /// A tile at `path`, waiting on the worker.
-    pub fn new(id: ItemId, path: &str, theme: Theme, cx: &Context<Self>) -> Self {
+    /// A tile at `path` on `worker`, waiting on it.
+    pub fn new(
+        id: ItemId,
+        worker: WorkerKey,
+        path: &str,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Self {
         Self {
             id,
+            worker,
             path: path.to_owned(),
             pages: FolderPages::new(path.to_owned()),
             listed: None,
@@ -763,6 +773,17 @@ impl FolderView {
         }
     }
 
+    /// Open the selected entry in the person's own editor, or the folder while none is
+    /// selected, as Finder's "Open With" takes the selection.
+    fn open_in_editor(&self, cx: &gpui::App) {
+        use crate::file::open_with;
+        let path = self.selected.and_then(|ix| self.entry_path(ix)).map(|(path, _)| path);
+        let path = path.as_deref().unwrap_or(&self.path);
+        if let Some(opening) = open_with::opening(self.worker, path, None, cx) {
+            open_with::open(&opening, cx);
+        }
+    }
+
     /// The selected entry is to be brought down and saved with the Files app.
     pub fn save_selected(&self, cx: &mut Context<Self>) {
         let Some((path, folder)) = self.selected.and_then(|ix| self.entry_path(ix)) else {
@@ -1212,6 +1233,13 @@ impl Render for FolderView {
                     .on_action(
                         cx.listener(|this, _: &TrashSelected, _window, cx| this.trash_selected(cx)),
                     )
+            })
+            .when(crate::file::open_with::offers(self.worker, &self.path, cx), |el| {
+                el.on_action(cx.listener(
+                    |this, _: &crate::file::open_with::OpenInEditor, _window, cx| {
+                        this.open_in_editor(cx);
+                    },
+                ))
             })
             .on_action(cx.listener(|this, _: &UploadFromFiles, _window, cx| this.upload_here(cx)))
             .on_action(cx.listener(|this, _: &SaveToFiles, _window, cx| this.save_selected(cx)))

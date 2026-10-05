@@ -21,6 +21,7 @@
     )
 )]
 mod e2e;
+mod editors;
 pub mod finder;
 mod hangs;
 mod invite;
@@ -975,12 +976,14 @@ impl Workspace {
         }
         let server = loaded.settings.client.server.clone();
         let sharing = loaded.settings.clipboard.clone();
+        slopty_ui::file::open_with::set_link(loaded.settings.client.editor.clone(), cx);
         self.settings = loaded.settings;
         self.view.update(cx, |v, cx| v.set_clipboard_sharing(sharing, cx));
         self.rebuild_theme(cx);
         self.apply_keymap(keymap, cx);
         // The app's palette lines show their chords from the keymap just bound.
-        self.view.update(cx, |v, _| v.extend_palette(app_palette_items()));
+        let palette = app_palette(cx);
+        self.view.update(cx, |v, _| v.extend_palette(palette));
         self.set_server(server, None, cx);
         self.refresh_menu(cx);
         // A server taken out of the file by hand leaves nothing to show: the first run again.
@@ -1405,6 +1408,7 @@ impl Workspace {
                 let remote = Some(link.remote());
                 let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
+                let home = ack.home.clone();
                 let sessions = ack.sessions.len();
                 let (resume_tx, mut resumes) = tokio::sync::mpsc::unbounded_channel();
                 let replaced = std::mem::take(&mut replacing);
@@ -1426,6 +1430,7 @@ impl Workspace {
                             v.disconnect_worker(key, WorkerStatus::Relinking, cx);
                         }
                         v.connect_worker(key, worker_link, ack, cx);
+                        editors::tell_editor_home(key, &name, &home, cx);
                         v.threads_linked(key, cx);
                     });
                     ws.refresh_menu(cx);
@@ -1632,6 +1637,7 @@ impl Workspace {
             let _gone = this.update(cx, |ws, cx| {
                 if ws.this_mac_worker != worker {
                     ws.this_mac_worker = worker;
+                    ws.tell_editor_machines(cx);
                     cx.notify();
                 }
             });
@@ -3645,6 +3651,14 @@ const KEYBOARD_SHORTCUTS: &str = "Keyboard shortcuts";
 
 /// The palette's way to the version and the build: Settings › About.
 const ABOUT: &str = "About Slopty";
+
+/// [`app_palette_items`] and the line that opens a tile in the person's editor, named for it
+/// ([`editors::palette_line`]).
+fn app_palette(cx: &App) -> Vec<slopty_ui::palette::PaletteItem> {
+    let mut items = app_palette_items();
+    items.extend(editors::palette_line(cx));
+    items
+}
 
 /// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {

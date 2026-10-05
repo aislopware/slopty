@@ -824,6 +824,27 @@ pub struct ClientSettings {
 pub struct EditorLink(String);
 
 impl EditorLink {
+    /// Whether none is set: the system's handler opens files.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The editor its scheme names, for the editors that publish one: `zed://` is Zed.
+    #[must_use]
+    pub fn editor_name(&self) -> Option<&'static str> {
+        let (scheme, _) = self.0.split_once(':')?;
+        Some(match scheme.to_ascii_lowercase().as_str() {
+            "zed" => "Zed",
+            "vscode" => "VS Code",
+            "vscode-insiders" => "VS Code Insiders",
+            "vscodium" => "VSCodium",
+            "cursor" => "Cursor",
+            "windsurf" => "Windsurf",
+            _ => return None,
+        })
+    }
+
     /// The link that opens `path` on `host` at `line`, or `None` for the system's handler.
     #[must_use]
     #[expect(
@@ -862,7 +883,8 @@ impl<'de> Deserialize<'de> for EditorLink {
 
 /// `path` as a link's path: every byte but the unreserved ones and `/` percent-encoded, so a
 /// space, `#` or `?` in a name stays part of it.
-fn link_path(path: &str) -> String {
+#[must_use]
+pub fn link_path(path: &str) -> String {
     use std::fmt::Write as _;
     path.bytes().fold(String::with_capacity(path.len()), |mut out, b| {
         if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {

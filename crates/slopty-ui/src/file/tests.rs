@@ -791,6 +791,7 @@ fn measure_the_reload_diff_at_its_bound() {
 }
 
 mod editing;
+mod open_with;
 mod reading;
 
 /// A file not on disk yet opens as an empty editor that says so; ⌘S makes it unedited, based

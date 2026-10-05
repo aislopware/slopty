@@ -453,6 +453,23 @@ impl ReviewView {
         Some(state.meta.cwd.clone()).filter(|cwd| !cwd.trim().is_empty())
     }
 
+    /// Whether the person's own editor opens the reviewed folder ([`crate::file::open_with`]).
+    fn editor_opens(&self, cx: &App) -> bool {
+        self.repo(cx).is_some_and(|repo| {
+            crate::file::open_with::offers_named(self.hub.read(cx).worker(), &repo, cx)
+        })
+    }
+
+    /// Open the reviewed folder, its repository, in the person's own editor.
+    fn open_in_editor(&self, cx: &App) {
+        use crate::file::open_with;
+        let Some(repo) = self.repo(cx) else { return };
+        if let Some(opening) = open_with::opening_named(self.hub.read(cx).worker(), &repo, None, cx)
+        {
+            open_with::open(&opening, cx);
+        }
+    }
+
     /// Ask the branch's pull request once the folder is known: the tile shows where it stands.
     fn ask_pull(&mut self, cx: &mut Context<Self>) {
         if self.pull_asked {
@@ -1947,6 +1964,13 @@ impl Render for ReviewView {
                 el.on_action(
                     cx.listener(|this, _: &ReviewWithAgent, _w, cx| this.review_with_agent(cx)),
                 )
+            })
+            .when(self.editor_opens(cx), |el| {
+                el.on_action(cx.listener(
+                    |this, _: &crate::file::open_with::OpenInEditor, _w, cx| {
+                        this.open_in_editor(cx);
+                    },
+                ))
             })
             .relative()
             .child(scopes)
