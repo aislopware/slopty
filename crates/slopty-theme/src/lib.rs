@@ -822,6 +822,10 @@ pub mod stroke {
     pub const MARK: f32 = 1.5;
 }
 
+/// How much of the focus tone a focused field's edge starts from ([`Surfaces::field_focus`]):
+/// a mid tone, so the field says it has the keyboard without the weight of the text colour.
+pub const FIELD_FOCUS: f32 = 0.45;
+
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
 /// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
@@ -1244,6 +1248,27 @@ fn thicken_until(line: Tint, reads: impl Fn(Tint) -> bool) -> Tint {
 }
 
 impl Surfaces {
+    /// The edge of a text field that has the keyboard (a composer, a message being written):
+    /// the focus tone set back toward the field's [`Self::elevated`] ground, so focus is said
+    /// quietly. A near-black ring round a whole card was the loudest thing on the screen. It
+    /// keeps the least of [`FIELD_FOCUS`] of the focus tone that still clears 3:1 against the
+    /// ground (WCAG 1.4.11, non-text contrast); under Increase Contrast it is the focus tone
+    /// whole.
+    #[must_use]
+    pub fn field_focus(&self, contrast: Contrast) -> Rgb {
+        if contrast == Contrast::Increased {
+            return self.focus;
+        }
+        let mut share = FIELD_FOCUS;
+        loop {
+            let edge = self.elevated.mix(self.focus, share);
+            if edge.contrast(self.elevated) >= NON_TEXT || share >= 1.0 {
+                return edge;
+            }
+            share = (share + 0.05).min(1.0);
+        }
+    }
+
     /// The chrome for `content`, the terminal's background: dark tones on a dark one, light on
     /// a light one.
     ///
@@ -1915,6 +1940,13 @@ impl Theme {
         self.terminal.bg
     }
 
+    /// The edge of a text field that has the keyboard, under this theme's contrast
+    /// ([`Surfaces::field_focus`]).
+    #[must_use]
+    pub fn field_focus(&self) -> Rgb {
+        self.surfaces.field_focus(self.contrast)
+    }
+
     /// Which variant the colours are: light when the terminal's background reads as light,
     /// whatever the settings made it.
     #[must_use]
@@ -2449,6 +2481,24 @@ mod tests {
     /// 7:1 on every surface it can land on, or as far as black or white go there; the dividing
     /// hairline reads 3:1 on every surface it crosses and the quiet one stays under it; and
     /// nothing reads weaker than in the standard look.
+    #[test]
+    fn a_focused_field_says_so_quietly_and_still_clears_three_to_one() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let plain = Surfaces::derive(content, Contrast::Standard);
+            let edge = plain.field_focus(Contrast::Standard);
+            let (said, full) =
+                (edge.contrast(plain.elevated), plain.focus.contrast(plain.elevated));
+            assert!(said >= NON_TEXT, "{name}: the edge reads {said:.2} on its card");
+            assert!(said < full || full < NON_TEXT, "{name}: quieter than the ring ({said:.2})");
+            let rest = plain.border.over(plain.elevated);
+            assert!(said > rest.contrast(plain.elevated), "{name}: stronger than at rest");
+            println!("MEASURE field focus {name}: {said:.2}:1, the ring {full:.2}:1");
+            let more = Surfaces::derive(content, Contrast::Increased);
+            assert_eq!(more.field_focus(Contrast::Increased), more.focus, "{name}: whole");
+        }
+    }
+
     #[test]
     fn increase_contrast_raises_text_and_hairlines() {
         for (name, bg) in BACKGROUNDS {
