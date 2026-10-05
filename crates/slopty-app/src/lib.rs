@@ -3343,16 +3343,18 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::FsDone { request, outcome }) => {
             view.update(cx, |v, cx| v.fs_done(key, request, outcome, cx));
         }
+        LinkEvent::Control(WorkerMsg::Sessions(past)) => {
+            view.update(cx, |v, cx| v.past_sessions(key, past, cx));
+        }
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`). Nothing asks for an agent's past sessions yet.
+        // read (`LinkEvent::Handoff`).
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_)
-            | WorkerMsg::Sessions(_),
+            | WorkerMsg::Handoff(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
