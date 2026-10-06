@@ -9,7 +9,7 @@
 //! A frame counts as matching when at most `tolerance` of its pixels differ by more than
 //! [`CHANNEL_SLACK`] in any channel: font hinting, the RTT readout and a blinking cursor
 //! move a few hundred pixels, a broken layout moves a few hundred thousand. A pixel on an edge
-//! that each picture's neighbourhood explains also matches ([`edge_explained`]): one macOS
+//! that each picture's neighbourhood explains also matches (`edge_explained`): one macOS
 //! rasterises a glyph's edge a shade apart from another's. Pass `--accept`
 //! to write missing and failing goldens, or `--accept-all` to rewrite every golden (via
 //! `SLOPTY_E2E_ACCEPT=changed` and `SLOPTY_E2E_ACCEPT=all`).
@@ -26,7 +26,7 @@ use image::{Rgba, RgbaImage};
 pub const CHANNEL_SLACK: u8 = 4;
 
 /// The most a glyph's edge may be shaded apart between two macOS releases and still match,
-/// when both pictures' neighbourhoods explain it ([`edge_explained`]).
+/// when both pictures' neighbourhoods explain it (`edge_explained`).
 ///
 /// CI's macOS 26 renders against this Mac's goldens (CI e2e run 37390615720): of `thread`'s
 /// 1 655 pixels more than [`CHANNEL_SLACK`] apart, 1 628 were within 64 and none past 150,
