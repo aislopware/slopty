@@ -15574,3 +15574,40 @@ planes are the default grounds (#171717 dark, #f7f7f7 light) and the chrome step
 ```sh
 cargo test -p slopty-theme --lib the_line_weighs_the_same_at_every_scale -- --nocapture
 ```
+
+## 2026-10-07 — Tabler glyphs at 1x and 2x
+
+Four Tabler glyphs (v3.49.0, stroke 1.75 on the 24 grid) at 14 pt, drawn three ways: on their
+grid by `slopty_platform::outline::rasterize_on_grid`, the stroke rounded to whole device pixels
+and an odd width drawn half a pixel over; as GPUI's `svg()` draws them, at twice the device size
+with the published width and then sampled linearly into half the size (the mean of each 2 × 2
+block, the sprite lying on whole pixels); and once at the device's size with the published
+width. Crisp is Σα²/Σα (1 when every inked pixel is whole), solid the share of inked pixels at
+α ≥ 0.9; each cell is crisp / solid.
+
+| glyph | 1x, on its grid | 1x, `svg()` | 1x, once | 2x, on its grid | 2x, `svg()` |
+| --- | --- | --- | --- | --- | --- |
+| search | **0.733 / 0.18** | 0.649 / 0.10 | 0.650 / 0.11 | 0.827 / 0.35 | 0.830 / 0.36 |
+| git-branch | **0.773 / 0.32** | 0.709 / 0.22 | 0.709 / 0.22 | 0.869 / 0.42 | 0.869 / 0.40 |
+| folder | **0.765 / 0.28** | 0.605 / 0.04 | 0.605 / 0.04 | 0.815 / 0.35 | 0.818 / 0.35 |
+| x | 0.705 / **0.35** | 0.714 / 0.30 | 0.710 / 0.30 | 0.848 / 0.21 | 0.852 / 0.18 |
+
+- At 1x the grid draw is 0.075 crisper on the mean and has more whole pixels on every glyph.
+  The folder gains most: its straight sides land on whole columns and rows, where through
+  `svg()` almost none is whole.
+- The gain is the fitting, not the skipped halving. Drawing twice the size and halving is no
+  crisper than drawing once at the size (coverage adds up), so `svg()` and the single draw agree
+  to 0.005. What `svg()` lacks is a width of whole pixels: 1.75 at 14 px is 1.02 px.
+- The cross is all diagonals, which are never whole, so it gains whole pixels and not
+  crispness.
+- At 2x the three ways agree within 0.004: 1.75 at 28 px is 2.04 px, so rounding moves almost
+  nothing, and the grid's units do not fall on whole pixels there.
+- The `svg()` column is emulated with Core Graphics in the test. resvg 0.46.0, the version GPUI
+  uses, rendered from the same files and halved the same way, agrees within 0.011 crisp and
+  0.01 solid (1x: 0.644 / 0.11, 0.720 / 0.22, 0.611 / 0.04, 0.710 / 0.30; 2x: 0.830 / 0.36,
+  0.868 / 0.42, 0.817 / 0.36, 0.853 / 0.21). That check was a scratch crate outside the
+  checkout, not kept.
+
+```sh
+cargo test -p slopty-platform --lib a_glyph_on_its_grid_is_crisper_than_one_halved -- --nocapture
+```

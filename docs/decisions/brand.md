@@ -281,8 +281,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (move, line, cubic, arc and close, absolute and relative), arcs become cubics and the ink
     box is worked out from the curves themselves. Core Graphics fills it with the non-zero
     rule into an alpha byte per pixel, the ink box's size, as the SF Symbols beside it are
-    drawn; GPUI's own SVG path draws at twice the size and halves it, which cost the edges at
-    1x. pi is filled cell by cell on whole pixels.
+    drawn; GPUI's own SVG path fits nothing to the pixels (it draws at twice the size and
+    halves it, no crisper than one draw), which cost the edges at 1x (MEASUREMENTS
+    2026-10-07, "Tabler glyphs at 1x and 2x"). pi is filled cell by cell on whole pixels.
   - **Sized by the ink, centred on it.** A radial mark's ink box is its slot less the
     smallest space: 16 → 14 pt in a row's lead (the navigator's, the tile header's, the
     picker's), the one place a mark is drawn now. pi's square reads larger than a radial mark as wide, so it
