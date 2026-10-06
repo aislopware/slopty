@@ -715,8 +715,8 @@ pub struct WorkspaceView {
     attention_at: Option<usize>,
     /// The last agent started, where and in which folder: what "New agent…" lists first.
     last_start: Option<agent_start::LastStart>,
-    /// The past sessions the open step waits on: of which agent, on which machine.
-    sessions_asked: Option<(WorkerKey, slopty_proto::thread::AgentId, gpui::EntityId)>,
+    /// The session step that is up: its agent and machine, and what the machine said for it.
+    sessions_asked: Option<agent_start::SessionsAsked>,
     /// The tiles of threads on their way.
     starting: starting::Starts,
     /// Each worker's items kept on this device.

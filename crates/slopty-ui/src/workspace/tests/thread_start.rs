@@ -545,6 +545,130 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
     assert!(starts(&mut studio).is_empty(), "a session that runs is not started twice");
 }
 
+/// The session step's words find the listed sessions at once, and once the field rests the
+/// machine is asked for them: the sessions whose prompts it finds join the list, an answer for
+/// words the field no longer says is dropped, the line the person is on stays chosen, and with
+/// the words gone the list is the machine's own again.
+#[gpui::test]
+fn a_past_session_is_found_by_what_was_asked_in_it(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{PastSession, PastSessions, PromptHit};
+
+    use crate::conversation::thread::find::ASK_AFTER;
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let codex = AgentId::named(AgentId::CODEX);
+    let key = studio.key;
+    let session = |native: &str, prompt: &str| PastSession {
+        agent: codex.clone(),
+        native: native.to_owned(),
+        cwd: Some("/src/app".to_owned()),
+        title: None,
+        updated_ms: None,
+        thread: None,
+        resume: vec!["resume".to_owned(), native.to_owned()],
+        facts: BTreeMap::new(),
+        prompts: vec![PromptHit {
+            text: prompt.to_owned(),
+            spans: Vec::new(),
+            cut_before: false,
+            cut_after: false,
+            at_ms: None,
+        }],
+    };
+    let answer = |query: &str, sessions: Vec<PastSession>| PastSessions {
+        agent: Some(codex.clone()),
+        cwd: None,
+        query: query.to_owned(),
+        sessions,
+        absent: None,
+        cut: None,
+    };
+    let asked = |studio: &mut Fake| -> Vec<String> {
+        studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Sessions { query, .. }) => Some(query),
+                _ => None,
+            })
+            .collect()
+    };
+    let chosen = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, cx| {
+            let palette = v.palette.clone().expect("the step is up");
+            palette.read(cx).chosen().map(|l| l.label.clone())
+        })
+    };
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("resume");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(asked(&mut studio), [""], "the list, with no words");
+    view.update_in(cx, |v, _w, cx| {
+        let listed = vec![
+            session("019a", "the parser drops a token"),
+            session("019b", "port the CLI to clap 5"),
+        ];
+        v.past_sessions(key, answer("", listed), cx);
+    });
+    settle(cx);
+
+    // A burst of keys finds the listed session at once and asks the machine once it rests.
+    cx.simulate_input("cla");
+    cx.executor().advance_clock(ASK_AFTER.div_f32(2.0));
+    cx.simulate_input("p");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["port the CLI to clap 5"], "the listed one, at once");
+    assert_eq!(asked(&mut studio), Vec::<String>::new(), "nothing before the field rests");
+    cx.executor().advance_clock(ASK_AFTER);
+    settle(cx);
+    assert_eq!(asked(&mut studio), ["clap"]);
+    assert_eq!(chosen(cx).as_deref(), Some("port the CLI to clap 5"));
+
+    // An answer for words the field no longer says is dropped.
+    view.update_in(cx, |v, _w, cx| {
+        v.past_sessions(key, answer("cla", vec![session("0100", "clamp the scroll")]), cx);
+    });
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["port the CLI to clap 5"], "a stale answer is dropped");
+
+    // The machine's answer adds a session older than the list; the chosen line stays chosen.
+    view.update_in(cx, |v, _w, cx| {
+        let found =
+            vec![session("0042", "move to clap 4"), session("019b", "port the CLI to clap 5")];
+        v.past_sessions(key, answer("clap", found), cx);
+    });
+    settle(cx);
+    let mut lines = step_lines(&view, cx);
+    lines.sort();
+    assert_eq!(lines, ["move to clap 4", "port the CLI to clap 5"], "found by its prompt");
+    assert_eq!(chosen(cx).as_deref(), Some("port the CLI to clap 5"), "the chosen line stays");
+
+    // With the words gone, the list is the machine's own again, and nothing more is asked.
+    for _ in 0..4 {
+        cx.simulate_keystrokes("backspace");
+    }
+    cx.executor().advance_clock(ASK_AFTER);
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["the parser drops a token", "port the CLI to clap 5"]);
+    assert_eq!(asked(&mut studio), Vec::<String>::new());
+
+    // A machine out of reach once the field rests is not asked.
+    cx.simulate_input("parser");
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    cx.executor().advance_clock(ASK_AFTER);
+    settle(cx);
+    assert_eq!(asked(&mut studio), Vec::<String>::new(), "out of reach, it is not asked");
+}
+
 /// "Plan first" under a Claude Code start's field starts it in plan mode, its published
 /// `--permission-mode plan`, by a click or the palette's "Start in plan mode"; a Codex start
 /// has no such tick.

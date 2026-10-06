@@ -11,8 +11,11 @@
 //!
 //! The folder step ends with "Resume a past session…": the machine lists the agent's sessions
 //! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
-//! that opens at once saying it reads them. A session picked opens the thread kept of it, its
-//! agent taken up again if it exited, or starts the agent on it in its own words.
+//! that opens at once saying it reads them. What the person types there finds the listed ones
+//! at once, and once the field rests the machine is asked too: it searches every prompt the
+//! agent recorded, so a session older than the list is found by what was asked in it. A
+//! session picked opens the thread kept of it, its agent taken up again if it exited, or starts
+//! the agent on it in its own words.
 //!
 //! "New project…" runs the same steps for the agent that will orchestrate the project. It lists
 //! only the agents that run in a terminal, since a project's orchestrator is one, and offers no
@@ -21,7 +24,7 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Window};
+use gpui::{AppContext as _, Context, Entity, Task, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::AgentId;
@@ -33,6 +36,7 @@ use super::actions::{
     ResumeSession, StartOrchestrator, StartThread,
 };
 use super::projects::agent_label;
+use crate::conversation::thread::find;
 use crate::icons::{Status, Symbol};
 use crate::palette::{CommandPalette, PaletteItem};
 
@@ -91,6 +95,28 @@ pub(super) const READING_SESSIONS: &str = "Reading past sessions\u{2026}";
 
 /// The most past sessions the step lists.
 const SESSIONS_LISTED: u32 = 50;
+
+/// The session step that is up, and what its machine said for it. Answers come in any order,
+/// so the one for the field's words is kept only while they are still the field's; the list
+/// with no words is kept for as long as the step is up.
+pub(super) struct SessionsAsked {
+    /// The machine asked.
+    worker: WorkerKey,
+    /// Whose sessions.
+    agent: AgentId,
+    /// The step's palette.
+    step: gpui::EntityId,
+    /// The sessions the machine listed with no words; `None` while it reads them.
+    listed: Option<Vec<PastSession>>,
+    /// Why it could list none, when it said.
+    absent: Option<String>,
+    /// The field's words last asked for, trimmed; empty while they are too short to ask.
+    words: String,
+    /// The sessions whose prompts hold `words`, once the machine answered for them.
+    found: Option<Vec<PastSession>>,
+    /// The wait before `words` are asked for: dropped, so never sent, when they change first.
+    _asking: Option<Task<()>>,
+}
 
 /// The last start: what each step lists first next time.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -423,34 +449,129 @@ impl WorkspaceView {
         self.open_step(Vec::new(), PICK_SESSION, window, cx);
         if let Some(palette) = self.palette.clone() {
             palette.update(cx, |p, cx| p.set_empty(READING_SESSIONS, cx));
-            self.sessions_asked = Some((worker, agent, palette.entity_id()));
+            self.sessions_asked = Some(SessionsAsked {
+                worker,
+                agent,
+                step: palette.entity_id(),
+                listed: None,
+                absent: None,
+                words: String::new(),
+                found: None,
+                _asking: None,
+            });
         }
     }
 
-    /// `key` listed an agent's past sessions: the step waiting on them lists them, or says why
-    /// there are none. An answer nothing waits on, or for another step, is dropped.
-    pub fn past_sessions(&mut self, key: WorkerKey, past: PastSessions, cx: &mut Context<Self>) {
-        let Some((worker, agent, step)) = self.sessions_asked.clone() else { return };
-        if worker != key || past.agent.as_ref() != Some(&agent) || past.cwd.is_some() {
-            return;
-        }
-        self.sessions_asked = None;
-        let Some(palette) = self.palette.clone().filter(|p| p.entity_id() == step) else {
+    /// The session step's field says `text`. The listed sessions it finds show at once; once
+    /// the field rests [`find::ASK_AFTER`], words of [`find::ASK_FROM`] characters or more are
+    /// asked of the machine, which searches every prompt the agent recorded. New words drop
+    /// the last answer and the ask still waiting. A machine out of reach by then is not asked.
+    pub(super) fn ask_sessions(
+        &mut self,
+        palette: &Entity<CommandPalette>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(asked) = self.sessions_asked.as_mut().filter(|a| a.step == palette.entity_id())
+        else {
             return;
         };
-        let now = crate::clock::now(cx).as_millis();
-        let home = self.home_of(worker).map(str::to_owned);
-        let lines: Vec<PaletteItem> = past
-            .sessions
-            .into_iter()
-            .map(|session| session_line(worker, session, home.as_deref(), now))
-            .collect();
-        let empty = past.absent.unwrap_or_else(|| {
-            format!("{} has no past {} sessions", self.worker_name(worker), agent_label(&agent))
+        let typed = text.trim();
+        let words = if typed.chars().count() >= find::ASK_FROM { typed } else { "" };
+        if words == asked.words {
+            return;
+        }
+        let (worker, agent, step) = (asked.worker, asked.agent.clone(), asked.step);
+        let query = words.to_owned();
+        let asking = (!words.is_empty()).then(|| {
+            let (agent, query) = (agent.clone(), query.clone());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(find::ASK_AFTER).await;
+                let _gone = this.update(cx, |this, _cx| {
+                    let up = this.palette.as_ref().is_some_and(|p| p.entity_id() == step);
+                    if up && this.workers.get(&worker).is_some_and(super::Worker::is_linked) {
+                        let limit = SESSIONS_LISTED;
+                        let ask =
+                            ThreadRequest::Sessions { agent: Some(agent), cwd: None, query, limit };
+                        this.send(worker, ClientMsg::Thread(ask));
+                    }
+                });
+            })
         });
+        let (listed, absent) = (asked.listed.take(), asked.absent.take());
+        *asked = SessionsAsked {
+            worker,
+            agent,
+            step,
+            listed,
+            absent,
+            words: query,
+            found: None,
+            _asking: asking,
+        };
+        self.show_sessions(cx);
+    }
+
+    /// `key` listed an agent's past sessions, with no words or for the field's: the step
+    /// waiting on them lists them, or says why there are none. An answer nothing waits on, for
+    /// another step, or for words the field no longer says, is dropped.
+    pub fn past_sessions(&mut self, key: WorkerKey, past: PastSessions, cx: &mut Context<Self>) {
+        let Some(asked) = self.sessions_asked.as_mut() else {
+            return;
+        };
+        if asked.worker != key || past.agent.as_ref() != Some(&asked.agent) || past.cwd.is_some() {
+            return;
+        }
+        if past.query.is_empty() {
+            asked.listed = Some(past.sessions);
+            asked.absent = past.absent;
+        } else if past.query == asked.words {
+            asked.found = Some(past.sessions);
+        } else {
+            return;
+        }
         if let Some(cut) = past.cut {
             tracing::info!(%cut, "past sessions listed in part");
         }
+        self.show_sessions(cx);
+    }
+
+    /// The session step's lines: the sessions found for the field's words, best first, then
+    /// the listed ones they leave out, for the field to find among.
+    fn show_sessions(&self, cx: &mut Context<Self>) {
+        let Some(asked) = &self.sessions_asked else {
+            return;
+        };
+        let Some(palette) = self.palette.clone().filter(|p| p.entity_id() == asked.step) else {
+            return;
+        };
+        let worker = asked.worker;
+        let found = asked.found.as_deref().unwrap_or_default();
+        let listed = asked.listed.as_deref().unwrap_or_default();
+        let same = |a: &PastSession, b: &PastSession| a.agent == b.agent && a.native == b.native;
+        let left = listed.iter().filter(|l| !found.iter().any(|f| same(f, l)));
+        let now = crate::clock::now(cx).as_millis();
+        let home = self.home_of(worker);
+        let lines: Vec<PaletteItem> = found
+            .iter()
+            .chain(left)
+            .map(|session| session_line(worker, session.clone(), home, now))
+            .collect();
+        let reading = asked.listed.is_none() || (!asked.words.is_empty() && asked.found.is_none());
+        let empty = match &asked.absent {
+            Some(absent) => absent.clone(),
+            None if reading => READING_SESSIONS.to_owned(),
+            None if asked.words.is_empty() => format!(
+                "{} has no past {} sessions",
+                self.worker_name(worker),
+                agent_label(&asked.agent)
+            ),
+            None => format!(
+                "No past {} prompt on {} says that",
+                agent_label(&asked.agent),
+                self.worker_name(worker)
+            ),
+        };
         palette.update(cx, |p, cx| {
             p.set_items(lines, cx);
             p.set_empty(empty, cx);

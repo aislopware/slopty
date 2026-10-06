@@ -451,12 +451,13 @@ impl WorkspaceView {
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's
     /// files under the focused shell's directory, or the worker's home; and the workspace's
-    /// own palette asks every linked worker's threads for the words ([`Self::ask_threads`]).
+    /// own palette asks every linked worker's threads for the words ([`Self::ask_threads`]), and
+    /// the session step its machine's past prompts ([`Self::ask_sessions`]).
     fn palette_changed(
         &mut self,
         palette: &Entity<CommandPalette>,
         text: &str,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if let Some(query) = palette::files_query(text)
             && let Some(key) = self.context_worker()
@@ -467,6 +468,7 @@ impl WorkspaceView {
         if palette.read(cx).is_live() {
             self.ask_threads(text, cx);
         }
+        self.ask_sessions(palette, text, cx);
     }
 
     /// A worker found files for the palette's text: they are its `Open <path>` lines.

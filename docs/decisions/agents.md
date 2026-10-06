@@ -690,9 +690,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       itself then, since `serverRequest/resolved` does not say who answered.
     - A message goes as `turn/start`, or as `turn/steer` into the turn under way, carrying its
       intent as `clientUserMessageId`, which comes back as the user message's intent. An
-      interrupt is `turn/interrupt`. Queueing is not offered yet (no `queue` capability).
-    - Not carried yet: starting a Codex thread or its TUI from Slopty (`codex --remote`), the
-      models list, images in a user message, and expanding a clipped output.
+      interrupt is `turn/interrupt`. A message sent while a turn runs can instead wait in the
+      worker's queue (`Cap::QUEUE`, `slopty_agent::queue`) and go as the next turn.
+    - Carried since: starting a Codex thread (`thread/start`, `Codex::start`), its TUI joining
+      as `codex resume <thread>` in a worker terminal (`Codex::release`), the models list
+      (`model/list`) and pictures in a user message (`localImage`). Not carried: expanding a
+      clipped output, which the worker serves only for Claude Code (`Threads::expand` in
+      `apps/slopty-worker/src/threads.rs`).
 
 - ✅ **pi is driven over its RPC mode, with a gate that fails closed by pi's own rule**
   (2026-10-02, verified against pi 1.0.0, the latest on npm; `crates/slopty-agent/src/pi.rs`,
@@ -1403,7 +1407,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   first, and each session comes with the prompts that matched (`PromptHit`: the prompt cut to
   600 bytes round its first match, the matches as byte spans) and the words that take it up
   again. With no words, the sessions come prompted last first, each with its last prompt. A
-  client asks every machine and merges the answers by time.
+  client can ask every machine and merge the answers by time.
   - **What is read.** Claude Code's own prompt history (`~/.claude/history.jsonl`), with a long
     paste put back from the line or from `paste-cache/<hash>.txt`. This widens the earlier rule
     that no transcript is opened: the history is the record Claude Code keeps of what the person
@@ -1434,9 +1438,19 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `resume <id>`, `--session <id>`) and the thread kept of it, if one is, so opening a hit goes
     through the start path that already takes a session up again. A Claude Code session whose
     transcript is gone, or a Codex thread with no rollout, has no words and is shown only.
-  - **Not yet.** The palette's search across machines, `slopty prompts` and an MCP tool are the
-    client's half and come next. Claude Code driven over stream-json may not write its prompt
-    history; that is checked when the driven drive is used.
+  - **Asked from the session step** (2026-10-06, journeys audit J3). "Resume a past session…"
+    lists the machine's sessions with no words, and what the person types finds among them at
+    once. Until then the step never sent the words, so a session older than the 50 listed could
+    not be found by what was asked in it. Now, once the field rests (`find::ASK_AFTER`, 120 ms,
+    two characters or more), the machine is asked for the words too. The sessions it finds lead
+    the step, followed by the listed ones they leave out. The rules are the palette's Threads
+    section's (`docs/decisions/workspace.md`): an answer for words the field no longer says is
+    dropped, new words drop the ask still waiting, the line the person is on stays chosen, and
+    a machine out of reach by then is not asked. Test:
+    `workspace::tests::thread_start::a_past_session_is_found_by_what_was_asked_in_it`.
+  - **Not yet.** A search of every machine's prompts at once (the session step asks only the
+    machine it is on), `slopty prompts` and an MCP tool are not built. Claude Code driven over
+    stream-json may not write its prompt history; that is checked when the driven drive is used.
   - Tests: `claude_codes_history_gives_prompts_with_their_pastes`,
     `codex_gives_prompts_from_its_history_and_rollouts`, `pi_gives_prompts_from_its_session_files`,
     `a_slash_command_is_no_prompt` (`slopty-agent::history`);
@@ -1566,8 +1580,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     stopped in the middle of sending comes back held ("It was being sent when the worker
     stopped, so it may have gone") for the person to take back or send again, never sent on its
     own. A message scheduled for a thread keeps its agent from being put to sleep.
-  - **Not yet.** The composer's way to pick a time or a thread is the client's half. So is
-    automation: a server project task on a schedule.
+  - **The client's half.** The composer sets a time only as "Continue at" a usage limit's reset
+    (`conversation/thread/view/later.rs`), the scope kept when `After` and "Send later…" went.
+    Test: `a_thread_a_limit_stopped_continues_when_it_lifts`
+    (`conversation::thread::tests::composing`). **Not built:** a server project task on a
+    schedule.
   - Tests: `a_message_goes_at_its_time_or_once_its_thread_has_settled` (`thread::schedule`);
     `a_scheduled_message_waits_on_the_worker_and_outlives_a_restart` and
     `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
@@ -1600,10 +1617,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     turn, so the lineage reads as a fork's does. The old thread goes on as it was.
   - **Once.** The start is once per intent, as a client's start is. A repeat starts nothing and
     finishes what the first may not have, the draft and where it came from, both kept once.
-  - **Not yet.** The thread view's door ("Continue in…" with the agents this worker has) is the
-    client's half. So is a project task's "Restart fresh" or "Give to another agent", which
-    starts the task's runner again with the account, its branch and its brief. A seated
-    thread's seat does not go with it.
+  - **The client's half.** "Continue in…" in the model chip's menu and "Branch from here" on a
+    message are one panel (`conversation/thread/view/branch.rs`). It offers the thread's own
+    agent first, then the others the worker can start (`ThreadHub`'s agents, from the link).
+    Test: `branching_to_another_agent_carries_the_thread_over`
+    (`conversation::thread::tests::carry`). A seated thread's seat does not go with it.
+    **Not built:** a project task's "Restart fresh" or "Give to another agent".
   - Tests: `a_thread_is_told_whole_when_it_fits`,
     `the_newest_message_stays_when_the_budget_is_tight` and the property test
     `an_account_keeps_within_its_budget` (`slopty_agent::handoff`);
@@ -1627,7 +1646,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **No race to lose.** The stop is the agent's to make. A turn that ends before the stop lands
     leaves the message to go as a queued one does, so it goes once either way. Orchestration's
     intents take the same path.
-  - **Not yet.** The composer's "Interrupt and send" for such an agent is the client's half.
+  - **The client's half.** "Interrupt and send" stands beside the queue's send while a turn
+    runs on such an agent (`conversation/thread/view/composer.rs`). The message waits in the
+    tray until it goes. Test: `interrupt_and_send_waits_in_the_tray`
+    (`conversation::thread::tests::carry`).
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
@@ -1660,8 +1682,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Order and once.** It is refused while a turn is under way. The branch comes first, since it
     changes nothing on disk, then the files, then the draft. Each step is kept under an intent of
     its own, so a repeat finishes what the first left and repeats nothing.
-  - **Not yet.** The menu item on a person's message, "Edit from here" with or without the
-    files, is the client's half.
+  - **The client's half.** "Branch from here" on a person's message
+    (`conversation/thread/view/message_menu.rs`) opens the branch panel. On the thread's own
+    agent it edits from just before the message, with the files kept or put back
+    (`conversation/thread/view/branch.rs`). Test:
+    `branching_from_a_message_keeps_or_puts_back_the_files`
+    (`conversation::thread::tests::carry`).
   - Tests: `an_edit_from_a_turn_branches_before_it_and_puts_its_files_back`
     (`slopty-worker/tests/codex.rs`, a stand-in Codex daemon and a real git folder);
     `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`
@@ -1706,8 +1732,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     is Shift-Tab's cycle. Driving either means keys into a menu or a mode cycle, which Slopty
     never types, so an observed thread has no `SET_MODE` and no `SET_EFFORT`. Its mode and
     effort stay read-only meters.
-  - **Not yet.** The effort picker beside the model and mode chips is the client's half
-    (`target/lanes/ui-queue.md`).
+  - **The client's half.** The effort chip beside the model and mode chips
+    (`conversation/thread/view/composing.rs`), and "Next effort level" in the palette. Test:
+    `the_effort_chip_switches_how_hard_the_model_thinks` (`conversation::thread::tests::face`).
   - Tests: `a_thread_switches_among_what_codex_offers` and
     `the_threads_settings_are_its_mode_and_effort` (`slopty-agent/tests/codex.rs`);
     `a_switch_goes_to_codex_as_the_threads_settings` (`slopty-worker/tests/codex.rs`, a
@@ -1737,8 +1764,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ITEM_HIT_BYTES` of each, with counts of what was left out.
   - **No adapter waits on a search.** It runs on the blocking pool, and the host's lock is
     taken one thread at a time (`Host::visit`).
-  - **Not yet.** The palette's "Threads" section is the client's half
-    (`target/lanes/ui-queue.md`), and a CLI verb waits on a control-socket request of its own.
+  - **The client's half.** The palette's Threads section, which asks every linked machine
+    (2026-10-06, `docs/decisions/workspace.md`, "The palette finds words said in any thread, on
+    every machine"). **Not built:** a CLI verb, which waits on a control-socket request of its
+    own.
   - Tests: `every_word_is_found_in_what_was_said_the_best_and_newest_first` and
     `a_hit_shows_its_match_and_the_limit_counts_what_it_left_out` (`thread::search`); goldens
     `client_thread_search` and `link_worker_thread_hits`.
