@@ -756,6 +756,14 @@ impl Spacing {
         self.md
     }
 
+    /// The canvas showing between panels (8): between two columns, between the navigator and
+    /// the first one, and under the last row, as niri's gaps part its windows. A tile is a
+    /// panel standing on the canvas, and the gutter is its edge, so no hairline parts them.
+    #[must_use]
+    pub const fn gutter(&self) -> f32 {
+        self.sm
+    }
+
     /// How far a row's trailing edge sits in (6): half the leading inset, as `MonoCode`'s rows
     /// are padded 12 and 6. What ends a row is usually an icon button, whose own square adds
     /// the rest, so its glyph lands near the leading inset from the edge.

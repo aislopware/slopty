@@ -296,10 +296,11 @@ impl WorkspaceView {
 
         use crate::colors::hsla;
 
-        let theme = &self.theme;
+        // The navigator's row: its tones, on glass where it docks there.
+        let theme = self.nav_theme();
         let s = &theme.surfaces;
         let (_, second_h) = super::navigator::line_heights(theme);
-        let button = |id: String, label: &'static str, ink| {
+        let button = |id: String, label: &'static str, ink, weight| {
             let selector = id.clone();
             let el = div()
                 .id(ElementId::Name(id.into()))
@@ -314,6 +315,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .text_color(hsla(ink))
+                .font_weight(weight)
                 .map(crate::kit::eased)
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(label);
@@ -327,9 +329,39 @@ impl WorkspaceView {
                 this.answer_row(&answer, allow, cx);
             })
         };
-        let deny =
-            button(format!("nav-deny-{of}"), DENY, s.text_secondary).on_click(answered(false));
-        let allow = button(format!("nav-allow-{of}"), ALLOW, s.accent).on_click(answered(true));
+        let [(deny_ink, deny_weight), (allow_ink, allow_weight)] = answer_inks(theme);
+        let deny = button(format!("nav-deny-{of}"), DENY, deny_ink, gpui::FontWeight(deny_weight))
+            .on_click(answered(false));
+        let allow =
+            button(format!("nav-allow-{of}"), ALLOW, allow_ink, gpui::FontWeight(allow_weight))
+                .on_click(answered(true));
         div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
+    }
+}
+/// The tone and weight of a row's "Deny" and "Allow": neutral, as every answer is, since green
+/// says done and an approval is not done yet. The yes leads in the text's tone at the
+/// action's weight, the no a tier back at the metadata's.
+fn answer_inks(theme: &slopty_theme::Theme) -> [(slopty_theme::Rgb, f32); 2] {
+    let (s, roles) = (&theme.surfaces, theme.roles());
+    [(s.text_secondary, roles.metadata.weight), (s.text, roles.action.weight)]
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_theme::{Theme, Variant};
+
+    /// A row's answers are neutral in both modes: never the accent's green, which says done.
+    /// The yes leads the no by its tone and weight.
+    #[test]
+    fn an_answer_is_neutral_and_the_yes_leads() {
+        for theme in [Theme::new(Variant::Light), Theme::new(Variant::Dark)] {
+            let s = theme.surfaces;
+            let [(deny, deny_weight), (allow, allow_weight)] = super::answer_inks(&theme);
+            for ink in [deny, allow] {
+                assert!(ink != s.accent && ink != s.success, "no green on an answer");
+            }
+            assert_eq!(allow, s.text, "the yes in the text's tone");
+            assert!(allow_weight > deny_weight, "and a step heavier than the no");
+        }
     }
 }

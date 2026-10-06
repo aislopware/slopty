@@ -15440,3 +15440,75 @@ lanes' load:
 ```sh
 cargo test -p slopty-ui --release --lib soft_edge_cost -- --ignored --nocapture
 ```
+
+## 2026-10-06 — panels on the canvas: what their edges cost the GPU
+
+Tiles became panels on the canvas (`docs/decisions/ui.md`, "Premium foundations: tiles stand
+on the canvas as panels"). A light panel rests on two faint contact shadows, and every panel
+has a ring and its corners covered with the canvas. A shadow's quad covers its element and
+the blur round it, and the fragment shader runs its four-sample blur on every pixel, so a
+shadow under a panel costs a pass over the whole panel.
+
+**GPU.** The scenes are drawn offscreen by gpui-fast's Metal renderer: a 1280 × 800 window at
+2×, the navigator's 260 points left bare, a strip of 2, 3 or 6 columns each holding a header
+glyph and 48 lines as quads, 300 frames after 30, the scenes alternated a frame at a time.
+The rows are as follows.
+- Flush: what the strip drew before, flush tiles with a hairline between columns.
+- Whole: the panel's two shadows, its corner cover and its ring each inserted as one
+  primitive over the whole panel.
+- In pieces: the cover and the ring as `Window::paint_quad` draws a border round an empty
+  middle (its edge strips, inside corner squares), the shadows still whole.
+- Bands: the shadows drawn in four bands along the edges, as `kit::panel` draws them.
+GPU time per frame from the command buffer, p50 in µs, two runs of the same binary (mac-studio,
+load average 10 to 15):
+
+| columns | flush | whole, no shadow | whole | in pieces, no shadow | in pieces | bands |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 373, 375 | 761, 763 | 1519, 1532 | 423, 426 | 1197, 1202 | 468, 474 |
+| 3 | 377, 370 | 725, 710 | 1408, 1417 | 420, 417 | 1145, 1088 | 467, 460 |
+| 6 | 359, 411 | 713, 786 | 1412, 1522 | 417, 466 | 1137, 1237 | 479, 508 |
+
+- The two shadows drawn whole are most of the cost: they put a panel at three times flush
+  tiles. The cost follows the panels' area, not their number.
+- Drawn in bands, the panels cost 1.25 times flush tiles, about 0.1 ms a frame at this size.
+  The cover and the ring in pieces cost 1.13 times flush. The encode stays at 17 to 23 µs in
+  every row.
+- The GPU's clock follows its load, so a number only compares with its own run's neighbours.
+  One build ran every scene at about 1.4 times these times; its ratios matched.
+- The test is on the fork's branch `measure/panel-shadows` (`fefb630`, not yet on the fork's
+  main). The same branch's `ffd8368` clips a drop shadow to outside its element in the Metal
+  shader, as CSS clips an outer box-shadow. Interior pixels are discarded before the blur.
+  With it, whole shadows cost 1.46 times the panels without them instead of 2.8, and bands
+  1.07 instead of 1.11. Slopty draws bands either way; the clip would help every other
+  shadow (sheets, menus).
+
+```sh
+cd .research/gpui-fast && git switch measure/panel-shadows
+IPHONEOS_DEPLOYMENT_TARGET= cargo test -p gpui_apple --release --lib panel_shadow_gpu_cost -- --ignored --nocapture
+# without the shader clip: check out ffd8368^ -- crates/gpui_apple/src/shaders.metal first
+```
+
+**CPU.** A panel adds a canvas under a tile and one over its content, and about a dozen paint
+calls. The two arms are the release `slopty-ui` test binaries of `50f9c777` (before, a
+`git archive` in `target/scratch-panels/tree`) and of the tree with the panels, alternated
+three times, p50 in ms:
+
+| run | the keyboard moving, 60 shells + 60 notes: before / after | a frame over a large registry: before / after |
+| --- | --- | --- |
+| 1 | 1.003 / 1.045 | 3.386 / 3.398 |
+| 2 | 0.990 / 1.071 | 3.372 / 3.619 |
+| 3 | 1.084 / 1.112 | 3.639 / 3.593 |
+
+- The keyboard moving costs about 4 % more, 0.03 to 0.08 ms, in every round. The large
+  registry's frame moves within its noise.
+- `measure_a_frame_of_motion_beside_the_chrome`, `measure_an_echo_frame_beside_the_chrome`,
+  `measure_a_pointer_frame_beside_the_chrome` and `measure_a_stream_frame_beside_the_chrome`
+  fail at their first check, that the navigator is drawn, in both arms. They were not used.
+
+```sh
+(cd target/scratch-panels/tree && CARGO_TARGET_DIR=../target cargo test -p slopty-ui --release --lib --no-run)
+CARGO_TARGET_DIR=target/scratch-panels/target cargo test -p slopty-ui --release --lib --no-run
+<binary> --ignored --exact --nocapture --test-threads 1 \
+  workspace::tests::chrome::measure_the_keyboard_moving_beside_the_chrome \
+  workspace::tests::measure::measure_a_frame_over_a_large_registry
+```

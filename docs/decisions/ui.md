@@ -8271,3 +8271,72 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::frame::the_frame_says_where_the_focused_tile_is_once` (no disc, the count
     said),
     `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`.
+- ✅ **Premium foundations: tiles stand on the canvas as panels** (2026-10-06,
+  `.research/premium-foundations-2026-10-06.md` changes 1 and 9). The strip was one flat plane:
+  the tiles, the title bar and the navigator one surface, parted by hairlines. Every reference
+  (t3code, zeron, Linear, niri itself) puts its work on panels over a frame.
+  - **Panels.** Each tile is a panel on the canvas: the content's surface at `radii.md`, a ring
+    in `border_subtle`, and in light the resting contact (`Elevation::LIGHT.rest`); in dark its
+    top edge catches the light (`Rim::rest`). `kit::panel` is the only way to draw a tile's
+    ground: the strip's tiles, a tile closing, a tile starting, a tile whose machine is away and
+    the empty workspace's page. The lint `a_tile_stands_on_a_panel` holds the files that draw
+    them to it.
+  - **Gutters.** `Spacing::gutter()` (8) parts two columns, two stacked tiles, the navigator
+    from the first column and the last row from the window's bottom. The layout keeps its
+    columns flush. The frame sets the strip half a gutter in from its sides and bottom, and
+    each panel stands half a gutter in from its place, so widths, scrolling and every handler's
+    geometry stay the layout's. A terminal's grid is sized to its panel. The clip is the
+    frame's, so a panel sliding off is cut at the window's edge.
+  - **No hairlines.** The dividers between tiles and the navigator's and the rail's trailing
+    hairline are deleted: the gutter is the edge. A header lies inside its panel's top with no
+    fill and no rule. The focused panel is unmarked; focus stays the title's tone and weight.
+  - **Handles and drops.** The resize handle sits in the gutter, as tall as the panels, its
+    accent line down the gutter's middle. A drop's line runs down the gutter where the column
+    opens, and its wash is the panel the tile would stand as, rounded as one.
+  - **Corners.** GPUI clips children to rectangles, so a child painting to the edge (a remote
+    picture, a page, a body's own fill) would poke square corners out of the round ones. The
+    panel covers its corners last with the ground it stands on, then draws its ring. The
+    composition oracle draws a primitive after a native over it, so a remote picture's corners
+    are covered too.
+  - **What it costs.** Drawn whole, two shadows, the corner cover and the ring under each
+    panel cost the GPU about four times flush tiles, because a shadow's quad covers its whole
+    element. The contact shadow is drawn in bands along the edges, and GPUI already draws a
+    border round an empty middle as its edge strips. The panels then cost a quarter more than
+    flush tiles (`docs/MEASUREMENTS.md`, "Panels on the canvas: what their edges cost the GPU").
+  - **Phone.** A phone's tiles are full-bleed: no gutter, no radius, no ring and no shadow, as
+    its screen shows one tile at a time. A Mac window narrower than `phone_below` lays out as a
+    phone, so `window-minimum` (375 pt) shows one full-bleed column. The iPad keeps gutters.
+  - **The overview.** A workspace's block is the canvas in small, its panels standing on it,
+    and the words above it start on the panels' glyphs.
+  - **Glass across the frame.** The material is under the window whenever it can be, not only
+    while the navigator docks. The frame lays the canvas on it at `alpha::GLASS` wherever the
+    canvas shows: under a docked navigator or the rail, in the title bar (which paints no ground
+    of its own now) and in the gutters. The panels stay opaque. The title bar, the breadcrumb
+    and the bar's readouts draw in the glass's tones (`frame_theme`). A navigator floating on
+    its own sheet keeps the workspace's tones.
+  - **Overrules.** The 2026-09-25 "Panes sit flush, divided by hairlines" ruling and its
+    shipped follow-ups ("the flush layout", "flush tiles"), which removed gaps and corners at
+    the person's word. The layout itself stays flush; only the drawing stands back. Why a
+    ruling of the person's own is reversed: they had asked for flush panes to look modern and
+    minimal the way Warp does. Flush panes, with the hairlines between them since thinned at
+    their word, became one flat page, and on 2026-10-06 they judged the whole as provincial,
+    not premium. Panels are niri's own look, and the foundations study traced the provincial
+    read to tiles having no plane. The way back is cheap if they want it: `Spacing::gutter()`
+    to 0 and `kit::panel`'s radius off.
+  - **Also in this batch.**
+    - A navigator row's "Allow" is neutral: the text's tone at the action's weight, "Deny" a
+      tier back. It was the accent's green, which says done.
+    - A project's notice in the title bar says the task and how it stands. It is named by its
+      project only while that project's orchestrator is not on the workspace in view.
+  - Tests: `kit::panel::tests::{the_bands_hold_the_edge_and_leave_the_middle,
+    a_panel_stands_on_the_canvas_with_its_corners_covered, a_flat_panel_is_its_surface_alone}`,
+    `kit::tests::a_tile_stands_on_a_panel`,
+    `workspace::tests::tiles::{a_tile_stands_on_a_panel_and_its_header_on_it,
+    a_gutter_parts_every_neighbour, a_phone_tile_is_full_bleed}`,
+    `workspace::tests::strip_marks::{the_handle_sits_in_the_gutter_and_resizes_the_column,
+    the_drop_line_runs_down_the_gutter_and_a_join_washes_its_panel}`,
+    `workspace::tests::frame::on_glass_the_frame_shows_the_material_and_the_panels_stay_opaque`,
+    `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight` (the
+    panels' edges alike),
+    `workspace::approvals::tests::an_answer_is_neutral_and_the_yes_leads`,
+    `workspace::tests::projects::a_project_s_notice_in_view_says_its_task_alone`.

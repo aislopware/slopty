@@ -261,7 +261,7 @@ impl WorkspaceView {
         if phone || self.workers.is_empty() {
             return None;
         }
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let s = &theme.surfaces;
         let spacing = theme.spacing;
 
@@ -374,7 +374,7 @@ impl WorkspaceView {
     /// that it is not news, and the composer's meter says the context. Clicked, every
     /// machine's readings.
     fn plan_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let s = &theme.surfaces;
         let tile = self.focused();
         let worker = tile.map(|t| t.worker).or_else(|| self.readout_worker())?;
@@ -400,7 +400,7 @@ impl WorkspaceView {
     /// upload (its header says that one, with its stop): how many and how far, together.
     /// Clicked, the list of them.
     fn transfers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let s = &theme.surfaces;
         let rows = self.transfer_rows(cx.background_executor().now());
         let focused = self.focused();

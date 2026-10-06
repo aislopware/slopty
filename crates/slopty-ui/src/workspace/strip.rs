@@ -55,8 +55,9 @@ const HAIRLINE: f32 = 1.0;
 /// The line that marks where a drop opens a new column or workspace.
 const DROP_LINE: f32 = 2.0;
 
-/// One mark of a drop hint: `rect` filled with `ink`, square and frameless.
-fn hint(selector: &'static str, rect: Rect, ink: gpui::Hsla) -> gpui::AnyElement {
+/// One mark of a drop hint: `rect` filled with `ink`, rounded at `radius` (a wash takes the
+/// shape of the panel it shows), frameless.
+fn hint(selector: &'static str, rect: Rect, ink: gpui::Hsla, radius: f32) -> gpui::AnyElement {
     div()
         .debug_selector(move || selector.to_owned())
         .absolute()
@@ -64,6 +65,7 @@ fn hint(selector: &'static str, rect: Rect, ink: gpui::Hsla) -> gpui::AnyElement
         .top(px(rect.y))
         .w(px(rect.w))
         .h(px(rect.h))
+        .rounded(px(radius))
         .bg(ink)
         .into_any_element()
 }
@@ -573,6 +575,7 @@ impl WorkspaceView {
         };
         let row = |ix: usize| frame.workspaces.iter().find(|(i, _)| *i == ix).map(|(_, r)| *r);
         let accent = self.theme.surfaces.accent_fill;
+        let panel = self.stand(frame.zoom);
         let (wash, line) = match *target {
             DropTarget::IntoColumn { workspace, column: col, index } => {
                 let Some(r) = column(workspace, col) else { return Vec::new() };
@@ -605,10 +608,14 @@ impl WorkspaceView {
                     // An empty workspace: the whole of it is the new column.
                     (None, None) => {
                         let Some(r) = row(workspace) else { return Vec::new() };
-                        return vec![hint("drop-wash", r, hsla_alpha(accent, alpha::FAINT))];
+                        let wash = self.panel_rect(r, frame.zoom);
+                        let ink = hsla_alpha(accent, alpha::FAINT);
+                        return vec![hint("drop-wash", wash, ink, panel.radius)];
                     }
                 };
-                let line = Rect { x: x - DROP_LINE / 2.0, y: r.y, w: DROP_LINE, h: r.h };
+                // In the gutter's middle, as tall as the panels beside it.
+                let tall = self.panel_rect(r, frame.zoom);
+                let line = Rect { x: x - DROP_LINE / 2.0, y: tall.y, w: DROP_LINE, h: tall.h };
                 let width = dragged.map_or(r.w, |d| d.rect.w);
                 let limit = row(workspace).map_or(f32::MAX, |w| w.right());
                 let wash = Rect { x, y: r.y, w: width.min(limit - x).max(0.0), h: r.h };
@@ -623,14 +630,18 @@ impl WorkspaceView {
                 (None, Some(Rect { x: r.x, y: centre - DROP_LINE / 2.0, w: r.w, h: DROP_LINE }))
             }
         };
-        let wash = wash.map(|r| hint("drop-wash", r, hsla_alpha(accent, alpha::FAINT)));
-        let line = line.map(|r| hint("drop-hint", r, hsla(accent)));
+        // The wash is the panel the tile would stand as, where it would stand.
+        let wash = wash.map(|r| {
+            let shown = self.panel_rect(r, frame.zoom);
+            hint("drop-wash", shown, hsla_alpha(accent, alpha::FAINT), panel.radius)
+        });
+        let line = line.map(|r| hint("drop-hint", r, hsla(accent), 0.0));
         wash.into_iter().chain(line).collect()
     }
 
-    /// A handle on the divider right of each column of the active workspace, straddling the
-    /// line: a drag resizes the column on its left, a double-click puts it back at the width a
-    /// column opens at. Its accent line lies over the divider while the pointer is on it and
+    /// A handle in the gutter right of each column of the active workspace, centred in it: a
+    /// drag resizes the column on its left, a double-click puts it back at the width a column
+    /// opens at. Its accent line runs down the gutter's middle while the pointer is on it and
     /// while it is dragged.
     fn resize_handles(&self, frame: &Frame, cx: &Draw<'_, Self>) -> Vec<gpui::AnyElement> {
         if frame.overview > 0.0 {
@@ -670,15 +681,17 @@ impl WorkspaceView {
                 } else {
                     line.group_hover(HANDLE_GROUP, move |st| st.bg(accent))
                 };
+                // Centred in the gutter, as tall as the panels beside it.
+                let tall = self.panel_rect(r, 1.0);
                 div()
                     .id(("divider", column))
                     .debug_selector(move || format!("divider-{column}"))
                     .group(HANDLE_GROUP)
                     .absolute()
                     .left(px(r.right() - HANDLE_W / 2.0))
-                    .top(px(r.y))
+                    .top(px(tall.y))
                     .w(px(HANDLE_W))
-                    .h(px(r.h))
+                    .h(px(tall.h))
                     .cursor_ew_resize()
                     .child(line)
                     .on_mouse_down(
@@ -770,15 +783,14 @@ impl WorkspaceView {
         };
         let mut placed = Vec::new();
         let mut tiles = Vec::new();
-        let mut dividers = Vec::new();
         let mut notices = Vec::new();
         for p in &frame.tiles {
             if p.hidden || !(p.near || p.focused || dragged == Some(p.tile)) {
                 continue;
             }
+            let p = &self.panelled(p, chrome.k);
             if let Some(el) = self.render_tile(p, chrome, window, cx) {
                 tiles.push(el);
-                dividers.extend(self.render_dividers(p));
                 notices.extend(self.tile_notices(p, chrome, cx));
                 let r = p.rect;
                 placed.push((
@@ -827,7 +839,6 @@ impl WorkspaceView {
             .relative()
             .flex_1()
             .w_full()
-            .overflow_hidden()
             .capture_pinch(cx.listener(Self::pinch))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -836,13 +847,51 @@ impl WorkspaceView {
             .children(backdrops)
             .children(closing)
             .children(tiles)
-            .children(dividers)
             .children(notices)
             .children(handles)
             .children(hint)
             .children(empty)
             .children(self.render_marks());
         strip.into_any_element()
+    }
+
+    /// What the strip's panels stand on at the zoom `k`: the frame's ground, the canvas or the
+    /// canvas on glass, which covers their corners. A phone's are full-bleed, as its screen
+    /// shows one tile at a time edge to edge.
+    pub(super) fn stand(&self, k: f32) -> kit::Stand {
+        let ground = self.nav.glass.ground(&self.theme);
+        if self.phone { kit::Stand::flat(ground) } else { kit::Stand::on(&self.theme, ground, k) }
+    }
+
+    /// How far a panel stands back from its place in the layout at the zoom `k`, on every
+    /// side: half a gutter, and nothing on a phone.
+    pub(super) fn panel_inset(&self, k: f32) -> f32 {
+        if self.phone { 0.0 } else { self.theme.spacing.gutter() / 2.0 * k }
+    }
+
+    /// Where a tile the layout puts at `rect` is drawn: half a gutter in from every edge, so
+    /// two neighbours are a gutter apart and the strip's own half-gutter margin
+    /// (`render_frame`) makes the edges a gutter too. The layout's columns stay flush, so
+    /// widths, scrolling and every handler's geometry are the layout's; only the drawing
+    /// stands back. A phone's tiles meet.
+    pub(super) fn panel_rect(&self, rect: Rect, k: f32) -> Rect {
+        let half = self.panel_inset(k);
+        Rect {
+            x: rect.x + half,
+            y: rect.y + half,
+            w: half.mul_add(-2.0, rect.w).max(0.0),
+            h: half.mul_add(-2.0, rect.h).max(0.0),
+        }
+    }
+
+    /// `p` as its panel is drawn: its place and its place at rest both stood back
+    /// ([`Self::panel_rect`]), so a terminal's grid is sized to the panel it is drawn in.
+    fn panelled(&self, p: &slopty_client::layout::Placed, k: f32) -> slopty_client::layout::Placed {
+        slopty_client::layout::Placed {
+            rect: self.panel_rect(p.rect, k),
+            target: self.panel_rect(p.target, 1.0),
+            ..*p
+        }
     }
 
     /// The notices about `p`'s own work, under its header at its trailing edge, moving with it.
@@ -890,8 +939,8 @@ impl WorkspaceView {
         }
     }
 
-    /// The overview's blocks, under the tiles: each workspace with tiles is one block on the
-    /// content's surface holding its panes flush, a base unit wider all round so its corners
+    /// The overview's blocks, under the tiles: each workspace with tiles is one block of the
+    /// canvas holding its panels as the strip does, a base unit wider all round so its corners
     /// (`radii.lg`, the radius of what floats) clear theirs, with a hairline. Only the active
     /// one floats: it takes the one elevation and nothing more, no ring round it, so the map is
     /// blocks of work rather than a box in a ring in a box. A shadow under every block would
@@ -910,8 +959,9 @@ impl WorkspaceView {
         let active = self.layout.active_workspace();
         let fade = frame.overview;
         let (opening, moves) = (self.layout.overview_open(), self.chrome_moves(cx));
-        // The words start on the panes' glyphs' edge: a miniature pads its glyph by `inset`.
-        let inset = theme.spacing.md;
+        // The words start on the panes' glyphs' edge: a panel stands half a gutter in at the
+        // zoom, and a miniature pads its glyph by `inset` in it.
+        let inset = theme.spacing.md + self.panel_inset(frame.zoom);
         let glyph_slot = theme.typography.icon_large();
         let mut left = None;
         let mut out = Vec::new();
@@ -992,8 +1042,9 @@ impl WorkspaceView {
                         el.border(kit::HAIR).border_color(hsla(s.border))
                     }
                 })
-                // The panes' own surface, lifted or not: the block is what they sit on.
-                .bg(hsla(theme.content()));
+                // The canvas, lifted or not: the block is the workspace's frame in small, its
+                // panels standing on it as they stand on the strip.
+                .bg(hsla(s.canvas));
             let ink = if here { s.text } else { s.text_secondary };
             let glance = self.workspace_glance(ix);
             let label = div()
@@ -1272,16 +1323,14 @@ impl WorkspaceView {
                 .children(recent)
                 .child(section("empty-workers", "Machines").children(workers))
         };
-        // The strip is the content step with or without a tile on it: the empty workspace is
-        // the page a tile would be, not a hole down to the bars' `canvas`. It starts a fifth of
-        // the way down, where a dialog sits, by this frame's layout: the strip's size as the
-        // last frame measured it is a frame behind chrome that comes or goes.
-        div()
+        // The empty workspace is the page a tile would be, a panel where the tile would stand,
+        // not a hole down to the canvas. It starts a fifth of the way down, where a dialog
+        // sits, by this frame's layout: the strip's size as the last frame measured it is a
+        // frame behind chrome that comes or goes.
+        let page = div()
             .id("empty-workspace")
-            .absolute()
-            .inset_0()
+            .size_full()
             .overflow_y_scroll()
-            .bg(hsla(theme.content()))
             .flex()
             .flex_col()
             .items_center()
@@ -1292,8 +1341,10 @@ impl WorkspaceView {
             // Slopty's mark, centred over the page's words: its cursor lit while a worker is
             // reachable ([`super::about::Mark`]).
             .child(div().flex_none().pb(px(spacing.xl)).child(self.empty_mark.clone()))
-            .child(column.pb(px(spacing.xl)))
-            .into_any_element()
+            .child(column.pb(px(spacing.xl)));
+        let half = px(self.panel_inset(1.0));
+        let stands = div().absolute().left(half).top(half).right(half).bottom(half);
+        kit::panel(stands, theme, self.stand(1.0), div().child(page)).into_any_element()
     }
 
     /// Whether the active workspace has nothing on it: the start page shows.

@@ -29,6 +29,7 @@ mod fit;
 mod identity;
 pub mod menu;
 pub mod message;
+mod panel;
 mod press;
 mod priority;
 pub mod progress;
@@ -42,6 +43,7 @@ pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
 pub use identity::{identity_ink, machine_ink, wears_identity};
 pub use menu::{Menu, MenuItem, MenuPanel};
+pub use panel::{Stand, panel};
 pub use press::menu_press;
 pub use priority::{Dropped, Measured, Priority, PriorityRow, TitleFit, fit_row, priority_row};
 pub use room::{Room, room_query};
@@ -3079,6 +3081,35 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "a size off the one scale:\n{}", wrong.join("\n"));
+    }
+
+    /// Every tile stands on a panel ([`super::panel`]): in the files that draw tiles (the
+    /// strip, a tile, a tile starting, a tile whose machine is away) nothing paints the
+    /// content's surface as a ground of its own, square and flush, where the panel rounds,
+    /// rings and stands it on the canvas. A fill of it that is not a ground (a backing that
+    /// hides text under the header's controls) says so on the line before.
+    #[test]
+    fn a_tile_stands_on_a_panel() {
+        let tiles = ["strip.rs", "tile.rs", "starting.rs", "kept_items.rs"]
+            .map(|name| std::path::Path::new("workspace").join(name));
+        let mut wrong = Vec::new();
+        let mut before = String::new();
+        for (file, line_no, line) in chrome_lines("slopty-ui/src") {
+            let drawn = tiles.iter().any(|t| std::path::Path::new(&file).ends_with(t));
+            let code = line.split("//").next().unwrap_or_default();
+            // A fill whose colour is the content's surface, however it is reached.
+            let ground = code.match_indices(".bg(").any(|(at, _)| {
+                let fill = code.get(at..).unwrap_or_default();
+                let fill = fill.split(".bg(").nth(1).unwrap_or_default();
+                let fill = fill.split(").").next().unwrap_or(fill);
+                fill.contains("content()") || fill.contains("terminal.bg")
+            });
+            if drawn && ground && !before.contains("Not a ground") {
+                wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+            }
+            before = line;
+        }
+        assert!(wrong.is_empty(), "a tile's ground not on a panel:\n{}", wrong.join("\n"));
     }
 
     /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a

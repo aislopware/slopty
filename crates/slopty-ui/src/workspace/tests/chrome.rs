@@ -596,7 +596,8 @@ fn the_workspace_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     assert!((0.0..=Theme::default().spacing.md).contains(&gap), "+ follows it: {gap}");
 }
 
-/// No bar runs along the bottom: the strip reaches the window's bottom edge, and the title
+/// No bar runs along the bottom: the strip's panels stand a gutter above the window's bottom
+/// edge, with nothing but the canvas under them, and the title
 /// bar says nothing of itself while nothing needs saying. The server out of reach is said at
 /// its trailing end until it answers; a word about no one tile sits in its lane; a failure in
 /// a tile's own work sits beside that tile, under its header at its trailing edge, and moves to
@@ -610,9 +611,15 @@ fn no_bar_runs_along_the_bottom_and_a_notice_sits_by_its_work(cx: &mut TestAppCo
     let strip = bounds(cx, "strip").expect("the strip is drawn");
     let window = cx.update(|window, _| window.viewport_size());
     assert!(bounds(cx, "statusbar").is_none(), "no bar along the bottom");
+    let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell");
+    let gutter = Theme::default().spacing.gutter();
     assert!(
-        (f32::from(strip.bottom()) - f32::from(window.height)).abs() < 0.5,
-        "the strip runs to the bottom edge: {strip:?} in {window:?}"
+        (f32::from(window.height - tile.bottom()) - gutter).abs() < 0.5,
+        "a gutter under the panel: {tile:?} in {window:?}"
+    );
+    assert!(
+        (f32::from(window.height - strip.bottom()) - gutter / 2.0).abs() < 0.5,
+        "the strip half a gutter above the edge: {strip:?} in {window:?}"
     );
     assert!(bounds(cx, "readouts").is_none(), "nothing to say, nothing said");
     assert!(bounds(cx, "status-worker").is_none(), "the worker is the navigator's to name");

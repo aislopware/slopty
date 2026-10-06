@@ -213,15 +213,6 @@ enum Wait {
     Loading(SharedString),
 }
 
-/// What surrounds a tile on the strip.
-#[derive(Clone, Copy, Debug)]
-struct Edges {
-    /// A column continues to its right: it draws the divider on its right edge.
-    right: bool,
-    /// A tile is stacked below it in its column: it draws the divider on its bottom edge.
-    below: bool,
-}
-
 /// What a pane says of an open that failed: its title, why, and its way to pick another.
 /// A window or display that went is named for what it is, the rest by the failure's own words
 /// ([`crate::screen::failure_text`]).
@@ -892,10 +883,6 @@ impl WorkspaceView {
                 .w(px(width))
                 .h(px(height))
                 .opacity(placed.alpha)
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(hsla(theme.terminal.bg))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
@@ -920,12 +907,13 @@ impl WorkspaceView {
                         },
                     ))
                 })
-                .children(header)
-                .child(body)
-                .children(
-                    (takes_files && self.files_over == Some(tile) && cx.has_active_drag())
-                        .then(|| self.drop_overlay(tile, item, chrome)),
-                )
+                .map(|el| {
+                    let inside = div().flex().flex_col().children(header).child(body).children(
+                        (takes_files && self.files_over == Some(tile) && cx.has_active_drag())
+                            .then(|| self.drop_overlay(tile, item, chrome)),
+                    );
+                    kit::panel(el, theme, self.stand(chrome.k), inside)
+                })
                 .into_any_element(),
         )
     }
@@ -989,58 +977,6 @@ impl WorkspaceView {
         }
     }
 
-    /// The hairlines a tile owes its neighbours: on its right edge where a column follows, on
-    /// its bottom edge where a tile is stacked below. Laid over the tile's own edge, so a
-    /// neighbour coming or going never moves its content by a point (a terminal would re-fit
-    /// its grid). The strip draws them above every tile: a neighbour's edge, rounded to the same
-    /// pixel at a fractional zoom, would otherwise paint over a line its tile drew.
-    pub(super) fn render_dividers(&self, placed: &Placed) -> Vec<gpui::AnyElement> {
-        let edges = self.edges(placed);
-        let id = placed.tile.item;
-        let rect = placed.rect;
-        let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
-        let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
-        // Drawn as a border on an empty box: GPUI snaps a border to at least one device pixel,
-        // where a box half a point wide would round to nothing on a 1x screen.
-        let hair = slopty_theme::stroke::HAIR;
-        let line = || {
-            div().absolute().opacity(placed.alpha).border_color(hsla(self.theme.surfaces.border))
-        };
-        let right = edges.right.then(|| {
-            line()
-                .debug_selector(move || format!("divider-right-{}", id.as_uuid()))
-                .left(px(left + width - hair))
-                .top(px(top))
-                .h(px(height))
-                .border_l(px(hair))
-                .into_any_element()
-        });
-        let below = edges.below.then(|| {
-            line()
-                .debug_selector(move || format!("divider-below-{}", id.as_uuid()))
-                .left(px(left))
-                .top(px(top + height - hair))
-                .w(px(width))
-                .border_t(px(hair))
-                .into_any_element()
-        });
-        right.into_iter().chain(below).collect()
-    }
-
-    /// Where another tile continues from this one. Read off its place in the layout: two
-    /// lengths, no walk over the tiles.
-    fn edges(&self, placed: &Placed) -> Edges {
-        let pos = placed.pos;
-        let columns = self.layout.workspaces().get(pos.workspace).map_or(&[][..], |w| w.columns());
-        let stacked = columns.get(pos.column).map_or(1, |c| c.tiles().len());
-        // A tabbed column shows one tile at a time: nothing is below it.
-        let stacked = if placed.tabs.is_some() { 1 } else { stacked };
-        Edges {
-            right: !placed.fullscreen && pos.column.saturating_add(1) < columns.len(),
-            below: pos.tile.saturating_add(1) < stacked,
-        }
-    }
-
     /// Whether a tile's body may be drawn from its cached view: not in the frame the strip's
     /// focus comes to its tile or leaves it, which the body is laid out by. The keyboard moving
     /// needs nothing here. A view asks for its focus through its handle (its input handler, a
@@ -1072,10 +1008,10 @@ impl WorkspaceView {
         view.clone().into_any_element()
     }
 
-    /// A tile fading out where it stood, over a fade: its surface and its header's glyph and
-    /// title as they were, the content already gone. Square and frameless at any zoom, as every
-    /// tile is, and never scaled: text does not shrink on its way out. Nothing where chrome
-    /// does not move.
+    /// A tile fading out where it stood, over a fade: its panel and its header's glyph and
+    /// title as they were, the content already gone. A panel at any zoom, as every tile is,
+    /// and never scaled: text does not shrink on its way out. Nothing where chrome does not
+    /// move.
     pub(super) fn render_closing(
         &self,
         closing: &slopty_client::layout::Closing,
@@ -1087,7 +1023,8 @@ impl WorkspaceView {
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (rect, k) = (closing.rect, chrome.k);
+        let k = chrome.k;
+        let rect = self.panel_rect(closing.rect, k);
         let id = closing.tile.item;
         let was = self.closed.iter().rev().find(|c| c.tile == closing.tile).map(|c| &c.item);
         let header = was.filter(|_| k >= SHAPES_BELOW).map(|item| {
@@ -1114,12 +1051,9 @@ impl WorkspaceView {
             .left(px(rect.x))
             .top(px(rect.y))
             .w(px(rect.w))
-            .h(px(rect.h))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(hsla(theme.terminal.bg))
-            .children(header);
+            .h(px(rect.h));
+        let ghost =
+            kit::panel(ghost, theme, self.stand(k), div().flex().flex_col().children(header));
         let fade = kit::Pace::Fade.animation();
         Some(
             ghost
@@ -1153,10 +1087,11 @@ impl WorkspaceView {
         };
         let ink = title_ink(theme, focused);
         let heading = SharedString::from(spoken_heading(&kind, &title));
-        // Every header sits on its body's surface with nothing between them, focused or not, so
-        // a tile reads as one piece and the strip as content, not as rows of bands. A page or a
-        // remote picture is another program's surface, never quite the content's, so a hairline
-        // parts its header from it: there the two surfaces meet anyway.
+        // Every header lies inside its panel's top, on the panel's own surface with nothing
+        // between it and the body, focused or not, so a tile reads as one piece and the strip
+        // as panels, not as rows of bands. A page or a remote picture is another program's
+        // surface, never quite the content's, so a hairline parts its header from it: there
+        // the two surfaces meet anyway.
         let foreign = matches!(
             item.kind,
             ItemKind::Browser { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
@@ -1179,7 +1114,6 @@ impl WorkspaceView {
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
             .cursor_grab()
-            .bg(hsla(theme.content()))
             .when(!shapes && foreign, |el| {
                 el.border_b(kit::HAIR).border_color(hsla(s.border_subtle))
             })
@@ -2498,6 +2432,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs * k))
             .pl(px(theme.spacing.xs * k))
+            // Not a ground: the backing that hides the title's end under the controls.
             .bg(hsla(theme.content()))
             .invisible()
             .group_hover(HEADER_GROUP, gpui::Styled::visible)

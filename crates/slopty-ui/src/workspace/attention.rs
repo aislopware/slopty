@@ -656,6 +656,24 @@ impl WorkspaceView {
         Some(Heard { route, kind: notice.kind, title, body, stack: None })
     }
 
+    /// A project's notice said in the workspace while the app is in front: the task and how
+    /// it stands, as the server words it, named by its project only while that project's
+    /// orchestrator is not on the workspace in view, where the breadcrumb already names it.
+    pub fn say_project_notice(&mut self, heard: &Heard, cx: &mut Context<Self>) {
+        let route = heard.route;
+        let in_view = route.item.is_some_and(|item| {
+            let tile = TileRef { worker: route.worker, item };
+            let active = self.layout.active_workspace();
+            self.layout.position(tile).is_some_and(|at| at.workspace == active)
+        });
+        let text = if in_view || heard.title.trim().is_empty() {
+            heard.body.clone()
+        } else {
+            format!("{}: {}", heard.title, heard.body)
+        };
+        self.show_notice(text, cx);
+    }
+
     /// A project's notice, at `entry` of `project`'s timeline: a note that leads to its
     /// orchestrator's terminal, stacked with the project's others. `None` for a project with no
     /// orchestrator to lead to.

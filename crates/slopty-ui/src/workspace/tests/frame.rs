@@ -795,8 +795,11 @@ fn narrowing_the_window_never_lays_the_strip_out_as_a_phone(cx: &mut TestAppCont
     let [(_, first), ..] = three_shells(&view, cx, &fake);
     click(cx, selector("nav-tile", first.item));
     let before = cx.debug_bounds(selector("item", first.item)).expect("drawn");
-    let strip_left =
-        |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.viewport.get().left());
+    // The first panel stands half a gutter in from where its column starts the strip.
+    let half = px(theme().spacing.gutter() / 2.0);
+    let strip_left = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.drawn.viewport.get().left()) + half
+    };
     assert_eq!(before.left(), strip_left(cx), "the first column starts the strip");
 
     cx.simulate_resize(size(px(900.0), px(600.0)));
@@ -804,4 +807,45 @@ fn narrowing_the_window_never_lays_the_strip_out_as_a_phone(cx: &mut TestAppCont
     assert!(cx.debug_bounds("navigator").is_none(), "no room to dock: it waits closed");
     let after = cx.debug_bounds(selector("item", first.item)).expect("drawn");
     assert_eq!(after.left(), strip_left(cx), "no strut before it: {after:?}");
+}
+
+/// On glass the frame's canvas is the material wherever it shows: the title bar paints no
+/// ground of its own over the frame's, the frame lays the canvas at `alpha::GLASS`, the
+/// panels stay opaque, and their corners are covered with the glass's ground so they meet it
+/// without a seam. The title bar's words take the tones that read on glass.
+#[gpui::test]
+fn on_glass_the_frame_shows_the_material_and_the_panels_stay_opaque(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    view.update(cx, |v, cx| {
+        v.nav.glass.assume();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let theme = theme();
+    let glass = crate::colors::hsla_alpha(theme.surfaces.canvas, slopty_theme::alpha::GLASS);
+    let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
+    let bar = cx.debug_bounds("titlebar").expect("the title bar").scale(scale);
+    let over_bar = |q: &&gpui::Quad| {
+        q.bounds.origin.y.0 <= bar.origin.y.0 + 0.5
+            && q.bounds.size.height.0 >= bar.size.height.0 - 0.5
+            && q.background.as_solid().is_some_and(|c| c.a > 0.0)
+    };
+    let grounds: Vec<_> = quads.iter().filter(over_bar).collect();
+    assert!(grounds.iter().any(|q| q.background.as_solid() == Some(glass)), "the frame on glass");
+    assert!(
+        grounds.iter().all(|q| q.background.as_solid().is_some_and(|c| c.a < 1.0)),
+        "nothing opaque under the title bar: {grounds:?}"
+    );
+    let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell").scale(scale);
+    let content = crate::colors::hsla(theme.content());
+    let panel = quads.iter().find(|q| {
+        (q.bounds.origin.x.0 - tile.origin.x.0).abs() < 0.5
+            && q.background.as_solid() == Some(content)
+    });
+    assert!(panel.is_some(), "the panel is opaque");
+    assert!(quads.iter().any(|q| q.border_color == glass), "its corners covered with the glass");
+    let tones = view.read_with(cx, |v, _| v.frame_theme().surfaces);
+    assert_eq!(tones, theme.surfaces.on_glass(), "the title bar's words read on glass");
 }

@@ -737,7 +737,8 @@ fn the_layout_keys_move_the_focus_and_the_columns(cx: &mut TestAppContext) {
     assert_ne!(focused(&view, cx), Some(first), "⌘⌥↑ walks the column");
 }
 
-/// A lone column fills the strip. Beside another, ⌘R cycles it through the preset widths;
+/// A lone column fills the strip, its panel a gutter short of it, half a gutter each side.
+/// Beside another, ⌘R cycles it through the preset widths;
 /// the terminal's grid follows the width it comes to rest at. ⌘⇧↩ fills the view, and again
 /// restores.
 #[gpui::test]
@@ -753,12 +754,13 @@ fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
         view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).size().cols)
     };
     let strip = f32::from(cx.debug_bounds("strip").unwrap().size.width);
-    assert!((width(cx) - strip).abs() < 2.0, "alone, edge to edge: {}", width(cx));
+    let gutter = Theme::default().spacing.gutter();
+    assert!((width(cx) + gutter - strip).abs() < 2.0, "alone, edge to edge: {}", width(cx));
     let _beside = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
     let half = width(cx);
-    assert!((half - strip / 2.0).abs() < 2.0, "half the strip, edge to edge: {half}");
+    assert!((half + gutter - strip / 2.0).abs() < 2.0, "half the strip, edge to edge: {half}");
     let half_cols = cols(cx);
     cx.simulate_keystrokes("cmd-r");
     cx.run_until_parked();

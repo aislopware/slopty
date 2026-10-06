@@ -223,14 +223,15 @@ pub(super) struct NavState {
     pub list: NavList,
     /// Draws it again when a label it shows changes with the clock (a turn's time, an age).
     pub tick: RefCell<Option<Task<()>>>,
-    /// The system's sidebar material under it while it docks (macOS).
+    /// The system's sidebar material under the frame (macOS).
     pub glass: OnGlass,
 }
 
-/// The navigator on glass (macOS): the system's sidebar material under the window while the
-/// navigator docks, its own ground the canvas at [`alpha::GLASS`] over it, and its text in the
-/// tones that read there ([`slopty_theme::Surfaces::on_glass`]). Everything right of it paints
-/// the canvas whole, so the material shows only through the navigator.
+/// The frame on glass (macOS): the system's sidebar material under the window, the frame's
+/// canvas laid on it at [`alpha::GLASS`] wherever it shows (under a docked navigator or the
+/// rail, in the title bar, in the gutters), and the chrome's text there in the tones that read
+/// on it ([`slopty_theme::Surfaces::on_glass`]). The panels stay opaque: the work is never seen
+/// through.
 ///
 /// Never in the self-test build, whose renders are compared pixel for pixel. Under Reduce
 /// Transparency AppKit draws the material as a solid colour of its own, and the window is opaque
@@ -242,6 +243,10 @@ pub(super) struct OnGlass {
     material: Option<(slopty_platform::material::Glass, bool)>,
     /// The workspace's theme, and the navigator's on glass derived from it, while it shows.
     theme: Option<(Theme, Theme)>,
+    /// A test's stand-in for the material: the frame takes the glass's ground and tones as
+    /// though it were under the window.
+    #[cfg(test)]
+    assumed: bool,
 }
 
 impl OnGlass {
@@ -250,12 +255,18 @@ impl OnGlass {
         self.theme.is_some()
     }
 
+    /// Stand in for the material under the window, as a test has none to put there.
+    #[cfg(test)]
+    pub const fn assume(&mut self) {
+        self.assumed = true;
+    }
+
     /// The theme the navigator draws in: `theme` itself, or its tones for glass.
     pub fn theme<'a>(&'a self, theme: &'a Theme) -> &'a Theme {
         self.theme.as_ref().map_or(theme, |(_, on)| on)
     }
 
-    /// The navigator's ground: the canvas, laid at [`alpha::GLASS`] on glass.
+    /// The frame's ground: the canvas, laid at [`alpha::GLASS`] on glass.
     pub fn ground(&self, theme: &Theme) -> gpui::Hsla {
         let canvas = theme.surfaces.canvas;
         if self.shows() { hsla_alpha(canvas, alpha::GLASS) } else { hsla(canvas) }
@@ -1341,16 +1352,31 @@ impl WorkspaceView {
     /// The material under a docked navigator follows how it sits and the theme: there while
     /// it docks, leaning as the theme does.
     pub(super) fn settle_glass(&mut self, window: &Window) {
-        let wanted = self.nav.drawn == Some(Mode::Docked);
+        // The frame's canvas is glass wherever it shows: under a docked navigator or the rail,
+        // and in the title bar and the gutters round the panels, whichever way the navigator
+        // is drawn. Reduce Transparency takes the material away.
         let dark = self.theme.variant() == Variant::Dark;
-        let under = self.nav.glass.place(wanted, dark, window);
+        let under = self.nav.glass.place(true, dark, window);
+        #[cfg(test)]
+        let under = under || self.nav.glass.assumed;
         self.nav.glass.follow(under, &self.theme);
     }
 
-    /// The theme the navigator draws in: the workspace's, with its text toned for glass while
-    /// the material shows ([`OnGlass`]).
-    pub(super) fn nav_theme(&self) -> &Theme {
+    /// The theme the frame's chrome draws in (the title bar, a docked navigator, the rail): the
+    /// workspace's, with its text toned for glass while the material shows ([`OnGlass`]).
+    pub(super) fn frame_theme(&self) -> &Theme {
         self.nav.glass.theme(&self.theme)
+    }
+
+    /// The theme the navigator draws in: the frame's while it lies on the frame (docked, or
+    /// the rail), the workspace's while it floats on its own opaque sheet.
+    pub(super) fn nav_theme(&self) -> &Theme {
+        let on_frame = match self.nav.drawn {
+            Some(Mode::Docked) => true,
+            Some(Mode::Overlay | Mode::Drawer) => false,
+            None => self.nav.rail,
+        };
+        if on_frame { self.frame_theme() } else { &self.theme }
     }
 
     /// The plane the navigator's rows lie on: the canvas while it docks, a float laid over the
@@ -2697,7 +2723,6 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = self.nav_theme();
-        let s = theme.surfaces;
         let safe = window.insets().effective();
         let rows = div().flex_1().min_h_0().flex().flex_col().child(self.chrome.nav_rows.clone());
         div()
@@ -2726,12 +2751,10 @@ impl WorkspaceView {
             })
             .flex()
             .flex_col()
-            // The bars' surface: the navigator is chrome, one surface with them, and the panel
-            // step is left to the unfocused tiles' headers. Docked on a Mac, it is that surface
-            // laid over the system's glass.
+            // The canvas: the navigator is chrome, one surface with the title bar and the
+            // gutters, and docked it needs no edge of its own, since the gutter beside it is
+            // its edge. Docked on a Mac, it is that surface laid over the system's glass.
             .bg(self.nav.glass.ground(theme))
-            .border_r(kit::HAIR)
-            .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. Over a wider frame it
             // meets the window's top, left and bottom edges, so only its trailing edge carries
@@ -2907,9 +2930,8 @@ impl WorkspaceView {
             .overflow_y_scroll()
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
-            .bg(hsla(s.canvas))
-            .border_r(kit::HAIR)
-            .border_color(hsla(s.border))
+            // The canvas, as the docked navigator's: the gutter beside it is its edge.
+            .bg(self.nav.glass.ground(theme))
             .children(buttons)
             .into_any_element()
     }

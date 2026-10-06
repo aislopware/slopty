@@ -156,11 +156,13 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
         .collect()
 }
 
-/// Panes sit flush: no tile is rounded or framed, the focused one included. Every header is
-/// its body's surface with nothing under it, focused or not: focus is the title's tone
-/// (`focus::the_focused_tile_is_said_by_its_titles_tone_alone`).
+/// Every tile stands on a panel: the content's surface rounded at `radii.md`, its corners
+/// covered with the canvas it stands on and its ring in the quiet border, the focused one
+/// included. Every header lies inside its panel's top with no fill and no rule of its own:
+/// focus is the title's tone and weight
+/// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`).
 #[gpui::test]
-fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) {
+fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -168,61 +170,71 @@ fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) 
     assert_eq!(focused(&view, cx), Some(second));
     cx.run_until_parked();
     let theme = Theme::default();
-    let fill = |c| gpui::Background::from(crate::colors::hsla(c));
-    let content = fill(theme.content());
+    let scale = cx.update(|window, _| window.scale_factor());
+    let content = gpui::Background::from(crate::colors::hsla(theme.content()));
+    let ring = crate::colors::hsla(theme.surfaces.border_subtle);
     for tile in [first, second] {
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         let quads = quads_at(cx, bounds);
-        assert!(!quads.is_empty(), "the tile paints its surface");
-        for q in &quads {
-            let r = q.corner_radii;
-            let w = q.border_widths;
-            assert!(
-                [r.top_left, r.top_right, r.bottom_left, r.bottom_right].iter().all(|c| c.0 == 0.0),
-                "a square tile: {q:?}"
-            );
-            assert!(
-                [w.top, w.right, w.bottom, w.left].iter().all(|b| b.0 == 0.0),
-                "no frame: {q:?}"
-            );
-        }
-    }
-    let header = |cx: &mut VisualTestContext, tile: TileRef| {
-        let bounds = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
-        quads_at(cx, bounds)
-    };
-    for tile in [second, first] {
-        let quads = header(cx, tile);
-        assert!(quads.iter().any(|q| q.background == content), "{tile:?}: the body's surface");
-        assert!(quads.iter().all(|q| q.border_widths.bottom.0 == 0.0), "and nothing under it");
+        let ground = quads.iter().find(|q| q.background == content).expect("its surface");
+        let radius = ground.corner_radii.top_left.0 / scale;
+        assert!((radius - theme.radii.md).abs() < 0.01, "rounded at radii.md: {ground:?}");
+        assert!(quads.iter().any(|q| q.border_color == ring), "{tile:?}: its ring");
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
+        assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the panel's top");
+        assert!(quads_at(cx, header).is_empty(), "{tile:?}: no band and no rule of its own");
     }
 }
 
-/// One divider between each pair of neighbours: a tile draws it on its right edge where a
-/// column follows and on its bottom edge where a tile is stacked below, and nowhere else.
+/// A gutter of the canvas parts every two neighbours, a column from the next and a tile from
+/// the one stacked under it, and runs round the outer ones: no hairline is drawn between them.
 #[gpui::test]
-fn a_divider_runs_only_between_neighbours(cx: &mut TestAppContext) {
+fn a_gutter_parts_every_neighbour(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), (_, third)] = three_shells(&view, cx, &fake);
     cx.simulate_keystrokes("cmd-[");
     cx.run_until_parked();
     assert_eq!(column_of(&view, cx, third), column_of(&view, cx, second), "stacked");
-    let drawn = |cx: &mut VisualTestContext, part: &str, tile: TileRef| {
-        cx.debug_bounds(selector(part, tile.item)).is_some()
+    let at = |cx: &mut VisualTestContext, tile: TileRef| {
+        cx.debug_bounds(selector("item", tile.item)).expect("drawn")
     };
-    assert!(drawn(cx, "divider-right", first), "a column follows the first");
-    assert!(!drawn(cx, "divider-below", first));
-    assert!(!drawn(cx, "divider-right", second), "the last column: nothing to its right");
-    assert!(drawn(cx, "divider-below", second), "the third is below it");
-    assert!(!drawn(cx, "divider-right", third) && !drawn(cx, "divider-below", third));
-
+    let (first, second, third) = (at(cx, first), at(cx, second), at(cx, third));
+    let gutter = Theme::default().spacing.gutter();
+    let near = |a: Pixels, b: f32, what: &str| {
+        assert!((f32::from(a) - b).abs() < 0.5, "{what}: {a:?}, not {b}");
+    };
+    near(second.left() - first.right(), gutter, "between two columns");
+    near(third.top() - second.bottom(), gutter, "between two stacked tiles");
+    let window = cx.update(|window, _| window.viewport_size());
+    near(window.height - third.bottom(), gutter, "under the last row");
+    let strip = cx.debug_bounds("strip").expect("the strip");
+    near(first.left() - strip.left(), gutter / 2.0, "half from the strip, half its margin");
     let border = crate::colors::hsla(Theme::default().surfaces.border);
-    let line = cx.debug_bounds(selector("divider-below", second.item)).expect("drawn");
-    let scale = cx.update(|window, _| window.scale_factor());
-    let device = f32::from(line.size.height) * scale;
-    assert!((device - 1.0).abs() < 0.01, "a hairline, one device pixel: {device}");
-    assert!(quads_at(cx, line).iter().any(|q| q.border_color == border), "in the border colour");
+    let lines = cx.update(|w, _| w.painted_quads());
+    assert!(!lines.iter().any(|q| q.border_color == border), "no hairline parts them");
+}
+
+/// A phone's tile is full-bleed: it meets the screen's edges and its neighbours, square, with
+/// no ring, as its screen shows one tile at a time.
+#[gpui::test]
+fn a_phone_tile_is_full_bleed(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+    let strip = cx.debug_bounds("strip").expect("the strip");
+    assert_eq!(bounds.size.width, strip.size.width, "edge to edge: {bounds:?} in {strip:?}");
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(f32::from(window.height - bounds.bottom()).abs() < 0.5, "to the bottom edge");
+    let quads = quads_at(cx, bounds);
+    assert!(!quads.is_empty(), "its surface");
+    for q in &quads {
+        assert_eq!(q.corner_radii.top_left.0, 0.0, "square: {q:?}");
+        assert_eq!(q.border_widths.top.0, 0.0, "no ring: {q:?}");
+    }
 }
 
 /// No body is veiled, focused or not: the header carries the focus, and a quad over every
@@ -323,7 +335,10 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
     assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
-    assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
+    let ring = crate::colors::hsla(Theme::default().surfaces.border_subtle);
+    let edges = quads_at(cx, tile);
+    let mut edges = edges.iter().filter(|q| q.border_widths.left.0 > 0.0);
+    assert!(edges.all(|q| q.border_color == ring), "no outline but the panel's ring");
 }
 
 /// A header holds no fill at rest: its state is a glyph at its end, not a chip. The leading

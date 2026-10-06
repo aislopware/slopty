@@ -1577,6 +1577,47 @@ fn a_project_s_notice_leads_to_its_orchestrator_stacked_by_project(cx: &mut Test
     assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "nowhere to lead");
 }
 
+/// In front, a project's notice is said in the title bar's lane as its task and how it
+/// stands; its project is named only while that project's orchestrator is not on the
+/// workspace in view.
+#[gpui::test]
+fn a_project_s_notice_in_view_says_its_task_alone(cx: &mut TestAppContext) {
+    use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let board = slopty_proto::project::ProjectId::new("board").unwrap();
+    let notice = Notice {
+        kind: NoticeKind::Project,
+        about: Subject::Project { project: board, entry: 7 },
+        tile: Some(TermRef { worker: WorkerId::new(), session: orchestrator }),
+        title: "Ship the project board".into(),
+        text: "#1 Wire the board: its verifier failed".into(),
+        worked_ms: None,
+        via: None,
+    };
+    let said = |cx: &mut VisualTestContext| {
+        tree(cx)
+            .into_iter()
+            .filter(|n| n.role == "Status")
+            .filter_map(|n| n.label)
+            .collect::<Vec<_>>()
+    };
+    let mut heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a note");
+    view.update(cx, |v, cx| v.say_project_notice(&heard, cx));
+    cx.run_until_parked();
+    assert!(
+        said(cx).iter().any(|l| l == "#1 Wire the board: its verifier failed"),
+        "{:?}",
+        said(cx)
+    );
+    heard.route.item = None;
+    view.update(cx, |v, cx| v.say_project_notice(&heard, cx));
+    cx.run_until_parked();
+    let named = "Ship the project board: #1 Wire the board: its verifier failed";
+    assert!(said(cx).iter().any(|l| l == named), "out of view, named: {:?}", said(cx));
+}
+
 /// The bar under the header fills only with what merged: empty while nothing has, though every
 /// task stands in a lane, then the merged tasks' share of them all, its value said as a
 /// percentage. How the rest stands is the lanes' counts, not the bar's.

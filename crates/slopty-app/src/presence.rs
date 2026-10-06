@@ -130,7 +130,7 @@ impl Workspace {
     pub(crate) fn heard_notice(&mut self, notice: &Notice, cx: &mut Context<Self>) {
         let Some(heard) = self.view.read(cx).heard(notice) else { return };
         if heard.stack.is_some() && self.attention.active() {
-            self.show_notice(format!("{}: {}", heard.title, heard.body), cx);
+            self.view.update(cx, |v, cx| v.say_project_notice(&heard, cx));
             return;
         }
         let in_front = cx.active_window().is_some();

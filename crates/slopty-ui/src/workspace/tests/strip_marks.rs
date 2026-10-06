@@ -32,11 +32,6 @@ fn quads_at(cx: &mut VisualTestContext, at: Bounds<Pixels>) -> Vec<gpui::Quad> {
         .collect()
 }
 
-fn square(q: &gpui::Quad) -> bool {
-    let r = q.corner_radii;
-    [r.top_left, r.top_right, r.bottom_right, r.bottom_left].iter().all(|c| c.0 == 0.0)
-}
-
 fn accent() -> gpui::Hsla {
     crate::colors::hsla(Theme::default().surfaces.accent)
 }
@@ -51,12 +46,12 @@ fn filled(cx: &mut VisualTestContext, at: Bounds<Pixels>, ink: gpui::Hsla) -> bo
     quads_at(cx, at).iter().any(|q| q.background.as_solid() == Some(ink))
 }
 
-/// The handle between two columns straddles their divider: a 12 pt target centred on the line,
-/// whose accent line lies over the divider under the pointer and while dragged. Dragging it
-/// widens the column on its left by what the pointer travelled, and the next column still
-/// starts where it ends.
+/// The handle between two columns sits in the gutter between their panels: a 12 pt target
+/// centred on it, as tall as the panels, whose accent line runs down the gutter's middle under
+/// the pointer and while dragged. Dragging it widens the column on its left by what the
+/// pointer travelled, and the next panel still stands a gutter past where it ends.
 #[gpui::test]
-fn the_handle_straddles_the_divider_and_resizes_the_column(cx: &mut TestAppContext) {
+fn the_handle_sits_in_the_gutter_and_resizes_the_column(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
@@ -64,16 +59,18 @@ fn the_handle_straddles_the_divider_and_resizes_the_column(cx: &mut TestAppConte
     cx.run_until_parked();
     let (left, right) =
         (bounds(cx, selector("item", first.item)), bounds(cx, selector("item", second.item)));
-    near(f32::from(left.right()), f32::from(right.left()));
+    let gutter = Theme::default().spacing.gutter();
+    near(f32::from(right.left() - left.right()), gutter);
+    let middle = f32::from(left.right()) + gutter / 2.0;
 
     let handle = bounds(cx, "divider-0");
     near(f32::from(handle.size.width), 12.0);
-    near(f32::from(handle.center().x), f32::from(left.right()));
+    near(f32::from(handle.center().x), middle);
     near(f32::from(handle.top()), f32::from(left.top()));
     near(f32::from(handle.size.height), f32::from(left.size.height));
     let line = bounds(cx, "divider-line-0");
     near(f32::from(line.size.width), 1.0);
-    near(f32::from(line.right()), f32::from(left.right()));
+    near(f32::from(line.right()), middle);
     assert!(!filled(cx, line, accent()), "the line is quiet until the pointer comes");
 
     let grab = handle.center();
@@ -86,22 +83,22 @@ fn the_handle_straddles_the_divider_and_resizes_the_column(cx: &mut TestAppConte
     cx.run_until_parked();
     let dragged = bounds(cx, "divider-line-0");
     assert!(filled(cx, dragged, accent()), "the line stays lit while dragged");
-    near(f32::from(dragged.right()), f32::from(left.right()) + 60.0);
+    near(f32::from(dragged.right()), middle + 60.0);
     cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
 
     let (left_after, right_after) =
         (bounds(cx, selector("item", first.item)), bounds(cx, selector("item", second.item)));
     near(f32::from(left_after.size.width), f32::from(left.size.width) + 60.0);
-    near(f32::from(right_after.left()), f32::from(left_after.right()));
+    near(f32::from(right_after.left() - left_after.right()), gutter);
 }
 
-/// A header dragged near a column's edge draws a 2 pt accent line centred on the divider the
-/// new column would open, over a faint wash as wide as the column the tile brings; over the
-/// middle of a column of one it washes the half the tile would take, with no corner and no
-/// frame.
+/// A header dragged near a column's edge draws a 2 pt accent line down the middle of the
+/// gutter where the new column would open, as tall as the panels, over a faint wash in the
+/// shape of the panel the tile would stand as; over the middle of a column of one it washes the
+/// panel the tile would take in its lower half, rounded as a panel is, with no frame.
 #[gpui::test]
-fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAppContext) {
+fn the_drop_line_runs_down_the_gutter_and_a_join_washes_its_panel(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
@@ -121,7 +118,8 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
     cx.run_until_parked();
     let line = bounds(cx, "drop-hint");
     near(f32::from(line.size.width), 2.0);
-    near(f32::from(line.center().x), f32::from(column.left()));
+    let gutter = Theme::default().spacing.gutter();
+    near(f32::from(line.center().x), f32::from(column.left()) - gutter / 2.0);
     near(f32::from(line.top()), f32::from(column.top()));
     near(f32::from(line.size.height), f32::from(column.size.height));
     assert!(filled(cx, line, mark()), "the line is the accent's mark");
@@ -137,26 +135,29 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
     let wash = bounds(cx, "drop-wash");
     near(f32::from(wash.left()), f32::from(column.left()));
     near(f32::from(wash.size.width), f32::from(column.size.width));
-    near(f32::from(wash.top()), f32::from(column.center().y));
+    // The lower half of the column's place, a panel in it: half a gutter under the middle.
+    near(f32::from(wash.top()), f32::from(column.center().y) + gutter / 2.0);
     near(f32::from(wash.bottom()), f32::from(column.bottom()));
     let faint = mark().opacity(slopty_theme::alpha::FAINT);
     let quads = quads_at(cx, wash);
     let quad = quads.iter().find(|q| q.background.as_solid() == Some(faint)).expect("a wash");
-    assert!(square(quad), "no corner: {quad:?}");
+    let radius = quad.corner_radii.top_left.0 / cx.update(|w, _| w.scale_factor());
+    near(radius, Theme::default().radii.md);
     let b = quad.border_widths;
     assert!([b.top, b.right, b.bottom, b.left].iter().all(|w| w.0 == 0.0), "no frame: {quad:?}");
     cx.simulate_mouse_up(column.center(), MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
 }
 
-/// In the overview a workspace with tiles is one block round its panes: the content's surface
-/// a base unit wider all round, rounded at the floating radius, with a hairline. Only the
+/// In the overview a workspace with tiles is one block round its panels: the canvas a base
+/// unit wider all round, rounded at the floating radius, with a hairline, its panels standing
+/// on it as they stand on the strip. Only the
 /// active one floats (the one elevation, which the scene does not expose) and wears a 1.5 pt
 /// edge in the text's tone at half strength flush with it, as a selected thumbnail does: not
 /// the accent, which means "done". The place for a new workspace is a
 /// ghost button under the last block, on its left edge, a row tall, and a click on it opens that
-/// workspace. No tile's header is a band of its own at that zoom: every header is the body's
-/// surface, with no hairline.
+/// workspace. No tile's header is a band of its own at that zoom: every header lies on its
+/// panel's surface, with no fill and no hairline of its own.
 #[gpui::test]
 fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -168,7 +169,7 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     cx.run_until_parked();
     let theme = Theme::default();
     let pad = theme.spacing.sm;
-    let content = crate::colors::hsla(theme.content());
+    let canvas = crate::colors::hsla(theme.surfaces.canvas);
 
     let block = |cx: &mut VisualTestContext, ix: usize| {
         let at = cx.debug_bounds(Box::leak(format!("overview-block-{ix}").into_boxed_str()));
@@ -176,8 +177,8 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         let quads = quads_at(cx, at);
         let quad = quads
             .into_iter()
-            .find(|q| q.background.as_solid() == Some(content))
-            .unwrap_or_else(|| panic!("block {ix} is on the content's surface"));
+            .find(|q| q.background.as_solid() == Some(canvas))
+            .unwrap_or_else(|| panic!("block {ix} is the canvas"));
         (at, quad)
     };
     let (first, first_quad) = block(cx, 0);
@@ -213,15 +214,18 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         .filter_map(|(_, tile)| cx.debug_bounds(selector("item", tile.item)))
         .find(|b| first.contains(&b.center()))
         .expect("a pane in the first block");
-    near(f32::from(pane.left() - first.left()), pad);
+    // The block's pad, then the panel's half gutter at the overview's zoom.
+    let zoom = view.read_with(cx, |v, _| v.layout.frame().zoom);
+    let stands = theme.spacing.gutter() / 2.0 * zoom;
+    near(f32::from(pane.left() - first.left()), pad + stands);
 
     // The name and the place for the next one start where the panes' glyphs do: a summary
     // pads its glyph by `inset`.
     let inset = theme.spacing.md;
     let new = bounds(cx, "overview-new-workspace");
     let name = bounds(cx, "overview-name-1");
-    near(f32::from(name.left()), f32::from(second.left()) + pad + inset);
-    near(f32::from(new.left()), f32::from(second.left()) + inset);
+    near(f32::from(name.left()), f32::from(second.left()) + pad + stands + inset);
+    near(f32::from(new.left()), f32::from(second.left()) + stands + inset);
     assert!(new.top() >= second.bottom() - px(0.5), "under the last block");
     near(f32::from(new.size.height), theme.density.row);
     assert!(new.size.width < second.size.width, "a button, not a block: {new:?}");
@@ -229,12 +233,7 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     for (_, tile) in &shells {
         let header = cx.debug_bounds(selector("title", tile.item)).expect("a header");
         let quads = quads_at(cx, header);
-        assert!(!quads.is_empty(), "the header paints");
-        assert!(
-            quads.iter().all(|q| q.background.as_solid() == Some(content)),
-            "the body's surface: {quads:?}"
-        );
-        assert!(quads.iter().all(|q| q.border_widths.bottom.0 == 0.0), "no hairline");
+        assert!(quads.is_empty(), "no band and no hairline of its own: {quads:?}");
     }
     cx.simulate_click(new.center(), Modifiers::default());
     cx.run_until_parked();

@@ -307,7 +307,7 @@ impl WorkspaceView {
         label: &'static str,
         action: &'static dyn gpui::Action,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let hint_theme = Rc::new(theme.clone());
         kit::icon_button(theme, id, icon, label).when(SHORTCUT_HINTS, |el| {
             kit::hint_timing(el).tooltip(move |_window, cx| {
@@ -365,7 +365,7 @@ impl WorkspaceView {
         let trailing = spacing.md + f32::from(safe.right);
         let phone = self.phone;
         let phone_title = (has_workers && phone).then(|| self.render_phone_title());
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let s = &theme.surfaces;
 
         // Left: the navigator's toggle (a docked navigator holds it in its own top row, at the
@@ -488,7 +488,6 @@ impl WorkspaceView {
             .gap(px(spacing.md))
             .pl(px(leading))
             .pr(px(trailing))
-            .bg(hsla(theme.content()))
             .font_family(theme.typography.ui_family.clone())
             .child(
                 div()
@@ -517,7 +516,7 @@ impl WorkspaceView {
     /// are the bar's "…". With no tile focused it names the workspace.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
-        let theme = &self.theme;
+        let theme = self.frame_theme();
         let s = &theme.surfaces;
         let focused = self.focused().and_then(|tile| self.item(tile).map(|item| (tile, item)));
         let Some((tile, item)) = focused else {

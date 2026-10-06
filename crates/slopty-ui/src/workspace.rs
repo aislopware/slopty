@@ -1952,7 +1952,7 @@ impl gpui::Render for WorkspaceView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // Clear where the navigator stands on glass; the rest of the frame paints its own.
+            // Clear on glass, where the navigator and the frame lay their own ground on it.
             .when(!self.nav.glass.shows(), |el| {
                 el.bg(crate::colors::hsla(self.theme.surfaces.canvas))
             });
@@ -2128,9 +2128,25 @@ impl WorkspaceView {
             }
             None => (None, None, None, None),
         };
+        // The strip stands half a gutter in from the frame's sides and bottom, and each panel
+        // half a gutter in from its place, so the canvas between every two panels and round
+        // the outer ones is one gutter (`WorkspaceView::panel_rect`). The clip is the frame's,
+        // not the strip's, so a panel sliding off is cut at the window's edge.
+        let half = px(self.panel_inset(1.0));
         let middle =
             gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
-                gpui::div().relative().flex_1().min_w_0().h_full().flex().flex_col().child(strip),
+                gpui::div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .pl(half)
+                    .pr(half)
+                    .pb(half)
+                    .child(strip),
             );
         gpui::div()
             .relative()
@@ -2147,9 +2163,9 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .when(self.nav.glass.shows(), |el| {
-                        el.bg(crate::colors::hsla(self.theme.surfaces.canvas))
-                    })
+                    // The frame's ground on glass: the title bar and the gutters show the
+                    // material as the navigator does, and only the panels are opaque.
+                    .when(self.nav.glass.shows(), |el| el.bg(self.nav.glass.ground(&self.theme)))
                     .child(titlebar)
                     .child(middle),
             )

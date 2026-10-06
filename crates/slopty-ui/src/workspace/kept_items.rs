@@ -110,7 +110,6 @@ impl WorkspaceView {
             .px(px(theme.spacing.inset() * k))
             .overflow_hidden()
             .whitespace_nowrap()
-            .bg(hsla(theme.content()))
             .text_size(px(theme.typography.ui_size * k))
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
@@ -134,24 +133,22 @@ impl WorkspaceView {
                 .w(px(width))
                 .h(px(height))
                 .opacity(placed.alpha)
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(hsla(theme.content()))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
                 )
-                .child(header)
-                .child(
-                    div()
-                        .debug_selector(move || format!("missing-{}", id.as_uuid()))
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .relative()
-                        .children(pill),
-                )
+                .map(|el| {
+                    let inside = div().flex().flex_col().child(header).child(
+                        div()
+                            .debug_selector(move || format!("missing-{}", id.as_uuid()))
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .relative()
+                            .children(pill),
+                    );
+                    crate::kit::panel(el, theme, self.stand(k), inside)
+                })
                 .into_any_element(),
         )
     }
