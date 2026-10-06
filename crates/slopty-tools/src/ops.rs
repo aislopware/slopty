@@ -94,7 +94,7 @@ async fn opened<D: Dispatch>(
     verb: Verb,
 ) -> Result<TermRef, ToolError> {
     match dispatch.send(key, verb).await {
-        Outcome::Opened(term) => Ok(term),
+        Outcome::Opened(term) | Outcome::OpenedIn { term, .. } => Ok(term),
         other => Err(ToolError::unexpected(other)),
     }
 }

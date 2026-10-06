@@ -243,7 +243,9 @@ async fn session(
                         // next with the answer (name it a project's orchestrator, list it) finds
                         // it as it is.
                         let ahead = match (&outcome, resized) {
-                            (Outcome::Opened(term), _) => Some(term.session),
+                            (Outcome::Opened(term) | Outcome::OpenedIn { term, .. }, _) => {
+                                Some(term.session)
+                            }
                             (Outcome::Done, resized) => resized,
                             _ => None,
                         };

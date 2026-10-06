@@ -1547,9 +1547,10 @@ R2).
   kept. A worktree the worker keeps stays on the card with the reason on the timeline.
 - Only a merged task's worktree is freed. A task given up may be tried again, and Claude
   Code's `--worktree` remakes a missing worktree with `git worktree add -B`, which would reset
-  the kept branch to the base. A Codex task's worktree is not freed yet: the worker makes it now,
-  but the card learns a worktree from the agent's own reports (Claude Code's status line, a
-  thread's start), and a Codex terminal reports none.
+  the kept branch to the base. A worktree the worker made for a task is on its card from the
+  start: `OpenTerminal` and `SpawnAgent` that named one answer `Outcome::OpenedIn` with it, as
+  `StartThread` answers with its thread's, so a Codex terminal's worktree, which Codex never
+  reports, is freed once merged too (2026-10-06). A status line still updates the card after.
 - `RemoveWorktree` is the server's alone: a tool that asks is `Forbidden`.
 - Tests: `a_clean_worktree_goes_and_its_branch_only_once_landed` and
   `a_worktree_in_use_or_not_committed_is_kept` (`slopty-worker`, on real git repositories),

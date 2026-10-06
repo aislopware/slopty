@@ -1315,6 +1315,14 @@ pub enum Outcome {
     },
     /// For [`Verb::OpenTerminal`] and [`Verb::SpawnAgent`].
     Opened(TermRef),
+    /// For [`Verb::OpenTerminal`] and [`Verb::SpawnAgent`] that named a worktree: the terminal,
+    /// and the worktree it opened in, made or reopened, so whoever started it can free it.
+    OpenedIn {
+        /// The terminal.
+        term: TermRef,
+        /// The worktree.
+        worktree: Box<crate::agent::Worktree>,
+    },
     /// For [`Verb::ReadScreen`].
     Screen(Screen),
     /// For [`Verb::ReadOutput`]: the lines, and the index to ask from next.

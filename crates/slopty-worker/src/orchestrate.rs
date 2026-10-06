@@ -406,20 +406,20 @@ impl Orchestrator {
                 if let Some(running) = self.running(session) {
                     return Ok(Outcome::Opened(TermRef { worker, session: running }));
                 }
-                let cwd = match (worktree, cwd) {
-                    (Some(asked), Some(clone)) => Some(
-                        crate::repo::worktrees::open(&clone, asked, &|_| {})
+                let (cwd, made) = match (worktree, cwd) {
+                    (Some(asked), Some(clone)) => {
+                        let (at, made) = crate::repo::worktrees::open(&clone, asked, &|_| {})
                             .await
-                            .map_err(|failed| worktree_failed(&failed))?
-                            .0,
-                    ),
+                            .map_err(|failed| worktree_failed(&failed))?;
+                        (Some(at), Some(made))
+                    }
                     (Some(_), None) => {
                         return Err(Failure::new(
                             ErrorCode::Invalid,
                             "a terminal opens in a worktree of the clone its cwd names",
                         ));
                     }
-                    (None, cwd) => cwd,
+                    (None, cwd) => (cwd, None),
                 };
                 let req = OpenSession {
                     size: term_size(size)?,
@@ -436,7 +436,7 @@ impl Orchestrator {
                 if slopty_agent::detect::is_claude("", &req.command) {
                     inner.agent_terms.lock().insert(handle.id());
                 }
-                Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
+                Ok(opened(TermRef { worker, session: handle.id() }, made))
             }
             Verb::RunScript { worker, cwd, line, name, session } => {
                 self.mine(worker)?;
@@ -475,12 +475,19 @@ impl Orchestrator {
                     return Ok(Outcome::Opened(TermRef { worker, session: running }));
                 }
                 // Made, or reopened as it is, for the agent's own `--worktree <name>` to open.
-                if let Some(asked) = worktree {
-                    crate::repo::worktrees::open(&spawn.cwd, asked, &|_| {})
-                        .await
-                        .map_err(|failed| worktree_failed(&failed))?;
+                let made = match worktree {
+                    Some(asked) => Some(
+                        crate::repo::worktrees::open(&spawn.cwd, asked, &|_| {})
+                            .await
+                            .map_err(|failed| worktree_failed(&failed))?
+                            .1,
+                    ),
+                    None => None,
+                };
+                match self.spawn_agent(agent, spawn, prompt, session).await? {
+                    Outcome::Opened(term) => Ok(opened(term, made)),
+                    other => Ok(other),
                 }
-                self.spawn_agent(agent, spawn, prompt, session).await
             }
             Verb::SendInput { term, input } => {
                 let handle = self.session(term)?;
@@ -1081,6 +1088,14 @@ struct Spawn {
     size: TermSize,
     /// It may be given flags and modes that loosen its permissions.
     permission_flags: bool,
+}
+
+/// A terminal opened, in the worktree `made` when it was asked one.
+fn opened(term: TermRef, made: Option<slopty_proto::agent::Worktree>) -> Outcome {
+    match made {
+        Some(worktree) => Outcome::OpenedIn { term, worktree: Box::new(worktree) },
+        None => Outcome::Opened(term),
+    }
 }
 
 /// A worktree that could not be made or reopened, as the verb's failure.

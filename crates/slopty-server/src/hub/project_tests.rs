@@ -1606,8 +1606,22 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let name = format!("slopty-slopty-{codex_task}");
     assert_eq!(worktree.map(|w| (w.name, w.base)), Some((name.clone(), Some("main".to_owned()))));
     assert!(command[2].contains(&format!("a git worktree of your own, {name}")), "{command:?}");
-    opened(&linux_lease, &start);
-    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    // The worker says where it made it, so the task frees it once merged: Codex names none.
+    let (worker, session) = chosen(&start.1);
+    linux_lease.handle(ToServer::SessionChanged(summary(session)));
+    let path = format!("/home/c/slopty/.claude/worktrees/{name}");
+    let worktree = Box::new(Worktree {
+        name: name.clone(),
+        path: path.clone(),
+        branch: Some(format!("worktree-{name}")),
+        original_cwd: "/home/c/slopty".to_owned(),
+        original_branch: Some("main".to_owned()),
+    });
+    let term = TermRef { worker, session };
+    linux_lease
+        .handle(ToServer::Reply { id: start.0, outcome: Outcome::OpenedIn { term, worktree } });
+    let Outcome::Task(task) = asked.await.unwrap() else { panic!("no task") };
+    assert_eq!(task.worktree.as_deref(), Some(path.as_str()), "the task knows its worktree");
 
     let spec = TaskSpec {
         title: "Read the logs".to_owned(),

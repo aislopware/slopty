@@ -1243,7 +1243,9 @@ impl Hub {
         let started = tokio::spawn(async move {
             let placed = InFlight { hub: &hub, id, settled: false };
             let outcome = hub.forward(key.clone(), start).await;
-            if matches!(outcome, Outcome::Opened(_)) || maybe_done(&outcome) {
+            if matches!(outcome, Outcome::Opened(_) | Outcome::OpenedIn { .. })
+                || maybe_done(&outcome)
+            {
                 placed.answered();
             }
             if let Some(key) = &key {
@@ -1511,11 +1513,10 @@ impl Hub {
         state: &mut State,
         (project, task): (&ProjectId, TaskId),
         term: TermRef,
-        (conversation, thread): (Option<String>, Option<(ThreadId, Option<AgentBranch>)>),
+        (conversation, thread, made): (Option<String>, Option<ThreadId>, Option<AgentBranch>),
     ) -> Result<Task, Outcome> {
         let (mut terminals, _) = live(state);
         terminals.insert(term);
-        let (thread, made) = thread.map_or((None, None), |(id, made)| (Some(id), made));
         let branch = made.or_else(|| branch_of(state, term));
         let who = Assignee { term, spawned: true, branch: branch.as_ref(), conversation, thread };
         let (task, updates) =
@@ -1721,16 +1722,17 @@ impl Hub {
         // answer; one whose answer was lost may still open, and is put on its task when its
         // worker announces it.
         let outcome = self.forward(key.map(|k| k.part("start")), start).await;
-        let (opened, thread) = match outcome {
-            Outcome::Opened(opened) => (opened, None),
-            Outcome::ThreadStarted { thread, worktree } => {
-                let branch = worktree.map(|w| AgentBranch {
-                    session: term.session,
-                    pr: None,
-                    worktree: Some(*w),
-                });
-                (term, Some((thread, branch)))
-            }
+        let made = |worktree: Box<_>| AgentBranch {
+            session: term.session,
+            pr: None,
+            worktree: Some(*worktree),
+        };
+        let (opened, thread, made) = match outcome {
+            Outcome::Opened(opened) => (opened, None, None),
+            // The worktree the worker made is the task's from the start, so it is freed once the
+            // task merges, whatever its agent says of it.
+            Outcome::OpenedIn { term: opened, worktree } => (opened, None, Some(made(worktree))),
+            Outcome::ThreadStarted { thread, worktree } => (term, Some(thread), worktree.map(made)),
             other if maybe_done(&other) => {
                 if let Some(s) = self.inner.state.lock().starting.iter_mut().find(|s| s.id == id) {
                     s.conversation = conversation;
@@ -1745,7 +1747,7 @@ impl Hub {
             &mut self.inner.state.lock(),
             (project, task),
             opened,
-            (conversation, thread),
+            (conversation, thread, made),
         );
         match assigned {
             Ok(task) => Outcome::Task(Box::new(task)),
@@ -1765,8 +1767,8 @@ impl Hub {
         };
         let Some((project, task)) = start.task.clone() else { return };
         let conversation = start.conversation.clone();
-        let thread = state.board.seated_thread(term).map(|thread| (thread, None));
-        match self.assign_started(state, (&project, task), term, (conversation, thread)) {
+        let thread = state.board.seated_thread(term);
+        match self.assign_started(state, (&project, task), term, (conversation, thread, None)) {
             Ok(_) => tracing::info!(%project, %task, session = %term.session, "a lost start found"),
             Err(refused) => {
                 tracing::warn!(%project, %task, ?refused, "a lost start found and not taken");

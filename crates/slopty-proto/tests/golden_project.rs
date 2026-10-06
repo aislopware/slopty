@@ -513,6 +513,10 @@ mod golden_project {
         let thread =
             ThreadId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0006));
         snap(
+            "opened_in",
+            &reply(Outcome::OpenedIn { term: term(), worktree: Box::new(made.clone()) }),
+        );
+        snap(
             "thread_started",
             &reply(Outcome::ThreadStarted { thread, worktree: Some(Box::new(made)) }),
         );
