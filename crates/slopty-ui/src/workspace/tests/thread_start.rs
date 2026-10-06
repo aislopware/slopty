@@ -791,6 +791,25 @@ fn a_worktree_is_named_by_its_first_message() {
     assert_eq!(named(None), format!("claude-code-{tail}"));
     let long = named(Some("supercalifragilisticexpialidocious antidisestablishmentarianism"));
     assert!(long.len() <= 40 + 5, "{long}");
+    assert_eq!(
+        named(Some("Sửa lỗi đăng nhập trên iPad")),
+        format!("sua-loi-dang-nhap-tren-ipad-{tail}"),
+        "Latin letters as ASCII"
+    );
+    assert_eq!(named(Some("Straße, Ørsted, Łódź")), format!("strasse-orsted-lodz-{tail}"));
+    assert_eq!(
+        named(Some("su\u{31b}\u{309}a lo\u{302}\u{303}i")),
+        format!("sua-loi-{tail}"),
+        "decomposed as typed, the same"
+    );
+    assert_eq!(
+        named(Some("修复登录 重定向")),
+        format!("修复登录-重定向-{tail}"),
+        "a script with no Latin form keeps its letters"
+    );
+    assert_eq!(named(Some("แก้ไข")), format!("แก้ไข-{tail}"), "its marks with them");
+    let wide = named(Some(&"修".repeat(30)));
+    assert!(wide.len() <= 40 + 5 && wide.starts_with("修修"), "cut at a letter's edge: {wide}");
 }
 
 /// The folder step offers a new worktree of each repository its folders are in, once each,

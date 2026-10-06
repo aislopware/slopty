@@ -8476,6 +8476,8 @@ dependencies = [
  "gpui-kit",
  "gpui_apple",
  "gpui_platform",
+ "icu_normalizer",
+ "icu_properties",
  "image",
  "nucleo-matcher",
  "objc2-core-foundation",

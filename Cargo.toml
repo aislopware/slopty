@@ -82,6 +82,10 @@ parking_lot = "0.12.5"
 uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
 # WHATWG URL parsing: the host a handed-over web page opens at, as a browser reads it.
 url = "2.5.8"
+# Unicode decomposition and general categories, to fold a Latin letter's marks into its ASCII
+# base for a branch name; `url` already builds both through `idna`.
+icu_normalizer = { version = "2.3.0", default-features = false, features = [ "compiled_data" ] }
+icu_properties = { version = "2.3.0", default-features = false, features = [ "compiled_data" ] }
 # The MCP SDK (protocol revision 2026-07-28): the server's Streamable HTTP endpoint and the
 # `slopty mcp` stdio shim. Each crate adds the transport it serves.
 rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }

@@ -20,6 +20,10 @@ gpui.workspace = true
 # A stream's `VideoLayer` (`screen::glass`).
 gpui_apple.workspace = true
 gpui-kit.workspace = true
+# A worktree's branch named from the first message, a Latin letter's marks folded away
+# (`workspace::starting`).
+icu_normalizer.workspace = true
+icu_properties.workspace = true
 # The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }

@@ -8065,7 +8065,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     with its words and files as they were, where it used to close the tile.
   - **A worktree is named by the first message** (R5): its words, lower case and joined by
     hyphens, six at most and 40 bytes, then four hex digits of the tile's id
-    (`fix-the-login-redirect-3f2a`). With no words, the agent's name stands in.
+    (`fix-the-login-redirect-3f2a`). With no words, the agent's name stands in. Amended
+    2026-10-06: a word is its letters, digits and marks in any script, and Latin letters fold
+    to ASCII (NFD with the nonspacing marks dropped, and a small table for the letters with no
+    decomposition: đ, ß, ø, æ, ł and the like), because remotes, pull request addresses, shells
+    and CI take an ASCII branch best. "sửa lỗi đăng nhập" names `sua-loi-dang-nhap`; it used
+    to be cut to `s-a-l-i-ng-nh`. A script with no Latin form (CJK, Cyrillic, Thai) keeps its
+    letters and marks. A word longer than the room is cut at a letter's edge.
   - Picking a model, mode or effort, or closing the "+" menu by its button, hands the keyboard
     back to the field, in a draft and in a thread alike.
   - Tests: `workspace::tests::thread_start::{a_start_is_written_in_the_threads_composer,

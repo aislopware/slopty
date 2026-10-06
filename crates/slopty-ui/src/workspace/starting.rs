@@ -50,15 +50,23 @@ const NAME_LEN: usize = 40;
 
 /// The name of the worktree a start makes for `agent` in tile `item`: the first message's
 /// words, lower case and joined by hyphens, as a branch reads ("fix-the-login-redirect"), then
-/// the end of the tile's id, so two starts with the same words make two worktrees. With no
-/// words to take, the agent's name stands in for them.
+/// the end of the tile's id, so two starts with the same words make two worktrees. A word is
+/// its letters and digits in any script. Latin letters fold to ASCII ([`ascii_where_latin`]),
+/// as remotes, pull request addresses, shells and CI take a branch best: "sửa lỗi đăng nhập"
+/// names "sua-loi-dang-nhap"; a script with no Latin form (CJK, Cyrillic, Thai) keeps its
+/// letters. With no words to take, the agent's name stands in for them.
 pub(super) fn worktree_name(prompt: Option<&str>, agent: &AgentId, item: ItemId) -> String {
+    // A mark is part of its word: Thai's vowels and tones, a decomposed accent.
+    let category =
+        icu_properties::CodePointMapData::<icu_properties::props::GeneralCategory>::new();
+    let marks = icu_properties::props::GeneralCategoryGroup::Mark;
     let words: Vec<String> = prompt
         .unwrap_or_default()
-        .split(|c: char| !c.is_ascii_alphanumeric())
+        .split(|c: char| !c.is_alphanumeric() && !marks.contains(category.get(c)))
         .filter(|w| !w.is_empty())
         .take(NAME_WORDS)
-        .map(str::to_ascii_lowercase)
+        .map(|w| ascii_where_latin(&w.to_lowercase()))
+        .filter(|w| !w.is_empty())
         .collect();
     let mut name = String::new();
     for word in &words {
@@ -68,7 +76,12 @@ pub(super) fn worktree_name(prompt: Option<&str>, agent: &AgentId, item: ItemId)
         if !name.is_empty() {
             name.push('-');
         }
-        name.push_str(word.get(..NAME_LEN).unwrap_or(word));
+        // A word longer than the whole name is cut at a letter's edge.
+        let room = NAME_LEN.saturating_sub(name.len());
+        name.extend(word.chars().scan(0_usize, |used, c| {
+            *used = used.saturating_add(c.len_utf8());
+            (*used <= room).then_some(c)
+        }));
     }
     if name.is_empty() {
         name = agent.0.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
@@ -77,6 +90,68 @@ pub(super) fn worktree_name(prompt: Option<&str>, agent: &AgentId, item: ItemId)
     let id = item.as_uuid().simple().to_string();
     format!("{name}-{}", id.get(id.len().saturating_sub(4)..).unwrap_or(&id))
 }
+
+/// `word`, lower case, with its Latin letters as ASCII: each decomposed (NFD) and its
+/// nonspacing marks dropped ("ử" is "u"), and those that do not decompose by [`LATIN_ALONE`]
+/// ("đ" is "d"). A letter of another script stays as it is: a Thai or Devanagari vowel sign is
+/// a nonspacing mark too, and is the word's own.
+fn ascii_where_latin(word: &str) -> String {
+    use icu_properties::CodePointMapData;
+    use icu_properties::props::{GeneralCategory, Script};
+
+    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
+    let category = CodePointMapData::<GeneralCategory>::new();
+    let script = CodePointMapData::<Script>::new();
+    let mut out = String::with_capacity(word.len());
+    // Whether the last letter was Latin: a nonspacing mark typed after it, as a decomposed
+    // "u" and its horn arrive, goes with the accent it is.
+    let mut after_latin = false;
+    for c in word.chars() {
+        let mark = category.get(c) == GeneralCategory::NonspacingMark;
+        if mark && after_latin {
+            continue;
+        }
+        if mark {
+            out.push(c);
+        } else if c.is_ascii() {
+            after_latin = true;
+            out.push(c);
+        } else if script.get(c) != Script::Latin {
+            after_latin = false;
+            out.push(c);
+        } else if let Some((_, ascii)) = LATIN_ALONE.iter().find(|(l, _)| *l == c) {
+            after_latin = true;
+            out.push_str(ascii);
+        } else {
+            after_latin = true;
+            let mut one = [0_u8; 4];
+            let parts = nfd.normalize(c.encode_utf8(&mut one));
+            out.extend(
+                parts.chars().filter(|p| category.get(*p) != GeneralCategory::NonspacingMark),
+            );
+        }
+    }
+    out
+}
+
+/// The lower-case Latin letters with no decomposition, as ASCII.
+const LATIN_ALONE: [(char, &str); 15] = [
+    ('đ', "d"),
+    ('ð', "d"),
+    ('ß', "ss"),
+    ('ø', "o"),
+    ('æ', "ae"),
+    ('œ', "oe"),
+    ('ł', "l"),
+    ('þ', "th"),
+    ('ı', "i"),
+    ('ħ', "h"),
+    ('ŧ', "t"),
+    ('ŀ', "l"),
+    ('ĸ', "k"),
+    ('ŋ', "n"),
+    ('ƒ', "f"),
+];
 
 /// The tiles of threads on their way, by the id their item will have.
 #[derive(Default)]
