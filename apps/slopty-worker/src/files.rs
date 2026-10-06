@@ -222,6 +222,7 @@ pub async fn git_op(
         GitOp::Merge { .. } => "merge",
         GitOp::Changes { .. } => "changes",
         GitOp::RemoveWorktree => "remove worktree",
+        GitOp::Branches => "branches",
     };
     let terminals =
         if matches!(op, GitOp::RemoveWorktree) { terminal_dirs(worker).await } else { Vec::new() };
