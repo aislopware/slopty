@@ -716,8 +716,13 @@ pub struct WorkspaceView {
     drawn_thread_waits: Vec<faces::ThreadWait>,
     /// Where ⌘⇧A's last step stood on the attention ladder.
     attention_at: Option<usize>,
-    /// The last agent started, where and in which folder: what "New agent…" lists first.
-    last_start: Option<agent_start::LastStart>,
+    /// The starts made here: the last one, what "New agent…" lists first, and each agent's
+    /// chips, where its next draft begins.
+    starts: slopty_client::starts::Starts,
+    /// Where they are kept, once the app says.
+    starts_file: Option<std::path::PathBuf>,
+    /// Their write under way: the next waits on it, so the latest lands last.
+    starts_writing: Option<Task<()>>,
     /// The session step that is up: its agent and machine, and what the machine said for it.
     sessions_asked: Option<agent_start::SessionsAsked>,
     /// The folders each machine's agents' past sessions ran in, as it last listed them.
@@ -1032,7 +1037,9 @@ impl WorkspaceView {
             drawn_waiting: Vec::new(),
             drawn_thread_waits: Vec::new(),
             attention_at: None,
-            last_start: None,
+            starts: slopty_client::starts::Starts::default(),
+            starts_file: None,
+            starts_writing: None,
             sessions_asked: None,
             past_places: HashMap::new(),
             folder_step: None,

@@ -330,9 +330,14 @@ impl WorkspaceView {
         let place = self.start_place(worker, &cwd, worktree);
         let recall = self.starting.sent.clone();
         let offers = self.offers(worker, &agent);
+        // Its chips begin where the agent's last start left them, as far as this machine
+        // offers those choices.
+        let chips = self.starts.seed(&agent, &offers);
         let others = self.startable_on(worker);
         let draft = cx.new(|_| {
-            Draft::new(agent.clone(), cwd.clone(), offers, place, recall).with_others(others)
+            Draft::new(agent.clone(), cwd.clone(), offers, place, recall)
+                .with_others(others)
+                .seeded(chips)
         });
         let theme = self.theme.clone();
         let view = cx.new(|cx| ThreadView::drafting(hub, draft.clone(), theme, window, cx));
@@ -452,7 +457,20 @@ impl WorkspaceView {
         }
         let DraftSent { text, attachments, model, mode, effort, also } = sent;
         let (cwd, worktree, pull) = (starting.cwd.clone(), starting.worktree, starting.pull);
+        let chips = slopty_client::starts::Chips {
+            model: model.clone(),
+            mode: mode.clone(),
+            effort: effort.clone(),
+        };
+        let went = slopty_client::starts::LastStart {
+            agent: starting.agent.clone(),
+            worker,
+            cwd: cwd.clone(),
+            worktree,
+            at: crate::clock::now(cx),
+        };
         starting.chosen = Chosen { model, mode, effort, attachments: attachments.clone() };
+        self.start_went(went, Some(chips), cx);
         let prompt = (!text.is_empty()).then_some(text);
         if let Some(words) = &prompt {
             let kept = &mut self.starting.sent;

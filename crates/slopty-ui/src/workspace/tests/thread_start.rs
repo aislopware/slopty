@@ -1322,6 +1322,116 @@ fn one_ask_for_past_sessions_feeds_the_folder_and_session_steps(cx: &mut TestApp
     assert_eq!(asks(&mut studio), 1, "answered, the next step asks again");
 }
 
+/// A relaunch begins where the last run's start left off: the agent step lists its agent
+/// first, the folder step its new worktree first, and the draft's chips begin on that agent's
+/// last choices the machine still offers. The start that goes is what the next run reads.
+#[gpui::test]
+fn a_relaunch_starts_where_the_last_run_left_off(cx: &mut TestAppContext) {
+    use slopty_client::starts::{Chips, LastStart, Starts};
+    use slopty_proto::thread::{Effort, Mode, Model, Offers};
+
+    use super::super::agent_start::NEW_WORKTREE;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join(slopty_client::starts::FILE);
+    let key = worker_key(WorkerId::new());
+    let codex = AgentId::named(AgentId::CODEX);
+    let mut kept = Starts::default();
+    let chips = |model: &str, mode: &str, effort: Option<&str>| Chips {
+        model: Some(model.to_owned()),
+        mode: Some(mode.to_owned()),
+        effort: effort.map(str::to_owned),
+    };
+    let last = LastStart {
+        agent: codex.clone(),
+        worker: key,
+        cwd: "/w/atlas".to_owned(),
+        worktree: true,
+        at: WallMs::from_millis(1_000),
+    };
+    kept.went(last, Some(chips("gpt-5", "auto", Some("xhigh"))));
+    kept.write(&path).expect("the last run's starts");
+
+    let (view, cx) = still_workspace(cx);
+    view.update_in(cx, |v, _w, _cx| v.set_starts_file(path.clone()));
+    let mut studio = connect(&view, cx, key.value(), "studio");
+    let choice = |id: &str| (id.to_owned(), id.to_uppercase());
+    let offers = Offers {
+        models: ["gpt-5", "gpt-4"].map(|id| Model { id: choice(id).0, label: choice(id).1 }).into(),
+        modes: vec![Mode { id: "auto".to_owned(), label: "Auto".to_owned(), description: None }],
+        efforts: vec![Effort {
+            id: "high".to_owned(),
+            label: "High".to_owned(),
+            description: None,
+        }],
+        commands: Vec::new(),
+    };
+    let installed = |agent: &AgentId, offers: Offers| slopty_proto::server::InstalledAgent {
+        agent: agent.clone(),
+        version: "1.0".to_owned(),
+        offers,
+    };
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    let caps = WorkerCaps {
+        agents: vec![installed(&claude, Offers::default()), installed(&codex, offers)],
+        ..healthy()
+    };
+    let session = SessionId::new();
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Terminal { session },
+        name: None,
+        facts: BTreeMap::new(),
+    };
+    let summary =
+        SessionSummary { repo: Some("/w/atlas".to_owned()), ..summary(session, Some("/w/atlas")) };
+    let by = studio.me;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, caps, cx);
+        v.session_opened(key, summary, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Add(item) }, cx);
+    });
+    settle(cx);
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Codex", "Claude Code"], "the last run's agent first");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let lines = step_lines(&view, cx);
+    assert_eq!(
+        lines.first().cloned(),
+        Some(format!("{NEW_WORKTREE} atlas")),
+        "its new worktree first: {lines:?}"
+    );
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("go on");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<Start> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
+            _ => None,
+        })
+        .collect();
+    let [start] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!((&start.agent, start.cwd.as_str()), (&codex, "/w/atlas"));
+    assert!(start.worktree.is_some(), "in a new worktree again");
+    assert_eq!(
+        (start.model.as_deref(), start.mode.as_deref(), start.effort.as_deref()),
+        (Some("gpt-5"), Some("auto"), None),
+        "the chips begin on the last choices offered; an effort no longer offered is the default"
+    );
+
+    let next = Starts::read(&path);
+    assert_eq!(next.last().map(|l| (l.worktree, l.cwd.as_str())), Some((true, "/w/atlas")));
+    assert_eq!(next.chips(&codex), Some(&chips("gpt-5", "auto", None)), "what went, kept");
+}
+
 /// A folder's changes tile on `/w/atlas`, on a studio with `agents` where a Codex thread last
 /// worked in that folder, with one comment written on its added line.
 fn a_folder_commented<'a>(

@@ -4104,6 +4104,8 @@ pub fn open_workspace(
         view.set_thread_cache(slopty_platform::dirs::data_dir().join("thread-cache"));
         // Each worker's items, so a cold launch draws its tiles before it is linked.
         view.set_item_cache(slopty_platform::dirs::data_dir().join("items"));
+        // The starts made here, so a relaunch lists the last first and drafts on its chips.
+        view.set_starts_file(slopty_platform::dirs::data_dir().join(slopty_client::starts::FILE));
         view.set_pasteboard(pasteboard());
         view.set_hardware_keyboard(hardware_keyboard_attached(), cx);
         #[cfg(feature = "e2e")]

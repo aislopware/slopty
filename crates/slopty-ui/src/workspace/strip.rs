@@ -1409,7 +1409,7 @@ impl WorkspaceView {
                     .max(rank(t.terminal.and_then(|s| shells.get(&s).copied())));
                 seen.push((tile, t.updated.as_millis(), *key, t.cwd, t.repo, None));
             }
-            let last = self.last_start.as_ref().filter(|l| l.worker == *key && ours(&l.agent));
+            let last = self.starts.last().filter(|l| l.worker == *key && ours(&l.agent));
             if let Some(last) = last {
                 seen.push((None, last.at.as_millis(), *key, last.cwd.clone(), None, None));
             }

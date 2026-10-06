@@ -139,6 +139,32 @@ impl Draft {
         Self { state, place, sent: false, recall, others: Vec::new(), also: Vec::new() }
     }
 
+    /// The same draft with its chips on `chips`, as a switch of each would set them: where a
+    /// start of its agent last left them ([`slopty_client::starts::Starts::seed`]).
+    #[must_use]
+    pub fn seeded(mut self, chips: slopty_client::starts::Chips) -> Self {
+        let slopty_client::starts::Chips { model, mode, effort } = chips;
+        if let Some(model) = model {
+            self.set_model(model);
+        }
+        let meters = &mut self.state.meters;
+        if mode.is_some() {
+            meters.mode = mode;
+        }
+        if effort.is_some() {
+            meters.effort = effort;
+        }
+        self
+    }
+
+    /// Its model chip on `model`, by the agent's id, named as the agent names it.
+    fn set_model(&mut self, model: String) {
+        let label = self.state.meta.models.iter().find(|m| m.id == model);
+        let meters = &mut self.state.meters;
+        meters.model = Some(label.map_or_else(|| model.clone(), |m| m.label.clone()));
+        meters.model_id = Some(model);
+    }
+
     /// The same draft, offering to start its message on `others` too, each in a worktree of
     /// its own; offered only when it starts in a new worktree itself.
     #[must_use]
@@ -205,17 +231,13 @@ impl Draft {
     /// The composer asked `intent` of the thread: a switch sets the draft's meters, and a
     /// message starts it, once; nothing else is asked of a thread that is not there yet.
     pub(super) fn take(&mut self, intent: Intent, cx: &mut Context<Self>) {
-        let meters = &mut self.state.meters;
         match intent {
-            Intent::SetModel { model } => {
-                let label = self.state.meta.models.iter().find(|m| m.id == model);
-                meters.model = Some(label.map_or_else(|| model.clone(), |m| m.label.clone()));
-                meters.model_id = Some(model);
-            }
-            Intent::SetMode { mode } => meters.mode = Some(mode),
-            Intent::SetEffort { effort } => meters.effort = Some(effort),
+            Intent::SetModel { model } => self.set_model(model),
+            Intent::SetMode { mode } => self.state.meters.mode = Some(mode),
+            Intent::SetEffort { effort } => self.state.meters.effort = Some(effort),
             Intent::Send { text, attachments, .. } if !self.sent => {
                 self.sent = true;
+                let meters = &self.state.meters;
                 cx.emit(DraftSent {
                     text,
                     attachments,

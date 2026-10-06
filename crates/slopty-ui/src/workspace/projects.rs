@@ -922,9 +922,14 @@ impl WorkspaceView {
     ) {
         let StartOrchestrator { worker, agent, cwd, worktree } = start.clone();
         let at = crate::clock::now(cx);
-        let last =
-            super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone(), at };
-        self.last_start = Some(last);
+        let went = slopty_client::starts::LastStart {
+            agent: agent.clone(),
+            worker,
+            cwd: cwd.clone(),
+            worktree,
+            at,
+        };
+        self.start_went(went, None, cx);
         let item = ItemId::new();
         let starting = super::starting::Starting::new(worker, agent, cwd, None);
         self.open_starting(item, starting.in_worktree(worktree), cx);

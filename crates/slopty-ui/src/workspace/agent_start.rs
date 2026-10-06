@@ -122,16 +122,6 @@ pub(super) struct SessionsAsked {
     _asking: Option<Task<()>>,
 }
 
-/// The last start: what each step lists first next time.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) struct LastStart {
-    pub agent: AgentId,
-    pub worker: WorkerKey,
-    pub cwd: String,
-    /// When it was made.
-    pub at: WallMs,
-}
-
 /// A folder one of an agent's past sessions ran in on a machine, as the machine listed them
 /// with no words: one of the places a start offers.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -186,7 +176,7 @@ impl WorkspaceView {
     /// offers.
     pub(super) fn agent_for(&self, key: WorkerKey) -> Option<AgentId> {
         let offered = self.startable_on(key);
-        let last = self.last_start.as_ref().map(|l| &l.agent).filter(|a| offered.contains(a));
+        let last = self.starts.last().map(|l| &l.agent).filter(|a| offered.contains(a));
         last.cloned().or_else(|| offered.into_iter().next())
     }
 
@@ -212,7 +202,7 @@ impl WorkspaceView {
             None => self.startable_agents(),
         };
         if let Some(at) =
-            self.last_start.as_ref().and_then(|last| agents.iter().position(|a| *a == last.agent))
+            self.starts.last().and_then(|last| agents.iter().position(|a| *a == last.agent))
         {
             let agent = agents.remove(at);
             agents.insert(0, agent);
@@ -270,7 +260,7 @@ impl WorkspaceView {
         let mut agents: Vec<AgentId> =
             self.startable_agents().into_iter().filter(runs_in_terminal).collect();
         if let Some(at) =
-            self.last_start.as_ref().and_then(|last| agents.iter().position(|a| *a == last.agent))
+            self.starts.last().and_then(|last| agents.iter().position(|a| *a == last.agent))
         {
             let agent = agents.remove(at);
             agents.insert(0, agent);
@@ -329,7 +319,7 @@ impl WorkspaceView {
             .filter(|k| self.startable_on(*k).contains(agent))
             .collect();
         machines.sort_by_key(|k| self.worker_name(*k).to_lowercase());
-        let last = self.last_start.as_ref().map(|l| l.worker);
+        let last = self.starts.last().map(|l| l.worker);
         for first in [self.context_worker(), last] {
             if let Some(at) = first.and_then(|k| machines.iter().position(|m| *m == k)) {
                 let key = machines.remove(at);
@@ -437,6 +427,11 @@ impl WorkspaceView {
         // it: the worker makes it from that repository's clone, and the agent stands there.
         let mut repos: Vec<String> = Vec::new();
         let mut worktrees: Vec<PaletteItem> = Vec::new();
+        // The last start's new worktree there, when it made one: first, so ↩ makes another.
+        let last =
+            self.starts.last().filter(|l| l.worktree && l.worker == worker && l.agent == *agent);
+        let last_repo = last.and_then(|l| self.repo_at(worker, &l.cwd, cx));
+        let mut first: Option<PaletteItem> = None;
         for cwd in &folders {
             let Some(repo) = self.repo_at(worker, cwd, cx).filter(|r| !repos.contains(r)) else {
                 continue;
@@ -444,9 +439,13 @@ impl WorkspaceView {
             let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
             let action = start(purpose, worker, agent, cwd.clone(), true);
             let shown = format!("{NEW_WORKTREE} {name}");
-            worktrees.push(
-                PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Branch),
-            );
+            let line =
+                PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Branch);
+            if first.is_none() && last_repo.as_ref() == Some(&repo) {
+                first = Some(line);
+            } else {
+                worktrees.push(line);
+            }
             repos.push(repo);
         }
         let mut lines: Vec<PaletteItem> = folders
@@ -458,11 +457,43 @@ impl WorkspaceView {
             })
             .collect();
         lines.extend(worktrees);
+        if let Some(first) = first {
+            lines.insert(0, first);
+        }
         if purpose == For::Agent {
             let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
             lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
         }
         lines
+    }
+
+    /// Keep the starts in `path`, and begin from those a previous run kept there. Set before
+    /// the workers are added.
+    pub fn set_starts_file(&mut self, path: std::path::PathBuf) {
+        self.starts = slopty_client::starts::Starts::read(&path);
+        self.starts_file = Some(path);
+    }
+
+    /// `start` went, with its draft's `chips` when it had one: it is the last start, and the
+    /// chips its agent's next draft begins on. They are written off the UI thread, after the
+    /// write under way.
+    pub(super) fn start_went(
+        &mut self,
+        start: slopty_client::starts::LastStart,
+        chips: Option<slopty_client::starts::Chips>,
+        cx: &Context<Self>,
+    ) {
+        self.starts.went(start, chips);
+        let Some(path) = self.starts_file.clone() else { return };
+        let (starts, before) = (self.starts.clone(), self.starts_writing.take());
+        self.starts_writing = Some(cx.background_spawn(async move {
+            if let Some(before) = before {
+                before.await;
+            }
+            if let Err(e) = starts.write(&path) {
+                tracing::warn!(path = %path.display(), error = %e, "starts save");
+            }
+        }));
     }
 
     /// Ask `key` for its agents' past sessions with no words, `agent`'s alone when given: the

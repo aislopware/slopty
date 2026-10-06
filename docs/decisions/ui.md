@@ -8524,3 +8524,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and the places. A dropped link lets the next ask go.
   - Tests: `workspace::tests::thread_start::every_start_offers_where_threads_and_past_sessions_worked`,
     `…::one_ask_for_past_sessions_feeds_the_folder_and_session_steps`.
+
+- ✅ **Starts remember the last one across a relaunch** (2026-10-06, readiness 2026-10-08 R10).
+  The last start and the chips lived only in the window's memory, so every launch began on the
+  first agent, the first machine and default chips.
+  - The device keeps its starts in `starts.json` in the client's data
+    (`slopty_client::starts`), apart from the layout, since they are the person's defaults. It
+    holds the last start that went (agent, machine, folder, whether in a new worktree, when) and
+    each agent's chips as its last start sent them. The file is written whole, off the UI
+    thread, each write after the one before. A file that does not read is dropped.
+  - Only a start that goes counts: a draft closed unsent changes nothing. A project's
+    orchestrator, which starts with no draft, sets the last start and leaves its agent's chips.
+  - The steps list the last agent and machine first. When the last start on that machine and
+    agent made a new worktree, the folder step lists that repository's "New worktree" line
+    first, so ↩ ↩ ↩ makes another.
+  - A draft's chips begin on its agent's last choices, each only where the machine offers it
+    now; another one stays at the agent's default.
+  - Tests: `slopty_client::starts::tests` (the round trip, and seeding only what is offered);
+    `workspace::tests::thread_start::a_relaunch_starts_where_the_last_run_left_off`.

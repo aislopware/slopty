@@ -186,16 +186,14 @@ impl WorkspaceView {
     }
 
     /// The last step of "New agent…": the thread's tile opens at once, its field for the first
-    /// message taking the keyboard, and the choice is what each step lists first next time.
+    /// message taking the keyboard. Once it goes, it is what each step lists first next time
+    /// ([`Self::start_went`]).
     pub(super) fn start_thread_action(
         &mut self,
         start: &StartThread,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let StartThread { worker, agent, cwd, .. } = start.clone();
-        let at = crate::clock::now(cx);
-        self.last_start = Some(super::agent_start::LastStart { agent, worker, cwd, at });
         self.begin_start(start.clone(), window, cx);
     }
 
