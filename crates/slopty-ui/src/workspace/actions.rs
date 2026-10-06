@@ -221,6 +221,14 @@ pub struct ReviewPullNumber {
     pub number: u32,
 }
 
+/// "Remove `<machine>`…": its confirm, then the worker and everything else of Slopty's off it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct RemoveMachine {
+    /// The machine.
+    pub worker: slopty_client::layout::WorkerKey,
+}
+
 /// "Resume a past session…", the last line of "New agent…"'s folder step: `agent`'s past
 /// sessions on `worker` are listed next, the last prompted first.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]

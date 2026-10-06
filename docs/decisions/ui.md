@@ -8417,3 +8417,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     request and not only these. Until the worker has said which, it reads against the guessed
     base.
   - Test: `workspace::tests::thread_start::a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out`.
+
+- ✅ **A machine is removed from its row or the palette, after a confirm** (2026-10-06,
+  readiness rank 20; what goes and what stays is ruled in `docs/decisions/workers.md`, "A
+  machine is removed whole").
+  - **Where.** "Remove…" closes a machine's "…" menu, after Forget, and the palette has
+    "Remove studio…" for each machine. Both are offered only by the Mac's app, which can reach
+    a machine to change it. While a removal runs, neither is offered for that machine again.
+  - **The confirm.** An alert titled "Remove studio?" says what goes: Slopty stops there, its
+    services, its own files and its hooks go, and the machine is forgotten here and on the
+    server. It says the person's repositories, worktrees and agent sessions there stay as they
+    are. It adds "Its 3 open shells and agents end." while shells are open there, and for this
+    Mac "Slopty will no longer open at login." Remove runs the removal. Cancel, Esc or a click
+    outside removes nothing.
+  - **The order.** The app takes the worker off over ssh (or in place on this Mac), then waits
+    for the server to list the worker as away, and only then asks it to forget the machine
+    (`Verb::ForgetWorker`, which refuses one that is online). The wait follows the directory's
+    own word; a worker still listed online 10 s after its removal is said to still answer. A
+    removal that fails there says why and forgets nothing.
+  - Remove stands in the primary style until kit has a destructive one.
+  - Tests: `workspace::tests::bars::removing_a_machine_asks_first_and_says_what_stays`;
+    `slopty-app` `ssh::tests::a_removal_takes_the_worker_off_then_the_server_forgets_it`.

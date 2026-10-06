@@ -43,6 +43,12 @@ pub struct HostActions {
     /// Wake it from sleep: offered while the server can send it a magic packet
     /// (`slopty_client::directory::Directory::can_wake`). The palette offers it too.
     pub wake: Option<MenuRun>,
+    /// Take the worker and everything else of Slopty's off it, then forget it: offered where
+    /// the app can reach machines to change them. Its confirm comes first
+    /// (the remove sheet); the palette offers it too.
+    pub remove: Option<MenuRun>,
+    /// It is this Mac, which Slopty then no longer opens at login on.
+    pub here: bool,
 }
 
 impl std::fmt::Debug for HostActions {
@@ -51,6 +57,8 @@ impl std::fmt::Debug for HostActions {
             .field("connect", &self.connect.is_some())
             .field("forget", &self.forget.is_some())
             .field("wake", &self.wake.is_some())
+            .field("remove", &self.remove.is_some())
+            .field("here", &self.here)
             .finish()
     }
 }
@@ -192,6 +200,13 @@ impl WorkspaceView {
             run
         });
         let update = self.update_run(key, cx);
+        let remove = host.remove.is_some().then(|| {
+            let entity = entity.clone();
+            let run: MenuRun = std::rc::Rc::new(move |window, cx| {
+                let _gone = entity.update(cx, |this, cx| this.ask_remove_machine(key, window, cx));
+            });
+            run
+        });
         let connect = host.connect.filter(|_| !w.status.is_up());
         // Its header's "+" under the pointer, here for a finger, which has no hover.
         let shell = w.link.is_some().then(|| {
@@ -211,6 +226,7 @@ impl WorkspaceView {
             Some(entry(MenuGroup::Settings, clipboard, share)),
             settings.map(|run| entry(MenuGroup::Settings, EDIT_SETTINGS, run)),
             host.forget.map(|run| entry(MenuGroup::Removal, "Forget", run)),
+            remove.map(|run| entry(MenuGroup::Removal, super::machine_remove::REMOVE, run)),
         ]
         .into_iter()
         .flatten()

@@ -187,6 +187,18 @@ pub trait Deployer: std::fmt::Debug {
         let none = Failure::new("This build sets up no server".to_owned(), None, Vec::new());
         Box::pin(std::future::ready(Err(none)))
     }
+    /// Take the worker and everything else of Slopty's off `to` (`slopty worker uninstall
+    /// --purge` there), each event sent to `events` as it happens; on this Mac, Slopty no
+    /// longer opens at login after. Dropping what it returns stops it. A deployer that removes
+    /// nothing says so.
+    fn remove(
+        &self,
+        _to: &Target,
+        _events: mpsc::UnboundedSender<Event>,
+    ) -> Pending<Result<slopty_deploy::Removed, Failure>> {
+        let none = Failure::new("This build removes no machine".to_owned(), None, Vec::new());
+        Box::pin(std::future::ready(Err(none)))
+    }
     /// Trust `key` for its machine from now on, as the person said after checking it.
     fn trust(&self, key: &HostKey) -> Pending<Result<(), Failure>> {
         let none =
@@ -543,6 +555,24 @@ pub struct UpdateRun {
 
 /// Every update under way or failed.
 pub type Updating = HashMap<String, UpdateRun>;
+
+/// How long a removed machine's worker has to go off the server's list before the removal
+/// says it still answers.
+const GOES_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A machine's removal under way, by its worker.
+#[derive(Debug)]
+pub struct RemoveRun {
+    /// The machine, as the person knows it.
+    name: String,
+    /// The removal there, then the wait for the server to see its worker go.
+    task: Option<gpui::Task<()>>,
+    /// The worker there is gone: the server is to forget it once it lists it as away.
+    removed: bool,
+}
+
+/// Every removal under way.
+pub type Removing = HashMap<WorkerId, RemoveRun>;
 
 impl Workspace {
     /// Open the sheet on the panel (the panel too, if it is not up), keeping what was typed.
@@ -1418,6 +1448,99 @@ fn on_a_tile(failure: Failure) -> Failure {
     )
 }
 
+impl Workspace {
+    /// Take `worker`'s machine off, as its confirm said: the worker and everything else of
+    /// Slopty's there goes ([`Deployer::remove`]), then, once the server lists the worker as
+    /// away, the server forgets it ([`Self::forget_worker`]). The person's repositories,
+    /// worktrees and agent sessions there stay.
+    pub(crate) fn remove_worker(&mut self, worker: WorkerId, cx: &mut Context<Self>) {
+        let Some(deployer) = self.deployer.clone() else {
+            self.show_notice("Machines are removed from Slopty on a Mac".to_owned(), cx);
+            return;
+        };
+        if self.removals.contains_key(&worker) {
+            return;
+        }
+        let listed = self.directory.get(worker);
+        let name = listed.map_or_else(|| worker.to_string(), |w| w.name.clone());
+        let host = listed
+            .and_then(|w| w.address.parse::<std::net::SocketAddr>().ok())
+            .map_or_else(|| name.clone(), |addr| addr.ip().to_string());
+        let target = deployer.target_of(worker).unwrap_or_else(|| Target::host(&host));
+        let (tx, events) = mpsc::unbounded_channel();
+        let removal = deployer.remove(&target, tx);
+        let task = cx.spawn(async move |this, cx| {
+            let quiet = |_ws: &mut Self, _event: Event, _cx: &mut Context<Self>| {};
+            let Some(done) = drive(removal, events, &this, cx, quiet).await else { return };
+            let _gone = this.update(cx, |ws, cx| ws.worker_removed(worker, done, cx));
+        });
+        self.show_notice(format!("Removing {name}\u{2026}"), cx);
+        self.removals.insert(worker, RemoveRun { name, task: Some(task), removed: false });
+        self.refresh_hosts(cx);
+    }
+
+    /// `worker`'s removal there ended: on to the server forgetting it once it lists the worker
+    /// as away, at once when it does already; or why it stopped.
+    fn worker_removed(
+        &mut self,
+        worker: WorkerId,
+        done: Result<slopty_deploy::Removed, Failure>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(run) = self.removals.get_mut(&worker) else { return };
+        match done {
+            Err(failure) => {
+                let name = run.name.clone();
+                self.removals.remove(&worker);
+                self.refresh_hosts(cx);
+                let failure = on_a_tile(failure);
+                let hint = failure.hint.map(|h| format!(" {h}")).unwrap_or_default();
+                self.show_failure(format!("Could not remove {name}: {}.{hint}", failure.title), cx);
+            }
+            Ok(removed) => {
+                tracing::info!(%worker, paths = removed.paths.len(), "worker removed there");
+                run.removed = true;
+                let online = self
+                    .directory
+                    .get(worker)
+                    .is_some_and(|w| w.liveness == slopty_proto::server::Liveness::Online);
+                if !online {
+                    self.removal_went_away(worker, cx);
+                    return;
+                }
+                run.task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(GOES_WITHIN).await;
+                    let _gone = this.update(cx, |ws, cx| ws.removal_still_answers(worker, cx));
+                }));
+            }
+        }
+    }
+
+    /// The server lists `worker` as away: a removal that took its worker off has the server
+    /// forget it now.
+    pub(crate) fn removal_went_away(&mut self, worker: WorkerId, cx: &mut Context<Self>) {
+        if !self.removals.get(&worker).is_some_and(|run| run.removed) {
+            return;
+        }
+        let Some(run) = self.removals.remove(&worker) else { return };
+        self.forget_worker(worker, cx);
+        tracing::info!(%worker, name = %run.name, "removed, and forgotten");
+    }
+
+    /// The server still lists `worker` as online a while after its removal there.
+    fn removal_still_answers(&mut self, worker: WorkerId, cx: &mut Context<Self>) {
+        let Some(run) = self.removals.remove(&worker) else { return };
+        self.refresh_hosts(cx);
+        let name = run.name;
+        self.show_failure(format!("{name} still answers; Slopty did not stop there"), cx);
+    }
+
+    /// Whether `worker`'s machine is being removed.
+    pub(crate) fn removing(&self, worker: WorkerId) -> bool {
+        self.removals.contains_key(&worker)
+    }
+}
+
 /// Await `deploy`, handing each event to `apply` on the workspace as it comes; what it ended
 /// with, or `None` when the workspace is gone.
 async fn drive<T>(
@@ -1588,6 +1711,45 @@ mod mac {
                 explained_here(&to, "serve", done)
             });
             let died = Err(Failure::new("The install stopped".to_owned(), None, Vec::new()));
+            Aborting(task).pending(died)
+        }
+
+        fn remove(
+            &self,
+            to: &Target,
+            events: mpsc::UnboundedSender<Event>,
+        ) -> Pending<Result<slopty_deploy::Removed, Failure>> {
+            let to = to.clone();
+            let task = self.runtime.spawn(async move {
+                let source = here()?;
+                let sources = slopty_deploy::bundled(&source);
+                let mut on = |event| {
+                    let _gone = events.send(event);
+                };
+                let done = match runner(&to).await {
+                    Runner::Here(local) => {
+                        let done = slopty_deploy::remove(&local, &sources, None, &mut on).await;
+                        // "Use this Mac" opened Slopty at login so a Mac that shares itself
+                        // says when an agent needs the person; that goes with the worker.
+                        if done.is_ok()
+                            && let Err(e) =
+                                tokio::task::spawn_blocking(|| slopty_platform::login::set(false))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|set| set)
+                        {
+                            tracing::warn!(error = %e, "stop opening at login");
+                        }
+                        done
+                    }
+                    Runner::Ssh(ssh) => {
+                        let done = slopty_deploy::remove(&ssh, &sources, None, &mut on).await;
+                        return explained(&ssh, &to, "remove", done).await;
+                    }
+                };
+                explained_here(&to, "remove", done)
+            });
+            let died = Err(Failure::new("The removal stopped".to_owned(), None, Vec::new()));
             Aborting(task).pending(died)
         }
 

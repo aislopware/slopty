@@ -48,6 +48,7 @@ mod folders;
 mod grouping;
 mod handoffs;
 mod kept_items;
+mod machine_remove;
 mod machines;
 mod marks;
 mod miniature;
@@ -831,6 +832,8 @@ pub struct WorkspaceView {
     readouts: readouts::Readouts,
     /// What the app lets the person do to each machine, and how one is added.
     machines: machines::Machines,
+    /// The confirm of a machine's removal, while it is open.
+    machine_remove: Option<machine_remove::Asking>,
     /// The permission prompts this client may answer from a row or a note.
     approvals: approvals::Approvals,
     /// Agents' turns under way, and the ones that ended unread.
@@ -1086,6 +1089,7 @@ impl WorkspaceView {
             nav: navigator::NavState::default(),
             readouts: readouts::Readouts::default(),
             machines: machines::Machines::default(),
+            machine_remove: None,
             approvals: approvals::Approvals::default(),
             turns: turns::Turns::default(),
             more_entries: Vec::new(),
@@ -1987,6 +1991,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::review_pull))
             .on_action(cx.listener(Self::review_pull_in))
             .on_action(cx.listener(Self::review_pull_number))
+            .on_action(cx.listener(Self::remove_machine))
             .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
@@ -2058,6 +2063,7 @@ impl gpui::Render for WorkspaceView {
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
             .children(self.render_project_sheet(window, cx))
+            .children(self.render_remove_machine(window, cx))
     }
 }
 

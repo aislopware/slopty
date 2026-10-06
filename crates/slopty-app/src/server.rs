@@ -77,13 +77,23 @@ pub(crate) struct ServerSlot {
     task: Option<ServerTask>,
     /// It answered last on a different build: what to say of it, and what updates it.
     other_build: Option<UpdateNotice>,
+    /// A test's own end of the link: the verbs sent up it wait in the test's queue
+    /// ([`ServerCaller::queued`]).
+    #[cfg(test)]
+    caller: Option<ServerCaller>,
 }
 
 #[cfg(test)]
 impl ServerSlot {
     /// The server at `address`, its link not started: what a test sets to have a server.
     pub(crate) const fn stand_in(address: HostAddr) -> Self {
-        Self { address, task: None, other_build: None }
+        Self { address, task: None, other_build: None, caller: None }
+    }
+
+    /// [`Self::stand_in`], the verbs sent to it queued for the test to answer.
+    pub(crate) fn answered_by(address: HostAddr) -> (Self, slopty_client::server::CallQueue) {
+        let (caller, queue) = ServerCaller::queued();
+        (Self { caller: Some(caller), ..Self::stand_in(address) }, queue)
     }
 }
 
@@ -179,7 +189,12 @@ pub(crate) async fn write_cache(
 impl Workspace {
     /// A handle on the server link, while one runs.
     pub(crate) fn server_caller(&self) -> Option<ServerCaller> {
-        self.server.as_ref()?.task.as_ref().map(ServerTask::caller)
+        let slot = self.server.as_ref()?;
+        #[cfg(test)]
+        if let Some(caller) = &slot.caller {
+            return Some(caller.clone());
+        }
+        slot.task.as_ref().map(ServerTask::caller)
     }
 
     /// Something may have killed the server link: it is probed now, or dialled now if it is
@@ -237,7 +252,13 @@ impl Workspace {
             let _sent = tx.send(net::serve_directory(dial, first));
         });
         let generation = self.server_generation;
-        self.server = Some(ServerSlot { address, task: None, other_build: None });
+        self.server = Some(ServerSlot {
+            address,
+            task: None,
+            other_build: None,
+            #[cfg(test)]
+            caller: None,
+        });
         cx.spawn(async move |this, cx| {
             let (task, mut events) = match rx.await {
                 Ok(Ok(started)) => started,
@@ -408,6 +429,9 @@ impl Workspace {
                 }
             }
             Change::Liveness { worker, now, .. } => {
+                if now != Liveness::Online {
+                    self.removal_went_away(worker, cx);
+                }
                 let key = worker_key(worker);
                 let Some(slot) = self.slot(worker) else { return };
                 match away(now) {

@@ -390,7 +390,7 @@ fn a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it(cx: &mut Test
                 let actions = HostActions {
                     connect: Some(run(&connected)),
                     forget: Some(run(&forgot)),
-                    wake: None,
+                    ..HostActions::default()
                 };
                 (k, actions)
             })
@@ -971,4 +971,82 @@ fn a_machines_settings_open_in_a_file_tile_on_it(cx: &mut TestAppContext) {
     let file = ItemKind::File { path: PATH.to_owned() };
     assert_eq!(focused, Some((Some(key), file)), "the open tile, focused, not a second one");
     assert_eq!(opened(&mut studio), None, "no second tile");
+}
+
+/// "Remove…" on a machine's menu, and "Remove studio…" in the palette, ask first: the confirm
+/// says what goes and that the person's repositories, worktrees and agent sessions stay, and
+/// that the shell open there ends. Cancel, Esc and a click outside remove nothing; Remove runs
+/// the app's removal once. For this Mac it adds that Slopty no longer opens at login, and a
+/// machine the app cannot remove offers neither line.
+#[gpui::test]
+fn removing_a_machine_asks_first_and_says_what_stays(cx: &mut TestAppContext) {
+    use super::super::actions::RemoveMachine;
+    use super::super::machine_remove::{NO_LOGIN, REMOVE};
+
+    let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (studio_key, laptop_key) = (studio.key, laptop.key);
+    let removed = Rc::new(Cell::new(0_u32));
+    let set = |here: bool, cx: &mut VisualTestContext| {
+        let counted = Rc::clone(&removed);
+        let remove: MenuRun = Rc::new(move |_w, _cx| counted.set(counted.get().saturating_add(1)));
+        let hosts = [
+            (studio_key, HostActions { remove: Some(remove), here, ..HostActions::default() }),
+            (laptop_key, HostActions::default()),
+        ]
+        .into_iter()
+        .collect();
+        view.update_in(cx, |v, _w, cx| v.set_host_actions(hosts, None, cx));
+        cx.run_until_parked();
+    };
+    set(false, cx);
+    let lines: Vec<String> =
+        view.update(cx, |v, cx| v.palette_lines(cx)).into_iter().map(|l| l.label).collect();
+    assert!(lines.iter().any(|l| l == "Remove studio\u{2026}"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == "Remove laptop\u{2026}"), "nothing the app cannot remove");
+    let words =
+        |cx: &mut VisualTestContext| view.read_with(cx, WorkspaceView::remove_machine_words);
+
+    machine_menu(cx, studio_key);
+    click(cx, leak(format!("menu-{REMOVE}")));
+    let said = words(cx).expect("the confirm, before anything is removed");
+    assert_eq!(said.title, "Remove studio?");
+    assert!(
+        said.body.ends_with(
+            "Your repositories, worktrees and agent sessions on studio stay as they are."
+        ),
+        "{}",
+        said.body
+    );
+    assert_eq!(said.also, ["Its one open shell or agent ends."]);
+    cx.update(|window, _| window.set_a11y_active(true));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("AlertDialog", Some("Remove studio?"))), "an alert");
+    click(cx, "remove-machine-cancel");
+    assert!(words(cx).is_none() && removed.get() == 0, "Cancel removes nothing");
+
+    view.update_in(cx, |v, w, cx| v.remove_machine(&RemoveMachine { worker: studio_key }, w, cx));
+    cx.run_until_parked();
+    assert!(words(cx).is_some(), "the palette's line asks too");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(words(cx).is_none() && removed.get() == 0, "Esc removes nothing");
+
+    view.update_in(cx, |v, w, cx| v.remove_machine(&RemoveMachine { worker: studio_key }, w, cx));
+    cx.run_until_parked();
+    click(cx, "remove-machine-confirm");
+    assert_eq!(removed.get(), 1, "Remove runs the app's removal");
+    assert!(words(cx).is_none(), "and the confirm goes");
+
+    set(true, cx);
+    view.update_in(cx, |v, w, cx| v.remove_machine(&RemoveMachine { worker: studio_key }, w, cx));
+    cx.run_until_parked();
+    let said = words(cx).expect("asked");
+    assert_eq!(said.also.last().map(String::as_str), Some(NO_LOGIN), "this Mac: {said:?}");
+    view.update_in(cx, |v, w, cx| v.remove_machine(&RemoveMachine { worker: laptop_key }, w, cx));
+    assert_eq!(words(cx).map(|w| w.title).as_deref(), Some("Remove studio?"), "laptop: none");
 }

@@ -519,8 +519,11 @@ fn the_away_pill_says_why_and_offers_the_way_back(cx: &mut TestAppContext) {
         let n = Rc::clone(n);
         Rc::new(move |_w, _cx| n.set(n.get().saturating_add(1)))
     };
-    let actions =
-        HostActions { connect: Some(count(&dialled)), forget: None, wake: Some(count(&woke)) };
+    let actions = HostActions {
+        connect: Some(count(&dialled)),
+        wake: Some(count(&woke)),
+        ..HostActions::default()
+    };
     view.update_in(cx, |v, _w, cx| {
         v.set_host_actions(std::iter::once((key, actions)).collect(), None, cx);
         v.set_tailnet_grant(Some("grant-json".to_owned()));

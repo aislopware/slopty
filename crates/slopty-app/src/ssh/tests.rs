@@ -46,6 +46,8 @@ struct StandIn {
     servers: RefCell<HashMap<String, Target>>,
     /// It plays an installed app, which brings its own Mac's daemons to its build.
     installed: std::cell::Cell<bool>,
+    /// The ending of the removal under way.
+    removing: RefCell<Option<oneshot::Sender<Result<slopty_deploy::Removed, Failure>>>>,
 }
 
 impl StandIn {
@@ -152,6 +154,27 @@ impl Deployer for StandIn {
     fn trust(&self, key: &HostKey) -> Pending<Result<(), Failure>> {
         self.trusted.borrow_mut().push(key.target.clone());
         Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn remove(
+        &self,
+        to: &Target,
+        events: mpsc::UnboundedSender<Event>,
+    ) -> Pending<Result<slopty_deploy::Removed, Failure>> {
+        let Target { host, user, port } = to;
+        self.asked.borrow_mut().push(format!("remove {host} {user:?} {port:?}"));
+        *self.events.borrow_mut() = Some(events);
+        let (tx, rx) = oneshot::channel();
+        *self.removing.borrow_mut() = Some(tx);
+        Box::pin(async move { rx.await.unwrap_or_else(|_| Err(failure("the test let go"))) })
+    }
+}
+
+impl StandIn {
+    fn removed(&self, cx: &VisualTestContext, done: Result<slopty_deploy::Removed, Failure>) {
+        let finish = self.removing.borrow_mut().take().expect("a removal runs");
+        finish.send(done).unwrap();
+        cx.run_until_parked();
     }
 }
 
@@ -986,4 +1009,86 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
         ["deploy mini None None server=hub:45560 password"],
         "no key this time"
     );
+}
+
+/// A machine's removal reaches it the way it was installed, takes the worker off there, and
+/// only once the server lists that worker as away has the server forget it
+/// (`Verb::ForgetWorker`). A removal that fails there says so and forgets nothing.
+#[gpui::test]
+fn a_removal_takes_the_worker_off_then_the_server_forgets_it(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::server::{FromServer, Liveness, WorkerInfo};
+
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let ws = workspace(cx, &runtime, &dir);
+    let root = ws.clone();
+    let (_root, cx) =
+        cx.add_window_view(move |window, cx| gpui_kit::component::Root::new(root, window, cx));
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    let (slot, mut verbs) =
+        crate::server::ServerSlot::answered_by(HostAddr::new("hub", SERVER_PORT));
+    ws.update(cx, |ws, _cx| {
+        ws.deployer = Some(shared);
+        ws.server = Some(slot);
+    });
+    let (mini, other) = (WorkerId::new(), WorkerId::new());
+    list(&ws, cx, mini, "mini");
+    list(&ws, cx, other, "other");
+    let installed = Target { user: Some("admin".to_owned()), ..Target::host("mini") };
+    deployer.remember(mini, &installed);
+    let view = ws.read_with(cx, |ws, _| ws.view.clone());
+    let offered = view.update(cx, |v, cx| {
+        v.palette_lines(cx).into_iter().any(|l| l.label == "Remove mini\u{2026}")
+    });
+    assert!(offered, "a Mac's app offers the removal");
+    let notice =
+        |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+    let away = |id: WorkerId, name: &str, cx: &mut VisualTestContext| {
+        let info = WorkerInfo {
+            worker: id,
+            name: name.to_owned(),
+            address: "100.64.0.2:45550".to_owned(),
+            liveness: Liveness::Unreachable,
+            caps: WorkerCaps::bare(WorkerOs::MacOs),
+            load: 0.0,
+            last_seen_ms: slopty_core::WallMs::ZERO,
+        };
+        let said = slopty_client::server::ServerEvent::Message(Box::new(FromServer::Worker(info)));
+        ws.update(cx, |ws, cx| ws.server_event(said, cx));
+        cx.run_until_parked();
+    };
+
+    ws.update(cx, |ws, cx| ws.remove_worker(mini, cx));
+    cx.run_until_parked();
+    assert_eq!(deployer.asked(), ["remove mini Some(\"admin\") None"], "as it was installed");
+    assert_eq!(notice(cx).as_deref(), Some("Removing mini\u{2026}"));
+    deployer.removed(cx, Ok(slopty_deploy::Removed::default()));
+    assert!(verbs.try_next().is_none(), "nothing forgotten while the server lists it online");
+    away(other, "other", cx);
+    runtime.block_on(tokio::task::yield_now());
+    assert!(verbs.try_next().is_none(), "another machine going away is not this one");
+
+    // The verb goes up from the networking runtime, which this test turns by hand.
+    let turn = |cx: &mut VisualTestContext| {
+        runtime.block_on(tokio::task::yield_now());
+        cx.run_until_parked();
+    };
+    away(mini, "mini", cx);
+    turn(cx);
+    let (verb, answer) = verbs.try_next().expect("the server is asked to forget it");
+    assert_eq!(verb, Verb::ForgetWorker { worker: mini });
+    answer.send(Outcome::Done).unwrap();
+    turn(cx);
+    assert_eq!(notice(cx).as_deref(), Some("Forgot mini"));
+    assert!(!ws.read_with(cx, |ws, _| ws.removing(mini)), "done");
+
+    ws.update(cx, |ws, cx| ws.remove_worker(other, cx));
+    cx.run_until_parked();
+    deployer.removed(cx, Err(failure("Could not reach other")));
+    turn(cx);
+    assert!(verbs.try_next().is_none(), "a failed removal forgets nothing");
+    let said = notice(cx).unwrap_or_default();
+    assert!(said.starts_with("Could not remove other: Could not reach other"), "{said}");
 }

@@ -555,6 +555,8 @@ pub struct Workspace {
     ssh_runs: u64,
     /// Updates from the tiles of a worker on a different build, by host.
     updates: ssh::Updating,
+    /// The machines being removed, by worker ([`Self::remove_worker`]).
+    removals: ssh::Removing,
     /// This Mac's workers brought to this build unasked this launch: once each.
     updated_unasked: std::collections::HashSet<WorkerId>,
     /// The server being brought to this build ([`Workspace::update_server`]).
@@ -699,6 +701,7 @@ impl Workspace {
             deployer,
             ssh_runs: 0,
             updates: ssh::Updating::new(),
+            removals: ssh::Removing::new(),
             updated_unasked: std::collections::HashSet::new(),
             server_update: None,
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
@@ -1297,7 +1300,16 @@ impl Workspace {
                     });
                     run
                 });
-                (slot.key, HostActions { connect: Some(connect), forget, wake })
+                // Removing reaches the machine to change it, which only a Mac's deployer does.
+                let remove = self.deployer.as_ref().filter(|_| !self.removing(id)).map(|_| {
+                    let this = this.clone();
+                    let run: MenuRun = Rc::new(move |_window, cx| {
+                        let _gone = this.update(cx, |ws, cx| ws.remove_worker(id, cx));
+                    });
+                    run
+                });
+                let here = self.this_mac_worker == Some(id);
+                (slot.key, HostActions { connect: Some(connect), forget, wake, remove, here })
             })
             .collect();
         let add: MenuRun = Rc::new(move |window, cx| {
