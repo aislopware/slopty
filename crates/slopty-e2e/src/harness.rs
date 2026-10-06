@@ -76,7 +76,7 @@ const ROOTS: &str = "slopty-e2e-";
 /// renders (a shell's prompt, a folder's path bar), and `TMPDIR` is a per-user
 /// `/var/folders/…` path, so a golden taken on one Mac never matched another's render
 /// (CI e2e run 37390615720, `folder`). The name under it is already the test's own.
-fn roots_parent() -> PathBuf {
+pub(crate) fn roots_parent() -> PathBuf {
     if cfg!(target_os = "macos") { PathBuf::from("/private/tmp") } else { std::env::temp_dir() }
 }
 

@@ -128,16 +128,22 @@ fn scrub_ports(text: &str) -> String {
 }
 
 /// `text` with each run's scratch directory spelled `$SCRATCH`: the system temporary
-/// directory, as the app saw it raw or resolved, and the directory the run made in it, whose
-/// name is random. Resolved first, since the raw root is a part of it (`/private/var/…`).
+/// directory and the stacks' roots' parent ([`crate::harness::roots_parent`]), as the app saw
+/// each raw or resolved, and the directory the run made in it, whose name is random. Resolved
+/// first, since the raw root is a part of it (`/private/var/…`, `/private/tmp`).
 fn scrub_scratch(text: &str) -> String {
-    let raw = std::env::temp_dir();
-    let resolved = std::fs::canonicalize(&raw).unwrap_or_else(|_| raw.clone());
-    [resolved, raw].iter().fold(text.to_owned(), |text, root| {
-        let root = root.to_string_lossy();
-        let root = root.trim_end_matches('/');
-        if root.is_empty() { text } else { scrub_root(&text, root) }
-    })
+    let resolved = |raw: PathBuf| std::fs::canonicalize(&raw).unwrap_or_else(|_| raw.clone());
+    let (temp, roots) = (std::env::temp_dir(), crate::harness::roots_parent());
+    // `/tmp` is a link to `/private/tmp`; a shell's prompt shows the spelling it was given.
+    let tmp = PathBuf::from("/tmp");
+    [resolved(temp.clone()), temp, resolved(roots.clone()), roots, tmp].iter().fold(
+        text.to_owned(),
+        |text, root| {
+            let root = root.to_string_lossy();
+            let root = root.trim_end_matches('/');
+            if root.is_empty() { text } else { scrub_root(&text, root) }
+        },
+    )
 }
 
 /// `text` with every `root/<name>` spelled `$SCRATCH`, `<name>` being the run's directory.
@@ -688,12 +694,15 @@ mod tests {
             a11y: vec![
                 node("Label", &format!("File {}", raw.display()), [0.0, 0.0, 1.0, 1.0]),
                 node("Label", &format!("In {}. Done", resolved.display()), [0.0, 0.0, 1.0, 1.0]),
+                node("Label", "At /private/tmp/slopty-e2e-ios-3ac00c2c/a", [0.0, 0.0, 1.0, 1.0]),
+                node("Label", "At /tmp/slopty-e2e-folder-1f2e3d4c", [0.0, 0.0, 1.0, 1.0]),
             ],
             scale: 1.0,
         };
         assert_eq!(
             frame.text(&[]),
-            "Label \u{2502} File $SCRATCH/project/main.rs\nLabel \u{2502} In $SCRATCH. Done\n"
+            "Label \u{2502} File $SCRATCH/project/main.rs\nLabel \u{2502} In $SCRATCH. Done\n\
+             Label \u{2502} At $SCRATCH/a\nLabel \u{2502} At $SCRATCH\n"
         );
     }
 
