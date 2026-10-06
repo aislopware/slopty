@@ -8204,6 +8204,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopty-notify"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "slopty-platform",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "slopty-platform"
 version = "0.1.0"
 dependencies = [
@@ -8233,6 +8246,7 @@ dependencies = [
  "serde_json",
  "slopty-core",
  "slopty-proto",
+ "slopty-push",
  "slopty-testkit",
  "tempfile",
  "thiserror 2.0.21",

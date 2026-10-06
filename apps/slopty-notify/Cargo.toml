@@ -1,0 +1,32 @@
+[package]
+name = "slopty-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty's notification service extension: opens a pushed note sealed to the phone"
+
+[lints]
+workspace = true
+
+[lib]
+name = "slopty_notify"
+path = "src/lib.rs"
+crate-type = [ "staticlib", "rlib" ]
+
+[target.'cfg(target_os = "ios")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [ "NSDictionary", "NSString" ] }
+# The extension's class and the note it hands back.
+objc2-user-notifications = { workspace = true, features = [
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationServiceExtension",
+] }
+# The pushed note's opening and mapping, and the Keychain it reads (`notify::pushed`).
+slopty-platform.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

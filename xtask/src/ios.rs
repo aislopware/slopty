@@ -2,8 +2,11 @@
 //! the app bundle, and run it on the simulator or a connected device.
 //!
 //! The app has no source outside Rust: the static library holds `main` and UIKit's delegates,
-//! and Xcode only links it and packages the bundle. The `XcodeGen` spec and `Info.plist` are
-//! generated under `target/ios/<sdk>/` on every run, so nothing in the tree is Xcode-specific.
+//! and Xcode only links it and packages the bundle. The notification service extension
+//! (`apps/slopty-notify`), which opens a pushed note, is a second static library linked the same
+//! way into `SloptyNotify.appex` inside the app. The `XcodeGen` spec, the `Info.plist`s and the
+//! entitlements are generated under `target/ios/<sdk>/` on every run, so nothing in the tree is
+//! Xcode-specific.
 
 use anyhow::{Context as _, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -14,6 +17,14 @@ use crate::tools::step;
 
 /// Bundle identifier of the iOS app.
 pub const BUNDLE_ID: &str = "dev.aislopware.slopty";
+/// The notification service extension's target and product name.
+const NOTIFY: &str = "SloptyNotify";
+/// Its bundle identifier, under the app's.
+const NOTIFY_ID: &str = "dev.aislopware.slopty.notifications";
+/// The Keychain access group the app and the extension share, where the phone's push key and
+/// device token live (`slopty_platform::notify::pushed::keychain`): first in both, so an item
+/// named in no group goes there.
+const SHARED_KEYCHAIN: &str = "$(AppIdentifierPrefix)dev.aislopware.slopty.shared";
 /// Product / scheme name.
 const PRODUCT: &str = "Slopty";
 /// Deployment target (the project floor). Simulators run the newest installed iOS runtime at
@@ -151,9 +162,12 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let out = root.join("target").join("ios").join(sdk.dir());
     sh.create_dir(&out)?;
     let link_object = out.join("link.o");
-    let links = {
+    let (links, notify_links) = {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
-        let links = build_static_lib(sh, &format!("{triple}, {profile}"), triple, &cargo_flags)?;
+        let what = format!("{triple}, {profile}");
+        let links = build_static_lib(sh, "slopty-ios", &what, triple, &cargo_flags)?;
+        let release: &[&str] = if opts.release { &["--release"] } else { &[] };
+        let notify_links = build_static_lib(sh, "slopty-notify", &what, triple, release)?;
         // Xcode links a target only when it has an object file of its own, and every line of
         // the app is in the static library: an empty crate compiled to an object is that file.
         step(
@@ -164,16 +178,22 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
             )
             .stdin(""),
         )?;
-        links
+        (links, notify_links)
     };
     let lib = root.join("target").join(triple).join(profile).join("libslopty_ios.a");
-    if !lib.exists() {
-        bail!("static library missing: {lib}");
+    let notify_lib = root.join("target").join(triple).join(profile).join("libslopty_notify.a");
+    for built in [&lib, &notify_lib] {
+        if !built.exists() {
+            bail!("static library missing: {built}");
+        }
     }
 
     // Xcode compiles the Icon Composer document (`wrapper.icon`) with the target's resources.
     crate::icon::Art::load(sh)?.write_document(sh, &out)?;
-    sh.write_file(out.join("project.yml"), project_spec(sdk, &lib, &link_object, &links))?;
+    let app = Linked { lib: &lib, links: &links };
+    let notify = Linked { lib: &notify_lib, links: &notify_links };
+    let spec = project_spec(sdk, opts.release, &link_object, &app, &notify);
+    sh.write_file(out.join("project.yml"), spec)?;
     step(
         "xcodegen generate",
         &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
@@ -211,7 +231,7 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     Ok(app)
 }
 
-/// Build `slopty-ios`'s static library; returns the linker flags for the system libraries and
+/// Build `package`'s static library; returns the linker flags for the system libraries and
 /// frameworks its crates link.
 ///
 /// A static library keeps no record of those (a `#[link]` puts no load command in its objects),
@@ -219,16 +239,17 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
 /// by hand, and a crate that starts calling a new framework links it here without an edit.
 fn build_static_lib(
     sh: &Shell,
+    package: &str,
     what: &str,
     triple: &str,
     cargo_flags: &[&str],
 ) -> Result<Vec<String>> {
-    let title = format!("cargo build slopty-ios ({what})");
+    let title = format!("cargo build {package} ({what})");
     println!("▶ {title}");
     let started = std::time::Instant::now();
     let output = cmd!(
         sh,
-        "cargo rustc -p slopty-ios --lib --target {triple} {cargo_flags...} --message-format json-diagnostic-rendered-ansi -- --print native-static-libs"
+        "cargo rustc -p {package} --lib --crate-type staticlib --target {triple} {cargo_flags...} --message-format json-diagnostic-rendered-ansi -- --print native-static-libs"
     )
     .ignore_status()
     .output()
@@ -268,20 +289,48 @@ fn native_static_libs(messages: &str) -> (Option<Vec<String>>, String) {
     (links, rendered)
 }
 
-/// The `XcodeGen` spec: one application target wrapping the static library, linked beside
-/// `link_object` (see [`build`]) with `links`, the system libraries and frameworks it needs.
-fn project_spec(sdk: Sdk, lib: &Utf8Path, link_object: &Utf8Path, links: &[String]) -> String {
-    let lib_dir = lib.parent().map_or(".", Utf8Path::as_str);
-    let mut link_flags = String::new();
-    for flag in links {
-        link_flags.push_str("          - \"");
-        link_flags.push_str(flag);
-        link_flags.push_str("\"\n");
+/// A static library a target links whole, with the system libraries and frameworks its crates
+/// need.
+struct Linked<'a> {
+    lib: &'a Utf8Path,
+    links: &'a [String],
+}
+
+impl Linked<'_> {
+    /// The target's `OTHER_LDFLAGS` entries: the library whole, then `links`, each on its own
+    /// line at `indent`.
+    fn ldflags(&self, indent: &str) -> String {
+        use std::fmt::Write as _;
+        let mut flags = format!("{indent}- \"-Wl,-force_load,{}\"\n", self.lib);
+        for flag in self.links {
+            let _infallible = writeln!(flags, "{indent}- \"{flag}\"");
+        }
+        flags
     }
+}
+
+/// The `XcodeGen` spec: the application target wrapping `app`'s static library, and the
+/// notification service extension wrapping `notify`'s, embedded in it; each linked beside
+/// `link_object` (see [`build`]).
+///
+/// Both carry the shared Keychain group, and the app the push entitlement: the sandbox APNs for
+/// a debug build, production for a release. The simulator's build is signed ad hoc, which is
+/// what applies entitlements there; a device's is signed by its team.
+fn project_spec(
+    sdk: Sdk,
+    release: bool,
+    link_object: &Utf8Path,
+    app: &Linked<'_>,
+    notify: &Linked<'_>,
+) -> String {
+    let lib_dir = app.lib.parent().map_or(".", Utf8Path::as_str);
+    let link_flags = app.ldflags("          ");
+    let notify_flags = notify.ldflags("          ");
     let signing = match sdk {
-        Sdk::Simulator => "    CODE_SIGNING_ALLOWED: NO\n",
+        Sdk::Simulator => "    CODE_SIGN_IDENTITY: \"-\"\n    CODE_SIGN_STYLE: Manual\n",
         Sdk::Device => "",
     };
+    let aps = if release { "production" } else { "development" };
     format!(
         r#"name: {PRODUCT}
 options:
@@ -348,8 +397,44 @@ settings:
         LIBRARY_SEARCH_PATHS:
           - "{lib_dir}"
         OTHER_LDFLAGS:
-          - "-Wl,-force_load,{lib}"
-{link_flags}    dependencies:
+{link_flags}    entitlements:
+      path: {PRODUCT}.entitlements
+      properties:
+        aps-environment: {aps}
+        keychain-access-groups:
+          - "{SHARED_KEYCHAIN}"
+    dependencies:
+      - framework: {link_object}
+        embed: false
+      - target: {NOTIFY}
+  {NOTIFY}:
+    type: app-extension
+    platform: iOS
+    info:
+      path: {NOTIFY}-Info.plist
+      properties:
+        CFBundleDisplayName: {PRODUCT}
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: SloptyNotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: {NOTIFY_ID}
+        PRODUCT_NAME: {NOTIFY}
+        TARGETED_DEVICE_FAMILY: "1,2"
+        DEAD_CODE_STRIPPING: YES
+        LIBRARY_SEARCH_PATHS:
+          - "{lib_dir}"
+        # The extension needs few of the frameworks its crates name: a framework nothing calls
+        # is not loaded, under the extension's tight memory limit.
+        OTHER_LDFLAGS:
+          - "-Wl,-dead_strip_dylibs"
+{notify_flags}    entitlements:
+      path: {NOTIFY}.entitlements
+      properties:
+        keychain-access-groups:
+          - "{SHARED_KEYCHAIN}"
+    dependencies:
       - framework: {link_object}
         embed: false
 "#,
@@ -503,7 +588,7 @@ fn first_device(sh: &Shell) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{native_static_libs, newest_runtime};
+    use super::{Linked, Sdk, native_static_libs, newest_runtime, project_spec};
 
     #[test]
     fn the_link_line_is_the_frameworks_rustc_lists_and_other_diagnostics_are_shown() {
@@ -526,6 +611,38 @@ mod tests {
         assert_eq!(links.unwrap(), ["-framework", "ImageIO", "-lSystem", "-lc"]);
         assert_eq!(rendered, "warning: unused import\n");
         assert_eq!(native_static_libs(&message("warning", "x")).0, None, "no list, no link line");
+    }
+
+    /// The app embeds the notification service extension, whose bundle names the principal
+    /// class the extension registers; each links its own library whole, the extension dropping
+    /// the frameworks it does not call. Both share the Keychain group, the app alone asks for
+    /// pushes (the sandbox for a debug build), and the simulator's build is signed ad hoc so
+    /// the entitlements apply there.
+    #[test]
+    fn the_app_embeds_the_extension_that_opens_a_push() {
+        let flags = ["-framework".to_owned(), "UserNotifications".to_owned()];
+        let app = Linked { lib: "/t/libslopty_ios.a".into(), links: &flags };
+        let notify = Linked { lib: "/t/libslopty_notify.a".into(), links: &flags };
+        let spec = project_spec(Sdk::Simulator, false, "/t/link.o".into(), &app, &notify);
+        // The two targets, the app's first.
+        let (slopty, ext) = spec.split_once("\n  SloptyNotify:\n").unwrap();
+        assert!(slopty.ends_with("\n      - target: SloptyNotify"), "the app embeds it");
+        assert!(ext.contains("type: app-extension"));
+        assert!(ext.contains("NSExtensionPointIdentifier: com.apple.usernotifications.service"));
+        assert!(ext.contains("NSExtensionPrincipalClass: SloptyNotificationService"));
+        assert!(ext.contains("PRODUCT_BUNDLE_IDENTIFIER: dev.aislopware.slopty.notifications"));
+        assert!(slopty.contains("- \"-Wl,-force_load,/t/libslopty_ios.a\""));
+        assert!(ext.contains("- \"-Wl,-force_load,/t/libslopty_notify.a\""));
+        assert!(ext.contains("- \"-Wl,-dead_strip_dylibs\""), "the frameworks it never calls");
+        assert!(!slopty.contains("libslopty_notify") && !ext.contains("libslopty_ios"));
+        let group = "keychain-access-groups:\n          - \"$(AppIdentifierPrefix)dev.aislopware.slopty.shared\"";
+        assert!(slopty.contains(group) && ext.contains(group), "one Keychain group for both");
+        assert!(slopty.contains("aps-environment: development"), "a debug build's sandbox");
+        assert!(!ext.contains("aps-environment"), "the app alone is pushed to");
+        assert!(spec.contains("CODE_SIGN_IDENTITY: \"-\""), "ad hoc, so the entitlements apply");
+        let release = project_spec(Sdk::Device, true, "/t/link.o".into(), &app, &notify);
+        assert!(release.contains("aps-environment: production"));
+        assert!(!release.contains("CODE_SIGN_IDENTITY"), "a team signs a device's build");
     }
 
     #[test]

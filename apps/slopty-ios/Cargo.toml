@@ -26,6 +26,9 @@ gpui-kit.workspace = true
 gpui_ios.workspace = true
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = [
+    # The device token, and why there is none (`application:didRegisterForRemoteNotifications…`).
+    "NSData",
+    "NSError",
     "NSDictionary",
     "NSEnumerator",
     "NSSet",

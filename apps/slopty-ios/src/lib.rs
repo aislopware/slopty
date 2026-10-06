@@ -3,9 +3,10 @@
 //! A static library the app bundle links whole: it defines `main`, which hands the process to
 //! `UIApplicationMain`, and the two classes UIKit drives, the app delegate and the window
 //! scene's delegate. The app delegate installs the notification delegate while the app
-//! finishes launching; the scene delegate starts the tokio runtime and GPUI, embedded in
-//! UIKit's run loop, once the window scene connects, and forwards the scene's lifecycle to
-//! `gpui_ios`. Everything the app does lives in `slopty-app`, shared with the macOS app.
+//! finishes launching, asks APNs for the device token a pushed note is addressed to, and hands
+//! it on (`slopty_platform::notify::pushed`); the scene delegate starts the tokio runtime and GPUI,
+//! embedded in UIKit's run loop, once the window scene connects, and forwards the scene's lifecycle
+//! to `gpui_ios`. Everything the app does lives in `slopty-app`, shared with the macOS app.
 
 #![cfg(target_os = "ios")]
 
@@ -16,7 +17,7 @@ use gpui_ios::ios::ffi;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{ClassType as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_foundation::{NSDictionary, NSObject, NSSet, NSString};
+use objc2_foundation::{NSData, NSDictionary, NSError, NSObject, NSSet, NSString};
 use objc2_ui_kit::{
     UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext,
     UIResponder, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIWindowScene,
@@ -60,7 +61,21 @@ define_class!(
         ) -> bool {
             init_logging();
             slopty_platform::notify::install();
+            slopty_platform::notify::pushed::register();
             true
+        }
+
+        /// APNs' address for this app on this phone, which the server pushes to.
+        #[unsafe(method(application:didRegisterForRemoteNotificationsWithDeviceToken:))]
+        fn did_register_for_pushes(&self, _application: &UIApplication, token: &NSData) {
+            slopty_platform::notify::pushed::token_arrived(&token.to_vec());
+        }
+
+        /// No token: a build without the push entitlement, or no network yet. Notes still post
+        /// while the app runs.
+        #[unsafe(method(application:didFailToRegisterForRemoteNotificationsWithError:))]
+        fn did_fail_to_register_for_pushes(&self, _application: &UIApplication, error: &NSError) {
+            tracing::info!(error = %error.localizedDescription(), "no device token for pushes");
         }
 
         #[unsafe(method(applicationDidReceiveMemoryWarning:))]

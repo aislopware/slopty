@@ -167,6 +167,7 @@ impl Shard {
                 "slopty-tools",
                 "slopty-theme",
                 "slopty-ios",
+                "slopty-notify",
                 // Here, not in the rest: its icon test waits on actool for minutes, and the rest
                 // was the longer shard (.research/dev-speed-2026-10-05.md).
                 "xtask",
