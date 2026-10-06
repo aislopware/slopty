@@ -1347,7 +1347,7 @@ impl orchestrate::TaskThreads for Threads {
                     Err(Failure::new(ErrorCode::Unsupported, why))
                 }
                 Outcome::Refused { reason } => Err(Failure::new(ErrorCode::Failed, reason)),
-                Outcome::Done | Outcome::Accepted => {
+                Outcome::Done | Outcome::Accepted | Outcome::SetupFailed { .. } => {
                     let why = format!("{} started no thread", agent.0);
                     Err(Failure::new(ErrorCode::Failed, why))
                 }

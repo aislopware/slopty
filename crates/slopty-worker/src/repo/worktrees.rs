@@ -333,7 +333,7 @@ pub async fn enter(
 }
 
 /// Make or reopen the worktree `asked` names ([`make`]) from the clone `cwd` is in, and set it
-/// up ([`set_up`]), saying the setup's last lines to `said` while it runs.
+/// up (`set_up`), saying the setup's last lines to `said` while it runs.
 ///
 /// It is trusted for the agent, and the answer says where `cwd` stands in it (its root when
 /// that folder is not in it) and what it is. [`enter`] starts a thread there; a spawned
