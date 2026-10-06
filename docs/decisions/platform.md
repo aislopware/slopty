@@ -334,14 +334,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `command_finished` counts the focused tile as watched only while the app is active
     (304adfe7, 2026-10-02).
 
-- ⏸ **Attention past the background grace needs push through the server (APNs)**
-  (2026-09-28). Local notifications stop when iOS suspends the app, a few tens of seconds
-  after it leaves the screen, because the links go with it. Reaching a phone after that needs
-  the server to send a push: an APNs key or certificate, the device token sent to the server,
-  and a relay the server can reach. The server already hears every agent's state over its
-  directory link. Deferred until asked: it brings Apple credentials and a hosted dependency
-  into a design that otherwise has none. Its payload would carry the same `userInfo` as the
-  local note, so a tap routes the same way.
 - ✅ **One way to replace a file, one home** (2026-09-28, audit of the non-UI crates). Seven
   copies of write-temporary-then-rename (hook settings, the item registry, the transfer
   ledger, a worker file save, the server's store, the directory cache, the known workers) and
@@ -846,3 +838,63 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     profiles for the Mac and iOS is the person's step (readiness 10-06 §5). After that it is
     one line in each entitlements writer (`xtask/src/bundle.rs`, `xtask/src/ios.rs`).
   - Test: `slopty-ui` `workspace::attention::tests::only_needs_you_breaks_through_a_focus`.
+
+- ✅ **Notes reach a pocketed phone: the server pushes, sealed, through a relay the person
+  deploys** (readiness N6, 2026-10-06; `.research/push-2026-10-06.md`). It replaces the
+  deferral from 2026-09-28. A phone's links end a few tens of seconds after it leaves the
+  screen, so local notes stop there. Now the server pushes what a linked client would have
+  heard, and APNs carries it as ciphertext.
+  - **Who gets a push.** The phone sends `ToServer::PushDevice { client, device }` on every link:
+    its APNs token, the public half of an X25519 key only it holds, its topic and its
+    slow-command time. `device: None` withdraws it, on any link. The server keeps phones by
+    client id in `push.json`. A notice that finds the person at none of their clients
+    (`route` falls through to every link) is pushed to each phone not listening on a live link:
+    its link is gone, or it said `Presence { listening: false }` before the system suspended
+    it. A finished turn shorter than that phone's slow-command time is not pushed, as a linked
+    phone would not post it. Notices come only on a change of rung, so a ladder ranked again
+    pushes nothing.
+  - **What is pushed.** The server's own `Notice`, sealed: `PushBody { notice, ask }`, where
+    `ask` is the thread's request when it is a plain yes or no a note's buttons answer
+    (`RequestCard::answerable`, which the app's notes use too). It is postcard, cut to fit APNs'
+    4 KB, and sealed with HPKE (X25519, HKDF-SHA256, ChaCha20-Poly1305, base mode) to the
+    phone's key, with the token as associated data so it opens on no other phone. APNs sees fixed
+    words ("Slopty", "An agent needs you" when it is urgent, else "An agent has news"),
+    `mutable-content`, Time Sensitive for *Needs you* only, and thread and collapse ids that
+    are hashes keyed by the phone's key. The phone's notification extension opens the body and
+    shows what the app would have posted (P5).
+  - **The relay** (`apps/slopty-relay`, a Cloudflare Worker in Rust). It holds the team's APNs
+    key, and APNs is reached only through it, unless a self-builder names their own key
+    (below). A server signs each request with an Ed25519 install key made once (`push.key`,
+    readable by its owner only), over the route, the time and the body's hash, within five
+    minutes. The relay binds each token to the first four installs that push to it, in KV, and
+    holds each phone to 30 pushes a minute and each install to 120. It builds the APNs request
+    itself with its own words, so it can't be used to show anyone's text, and it never logs a
+    body. Its checks are plain Rust in `slopty_push::relay`, tested on the host. The Worker is a
+    thin adapter, linted for `wasm32-unknown-unknown` in the clippy-linux lane.
+  - **Off until set up.** No relay address is built in. `[server.push] relay` names the one the
+    person deployed, or `apns_key`, `key_id` and `team_id` send straight to APNs with their own
+    `.p8`. The same payload and the same token code are used either way, and the key wins when
+    both are set. Deploying, the `.p8`, the App IDs and the capabilities stay with the person.
+  - **The provider token.** ES256, with `iat` fixed to a half-hour bucket and RFC 6979
+    deterministic signatures. Every Worker isolate then makes the same token, byte for byte,
+    and it changes once in 30 minutes, inside Apple's 20 to 60.
+  - **The server's HTTPS client** is hyper 1 over HTTP/2 with rustls on ring and the platform
+    verifier. ring needs no CMake, so the static musl server builds with zig as its only C
+    compiler (`docs/decisions/tooling.md`, "Linux clippy compiles the build scripts' C with
+    zig"). `NSURLSession` would have left the Linux server with no push.
+  - **What a send does.** APNs' 410 or `BadDeviceToken` forgets the phone. A 429, a 5xx or a
+    provider token being renewed is tried again after 2 s and 10 s, then dropped.
+  - Not yet: the phone's half, the notification extension in `apps/slopty-notify`, the key in
+    the Keychain and the registration (P5); taking a pushed note back once it is answered
+    elsewhere, by a background push (after the main path is green end to end).
+  - Tests:
+    - `slopty-push`: the seal opens only with the phone's key and token; the relay's checks
+      and the APNs request it builds;
+    - `slopty-server`: `hub::ladder::tests::needs_you_pushes_once_per_ask`,
+      `store::tests::the_phones_and_the_relay_key_outlive_the_server` and
+      `push::tests::a_long_notice_still_fits_apns`;
+    - `tests/push.rs` `a_notice_reaches_the_phone_through_the_relay`: a server, a phone that
+      stops listening and a worker's thread needing the person, through a stand-in relay
+      running the relay's own checks to a stand-in APNs, both HTTP/2 over TLS on loopback; and
+      straight to that APNs with a test `.p8`;
+    - `slopty-relay` `binding::tests::a_token_binds_to_its_first_installs`.

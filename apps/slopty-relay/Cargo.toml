@@ -1,0 +1,24 @@
+[package]
+name = "slopty-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty's push relay: a Cloudflare Worker that checks a server's signed push and sends it on to APNs, reading nothing"
+
+[lints]
+workspace = true
+
+[lib]
+# The Worker is a cdylib for `worker-build`; the rlib is the host's, for the binding's tests.
+crate-type = [ "cdylib", "rlib" ]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# The relay's checks and the APNs request; no randomness, which wasm32 has no source for here.
+slopty-push.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker.workspace = true

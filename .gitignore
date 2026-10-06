@@ -11,3 +11,4 @@
 .vscode/
 *.profraw
 /mutants.out*
+/apps/slopty-relay/build

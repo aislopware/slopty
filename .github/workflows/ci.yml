@@ -51,7 +51,9 @@ jobs:
           - lane: clippy-linux
             os: ubuntu-24.04
             disk-floor-gb: 5
-            targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
+            targets: >-
+              x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl,
+              wasm32-unknown-unknown
           - { lane: clippy-host, os: macos-26 }
           - { lane: clippy-ios, os: macos-26 }
           - { lane: tests, shard: ui, os: macos-26 }

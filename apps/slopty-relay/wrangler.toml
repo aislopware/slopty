@@ -1,0 +1,36 @@
+# The push relay (`docs/decisions/platform.md`, "Notes reach a pocketed phone"), deployed by
+# the person who publishes the app, from this directory:
+#
+#   wrangler secret put APNS_KEY      # the .p8's text
+#   wrangler secret put APNS_KEY_ID   # its 10-character id
+#   wrangler secret put APNS_TEAM_ID  # the team's 10-character id
+#   wrangler deploy
+#
+# then `[server.push] relay = "https://<this worker's address>"` on each server.
+name = "slopty-relay"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-06"
+
+[build]
+command = "cargo install -q worker-build@0.8.7 && worker-build --release"
+
+[vars]
+# The app the relay pushes for: APNs' topic.
+APNS_TOPIC = "dev.aislopware.slopty"
+
+# Which installs each phone's token is bound to. Wrangler creates the namespace on the first
+# deploy.
+[[kv_namespaces]]
+binding = "BINDINGS"
+
+# A phone hears at most 30 pushes a minute.
+[[ratelimits]]
+name = "DEVICE_LIMIT"
+namespace_id = "45501"
+simple = { limit = 30, period = 60 }
+
+# A server sends at most 120 a minute, across all its phones.
+[[ratelimits]]
+name = "INSTALL_LIMIT"
+namespace_id = "45502"
+simple = { limit = 120, period = 60 }
