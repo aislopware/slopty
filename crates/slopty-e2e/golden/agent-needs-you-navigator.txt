@@ -44,8 +44,9 @@ Image │ Claude Code
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
+Heading │ What should Claude Code do?
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
+Label │ on e2e-worker
 Button │ Model, Claude
 Button │ Send

@@ -44,7 +44,6 @@ Image │ Needs you
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude
@@ -54,9 +53,10 @@ Heading │ opencode
 Button │ Commit on atlas
 Button │ Close tile
 Group │ Thread
-Status
+Heading │ What should opencode do in atlas?
 MultilineTextInput │ Message
 Button │ Add to the message
+Label │ in atlas on studio
 Button │ Model, Canned
 Button │ Mode, build
 Button │ Send
@@ -68,7 +68,6 @@ Image │ Working
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
@@ -79,9 +78,10 @@ Image │ pi
 Button │ Commit on atlas
 Button │ Close tile
 Group │ Thread
-Status
+Heading │ What should pi do in atlas?
 MultilineTextInput │ Message
 Button │ Add to the message
+Label │ in atlas on studio
 Label │ Model, Canned
 Label │ Effort, Medium
 Button │ Continue in the terminal

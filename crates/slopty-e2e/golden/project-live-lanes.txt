@@ -67,7 +67,6 @@ Image │ Working
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude

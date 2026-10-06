@@ -474,6 +474,8 @@ impl WorkspaceView {
             self.open_project(&project, cx);
         }
         self.projects.dirty = true;
+        // Whether a thread is a project's to brief moves with the boards.
+        self.faces_dirty = true;
         self.changed(cx);
         cx.notify();
     }

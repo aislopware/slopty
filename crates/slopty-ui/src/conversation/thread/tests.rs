@@ -180,23 +180,35 @@ fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
     };
     assert!(middle(cx), "the composer stands in the middle, not at the foot");
 
+    let mut working = state.clone();
+    working.status.phase = slopty_proto::thread::Phase::Working;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-hero").is_none(), "an agent at work asks nothing");
+
     let mut asking = state.clone();
     asking.requests = vec![approval("a")];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asking, 1), cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asking, 2), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("request-a").is_some(), "the request is on show");
     assert!(cx.debug_bounds("thread-hero").is_none(), "and nothing asks over it");
 
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-hero").is_some(), "asked again");
+    view.update(cx, |v, cx| v.set_briefed(true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-hero").is_none(), "a thread a project briefed asks nothing");
+    view.update(cx, |v, cx| v.set_briefed(false, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-hero").is_some(), "unbriefed, it asks once more");
     let field = view.read_with(cx, gpui::Focusable::focus_handle);
     let typing = |cx: &mut VisualTestContext| cx.update(|window, _| field.is_focused(window));
     assert!(typing(cx), "the field has the keyboard");
     let full = fixtures::thread("edit");
     let mut moved = full;
     moved.meta.id = thread;
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 3), cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 4), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-hero").is_none(), "a thread with rows asks nothing");
     assert!(cx.debug_bounds("thread-place").is_none(), "its header says where");

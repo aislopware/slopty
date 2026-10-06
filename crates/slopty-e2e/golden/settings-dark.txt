@@ -52,7 +52,7 @@ RadioButton │ Dark
 SpinButton │ Text size │ 13 pt
 Button │ Decrease
 Button │ Increase
-SpinButton │ Reading size │ 15 pt
+SpinButton │ Reading size │ 14 pt
 Button │ Decrease
 Button │ Increase
 Heading │ Light terminal colours

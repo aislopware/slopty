@@ -182,6 +182,9 @@ pub struct ThreadView {
     /// The thread not started yet that this view writes the first message of, drawn on its
     /// own state rather than the hub's ([`super::draft`]).
     draft: Option<Entity<Draft>>,
+    /// Its brief came from elsewhere (a project's orchestrator, or its task): it is never asked
+    /// what to do, even before its first row.
+    briefed: bool,
     /// The last frame drew the empty thread's question with the composer under it.
     heroed: bool,
     /// How many times the composer has docked at the foot after the question, for the move's
@@ -412,6 +415,7 @@ impl ThreadView {
             hub,
             thread,
             draft,
+            briefed: false,
             heroed: false,
             docks: None,
             zoom: 1.0,
@@ -532,6 +536,15 @@ impl ThreadView {
     /// Put back `text`, a draft kept from an earlier view of this thread, caret at its end.
     pub fn restore_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.set_draft(text, text.len(), window, cx);
+    }
+
+    /// Whether its brief came from elsewhere: a project's orchestrator or a task's agent, which
+    /// the empty thread's question never asks what to do.
+    pub fn set_briefed(&mut self, briefed: bool, cx: &mut Context<Self>) {
+        if self.briefed != briefed {
+            self.briefed = briefed;
+            cx.notify();
+        }
     }
 
     /// Draw the header, or leave it to the tile.
@@ -2179,7 +2192,8 @@ impl ThreadView {
     }
 
     /// The empty thread's agent and where it works, while it asks its first message: a draft
-    /// whose start has not gone, or a thread with no rows and nothing waiting on the person.
+    /// whose start has not gone, or a thread at rest with no rows and nothing waiting on the
+    /// person.
     /// The composer is then the page, under one question ([`hero_words`]).
     fn hero(&self, cx: &App) -> Option<(String, Place)> {
         let state = self.state(cx)?;
@@ -2188,7 +2202,13 @@ impl ThreadView {
             let draft = draft.read(cx);
             return (!draft.sent()).then(|| (agent, draft.place().clone()));
         }
-        if !self.rows.is_empty() || self.in_subagent() {
+        // At rest and unbriefed only: an agent at work on a turn whose rows have not come yet,
+        // or one a project briefed, is not asking the person anything.
+        if self.briefed
+            || !self.rows.is_empty()
+            || self.in_subagent()
+            || state.status.phase != Phase::Idle
+        {
             return None;
         }
         let hub = self.hub.read(cx);

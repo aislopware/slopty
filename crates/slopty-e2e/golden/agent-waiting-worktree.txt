@@ -18,7 +18,6 @@ Image │ Waiting
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5

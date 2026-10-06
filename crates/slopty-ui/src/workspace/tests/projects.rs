@@ -143,6 +143,20 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
     assert_eq!(focused(&view, cx), Some(agent_tile), "↩ went to task 1's agent");
     assert!(view.read_with(cx, |v, _| v.face_shown(agent)), "on the agent's thread");
+    // Its thread at rest with nothing in it yet: the project briefed it, so it asks nothing.
+    let thread = view.read_with(cx, |v, _| v.session_thread(agent)).expect("its thread");
+    let mut empty = crate::conversation::thread::fixtures::empty();
+    empty.meta.id = thread;
+    empty.meta.terminal = Some(agent);
+    let frame = slopty_proto::thread::wire::ThreadFrame::Snapshot {
+        cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
+        state: Box::new(empty),
+    };
+    let key = setup.fake.key;
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-composer").is_some(), "its thread is drawn");
+    assert!(cx.debug_bounds("thread-hero").is_none(), "a task's agent is never asked what to do");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();

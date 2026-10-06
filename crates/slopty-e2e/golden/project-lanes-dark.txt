@@ -75,9 +75,10 @@ Image │ Claude Code
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Status
+Heading │ What should Claude Code do?
 MultilineTextInput │ Message
 Button │ Add to the message
+Label │ on studio
 Button │ Model, Claude
 Button │ Send
 Status │ Ship the project board: #5 Check the wire goldens: its verifier failed
