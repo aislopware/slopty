@@ -399,9 +399,7 @@ impl WorkspaceView {
         prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(starting) = self.starting.get(item) else {
-            return;
-        };
+        let Some(starting) = self.starting.get(item) else { return };
         let key = starting.worker;
         let id = IntentId::new();
         let start = Start {
@@ -497,9 +495,7 @@ impl WorkspaceView {
 
     /// Where each of `worker`'s threads works, as its table last said.
     pub(super) fn places_on(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadPlace> {
-        let Some(hub) = self.faces.threads.hubs.get(&worker) else {
-            return Vec::new();
-        };
+        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
         let places = &self.faces.threads.places;
         hub.read(cx).threads().rows().rows.keys().filter_map(|t| places.get(t).cloned()).collect()
     }
@@ -1050,9 +1046,7 @@ impl WorkspaceView {
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
     /// its parent's business, not a tile's, and an aside its asker's.
     pub(super) fn threads_of_sessions(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let Some(hub) = self.faces.threads.hubs.get(&key) else {
-            return;
-        };
+        let Some(hub) = self.faces.threads.hubs.get(&key) else { return };
         let rows: Vec<&ThreadRow> =
             hub.read(cx).threads().rows().rows.values().filter(|r| !hub::is_aside(r)).collect();
         let found: Vec<(SessionId, ThreadId)> = rows
@@ -1131,9 +1125,7 @@ impl WorkspaceView {
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
         for thread in came_to_need.into_iter().filter(|_| linked) {
             cx.emit(WorkspaceEvent::Attention(thread));
-            let Some(stand) = self.faces.threads.stands.get(&thread) else {
-                continue;
-            };
+            let Some(stand) = self.faces.threads.stands.get(&thread) else { continue };
             let word = super::agents::agent_status_word(stand).to_lowercase();
             if let Some(tile) = self.tile_of_thread(thread) {
                 self.attention_toast(tile, Status::NeedsYou, &word, cx);
@@ -1173,9 +1165,7 @@ impl WorkspaceView {
             if current == Some(thread) {
                 continue;
             }
-            let Some(key) = self.worker_of_session(*session) else {
-                continue;
-            };
+            let Some(key) = self.worker_of_session(*session) else { continue };
             let handed = self.faces.threads.handed.remove(session);
             let view = if let Some(view) = handed.filter(|v| v.read(cx).thread() == thread) {
                 view
@@ -1475,9 +1465,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // Bound only while an agent runs in the focused terminal ([`Applies::agent`]).
-        let Some(session) = self.focused_session() else {
-            return;
-        };
+        let Some(session) = self.focused_session() else { return };
         let faces = self.faces_of(session);
         if faces.len() < 2 {
             self.show_notice(NO_THREAD_YET.to_owned(), cx);
