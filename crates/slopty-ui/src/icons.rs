@@ -4,16 +4,18 @@
 //! A [`Symbol`] is one of a closed list. A file's type is one of nine of them
 //! ([`FileType::symbol`]). An agent wears its owner's mark ([`AgentMark`]), drawn by us from
 //! the owner's outline into the same kind of mask, and an agent with none the neutral
-//! [`AGENT`]. Nothing else is drawn by us but the working mark's twelve spokes and the rings of
-//! a state ([`Ring`]), which SF cannot draw crisp at 1x (`docs/decisions/ui.md`, "The chrome's
-//! icons are SF Symbols" and "State is a glyph"; `docs/decisions/brand.md`, "Each agent wears
-//! its owner's mark").
+//! [`AGENT`]. Git is GitHub's Octicons ([`GitGlyph`]), drawn the same way, since SF has no git
+//! vocabulary. Nothing else is drawn by us but the working mark's cell of dots and the rings
+//! of a state ([`Ring`]), which SF cannot draw crisp at 1x (`docs/decisions/ui.md`, "The
+//! chrome's icons are SF Symbols", "State is a glyph" and "An icon takes its words' size,
+//! weight and tier"; `docs/decisions/brand.md`, "Each agent wears its owner's mark").
 //!
-//! An icon takes its size from the type scale: [`IconSize::Inline`] sits in the slot
-//! [`slopty_theme::Typography::icon`] beside the chrome's secondary text and is drawn at that
-//! text's point size; [`IconSize::Large`] stands in [`slopty_theme::Typography::icon_large`]
-//! at the chrome's own size. A slot sized larger or smaller (the chrome's zoom) draws its
-//! symbol larger or smaller by as much, so an icon never parts from its words' size.
+//! An icon takes its words' type role ([`beside`]): [`IconSize::Lead`] leads a row or stands
+//! alone in [`slopty_theme::Typography::icon_large`] at the chrome's size; [`IconSize::Inline`]
+//! sits in [`slopty_theme::Typography::icon`] beside a row's facts, at their size but never
+//! under [`SYMBOL_FLOOR`], where SF draws a smaller design. Its weight is its words'. A slot
+//! sized larger or smaller (the chrome's zoom) draws its symbol larger or smaller by as much,
+//! so an icon never parts from its words' size.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -23,21 +25,23 @@ use gpui::accesskit::Role;
 use gpui::{
     AnimationExt as _, AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId,
     Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ParentElement as _, PathBuilder, Pixels, Point, ScaledPixels, SharedString, Stateful,
+    LayoutId, ParentElement as _, Pixels, Point, ScaledPixels, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, TransformationMatrix, Window, canvas, div, point,
     px, radians,
 };
 use parking_lot::RwLock;
 use slopty_platform::symbols::{Masks, SymbolMask};
 pub use slopty_platform::symbols::{Scale, Symbol, SymbolSize, Weight};
-use slopty_theme::{Rgb, Theme};
+use slopty_theme::{Rgb, Theme, TypeRole, Typography};
 
 use crate::colors::hsla;
 pub use crate::file_types::FileType;
 
+mod git;
 mod marks;
 mod ring;
 
+pub use git::GitGlyph;
 pub use marks::AgentMark;
 pub use ring::Ring;
 
@@ -52,6 +56,14 @@ pub enum Mark {
     Symbol(Symbol),
     /// An agent's own mark; [`AgentMark::Neutral`] is drawn as [`AGENT`].
     Agent(AgentMark),
+    /// A git glyph, an Octicon.
+    Git(GitGlyph),
+}
+
+impl From<GitGlyph> for Mark {
+    fn from(glyph: GitGlyph) -> Self {
+        Self::Git(glyph)
+    }
 }
 
 impl From<Symbol> for Mark {
@@ -83,7 +95,7 @@ impl Mark {
     pub const fn label(self) -> Option<&'static str> {
         match self {
             Self::Agent(mark) => mark.label(),
-            Self::Symbol(_) => None,
+            Self::Symbol(_) | Self::Git(_) => None,
         }
     }
 }
@@ -92,6 +104,20 @@ impl Mark {
 #[must_use]
 pub fn file_symbol(path: &str) -> Symbol {
     FileType::of(path).map_or(Symbol::Doc, FileType::symbol)
+}
+
+/// The symbol a machine wears, by its form.
+///
+/// As Finder and Find My show a device: a laptop, a desktop's display, a server's rack. A
+/// machine that has not said yet wears the rack, the form of one that does not say.
+#[must_use]
+pub const fn machine(form: Option<slopty_proto::server::Form>) -> Symbol {
+    use slopty_proto::server::Form;
+    match form {
+        Some(Form::Laptop) => Symbol::Laptopcomputer,
+        Some(Form::Desktop) => Symbol::Display,
+        Some(Form::Server) | None => Symbol::ServerRack,
+    }
 }
 
 /// The symbol for an icon gpui-kit's components name by its asset path (`icons/check.svg`),
@@ -120,34 +146,74 @@ pub fn kit_symbol(path: &str) -> Option<Symbol> {
     })
 }
 
+/// The least point size a symbol is drawn at, the disclosure chevrons aside.
+///
+/// Under about 12.25 pt SF Symbols draws a smaller design, a fifth narrower for the same stroke,
+/// which cost an icon a quarter of its ink beside 13 pt words (`docs/MEASUREMENTS.md`, "SF Symbols'
+/// smaller design").
+pub const SYMBOL_FLOOR: f32 = 12.5;
+
 /// How large an icon is drawn, by the words it sits beside.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconSize {
-    /// Beside secondary chrome text: [`slopty_theme::Typography::small`]'s point size in
-    /// [`slopty_theme::Typography::icon`]'s slot.
+    /// Beside a row's facts, the metadata role: their point size, never under
+    /// [`SYMBOL_FLOOR`], in [`slopty_theme::Typography::icon`]'s slot.
     Inline,
-    /// Standing alone or beside a row's title: the chrome's size in
+    /// A row's lead, an icon button, or standing beside a title: the chrome's size in
     /// [`slopty_theme::Typography::icon_large`]'s slot.
-    Large,
+    Lead,
 }
 
 impl IconSize {
+    /// The size for an icon beside words of `role`: [`Self::Lead`] beside the chrome's size or
+    /// larger, [`Self::Inline`] beside smaller.
+    #[must_use]
+    pub fn beside(theme: &Theme, role: TypeRole) -> Self {
+        if role.size >= theme.typography.ui_size { Self::Lead } else { Self::Inline }
+    }
+
+    /// The side of the slot an icon beside words of `role` stands in: the words' size and the
+    /// room a lead or an inline icon keeps round it, so a finger's larger words get a larger
+    /// slot as a pointer's do.
+    #[must_use]
+    pub fn beside_slot(theme: &Theme, role: TypeRole) -> f32 {
+        let ty = &theme.typography;
+        let room = match Self::beside(theme, role) {
+            Self::Lead => ty.icon_large() - ty.ui_size,
+            Self::Inline => ty.icon() - ty.small(),
+        };
+        role.size + room
+    }
+
     /// The slot's side in points.
     #[must_use]
     pub fn slot(self, theme: &Theme) -> f32 {
         match self {
             Self::Inline => theme.typography.icon(),
-            Self::Large => theme.typography.icon_large(),
+            Self::Lead => theme.typography.icon_large(),
         }
     }
 
-    /// The point size of the words beside it, which the symbol is drawn at.
+    /// The point size the symbol is drawn at: its words', and never under [`SYMBOL_FLOOR`].
     #[must_use]
     pub fn point(self, theme: &Theme) -> f32 {
         match self {
-            Self::Inline => theme.typography.small(),
-            Self::Large => theme.typography.ui_size,
+            Self::Inline => theme.typography.small().max(SYMBOL_FLOOR),
+            Self::Lead => theme.typography.ui_size.max(SYMBOL_FLOOR),
         }
+    }
+}
+
+/// The symbol weight beside words of `weight` (400, 500 or 600): regular, medium or semibold,
+/// as the HIG matches a symbol's weight to its text's.
+#[must_use]
+pub fn weight_beside(weight: f32) -> Weight {
+    if weight > Typography::MEDIUM_WEIGHT {
+        Weight::Semibold
+    } else if weight >= Typography::MEDIUM_WEIGHT {
+        Weight::Medium
+    } else {
+        Weight::Regular
     }
 }
 
@@ -177,6 +243,19 @@ impl Drawn {
             scale: Scale::Medium,
             turn: 0.0,
         }
+    }
+
+    /// `mark` beside words of `role`, in a slot [`IconSize::beside_slot`] square: at their point
+    /// size, never under [`SYMBOL_FLOOR`], and their weight ([`weight_beside`]).
+    #[must_use]
+    pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole) -> Self {
+        let slot = IconSize::beside_slot(theme, role);
+        Self {
+            ratio: role.size.max(SYMBOL_FLOOR) / slot,
+            ink: (slot - theme.spacing.xxs) / slot,
+            ..Self::new(theme, mark, IconSize::beside(theme, role))
+        }
+        .weight(weight_beside(role.weight))
     }
 
     /// At `weight`, as the words beside it are.
@@ -216,7 +295,7 @@ impl Drawn {
             ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot,
             weight: Weight::Light,
             scale: Scale::Large,
-            ..Self::new(theme, mark, IconSize::Large)
+            ..Self::new(theme, mark, IconSize::Lead)
         }
     }
 
@@ -257,7 +336,21 @@ impl Drawn {
             Mark::Symbol(symbol) => self.paint_symbol(symbol, bounds, window),
             Mark::Agent(AgentMark::Neutral) => self.paint_symbol(AGENT, bounds, window),
             Mark::Agent(mark) => self.paint_agent(mark, bounds, window),
+            Mark::Git(glyph) => self.paint_git(glyph, bounds, window),
         }
+    }
+
+    /// Paints a git glyph centred on its ink in `bounds`, on the device's pixel grid, its
+    /// 16-unit grid [`git::EM`] of the symbol's point size. Never weighted: the Octicon's own
+    /// strokes, which sit between SF's regular and medium.
+    fn paint_git(self, glyph: GitGlyph, bounds: Bounds<Pixels>, window: &mut Window) {
+        let side = f32::from(bounds.size.width.min(bounds.size.height));
+        let device = window.scale_factor();
+        let em = self.size(side).point * git::EM;
+        let Some((mask, key)) = git::mask(glyph, em, device) else {
+            return;
+        };
+        paint_centred(&mask, key, bounds, window, || format!("{glyph:?}"));
     }
 
     /// Paints an agent's mark centred on its ink in `bounds`, on the device's pixel grid: its
@@ -269,25 +362,7 @@ impl Drawn {
         let Some((mask, key)) = marks::mask(mark, self.ink(side), device) else {
             return;
         };
-        let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height))
-        else {
-            return;
-        };
-        let centre = bounds.center().scale(device);
-        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
-        let (wide, high) = (mask.width as f32, mask.height as f32);
-        let snap =
-            |middle: ScaledPixels, extent: f32| px((middle.0 - extent / 2.0).round() / device);
-        let origin = point(snap(centre.x, wide), snap(centre.y, high));
-        let devices = gpui::size(DevicePixels(width), DevicePixels(height));
-        let ink = window.text_style().color;
-        let painted =
-            window.paint_mask(origin, devices, key, TransformationMatrix::unit(), ink, || {
-                Ok(Some(mask.alpha.clone()))
-            });
-        if let Err(error) = painted {
-            tracing::warn!(%error, ?mark, "an agent's mark was not painted");
-        }
+        paint_centred(&mask, key, bounds, window, || format!("{mark:?}"));
     }
 
     /// Paints `symbol` centred in `bounds`: its box across, its alignment rectangle (the
@@ -295,9 +370,8 @@ impl Drawn {
     fn paint_symbol(self, symbol: Symbol, bounds: Bounds<Pixels>, window: &mut Window) {
         let side = f32::from(bounds.size.width.min(bounds.size.height));
         let device = window.scale_factor();
-        let Some((mask, key)) =
-            fitted(symbol, self.size(side), f32::from(bounds.size.width) * device, device)
-        else {
+        let room = f32::from(bounds.size.width) * FIT_ROOM * device;
+        let Some((mask, key, _)) = fitted(symbol, self.size(side), room, device) else {
             return;
         };
         let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height))
@@ -328,6 +402,35 @@ impl Drawn {
     }
 }
 
+/// Paints `mask` in the text's ink with its box centred in `bounds` and its origin on a whole
+/// device pixel, as an agent's mark and a git glyph are; `what` names it if it fails.
+fn paint_centred(
+    mask: &Arc<SymbolMask>,
+    key: SharedString,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    what: impl FnOnce() -> String,
+) {
+    let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height)) else {
+        return;
+    };
+    let device = window.scale_factor();
+    let centre = bounds.center().scale(device);
+    #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
+    let (wide, high) = (mask.width as f32, mask.height as f32);
+    let snap = |middle: ScaledPixels, extent: f32| px((middle.0 - extent / 2.0).round() / device);
+    let origin = point(snap(centre.x, wide), snap(centre.y, high));
+    let devices = gpui::size(DevicePixels(width), DevicePixels(height));
+    let ink = window.text_style().color;
+    let painted =
+        window.paint_mask(origin, devices, key, TransformationMatrix::unit(), ink, || {
+            Ok(Some(mask.alpha.clone()))
+        });
+    if let Err(error) = painted {
+        tracing::warn!(%error, mark = what(), "a mark was not painted");
+    }
+}
+
 /// A drawn mask with the key the atlas keeps it under.
 type Kept = Option<(Arc<SymbolMask>, SharedString)>;
 
@@ -335,14 +438,35 @@ type Kept = Option<(Arc<SymbolMask>, SharedString)>;
 /// key, made once. A symbol the OS lacks is kept as a miss.
 struct Symbols {
     masks: Masks,
-    kept: RwLock<HashMap<(Symbol, SymbolSize, u32), Kept>>,
+    kept: RwLock<HashMap<(Symbol, SymbolSize, u32), Held>>,
+}
+
+/// A symbol's mask, its atlas key, and how many device pixels across its ink is: the OS pads
+/// a symbol's image a pixel or more each side, so a fit is judged on the ink.
+type Held = Option<(Arc<SymbolMask>, SharedString, u32)>;
+
+/// How many columns of `mask` hold ink, from the first to the last.
+fn ink_width(mask: &SymbolMask) -> u32 {
+    let Ok(wide) = usize::try_from(mask.width) else { return mask.width };
+    if wide == 0 {
+        return 0;
+    }
+    let inked = |x: &usize| mask.alpha.chunks(wide).any(|row| row.get(*x).is_some_and(|&a| a > 0));
+    let first = (0..wide).find(inked);
+    let last = (0..wide).rev().find(inked);
+    first
+        .zip(last)
+        .and_then(|(first, last)| last.checked_sub(first))
+        .and_then(|span| u32::try_from(span).ok())
+        .map_or(0, |span| span.saturating_add(1))
 }
 
 static SYMBOLS: LazyLock<Symbols> =
     LazyLock::new(|| Symbols { masks: Masks::new(), kept: RwLock::new(HashMap::new()) });
 
-/// `symbol` at `size` for a display of `device` pixels to the point, and its atlas key.
-fn mask(symbol: Symbol, size: SymbolSize, device: f32) -> Kept {
+/// `symbol` at `size` for a display of `device` pixels to the point, its atlas key and its
+/// ink's width.
+fn mask(symbol: Symbol, size: SymbolSize, device: f32) -> Held {
     let at = (symbol, size, device.to_bits());
     if let Some(kept) = SYMBOLS.kept.read().get(&at) {
         return kept.clone();
@@ -356,23 +480,24 @@ fn mask(symbol: Symbol, size: SymbolSize, device: f32) -> Kept {
             size.scale,
             device.to_bits()
         );
-        (mask, SharedString::from(key))
+        let ink = ink_width(&mask);
+        (mask, SharedString::from(key), ink)
     });
     SYMBOLS.kept.write().entry(at).or_insert(kept).clone()
 }
 
-/// `symbol` at `size`, drawn smaller where it is wider than `room` device pixels: a wide
-/// symbol (a server rack, a folder) kept in its slot, so it never reaches the words beside it.
+/// `symbol` at `size`, drawn smaller where its ink is wider than `room` device pixels: a wide
+/// symbol kept by its slot, so it never reaches the words beside it.
 ///
 /// The point size is scaled by the overflow and stepped down a quarter point at a time while
 /// the OS's rounding still leaves it a pixel over, so it shrinks no more than it must.
-fn fitted(symbol: Symbol, size: SymbolSize, room: f32, device: f32) -> Kept {
+fn fitted(symbol: Symbol, size: SymbolSize, room: f32, device: f32) -> Held {
     let room = room.ceil();
     let mut kept = mask(symbol, size, device)?;
     let mut point = size.point;
     for _ in 0..FIT_STEPS {
         #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
-        let wide = kept.0.width as f32;
+        let wide = kept.2 as f32;
         if wide <= room {
             break;
         }
@@ -384,6 +509,11 @@ fn fitted(symbol: Symbol, size: SymbolSize, room: f32, device: f32) -> Kept {
     }
     Some(kept)
 }
+
+/// How wide a symbol's ink may be against its slot before [`fitted`] draws it smaller: an
+/// eighth over, into the gap beside it, so a wide symbol (a server rack, a folder, 15 pt of
+/// ink at 13 pt) keeps its words' size in a lead's 16 pt slot and gives way only past 18.
+const FIT_ROOM: f32 = 18.0 / 16.0;
 
 /// How many times [`fitted`] draws a symbol smaller before it keeps the last.
 const FIT_STEPS: usize = 4;
@@ -424,15 +554,23 @@ pub fn prewarm(theme: &Theme, remembered: std::path::PathBuf) {
     // Core Graphics fills from their outlines, with nothing of the OS's held after.
     let inline = IconSize::Inline.slot(theme);
     let inks = [
-        Drawn::new(theme, AGENT, IconSize::Large).ink(IconSize::Large.slot(theme)),
+        Drawn::new(theme, AGENT, IconSize::Lead).ink(IconSize::Lead.slot(theme)),
         Drawn::new(theme, AGENT, IconSize::Inline).ink(inline),
         Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
     ];
+    // The git glyphs at a lead's and a fact's size, on the same thread: Core Graphics fills
+    // too, a couple of dozen microseconds each.
+    let ems = [IconSize::Lead, IconSize::Inline].map(|size| size.point(theme) * git::EM);
     let scales: Vec<f32> = scale.map_or_else(|| SCALES.to_vec(), |scale| vec![scale]);
     let marks = std::thread::Builder::new().name("agent-marks".into()).spawn(move || {
         for mark in AgentMark::OWNED {
             for (&ink, &scale) in inks.iter().flat_map(|ink| scales.iter().map(move |s| (ink, s))) {
                 marks::mask(mark, ink, scale);
+            }
+        }
+        for glyph in GitGlyph::ALL {
+            for (&em, &scale) in ems.iter().flat_map(|em| scales.iter().map(move |s| (em, s))) {
+                git::mask(glyph, em, scale);
             }
         }
     });
@@ -454,6 +592,14 @@ pub fn remember(path: &std::path::Path) {
 #[must_use]
 pub fn icon(theme: &Theme, symbol: impl Into<Mark>, size: IconSize, color: Hsla) -> Div {
     Drawn::new(theme, symbol, size).slot(px(size.slot(theme)), color)
+}
+
+/// `mark` beside words of `role`, in `ink`: their size and weight ([`Drawn::beside`]) in a
+/// slot of [`IconSize::beside_slot`]. Size the slot again only by the chrome's zoom, and the
+/// mark follows it.
+#[must_use]
+pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole, ink: Hsla) -> Div {
+    Drawn::beside(theme, mark, role).slot(px(IconSize::beside_slot(theme, role)), ink)
 }
 
 /// `symbol` in a slot `side` square, in `ink`, drawn at the inline icon's share of the slot:
@@ -492,7 +638,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// The symbol that marks it; `None` for the marks drawn by us, the working mark's spokes
+    /// The symbol that marks it; `None` for the marks drawn by us, the working mark's dots
     /// and the rings of idle and waiting ([`status_icon`]). The three that carry colour are
     /// filled, so the colour has a body at 1x.
     #[must_use]
@@ -673,7 +819,7 @@ impl Element for Arrive {
 
 /// `status` as an empty state's mark, in `color` at the chrome's zoom `k`.
 ///
-/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working spokes or a
+/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working cell or a
 /// ring at the heading's size, so a tile's state reads at the size of the notice it heads.
 #[must_use]
 pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyElement {
@@ -687,7 +833,7 @@ pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyE
 
 /// `status`'s icon, `side` square, in `color`.
 ///
-/// [`Status::Working`]'s spokes step round ([`spin_step`]), the only mark that moves;
+/// [`Status::Working`]'s dots go round ([`spin_step`]), the only mark that moves;
 /// [`Status::Running`] (waiting on its own background work) is a still dashed ring, since a mark
 /// that moves says work is in progress; [`Status::Idle`] is an empty ring, for the places a mark
 /// is required. The rest are their symbols.
@@ -1037,16 +1183,25 @@ pub fn motion_setting_changed(cx: &mut App) {
     SpinClock::wake(cx);
 }
 
-/// The share of the side a spoke runs, and its width in points at the inline slot's side.
-const SPOKE_LENGTH: f32 = 0.28;
-const SPOKE_WIDTH: f32 = 1.5;
+/// The working mark's dot and the pitch from one dot's edge to the next, as shares of its
+/// slot's side: at a row's 14 pt slot a dot is 2.4 pt and the pitch 3.8, the dots of a
+/// braille cell set at 12.5 pt, rounded to whole device pixels (2 and 4 at 1x, 5 and 8 at 2x).
+const DOT: f32 = 0.17;
+const DOT_PITCH: f32 = 0.27;
 
-/// The faintest spoke, the one the head has just left the furthest behind.
-const SPOKE_FAINTEST: f32 = 0.2;
+/// How much of the mark's ink the dots at rest keep: a faint track, so the cell holds one
+/// shape while the lit dots go round it.
+const DOT_TRACK: f32 = 0.22;
 
-/// The working mark: twelve spokes round a centre, the head at the spin clock's step and the
-/// rest fading behind it, so the eye reads a turn while nothing turns (Apple's activity
-/// indicator). Under Reduce Motion it stands on its first step and breathes.
+/// The cell's six dots, two columns of three, in the order the lit ones go round: clockwise
+/// from the top left.
+const DOT_RING: [(u8, u8); 6] = [(0, 0), (1, 0), (1, 1), (1, 2), (0, 2), (0, 1)];
+
+/// The working mark: a braille cell of six dots round which three lit dots go, a fourth lit on
+/// every other step as the head moves on, twelve frames a turn on the spin clock: the spinner a
+/// terminal draws, and `MonoCode`'s (`docs/decisions/ui.md`, "The working mark is a braille
+/// cell"). Drawn by us on whole device pixels, in the working hue, the dots at rest a faint
+/// track. Under Reduce Motion it stands on its first step and breathes.
 struct Spinner {
     side: Pixels,
     color: Hsla,
@@ -1061,40 +1216,46 @@ impl IntoElement for Spinner {
     }
 }
 
-/// Paints the twelve spokes in `bounds`, the head at `step`.
-fn paint_spokes(bounds: Bounds<Pixels>, step: u32, color: Hsla, window: &mut Window) {
+/// Which of [`DOT_RING`]'s dots `step` lights: the three ending at the head, which moves on
+/// every second step, and on the step between, the next one too.
+fn lit_dots(step: u32) -> [bool; 6] {
+    const RING: u32 = 6;
+    // The head starts a dot in, so the first frame, the one Reduce Motion stands on, is ⠋ and
+    // not a column of three, which would read as a menu's "⋮".
+    let head = step.wrapping_div(2).wrapping_add(1) % RING;
+    let half = step % 2 == 1;
+    let mut lit = [false; 6];
+    for (at, dot) in (0..RING).zip(lit.iter_mut()) {
+        let behind = head.wrapping_add(RING).wrapping_sub(at) % RING;
+        *dot = behind < 3 || (half && behind == RING.wrapping_sub(1));
+    }
+    lit
+}
+
+/// A dot's side and the pitch between dots, in whole device pixels, for a slot `side` points
+/// square on a display of `device` pixels to the point; the pitch leaves a pixel at least.
+fn dot_cell(side: f32, device: f32) -> (f32, f32) {
+    let dot = (DOT * side * device).round().max(1.0);
+    (dot, (DOT_PITCH * side * device).round().max(dot + 1.0))
+}
+
+/// Paints the working mark's cell centred in `bounds` at `step`: each dot a whole number of
+/// device pixels across, on a whole-pixel pitch, so every dot is the same and sharp at 1x.
+fn paint_dots(bounds: Bounds<Pixels>, step: u32, color: Hsla, window: &mut Window) {
     let side = f32::from(bounds.size.width.min(bounds.size.height));
-    let unit = side / 14.0;
-    let half = SPOKE_WIDTH * unit / 2.0;
-    let outer = side / 2.0 - half;
-    let inner = SPOKE_LENGTH.mul_add(-side, outer);
-    let centre = bounds.center();
-    #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
-    let steps = SPIN_STEPS as f32;
-    for spoke in 0..SPIN_STEPS {
-        #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
-        let angle = spoke as f32 / steps * std::f32::consts::TAU;
-        let behind = step.wrapping_add(SPIN_STEPS).wrapping_sub(spoke) % SPIN_STEPS;
-        #[expect(clippy::cast_precision_loss, reason = "twelve spokes")]
-        let fade = behind as f32 / (steps - 1.0);
-        let opacity = (1.0 - SPOKE_FAINTEST).mul_add(-fade, 1.0);
-        let (sin, cos) = angle.sin_cos();
-        let at = |r: f32, across: f32| {
-            point(
-                centre.x + px(cos.mul_add(across, sin * r)),
-                centre.y + px(sin.mul_add(across, -cos * r)),
-            )
-        };
-        let mut path = PathBuilder::fill();
-        path.move_to(at(inner, half));
-        path.line_to(at(outer, half));
-        path.arc_to(point(px(half), px(half)), px(0.0), false, false, at(outer, -half));
-        path.line_to(at(inner, -half));
-        path.arc_to(point(px(half), px(half)), px(0.0), false, false, at(inner, half));
-        path.close();
-        if let Ok(path) = path.build() {
-            window.paint_path(path, color.opacity(opacity));
-        }
+    let device = window.scale_factor();
+    let (dot, pitch) = dot_cell(side, device);
+    let centre = bounds.center().scale(device);
+    let left = (centre.x.0 - f32::midpoint(dot, pitch)).round();
+    let top = pitch.mul_add(-1.0, centre.y.0 - dot / 2.0).round();
+    let lit = lit_dots(step);
+    for (&(column, row), on) in DOT_RING.iter().zip(lit) {
+        let x = f32::from(column).mul_add(pitch, left) / device;
+        let y = f32::from(row).mul_add(pitch, top) / device;
+        let size = px(dot / device);
+        let ink = if on { color } else { color.opacity(DOT_TRACK) };
+        let dot = Bounds { origin: point(px(x), px(y)), size: gpui::size(size, size) };
+        window.paint_quad(gpui::fill(dot, ink).corner_radii(size / 2.0));
     }
 }
 
@@ -1123,7 +1284,7 @@ impl Element for Spinner {
         let mut inner = canvas(
             |_, _, _| {},
             move |bounds, (), window, _cx| {
-                paint_spokes(bounds, step, color, window);
+                paint_dots(bounds, step, color, window);
             },
         )
         .flex_none()
@@ -1222,22 +1383,112 @@ mod tests {
         let size = IconSize::Inline.point(&Theme::default());
         let size = SymbolSize::new(size, Weight::Regular);
         for device in [1.0, 2.0] {
-            let natural = mask(Symbol::ServerRack, size, device).unwrap().0;
-            let room = f32::from(u16::try_from(natural.width).unwrap()) - 3.0;
-            let fit = fitted(Symbol::ServerRack, size, room, device).unwrap().0;
-            assert!(
-                f32::from(u16::try_from(fit.width).unwrap()) <= room,
-                "{device}x: {}",
-                fit.width
-            );
-            assert!(fit.width + 6 >= natural.width, "{device}x shrank too far: {}", fit.width);
+            let natural = mask(Symbol::ServerRack, size, device).unwrap();
+            let room = f32::from(u16::try_from(natural.2).unwrap()) - 3.0;
+            let fit = fitted(Symbol::ServerRack, size, room, device).unwrap();
+            assert!(f32::from(u16::try_from(fit.2).unwrap()) <= room, "{device}x: {}", fit.2);
+            // SF's smaller design under 12.25 pt is narrower by a step of its own.
+            assert!(fit.2 * 4 >= natural.2 * 3, "{device}x shrank too far: {}", fit.2);
+            assert!(natural.2 < natural.0.width, "{device}x: the ink is inside the OS's padding");
             let roomy = fitted(Symbol::ServerRack, size, room + 3.0, device).unwrap().0;
-            assert_eq!(roomy.alpha, natural.alpha, "{device}x: one that fits is left alone");
+            assert_eq!(roomy.alpha, natural.0.alpha, "{device}x: one that fits is left alone");
         }
     }
 
+    /// Why the floor is 12.5 pt: SF draws a smaller design under about 12.25 pt, narrower for
+    /// the same stroke, so a symbol at 12 pt carried far less ink than at 12.5. Printed for
+    /// `docs/MEASUREMENTS.md` ("SF Symbols' smaller design"): each symbol's ink width at 2x and
+    /// its ink, the sum of its coverage.
+    #[test]
+    fn sf_draws_a_smaller_design_under_the_floor() {
+        let ink = |m: &SymbolMask| m.alpha.iter().map(|&a| u32::from(a)).sum::<u32>() / 255;
+        let symbols = [Symbol::Terminal, Symbol::Folder, Symbol::ServerRack, Symbol::DocText];
+        for symbol in symbols {
+            let mut row = Vec::new();
+            for point in [12.0, 12.25, 12.5, 13.0] {
+                let size = SymbolSize::new(point, Weight::Regular);
+                let (mask, _, wide) = mask(symbol, size, 2.0).expect("the OS draws it");
+                row.push((point, wide, ink(&mask)));
+            }
+            let said: Vec<String> =
+                row.iter().map(|(p, w, i)| format!("{p} pt {w} px wide, ink {i}")).collect();
+            eprintln!("{}: {}", symbol.name(), said.join("; "));
+            let (Some(small), Some(floor)) = (row.first(), row.get(2)) else { continue };
+            assert!(floor.1 * 10 >= small.1 * 11, "{}: 12.5 pt is a larger design", symbol.name());
+            assert!(floor.2 * 10 >= small.2 * 11, "{}: with more ink", symbol.name());
+        }
+    }
+
+    /// A lead's wide symbols keep their words' size in its slot: the machine, the folder and
+    /// the window are not drawn smaller, as they were when the fit was the slot itself.
+    #[test]
+    fn a_leads_wide_symbol_keeps_its_size() {
+        let theme = Theme::default();
+        let slot = IconSize::Lead.slot(&theme);
+        let size = Drawn::new(&theme, Symbol::ServerRack, IconSize::Lead).size(slot);
+        for symbol in [Symbol::ServerRack, Symbol::Folder, Symbol::Macwindow, Symbol::Terminal] {
+            for device in [1.0, 2.0] {
+                let natural = mask(symbol, size, device).unwrap().0;
+                let fit = fitted(symbol, size, slot * FIT_ROOM * device, device).unwrap().0;
+                assert_eq!(fit.alpha, natural.alpha, "{symbol:?} at {device}x was shrunk");
+            }
+        }
+    }
+
+    /// A lint as a test: no symbol is drawn under [`SYMBOL_FLOOR`], where SF's smaller design
+    /// starts, but the disclosure chevrons, which are Apple's own small drawing. The sizes
+    /// every icon is drawn at come from here, so the check is on them.
+    #[test]
+    fn no_icon_size_draws_a_symbol_under_12_5() {
+        let theme = Theme::default();
+        let drawn = [
+            (
+                "inline",
+                Drawn::new(&theme, Symbol::Doc, IconSize::Inline),
+                IconSize::Inline.slot(&theme),
+            ),
+            ("lead", Drawn::new(&theme, Symbol::Doc, IconSize::Lead), IconSize::Lead.slot(&theme)),
+            ("notice", Drawn::notice(&theme, Symbol::Doc), crate::kit::NOTICE_MARK),
+        ];
+        for (what, drawn, slot) in drawn {
+            let point = drawn.size(slot).point;
+            assert!(point >= SYMBOL_FLOOR - 1e-3, "{what} is drawn at {point}");
+        }
+        let roles = theme.typography.roles(false);
+        for role in [roles.caption, roles.metadata, roles.chrome, roles.action, roles.section] {
+            let slot = IconSize::beside_slot(&theme, role);
+            let point = Drawn::beside(&theme, Symbol::Doc, role).size(slot).point;
+            assert!(point >= SYMBOL_FLOOR - 1e-3, "beside {role:?}: {point}");
+        }
+        let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight);
+        assert!(chevron.size(IconSize::Inline.slot(&theme)).point < SYMBOL_FLOOR, "the exception");
+    }
+
+    /// An icon takes its words' weight: regular beside 400, medium beside 500, semibold beside
+    /// 600; and its words' size, the lead beside the chrome's and the inline beside a fact's.
+    #[test]
+    fn an_icon_takes_its_words_size_and_weight() {
+        let theme = Theme::default();
+        let roles = theme.typography.roles(false);
+        let weight = |role: TypeRole| Drawn::beside(&theme, Symbol::Doc, role).weight;
+        assert_eq!(weight(roles.chrome), Weight::Regular);
+        assert_eq!(weight(roles.action), Weight::Medium);
+        assert_eq!(weight(roles.section), Weight::Semibold);
+        assert_eq!(IconSize::beside(&theme, roles.chrome), IconSize::Lead);
+        assert_eq!(IconSize::beside(&theme, roles.metadata), IconSize::Inline);
+        let lead = IconSize::Lead;
+        assert_eq!(lead.point(&theme), theme.typography.ui_size, "a lead is its title's size");
+        let point = |role: TypeRole| {
+            Drawn::beside(&theme, Symbol::Doc, role).size(IconSize::beside_slot(&theme, role)).point
+        };
+        assert!((point(roles.chrome) - lead.point(&theme)).abs() < 1e-3, "the lead, by role");
+        assert!((IconSize::beside_slot(&theme, roles.chrome) - lead.slot(&theme)).abs() < 1e-3);
+        let finger = theme.typography.roles(true).chrome;
+        assert!((point(finger) - finger.size).abs() < 1e-3, "a finger's row: {}", point(finger));
+    }
+
     /// Each status the OS draws has its own symbol, and the three that carry colour are
-    /// filled; working's spokes and the idle and waiting rings are ours.
+    /// filled; working's dots and the idle and waiting rings are ours.
     #[test]
     fn each_status_has_its_own_mark() {
         let all = [Status::NeedsYou, Status::Done, Status::Failed, Status::Away];
@@ -1277,6 +1528,45 @@ mod tests {
     /// always waits for the next step's start. Under Reduce Motion the mark stands on its
     /// first step whatever the time, and breathes: whole and faint by turns over the breath,
     /// never under its floor.
+    /// The working mark's cell goes round in twelve frames, one a step: three dots lit, then
+    /// four as the head moves on, every frame unlike the one before, so a turn reads in a
+    /// second with nothing turning.
+    #[test]
+    fn the_working_cell_goes_round_in_twelve_frames() {
+        let count = |lit: [bool; 6]| lit.iter().filter(|on| **on).count();
+        let frames: Vec<[bool; 6]> = (0..SPIN_STEPS).map(lit_dots).collect();
+        for (step, lit) in frames.iter().enumerate() {
+            assert_eq!(count(*lit), if step % 2 == 0 { 3 } else { 4 }, "step {step}");
+        }
+        for pair in frames.windows(2) {
+            assert_ne!(pair.first(), pair.get(1), "each step moves");
+        }
+        assert_eq!(lit_dots(SPIN_STEPS), lit_dots(0), "a turn is twelve steps");
+        assert_eq!(
+            lit_dots(0),
+            [true, true, false, false, false, true],
+            "the first frame is ⠋, never a column"
+        );
+        assert_eq!(DOT_RING.len(), 6);
+    }
+
+    /// The cell's dots are whole device pixels on a whole-pixel pitch with a gap between, at a
+    /// row's slot and at a notice's, at 1x and 2x, so each dot is sharp and alike.
+    #[test]
+    fn the_working_cell_sits_on_whole_pixels() {
+        let theme = Theme::default();
+        assert_eq!(dot_cell(theme.typography.icon(), 1.0), (2.0, 4.0), "a row at 1x");
+        assert_eq!(dot_cell(theme.typography.icon(), 2.0), (5.0, 8.0), "a row at 2x");
+        for side in [theme.typography.icon(), theme.typography.icon_large(), 20.0, 8.0] {
+            for device in [1.0, 2.0, 3.0] {
+                let (dot, pitch) = dot_cell(side, device);
+                assert!(dot >= 1.0 && pitch > dot, "{side} pt at {device}x: {dot} {pitch}");
+                assert!(dot.fract() == 0.0 && pitch.fract() == 0.0, "{side} at {device}x");
+                assert!(2.0_f32.mul_add(pitch, dot) <= (side * device).ceil(), "inside its slot");
+            }
+        }
+    }
+
     #[test]
     fn the_working_mark_steps_twelve_times_a_turn_and_stands_under_reduce_motion() {
         let ms = Duration::from_millis;

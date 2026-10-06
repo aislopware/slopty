@@ -100,7 +100,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
-use crate::icons::{IconSize, Mark, Status, Symbol, icon, status_mark};
+use crate::icons::{IconSize, Mark, Status, Symbol, icon, status_mark, weight_beside};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -689,6 +689,12 @@ pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
     tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
 
+/// A group's fold chevron, Apple's disclosure drawing in the inline slot.
+fn disclosure(theme: &Theme, chevron: Symbol, ink: Rgb) -> Div {
+    crate::icons::Drawn::disclosure(theme, chevron)
+        .slot(px(IconSize::Inline.slot(theme)), hsla(ink))
+}
+
 /// A square of the leading slot's side around `child`, so every row's title starts on one edge.
 fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
     div()
@@ -825,7 +831,7 @@ struct NavGroup {
     /// What it is kept by: folded, scoped, gone to.
     key: GroupKey,
     /// What its header leads with.
-    glyph: Symbol,
+    glyph: Mark,
     name: String,
     /// Where it is, when another group listed has the same name.
     parent: Option<String>,
@@ -2740,7 +2746,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let side = kit::icon_button_side(theme);
-        let button = |id: String, label: String, glyph: Symbol, ink, rollup: Rollup| {
+        let button = |id: String, label: String, glyph: Mark, ink, rollup: Rollup| {
             let badge = rollup_slot(theme, format!("{id}-rollup"), rollup, true)
                 .absolute()
                 .right_0()
@@ -2760,7 +2766,10 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
+                .child(
+                    crate::icons::Drawn::new(theme, glyph, IconSize::Lead)
+                        .slot(px(theme.typography.icon_large()), hsla(ink)),
+                )
                 .child(badge);
             tab_stop(el, s.focus)
         };
@@ -2811,9 +2820,10 @@ impl WorkspaceView {
             if health.is_none() && rollup.shown().is_none() {
                 return None;
             }
-            let (glyph, ink) = match health {
-                Some((Status::Away, _)) => (Symbol::ServerRack, s.text_muted),
-                _ => (Symbol::ServerRack, s.text_secondary),
+            let glyph = Mark::from(self.machine_glyph(key));
+            let ink = match health {
+                Some((Status::Away, _)) => s.text_muted,
+                _ => s.text_secondary,
             };
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
             let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup).on_click(
@@ -2909,6 +2919,11 @@ impl WorkspaceView {
     /// `key`'s name, or nothing for a worker no longer known.
     pub(super) fn worker_name(&self, key: WorkerKey) -> String {
         self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default()
+    }
+
+    /// The glyph `key`'s machine wears, by its form ([`crate::icons::machine`]).
+    pub(super) fn machine_glyph(&self, key: WorkerKey) -> Symbol {
+        crate::icons::machine(self.workers.get(&key).and_then(|w| w.caps.as_ref()).map(|c| c.form))
     }
 
     /// A row of *Needs you* or *To review*: what it is and how long it has waited, then what
@@ -3040,10 +3055,8 @@ impl WorkspaceView {
                 label,
                 false,
             )
-            .child(lead_slot(
-                theme,
-                icon(theme, Symbol::RectangleStack, IconSize::Inline, hsla(s.text_muted)),
-            ))
+            // No glyph: a workspace is its name, and the empty slot keeps the names' edge.
+            .child(lead_slot(theme, div()))
             .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
                 el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             }))
@@ -3060,10 +3073,7 @@ impl WorkspaceView {
         let text = super::strip::NEW_WORKSPACE;
         row(theme, kit::Row::One, "nav-new-space", "nav-new-space".to_owned(), text.into(), false)
             .text_color(hsla(s.text_secondary))
-            .child(lead_slot(
-                theme,
-                icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_muted)),
-            ))
+            .child(crate::palette::lead_slot(theme, Symbol::Plus, hsla(s.text_secondary), 1.0))
             .child(title(text, hsla(s.text_secondary)))
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 let last = this.layout.workspaces().len().saturating_sub(1);
@@ -3089,20 +3099,25 @@ impl WorkspaceView {
             worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let lead =
-            match worker.health {
-                None => lead_slot(
-                    theme,
-                    icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted)),
-                ),
-                Some((Status::Away, _)) => lead_slot(
-                    theme,
-                    div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(
-                        icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted)),
-                    ),
-                ),
-                Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
-            };
+        // The machine by its form, beside its name at the name's weight; muted only while away.
+        let machine = |ink: Rgb| {
+            crate::palette::lead_slot_weighted(
+                theme,
+                self.machine_glyph(key),
+                weight_beside(Typography::MEDIUM_WEIGHT),
+                hsla(ink),
+                1.0,
+            )
+        };
+        let lead = match worker.health {
+            None => machine(s.text_secondary).into_any_element(),
+            Some((Status::Away, _)) => machine(s.text_muted)
+                .child(div().id("away").role(Role::Image).aria_label(Status::Away.label()))
+                .into_any_element(),
+            Some((mark, _)) => {
+                lead_slot(theme, status_mark(theme, Some(mark), 1.0)).into_any_element()
+            }
+        };
         let name = div()
             .debug_selector(move || format!("nav-worker-name-{key}"))
             .flex_1()
@@ -3266,7 +3281,7 @@ impl WorkspaceView {
                 .focus(|st| st.opacity(1.0))
                 .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).opacity(1.0))
         };
-        let chevron = lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
+        let chevron = lead_slot(theme, disclosure(theme, chevron, s.text_muted))
             .when(!touch, |el| el.invisible().group_hover(group.clone(), gpui::Styled::visible));
         let hover = div()
             .when(!touch, |el| el.absolute().top_0().bottom_0().right_0())
@@ -3334,7 +3349,13 @@ impl WorkspaceView {
             group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let lead = lead_slot(theme, icon(theme, group.glyph, IconSize::Inline, hsla(s.text_muted)));
+        let lead = crate::palette::lead_slot_weighted(
+            theme,
+            group.glyph,
+            weight_beside(Typography::MEDIUM_WEIGHT),
+            hsla(s.text_secondary),
+            1.0,
+        );
         let name_key = key.clone();
         let name = div()
             .debug_selector(move || format!("nav-group-name-{name_key}"))
@@ -3415,7 +3436,7 @@ impl WorkspaceView {
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xxs))
-            .child(lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted))))
+            .child(lead_slot(theme, disclosure(theme, chevron, s.text_muted)))
             .children(add);
         let trailing = div()
             .relative()
@@ -3459,8 +3480,12 @@ impl WorkspaceView {
         let id = board.project.as_str().to_owned();
         let label = SharedString::from(format!("{BOARD}, {}", board.words));
         let state = board.status.filter(|m| *m != Status::Idle);
-        let lead =
-            crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(s.text_muted), 1.0);
+        let lead = crate::palette::lead_slot(
+            theme,
+            Symbol::RectangleSplit3x1,
+            hsla(s.text_secondary),
+            1.0,
+        );
         let words_id = id.clone();
         let project = board.project.clone();
         row(
@@ -3506,7 +3531,7 @@ impl WorkspaceView {
         let strength = row_strength(t.status.or(Some(Status::Working)), false);
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         let state = t.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_muted), 1.0)
+        let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_secondary), 1.0)
             .debug_selector(move || format!("nav-thread-kind-{id}"));
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
@@ -3623,7 +3648,7 @@ impl WorkspaceView {
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         // What the row is leads it, and never changes while it lives: its kind, or its agent's
         // own mark, so the eye finds the same agent in the same column.
-        let lead = crate::palette::lead_slot(theme, t.kind, faded(s.text_muted), 1.0)
+        let lead = crate::palette::lead_slot(theme, t.kind, faded(ink), 1.0)
             .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end, by precedence: needs you, failed, at work (a running
         // command's clock beside it), away; else the unseen dot, else the age. The state is a

@@ -2805,7 +2805,7 @@ impl Workspace {
         // Nothing to offer: the section still stands, its one row saying what the scan found
         // and offering to look again, a line under it on what to do about it.
         if let Some(words) = search.words(mode) {
-            let size = px(ty.small());
+            let size = px(ty.icon());
             let mark = match search {
                 Search::Looking => {
                     status_icon(theme, Status::Running, size, hsla(s.text_muted)).into_any_element()
@@ -3701,7 +3701,7 @@ fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpu
 /// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
     use slopty_net::discover::Answer;
-    use slopty_ui::icons::{IconSize, Symbol, icon};
+    use slopty_ui::icons::{Drawn, Symbol, beside};
     let s = theme.surfaces;
     let (glyph, what, verb) = match host {
         Host::Server => (Symbol::ServerRack, "Server", "Connect to"),
@@ -3730,7 +3730,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         .map(kit::eased)
         .hover(move |el| el.bg(hsla(s.hover)))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
+        .child(beside(theme, glyph, theme.roles().action, hsla(s.text_secondary)))
         .child(
             div()
                 .flex_1()
@@ -3752,10 +3752,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                         .child(SharedString::from(format!("{what} \u{b7} {said}"))),
                 ),
         )
-        .child(
-            icon(theme, Symbol::ChevronRight, IconSize::Inline, hsla(s.text_muted))
-                .size(glyph_size),
-        );
+        .child(Drawn::disclosure(theme, Symbol::ChevronRight).slot(glyph_size, hsla(s.text_muted)));
     tab_stop(row, s.focus)
 }
 
@@ -3822,7 +3819,7 @@ fn entry_row_saying(
     title: &'static str,
     line: gpui::Div,
 ) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::{IconSize, Symbol, icon};
+    use slopty_ui::icons::{Drawn, Symbol, beside};
     let s = theme.surfaces;
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
@@ -3836,7 +3833,7 @@ fn entry_row_saying(
         .map(kit::eased)
         .hover(move |el| el.bg(hsla(s.hover)))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
+        .child(beside(theme, glyph, theme.roles().action, hsla(s.text_secondary)))
         .child(
             div()
                 .flex_1()
@@ -3852,10 +3849,7 @@ fn entry_row_saying(
                 )
                 .child(line),
         )
-        .child(
-            icon(theme, Symbol::ChevronRight, IconSize::Inline, hsla(s.text_muted))
-                .size(glyph_size),
-        );
+        .child(Drawn::disclosure(theme, Symbol::ChevronRight).slot(glyph_size, hsla(s.text_muted)));
     tab_stop(row, s.focus)
 }
 

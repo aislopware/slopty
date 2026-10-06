@@ -44,7 +44,10 @@ impl WorkspaceView {
                 Some((_, word)) => palette::sentence_case(word),
                 None => super::navigator::slow_rtt(self.shown_rtt(w)).unwrap_or_default(),
             };
-            PaletteItem::worker(&w.name, &detail, *key).with_status(health.map(|(mark, _)| mark))
+            let form = w.caps.as_ref().map(|caps| caps.form);
+            PaletteItem::worker(&w.name, &detail, *key)
+                .with_icon(crate::icons::machine(form))
+                .with_status(health.map(|(mark, _)| mark))
         })
     }
 

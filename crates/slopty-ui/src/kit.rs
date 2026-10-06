@@ -26,6 +26,7 @@ mod disclosure;
 mod facts;
 pub mod find;
 mod fit;
+mod identity;
 pub mod menu;
 pub mod message;
 mod press;
@@ -39,6 +40,7 @@ pub use disclosure::Disclosure;
 pub use facts::{FactAt, FactsRow, MeasuredFacts, facts_row, wrap_facts};
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
+pub use identity::{identity_ink, machine_ink};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use press::menu_press;
 pub use priority::{Dropped, Measured, Priority, PriorityRow, TitleFit, fit_row, priority_row};
@@ -1228,8 +1230,9 @@ fn square_icon(
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
-            crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(ink))
-                .size(px(theme.typography.icon() * k)),
+            crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Lead)
+                .weight(crate::icons::Weight::Medium)
+                .slot(px(theme.typography.icon_large() * k), hsla(ink)),
         );
     crate::a11y::tab_stop(el, s.focus)
 }
@@ -2514,6 +2517,134 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The methods chained straight after the call that closes at the start of `rest`, each as
+    /// its name and its arguments squeezed: `).flex_none().size(px(a))` is
+    /// `[("flex_none", ""), ("size", "px(a)")]`.
+    fn chained(rest: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut chars = rest.chars().filter(|c| !c.is_whitespace()).peekable();
+        while chars.next_if_eq(&'.').is_some() {
+            let name: String =
+                std::iter::from_fn(|| chars.next_if(|c| c.is_alphanumeric() || *c == '_'))
+                    .collect();
+            if chars.next_if_eq(&'(').is_none() {
+                break;
+            }
+            let (mut depth, mut args) = (1_u32, String::new());
+            for c in chars.by_ref() {
+                match c {
+                    '(' => depth = depth.saturating_add(1),
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+                args.push(c);
+            }
+            out.push((name, args));
+        }
+        out
+    }
+
+    /// An icon's slot sized to words smaller than its own (`small()`, `caption()`) draws its
+    /// symbol under [`crate::icons::SYMBOL_FLOOR`], in SF's smaller design. A check inside its
+    /// filled box (`solid_ink`) is the box's own mark, sized to it.
+    fn icon_under_the_floor(call: &str, after: &str) -> Option<&'static str> {
+        let boxed = call.contains("Symbol::Checkmark") && call.contains("solid_ink");
+        let small = chained(after).iter().any(|(name, args)| {
+            name == "size" && (args.contains("small()") || args.contains("caption()"))
+        });
+        (small && !boxed).then_some(
+            "an icon's slot sized to small words, under the 12.5 pt floor; leave it its slot \
+             (`IconSize::Inline`), or use `icons::beside` or `Drawn::disclosure`",
+        )
+    }
+
+    #[test]
+    fn the_floor_check_knows_a_small_slot() {
+        let call = "icon(theme,Symbol::Link,IconSize::Inline,hsla(s.text_muted))";
+        assert!(icon_under_the_floor(call, ".size(px(theme.typography.small()*k)),").is_some());
+        assert!(icon_under_the_floor(call, ".flex_none().size(self.z(ty.caption())))").is_some());
+        assert!(icon_under_the_floor(call, ".size(px(theme.typography.icon()*k)),").is_none());
+        assert!(icon_under_the_floor(call, ").child(div().size(px(ty.small())))").is_none());
+        let check = "icon(theme,Symbol::Checkmark,IconSize::Inline,hsla(s.solid_ink))";
+        assert!(icon_under_the_floor(check, ".size(px(ty.small()*k))").is_none(), "a box's");
+    }
+
+    /// No symbol is drawn under 12.5 pt (`docs/decisions/ui.md`, "An icon takes its words'
+    /// size, weight and tier"): an icon's slot is never sized down to small words.
+    #[test]
+    fn a_symbol_is_never_drawn_under_12_5() {
+        const AWAITING: [&str; 0] = [];
+        let mut wrong = Vec::new();
+        for (file, lines) in chrome_files() {
+            if AWAITING.iter().any(|f| file.ends_with(f)) {
+                continue;
+            }
+            for (ix, (line_no, line)) in lines.iter().enumerate() {
+                let whole = line.split_once("icon(").is_some_and(|(before, _)| {
+                    !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
+                });
+                if !whole {
+                    continue;
+                }
+                let call = call_at(&lines, ix, "icon(");
+                let text: String =
+                    lines.iter().skip(ix).take(16).map(|(_, l)| l.as_str()).collect();
+                let squeezed: String = text.split_whitespace().collect();
+                let after = squeezed.split_once(call.as_str()).map_or("", |(_, after)| after);
+                if let Some(why) = icon_under_the_floor(&call, after) {
+                    wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A row's lead handed the muted tone: two tiers under its title.
+    fn muted_lead(call: &str) -> Option<&'static str> {
+        call.contains(".text_muted").then_some(
+            "a lead in `text_muted`; it is a tier under its title (`text_secondary`), muted \
+             only when away or disabled",
+        )
+    }
+
+    /// A lead sits one tier under its title, never two: `text_secondary` at rest and `text`
+    /// when chosen, so the navigator stops reading as grey specks beside black words
+    /// (`docs/decisions/ui.md`, "An icon takes its words' size, weight and tier"). Away and
+    /// disabled are muted through their own words (`Status::Away`), not at the call.
+    #[test]
+    fn a_lead_is_never_muted_at_rest() {
+        const AWAITING: [&str; 0] = [];
+        let mut wrong = Vec::new();
+        for (file, lines) in chrome_files() {
+            if AWAITING.iter().any(|f| file.ends_with(f)) {
+                continue;
+            }
+            for (ix, (line_no, line)) in lines.iter().enumerate() {
+                for needle in ["lead_slot(", "lead_slot_weighted(", "icon_slot("] {
+                    let whole = line.split_once(needle).is_some_and(|(before, _)| {
+                        !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
+                            && !before.trim_end().ends_with("fn")
+                    });
+                    if !whole {
+                        continue;
+                    }
+                    // A fold chevron sits in a lead's slot but leads nothing.
+                    let call = call_at(&lines, ix, needle);
+                    if call.contains("disclosure(") {
+                        continue;
+                    }
+                    if let Some(why) = muted_lead(&call) {
+                        wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A colour picked at a call site rather than taken from the theme: a hex or channel
     /// literal handed to GPUI. The tokens derive every colour from the content, so a literal
     /// is the one colour a custom background cannot move.
@@ -3588,11 +3719,14 @@ mod tests {
             for (file, line, text) in chrome_lines(dir) {
                 let code = text.split("//").next().unwrap_or_default();
                 // The app's mark is a drawing of ours (`brand`), `icons.rs` names the kit's
-                // drawings it stands symbols in for, and `icons/marks.rs` reads the agents'
-                // owners' outlines into masks as the symbols are.
+                // drawings it stands symbols in for, and `icons/marks.rs` and `icons/git.rs`
+                // read the agents' owners' outlines and the Octicons into masks as the symbols
+                // are. A git glyph (`GitGlyph::`) is one of those masks.
                 let mark = code.contains("assets/icon.svg")
                     || file.ends_with("icons.rs")
-                    || file.ends_with("icons/marks.rs");
+                    || file.ends_with("icons/marks.rs")
+                    || file.ends_with("icons/git.rs");
+                let code = code.replace("GitGlyph::", "");
                 if !mark
                     && ["svg()", ".svg\"", "IconName", "Glyph::"].iter().any(|b| code.contains(b))
                 {
@@ -3610,13 +3744,15 @@ mod tests {
     fn an_agents_mark_wears_no_colour_of_its_own() {
         let marks = include_str!("icons/marks.rs");
         let icons = include_str!("icons.rs");
-        let paint = icons
-            .split("fn paint_agent(")
-            .nth(1)
-            .and_then(|rest| rest.split("fn paint_symbol(").next())
-            .unwrap_or_default();
-        assert!(paint.contains("window.text_style().color"), "painted in the words' ink");
-        for (name, code) in [("icons/marks.rs", marks), ("icons.rs paint_agent", paint)] {
+        let between = |from: &str, to: &str| {
+            icons.split(from).nth(1).and_then(|rest| rest.split(to).next()).unwrap_or_default()
+        };
+        let paint = between("fn paint_agent(", "fn paint_symbol(");
+        let centred = between("fn paint_centred(", "\n}\n");
+        assert!(paint.contains("paint_centred("), "painted as a mask is");
+        assert!(centred.contains("window.text_style().color"), "painted in the words' ink");
+        let painters = [("icons.rs paint_agent", paint), ("icons.rs paint_centred", centred)];
+        for (name, code) in std::iter::once(("icons/marks.rs", marks)).chain(painters) {
             for (n, line) in code.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();
                 let tones = ["surfaces", "Rgb", "rgb(", "hsla(", "Hsla {", "0x", "\"#"];

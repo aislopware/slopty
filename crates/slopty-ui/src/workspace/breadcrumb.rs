@@ -35,7 +35,7 @@ use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconSize, Symbol, icon};
+use crate::icons::{Drawn, GitGlyph, IconSize, Symbol, icon};
 use crate::kit;
 
 /// The most room a workspace's name takes in the bar, in ems: a long name ends in an ellipsis
@@ -194,6 +194,7 @@ impl WorkspaceView {
         let more = crumbs.checkouts.len() > 1;
         let machine = self.crumb_worker();
         if let Some(worker) = machine.clone() {
+            let glyph = self.focused().map_or(Symbol::ServerRack, |t| self.machine_glyph(t.worker));
             let label = SharedString::from(format!("on {worker}"));
             let segment = if more {
                 self.crumb(MenuKind::Checkouts, "crumb-worker", label, cx)
@@ -202,7 +203,7 @@ impl WorkspaceView {
             }
             .gap(px(spacing.xs))
             .child(
-                icon(theme, Symbol::ServerRack, IconSize::Inline, hsla(s.text_muted))
+                icon(theme, glyph, IconSize::Inline, hsla(s.text_muted))
                     .size(px(theme.typography.icon())),
             )
             .child(SharedString::from(worker))
@@ -233,7 +234,7 @@ impl WorkspaceView {
                 .flex_initial()
                 .gap(px(spacing.xs))
                 .child(
-                    icon(theme, Symbol::ArrowTriangleBranch, IconSize::Inline, hsla(s.text_muted))
+                    icon(theme, GitGlyph::Branch, IconSize::Inline, hsla(s.text_muted))
                         .size(px(theme.typography.icon())),
                 )
                 .child(
@@ -338,8 +339,8 @@ impl WorkspaceView {
     /// The chevron of a segment that opens a menu.
     fn chevron(&self) -> gpui::Div {
         let theme = &self.theme;
-        icon(theme, Symbol::ChevronDown, IconSize::Inline, hsla(theme.surfaces.text_muted))
-            .size(px(theme.typography.caption()))
+        Drawn::disclosure(theme, Symbol::ChevronDown)
+            .slot(px(IconSize::Inline.slot(theme)), hsla(theme.surfaces.text_muted))
     }
 
     /// The workspace segment's menu: every workspace with something on it (the active one

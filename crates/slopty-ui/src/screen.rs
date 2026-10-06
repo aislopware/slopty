@@ -1468,7 +1468,7 @@ impl ScreenView {
             .text_color(hsla(s.text_secondary))
             .child(
                 crate::icons::icon(theme, glyph, crate::icons::IconSize::Inline, hsla(ink))
-                    .size(px(theme.typography.small() * k)),
+                    .size(px(theme.typography.icon() * k)),
             )
             .child(health.word());
         Some(

@@ -798,7 +798,11 @@ impl PaletteItem {
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
     #[must_use]
-    pub fn group(name: &str, glyph: Symbol, group: slopty_client::layout::GroupKey) -> Self {
+    pub fn group(
+        name: &str,
+        glyph: impl Into<Mark>,
+        group: slopty_client::layout::GroupKey,
+    ) -> Self {
         let run = PaletteRun::Group(group);
         Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
     }
@@ -1132,21 +1136,30 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
 /// its owner's mark"). `k` is the chrome's zoom (a tile header's in the overview); a list
 /// passes 1.
 ///
-/// A symbol is drawn in the inline icon's square, an agent's mark at a row title's size in
-/// the whole slot, so the two weigh alike. An agent's mark names its agent to a screen reader.
+/// Every mark is drawn at the row title's size in the whole slot ([`IconSize::Lead`]), at the
+/// regular weight beside a regular title ([`lead_slot_weighted`] for the others). An agent's
+/// mark names its agent to a screen reader.
 pub(crate) fn lead_slot(
     theme: &Theme,
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
     k: f32,
 ) -> gpui::Stateful<gpui::Div> {
+    lead_slot_weighted(theme, mark, icons::Weight::Regular, ink, k)
+}
+
+/// [`lead_slot`] beside a title of another weight: a symbol at `weight`, the title's
+/// ([`icons::weight_beside`]), as a group's semibold name or a tile's medium title.
+pub(crate) fn lead_slot_weighted(
+    theme: &Theme,
+    mark: impl Into<Mark>,
+    weight: icons::Weight,
+    ink: gpui::Hsla,
+    k: f32,
+) -> gpui::Stateful<gpui::Div> {
     let mark = mark.into();
     let large = px(theme.typography.icon_large() * k);
-    let drawn = match mark {
-        Mark::Agent(_) => icons::Drawn::new(theme, mark, IconSize::Large).slot(large, ink),
-        Mark::Symbol(_) => icons::Drawn::new(theme, mark, IconSize::Inline)
-            .slot(px(theme.typography.icon() * k), ink),
-    };
+    let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).weight(weight).slot(large, ink);
     div()
         .id("lead")
         .flex_none()
@@ -1849,7 +1862,7 @@ impl CommandPalette {
         let spacing = theme.spacing;
         let pad = list_pad(theme);
         let pressed = s.pressed;
-        let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
+        let icon_ink = if chosen { s.text } else { s.text_secondary };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         // How it is doing ends the line as its mark; its word, which the mark says, is read
         // with the line and not printed beside it.

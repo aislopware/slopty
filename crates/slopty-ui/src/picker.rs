@@ -455,7 +455,7 @@ impl WindowPicker {
         let Row { id, line, on_pick, .. } = row;
         let Line { icon, primary, secondary, hot, mark, worker } = line;
         let secondary_color = if hot { s.warn } else { s.text_muted };
-        let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
+        let icon_ink = if chosen { s.text } else { s.text_secondary };
         let pressed = s.pressed;
         let label =
             if secondary.is_empty() { primary.clone() } else { format!("{primary}, {secondary}") };

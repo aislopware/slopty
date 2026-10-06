@@ -29,7 +29,7 @@ use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
 use super::faces::ThreadPlace;
-use crate::icons::Symbol;
+use crate::icons::{GitGlyph, Mark, Symbol};
 
 /// Tiles and the groups they fell into.
 #[derive(Debug, Default)]
@@ -142,17 +142,17 @@ pub(super) fn listing_group(projects: &Grouping, claims: &[Claim], facts: &Facts
     })
 }
 
-/// What a group of `fact` is drawn with: a repository's glyph, a folder's, a declared
-/// project's, a machine's, a branch's, else a grid for any other grouping.
-pub(super) fn group_glyph(fact: &str) -> Symbol {
+/// What a group of `fact` is drawn with: a repository's glyph, a folder for a folder and a
+/// declared project (a project is a folder first), a machine's, a branch's, else a grid for any
+/// other grouping. A machine's own header wears its form ([`crate::icons::machine`]).
+pub(super) fn group_glyph(fact: &str) -> Mark {
     match fact {
-        fact::REPO => Symbol::PlusForwardslashMinus,
-        fact::FOLDER => Symbol::Folder,
-        fact::PROJECT => Symbol::RectangleSplit3x1,
-        fact::MACHINE => Symbol::ServerRack,
-        fact::BRANCH => Symbol::ArrowTriangleBranch,
-        fact::AGENT => crate::icons::AGENT,
-        _ => Symbol::SquareGrid2x2,
+        fact::REPO => GitGlyph::Repo.into(),
+        fact::FOLDER | fact::PROJECT => Symbol::Folder.into(),
+        fact::MACHINE => Symbol::ServerRack.into(),
+        fact::BRANCH => GitGlyph::Branch.into(),
+        fact::AGENT => crate::icons::AGENT.into(),
+        _ => Symbol::SquareGrid2x2.into(),
     }
 }
 
@@ -534,6 +534,6 @@ mod tests {
             let name = section_name(fact);
             assert!(name.chars().next().is_some_and(char::is_uppercase), "{name}");
         }
-        assert_eq!(group_glyph("labels.team"), Symbol::SquareGrid2x2);
+        assert_eq!(group_glyph("labels.team"), Mark::Symbol(Symbol::SquareGrid2x2));
     }
 }

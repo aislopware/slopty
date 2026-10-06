@@ -979,7 +979,7 @@ pub struct Surfaces {
     pub error_fill: Rgb,
     /// Working as text, for the rare word that has to say it in its hue. Blue.
     pub working: Rgb,
-    /// Working as a mark: the working spokes in lists, headers, the board and the rollups,
+    /// Working as a mark: the working cell's dots in lists, headers, the board and the rollups,
     /// so the most common state reads apart from idle at a glance. Blue, never the accent, a
     /// link or the focus.
     pub working_fill: Rgb,

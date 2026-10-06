@@ -112,7 +112,7 @@ static OUTLINES: LazyLock<[Option<Outline>; 2]> = LazyLock::new(|| {
 });
 
 /// Every path's data (`d="…"`) in `svg`, in order.
-fn path_data(svg: &str) -> Vec<&str> {
+pub(super) fn path_data(svg: &str) -> Vec<&str> {
     svg.split(" d=\"").skip(1).filter_map(|rest| rest.split('"').next()).collect()
 }
 

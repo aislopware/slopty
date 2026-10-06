@@ -117,6 +117,8 @@ symbols! {
     Globe => "globe",
     InfoCircle => "info.circle",
     Iphone => "iphone",
+    /// A laptop worker.
+    Laptopcomputer => "laptopcomputer",
     Line3HorizontalDecrease => "line.3.horizontal.decrease",
     Link => "link",
     Lock => "lock",

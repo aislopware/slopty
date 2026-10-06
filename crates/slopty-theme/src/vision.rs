@@ -87,7 +87,7 @@ fn opposite_states_stay_apart_for_every_dichromacy() {
 
 /// The three marks that say a thing went or goes on, working's blue, merged's violet and done's
 /// green, stay apart to a trichromat in both modes. A dichromat may see blue and violet alike;
-/// the glyphs (spokes, a filled check, a ring) carry the difference there.
+/// the glyphs (a cell of dots, a filled check, a ring) carry the difference there.
 #[test]
 fn working_merged_and_done_marks_stay_apart() {
     let normal = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

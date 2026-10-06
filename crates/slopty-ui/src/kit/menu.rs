@@ -545,7 +545,9 @@ fn row(
         })
         .on_click(move |_ev, window, cx| choose(&click_menu, n, &click_close, window, cx))
         .children(item.icon.map(|icon| {
-            crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted)).flex_none()
+            // At the label's size, a tier under it; muted only with it, when disabled.
+            let tone = if disabled { s.text_muted } else { s.text_secondary };
+            crate::icons::icon(theme, icon, IconSize::Lead, hsla(tone)).flex_none()
         }))
         .child(
             div()

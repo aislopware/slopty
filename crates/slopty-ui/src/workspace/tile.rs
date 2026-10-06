@@ -35,7 +35,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{IconSize, Mark, Status, Symbol};
+use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol};
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -1093,7 +1093,7 @@ impl WorkspaceView {
         let id = closing.tile.item;
         let was = self.closed.iter().rev().find(|c| c.tile == closing.tile).map(|c| &c.item);
         let header = was.filter(|_| k >= SHAPES_BELOW).map(|item| {
-            let muted = hsla(s.text_muted);
+            let lead = hsla(s.text_secondary);
             div()
                 .h(px(theme.density.header * k))
                 .flex_none()
@@ -1107,7 +1107,7 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size * k))
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::palette::lead_slot(theme, self.kind_glyph(item), muted, k))
+                .child(crate::palette::lead_slot(theme, self.kind_glyph(item), lead, k))
                 .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
@@ -1233,7 +1233,7 @@ impl WorkspaceView {
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
             let figure =
                 kit::progress::Progress::Share(upload.fraction()).figure().unwrap_or_default();
-            let side = px(theme.typography.small() * k);
+            let side = px(IconSize::Inline.slot(theme) * k);
             let ring = kit::progress::ring(
                 theme,
                 SharedString::from(format!("upload-ring-{}", id.as_uuid())),
@@ -1440,6 +1440,7 @@ impl WorkspaceView {
         let several = spans.is_some_and(|ws| ws.workers().len() > 1);
         let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
             let name = w.name.clone();
+            let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
             let muted = hsla(s.text_muted);
             div()
                 .id("worker")
@@ -1451,8 +1452,8 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs * k))
                 .text_color(muted)
                 .child(
-                    crate::icons::icon(theme, Symbol::ServerRack, IconSize::Inline, muted)
-                        .size(px(theme.typography.small() * k)),
+                    crate::icons::icon(theme, machine, IconSize::Inline, muted)
+                        .size(px(IconSize::Inline.slot(theme) * k)),
                 )
                 .child(
                     ChromeText::new(name, px(theme.typography.small()), k)
@@ -1539,9 +1540,13 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let id = item.id;
-        let s = &self.theme.surfaces;
-        let ink = if focused { s.text_secondary } else { s.text_muted };
-        let slot = crate::palette::lead_slot(&self.theme, self.kind_glyph(item), hsla(ink), k)
+        // The lead wears its title's tier and weight: the focused title's text at the medium
+        // weight, any other's muted at the regular.
+        let ink = title_ink(&self.theme, focused);
+        let weight =
+            if focused { crate::icons::Weight::Medium } else { crate::icons::Weight::Regular };
+        let glyph = self.kind_glyph(item);
+        let slot = crate::palette::lead_slot_weighted(&self.theme, glyph, weight, hsla(ink), k)
             .debug_selector(move || format!("kind-{}", id.as_uuid()))
             .into_any_element();
         self.file_proxy(item, tile, slot, k, cx)
@@ -1712,8 +1717,12 @@ impl WorkspaceView {
                 let item = self.item(tab)?;
                 let id = item.id;
                 let shown = tab == placed.tile;
-                let ink = title_ink(theme, shown && placed.focused);
-                let slot = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(ink), k)
+                let on = shown && placed.focused;
+                let ink = title_ink(theme, on);
+                let weight =
+                    if on { crate::icons::Weight::Medium } else { crate::icons::Weight::Regular };
+                let glyph = self.kind_glyph(item);
+                let slot = crate::palette::lead_slot_weighted(theme, glyph, weight, hsla(ink), k)
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
                 // How it is doing ends the tab, before its close button.
                 let state =
@@ -1925,7 +1934,7 @@ impl WorkspaceView {
         let checkout = at.checkout.filter(|c| worktree.is_none_or(|t| t.name != *c));
         let branch =
             at.branch.filter(|b| worktree.is_none_or(|t| t.branch.as_deref() != Some(b.as_str())));
-        let chip = |part: &'static str, glyph: Option<Symbol>, words: String| {
+        let chip = |part: &'static str, glyph: Option<Mark>, words: String| {
             let muted = hsla(s.text_muted);
             let said = SharedString::from(words.clone());
             let el = div()
@@ -1939,7 +1948,7 @@ impl WorkspaceView {
                 .text_color(muted)
                 .children(glyph.map(|glyph| {
                     crate::icons::icon(theme, glyph, IconSize::Inline, muted)
-                        .size(px(theme.typography.small() * k))
+                        .size(px(IconSize::Inline.slot(theme) * k))
                 }))
                 .child(
                     ChromeText::new(words, px(theme.typography.small()), k)
@@ -1974,7 +1983,7 @@ impl WorkspaceView {
             .map(|c| ("checkout", kit::Priority::MEDIUM, chip("thread-checkout", None, c)))
             .into_iter()
             .chain(branch.map(|b| {
-                let glyph = Some(Symbol::ArrowTriangleBranch);
+                let glyph = Some(GitGlyph::Branch.into());
                 ("branch", kit::Priority::MEDIUM, chip("thread-branch", glyph, b))
             }))
             .collect()
@@ -1996,12 +2005,16 @@ impl WorkspaceView {
         let k = chrome.k;
         let hint_theme = std::rc::Rc::new(theme.clone());
         let pr = branch.pr.as_ref().map(|pr| {
-            let (tone, icon) = match pr.review {
-                Some(Review::Approved) => (s.success, Symbol::ArrowTrianglePull),
-                Some(Review::ChangesRequested) => (s.error, Symbol::ArrowTrianglePull),
-                Some(Review::Draft) => (s.text_muted, Symbol::ArrowTrianglePull),
-                Some(Review::Pending) | None => (s.text_secondary, Symbol::ArrowTrianglePull),
+            let tone = match pr.review {
+                Some(Review::Approved) => s.success,
+                Some(Review::ChangesRequested) => s.error,
+                Some(Review::Draft) => s.text_muted,
+                Some(Review::Pending) | None => s.text_secondary,
             };
+            // The glyph says the request's state in its hue, as GitHub's does; the words its
+            // review.
+            let icon = GitGlyph::of_review(pr.review);
+            let glyph_ink = icon.state_ink(theme).unwrap_or(tone);
             let url = pr.url.clone();
             let chip = kit::pill_frame(theme, k)
                 .id("pr")
@@ -2016,8 +2029,8 @@ impl WorkspaceView {
                 .hover(|el| el.bg(hsla(s.hover)))
                 .active(|el| el.bg(hsla(s.pressed)))
                 .child(
-                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
-                        .size(px(theme.typography.small() * k)),
+                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(glyph_ink))
+                        .size(px(IconSize::Inline.slot(theme) * k)),
                 )
                 .child(
                     ChromeText::new(super::handoffs::pr_label(pr), px(theme.typography.small()), k)
@@ -2051,8 +2064,8 @@ impl WorkspaceView {
                     cx.new(|_| kit::Hint::new(hint, path, theme)).into()
                 })
                 .child(
-                    crate::icons::icon(theme, Symbol::ArrowTriangleBranch, IconSize::Inline, muted)
-                        .size(px(theme.typography.small() * k)),
+                    crate::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
+                        .size(px(IconSize::Inline.slot(theme) * k)),
                 )
                 .child(
                     ChromeText::new(tree.name.clone(), px(theme.typography.small()), k)
@@ -3270,9 +3283,8 @@ impl WorkspaceView {
                 _ if self.board_shown(*session)
                     && let Some(board) = self.board_view(*session).cloned() =>
                 {
-                    let width = placed.target.w;
-                    let handed = Handed::Board { zoom: k, width };
-                    self.hand_over(cx, &board, handed, move |v, cx| v.set_layout(k, width, cx));
+                    let handed = Handed::Board { zoom: k };
+                    self.hand_over(cx, &board, handed, move |v, cx| v.set_zoom(k, cx));
                     let body = self.body_view(&board, placed, cx);
                     fixed(body)
                 }

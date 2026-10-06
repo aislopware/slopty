@@ -672,15 +672,18 @@ impl FolderView {
                 .px(px(theme.spacing.inset() * k))
                 .border_b(crate::kit::HAIR)
                 .border_color(hsla(theme.surfaces.border_subtle))
-                .child(crate::icons::symbol(
-                    theme,
-                    Symbol::FolderBadgePlus,
-                    px(theme.typography.icon() * k),
-                    hsla(theme.surfaces.text_secondary),
-                ))
+                .child(self.lead(Symbol::FolderBadgePlus, hsla(theme.surfaces.text_secondary)))
                 .children(self.name_field(NEW_FOLDER))
                 .into_any_element(),
         )
+    }
+
+    /// A row's lead: `symbol` beside the row's name at its size and weight, at the zoom.
+    fn lead(&self, symbol: Symbol, ink: gpui::Hsla) -> gpui::Div {
+        let theme = &self.theme;
+        let chrome = theme.roles().chrome;
+        crate::icons::beside(theme, symbol, chrome, ink)
+            .size(px(IconSize::beside_slot(theme, chrome) * self.zoom))
     }
 
     /// Over the rows, a folder asked for here and not yet listed, drawn as made.
@@ -700,12 +703,7 @@ impl FolderView {
             .h(px(theme.density.row * k))
             .px(px(theme.spacing.inset() * k))
             .opacity(ASKED)
-            .child(crate::icons::symbol(
-                theme,
-                Symbol::Folder,
-                px(theme.typography.icon() * k),
-                hsla(theme.surfaces.text_secondary),
-            ))
+            .child(self.lead(Symbol::Folder, hsla(theme.surfaces.text_secondary)))
             .child(
                 div()
                     .flex_1()
@@ -882,15 +880,11 @@ impl FolderView {
             .whitespace_nowrap();
         for (n, (label, path)) in crumbs.into_iter().enumerate() {
             if n > 0 {
-                trail = trail.child(
-                    crate::icons::icon(
-                        theme,
-                        Symbol::ChevronRight,
-                        IconSize::Inline,
+                trail =
+                    trail.child(crate::icons::Drawn::disclosure(theme, Symbol::ChevronRight).slot(
+                        px(theme.typography.icon() * k),
                         crate::palette::separator_ink(theme),
-                    )
-                    .size(px(theme.typography.small() * k)),
-                );
+                    ));
             }
             let here = n == last;
             let crumb = div()
@@ -1080,12 +1074,7 @@ impl FolderView {
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
                 this.clicked(ix, ev.click_count(), cx);
             }))
-            .child(crate::icons::symbol(
-                theme,
-                icon,
-                px(theme.typography.icon() * k),
-                hsla(ink.icon),
-            ))
+            .child(self.lead(icon, hsla(ink.icon)))
             .child(self.renaming(&entry.name).unwrap_or_else(|| {
                 div()
                     .flex_1()
@@ -1103,7 +1092,7 @@ impl FolderView {
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
                     crate::icons::icon(theme, Symbol::Link, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(theme.typography.small() * k)),
+                        .size(px(IconSize::Inline.slot(theme) * k)),
                 )
             })
             .child(column(detail, SIZE_W))
@@ -1424,17 +1413,17 @@ pub(crate) struct RowInk {
 }
 
 impl RowInk {
-    /// A folder's icon a step up from a file's, and the selected row's too. A hidden entry
+    /// The icon a tier under its name, and the name's own ink when chosen
+    /// (`docs/decisions/ui.md`, "An icon takes its words' size, weight and tier"). A hidden entry
     /// (a dot name, `UF_HIDDEN`) is the whole row set back, as Finder shows one: muted text
     /// alone was the same AA grey as every size and age beside it, so it did not read as
     /// hidden at all.
-    pub(crate) fn of(theme: &Theme, entry: &FolderEntry, chosen: bool) -> Self {
+    pub(crate) const fn of(theme: &Theme, entry: &FolderEntry, chosen: bool) -> Self {
         let s = &theme.surfaces;
-        let folder = entry.kind == FileKind::Dir;
         if entry.hidden {
             return Self { icon: s.text_muted, name: s.text_muted, opacity: HIDDEN };
         }
-        let icon = if folder || chosen { s.text_secondary } else { s.text_muted };
+        let icon = if chosen { s.text } else { s.text_secondary };
         Self { icon, name: s.text, opacity: 1.0 }
     }
 }
