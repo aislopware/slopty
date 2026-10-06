@@ -651,6 +651,7 @@ async fn spawn_worker(
     server: Option<&str>,
     port: u16,
 ) -> Result<(Child, String)> {
+    seed_worker_id(&root.join("worker"), worker_name)?;
     let mut command = scrubbed(bin("slopty-worker")?, &root.join("home"));
     command
         .arg("--ptyd-socket")
@@ -1539,6 +1540,39 @@ fn remove_page_store(root: &Path) {
     if let Some(store) = page_store(root) {
         let _gone = std::fs::remove_dir_all(store);
     }
+}
+
+/// Give the worker named `worker_name` in `data_dir` an id of the test's own before its first
+/// start, so what is keyed by it (a machine's colour, which is the hash of its id) is the same
+/// on every run of the test and a render holds still. The id is the test's name and the
+/// worker's, hashed: two tests running side by side never share one, so neither's page store
+/// is the other's. A worker started again keeps the id it wrote.
+fn seed_worker_id(data_dir: &Path, worker_name: &str) -> Result<()> {
+    let path = data_dir.join("worker-id");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(data_dir)?;
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or_default();
+    let key = format!("{test}\n{worker_name}");
+    // FNV-1a, 64 bits, from two offsets: 128 bits that are the same in every build.
+    let fnv = |offset: u64| {
+        key.bytes()
+            .fold(offset, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3))
+    };
+    let id =
+        (u128::from(fnv(0xcbf2_9ce4_8422_2325)) << 64) | u128::from(fnv(0x8422_2325_cbf2_9ce4));
+    let uuid = format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        id >> 96,
+        (id >> 80) & 0xffff,
+        (id >> 64) & 0xffff,
+        (id >> 48) & 0xffff,
+        id & 0xffff_ffff_ffff
+    );
+    std::fs::write(&path, uuid).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
 }
 
 /// The run's worker's id, as it writes it.
