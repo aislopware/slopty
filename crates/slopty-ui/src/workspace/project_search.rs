@@ -180,7 +180,7 @@ impl WorkspaceView {
                 path.rsplit_once('/')
                     .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned())
             }),
-            ItemKind::Folder { path } | ItemKind::Changes { path } => Some(path.clone()),
+            ItemKind::Folder { path } | ItemKind::Changes { path, .. } => Some(path.clone()),
             ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }

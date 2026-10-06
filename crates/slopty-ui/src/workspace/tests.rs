@@ -114,6 +114,7 @@ fn healthy() -> WorkerCaps {
         agents: vec![slopty_proto::server::InstalledAgent {
             agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
             version: "2.1.0".into(),
+            offers: slopty_proto::thread::Offers::default(),
         }],
         ..WorkerCaps::bare(Os::MacOs)
     }

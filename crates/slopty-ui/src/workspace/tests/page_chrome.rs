@@ -256,18 +256,23 @@ fn a_page_that_closes_its_window_closes_its_tile(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.closed.iter().any(|c| c.tile == tile)), "undoable");
 }
 
-/// The header's back and forward buttons show only while the page has history that way, so a
-/// fresh page's header holds reload alone.
+/// The header's back and forward buttons, a matched pair of chevrons under the pointer, show
+/// only while the page has history that way, so a fresh page's header holds neither. Reload is
+/// the header's menu's, not a button.
 #[gpui::test]
 fn back_and_forward_show_only_with_history_that_way(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let tile = page(&view, cx, &fake);
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("its header");
     let shown = |cx: &mut VisualTestContext| {
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector("close", tile.item)).is_some(), "its controls show");
         ["back", "forward", "reload"]
             .map(|part| cx.debug_bounds(selector(part, tile.item)).is_some())
     };
-    assert_eq!(shown(cx), [false, false, true], "a fresh page: reload alone");
+    assert_eq!(shown(cx), [false, false, false], "a fresh page: neither");
     let history = |cx: &mut VisualTestContext, back: bool, forward: bool| {
         view.update_in(cx, |v, _w, cx| {
             let page = v.browser(tile.item).cloned().expect("a page view");
@@ -276,9 +281,20 @@ fn back_and_forward_show_only_with_history_that_way(cx: &mut TestAppContext) {
         cx.run_until_parked();
     };
     history(cx, true, false);
-    assert_eq!(shown(cx), [true, false, true], "a page to go back to");
+    assert_eq!(shown(cx), [true, false, false], "a page to go back to");
     history(cx, true, true);
-    assert_eq!(shown(cx), [true, true, true], "and one to go forward to, after back");
+    assert_eq!(shown(cx), [true, true, false], "and one to go forward to, after back");
+    let (back, forward) = (
+        cx.debug_bounds(selector("back", tile.item)).expect("drawn"),
+        cx.debug_bounds(selector("forward", tile.item)).expect("drawn"),
+    );
+    assert_eq!(back.size, forward.size, "a matched pair");
     history(cx, false, true);
-    assert_eq!(shown(cx), [false, true, true], "at the first page, forward alone");
+    assert_eq!(shown(cx), [false, true, false], "at the first page, forward alone");
+    cx.simulate_mouse_down(header.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(header.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let rows: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
+    assert!(rows.iter().any(|r| r == "Reload page"), "reload is the menu's: {rows:?}");
 }

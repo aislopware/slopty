@@ -4564,8 +4564,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     at what needs you, and only that".)
   - **A notice under the pointer stays.** Hovering holds every notice; leaving gives it two
     more seconds (`SAY_AFTER_HOVER`), as macOS banners and Linear's toasts do.
-  - Not yet: pushes chosen by presence (the server does not know where the person is), and a
-    child agent reporting through its parent (the workspace does not know the project tree).
+  - Both later landed: pushes chosen by presence (the server pushes when the person is at none
+    of their clients, `slopty-server/src/hub/ladder.rs`), and a child agent reporting through
+    its parent ("Notifications by presence, and children through their parent", below).
   - Tests: `workspace::tests::triage` and
     `toasts::a_notice_under_the_pointer_stays_until_the_pointer_leaves`.
 
@@ -8027,3 +8028,71 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the same way once the questionnaire takes a field of several lines (the gpui-kit fork).
   - Tests: `review::tests::a_comment_keeps_its_lines`,
     `conversation::thread::tests::doors::a_reason_keeps_its_lines`.
+- ✅ **The first message is written in the thread's composer** (2026-10-06,
+  `.research/readiness-2026-10-07.md` R1 and R5; amends "A start opens its tile at once" in
+  `agents.md` and supersedes "A Claude Code start can plan first" in `claude-code.md`). The
+  prompt that defines a task was written in the weakest field in the app: one line, which
+  glued a pasted spec's lines together and dropped a pasted picture, with no `/`, `@`, recall
+  or model. T3 Code's draft thread is its full composer, and MonoCode's start takes the model,
+  effort and mode with the prompt.
+  - **One composer.** A start's tile hosts the thread view in a draft mode
+    (`conversation::thread::draft`). It draws a local state in place of a mirror, asks the
+    worker nothing, and keeps the composer's intents: a model, mode or effort picked sets the
+    draft's meters, so the chips read as they will, and ↵ hands the start the message, its
+    attachments and those choices. Pasted lines, ⇧↵, pictures, files, drops on the tile, `/`,
+    `@` and ↑ all work as in a thread, ↑ bringing back earlier starts' first messages. ↵ on an
+    empty composer still starts the agent bare.
+  - **What the chips offer** is what the machine says a new thread of the agent can start with
+    (`InstalledAgent::offers`): the adapter's own start options, such as Claude Code's modes,
+    else the newest thread's. With none offered, the chip offers nothing.
+  - **The start carries it all** (`Start::{prompt, model, mode, effort, attachments}`), and
+    each adapter applies it at launch. The app no longer builds Claude Code's
+    `--permission-mode plan`.
+  - **Deleted:** the start's own field (`StartField`, `FieldView`), the "Plan first" tick, the
+    palette's "Start in plan mode" (`TogglePlanFirst`) and the plan flag.
+  - **A refusal gives the draft back.** Once sent, the thread says "Starting …" in place of
+    the composer. A start the machine refuses, or one whose link drops, returns to the draft
+    with its words and files as they were, where it used to close the tile.
+  - **A worktree is named by the first message** (R5): its words, lower case and joined by
+    hyphens, six at most and 40 bytes, then four hex digits of the tile's id
+    (`fix-the-login-redirect-3f2a`). With no words, the agent's name stands in.
+  - Picking a model, mode or effort, or closing the "+" menu by its button, hands the keyboard
+    back to the field, in a draft and in a thread alike.
+  - Tests: `workspace::tests::thread_start::{a_start_is_written_in_the_threads_composer,
+    a_worktree_is_named_by_its_first_message, a_start_can_take_a_new_worktree_of_a_repository}`;
+    e2e `threads_start` and `showcase` start on the composer.
+- ✅ **A tile's header holds no button at rest** (2026-10-06,
+  `.research/elegance-icons-2026-10-06.md` §3.5, §5.13 and §5.14). The focused tile showed four
+  buttons at rest: a face switch of two or three segments, fullscreen and close. A wall of tiles
+  read as rows of buttons, and the person mostly watches. At rest a header now shows the lead,
+  the title, the facts and how the tile stands, focused or not.
+  - **Under the pointer** come the kind's actions (a page's back and forward, a folder's way up,
+    the trackpad, mute), one face toggle and close. The toggle is a single button showing the
+    face ⌘J goes to next, named for it ("Show terminal"). The face switch is gone.
+  - **What stays at rest** is what says how the tile stands: another client ruling the PTY's
+    size ("Take over"), a stream's health, the system's keys sent on, a silenced worker.
+  - **Fullscreen has no button.** A double-click on the header's empty part fills the screen, as
+    a Mac's title bar zooms its window. A double-click on the name renames the tile. The palette
+    and the header's menu also offer "Fullscreen".
+  - **A page's reload** moves to the header's menu and the palette's "Reload page". ⌘R stays
+    the layout's (niri's width cycle). Back and forward are a matched pair, `chevron.left` and
+    `chevron.right`, where `arrow.right` stood beside `chevron.left`.
+  - **The state is a glyph, not a pill.** The agent pill ("Needs approval") is gone: the header
+    ends in the state's glyph, which carries the agent's whole state to a screen reader and what
+    it asks to the pointer. A terminal's agent waiting on the person makes it a button to the
+    TUI's prompt. Under the pointer it gives way to the controls, as the readouts do, so it is a
+    button for the keyboard, VoiceOver and touch; a click on the tile reaches the prompt anyway.
+    Hidden controls stay in the accessibility tree.
+  - **Touch** has no hover and draws none of them. The header's long press holds the other
+    faces, reload, fullscreen and close, and a phone's "…" lists the same rows.
+  - **A pull request** is read from the thread's row (`ThreadRow.pull`), for every agent alike,
+    not from Claude Code's status line. Its glyph is drawn by where it stands (open, merged,
+    closed, a draft) in that state's ink, then its number. The navigator's row shows it on its
+    second line, the glyph inked only where it needs the person or is ready to merge.
+  - **The navigator's machine and project heads** set the name at the section role's weight
+    (600), with the identity-tinted form glyph beside it at semibold.
+  - Tests: `workspace::tests::tiles::{a_header_at_rest_has_no_buttons,
+    the_header_fills_the_screen_names_and_closes_its_tile}`,
+    `faces::the_toggle_picks_the_face_and_a_plain_shell_has_none`,
+    `page_chrome::back_and_forward_show_only_with_history_that_way`,
+    `handoffs::an_agents_pull_request_rides_on_its_header_while_the_agent_runs`.

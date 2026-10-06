@@ -167,6 +167,10 @@ fn a_markdown_file_s_header_swaps_its_preview_and_source(cx: &mut TestAppContext
     };
     assert!(said(cx, crate::file::SHOW_SOURCE), "{:#?}", tree(cx));
     assert!(cx.debug_bounds(selector("file-preview", tile.item)).is_some(), "the preview");
+    // The toggle is drawn under the pointer, as the header's controls are.
+    let header = bounds(cx, selector("title", tile.item)).center();
+    cx.simulate_mouse_move(header, None, Modifiers::none());
+    cx.run_until_parked();
     let at = bounds(cx, toggle).center();
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();

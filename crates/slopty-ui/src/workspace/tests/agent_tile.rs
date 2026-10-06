@@ -7,7 +7,6 @@ use slopty_proto::thread::{AgentId, Cursor, ThreadId, ThreadState};
 
 use super::*;
 use crate::workspace::faces::Face;
-use crate::workspace::tile::FACE_SWITCH;
 
 fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
@@ -138,11 +137,12 @@ fn a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face(cx: &mut Te
 
     let title = view.read_with(cx, |v, _| v.tile_title(item));
     assert_eq!(tile_says(cx, &title).as_deref(), Some(Face::Thread.label()));
+    // Under the pointer its header offers the other face.
+    let header = cx.debug_bounds(selector("title", placeholder.item)).expect("its header");
+    cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    settle(cx);
     let nodes = tree(cx);
-    assert!(nodes.iter().any(|n| n.is("RadioGroup", Some(FACE_SWITCH))), "{nodes:#?}");
-    for face in [Face::Thread, Face::Terminal] {
-        assert!(nodes.iter().any(|n| n.is("RadioButton", Some(face.label()))), "{face:?}");
-    }
+    assert!(nodes.iter().any(|n| n.is("Button", Some("Show terminal"))), "{nodes:#?}");
     view.update_in(cx, |v, _w, cx| v.set_face(session, Face::Terminal, cx));
     settle(cx);
     assert_eq!(tile_says(cx, &title).as_deref(), Some(Face::Terminal.label()), "the face shown");

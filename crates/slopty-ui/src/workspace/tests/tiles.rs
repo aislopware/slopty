@@ -2,6 +2,7 @@
 //! status), the surface it sits on, the controls it offers, the pill over a body that cannot
 //! show what it should, and the notices in the strip's corner.
 
+use gpui::MouseButton;
 use slopty_core::WallMs;
 use slopty_grid::SemanticMark;
 use slopty_theme::alpha;
@@ -280,8 +281,9 @@ fn the_header_leads_with_its_kind_and_ends_with_its_state(cx: &mut TestAppContex
     assert!(state.left() > title.center().x, "at the header's end: {state:?} {title:?}");
 }
 
-/// A tile whose agent waits on the human says so once: the pill in its header, a button to
-/// the prompt, in the warn tone. No bar along the top and no outline repeat it.
+/// A tile whose agent waits on the human says so once: the waiting glyph that ends its header,
+/// a button to the prompt, its words to a screen reader. No bar along the top and no outline
+/// repeat it.
 #[gpui::test]
 fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -307,15 +309,15 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
         v.show_face(agent, false, cx);
     });
     cx.run_until_parked();
-    let pill = cx.debug_bounds(selector("agent", waiting.item)).expect("the pill");
+    let glyph = cx.debug_bounds(selector("agent", waiting.item)).expect("the glyph");
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
-    assert!(pill.top() >= header.top() && pill.bottom() <= header.bottom(), "in the header");
+    assert!(glyph.top() >= header.top() && glyph.bottom() <= header.bottom(), "in the header");
     // A statement, not a question the click cannot answer; what the click does is said apart.
     let nodes = tree(cx);
     let badge = nodes
         .iter()
         .find(|n| n.label.as_deref() == Some("Needs approval: Wants to run a command"))
-        .expect("the pill says what the agent waits for");
+        .expect("the glyph says what the agent waits for");
     assert_eq!(badge.role, "Button");
     assert_eq!(badge.description.as_deref(), Some(CHROME_WORDS[0]));
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
@@ -324,11 +326,11 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(quads_at(cx, tile).iter().all(|q| q.border_widths.left.0 == 0.0), "no outline");
 }
 
-/// A header holds one filled chip at most: the state's. The leading slot keeps the agent's
-/// glyph rather than a warn mark that would say the chip's news again, and an agent the worker
-/// guessed at offers nothing to install.
+/// A header holds no fill at rest: its state is a glyph at its end, not a chip. The leading
+/// slot keeps the agent's glyph rather than a warn mark that would say the state again, and an
+/// agent the worker guessed at offers nothing to install.
 #[gpui::test]
-fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestAppContext) {
+fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
@@ -352,9 +354,10 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     });
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
-    let chip = cx.debug_bounds(selector("agent", waiting.item)).expect("the state chip");
+    let state = cx.debug_bounds(selector("agent", waiting.item)).expect("the state's glyph");
     let slot = cx.debug_bounds(selector("kind", waiting.item)).expect("the slot");
-    assert!(cx.debug_bounds(selector("status", waiting.item)).is_none(), "the chip says it");
+    let mark = cx.debug_bounds(selector("status", waiting.item)).expect("its mark");
+    assert!(state.contains(&mark.center()), "the state is its mark: {mark:?} {state:?}");
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let inside = |q: &gpui::Quad, b: Bounds<Pixels>| {
         let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
@@ -374,8 +377,7 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
         .iter()
         .filter(|q| inside(q, header) && !q.background.is_transparent() && !surface(q))
         .collect();
-    assert_eq!(fills.len(), 1, "one fill in the header: {fills:#?}");
-    assert!(inside(fills[0], chip), "and it is the state's chip");
+    assert!(fills.is_empty(), "no fill in the header: {fills:#?}");
     assert!(cx.debug_bounds(selector("hooks", waiting.item)).is_none(), "no hooks offered");
     let nodes = tree(cx);
     let in_slot = |n: &&crate::a11y::Node| {
@@ -384,12 +386,12 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     };
     assert!(
         !nodes.iter().filter(in_slot).any(|n| n.is("Image", Some("Needs you"))),
-        "the chip says it; the slot keeps the agent's glyph"
+        "the end says it; the slot keeps the agent's glyph"
     );
 }
 
-/// One mark says how each tile is doing: its agent's state (a waiting one by its chip), a
-/// shell's failed last command, and a worker out of reach.
+/// One mark says how each tile is doing: its agent's state, a shell's failed last command, and
+/// a worker out of reach.
 #[gpui::test]
 fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -414,18 +416,18 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
             },
             cx,
         );
-        // On its TUI, where the header's chip speaks for it.
+        // On its TUI, where the header's glyph is a way to its prompt.
         v.show_face(agent, false, cx);
         // The failed command's own rows are off screen: only the header can say it.
         let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
-    // A waiting agent's news is its header's chip; its slot keeps the agent's glyph, and only
-    // its navigator row leads with the waiting mark.
+    // A waiting agent's news ends its header and its navigator row, each once; its slot keeps
+    // the agent's glyph.
     assert!(cx.debug_bounds(selector("agent", agent_tile.item)).is_some(), "the agent waits");
     let waiting = drawn.iter().filter(|m| *m == "Needs you").count();
-    assert_eq!(waiting, 1, "the chip in the header, the glyph in the row: {drawn:?}");
+    assert_eq!(waiting, 2, "the glyph in the header, the glyph in the row: {drawn:?}");
     assert!(drawn.iter().any(|m| m == "Failed"), "the shell's last command failed: {drawn:?}");
 
     let key = fake.key;
@@ -445,9 +447,11 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
     assert_eq!(away, 2, "both headers say away: {nodes:#?}");
 }
 
-/// Close and fullscreen on the header do what ⌘W and ⌃⌘F do to their tile.
+/// A double-click on the header's empty part fills the screen with its tile, as ⌃⌘F does and
+/// a Mac's title bar zooms its window; one on its name names it. Close, under the pointer, does
+/// what ⌘W does.
 #[gpui::test]
-fn the_header_controls_close_and_fullscreen_their_tile(cx: &mut TestAppContext) {
+fn the_header_fills_the_screen_names_and_closes_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     let _first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -456,8 +460,19 @@ fn the_header_controls_close_and_fullscreen_their_tile(cx: &mut TestAppContext) 
         f32::from(cx.debug_bounds(selector("item", second.item)).expect("drawn").size.width)
     };
     let before = width(cx);
-    click(cx, selector("fullscreen", second.item));
+    let name = cx.debug_bounds(selector("name", second.item)).expect("its name");
+    let empty = point(name.right() + px(24.0), name.center().y);
+    double_click(cx, empty);
     assert!(width(cx) > before + 100.0, "fullscreen: {before} → {}", width(cx));
+    let name = cx.debug_bounds(selector("name", second.item)).expect("drawn");
+    double_click(cx, name.center());
+    let renaming = view.read_with(cx, |v, _| v.rename.as_ref().map(|r| r.tile));
+    assert_eq!(renaming, Some(second), "a double-click on the name names the tile");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let header = cx.debug_bounds(selector("title", second.item)).expect("drawn");
+    cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    cx.run_until_parked();
 
     fake.drain();
     let nodes = tree(cx);
@@ -721,18 +736,17 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("closed").is_none(), "the offer is taken");
 }
 
-/// The header's right end: the agent's pill at rest; the face toggle, fullscreen and close
-/// while the pointer is on the header, laid over the pill's place on the header's ground and
-/// keeping no room at rest, the toggle a control among them and never among the readouts; and
-/// the swap moves nothing.
+/// A header at rest has no buttons, focused or not: its state's glyph ends it. Under the
+/// pointer the face toggle and close stand over the glyph's place on the header's ground,
+/// keeping no room at rest; and the swap moves nothing.
 #[gpui::test]
-fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut TestAppContext) {
+fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
-    let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    // The face switch is one of the controls; its tile shows the TUI, where the pill is.
+    let other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    // The face toggle is one of the controls; its tile shows the TUI.
     agent_thread(&view, cx, fake.key, agent);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
@@ -756,30 +770,34 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let bounds = |cx: &mut VisualTestContext, part: &str| {
         cx.debug_bounds(selector(part, waiting.item)).unwrap_or_else(|| panic!("{part} drawn"))
     };
-    let (header, name, pill) = (bounds(cx, "title"), bounds(cx, "name"), bounds(cx, "agent"));
+    let (header, name, glyph) = (bounds(cx, "title"), bounds(cx, "name"), bounds(cx, "agent"));
     let inset = Theme::default().spacing.inset();
-    let apart = Theme::default().spacing.sm;
     assert!(
-        (f32::from(header.right() - pill.right()) - inset).abs() < 0.5,
-        "the pill ends the header at rest: {pill:?} in {header:?}"
+        (f32::from(header.right() - glyph.right()) - inset).abs() < 0.5,
+        "the state ends the header at rest: {glyph:?} in {header:?}"
     );
-    assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
-    assert!(name.right() <= pill.left(), "the title ends before it: {name:?} {pill:?}");
+    assert!(name.right() <= glyph.left(), "the title ends before it: {name:?} {glyph:?}");
+    // Neither the focused tile nor the other draws a control: close and the face toggle are
+    // there for the keyboard and a screen reader, and drawn only under the pointer.
+    for tile in [waiting, other] {
+        for part in ["close", "face-thread", "face-terminal"] {
+            let drawn = cx.debug_bounds(selector(part, tile.item));
+            assert!(drawn.is_none(), "no {part} at rest: {drawn:?}");
+        }
+    }
 
     cx.simulate_mouse_move(header.center(), None, Modifiers::none());
     cx.run_until_parked();
-    assert!(quads_at(cx, pill).is_empty(), "hovered: the pill gives way");
-    assert_eq!(bounds(cx, "name"), name, "and so does the title");
+    assert_eq!(bounds(cx, "name"), name, "hovered: the title stays");
     let controls = bounds(cx, "controls");
-    assert!(controls.right() <= pill.right() + px(0.5), "over the pill's place: {controls:?}");
+    assert!(controls.right() <= glyph.right() + px(0.5), "over the glyph's place: {controls:?}");
     let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
     assert!(controls.contains(&close.center()), "close is one of them");
-    let face = cx.debug_bounds(selector("faces", waiting.item)).expect("the face switch");
-    assert!(controls.contains(&face.center()), "the switch is one of the controls");
+    let face = cx.debug_bounds(selector("face-thread", waiting.item)).expect("the face toggle");
+    assert!(controls.contains(&face.center()), "the toggle is one of the controls");
     assert!(face.right() <= close.left(), "before close: {face:?} {close:?}");
-    let next = cx.debug_bounds(selector("fullscreen", waiting.item)).unwrap_or(close);
-    let gap = f32::from(next.left() - face.right());
-    assert!(gap >= apart - 0.5, "set apart from the tile's own buttons: {gap}");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Button", Some("Show thread"))), "named for its face");
 }
 
 /// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
@@ -830,15 +848,128 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     assert_eq!(left, vec![first], "its close closed that tab's tile");
 }
 
+/// Four shells in one tabbed column, the last shown, beside a column of their own so the tabs
+/// are the column's header, in a window wide enough for both at any width. The tabs, in order.
+fn four_tabs(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<TileRef> {
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
+    let fake = connect(view, cx, 1, "studio");
+    let tabs: Vec<TileRef> =
+        (1..=4).map(|version| opens(view, cx, &fake, SessionId::new(), fake.me, version)).collect();
+    view.update_in(cx, |v, _w, cx| {
+        for tab in tabs.iter().skip(1) {
+            v.focus_tile(*tab, cx);
+            v.layout.consume_or_expel_window_left();
+        }
+        v.layout.toggle_tabbed();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    opens(view, cx, &fake, SessionId::new(), fake.me, 99);
+    let last = *tabs.last().expect("four tabs");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(last, cx));
+    cx.run_until_parked();
+    tabs
+}
+
+/// `tile`'s column dragged to `width`, as its divider is, and drawn twice so a scroll asked for
+/// lands.
+fn column_at(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef, width: f32) {
+    for _ in 0..4 {
+        let got =
+            view.read_with(cx, |v, _| v.tile_bounds(tile)).map_or(0.0, |b| f32::from(b.size.width));
+        if (got - width).abs() < 0.5 {
+            break;
+        }
+        let column = column_of(view, cx, tile);
+        view.update_in(cx, |v, _w, cx| {
+            v.layout.resize_begin(column);
+            v.layout.resize_update(width - got);
+            v.layout.resize_end();
+            v.focus_tile(tile, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Whether `tab`'s tab lies wholly inside `column`'s tile.
+fn tab_in_view(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tab: TileRef) -> bool {
+    let tile = view.read_with(cx, |v, _| v.tile_bounds(tab)).expect("the column is drawn");
+    let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
+    at.left() >= tile.left() - px(0.5) && at.right() <= tile.right() + px(0.5)
+}
+
+/// A narrow tabbed column scrolls its shown tab into view: the last of four at 312 pt, after
+/// the column narrowed from a width where every tab fitted, and again after another tab was
+/// shown and the last shown back. The strip never leaves the tab in hand past its edge.
+#[gpui::test]
+fn a_narrow_tab_row_keeps_its_shown_tab_in_view(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let tabs = four_tabs(&view, cx);
+    let (first, last) = (tabs[0], tabs[3]);
+    column_at(&view, cx, last, 720.0);
+    assert!(tab_in_view(&view, cx, last), "every tab fits at 720 pt");
+    column_at(&view, cx, last, 312.0);
+    assert!(tab_in_view(&view, cx, last), "the shown tab stays in view as the column narrows");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(tab_in_view(&view, cx, first), "the first, shown, is in view");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(last, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(tab_in_view(&view, cx, last), "and the last again, once shown");
+}
+
+/// A tab not shown keeps its close out of its row at rest, so a narrow tab keeps its mark and
+/// its four letters' room: its name runs to the tab's end. Its close is still drawn, over the
+/// tab's end, for the pointer and the keyboard.
+#[gpui::test]
+fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let tabs = four_tabs(&view, cx);
+    let last = tabs[3];
+    column_at(&view, cx, last, 312.0);
+    let theme = Theme::default();
+    for tab in tabs.iter().take(3) {
+        let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
+        let name = cx.debug_bounds(selector("name", tab.item)).expect("its name is drawn");
+        let pad = theme.spacing.xxs + 0.5;
+        assert!(name.right() >= at.right() - px(pad), "the name runs to the end: {name:?} {at:?}");
+        let letters = f32::from(name.size.width);
+        assert!(letters >= theme.typography.ui_size * 2.0, "room for its letters: {letters}");
+        // Under the pointer its close shows, over the tab's end.
+        cx.simulate_mouse_move(at.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let close = cx.debug_bounds(selector("tab-close", tab.item)).expect("its close is drawn");
+        assert!(close.left() >= at.left() && close.right() <= at.right(), "over the tab's end");
+    }
+    let shown = cx.debug_bounds(selector("name", last.item)).expect("drawn");
+    let close = cx.debug_bounds(selector("tab-close", last.item)).expect("drawn");
+    assert!(shown.right() <= close.left(), "the shown tab keeps its close in its row");
+}
+
 /// On a phone a column is the screen's width already and the tile has no header: its rows are
 /// the bar's "…", which offers to close it but not to fill the screen it fills. On a desktop,
-/// where a column is part of the strip, the header offers fullscreen.
+/// where a column is part of the strip, the header's menu offers fullscreen.
 #[gpui::test]
 fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    assert!(cx.debug_bounds(selector("fullscreen", shell.item)).is_some(), "on a desktop");
+    let header = cx.debug_bounds(selector("title", shell.item)).expect("drawn");
+    cx.simulate_mouse_down(header.center(), MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(header.center(), MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let rows: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
+    assert!(rows.iter().any(|r| r == "Fullscreen"), "on a desktop: {rows:?}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     click(cx, "more");
@@ -1229,4 +1360,27 @@ fn a_heading_never_says_its_agent_twice(_cx: &mut TestAppContext) {
     assert_eq!(spoken_heading("pi", "pi"), "pi");
     assert_eq!(spoken_heading("Claude Code", "Fix the login"), "Claude Code Fix the login");
     assert_eq!(spoken_heading("pi", "pilot run"), "pi pilot run", "a word, not a prefix");
+}
+
+/// A double-click of the left button at `at`.
+fn double_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    let (left, modifiers) = (MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(at, None, modifiers);
+    for click_count in [1, 2] {
+        let down = gpui::MouseDownEvent {
+            button: left,
+            position: at,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        };
+        cx.simulate_event(down);
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: left,
+            position: at,
+            modifiers,
+            click_count,
+        });
+    }
+    cx.run_until_parked();
 }

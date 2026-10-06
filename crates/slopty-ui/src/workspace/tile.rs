@@ -17,13 +17,13 @@ use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{Review, Worktree};
+use slopty_proto::agent::Worktree;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Theme, Typography};
 
-use super::actions::{AddWindow, CloseItem, FullscreenTile};
+use super::actions::{AddWindow, CloseItem};
 use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
@@ -117,10 +117,14 @@ struct HeaderParts<'a> {
     branch: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
     upload: Option<gpui::AnyElement>,
     readouts: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
-    /// The kind's own actions.
-    actions: Div,
+    /// What the kind says of how it stands, at rest: a size another client rules, a stream's
+    /// health, the system's keys sent on.
+    states: Option<Div>,
+    /// The kind's own actions, under the pointer only.
+    actions: Vec<gpui::AnyElement>,
     silenced: Option<gpui::AnyElement>,
-    face: Option<(gpui::AnyElement, f32)>,
+    /// The face toggle, or a Markdown file's preview toggle.
+    face: Option<gpui::AnyElement>,
 }
 
 /// How much faster a header's place shrinks than its title.
@@ -160,12 +164,6 @@ pub const COPY_COMMAND: &str = "Copy command";
 
 /// The accessible name of a tile's close button.
 pub const CLOSE_TILE: &str = "Close tile";
-
-/// The accessible name of a tile's fullscreen button.
-pub const FULLSCREEN_TILE: &str = "Fullscreen tile";
-
-/// The accessible name of an agent tile's switch between its faces ([`Face`]).
-pub const FACE_SWITCH: &str = "Face";
 
 /// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
@@ -641,7 +639,7 @@ impl WorkspaceView {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
             // The folder whose changes they are: the title says what they are.
-            ItemKind::Changes { path } => Some(folder_title(path)),
+            ItemKind::Changes { path, .. } => Some(folder_title(path)),
             // The host alone: the path is the page's business, and the title names the page.
             ItemKind::Browser { .. } => self.page_facts(item.id).and_then(|page| {
                 let host = page.short_url.split('/').next().unwrap_or_default();
@@ -1166,6 +1164,7 @@ impl WorkspaceView {
         // At the overview's small zoom the miniature's label names the tile; a band on top of it in
         // another step, and a hairline under only some of them, read as tiles half drawn.
         let shapes = k < SHAPES_BELOW;
+        let fills = self.offers_fullscreen(placed);
         let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
@@ -1186,11 +1185,15 @@ impl WorkspaceView {
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    // The second click of a double-click names the tile; the first began a
-                    // move that its mouse-up ended.
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    // The second click of a double-click on the header's empty part fills the
+                    // screen, as a Mac's title bar zooms its window (the name's names the
+                    // tile); the first began a move that its mouse-up ended.
                     if ev.click_count == 2 {
-                        this.start_rename(tile, window, cx);
+                        if fills {
+                            this.focus_tile(tile, cx);
+                            this.width_action(cx, slopty_client::layout::Layout::toggle_fullscreen);
+                        }
                     } else {
                         this.begin_move(tile, ev, cx);
                     }
@@ -1200,17 +1203,6 @@ impl WorkspaceView {
         if shapes {
             return header.into_any_element();
         }
-        // The face's approval card is the tile's statement while it shows: a pill over it would
-        // say the same thing a few hundred points higher.
-        let badge = agent
-            .filter(|(session, _)| !self.face_asks(*session))
-            .and_then(|(session, a)| self.agent_badge(tile, Some(session), a, chrome, cx))
-            .or_else(|| match item.kind {
-                ItemKind::Thread { thread } => self
-                    .thread_stand(thread)
-                    .and_then(|st| self.agent_badge(tile, None, st, chrome, cx)),
-                _ => None,
-            });
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
             _ => None,
@@ -1302,20 +1294,16 @@ impl WorkspaceView {
         let mut branch = thread_place.clone().map_or_else(Vec::new, |at| {
             self.place_chips(placed.tile, at, worktree.as_ref(), chrome, cx)
         });
+        branch.extend(self.pull_chip(item, chrome));
         branch.extend(
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome)),
         );
-        let kind_actions = self.header_actions(tile, item, chrome, cx);
+        let (kind_states, kind_actions) = self.header_actions(tile, item, chrome, cx);
         let silenced = self.silenced(tile, item, chrome, cx);
         let face = match agent {
-            Some((session, _)) => self.face_switch(tile, session, chrome, cx),
-            None => self
-                .preview_toggle(tile, chrome, cx)
-                .map(|toggle| (toggle, kit::icon_button_side(&self.theme) * chrome.k)),
+            Some((session, _)) => self.face_toggle(tile, session, chrome, cx),
+            None => self.preview_toggle(tile, chrome, cx),
         };
-        // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
-        // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
-        // them.
         let actions = |actions: Vec<gpui::AnyElement>| {
             div().flex().flex_none().items_center().gap(px(theme.spacing.xs * k)).children(actions)
         };
@@ -1372,9 +1360,8 @@ impl WorkspaceView {
                 }))
                 .into_any_element()
         });
-        // Each readout with how much it is needed beside the title: the agent's word first.
+        // Each readout with how much it is needed beside the title.
         let readouts: Vec<(&'static str, kit::Priority, gpui::AnyElement)> = [
-            badge.map(|b| ("badge", kit::Priority::HIGH, b)),
             report.map(|r| ("report", kit::Priority::MEDIUM, r)),
             running.map(|r| ("running", kit::Priority::MEDIUM, r)),
             finished.map(|f| ("finished", kit::Priority::HIGH, f)),
@@ -1442,6 +1429,8 @@ impl WorkspaceView {
             let name = w.name.clone();
             let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
             let muted = hsla(s.text_muted);
+            // The glyph wears its machine's own colour; the name stays quiet.
+            let tint = hsla(kit::machine_ink(theme, tile.worker, w.link.is_none()));
             div()
                 .id("worker")
                 .debug_selector(move || format!("worker-{}", id.as_uuid()))
@@ -1452,7 +1441,7 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs * k))
                 .text_color(muted)
                 .child(
-                    crate::icons::icon(theme, machine, IconSize::Inline, muted)
+                    crate::icons::icon(theme, machine, IconSize::Inline, tint)
                         .size(px(IconSize::Inline.slot(theme) * k)),
                 )
                 .child(
@@ -1481,9 +1470,10 @@ impl WorkspaceView {
         let tabbed = placed.tabs.is_some();
         let header = if tabbed {
             let readouts = readouts.into_iter().map(|(_, _, el)| el).collect();
-            let strip = self.trailing_strip(placed, readouts, face, k, cx);
-            let actions = actions(kind_actions)
-                .when(!focused, |el| el.invisible().group_hover(TILE_GROUP, gpui::Styled::visible));
+            let buttons = f32::from(1_u8.saturating_add(u8::from(face.is_some())));
+            let controls = self.hover_controls(tile, kind_actions, face, k, cx);
+            let strip = self.trailing_strip(placed, readouts, controls, buttons, k);
+            let states = (!kind_states.is_empty()).then(|| actions(kind_states));
             let branch = branch.into_iter().map(|(_, _, el)| el);
             let tabs = self.render_tabs(placed, chrome, cx);
             // What the tabs leave is the header's; the tile's controls end it.
@@ -1497,7 +1487,7 @@ impl WorkspaceView {
                 .pr(px(theme.spacing.inset() * k))
                 .children(branch)
                 .when_some(upload, gpui::ParentElement::child)
-                .child(actions)
+                .children(states)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
             header.border_b_0().child(tabs).child(rest)
@@ -1515,7 +1505,8 @@ impl WorkspaceView {
                     branch,
                     upload,
                     readouts,
-                    actions: actions(kind_actions),
+                    states: (!kind_states.is_empty()).then(|| actions(kind_states)),
+                    actions: kind_actions,
                     silenced,
                     face,
                 },
@@ -1552,28 +1543,70 @@ impl WorkspaceView {
         self.file_proxy(item, tile, slot, k, cx)
     }
 
-    /// How the tile is doing, at the header's end before its controls (working, failed, done,
-    /// away), never on its lead. An agent waiting on the human shows none: the state chip
-    /// beside the title says it, and a warn mark said it a second time. Nor does one at rest:
-    /// a hollow ring read as an unticked radio button. A remote picture on its way turns its
-    /// mark in the body, which says what opens.
-    fn header_state(&self, tile: TileRef, item: &Item, k: f32) -> Option<gpui::AnyElement> {
+    /// How the tile is doing, at the header's end (working, waiting on the person, failed,
+    /// done, away), never on its lead, and as its glyph alone: no pill of words beside it, which
+    /// the navigator's line and the pointer's hint say. None at rest: a hollow ring read as an
+    /// unticked radio button. A remote picture on its way turns its mark in the body, which
+    /// says what opens.
+    ///
+    /// An agent's glyph carries its whole state to a screen reader and what it asks to the
+    /// pointer. While a terminal's agent waits on the person, its glyph is the one state worth a
+    /// click: it brings up the terminal, whose own prompt is answered there (Slopty never answers
+    /// for the person). A thread's face answers in its own card, so its glyph only says it.
+    fn header_state(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        k: f32,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
         let id = item.id;
-        let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agent_state(session).is_some(),
-            _ => false,
-        };
         let opening = self.opening(item);
         let status = self
             .tile_status(tile, item)
             .filter(|st| *st != Status::Idle)
-            .filter(|st| !(agent && *st == Status::NeedsYou))
             .filter(|st| !(opening && *st == Status::Working))?;
-        Some(
-            crate::icons::status_mark(&self.theme, Some(status), k)
-                .debug_selector(move || format!("status-{}", id.as_uuid()))
-                .into_any_element(),
-        )
+        let theme = &self.theme;
+        let mark = crate::icons::status_mark(theme, Some(status), k)
+            .debug_selector(move || format!("status-{}", id.as_uuid()));
+        let (session, agent) = match item.kind {
+            ItemKind::Terminal { session } => (Some(session), self.agent_state(session)),
+            ItemKind::Thread { thread } => (None, self.thread_stand(thread)),
+            _ => (None, None),
+        };
+        let Some(agent) = agent else { return Some(mark.into_any_element()) };
+        let words = SharedString::from(super::agents::agent_status_text(agent));
+        let hint =
+            super::agents::agent_ask_text(agent).map_or_else(|| words.clone(), SharedString::from);
+        let waiting = session
+            .filter(|session| super::agents::needs_human(agent) && !self.face_shown(*session));
+        let hint_theme = std::rc::Rc::new(theme.clone());
+        let s = &theme.surfaces;
+        let glyph = div()
+            .id("agent-state")
+            .role(if waiting.is_some() { Role::Button } else { Role::Status })
+            .aria_label(words)
+            .flex_none()
+            .rounded(px(theme.radii.xs * k))
+            .child(mark)
+            .map(kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&hint_theme));
+                cx.new(|_| kit::Hint::new(hint, "", theme)).into()
+            });
+        Some(match waiting {
+            Some(session) => tab_stop(
+                glyph
+                    .debug_selector(move || format!("agent-{}", id.as_uuid()))
+                    .aria_description(super::agents::SHOW_PROMPT)
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover))),
+                s.focus,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)))
+            .into_any_element(),
+            None => glyph.into_any_element(),
+        })
     }
 
     /// The field that renames `tile` (`id`) in its title's place while it is renamed (an
@@ -1742,13 +1775,34 @@ impl WorkspaceView {
                 )
                 .on_click(
                     cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)),
-                )
-                .when(!shown, |el| el.invisible().group_hover(TAB_GROUP, gpui::Styled::visible));
+                );
+                // The shown tab keeps its close in the row. Any other's takes no room at rest, so
+                // a narrow tab keeps its four letters: it shows over the tab's end while the
+                // pointer is on the tab, on the tab's hover fill made solid, so the name it covers
+                // gives way under it.
+                let close = if shown {
+                    close.into_any_element()
+                } else {
+                    let under = hsla(s.hover.over(theme.content()));
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .pr(px(theme.spacing.xxs * k))
+                        .flex()
+                        .items_center()
+                        .rounded(px(theme.radii.sm * k))
+                        .group_hover(TAB_GROUP, move |el| el.bg(under))
+                        .child(close.invisible().group_hover(TAB_GROUP, gpui::Styled::visible))
+                        .into_any_element()
+                };
                 let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
                 Some(
                     Self::tile_menu_press(el, tab, Pressed::Tab, cx)
                         .debug_selector(move || format!("tab-{}", id.as_uuid()))
                         .group(TAB_GROUP)
+                        .relative()
                         .role(Role::Tab)
                         .aria_label(label)
                         .aria_selected(shown)
@@ -1797,15 +1851,19 @@ impl WorkspaceView {
         // The tabs take their titles' widths and the header after them the rest. The first
         // tab's kind sits on the edge grid, where a single header's does: its pad round it.
         // Tabs that do not fit scroll, as Zed's tab bar does, and the shown one is brought
-        // into view whenever it changes.
+        // into view whenever it changes and whenever the column's width does, so a column that
+        // narrows never leaves its shown tab past its edge. Between those the row stays where
+        // the person scrolled it.
         let first = column.first().map_or(placed.tile.item, |t| t.item);
         let shown_ix = column.iter().position(|t| *t == placed.tile).unwrap_or_default();
+        let width = placed.target.w;
         let handle = {
             let mut rows = self.drawn.tab_rows.borrow_mut();
-            let (handle, last) =
-                rows.entry(first).or_insert_with(|| (gpui::ScrollHandle::new(), first));
-            if *last != placed.tile.item {
+            let (handle, last, wide) =
+                rows.entry(first).or_insert_with(|| (gpui::ScrollHandle::new(), first, f32::NAN));
+            if *last != placed.tile.item || (*wide - width).abs() >= 0.5 || wide.is_nan() {
                 *last = placed.tile.item;
+                *wide = width;
                 handle.scroll_to_item(shown_ix);
             }
             handle.clone()
@@ -1989,10 +2047,9 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// An agent's pull request and worktree, as the worker last said: the request's number
-    /// in words toned by its review (green approved, red changes asked, muted draft), a click
-    /// away from its page; and the worktree's name, quiet, its branch in the hint. Words, not
-    /// chips: the header's one fill is the state's.
+    /// An agent's worktree, as the worker last said: its name, quiet, its branch in the hint.
+    /// Words, not a chip: the header's one fill is the state's. Its pull request is the
+    /// thread's ([`Self::pull_chip`]).
     fn branch_chips(
         &self,
         id: ItemId,
@@ -2004,42 +2061,6 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let k = chrome.k;
         let hint_theme = std::rc::Rc::new(theme.clone());
-        let pr = branch.pr.as_ref().map(|pr| {
-            let tone = match pr.review {
-                Some(Review::Approved) => s.success,
-                Some(Review::ChangesRequested) => s.error,
-                Some(Review::Draft) => s.text_muted,
-                Some(Review::Pending) | None => s.text_secondary,
-            };
-            // The glyph says the request's state in its hue, as GitHub's does; the words its
-            // review.
-            let icon = GitGlyph::of_review(pr.review);
-            let glyph_ink = icon.state_ink(theme).unwrap_or(tone);
-            let url = pr.url.clone();
-            let chip = kit::pill_frame(theme, k)
-                .id("pr")
-                .debug_selector(move || format!("pr-{}", id.as_uuid()))
-                .role(Role::Link)
-                .aria_label(SharedString::from(super::handoffs::pr_said(pr)))
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xxs * k))
-                .text_color(hsla(tone))
-                .cursor_pointer()
-                .hover(|el| el.bg(hsla(s.hover)))
-                .active(|el| el.bg(hsla(s.pressed)))
-                .child(
-                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(glyph_ink))
-                        .size(px(IconSize::Inline.slot(theme) * k)),
-                )
-                .child(
-                    ChromeText::new(super::handoffs::pr_label(pr), px(theme.typography.small()), k)
-                        .zooming(chrome.zooming),
-                );
-            tab_stop(chip, s.focus)
-                .on_click(move |_ev, _window, cx| cx.open_url(&url))
-                .into_any_element()
-        });
         let worktree = branch.worktree.as_ref().map(|tree| {
             let muted = hsla(s.text_muted);
             let hint = tree.branch.as_ref().map_or_else(
@@ -2074,11 +2095,73 @@ impl WorkspaceView {
                 )
                 .into_any_element()
         });
-        // The request stays while the title narrows; the worktree's name goes first.
-        pr.map(|pr| ("pr", PR_PRIORITY, pr))
-            .into_iter()
-            .chain(worktree.map(|tree| ("worktree", kit::Priority::LOW, tree)))
-            .collect()
+        worktree.map(|tree| ("worktree", kit::Priority::LOW, tree)).into_iter().collect()
+    }
+
+    /// The pull request of `item`'s agent's branch, as its thread's row in its worker's table
+    /// last read it, for every agent alike: a terminal's agent's or a thread tile's.
+    pub(super) fn tile_pull(&self, item: &Item) -> Option<&slopty_proto::thread::wire::PullSeen> {
+        let thread = match item.kind {
+            ItemKind::Terminal { session } if self.agent_state(session).is_some() => {
+                self.session_thread(session)?
+            }
+            ItemKind::Thread { thread } => thread,
+            _ => return None,
+        };
+        self.thread_place(thread)?.pull.as_ref()
+    }
+
+    /// The chip of `item`'s agent's branch's pull request ([`Self::tile_pull`]), for
+    /// every agent alike: its glyph by where it stands in that state's ink (open green, merged
+    /// violet, closed red, a draft grey, as GitHub's), then its number in the quiet tier. A
+    /// click opens its page; the pointer and a screen reader have its line ("#42: lint
+    /// failed") and its title. It stays while the title narrows; the worktree's name goes
+    /// first.
+    fn pull_chip(
+        &self,
+        item: &Item,
+        chrome: Chrome,
+    ) -> Option<(&'static str, kit::Priority, gpui::AnyElement)> {
+        let id = item.id;
+        let pull = self.tile_pull(item)?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = chrome.k;
+        let glyph = GitGlyph::of_stands(pull.stands);
+        let glyph_ink = glyph.state_ink(theme).unwrap_or(s.text_secondary);
+        let line = SharedString::from(pull.line());
+        let title = SharedString::from(pull.title.clone());
+        let url = pull.url.clone();
+        let hint_theme = std::rc::Rc::new(theme.clone());
+        let chip = kit::pill_frame(theme, k)
+            .id("pr")
+            .debug_selector(move || format!("pr-{}", id.as_uuid()))
+            .role(Role::Link)
+            .aria_label(line.clone())
+            .aria_description(title.clone())
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs * k))
+            .text_color(hsla(s.text_secondary))
+            .cursor_pointer()
+            .hover(|el| el.bg(hsla(s.hover)))
+            .active(|el| el.bg(hsla(s.pressed)))
+            .map(kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                let (line, title) = (line.clone(), title.clone());
+                let theme = std::rc::Rc::clone(&hint_theme);
+                cx.new(|_| kit::Hint::new(line, title, theme)).into()
+            })
+            .child(
+                crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
+                    .size(px(IconSize::Inline.slot(theme) * k)),
+            )
+            .child(
+                ChromeText::new(format!("#{}", pull.number), px(theme.typography.small()), k)
+                    .zooming(chrome.zooming),
+            );
+        let chip = tab_stop(chip, s.focus).on_click(move |_ev, _window, cx| cx.open_url(&url));
+        Some(("pr", PR_PRIORITY, chip.into_any_element()))
     }
 
     /// A worker's sound was silenced or resumed: every remote tile copies its stream again, so
@@ -2141,19 +2224,22 @@ impl WorkspaceView {
         self.mute_toggle(tile, item.id, true, chrome, cx)
     }
 
-    /// What a tile's kind offers in its header: take the PTY's size, mute, a page's back and
-    /// reload.
+    /// What a tile's kind says and offers in its header: first what stands at rest because it
+    /// is a state to see (another client rules the PTY's size, so take it; a stream's health;
+    /// the system's keys going to the worker), then its actions, shown under the pointer only
+    /// (the trackpad, mute, a page's ways back and forward, a folder's way up).
     fn header_actions(
         &self,
         tile: TileRef,
         item: &Item,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
         let theme = &self.theme;
         let id = item.id;
         let stream = self.stream(id).copied().unwrap_or_default();
         let muted = stream.muted;
+        let mut states: Vec<gpui::AnyElement> = Vec::new();
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
         match &item.kind {
             ItemKind::Terminal { session } => {
@@ -2167,7 +2253,7 @@ impl WorkspaceView {
                     let pill = pill("take", id, (None, TAKE), theme.surfaces.accent, theme, chrome)
                         .role(Role::Button)
                         .aria_label(TAKE_OVER);
-                    actions.push(
+                    states.push(
                         tab_stop(pill, theme.surfaces.focus)
                             .on_click(
                                 cx.listener(move |this, _ev, _w, cx| this.take_over(tile, cx)),
@@ -2179,7 +2265,7 @@ impl WorkspaceView {
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 if let Some(view) = self.screens.get(&id) {
                     use crate::screen::ScreenView;
-                    actions.extend(ScreenView::health_mark(view, stream.header, theme, chrome.k));
+                    states.extend(ScreenView::health_mark(view, stream.header, theme, chrome.k));
                     let trackpad =
                         ScreenView::trackpad_button(view, stream.header, theme, chrome.k);
                     actions.extend(trackpad);
@@ -2195,7 +2281,7 @@ impl WorkspaceView {
                         true,
                         chrome.k,
                     );
-                    actions.push(
+                    states.push(
                         toggle
                             .on_click(cx.listener(move |this, _ev, _w, cx| {
                                 this.flip_system_keys(id, cx);
@@ -2208,9 +2294,9 @@ impl WorkspaceView {
                     actions.extend(self.mute_toggle(tile, id, false, chrome, cx));
                 }
             }
-            // A page's ways back and forward and its reload are the header's bare icon
-            // buttons, as fullscreen and close are: nothing in the bar has a fill until the
-            // pointer is on it. Back and forward show only while there is history that way.
+            // A page's ways back and forward are a matched pair of the header's bare icon
+            // buttons, as close is, shown only while there is history that way. Reload is the
+            // header's menu's and the palette's: ⌘R is the layout's.
             ItemKind::Browser { .. } => {
                 if let Some(view) = self.browsers.get(&id).cloned() {
                     let uuid = id.as_uuid();
@@ -2220,7 +2306,7 @@ impl WorkspaceView {
                         .map_or((false, false), |p| (p.can_go_back, p.can_go_forward));
                     let ways: [(bool, &str, Symbol, &str, Go); 2] = [
                         (back, "back", Symbol::ChevronLeft, "Back", BrowserView::back),
-                        (forward, "forward", Symbol::ArrowRight, "Forward", BrowserView::forward),
+                        (forward, "forward", Symbol::ChevronRight, "Forward", BrowserView::forward),
                     ];
                     for (shown, key, icon, label, go) in ways {
                         if !shown {
@@ -2233,17 +2319,6 @@ impl WorkspaceView {
                                 .into_any_element(),
                         );
                     }
-                    actions.push(
-                        kit::icon_button_at(
-                            theme,
-                            format!("reload-{uuid}"),
-                            Symbol::ArrowClockwise,
-                            "Reload",
-                            k,
-                        )
-                        .on_click(move |_ev, _w, cx| view.update(cx, BrowserView::reload))
-                        .into_any_element(),
-                    );
                 }
             }
             // The way up is the header's bare icon button, as a page's way back is.
@@ -2269,7 +2344,7 @@ impl WorkspaceView {
             | ItemKind::Changes { .. }
             | ItemKind::Thread { .. } => {}
         }
-        actions
+        (states, actions)
     }
 
     /// What an agent's tile shows, for a screen reader: its face, as its header's switch says
@@ -2284,89 +2359,44 @@ impl WorkspaceView {
         }
     }
 
-    /// The switch between an agent tile's faces ([`Face`]): one icon a face, Thread ·
-    /// Terminal, and Board for an orchestrator, the one on show on the selected wash. A control,
-    /// so it sits with fullscreen and close in the trailing strip. Quiet at rest, since every
-    /// agent's tile carries it and the person mostly watches: the icons in the muted ink, no
-    /// outline round them. Each is an icon button's square, a finger's 44 pt under touch. A
-    /// spacing step stands between it and the tile's own buttons, so the header reads as one
-    /// switch and two actions, not four alike buttons. With its width in points, that step
-    /// included; `None` while the tile has one face, a shell no agent runs in.
-    fn face_switch(
+    /// An agent tile's face toggle ([`Face`]): one icon button, the face ⌘J goes to next by
+    /// its glyph and named for it ("Show terminal"), under the pointer only, as close is. A
+    /// switch of a segment a face stood on every agent's header at rest, three to four buttons
+    /// where the person mostly watches. `None` while the tile has one face, a shell no agent
+    /// runs in.
+    fn face_toggle(
         &self,
         tile: TileRef,
         session: SessionId,
         chrome: Chrome,
         cx: &Draw<'_, Self>,
-    ) -> Option<(gpui::AnyElement, f32)> {
+    ) -> Option<gpui::AnyElement> {
         let faces = self.faces_of(session);
         if faces.len() < 2 {
             return None;
         }
         let shown = self.tile_face(session);
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let k = chrome.k;
-        let apart = theme.spacing.sm * k;
-        let segments_wide = f32::from(u8::try_from(faces.len()).unwrap_or(u8::MAX));
-        let width = segments_wide.mul_add(kit::icon_button_side(theme) * k, apart);
-        let side = px(kit::icon_button_side(theme) * k);
-        let segments = faces.into_iter().map(|face| {
-            let on = face == shown;
-            let ink = if on { s.text } else { s.text_muted };
-            let id = format!("face-{}-{}", face.key(), tile.item.as_uuid());
-            let selector = id.clone();
-            let segment = div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::RadioButton)
-                .aria_label(face.label())
-                .aria_toggled(if on {
-                    gpui::accesskit::Toggled::True
-                } else {
-                    gpui::accesskit::Toggled::False
-                })
-                .flex_none()
-                .size(side)
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(theme.radii.sm * k))
-                .cursor_pointer()
-                .map(|el| {
-                    if on {
-                        el.bg(hsla(s.selected))
-                    } else {
-                        el.hover(move |el| el.bg(hsla(s.hover)))
-                    }
-                })
-                .active(move |el| el.bg(hsla(s.pressed)))
-                .child(
-                    crate::icons::icon(theme, face.symbol(), IconSize::Inline, hsla(ink))
-                        .size(px(theme.typography.icon() * k)),
-                )
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.focus_tile(tile, cx);
-                    this.set_face(session, face, cx);
-                }));
-            tab_stop(kit::eased(segment), s.focus).into_any_element()
-        });
-        let id = format!("faces-{}", tile.item.as_uuid());
-        let selector = id.clone();
-        Some((
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::RadioGroup)
-                .aria_label(FACE_SWITCH)
-                .flex_none()
-                .mr(px(apart))
-                .flex()
-                .items_center()
-                .children(segments)
-                .into_any_element(),
-            width,
-        ))
+        let next = faces
+            .iter()
+            .skip_while(|face| **face != shown)
+            .nth(1)
+            .or_else(|| faces.first())
+            .copied()?;
+        let id = format!("face-{}-{}", next.key(), tile.item.as_uuid());
+        Some(
+            kit::icon_button_at(
+                &self.theme,
+                id,
+                next.symbol(),
+                super::context_menus::show_face(next),
+                chrome.k,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                this.focus_tile(tile, cx);
+                this.set_face(session, next, cx);
+            }))
+            .into_any_element(),
+        )
     }
 
     /// The button that turns a Markdown file's tile between its preview and its source, as ⌘⇧V
@@ -2433,51 +2463,57 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A tile's fullscreen button, where fullscreen adds something, and its close button.
-    fn tile_controls(
+    /// Whether filling the screen adds something to `placed`: not on a phone, where a column is
+    /// the screen's width already.
+    pub(super) fn offers_fullscreen(&self, placed: &Placed) -> bool {
+        let view_w = f32::from(self.drawn.viewport.get().size.width);
+        view_w >= self.layout.config().phone_below || placed.target.w + 1.0 < view_w
+    }
+
+    /// The controls a header shows under the pointer, on its own ground over what ends it at
+    /// rest: the kind's actions, the face toggle, then close.
+    fn hover_controls(
         &self,
-        placed: &Placed,
+        tile: TileRef,
+        actions: Vec<gpui::AnyElement>,
+        face: Option<gpui::AnyElement>,
         k: f32,
         cx: &Draw<'_, Self>,
-    ) -> (Option<Stateful<Div>>, Stateful<Div>) {
+    ) -> Div {
         let theme = &self.theme;
-        let tile = placed.tile;
         let id = tile.item.as_uuid();
-        // On a phone a column is the screen's width already: fullscreen would add nothing.
-        let view_w = f32::from(self.drawn.viewport.get().size.width);
-        let offer_fullscreen =
-            view_w >= self.layout.config().phone_below || placed.target.w + 1.0 < view_w;
-        let fullscreen = offer_fullscreen.then(|| {
-            kit::icon_button_at(
-                theme,
-                format!("fullscreen-{id}"),
-                Symbol::ArrowUpLeftAndArrowDownRight,
-                FULLSCREEN_TILE,
-                k,
-            )
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.focus_tile(tile, cx);
-                // The action runs from the focused element up; the workspace takes the focus when
-                // nothing inside it has it, so the action reaches the handler on its root.
-                if !this.focus.contains_focused(window, cx) {
-                    window.focus(&this.focus, cx);
-                }
-                window.dispatch_action(Box::new(FullscreenTile), cx);
-            }))
-        });
-        let close = kit::icon_button_at(theme, format!("close-{id}"), Symbol::Xmark, CLOSE_TILE, k)
+        div()
+            .debug_selector(move || format!("controls-{id}"))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs * k))
+            .pl(px(theme.spacing.xs * k))
+            .bg(hsla(theme.content()))
+            .invisible()
+            .group_hover(HEADER_GROUP, gpui::Styled::visible)
+            .children(actions)
+            .children(face)
+            .child(self.tile_close(tile, k, cx))
+    }
+
+    /// A tile's close button. Fullscreen has no button: a double-click on the header's empty
+    /// part fills the screen (as a Mac's title bar zooms its window), as do the palette's and
+    /// the header's menu's "Fullscreen".
+    fn tile_close(&self, tile: TileRef, k: f32, cx: &Draw<'_, Self>) -> Stateful<Div> {
+        let id = tile.item.as_uuid();
+        kit::icon_button_at(&self.theme, format!("close-{id}"), Symbol::Xmark, CLOSE_TILE, k)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.close_tile(tile, window, cx);
-            }));
-        (fullscreen, close)
+            }))
     }
 
     /// A single tile's header row: its lead, its title and where it is, then at the trailing
     /// end its facts, its state and its readouts, laid out as a [`kit::priority_row`]. The
     /// title keeps a third of the header; a worktree's name and the worker go before a word
-    /// of it, a pull request and the readouts while it narrows to that floor. The controls show
-    /// at rest on the focused tile with nothing to read out; else they show under the pointer
-    /// over the readouts' place, on the header's own ground, and keep no room at rest.
+    /// of it, a pull request and the readouts while it narrows to that floor. No button stands
+    /// at rest, focused or not: the kind's actions, the face toggle and close show under the
+    /// pointer over the readouts' place, on the header's own ground, and keep no room at rest.
+    /// Touch has no hover, and its header none of them: they are its long press's menu.
     fn header_row(
         &self,
         parts: HeaderParts<'_>,
@@ -2496,6 +2532,7 @@ impl WorkspaceView {
             branch,
             upload,
             readouts,
+            states,
             actions,
             silenced,
             face,
@@ -2506,7 +2543,8 @@ impl WorkspaceView {
         let k = chrome.k;
         let focused = placed.focused;
         let lead = self.leading_slot(tile, item, focused, k, cx);
-        let state = self.header_state(tile, item, k);
+        let state = self.header_state(tile, item, k, cx);
+        let touch = theme.density == slopty_theme::Density::TOUCH;
         let name = self.header_name(tile, id, title, chrome);
         let renaming = self.rename.as_ref().is_some_and(|r| r.tile == tile);
         // "Edited" follows the title it qualifies, as a document's title bar has it.
@@ -2516,14 +2554,28 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs * k))
             .when(focused, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
-            .when(address_title, |el| {
-                el.cursor_text().on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
-                        this.start_address(tile, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
+            .map(|el| {
+                if address_title {
+                    el.cursor_text().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
+                            this.start_address(tile, window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                } else {
+                    // A double-click on the name names the tile; on the rest of the header it
+                    // fills the screen. The first click began a move, as on the header.
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            if ev.click_count == 2 {
+                                this.start_rename(tile, window, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                }
             })
             .child(name)
             .when_some(unsaved, gpui::ParentElement::child);
@@ -2535,8 +2587,6 @@ impl WorkspaceView {
             .gap(px(theme.spacing.sm * k))
             .child(named)
             .children(place);
-        let (fullscreen, close) = self.tile_controls(placed, k, cx);
-        let at_rest = focused && readouts.is_empty();
         let inset = theme.spacing.inset() * k;
         let floor = (inset.mul_add(-2.0, placed.target.w * k) / 3.0).max(0.0);
         let mut row = kit::priority_row(SharedString::from(format!("header-row-{}", id.as_uuid())))
@@ -2555,92 +2605,54 @@ impl WorkspaceView {
         if let Some(upload) = upload {
             row = row.item("upload", kit::Priority::HIGH, upload);
         }
-        if let Some(state) = state {
-            row = row.item("state", kit::Priority::HIGH, state);
+        if let Some(states) = states {
+            row = row.item("states", kit::Priority::HIGH, states);
         }
         if let Some(silenced) = silenced {
             row = row.item("silenced", kit::Priority::MEDIUM, silenced);
         }
-        // Under the pointer the controls take the readouts' place.
+        // The state ends the header at rest. Under the pointer the controls take its place and
+        // the readouts', as the tile is a click from its prompt there anyway; the keyboard and a
+        // screen reader still reach a waiting agent's glyph.
+        if let Some(state) = state {
+            let state = div()
+                .when(!touch, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
+                .child(state);
+            row = row.item("state", kit::Priority::HIGH, state);
+        }
         for (key, priority, readout) in readouts {
             let readout = div()
-                .when(!at_rest, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
+                .when(!touch, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
                 .child(readout);
             row = row.item(key, priority, readout);
         }
-        // The kind's actions stand in the row on the focused tile, else under the pointer.
-        let (actions, hovered_actions) =
-            if focused { (Some(actions), None) } else { (None, Some(actions)) };
-        if let Some(actions) = actions {
-            row = row.item("actions", kit::Priority::HIGH, actions);
-        }
-        let face = face.map(|(face, _)| face);
-        let row = if at_rest {
-            let row = match face {
-                Some(face) => row.item("face", kit::Priority::ESSENTIAL, face),
-                None => row,
-            };
-            let row = match fullscreen {
-                Some(fullscreen) => row.item("fullscreen", kit::Priority::ESSENTIAL, fullscreen),
-                None => row,
-            };
-            row.item("close", kit::Priority::ESSENTIAL, close)
+        let row = if touch {
+            row
         } else {
-            row.overlay(
-                div()
-                    .debug_selector(move || format!("controls-{}", id.as_uuid()))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs * k))
-                    .pl(px(theme.spacing.xs * k))
-                    .bg(hsla(theme.content()))
-                    .invisible()
-                    .group_hover(HEADER_GROUP, gpui::Styled::visible)
-                    .children(hovered_actions)
-                    .children(face)
-                    .children(fullscreen)
-                    .child(close),
-            )
+            row.overlay(self.hover_controls(tile, actions, face, k, cx).h_full())
         };
         header.items_center().px(px(inset)).child(row)
     }
 
-    /// The header's right end: one fixed strip where the tile's readouts (the agent's pill, a
-    /// finished command's time) sit at rest and the controls (an agent's face switch,
-    /// fullscreen, close) take their place while the pointer is on the header. It is never
-    /// narrower than the buttons, so the swap moves nothing beside it. The focused tile with
-    /// nothing to say shows its buttons at rest (touch has no hover). Each button focuses its
-    /// tile and runs the action its key runs, so a click and ⌘J, ⌃⌘F or ⌘W do the same thing.
+    /// A tabbed header's right end: one fixed strip where the tile's readouts (a finished
+    /// command's time, a program's progress) sit at rest and the controls (the kind's actions,
+    /// the face toggle, close) take their place while the pointer is on the header, as a single
+    /// header's do. It is never narrower than the face toggle and close, so the swap moves
+    /// nothing beside it. Touch has no hover, and the strip no controls: they are the long
+    /// press's menu. Each button focuses its tile and runs the action its key runs, so a click
+    /// and ⌘J or ⌘W do the same thing.
     fn trailing_strip(
         &self,
         placed: &Placed,
         readouts: Vec<gpui::AnyElement>,
-        face: Option<(gpui::AnyElement, f32)>,
+        controls: Div,
+        buttons: f32,
         k: f32,
-        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
-        let (tile, focused) = (placed.tile, placed.focused);
-        let id = tile.item.as_uuid();
-        let (fullscreen, close) = self.tile_controls(placed, k, cx);
-        let offer_fullscreen = fullscreen.is_some();
-        let quiet = readouts.is_empty();
-        let buttons = f32::from(1_u8.saturating_add(u8::from(offer_fullscreen)));
-        let face_w = face.as_ref().map_or(0.0, |(_, w)| *w);
-        let controls = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right_0()
-            .flex()
-            .items_center()
-            .when(!(focused && quiet), |el| {
-                el.invisible().group_hover(HEADER_GROUP, gpui::Styled::visible)
-            })
-            .children(face.map(|(face, _)| face))
-            .children(fullscreen)
-            .child(close);
+        let id = placed.tile.item.as_uuid();
+        let touch = theme.density == slopty_theme::Density::TOUCH;
+        let controls = (!touch).then(|| controls.absolute().top_0().bottom_0().right_0());
         let readouts = div()
             .debug_selector(move || format!("readouts-{id}"))
             .min_w_0()
@@ -2648,23 +2660,24 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs * k))
-            .group_hover(HEADER_GROUP, gpui::Styled::invisible)
+            .when(!touch, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
             .children(readouts);
         let mut strip = div();
         // Gives way well before the title does and well after the place, down to its buttons.
         strip.style().flex_shrink = Some(STRIP_SHRINK);
+        let least = if touch { 0.0 } else { buttons * kit::icon_button_side(theme) * k };
         kit::tabular(
             strip
                 .debug_selector(move || format!("strip-{id}"))
                 .relative()
                 .h_full()
-                .min_w(px(buttons.mul_add(kit::icon_button_side(theme) * k, face_w)))
+                .min_w(px(least))
                 .flex()
                 .items_center()
                 .justify_end(),
         )
         .child(readouts)
-        .child(controls)
+        .children(controls)
         .into_any_element()
     }
 

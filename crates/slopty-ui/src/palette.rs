@@ -689,6 +689,9 @@ pub struct PaletteItem {
     /// mark). A command has none: it is its words (`docs/decisions/ui.md`, "A command is its
     /// words").
     pub icon: Option<Mark>,
+    /// Whose own colour the mark wears: a machine's or a project's group key
+    /// ([`crate::kit::identity_ink`]); `None` for a mark in the lead's tier.
+    pub identity: Option<slopty_client::groups::GroupKey>,
     /// How the tile or worker is doing: while it is not idle its mark ends the line, and its
     /// word is read with the line.
     pub status: Option<Status>,
@@ -721,6 +724,7 @@ impl PaletteItem {
             keys,
             run,
             icon,
+            identity: None,
             status: None,
             worker: None,
             cwd: None,
@@ -760,13 +764,16 @@ impl PaletteItem {
     /// A worker by its name, `detail` (its round trip, or what is wrong) on the right.
     #[must_use]
     pub fn worker(name: &str, detail: &str, worker: slopty_client::layout::WorkerKey) -> Self {
-        Self::line(
-            name.to_owned(),
-            detail.to_owned(),
-            PaletteRun::Worker(worker),
-            Some(Mark::Symbol(Symbol::ServerRack)),
-            Section::Workers,
-        )
+        Self {
+            identity: Some(slopty_client::groups::GroupKey::machine(worker)),
+            ..Self::line(
+                name.to_owned(),
+                detail.to_owned(),
+                PaletteRun::Worker(worker),
+                Some(Mark::Symbol(Symbol::ServerRack)),
+                Section::Workers,
+            )
+        }
     }
 
     /// `Reopen <title>` for a tile closed as closing `seq`, the latest first.
@@ -786,14 +793,21 @@ impl PaletteItem {
     /// A project by its title: ↩ shows its board.
     #[must_use]
     pub fn project(title: &str, project: slopty_proto::project::ProjectId) -> Self {
+        let key = slopty_client::groups::GroupKey::new(
+            slopty_client::groups::fact::PROJECT,
+            project.as_str(),
+        );
         let run = PaletteRun::Project(project);
-        Self::line(
-            title.to_owned(),
-            String::new(),
-            run,
-            Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
-            Section::Tiles,
-        )
+        Self {
+            identity: Some(key),
+            ..Self::line(
+                title.to_owned(),
+                String::new(),
+                run,
+                Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
+                Section::Tiles,
+            )
+        }
     }
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
@@ -803,8 +817,12 @@ impl PaletteItem {
         glyph: impl Into<Mark>,
         group: slopty_client::layout::GroupKey,
     ) -> Self {
+        let identity = crate::kit::wears_identity(&group).then(|| group.clone());
         let run = PaletteRun::Group(group);
-        Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
+        Self {
+            identity,
+            ..Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
+        }
     }
 
     /// An item in the workspace by its title; its icon says what it is.
@@ -914,6 +932,14 @@ impl PaletteItem {
         let run = PaletteRun::OpenAgent { cwd: cwd.to_owned() };
         let label = format!("New agent in {cwd}");
         Self::line(label, String::new(), run, None, Section::Files)
+    }
+
+    /// The same line, its mark in the own colour of the machine or project `key` names
+    /// ([`crate::kit::identity_ink`]).
+    #[must_use]
+    pub fn with_identity(mut self, key: slopty_client::groups::GroupKey) -> Self {
+        self.identity = Some(key);
+        self
     }
 
     /// The same line with another kind icon, or an agent's mark.
@@ -1103,17 +1129,22 @@ enum Line {
 /// The quiet label over a group of rows ([`crate::kit::label`]) on the one edge grid: the
 /// palette's sections, the pickers', the inbox's, the empty workspace's workers. A heading, not
 /// a row, to a screen reader.
+///
+/// Sections part by space, not rules: every head but the list's `first` stands a large step
+/// below the rows before it, so a group reads as one before its head is read.
 pub(crate) fn section_heading(
     theme: &Theme,
     id: ElementId,
     text: impl Into<SharedString>,
+    first: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
+    let above = if first { theme.spacing.sm } else { theme.spacing.lg };
     crate::kit::inset_x(crate::kit::label(theme, text.clone()), theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
-        .pt(px(theme.spacing.sm))
+        .pt(px(above))
         .pb(px(theme.spacing.xs))
 }
 
@@ -1862,7 +1893,14 @@ impl CommandPalette {
         let spacing = theme.spacing;
         let pad = list_pad(theme);
         let pressed = s.pressed;
-        let icon_ink = if chosen { s.text } else { s.text_secondary };
+        // A machine's or a project's mark wears its own colour, chosen or not, and a machine
+        // out of reach goes grey; any other mark is a tier under its words.
+        let icon_ink = match &item.identity {
+            Some(_) if item.status == Some(Status::Away) => s.text_muted,
+            Some(key) => crate::kit::identity_ink(theme, key),
+            None if chosen => s.text,
+            None => s.text_secondary,
+        };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         // How it is doing ends the line as its mark; its word, which the mark says, is read
         // with the line and not printed beside it.
@@ -1997,7 +2035,8 @@ impl CommandPalette {
         match self.lines.get(ix) {
             Some(Line::Heading { heading, slug }) => {
                 let name = format!("palette-heading-{slug}");
-                section_heading(&self.theme, ElementId::Name(name.clone().into()), *heading)
+                let first = ix == 0;
+                section_heading(&self.theme, ElementId::Name(name.clone().into()), *heading, first)
                     .debug_selector(move || name)
                     .into_any_element()
             }

@@ -106,10 +106,10 @@ fn the_face_toggles_over_the_same_session_and_keeps_its_draft(cx: &mut TestAppCo
     assert_eq!(draft.as_deref(), Some("half a thought, whole"), "the keyboard is the thread's");
 }
 
-/// The header's switch shows a face per click and says which one shows; a shell no agent runs
-/// in has no switch.
+/// The header's face toggle, under the pointer, shows the other face per click and is named for
+/// it; a shell no agent runs in has none.
 #[gpui::test]
-fn the_switch_picks_the_face_and_a_plain_shell_has_none(cx: &mut TestAppContext) {
+fn the_toggle_picks_the_face_and_a_plain_shell_has_none(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let plain = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
@@ -117,11 +117,24 @@ fn the_switch_picks_the_face_and_a_plain_shell_has_none(cx: &mut TestAppContext)
     table(&view, cx, studio.key, vec![thread_on(session).row(WallMs::ZERO)]);
     let shows = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.tile_face(session));
     assert_eq!(shows(cx), Face::Thread);
-    assert!(cx.debug_bounds(selector("faces", plain.item)).is_none(), "a shell has one face");
+    let hover = |cx: &mut VisualTestContext, tile: TileRef| {
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("its header");
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+    };
+    hover(cx, plain);
+    assert!(cx.debug_bounds(selector("close", plain.item)).is_some(), "its controls show");
+    for face in [Face::Thread, Face::Terminal] {
+        let part = selector(&format!("face-{}", face.key()), plain.item);
+        assert!(cx.debug_bounds(part).is_none(), "a shell has one face");
+    }
 
     let click = |cx: &mut VisualTestContext, face: Face| {
+        hover(cx, tile);
+        let named = format!("Show {}", face.label().to_lowercase());
+        assert!(tree(cx).iter().any(|n| n.is("Button", Some(&named))), "named {named}");
         let part = selector(&format!("face-{}", face.key()), tile.item);
-        let at = cx.debug_bounds(part).unwrap_or_else(|| panic!("{face:?} on the switch"));
+        let at = cx.debug_bounds(part).unwrap_or_else(|| panic!("{face:?} on the toggle"));
         cx.simulate_click(at.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());

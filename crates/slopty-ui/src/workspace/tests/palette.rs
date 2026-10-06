@@ -29,7 +29,8 @@ fn open_palette(cx: &mut VisualTestContext) {
 }
 
 /// The palette lists the tiles first, then the workers, then the commands, each group under
-/// its heading, with the worker named on a tile's line once there are two of them, and a
+/// its heading (every head after the first a large step below the rows before it), with the
+/// worker named on a tile's line once there are two of them, and a
 /// waiting agent marked. A query that leaves a group empty hides its heading, and one that
 /// leaves a single group needs none.
 #[gpui::test]
@@ -50,6 +51,18 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
         top(cx, "palette-heading-commands").expect("a commands heading"),
     );
     assert!(tiles < workers && workers < commands, "{tiles} {workers} {commands}");
+    // Sections part by space: every head after the first stands a large step below the rows
+    // before it, the first a small one below the field.
+    let tall = |cx: &mut VisualTestContext, heading: &'static str| {
+        let at = cx.debug_bounds(heading).expect("drawn");
+        f32::from(at.size.height)
+    };
+    let spacing = Theme::default().spacing;
+    let first = tall(cx, "palette-heading-tiles");
+    for later in ["palette-heading-workers", "palette-heading-commands"] {
+        let step = tall(cx, later) - first;
+        assert!((step - (spacing.lg - spacing.sm)).abs() < 0.5, "{later} stands lower: {step}");
+    }
     let lines = view.read_with(cx, |v, cx| {
         let palette = v.palette.clone().expect("open");
         palette
@@ -434,7 +447,9 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
 fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    three_shells(&view, cx, &fake);
+    // One shell, so the brief list (its tile, its machine, a few commands) stays short of the
+    // ceiling a query's matches reach.
+    opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     // Where the sheet lands, not its rise into place.
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     open_palette(cx);

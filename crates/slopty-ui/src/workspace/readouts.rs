@@ -458,7 +458,7 @@ impl WorkspaceView {
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(section_heading(theme, "transfers-heading".into(), TRANSFERS))
+            .child(section_heading(theme, "transfers-heading".into(), TRANSFERS, true))
             .children(rows);
         self.popover(Popover::Transfers, panel, window, cx)
     }
@@ -630,7 +630,7 @@ impl WorkspaceView {
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE))
+            .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE, true))
             .children(rows);
         self.popover(Popover::Plans, panel, window, cx)
     }

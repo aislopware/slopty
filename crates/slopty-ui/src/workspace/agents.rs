@@ -1,12 +1,11 @@
 //! Coding agents in terminals and threads: what their rows in the workers' thread tables say of
-//! them, the header badge, the banner when the human is away, and the count of the ones waiting
-//! on the human.
+//! them, a finished command's badge, the banner when the human is away, and the count of the ones
+//! waiting on the human.
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, px,
 };
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
@@ -185,13 +184,6 @@ pub(super) fn agent_status_word(agent: &ThreadStand) -> String {
         _ => "Idle",
     }
     .to_owned()
-}
-
-/// Whether an agent's state wears a pill in its tile's header: what calls for the person (waiting
-/// on them, failed, out of reach), and a turn paused on background work, whose pill says what it
-/// waits on. Working, at rest or finished, the header's leading mark says it alone.
-const fn wears_pill(status: Status) -> bool {
-    matches!(status, Status::NeedsYou | Status::Running | Status::Failed | Status::Away)
 }
 
 /// What a waiting agent asks, without the state word: the call it wants to make ("$ cargo
@@ -436,89 +428,6 @@ impl WorkspaceView {
         self.turns.command_ended(session);
         self.finished.insert(session, done);
         cx.notify();
-    }
-
-    /// The agent pill in a tile's header, a terminal's agent's or a thread's: a short line in
-    /// the tone of its status, which the status mark beside it draws as an icon. While a
-    /// terminal's agent waits on the human the pill is a button that brings the terminal up so
-    /// the TUI's own prompt can be answered there. Slopty never answers for the human. On a
-    /// phone, which has no room for the detail, and beside a face, which shows it itself, the
-    /// pill says the state alone; a screen reader still hears all of it. An idle or a working
-    /// agent has no pill ([`wears_pill`]): the slot's mark, spinning while it works, says all
-    /// there is, and a grey "Working" beside the spinner said it twice.
-    pub(super) fn agent_badge(
-        &self,
-        tile: TileRef,
-        session: Option<SessionId>,
-        agent: &ThreadStand,
-        chrome: Chrome,
-        cx: &Draw<'_, Self>,
-    ) -> Option<gpui::AnyElement> {
-        let theme = &self.theme;
-        let k = chrome.k;
-        // The pill's tone is its status mark's. Working, at rest or finished, the slot's mark
-        // is the statement.
-        let status = Some(agent_mark_of(agent)).filter(|s| wears_pill(*s))?;
-        // The pill's words in their hue's text tone: amber for one waiting, red for a failure.
-        let s = &theme.surfaces;
-        let color = match status {
-            Status::NeedsYou => s.warn,
-            Status::Failed => s.error,
-            _ => s.text_muted,
-        };
-        let full = agent_status_text(agent);
-        // The word alone: what is asked is the navigator's line and the pointer's, not a
-        // second sentence in every header (a screen reader still hears it in full).
-        let label = agent_status_word(agent);
-        let ask = agent_ask_text(agent);
-        let item = tile.item;
-        // A terminal's agent waiting on the human is the one state worth a click: the badge
-        // itself goes to its prompt. No second "go" beside it — a click on the tile did the
-        // same. A thread tile answers in its own tray.
-        let waiting = session.filter(|_| needs_human(agent));
-        let ui_size = theme.typography.small() * k;
-        let pill = crate::kit::pill(theme, color, k)
-            .id("agent")
-            .debug_selector(move || format!("agent-{}", item.as_uuid()))
-            .role(if waiting.is_some() { Role::Button } else { Role::Status })
-            .aria_label(SharedString::from(full))
-            // The answer belongs to the agent's own prompt; the click only goes there.
-            .when(waiting.is_some(), |el| el.aria_description(SHOW_PROMPT))
-            .when_some(ask, |el, ask| {
-                let theme = std::rc::Rc::new(theme.clone());
-                crate::kit::hint_timing(el).tooltip(move |_window, cx| {
-                    let (ask, theme) = (ask.clone(), std::rc::Rc::clone(&theme));
-                    cx.new(|_| crate::kit::Hint::new(ask, "", theme)).into()
-                })
-            })
-            .min_w_0()
-            .max_w(px(ui_size * 22.0))
-            .child(
-                div().min_w_0().overflow_hidden().child(
-                    ChromeText::new(label, px(theme.typography.small()), k)
-                        .fill()
-                        .zooming(chrome.zooming),
-                ),
-            );
-        let pill = if let Some(session) = waiting {
-            tab_stop(
-                pill.cursor_pointer().hover(move |el| el.bg(hsla_alpha(color, alpha::TINT))),
-                theme.surfaces.focus,
-            )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)))
-        } else {
-            pill
-        };
-        Some(
-            div()
-                .id("badge")
-                .debug_selector(move || format!("badge-{}", item.as_uuid()))
-                .flex()
-                .min_w_0()
-                .items_center()
-                .child(pill)
-                .into_any_element(),
-        )
     }
 
     /// The badge for a long shell command that ended unwatched: its status and how long it

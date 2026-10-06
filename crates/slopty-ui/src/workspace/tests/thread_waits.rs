@@ -39,7 +39,7 @@ fn table(
     cx.run_until_parked();
 }
 
-/// A Codex thread waiting on an approval marks its navigator row, wears the header's pill,
+/// A Codex thread waiting on an approval marks its navigator row, ends its header with the glyph,
 /// counts on the bell and the Dock, lists under *Needs you* with what it asks, and its row there
 /// opens its tile. Answered, every one of them lets go.
 #[gpui::test]
@@ -65,8 +65,8 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
         assert_eq!(asks.route.item, Some(tile.item), "that leads to its tile");
         assert_eq!(asks.body, "Run cargo test", "what it asks, said plainly");
     });
-    let pill = leak(format!("agent-{}", tile.item.as_uuid()));
-    assert!(cx.debug_bounds(pill).is_some(), "the header's pill");
+    let glyph = leak(format!("status-{}", tile.item.as_uuid()));
+    assert!(cx.debug_bounds(glyph).is_some(), "the header's glyph");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
     cx.run_until_parked();

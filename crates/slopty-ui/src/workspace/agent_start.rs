@@ -326,7 +326,9 @@ impl WorkspaceView {
                             For::Agent => Box::new(NewAgentOn { agent, worker }),
                             For::Project => Box::new(NewProjectOn { agent, worker }),
                         };
-                        PaletteItem::new(&name, action, &[]).with_icon(Symbol::ServerRack)
+                        PaletteItem::new(&name, action, &[])
+                            .with_icon(self.machine_glyph(worker))
+                            .with_identity(slopty_client::groups::GroupKey::machine(worker))
                     })
                     .collect();
                 self.open_step(lines, PICK_MACHINE, window, cx);
@@ -397,8 +399,9 @@ impl WorkspaceView {
             let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
             let action = start(purpose, worker, agent, cwd.clone(), true);
             let shown = format!("{NEW_WORKTREE} {name}");
-            worktrees
-                .push(PaletteItem::new(&shown, action, &[]).with_icon(Symbol::ArrowTriangleBranch));
+            worktrees.push(
+                PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Branch),
+            );
             repos.push(repo);
         }
         let mut lines: Vec<PaletteItem> = folders

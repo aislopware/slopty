@@ -27,7 +27,7 @@ use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentBranch, Review};
+use slopty_proto::agent::AgentBranch;
 use slopty_proto::handoff::{EditFile, EditOutcome, HandoffEvent, HandoffId, OfferReason, Wary};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
@@ -123,27 +123,6 @@ impl Offer {
         let age = if age == "now" { "just now".to_owned() } else { format!("{age} ago") };
         format!("{why} \u{b7} {age}")
     }
-}
-
-/// The label of an agent's pull request chip: `#1234`, or `!1234` for a merge request.
-#[must_use]
-pub fn pr_label(pr: &slopty_proto::agent::PullRequest) -> String {
-    let mark = if pr.merge_request { '!' } else { '#' };
-    format!("{mark}{}", pr.number)
-}
-
-/// What a screen reader hears of the chip: "Pull request 1234, approved".
-#[must_use]
-pub fn pr_said(pr: &slopty_proto::agent::PullRequest) -> String {
-    let kind = if pr.merge_request { "Merge request" } else { "Pull request" };
-    let review = match pr.review {
-        Some(Review::Approved) => ", approved",
-        Some(Review::Pending) => ", waiting on review",
-        Some(Review::ChangesRequested) => ", changes requested",
-        Some(Review::Draft) => ", draft",
-        None => "",
-    };
-    format!("{kind} {}{review}", pr.number)
 }
 
 impl WorkspaceView {

@@ -15,8 +15,8 @@ use std::sync::{Arc, LazyLock};
 use gpui::SharedString;
 use parking_lot::RwLock;
 use slopty_platform::outline::{Outline, rasterize_outline};
-use slopty_proto::agent::Review;
 use slopty_proto::git::PullStanding;
+use slopty_proto::thread::wire::PullStands;
 use slopty_theme::{Rgb, Theme};
 
 use super::Kept;
@@ -82,14 +82,20 @@ impl GitGlyph {
         }
     }
 
-    /// An agent's pull request's glyph by its `review`: a draft's, else open.
+    /// A thread's pull request's glyph by where it `stands` as its worker's table says:
+    /// merged, closed, a draft, else open.
     #[must_use]
-    pub const fn of_review(review: Option<Review>) -> Self {
-        match review {
-            Some(Review::Draft) => Self::PullRequestDraft,
-            Some(Review::Approved | Review::Pending | Review::ChangesRequested) | None => {
-                Self::PullRequest
-            }
+    pub const fn of_stands(stands: PullStands) -> Self {
+        match stands {
+            PullStands::Merged => Self::Merge,
+            PullStands::Closed => Self::PullRequestClosed,
+            PullStands::Draft => Self::PullRequestDraft,
+            PullStands::Conflicted
+            | PullStands::ChecksFailed
+            | PullStands::ChangesRequested
+            | PullStands::Running
+            | PullStands::Waiting
+            | PullStands::Ready => Self::PullRequest,
         }
     }
 

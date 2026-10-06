@@ -40,7 +40,7 @@ pub use disclosure::Disclosure;
 pub use facts::{FactAt, FactsRow, MeasuredFacts, facts_row, wrap_facts};
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
-pub use identity::{identity_ink, machine_ink};
+pub use identity::{identity_ink, machine_ink, wears_identity};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use press::menu_press;
 pub use priority::{Dropped, Measured, Priority, PriorityRow, TitleFit, fit_row, priority_row};
@@ -1791,7 +1791,6 @@ mod tests {
             crate::workspace::RECONNECTING,
             crate::workspace::SESSION_ENDED,
             crate::workspace::CLOSE_TILE,
-            crate::workspace::FULLSCREEN_TILE,
             crate::workspace::NEW_AGENT,
             crate::workspace::NO_WORKERS,
             crate::workspace::NO_WORKERS_NEXT,
@@ -2600,6 +2599,37 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A machine's or a project's own colour goes on its glyph and nowhere else
+    /// (`docs/decisions/ui.md`, "A machine and a project wear their own colour"): the identity
+    /// hues are read only through [`identity_ink`] and [`machine_ink`], and those are called
+    /// only where a machine's or a project's glyph is drawn.
+    #[test]
+    fn identity_colour_stays_on_its_glyph() {
+        const GLYPHS: [&str; 8] = [
+            "slopty-ui/src/kit/identity.rs",
+            "slopty-ui/src/palette.rs",
+            "slopty-ui/src/workspace/navigator.rs",
+            "slopty-ui/src/workspace/tile.rs",
+            "slopty-ui/src/workspace/breadcrumb.rs",
+            "slopty-ui/src/workspace/strip.rs",
+            "slopty-ui/src/workspace/miniature.rs",
+            "slopty-ui/src/project/view.rs",
+        ];
+        let mut wrong = Vec::new();
+        for (file, line_no, line) in
+            ["slopty-ui/src", "slopty-app/src"].into_iter().flat_map(chrome_lines)
+        {
+            let code = line.split("//").next().unwrap_or_default();
+            let hues = code.contains("surfaces.identity") || code.contains("s.identity");
+            let ink = code.contains("identity_ink(") || code.contains("machine_ink(");
+            let mine = file.ends_with("slopty-ui/src/kit/identity.rs");
+            if (hues && !mine) || (ink && !GLYPHS.iter().any(|f| file.ends_with(f))) {
+                wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+            }
+        }
+        assert!(wrong.is_empty(), "an identity colour off its glyph:\n{}", wrong.join("\n"));
     }
 
     /// A row's lead handed the muted tone: two tiers under its title.

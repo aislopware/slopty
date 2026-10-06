@@ -14,7 +14,7 @@ use slopty_client::groups::GroupKey;
 use slopty_client::layout::{Layout, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
-use super::actions::{CloseItem, FullscreenTile, RenameItem};
+use super::actions::{CloseItem, FullscreenTile, ReloadPage, RenameItem};
 use super::faces::Face;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
@@ -46,6 +46,9 @@ pub(super) const PROJECT_MENU: &str = "Project";
 
 /// Copies where a tile is.
 pub(super) const COPY_PATH: &str = "Copy path";
+
+/// Loads a page tile's page again.
+pub(super) const RELOAD_PAGE: &str = "Reload page";
 
 /// Keys beside a row where there is a keyboard with a ⌘ key.
 const HINTS: bool = cfg!(target_os = "macos");
@@ -135,8 +138,13 @@ impl WorkspaceView {
         })
     }
 
-    /// `tile`'s rows: Open (from the navigator), Rename, Fullscreen, Move out of the column (from
-    /// a tab), Copy path where it has one, then Close and, from a tab, Close other tabs.
+    /// `tile`'s rows: Open (from the navigator), from its header an agent's other faces to show
+    /// and a page's reload, then Rename, Fullscreen, Move out of the column (from a tab), Copy
+    /// path where it has one, then Close and, from a tab, Close other tabs.
+    ///
+    /// The header holds no button at rest and touch has no hover, so its long press is where a
+    /// finger finds the face toggle and close; a page's reload is here and the palette's, as ⌘R
+    /// is the layout's.
     fn tile_entries(&self, tile: TileRef, pressed: Pressed, cx: &Context<Self>) -> Vec<MenuEntry> {
         let Some(item) = self.item(tile) else { return Vec::new() };
         let path = tile_path(&item.kind).or_else(|| self.cwd_of(item));
@@ -148,6 +156,34 @@ impl WorkspaceView {
                 None,
                 Rc::new(move |this, _w, cx| this.go_to_tile(tile, cx)),
             ));
+        }
+        if pressed == Pressed::Header {
+            if let ItemKind::Terminal { session } = item.kind {
+                let shown = self.tile_face(session);
+                let faces = self.faces_of(session);
+                for face in faces.into_iter().filter(|face| *face != shown) {
+                    rows.push((
+                        MenuGroup::Navigation,
+                        show_face(face),
+                        None,
+                        Rc::new(move |this, _w, cx| {
+                            this.focus_tile(tile, cx);
+                            this.set_face(session, face, cx);
+                        }),
+                    ));
+                }
+            }
+            if let ItemKind::Browser { .. } = item.kind {
+                rows.push((
+                    MenuGroup::Navigation,
+                    RELOAD_PAGE,
+                    None,
+                    Rc::new(move |this, window, cx| {
+                        this.focus_tile(tile, cx);
+                        this.reload_page(&ReloadPage, window, cx);
+                    }),
+                ));
+            }
         }
         rows.push((
             MenuGroup::Navigation,
@@ -219,26 +255,17 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// A phone's "…" leads with the focused tile's rows, which its header holds on a wider
-    /// screen: the agent's other faces to show, then its menu's rows.
+    /// A phone's "…" leads with the focused tile's rows, which its header's menu holds on a
+    /// wider screen: the agent's other faces to show, then the rest of that menu.
     pub(super) fn phone_tile_entries(&self, cx: &Context<Self>) -> Vec<MenuEntry> {
         let Some(tile) = self.focused() else { return Vec::new() };
-        let mut entries = Vec::new();
-        if let Some(ItemKind::Terminal { session }) = self.item(tile).map(|item| &item.kind) {
-            let session = *session;
-            let shown = self.tile_face(session);
-            for face in self.faces_of(session).into_iter().filter(|face| *face != shown) {
-                let run: Run = Rc::new(move |this, _w, cx| this.set_face(session, face, cx));
-                entries.push(Self::entry(MenuGroup::Tile, show_face(face), String::new(), run, cx));
-            }
-        }
-        entries.extend(self.tile_entries(tile, Pressed::Header, cx).into_iter().map(
-            |mut entry| {
+        self.tile_entries(tile, Pressed::Header, cx)
+            .into_iter()
+            .map(|mut entry| {
                 entry.group = MenuGroup::Tile;
                 entry
-            },
-        ));
-        entries
+            })
+            .collect()
     }
 
     /// A project's rows: a new shell in its clone, where it has one, and folding it.
@@ -302,7 +329,7 @@ impl WorkspaceView {
 }
 
 /// The row that shows `face` in its tile.
-const fn show_face(face: Face) -> &'static str {
+pub(super) const fn show_face(face: Face) -> &'static str {
     match face {
         Face::Thread => "Show thread",
         Face::Terminal => "Show terminal",
@@ -314,7 +341,7 @@ const fn show_face(face: Face) -> &'static str {
 /// whose changes it shows. A shell's or an agent's is where it works ([`WorkspaceView::cwd_of`]).
 fn tile_path(kind: &ItemKind) -> Option<String> {
     match kind {
-        ItemKind::File { path } | ItemKind::Folder { path } | ItemKind::Changes { path } => {
+        ItemKind::File { path } | ItemKind::Folder { path } | ItemKind::Changes { path, .. } => {
             Some(path.clone())
         }
         _ => None,

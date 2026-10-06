@@ -167,6 +167,13 @@ fn a_click_opens_a_row_and_the_header_goes_up(cx: &mut TestAppContext) {
     answer(&view, cx, &studio, "/w/docs", &listed("/w/docs", Vec::new()));
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Button", Some("Enclosing folder"))), "{nodes:#?}");
+    // Drawn under the pointer, as the header's controls are.
+    let hover = |cx: &mut VisualTestContext, tile: TileRef| {
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("its header");
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+    };
+    hover(cx, tile);
     let up = cx.debug_bounds(selector("up", tile.item)).expect("the way up");
     cx.simulate_click(up.center(), Modifiers::none());
     cx.run_until_parked();
@@ -176,6 +183,8 @@ fn a_click_opens_a_row_and_the_header_goes_up(cx: &mut TestAppContext) {
     answer(&view, cx, &studio, "/", &listed("/", vec![entry("w", FileKind::Dir)]));
     view.update_in(cx, |v, _w, cx| v.focus_tile(root, cx));
     cx.run_until_parked();
+    hover(cx, root);
+    assert!(cx.debug_bounds(selector("close", root.item)).is_some(), "its controls show");
     assert!(cx.debug_bounds(selector("up", root.item)).is_none(), "nothing above the root");
 }
 

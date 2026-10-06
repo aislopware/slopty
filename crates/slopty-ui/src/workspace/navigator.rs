@@ -85,6 +85,7 @@ use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::Rung;
+use slopty_proto::thread::wire::{PullSeen, PullStands};
 use slopty_theme::{Rgb, Theme, Typography, Variant, alpha};
 
 use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
@@ -100,7 +101,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
-use crate::icons::{IconSize, Mark, Status, Symbol, icon, status_mark, weight_beside};
+use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark, weight_beside};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -689,6 +690,17 @@ pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
     tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
 
+/// The ink a group's glyph wears: a project's, a repository's or a folder's own colour
+/// ([`kit::identity_ink`]), the same on every client, so a project is found by its colour in
+/// every list; any other grouping's (a branch, an agent, a label) the lead's tier.
+fn group_ink(theme: &Theme, key: &GroupKey) -> Rgb {
+    if kit::wears_identity(key) {
+        kit::identity_ink(theme, key)
+    } else {
+        theme.surfaces.text_secondary
+    }
+}
+
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
 fn disclosure(theme: &Theme, chevron: Symbol, ink: Rgb) -> Div {
     crate::icons::Drawn::disclosure(theme, chevron)
@@ -744,6 +756,8 @@ struct NavTile {
     progress: Option<Progress>,
     /// It was reopened after its shell was lost.
     restored: bool,
+    /// Its agent's branch's pull request, as its worker's table last read it.
+    pull: Option<PullSeen>,
 }
 
 impl NavTile {
@@ -753,7 +767,25 @@ impl NavTile {
             Some(progress) => has_figure(progress),
             None => false,
         };
-        !self.meta.is_empty() || self.changes.is_some() || self.restored || figure
+        !self.meta.is_empty()
+            || self.changes.is_some()
+            || self.restored
+            || figure
+            || self.pull.is_some()
+    }
+}
+
+/// The ink of a row's pull request glyph: its state's where it calls for the person (a check
+/// failed, changes asked for, a conflict) or it is ready to merge, the two a glance at the list
+/// is for; quiet otherwise, so a list of open requests is not a column of green.
+fn pull_ink(theme: &Theme, stands: PullStands) -> Rgb {
+    let s = &theme.surfaces;
+    if stands.needs_you() {
+        s.warn_fill
+    } else if stands == PullStands::Ready {
+        s.success_fill
+    } else {
+        s.text_muted
     }
 }
 
@@ -1636,6 +1668,7 @@ impl WorkspaceView {
                 changes,
                 progress,
                 restored,
+                pull: self.tile_pull(item).cloned(),
             };
             let class = attention(mark, unseen);
             match (own_group, at.and_then(|g| by_group.get_mut(g))) {
@@ -2601,7 +2634,7 @@ impl WorkspaceView {
         let rows = self.nav.list.rows.borrow();
         match rows.get(ix) {
             Some(NavRow::Heading { selector, text }) => {
-                heading(theme, selector.clone(), text.clone()).into_any_element()
+                heading(theme, selector.clone(), text.clone(), ix == 0).into_any_element()
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
             Some(NavRow::Space(space)) => self.space_row(space, cx),
@@ -2610,7 +2643,7 @@ impl WorkspaceView {
             Some(NavRow::Group(group)) => self.group_header(group, cx),
             Some(NavRow::Board(board)) => self.board_row(board, cx),
             Some(NavRow::Thread(thread)) => self.thread_row(thread, cx),
-            Some(NavRow::Earlier(count, open)) => self.earlier_heading(*count, *open, cx),
+            Some(NavRow::Earlier(count, open)) => self.earlier_heading(*count, *open, ix == 0, cx),
             Some(NavRow::EarlierMore(more)) => self.earlier_more(*more, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected.get(), cx),
             Some(NavRow::Vacant(key)) => {
@@ -2802,7 +2835,7 @@ impl WorkspaceView {
                 format!("nav-rail-{}", group.key),
                 words(name.clone(), None, rollup),
                 group_glyph(&group.fact),
-                s.text_secondary,
+                group_ink(theme, &group.key),
                 rollup,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -2821,10 +2854,7 @@ impl WorkspaceView {
                 return None;
             }
             let glyph = Mark::from(self.machine_glyph(key));
-            let ink = match health {
-                Some((Status::Away, _)) => s.text_muted,
-                _ => s.text_secondary,
-            };
+            let ink = kit::machine_ink(theme, key, matches!(health, Some((Status::Away, _))));
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
             let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup).on_click(
                 cx.listener(move |this, _ev, _w, cx| {
@@ -3099,19 +3129,21 @@ impl WorkspaceView {
             worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        // The machine by its form, beside its name at the name's weight; muted only while away.
+        // A group's head: the name at the section's strong weight, and the machine by its form
+        // beside it at the same weight, in its own colour; muted only while away.
+        let strong = theme.roles().section.weight;
         let machine = |ink: Rgb| {
             crate::palette::lead_slot_weighted(
                 theme,
                 self.machine_glyph(key),
-                weight_beside(Typography::MEDIUM_WEIGHT),
+                weight_beside(strong),
                 hsla(ink),
                 1.0,
             )
         };
         let lead = match worker.health {
-            None => machine(s.text_secondary).into_any_element(),
-            Some((Status::Away, _)) => machine(s.text_muted)
+            None => machine(kit::machine_ink(theme, key, false)).into_any_element(),
+            Some((Status::Away, _)) => machine(kit::machine_ink(theme, key, true))
                 .child(div().id("away").role(Role::Image).aria_label(Status::Away.label()))
                 .into_any_element(),
             Some((mark, _)) => {
@@ -3125,7 +3157,7 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+            .font_weight(gpui::FontWeight(strong))
             .text_color(hsla(s.text))
             .child(SharedString::from(worker.name.clone()));
         // Only when something is wrong with the worker itself: a line under its name, in the
@@ -3349,11 +3381,13 @@ impl WorkspaceView {
             group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
+        // The name at the section's strong weight, its glyph beside it at the same weight.
+        let strong = theme.roles().section.weight;
         let lead = crate::palette::lead_slot_weighted(
             theme,
             group.glyph,
-            weight_beside(Typography::MEDIUM_WEIGHT),
-            hsla(s.text_secondary),
+            weight_beside(strong),
+            hsla(group_ink(theme, &group.key)),
             1.0,
         );
         let name_key = key.clone();
@@ -3364,7 +3398,7 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+            .font_weight(gpui::FontWeight(strong))
             .text_color(hsla(s.text))
             .child(SharedString::from(group.name.clone()));
         let hover_group = SharedString::from(format!("nav-group-hover-{key}"));
@@ -3480,12 +3514,10 @@ impl WorkspaceView {
         let id = board.project.as_str().to_owned();
         let label = SharedString::from(format!("{BOARD}, {}", board.words));
         let state = board.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::lead_slot(
-            theme,
-            Symbol::RectangleSplit3x1,
-            hsla(s.text_secondary),
-            1.0,
-        );
+        // The board wears its project's own colour, as the project's head above it does.
+        let project_key = GroupKey::new(fact::PROJECT, board.project.as_str());
+        let ink = kit::identity_ink(theme, &project_key);
+        let lead = crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(ink), 1.0);
         let words_id = id.clone();
         let project = board.project.clone();
         row(
@@ -3568,11 +3600,17 @@ impl WorkspaceView {
 
     /// The fold over the threads at rest with no tile here, a heading the list ends with: its
     /// name, how many, and the chevron. A click opens or folds it.
-    fn earlier_heading(&self, count: usize, open: bool, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    fn earlier_heading(
+        &self,
+        count: usize,
+        open: bool,
+        first: bool,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
         let theme = self.nav_theme();
         let s = &theme.surfaces;
         let label = format!("{EARLIER}, {count}, {}", if open { "open" } else { "folded" });
-        heading(theme, "nav-earlier".into(), EARLIER.into())
+        heading(theme, "nav-earlier".into(), EARLIER.into(), first)
             .aria_label(SharedString::from(label))
             .aria_expanded(open)
             .flex()
@@ -3765,6 +3803,22 @@ impl WorkspaceView {
                     .at_once(),
             )
         });
+        // Its pull request before the changes: the glyph in its state's ink where the state
+        // calls for a look, its number quiet.
+        let pull = t.pull.as_ref().map(|pull| {
+            let ink = pull_ink(theme, pull.stands);
+            div()
+                .id(SharedString::from(format!("nav-pull-{id}")))
+                .debug_selector(move || format!("nav-pull-{id}"))
+                .role(Role::Label)
+                .aria_label(SharedString::from(pull.line()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs))
+                .child(icon(theme, GitGlyph::of_stands(pull.stands), IconSize::Inline, hsla(ink)))
+                .child(SharedString::from(format!("#{}", pull.number)))
+        });
         let line2 = t.two_lines().then(|| {
             meta(div(), theme)
                 .text_color(faded(s.text_muted))
@@ -3787,6 +3841,7 @@ impl WorkspaceView {
                 )
                 .children(restored)
                 .child(div().flex_1())
+                .children(pull)
                 .children(changes)
                 .children(figure)
                 .children(bar)
@@ -3852,10 +3907,16 @@ fn within(repo: &str, cwd: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
-/// A section's heading, as every list in the frame heads its sections: the quiet label.
-fn heading(theme: &Theme, selector: SharedString, text: SharedString) -> Stateful<Div> {
+/// A section's heading, as every list in the frame heads its sections: the quiet label, a large
+/// step below the rows before it unless it is the list's `first` row.
+fn heading(
+    theme: &Theme,
+    selector: SharedString,
+    text: SharedString,
+    first: bool,
+) -> Stateful<Div> {
     let id = selector.clone();
-    crate::palette::section_heading(theme, id.into(), text)
+    crate::palette::section_heading(theme, id.into(), text, first)
         .debug_selector(move || selector.to_string())
 }
 

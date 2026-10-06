@@ -530,13 +530,13 @@ impl WindowPicker {
     }
 
     /// A muted heading over one of the picker's sections.
-    fn heading(&self, section: Section) -> impl IntoElement {
+    fn heading(&self, section: Section, first: bool) -> impl IntoElement {
         let name = match section {
             Section::Sessions => "picker-heading-sessions",
             Section::Displays => "picker-heading-displays",
             Section::Windows => "picker-heading-windows",
         };
-        section_heading(&self.theme, name.into(), section.heading())
+        section_heading(&self.theme, name.into(), section.heading(), first)
             .debug_selector(|| name.to_owned())
     }
 
@@ -567,7 +567,7 @@ impl Render for WindowPicker {
         for (ix, row) in visible.into_iter().enumerate() {
             if grouped && section != Some(row.section) {
                 section = Some(row.section);
-                rows.push(self.heading(row.section).into_any_element());
+                rows.push(self.heading(row.section, rows.is_empty()).into_any_element());
             }
             if ix == chosen && std::mem::take(&mut self.reveal) {
                 // Its place among the list's children, headings counted.
@@ -577,7 +577,7 @@ impl Render for WindowPicker {
         }
         if self.loading {
             if grouped && section != Some(Section::Windows) {
-                rows.push(self.heading(Section::Windows).into_any_element());
+                rows.push(self.heading(Section::Windows, rows.is_empty()).into_any_element());
             }
             rows.push(self.loading_row(window, cx).into_any_element());
         }

@@ -8,7 +8,7 @@
 //! word on the wire. The hues sit at the status fills' lightness and keep 20 degrees clear of
 //! every status hue, so a machine's glyph never reads as a state.
 
-use slopty_client::groups::GroupKey;
+use slopty_client::groups::{GroupKey, fact};
 use slopty_client::layout::WorkerKey;
 use slopty_theme::{Rgb, Theme};
 
@@ -22,6 +22,16 @@ pub fn identity_ink(theme: &Theme, key: &GroupKey) -> Rgb {
         .and_then(|at| hues.get(at))
         .copied()
         .unwrap_or(theme.surfaces.text_secondary)
+}
+
+/// Whether the group `key` names wears its own colour.
+///
+/// A machine does, and so do a project, a repository and a folder, which the navigator lists as
+/// projects. A grouping by anything else (a branch, an agent, a label) is not a thing with an
+/// identity, and its glyph keeps the lead's tier.
+#[must_use]
+pub fn wears_identity(key: &GroupKey) -> bool {
+    matches!(key.fact(), fact::MACHINE | fact::PROJECT | fact::REPO | fact::FOLDER)
 }
 
 /// The colour of `worker`'s machine glyph: its identity hue, or muted while it is `away`, so a

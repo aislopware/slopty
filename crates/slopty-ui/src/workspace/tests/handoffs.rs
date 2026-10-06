@@ -2,11 +2,13 @@
 //! client tells the worker back (what it takes, which shell is in front of the person), and an
 //! agent's pull request on its tile.
 
-use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
+use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handoff::{
     EditFile, EditOutcome, HandoffCaps, HandoffEvent, HandoffReply, OfferReason, OpenUrl, Wary,
 };
+use slopty_proto::thread::ThreadState;
+use slopty_proto::thread::wire::{PullSeen, PullStands, ThreadRow};
 
 use super::*;
 
@@ -370,24 +372,59 @@ fn a_reconnect_reports_the_shell_in_front_again(cx: &mut TestAppContext) {
     assert_eq!(focus_reports(&sent), [(a, true)], "{sent:?}");
 }
 
-/// An agent's pull request rides on its tile's header, toned by its review and named for a
-/// screen reader, a click away from its page; its worktree beside it. Replaced by each word
-/// from the worker, and gone with the agent.
+/// `key`'s thread table as one thread whose TUI runs in `session`, its branch's pull request
+/// `pull`; `None` for a table with no thread at all.
+fn pulled(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    key: WorkerKey,
+    thread: Option<(&ThreadState, Option<PullSeen>)>,
+) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+
+    let rows = thread
+        .map(|(state, pull)| ThreadRow { pull, ..state.row(WallMs::ZERO) })
+        .into_iter()
+        .collect();
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// A pull request numbered `number`, standing `stands`.
+fn pull(number: u32, stands: PullStands) -> PullSeen {
+    PullSeen {
+        number,
+        url: format!("https://github.com/o/r/pull/{number}"),
+        title: "Fix the build".to_owned(),
+        stands,
+        failed: 0,
+        failed_first: None,
+        running: 0,
+    }
+}
+
+/// An agent's pull request rides on its tile's header as its thread's row says it, for every
+/// agent alike: its glyph by where it stands, its number, its line for a screen reader, a click
+/// away from its page; its worktree beside it; its navigator row says it as well. Replaced by
+/// each row from the worker, and gone with the agent.
 #[gpui::test]
 fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
     let tile = opens(&view, cx, &studio, session, studio.me, 1);
-    let working = AgentEvent { status: AgentStatus::Working, ..blocked(session) };
-    let branch = |review| AgentBranch {
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let worktree = AgentBranch {
         session,
-        pr: Some(PullRequest {
-            number: 1234,
-            url: "https://github.com/o/r/pull/1234".to_owned(),
-            review,
-            merge_request: false,
-        }),
+        pr: None,
         worktree: Some(Worktree {
             name: "fix-build".to_owned(),
             path: "/r/.claude/worktrees/fix-build".to_owned(),
@@ -396,36 +433,32 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
             original_branch: Some("main".to_owned()),
         }),
     };
-    view.update_in(cx, |v, _w, cx| v.agent_branch(branch(Some(Review::Approved)), cx));
+    view.update_in(cx, |v, _w, cx| v.agent_branch(worktree, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "no agent, no chip");
 
-    view.update_in(cx, |v, _w, cx| v.agent_event(working.clone(), cx));
-    cx.run_until_parked();
+    pulled(&view, cx, studio.key, Some((&state, Some(pull(1234, PullStands::Ready)))));
     let chip = cx.debug_bounds(selector("pr", tile.item)).expect("the chip");
     assert!(cx.debug_bounds(selector("worktree", tile.item)).is_some(), "the worktree");
     let said: Vec<String> = tree(cx).into_iter().filter_map(|n| n.label).collect();
-    assert!(said.iter().any(|l| l == "Pull request 1234, approved"), "{said:?}");
+    assert!(said.iter().any(|l| l == "#1234 is ready to merge"), "{said:?}");
+    let row = selector("nav-pull", tile.item);
+    assert!(cx.debug_bounds(row).is_some(), "its navigator row says it too");
     cx.simulate_click(chip.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(cx.opened_url().as_deref(), Some("https://github.com/o/r/pull/1234"));
 
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_branch(AgentBranch { session, pr: None, worktree: None }, cx);
-    });
-    cx.run_until_parked();
+    pulled(&view, cx, studio.key, Some((&state, None)));
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "the request went away");
 
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_branch(branch(Some(Review::ChangesRequested)), cx);
-        v.agent_event(AgentEvent { status: AgentStatus::None, ..working }, cx);
-    });
-    cx.run_until_parked();
+    pulled(&view, cx, studio.key, Some((&state, Some(pull(7, PullStands::ChecksFailed)))));
+    assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a new one");
+    pulled(&view, cx, studio.key, None);
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "gone with the agent");
 }
 
 /// A narrow tile keeps its title: beside a board a thread is about 312 pt wide, and there its
-/// pull request and worktree leave the header rather than squeeze the name to nothing.
+/// pull request and worktree leave the header rather than squeeze the name under a third of it.
 #[gpui::test]
 fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -433,17 +466,11 @@ fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppCon
     opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let session = SessionId::new();
     let tile = opens(&view, cx, &studio, session, studio.me, 2);
-    let pr = PullRequest {
-        number: 42,
-        url: "https://github.com/o/r/pull/42".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_branch(AgentBranch { session, pr: Some(pr), worktree: None }, cx);
-        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
-    });
-    cx.run_until_parked();
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    // A title long enough to want the room the request takes.
+    state.meta.title = "Fix the flaky parser tests in the build pipeline".to_owned();
+    pulled(&view, cx, studio.key, Some((&state, Some(pull(42, PullStands::Waiting)))));
     let width = |cx: &mut VisualTestContext| {
         f32::from(cx.debug_bounds(selector("title", tile.item)).expect("the header").size.width)
     };
@@ -472,9 +499,14 @@ fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppCon
     }
     let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
     assert!(f32::from(header.size.width) < 400.0, "narrowed: {header:?}");
-    assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "the request gives way");
+    // The title keeps a third of the header; the request stays only beside that, never over it.
     let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
-    assert!(f32::from(name.size.width) > 40.0, "the title keeps its room: {name:?}");
+    let inset = Theme::default().spacing.inset();
+    let floor = inset.mul_add(-2.0, f32::from(header.size.width)) / 3.0;
+    assert!(f32::from(name.size.width) >= floor - 0.5, "the title keeps its room: {name:?}");
+    if let Some(pr) = cx.debug_bounds(selector("pr", tile.item)) {
+        assert!(name.right() <= pr.left(), "beside the title, not over it: {name:?} {pr:?}");
+    }
 }
 
 /// A waiting tile closed while its save is refused is not left hanging: once it is closed for

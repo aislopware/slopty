@@ -142,8 +142,8 @@ pub(super) struct Drawn {
     /// builds and pointer moves ask.
     pub motion: Cell<bool>,
     /// Each tabbed column's tab row, by its first tile: where it is scrolled, and the tab it
-    /// last brought into view.
-    pub tab_rows: RefCell<HashMap<ItemId, (gpui::ScrollHandle, ItemId)>>,
+    /// last brought into view at the column width it last had.
+    pub tab_rows: RefCell<HashMap<ItemId, (gpui::ScrollHandle, ItemId, f32)>>,
 }
 
 /// What a body takes from its tile: its zoom, and what else its kind is laid out by.
@@ -1235,7 +1235,7 @@ impl WorkspaceView {
                     .child(crate::palette::lead_slot(
                         theme,
                         crate::icons::machine(w.caps.as_ref().map(|c| c.form)),
-                        hsla(s.text_secondary),
+                        hsla(kit::machine_ink(theme, key, w.link.is_none())),
                         1.0,
                     ))
                     .child(

@@ -51,7 +51,7 @@ impl WorkspaceView {
     pub(super) fn worktree_here(&self) -> Option<(WorkerKey, String)> {
         let tile = self.focused()?;
         let path = match &self.item(tile)?.kind {
-            ItemKind::Folder { path } | ItemKind::Changes { path } => path.clone(),
+            ItemKind::Folder { path } | ItemKind::Changes { path, .. } => path.clone(),
             ItemKind::Thread { thread } | ItemKind::Review { thread } => {
                 self.thread_place(*thread)?.cwd.clone()?
             }
@@ -126,7 +126,7 @@ impl WorkspaceView {
             .filter(|(worker, item)| {
                 *worker == key
                     && matches!(&item.kind,
-                        ItemKind::Folder { path } | ItemKind::Changes { path } if within(path, root))
+                        ItemKind::Folder { path } | ItemKind::Changes { path, .. } if within(path, root))
             })
             .map(|(_, item)| item.id)
             .collect();

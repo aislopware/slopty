@@ -194,7 +194,10 @@ impl WorkspaceView {
         let more = crumbs.checkouts.len() > 1;
         let machine = self.crumb_worker();
         if let Some(worker) = machine.clone() {
-            let glyph = self.focused().map_or(Symbol::ServerRack, |t| self.machine_glyph(t.worker));
+            let at = self.focused().map(|t| t.worker);
+            let glyph = at.map_or(Symbol::ServerRack, |w| self.machine_glyph(w));
+            let away = at.is_some_and(|w| self.away_state(w).is_some());
+            let tint = at.map_or(s.text_muted, |w| kit::machine_ink(theme, w, away));
             let label = SharedString::from(format!("on {worker}"));
             let segment = if more {
                 self.crumb(MenuKind::Checkouts, "crumb-worker", label, cx)
@@ -203,8 +206,7 @@ impl WorkspaceView {
             }
             .gap(px(spacing.xs))
             .child(
-                icon(theme, glyph, IconSize::Inline, hsla(s.text_muted))
-                    .size(px(theme.typography.icon())),
+                icon(theme, glyph, IconSize::Inline, hsla(tint)).size(px(theme.typography.icon())),
             )
             .child(SharedString::from(worker))
             .when(more, |el| el.child(self.chevron()));
