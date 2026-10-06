@@ -803,6 +803,92 @@ impl Tiling {
         self.new_tab(tile, home);
     }
 
+    /// Put `tile`, from wherever it is, in a new tab of `home`'s project at `index` in its
+    /// tabs as they stand now (a drop on the title strip between two tabs); past the end, last.
+    /// The project shows it, focused. A tile alone in its tab dropped beside that tab only
+    /// moves the tab.
+    pub fn new_tab_at(&mut self, tile: TileRef, home: &GroupKey, index: usize) -> TabId {
+        let p = self.project_or_add(home);
+        let before = self.projects.get(p).and_then(|x| x.tabs.get(index)).map(Tab::id);
+        if let Some(pos) = self.position(tile)
+            && let Some(tab) = self.tab_of(pos.tab)
+            && tab.tiles().eq([tile])
+            && pos.project == p
+        {
+            self.move_tab(pos.tab, index);
+            self.show_tab(pos.tab);
+            self.focus(tile);
+            return pos.tab;
+        }
+        self.remove(tile);
+        // Taking it out may have closed a tab and moved the projects up.
+        let p = self.project_or_add(home);
+        let (pane, id) = (self.pane_id(), self.tab_id());
+        if let Some(project) = self.projects.get_mut(p) {
+            let at = before
+                .and_then(|b| project.tabs.iter().position(|t| t.id() == b))
+                .unwrap_or(project.tabs.len());
+            project.tabs.insert(at, Tab::new(id, Pane::new(pane, tile)));
+            project.shown = at;
+        }
+        self.show_index(p);
+        id
+    }
+
+    /// Move tab `id` to `index` among its project's tabs as they stand now (a title tab dragged
+    /// along the strip): it goes before the tab there, else last. The tab each project shows
+    /// stays the same tab. Whether it moved.
+    pub fn move_tab(&mut self, id: TabId, index: usize) -> bool {
+        let Some((p, from)) = self.tab_place(id) else { return false };
+        let Some(project) = self.projects.get_mut(p) else { return false };
+        let before = project.tabs.get(index).map(Tab::id);
+        if before == Some(id) {
+            return false;
+        }
+        let shown = project.tabs.get(project.shown).map(Tab::id);
+        let tab = project.tabs.remove(from);
+        let at = before
+            .and_then(|b| project.tabs.iter().position(|t| t.id() == b))
+            .unwrap_or(project.tabs.len());
+        let moved = at != from;
+        project.tabs.insert(at, tab);
+        if let Some(shown) = shown.and_then(|s| project.tabs.iter().position(|t| t.id() == s)) {
+            project.shown = shown;
+        }
+        moved
+    }
+
+    /// Move tab `id` whole, its layout as it is, to the end of `home`'s project (a title tab
+    /// dropped on a project's row), and show it there. The project it left closes up behind it
+    /// as a closed tab's does. Nothing when it is in that project already.
+    pub fn move_tab_to_project(&mut self, id: TabId, home: &GroupKey) -> bool {
+        let Some((p, at)) = self.tab_place(id) else { return false };
+        if self.projects.get(p).is_some_and(|x| x.home == *home) {
+            return false;
+        }
+        let Some(project) = self.projects.get_mut(p) else { return false };
+        let tab = project.tabs.remove(at);
+        if project.shown > at || project.shown >= project.tabs.len() {
+            project.shown = project.shown.saturating_sub(1);
+        }
+        // The project it goes to is made, or found, before the one it left may go.
+        let to = self.project_or_add(home);
+        if let Some(target) = self.projects.get_mut(to) {
+            target.tabs.push(tab);
+            target.shown = target.tabs.len().saturating_sub(1);
+        }
+        let to_home = home.clone();
+        self.emptied(p);
+        let to = self.project_of(&to_home).unwrap_or(to);
+        self.show_index(to);
+        true
+    }
+
+    fn tab_of(&self, id: TabId) -> Option<&Tab> {
+        let (p, t) = self.tab_place(id)?;
+        self.projects.get(p)?.tabs.get(t)
+    }
+
     // ----- keeping -----------------------------------------------------------------------
 
     /// What a relaunch begins from.

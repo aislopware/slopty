@@ -550,6 +550,84 @@ fn a_tile_moves_to_another_project_on_purpose() {
     assert_eq!(atlas.tabs()[0].panes().count(), 1);
 }
 
+/// The tabs of the project on show, each by its first tile.
+fn strip(tiling: &Tiling) -> Vec<TileRef> {
+    tiling.shown_project().unwrap().tabs().iter().map(|t| t.tiles().next().unwrap()).collect()
+}
+
+/// A tile dropped on the title strip becomes a tab of its own between the two it fell
+/// between, shown and focused, and the pane it left closes up. One alone in its tab dropped on
+/// the strip only moves its tab; past the end it goes last.
+#[test]
+fn a_tile_dropped_on_the_strip_is_a_tab_where_it_fell() {
+    let mut tiling = mac();
+    tiling.new_tab(t(1), &home("atlas"));
+    tiling.new_tab(t(2), &home("atlas"));
+    tiling.split_focused(t(3), Side::Right, &home("atlas"));
+    assert_eq!(strip(&tiling), [t(1), t(2)]);
+
+    let id = tiling.new_tab_at(t(3), &home("atlas"), 1);
+    assert_eq!(strip(&tiling), [t(1), t(3), t(2)], "between the two");
+    assert_eq!(tiling.shown_tab().map(Tab::id), Some(id));
+    assert_eq!(tiling.focused(), Some(t(3)));
+    let left = tiling.position(t(2)).unwrap();
+    let tab = tiling.tab_place(left.tab).unwrap();
+    assert_eq!(tiling.projects()[tab.0].tabs()[tab.1].panes().count(), 1, "it closed up");
+
+    let alone = tiling.position(t(1)).unwrap().tab;
+    assert_eq!(tiling.new_tab_at(t(1), &home("atlas"), 9), alone, "its own tab, moved");
+    assert_eq!(strip(&tiling), [t(3), t(2), t(1)], "past the end: last");
+    assert_eq!(tiling.focused(), Some(t(1)));
+
+    // From another project: a new tab here, and its old project closes up behind it.
+    tiling.new_tab(t(4), &home("web"));
+    tiling.new_tab(t(5), &home("web"));
+    tiling.new_tab_at(t(4), &home("atlas"), 0);
+    assert_eq!(tiling.shown_project().map(Project::home), Some(&home("atlas")));
+    assert_eq!(strip(&tiling), [t(4), t(3), t(2), t(1)]);
+    let web = &tiling.projects()[tiling.project_of(&home("web")).unwrap()];
+    assert_eq!(web.tabs().len(), 1);
+}
+
+/// A title tab dragged along the strip goes before the tab it is dropped on, else last; the
+/// tab on show stays the one on show, and a drop on its own place moves nothing.
+#[test]
+fn a_title_tab_moves_along_the_strip() {
+    let mut tiling = mac();
+    for n in 1..=3 {
+        tiling.new_tab(t(n), &home("atlas"));
+    }
+    tiling.select_tab(1);
+    let first = tiling.position(t(1)).unwrap().tab;
+    assert!(!tiling.move_tab(first, 0), "its own place");
+    assert!(tiling.move_tab(first, 2), "before the third");
+    assert_eq!(strip(&tiling), [t(2), t(1), t(3)]);
+    assert_eq!(tiling.focused(), Some(t(2)), "the shown tab kept");
+    assert!(tiling.move_tab(first, 5));
+    assert_eq!(strip(&tiling), [t(2), t(3), t(1)], "past the end: last");
+    assert_eq!(tiling.focused(), Some(t(2)));
+}
+
+/// A title tab dropped on another project's row goes there whole, its layout kept, and shows;
+/// the project it left closes up, and goes when it was left with nothing and no name.
+#[test]
+fn a_title_tab_moves_whole_to_another_project() {
+    let mut tiling = mac();
+    tiling.new_tab(t(1), &home("atlas"));
+    tiling.split_focused(t(2), Side::Right, &home("atlas"));
+    tiling.new_tab(t(3), &home("web"));
+    let tab = tiling.position(t(1)).unwrap().tab;
+    assert!(!tiling.move_tab_to_project(tab, &home("atlas")), "already there");
+    tiling.show_tab(tab);
+    assert!(tiling.move_tab_to_project(tab, &home("web")));
+    assert_eq!(tiling.shown_project().map(Project::home), Some(&home("web")));
+    assert_eq!(tiling.shown_tab().map(Tab::id), Some(tab), "shown there");
+    assert_eq!(tiling.shown_tab().unwrap().panes().count(), 2, "its layout kept");
+    assert_eq!(strip(&tiling), [t(3), t(1)], "last");
+    assert_eq!(tiling.project_of(&home("atlas")), None, "emptied and unnamed: gone");
+    tiles_exactly(&tiling.frame().panes, tiling.area());
+}
+
 /// A close taken back puts the tile where it stood: a tab of its pane while that pane holds
 /// others, else a pane of its own in its tab; a tab since gone takes nothing.
 #[test]
