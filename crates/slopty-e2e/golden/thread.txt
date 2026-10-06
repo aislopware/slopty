@@ -38,7 +38,6 @@ Button │ Worked 23 s: Edited notes.txt · Read 3 files
 Article │ done
 Button │ Copy message
 Dialog │ Allow Bash?
-Button │ Review the changes
 Group │ Grants that last
 Button │ Always allow · /work; accept edits mode
 Button │ Deny
@@ -47,5 +46,6 @@ Button │ Allow
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
+Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send

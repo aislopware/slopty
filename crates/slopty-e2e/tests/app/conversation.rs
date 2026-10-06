@@ -244,7 +244,7 @@ async fn an_agents_questions_are_answered_in_the_thread() {
         .wait_for("the questions over the composer", STEP, |d| has(d, "RadioButton", "Unified"))
         .await
         .unwrap();
-    assert!(has(&dump, "TextInput", "Other"), "a field for one's own: {:#?}", dump.a11y);
+    assert!(has(&dump, "MultilineTextInput", "Other"), "a field for one's own: {:#?}", dump.a11y);
     let split = dump.a11y_node("RadioButton", Some("Split")).unwrap();
     assert!(split.focused, "the first answer has the keyboard: {:#?}", dump.a11y);
     golden(drv, &dir, "thread-questions").await;
@@ -261,8 +261,11 @@ async fn an_agents_questions_are_answered_in_the_thread() {
     drv.keys("cmd-enter").await.unwrap();
     drv.wait_for("the second question", STEP, |d| has(d, "CheckBox", "Terminal")).await.unwrap();
     click(drv, "CheckBox", "Terminal").await;
-    click(drv, "TextInput", "Other").await;
+    click(drv, "MultilineTextInput", "Other").await;
+    // A written answer takes several lines: ⇧↵ breaks the line, and it reaches the agent whole.
     drv.type_text("Logs").await.unwrap();
+    drv.keys("shift-enter").await.unwrap();
+    drv.type_text("and traces").await.unwrap();
     click(drv, "Button", "Submit").await;
 
     let answered = tokio::time::timeout(STEP, held.wait_with_output()).await.unwrap().unwrap();
@@ -271,7 +274,7 @@ async fn an_agents_questions_are_answered_in_the_thread() {
         decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"],
         json!({
             "Which layout should the review use?": "Unified",
-            "Which panes stay open?": "Terminal, Logs"
+            "Which panes stay open?": "Terminal, Logs\nand traces"
         }),
         "{decision:#}"
     );

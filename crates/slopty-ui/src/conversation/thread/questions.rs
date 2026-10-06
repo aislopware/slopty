@@ -190,8 +190,9 @@ impl Questions {
     pub fn element(&self, theme: &Theme, lead: Vec<AnyElement>) -> AnyElement {
         let state = &self.state;
         let spacing = theme.spacing;
-        // The field stands as tall as an answer's card at this size (the kit's own measure:
-        // 32 + 4), so one's own answer reads as one more answer, not a footnote.
+        // The field stands at least as tall as an answer's card at this size (the kit's own
+        // measure: 32 + 4), so one's own answer reads as one more answer, not a footnote, and
+        // grows with the lines written in it.
         let field = gpui::px(spacing.xxl + spacing.xs);
         let items = self.asked.iter().enumerate().map(|(ix, question)| {
             let name = SharedString::from(ix.to_string());
@@ -205,7 +206,7 @@ impl Questions {
                 .child(QuestionnaireTitle::new(state, name.clone()))
                 .children(answers)
                 .child(crate::kit::field(
-                    QuestionnaireInput::new(state, name.clone()).h(field),
+                    QuestionnaireInput::new(state, name.clone()).min_h(field),
                     theme,
                 ))
                 .child(QuestionnaireError::new(state, name))
