@@ -545,10 +545,10 @@ impl ThreadHub {
         }
     }
 
-    /// `thread`'s last review.
+    /// `thread`'s last review over `scope`.
     #[must_use]
-    pub fn review(&self, thread: ThreadId) -> Option<&Arc<Review>> {
-        self.threads.review(thread)
+    pub fn review(&self, thread: ThreadId, scope: &ReviewScope) -> Option<&Arc<Review>> {
+        self.threads.review(thread, scope)
     }
 
     // ----- git ---------------------------------------------------------------------------

@@ -2546,7 +2546,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Tools render at three levels.** Title, summary and full. An edit or write shows its
     syntax-coloured diff unasked, up to 12 lines, then "N more lines". Each side of a hunk is
     highlighted as its own text. The diff is unified in a tile narrower than 960 pt and side by
-    side from 960 pt up. Bash shows its command and output tail. A subagent is a card that
+    side from 960 pt up (superseded 2026-10-07: unified at every width, "A diff is unified, its
+    files stacked and folding"). Bash shows its command and output tail. A subagent is a card that
     opens its own thread under a bar that leads back, and the bar is named from the `Agent`
     call when the thread's origin has no description. A clipped text offers "Show all" and
     sends `Expand`.
@@ -7878,7 +7879,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     tile.
   - **The review reads its room.** The file list sits beside the diff in a wide tile, as it
     did from 720 pt. The diff shows both sides when what the list leaves is itself a wide room
-    (960 pt of tile at the default chrome, as before). Both edges now move with the chrome size,
+    (960 pt of tile at the default chrome, as before; superseded 2026-10-07, the diff is
+    unified at every width). Both edges now move with the chrome size,
     so no fourth room was needed.
   - **A Markdown file reads on the thread's measure.** The preview centres its lines on the
     thread's 736 pt column, so a wide tile keeps lines the eye can follow back, and a long
@@ -8841,3 +8843,68 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `conversation::thread::tests::steps::the_column_s_gutter_follows_the_tile_s_room`
     and `file::tests::reading::the_preview_keeps_to_the_reading_measure`, both read
     `COLUMN`.
+
+- ✅ **The latest turn ends in the files it changed** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` item 13, M18). What a turn changed was said only
+  by the composer's changes chip and, in a thread with no composer, a row of the tray. Keeping
+  or putting back a change meant opening the review tile. MonoCode ends the latest turn in a
+  card of its changed files, with Undo, Keep and Review.
+  - **The card** (`view/changes.rs`, `Row::Changes`) stands under the latest turn's answer
+    once the turn settled and its edits were made. Its head says "Changed 2 files" and the
+    lines added and removed, then Undo, Keep and Review. Under it are the files, the first
+    three and "Show N more files", each with its type's icon, its path and its lines. A file
+    opens the review, as Review does. The review tile stays the place for a whole review.
+  - **Keep and Undo act on the turn's own review** (`ReviewScope::Turn`), which the card asks
+    once as it shows where the worker snapshots the tree (`Cap::SNAPSHOTS`). Keep sends
+    `Intent::Keep`, and Undo `Intent::Revert`, for each file as that review showed it, with its
+    blobs as the stamp, so the worker refuses a file that changed since. Either done, the card
+    goes (`ThreadView::kept`). A refusal is said in the tray, as the review tile's are. Without
+    snapshots the card offers only Review.
+  - **The client keeps a review per scope** (`slopty_client::threads::Threads::review`). It kept
+    one per thread, so the card's turn review and an open review tile's scope would each have
+    replaced the other's. The review tile reads the scope it asked.
+  - Deleted: the tray's edits row (`edited_section`, `thread-edited`), which the card replaces
+    where the thread has no composer.
+  - Tests: `thread::tests::steps::the_latest_turn_ends_in_its_changed_files_which_keep_from_there`,
+    and `workspace::tests::thread_start::a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out`
+    now counts the review tile's asks apart from the card's.
+
+- ✅ **A diff is unified, its files stacked and folding** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` item 16, M22). The review tile laid a wide room's
+  lines out side by side and a narrow one's in a column, so the same change read two ways and
+  a comment's lines were picked by pairs in one and by lines in the other. MonoCode's diff is
+  unified only, its files stacked, each folding to its head, with a switch for all of them.
+  - **Unified at every width.** `Row::Pair`, the side-by-side row, `lines::Ink::split` and
+    `diff::pairs` are deleted. A comment's lines are always a run of the hunk's lines.
+  - **A file folds to its head.** The head's name, folder and counts are one button with a
+    chevron, which folds the file to its head or opens it. Keep and Revert stay beside it.
+    What is folded is held by path (`ReviewView::folded`), so it lasts through the review's
+    updates and a change of span. Picking a folded file in the list opens it.
+  - **One switch for every file**, at the scope bar's end beside the refresh, as MonoCode's
+    diff head has: "Collapse all files" while any is open, "Expand all files" once all are
+    folded. It never leaves the bar for "More". Two Tabler glyphs came in for it, `fold` and
+    `arrows-move-vertical`.
+  - **What was already there.** The files were stacked, a hunk had its own Keep and Revert
+    (the thread's stage of a hunk), and a comment was written inline under its lines.
+  - **Not yet:** folds of the unchanged lines between hunks that open. A hunk carries three
+    lines of context and nothing else of the file reaches the client, so a fold would need the
+    new side's text from the worker.
+  - Tests: `review::tests::the_diff_is_unified_at_every_width` and
+    `review::tests::files_fold_to_their_heads_one_or_all`.
+
+- ✅ **A question is answered from the keyboard, or skipped** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` item 18, M20). An agent's questions already
+  stood in the tray directly over the composer (item 8), one at a time, with ↑↓, a digit, ↵,
+  ⌘↵ and "Other". MonoCode's question form adds Home and End, says "Select all that apply"
+  under a question that takes several answers, and lets a question be skipped.
+  - **Home and End** go to the question's first answer and its last while an answer has the
+    keyboard (`questions::Questions::to_end`); the field for one's own answer keeps them for
+    its text.
+  - **"Select all that apply"** stands under a multi-choice question's text.
+  - **Skip** sits with the ways on. A question is now optional in the questionnaire, so Skip
+    can pass it over, and going on (↵, ⌘↵, Next, Submit) still needs an answer, since the
+    questionnaire holds an optional question left empty as unanswered. A question skipped is
+    answered with nothing, and the answered line says "Skipped".
+  - The composer stays under the question, as in MonoCode, so a message can be written in
+    place of an answer.
+  - Test: `thread::tests::questions::a_question_is_walked_by_home_and_end_and_skipped`.

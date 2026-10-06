@@ -52,6 +52,7 @@ ExclamationmarkTriangleFill          alert-triangle-filled.svg
 Eye                                  eye.svg
 Film                                 movie.svg
 Flag                                 flag.svg
+Fold                                 fold.svg
 Folder                               folder.svg
 FolderBadgePlus                      folder-plus.svg
 Gearshape                            settings.svg
@@ -87,6 +88,7 @@ Terminal                             terminal-2.svg
 TextBubble                           message.svg
 TextMagnifyingglass                  file-search.svg
 Trash                                trash.svg
+Unfold                               arrows-move-vertical.svg
 Waveform                             wave-sine.svg
 WifiSlash                            wifi-off.svg
 WrenchAndScrewdriver                 tool.svg

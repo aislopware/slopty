@@ -71,8 +71,9 @@ pub struct Threads {
     mirrors: HashMap<ThreadId, Mirror>,
     outbox: Outbox,
     blobs: Blobs,
-    /// Each open thread's last review.
-    reviews: HashMap<ThreadId, Arc<Review>>,
+    /// Each open thread's last review of each scope asked: a review tile's and the thread's
+    /// own card of its last turn's changes ask different scopes of one thread at once.
+    reviews: HashMap<ThreadId, Vec<Arc<Review>>>,
     /// Expansions asked for and not come yet.
     asked: HashSet<ContentRef>,
     /// Who wrote the lines of the files shown.
@@ -242,7 +243,9 @@ impl Threads {
             if !self.mirrors.contains_key(&thread) {
                 return (Changed::Nothing, Vec::new());
             }
-            self.reviews.insert(thread, Arc::from(review));
+            let held = self.reviews.entry(thread).or_default();
+            held.retain(|r| r.scope != review.scope);
+            held.push(Arc::from(review));
             return (Changed::Review, Vec::new());
         }
         let Some(mirror) = self.mirrors.get_mut(&thread) else {
@@ -303,10 +306,10 @@ impl Threads {
             .then_some(ClientMsg::Thread(ThreadRequest::Review { thread, scope }))
     }
 
-    /// The last review of `thread` that came.
+    /// The last review of `thread` over `scope` that came.
     #[must_use]
-    pub fn review(&self, thread: ThreadId) -> Option<&Arc<Review>> {
-        self.reviews.get(&thread)
+    pub fn review(&self, thread: ThreadId, scope: &ReviewScope) -> Option<&Arc<Review>> {
+        self.reviews.get(&thread)?.iter().find(|r| r.scope == *scope)
     }
 
     /// The whole of `content`, when it came.

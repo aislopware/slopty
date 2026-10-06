@@ -11,7 +11,7 @@ use gpui::{
 };
 use slopty_theme::{Rgb, Theme, alpha};
 
-use super::diff::{Block, Kind, Line, Pair, TAB_SPACES};
+use super::diff::{Block, Kind, Line, TAB_SPACES};
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight;
 
@@ -157,36 +157,6 @@ impl Ink<'_> {
             )
             .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
             .child(self.text(line))
-    }
-
-    /// One row side by side: the old line on the left, the new on the right.
-    #[must_use]
-    pub fn split(&self, (old, new): Pair<'_>) -> Div {
-        let spacing = self.theme.spacing;
-        let side = |line: Option<&Line>, number: fn(&Line) -> Option<u32>| {
-            let (wash, sign, sign_tone) =
-                line.map_or((None, " ", self.theme.surfaces.text_muted), |l| self.tone(l.kind));
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_start()
-                .gap(px(spacing.xs))
-                .px(px(spacing.sm))
-                .when_some(
-                    wash.filter(|_| line.is_some_and(|l| l.kind != Kind::Context)),
-                    gpui::Styled::bg,
-                )
-                .child(self.number(line.and_then(number)))
-                .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
-                .children(line.map(|l| self.text(l)))
-        };
-        div()
-            .w_full()
-            .flex()
-            .gap(px(spacing.xxs))
-            .child(side(old, |l| l.old))
-            .child(side(new, |l| l.new))
     }
 
     /// The divider before a hunk, on the band with no rule round it: the line git names it by

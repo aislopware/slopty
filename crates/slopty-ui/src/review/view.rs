@@ -1,8 +1,10 @@
 //! The review tile, drawn: the scope switch, the file list, the diff and its foot.
 //!
-//! The diff is one virtualized list of rows (a file's head, a hunk's head, a line or a pair of
-//! lines, a comment, the field a comment is written in), so a review of thousands of lines lays
-//! out only what is in view.
+//! The diff is one virtualized list of rows (a file's head, a hunk's head, a line, a comment,
+//! the field a comment is written in), so a review of thousands of lines lays out only what is
+//! in view. It is unified at every width, as `MonoCode`'s is: the files stacked, each folding
+//! to its head, and all of them at once from the scope bar (`docs/decisions/ui.md`, "A diff is
+//! unified, its files stacked and folding").
 //!
 //! A press on a line comments on it; a drag over a hunk's lines, or a shift-press past the
 //! line commented on, comments on the run. A comment carries the code it is on, quoted, so the
@@ -123,6 +125,15 @@ const SCOPE_PRIORITY: kit::Priority = kit::Priority(176);
 /// The scope bar's refresh, by its key in its row.
 const BAR_REFRESH: &str = "refresh";
 
+/// The scope bar's switch that folds or opens every file, by its key in its row.
+const BAR_FOLD: &str = "fold";
+
+/// The fold switch while a file is open.
+pub const COLLAPSE_ALL: &str = "Collapse all files";
+
+/// The fold switch while every file is folded.
+pub const EXPAND_ALL: &str = "Expand all files";
+
 /// The scope bar's way to the agent's own review.
 const BAR_AGENT: &str = "agent";
 
@@ -184,18 +195,16 @@ enum Row {
     Bare(usize),
     /// A hunk's head: where it is, keep and put back.
     Hunk(usize, usize),
-    /// A line of a hunk, in a column.
+    /// A line of a hunk.
     Line(usize, usize, usize),
-    /// A pair of lines of a hunk, side by side.
-    Pair(usize, usize, usize),
     /// A comment waiting, by its place among them.
     Comment(usize),
     /// The field a comment is written in.
     Draft,
 }
 
-/// Rows of one hunk picked for a comment, by their place among the hunk's rows (its lines in
-/// a column, its pairs side by side): where the press went down and where it is now.
+/// Lines of one hunk picked for a comment, by their place in the hunk: where the press went
+/// down and where it is now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Span {
     at: usize,
@@ -332,6 +341,8 @@ pub struct ReviewView {
     findings_open: bool,
     /// A file's own menu, while it is open.
     file_menu: Option<file_menu::FileMenu>,
+    /// The files folded to their heads, by path: kept across the review's updates and spans.
+    folded: HashSet<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -470,6 +481,7 @@ impl ReviewView {
             hunk_hovered: None,
             findings_open: false,
             file_menu: None,
+            folded: HashSet::new(),
             _subscriptions: vec![writing, hearing, watching],
         };
         if let Some(thread) = view.own() {
@@ -514,12 +526,8 @@ impl ReviewView {
 
     /// Draw in a tile `width` points wide at rest whose body is `height` points tall.
     pub fn set_layout(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
-        let split = self.split();
         self.width = width;
         self.height = height;
-        if split != self.split() {
-            self.rebuild();
-        }
         self.list.remeasure();
         cx.notify();
     }
@@ -548,12 +556,6 @@ impl ReviewView {
     /// The tile's room, from its width at rest: a wide one sets the file list beside the diff.
     fn room(&self) -> kit::Room {
         kit::Room::of(self.width, &self.theme)
-    }
-
-    /// Whether the diff shows both sides: when what the file list beside it leaves is a wide
-    /// room of its own (960 pt of tile at the default chrome), so neither side is cramped.
-    fn split(&self) -> bool {
-        kit::Room::of(self.width - LIST_WIDTH, &self.theme).is_wide()
     }
 
     // ----- what comes ------------------------------------------------------------------
@@ -711,7 +713,9 @@ impl ReviewView {
     fn reviewed(&mut self, cx: &mut Context<Self>) {
         let hub = self.hub.read(cx);
         let review = match (&self.reviewed, self.scope.wire_alone(self.branch.as_deref())) {
-            (Reviewed::Thread(thread), _) => hub.review(*thread).cloned(),
+            (Reviewed::Thread(thread), _) => {
+                self.asked.as_ref().and_then(|scope| hub.review(*thread, scope)).cloned()
+            }
             (Reviewed::Folder(path), Some(ReviewScope::WorkingTree(against))) => {
                 hub.git().repo(path).and_then(|r| r.changes.get(&against)).cloned()
             }
@@ -771,10 +775,12 @@ impl ReviewView {
     /// the comments under the lines they are on.
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
-        let split = self.split();
         for listed in self.model.listed() {
             let at = listed.at;
             rows.push(Row::File(at));
+            if self.model.file(at).is_some_and(|f| self.folded.contains(&f.path)) {
+                continue;
+            }
             let Some(blocks) = self.blocks.get(&at).filter(|b| !b.is_empty()) else {
                 rows.push(Row::Bare(at));
                 continue;
@@ -782,20 +788,10 @@ impl ReviewView {
             let path = self.model.file(at).map(|f| f.path.clone()).unwrap_or_default();
             for (hunk, block) in blocks.iter().enumerate() {
                 rows.push(Row::Hunk(at, hunk));
-                if split {
-                    for (ix, pair) in diff::pairs(block).iter().enumerate() {
-                        let row = Row::Pair(at, hunk, ix);
-                        rows.push(row);
-                        let lines: Vec<&Line> =
-                            <[_; 2]>::from(*pair).into_iter().flatten().collect();
-                        self.under(&mut rows, &path, &lines, row);
-                    }
-                } else {
-                    for (ix, line) in block.lines.iter().enumerate() {
-                        let row = Row::Line(at, hunk, ix);
-                        rows.push(row);
-                        self.under(&mut rows, &path, &[line], row);
-                    }
+                for (ix, line) in block.lines.iter().enumerate() {
+                    let row = Row::Line(at, hunk, ix);
+                    rows.push(row);
+                    self.under(&mut rows, &path, &[line], row);
                 }
             }
         }
@@ -1102,39 +1098,13 @@ impl ReviewView {
         cx.notify();
     }
 
-    /// The row of the diff that row `ix` of hunk `hunk` of the file at `at` is, in the layout
-    /// on show.
-    fn row_of(&self, at: usize, hunk: usize, ix: usize) -> Row {
-        if self.split() { Row::Pair(at, hunk, ix) } else { Row::Line(at, hunk, ix) }
-    }
-
-    /// The lines of `span`, in the diff's order: a pair's removed line before its added one,
-    /// a context line once.
+    /// The lines of `span`, in the diff's order.
     fn span_lines(&self, span: Span) -> Vec<Line> {
         let Some(block) = self.blocks.get(&span.at).and_then(|b| b.get(span.hunk)) else {
             return Vec::new();
         };
         let (lo, hi) = span.range();
-        if !self.split() {
-            return block.lines.get(lo..=hi).map(<[Line]>::to_vec).unwrap_or_default();
-        }
-        let (mut out, mut removed, mut added) = (Vec::new(), Vec::new(), Vec::new());
-        for pair in diff::pairs(block).get(lo..=hi).unwrap_or_default() {
-            match *pair {
-                (Some(old), Some(new)) if std::ptr::eq(old, new) => {
-                    out.append(&mut removed);
-                    out.append(&mut added);
-                    out.push(old.clone());
-                }
-                (old, new) => {
-                    removed.extend(old.cloned());
-                    added.extend(new.cloned());
-                }
-            }
-        }
-        out.append(&mut removed);
-        out.append(&mut added);
-        out
+        block.lines.get(lo..=hi).map(<[Line]>::to_vec).unwrap_or_default()
     }
 
     /// The pointer went down on row `ix` of a hunk: it is picked, and a drag picks on from it.
@@ -1205,7 +1175,7 @@ impl ReviewView {
             anchor: model::anchor(&first.text),
             quote: diff::quote(&path, &quoted),
             span,
-            after: self.row_of(span.at, span.hunk, span.range().1),
+            after: Row::Line(span.at, span.hunk, span.range().1),
         });
         let placeholder =
             if end > line { "Comment on these lines" } else { "Comment on this line" };
@@ -1243,7 +1213,39 @@ impl ReviewView {
         cx.notify();
     }
 
-    fn reveal(&self, at: usize) {
+    /// Fold the file at `at` to its head, or open it again.
+    fn toggle_file(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.model.file(at).map(|f| f.path.clone()) else { return };
+        if !self.folded.remove(&path) {
+            self.folded.insert(path);
+        }
+        self.rebuild();
+        cx.notify();
+    }
+
+    /// Whether every file is folded to its head: the scope bar's switch then opens them all.
+    pub(super) fn all_folded(&self) -> bool {
+        self.model.review().is_some_and(|r| r.files.iter().all(|f| self.folded.contains(&f.path)))
+    }
+
+    /// Fold every file to its head, or open every one while all are folded.
+    fn fold_all(&mut self, cx: &mut Context<Self>) {
+        if self.all_folded() {
+            self.folded.clear();
+        } else if let Some(review) = self.model.review() {
+            self.folded = review.files.iter().map(|f| f.path.clone()).collect();
+        }
+        self.rebuild();
+        cx.notify();
+    }
+
+    fn reveal(&mut self, at: usize, cx: &mut Context<Self>) {
+        if let Some(file) = self.model.file(at)
+            && self.folded.remove(&file.path)
+        {
+            self.rebuild();
+            cx.notify();
+        }
         if let Some(ix) = self.rows.iter().position(|r| *r == Row::File(at)) {
             self.list.scroll_to_reveal_item(ix);
         }
@@ -1371,6 +1373,9 @@ impl ReviewView {
             row = row.item(scope.label(), priority, tab);
         }
         let mut row = row.end();
+        if let Some(fold) = self.fold_part(cx) {
+            row = row.item(BAR_FOLD, kit::Priority::ESSENTIAL, fold);
+        }
         if let Some(refresh) = self.refresh_part(cx) {
             row = row.item(BAR_REFRESH, kit::Priority::ESSENTIAL, refresh);
         }
@@ -1465,6 +1470,22 @@ impl ReviewView {
             Reviewed::Thread(_) => &Scope::THREAD,
             Reviewed::Folder(_) => &Scope::FOLDER,
         }
+    }
+
+    /// The switch that folds every file to its head, or opens them all while all are folded,
+    /// as `MonoCode`'s diff has; none while there are no files.
+    fn fold_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.model.review().filter(|r| !r.files.is_empty())?;
+        let (glyph, words) = if self.all_folded() {
+            (Symbol::Unfold, EXPAND_ALL)
+        } else {
+            (Symbol::Fold, COLLAPSE_ALL)
+        };
+        Some(
+            kit::icon_button(&self.theme, "review-fold-all", glyph, words)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.fold_all(cx)))
+                .into_any_element(),
+        )
     }
 
     /// A folder's changes are read when asked, so they are read again from here; a thread's
@@ -1896,7 +1917,7 @@ impl ReviewView {
                             .child(SharedString::from(name)),
                     )
                     .children(kit::changes(theme, file.patch.added, file.patch.removed))
-                    .on_click(cx.listener(move |this, _ev, _w, _cx| this.reveal(at)));
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal(at, cx)));
                 Some(Self::file_menu_press(row, at, cx))
             }))
             .into_any_element()
@@ -1909,7 +1930,6 @@ impl ReviewView {
             Row::Bare(at) => self.bare(at),
             Row::Hunk(at, hunk) => self.hunk_head(at, hunk, cx),
             Row::Line(at, hunk, line) => self.line_row(at, hunk, line, cx),
-            Row::Pair(at, hunk, pair) => self.pair_row(at, hunk, pair, cx),
             Row::Comment(c) => self.comment_row(c, cx),
             Row::Draft => self.draft_row(),
         };
@@ -2001,6 +2021,53 @@ impl ReviewView {
             _ => None,
         };
         let radius = px(theme.radii.sm);
+        let open = !self.folded.contains(&file.path);
+        let side = px(theme.typography.icon());
+        let fold = crate::a11y::tab_stop(
+            div()
+                .id(("review-fold", at))
+                .debug_selector(move || format!("review-fold-{at}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(file.path.clone()))
+                .aria_expanded(open)
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.sm))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_file(at, cx))),
+            s.focus,
+        )
+        .child(kit::Disclosure::new(
+            format!("review-fold-chevron-{at}"),
+            open,
+            theme,
+            side,
+            hsla(s.text_muted),
+        ))
+        .child(
+            div()
+                .flex_none()
+                .max_w(gpui::relative(0.6))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(hsla(s.text))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .child(SharedString::from(name.to_owned())),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(dir.to_owned())),
+        )
+        .children(status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)))
+        .children(kit::changes(theme, file.patch.added, file.patch.removed));
         let head = div()
             .debug_selector(move || format!("review-head-row-{at}"))
             .w_full()
@@ -2012,29 +2079,7 @@ impl ReviewView {
             .map(|el| kit::inset(el, theme))
             .min_h(px(kit::Row::One.height(theme)))
             .text_size(px(theme.typography.small()))
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(gpui::relative(0.6))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_color(hsla(s.text))
-                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                    .child(SharedString::from(name.to_owned())),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(dir.to_owned())),
-            )
-            .children(status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)))
-            .children(kit::changes(theme, file.patch.added, file.patch.removed))
-            .child(div().flex_1())
+            .child(fold)
             .child(self.picks(at, None, "file", cx));
         div()
             .debug_selector(move || format!("review-head-{at}"))
@@ -2112,18 +2157,6 @@ impl ReviewView {
         let new = line.new.filter(|_| line.kind != Kind::Removed);
         let tag = self.author_tag((at, hunk, ix), new, cx);
         self.pickable(id, (at, hunk, ix), ink.unified_numbered(line), tag, cx)
-    }
-
-    fn pair_row(&self, at: usize, hunk: usize, ix: usize, cx: &Context<Self>) -> AnyElement {
-        let Some(block) = self.blocks.get(&at).and_then(|b| b.get(hunk)) else {
-            return div().into_any_element();
-        };
-        let pairs = diff::pairs(block);
-        let Some(pair) = pairs.get(ix).copied() else { return div().into_any_element() };
-        let ink = self.ink(at);
-        let id = format!("review-pair-{at}-{hunk}-{ix}");
-        let tag = self.author_tag((at, hunk, ix), pair.1.and_then(|l| l.new), cx);
-        self.pickable(id, (at, hunk, ix), ink.split(pair), tag, cx)
     }
 
     /// Row `ix` of hunk `hunk` of the file at `at`, drawn as `lines`, as a press and a drag

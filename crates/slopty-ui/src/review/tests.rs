@@ -171,19 +171,43 @@ fn the_tile_asks_for_the_last_turn_and_lists_the_source_first(cx: &mut TestAppCo
     assert!(lib < lock && lock < test, "the source, then the quiet ones by weight");
 }
 
-/// From 960 pt the lines pair side by side; under it they run in a column.
+/// The diff is unified at every width: no side-by-side rows, wide or narrow.
 #[gpui::test]
-fn the_sides_pair_from_960_points(cx: &mut TestAppContext) {
-    let (_view, _hub, _sent, cx) = tile(cx, 1200.0);
-    assert!(cx.debug_bounds("review-pair-1-0-0").is_some());
-    assert!(cx.debug_bounds("review-line-1-0-0").is_none());
+fn the_diff_is_unified_at_every_width(cx: &mut TestAppContext) {
+    for width in [1600.0, 800.0] {
+        let (_view, _hub, _sent, cx) = tile(cx, width);
+        assert!(cx.debug_bounds("review-line-1-0-0").is_some(), "{width}: one column");
+        assert!(cx.debug_bounds("review-pair-1-0-0").is_none(), "{width}: no pairs");
+    }
 }
 
+/// A file's head folds it to the head and opens it again; the scope bar's switch folds every
+/// file, then, with all folded, opens them all; picking a folded file in the list opens it.
 #[gpui::test]
-fn under_960_points_the_lines_run_in_a_column(cx: &mut TestAppContext) {
-    let (_view, _hub, _sent, cx) = tile(cx, 800.0);
-    assert!(cx.debug_bounds("review-line-1-0-0").is_some());
-    assert!(cx.debug_bounds("review-pair-1-0-0").is_none());
+fn files_fold_to_their_heads_one_or_all(cx: &mut TestAppContext) {
+    let (view, _hub, _sent, cx) = tile(cx, 1200.0);
+    let shown = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).is_some();
+    click(cx, "review-fold-1");
+    assert!(!shown(cx, "review-line-1-0-0"), "the file folded to its head");
+    assert!(shown(cx, "review-head-1") && shown(cx, "review-line-0-0-0"), "the rest stay");
+    click(cx, "review-fold-1");
+    assert!(shown(cx, "review-line-1-0-0"), "and opened again");
+
+    click(cx, "review-fold-all");
+    for line in ["review-line-0-0-0", "review-line-1-0-0", "review-line-2-0-0"] {
+        assert!(!shown(cx, line), "{line}: every file folded");
+    }
+    assert!(view.read_with(cx, |v, _| v.all_folded()));
+    click(cx, "review-file-2");
+    assert!(shown(cx, "review-line-2-0-0"), "the file picked in the list opened");
+    assert!(!view.read_with(cx, |v, _| v.all_folded()));
+
+    click(cx, "review-fold-all");
+    assert!(view.read_with(cx, |v, _| v.all_folded()), "one open: the switch folds all");
+    click(cx, "review-fold-all");
+    for line in ["review-line-0-0-0", "review-line-1-0-0", "review-line-2-0-0"] {
+        assert!(shown(cx, line), "{line}: every file open");
+    }
 }
 
 /// A review is one plane, as the status-colour study ruled (`docs/decisions/ui.md`, "Space,

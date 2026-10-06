@@ -1,6 +1,7 @@
-//! The tray on the composer's top edge: what waits on the person, the plan, the edits of the
-//! last turn, the messages waiting to go, and the work in the background, stacked and parted
-//! by hairlines.
+//! The tray on the composer's top edge: what waits on the person, the plan, the messages
+//! waiting to go, and the work in the background, stacked and parted by space. The edits of
+//! the last turn are the card under its answer (`view::changes`) and the composer's changes
+//! chip.
 //!
 //! A request whose call is on screen is answered on the call's own card ([`Placement`]); the
 //! tray carries a copy of it only while that card is scrolled away, with the way back to it,
@@ -21,9 +22,9 @@ use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AskId, BackgroundTask, Cap, Delivery, Drive, ItemId, Request};
 
 use super::composer::sentence;
-use super::{PEEK_LINES, ThreadView, ThreadViewEvent, tail};
+use super::{PEEK_LINES, ThreadView, tail};
 use crate::colors::hsla;
-use crate::conversation::thread::activity::{Activity, Asked, Edit, Edited, STEP_DONE};
+use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
 use crate::conversation::thread::hub::Refusal;
 use crate::conversation::thread::questions;
 use crate::conversation::thread::rows::Row;
@@ -274,11 +275,6 @@ impl ThreadView {
                 .collect(),
         );
         groups.push(bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect());
-        // Over the composer the edits are its changes chip: a row of their own here said them a
-        // second time.
-        if !bar.edited.is_empty() && !tucked {
-            groups.push(vec![self.edited_section(&bar.edited, cx)]);
-        }
         let paused = bar.queue.iter().any(|q| q.stopped).then(|| self.paused_line());
         groups.push(
             paused
@@ -878,41 +874,6 @@ impl ThreadView {
         div().w_full().flex().flex_col().child(head).children(steps).into_any_element()
     }
 
-    fn edited_section(&self, edited: &[Edited], cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let (added, removed) = edited_counts(edited);
-        let words = match edited {
-            [one] => format!("Edits \u{b7} {}", one.path.rsplit('/').next().unwrap_or(&one.path)),
-            many => format!("Edits \u{b7} {} files", many.len()),
-        };
-        let thread = self.thread;
-        self.section()
-            .id("thread-edited")
-            .debug_selector(|| "thread-edited".to_owned())
-            .role(Role::Group)
-            .aria_label(SharedString::from(words.clone()))
-            .text_color(hsla(s.text_secondary))
-            .child(Self::slot().child(self.icon(Symbol::Pencil, s.text_muted)))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(words)),
-            )
-            .when(added > 0 || removed > 0, |el| el.child(kit::separator(theme)))
-            .children(kit::changes(theme, added, removed))
-            .child(div().flex_1())
-            .child(self.button("thread-review", "Review", ButtonKind::Ghost).on_click(cx.listener(
-                move |_this, _ev, _w, cx| {
-                    cx.emit(ThreadViewEvent::Review { thread });
-                },
-            )))
-            .into_any_element()
-    }
-
     /// Over a queue the person's stop holds: it goes on with their next message.
     fn paused_line(&self) -> AnyElement {
         let s = self.theme.surfaces;
@@ -1260,11 +1221,6 @@ pub(super) fn tasks_words<'a>(tasks: impl IntoIterator<Item = &'a BackgroundTask
 
 /// What the way back to the agent's own prompt says: the terminal its prompt runs in, or the
 /// agent's own TUI opened on the thread; `None` where it has neither.
-/// The lines `edited` added and removed, in all.
-fn edited_counts(edited: &[Edited]) -> (u32, u32) {
-    edited.iter().fold((0, 0), |(a, r), e| (a.saturating_add(e.added), r.saturating_add(e.removed)))
-}
-
 fn release_words(meta: &slopty_proto::thread::ThreadMeta) -> Option<String> {
     let joins = meta.can(Cap::LIVE_TUI) && meta.drive.is(Drive::SHARED);
     if joins {

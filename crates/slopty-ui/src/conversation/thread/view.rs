@@ -30,7 +30,7 @@ use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
 use slopty_proto::git::GitOp;
-use slopty_proto::thread::wire::{Expanded, Intent};
+use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
 use slopty_proto::thread::{
     AgentId, AskId, Cap, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
     ThreadState, ToolCall, ToolDetail, TurnId, TurnState, kind,
@@ -111,6 +111,7 @@ const BUBBLE_CHARS: usize = 480;
 mod aside;
 mod asking;
 mod branch;
+mod changes;
 pub(crate) mod composer;
 mod composing;
 mod decision;
@@ -234,6 +235,12 @@ pub struct ThreadView {
     open: HashSet<TurnId>,
     /// Turns under way the reader folded.
     shut: HashSet<TurnId>,
+    /// Turns whose changed files the person kept or put back from their card.
+    kept: HashSet<TurnId>,
+    /// The turn whose review the changes card asked for.
+    changes_asked: Option<TurnId>,
+    /// The changes card lists every file, not only its first few.
+    changes_open: bool,
     /// Calls and reasoning the reader opened.
     items_open: HashSet<ItemId>,
     /// The picture open large over the thread.
@@ -422,6 +429,8 @@ impl ThreadView {
                 this.aside_started(*intent, *thread, cx);
             }
             HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
+            // The changes card reads its turn's review.
+            HubEvent::Review(t) if *t == this.thread => this.rebuild(cx),
             // A draft's place chip reads its folder's branches.
             HubEvent::Git(_) if this.draft.is_some() => cx.notify(),
             _ => {}
@@ -477,6 +486,9 @@ impl ThreadView {
             composer,
             open: HashSet::new(),
             shut: HashSet::new(),
+            kept: HashSet::new(),
+            changes_asked: None,
+            changes_open: false,
             items_open: HashSet::new(),
             viewing: None,
             groups: HashSet::new(),
@@ -732,13 +744,28 @@ impl ThreadView {
                     unshown: &unshown,
                     open: &self.open,
                     shut: &self.shut,
+                    kept: &self.kept,
                     groups: &self.groups,
                 });
                 let keys = built
                     .rows
                     .iter()
                     .zip(&built.spans)
-                    .map(|(row, span)| (row.key(), self.rev(row, span, mirror, state, &unshown)))
+                    .map(|(row, span)| {
+                        let rev = match row {
+                            // The card draws the turn's review once it comes, and all its
+                            // files once opened.
+                            Row::Changes { turn } => {
+                                let scope = ReviewScope::Turn(*turn);
+                                let files =
+                                    threads.review(self.thread, &scope).map(|r| r.files.len());
+                                let files = files.map_or(0, |n| (n as u64).saturating_add(1));
+                                files.wrapping_mul(2) | u64::from(self.changes_open)
+                            }
+                            _ => self.rev(row, span, mirror, state, &unshown),
+                        };
+                        (row.key(), rev)
+                    })
                     .collect();
                 (built, keys)
             }
@@ -749,6 +776,7 @@ impl ThreadView {
         self.spans = built.spans;
         self.keys = keys;
         self.run_clock(cx);
+        self.ask_changes(cx);
         if self.reveal_terminal && self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
             self.reveal_terminal = false;
             cx.emit(ThreadViewEvent::ShowTerminal);
@@ -794,6 +822,8 @@ impl ThreadView {
             }
             Row::Group { open, .. } => (span.len() as u64).wrapping_mul(2) | u64::from(*open),
             Row::Working { .. } => 0,
+            // Measured again by `rebuild`, which reads the turn's review.
+            Row::Changes { .. } => u64::from(self.changes_open),
             Row::Sending { intent } => unshown
                 .iter()
                 .find(|s| s.id == *intent)
@@ -1422,6 +1452,7 @@ impl ThreadView {
             }
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
+            Row::Changes { turn } => (self.changes_card(*turn, cx), spacing.md),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
         };
         // Turns group: the person's message opens one a large step under the last, and what

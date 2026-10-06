@@ -73,6 +73,12 @@ pub enum Row {
         /// The item.
         item: ItemId,
     },
+    /// The files the latest turn changed, under its answer once it settled: kept, put back
+    /// or reviewed from there.
+    Changes {
+        /// The turn.
+        turn: TurnId,
+    },
     /// The agent is on its turn.
     Working {
         /// The turn.
@@ -99,7 +105,7 @@ impl Row {
             | Self::Note { item }
             | Self::Group { first: item, .. } => item.hash(&mut h),
             Self::Fold { turn, part, .. } => (turn, part).hash(&mut h),
-            Self::Working { turn } => turn.hash(&mut h),
+            Self::Working { turn } | Self::Changes { turn } => turn.hash(&mut h),
             Self::Sending { intent } => intent.hash(&mut h),
         }
         h.finish()
@@ -117,6 +123,8 @@ pub struct Input<'a> {
     pub open: &'a HashSet<TurnId>,
     /// The turns under way the reader folded.
     pub shut: &'a HashSet<TurnId>,
+    /// The turns whose changed files the person kept or put back: their card is done.
+    pub kept: &'a HashSet<TurnId>,
     /// The groups of quiet calls the reader opened, by their first call.
     pub groups: &'a HashSet<ItemId>,
 }
@@ -172,6 +180,9 @@ pub fn build_spans(input: Input<'_>) -> Built {
         }
         at = run.end;
     }
+    if let Some(last) = state.last_turn().filter(|t| changed_files(state, t.id, input.kept)) {
+        built.push(Row::Changes { turn: last.id }, 0..0);
+    }
     if let Some(last) = under_way(state) {
         built.push(Row::Working { turn: last.id }, 0..0);
     }
@@ -189,6 +200,12 @@ pub fn build_spans(input: Input<'_>) -> Built {
 pub fn settled(state: &ThreadState, turn: TurnId) -> bool {
     let last = state.last_turn().map(|t| t.id);
     state.turn(turn).is_some_and(|t| !matches!(t.state, TurnState::Active) || Some(t.id) != last)
+}
+
+/// Whether the latest turn `turn` ends in a card of the files it changed: it settled, its
+/// edits were made, and the person has not kept or put them back yet.
+fn changed_files(state: &ThreadState, turn: TurnId, kept: &HashSet<TurnId>) -> bool {
+    settled(state, turn) && !kept.contains(&turn) && !super::activity::edited(state).is_empty()
 }
 
 /// The turn the agent is working on: the last one, while open and the agent says it works.
@@ -697,6 +714,7 @@ mod tests {
             unshown: &[],
             open: &open,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -714,6 +732,7 @@ mod tests {
             unshown: &[],
             open: &open,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert_eq!(
@@ -744,6 +763,7 @@ mod tests {
             unshown: &[],
             open: &open,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -767,6 +787,7 @@ mod tests {
             unshown: &[],
             open: &open,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert_eq!(
@@ -800,6 +821,7 @@ mod tests {
             unshown: &[],
             open: &none,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -825,6 +847,7 @@ mod tests {
             unshown: &[],
             open: &none,
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert!(rows.contains(&Row::Tool { item: id("p") }), "{rows:?}");
@@ -847,6 +870,7 @@ mod tests {
             unshown: &[],
             open: &HashSet::new(),
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -869,6 +893,7 @@ mod tests {
             unshown: &[],
             open: &HashSet::new(),
             shut: &shut,
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert_eq!(
@@ -889,6 +914,7 @@ mod tests {
             unshown: &[],
             open: &HashSet::new(),
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert!(
@@ -916,6 +942,7 @@ mod tests {
             unshown: &unshown,
             open: &HashSet::new(),
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert_eq!(rows, [Row::Sending { intent: now.id }, Row::Sending { intent: refused.id }]);
@@ -954,6 +981,7 @@ mod tests {
             unshown: &[],
             open: &HashSet::new(),
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -983,7 +1011,14 @@ mod tests {
         let mut groups = HashSet::new();
         let built = |groups: &HashSet<ItemId>| {
             let none = HashSet::new();
-            build(Input { state: &state, unshown: &[], open: &none, shut: &none, groups })
+            build(Input {
+                state: &state,
+                unshown: &[],
+                open: &none,
+                shut: &none,
+                kept: &HashSet::new(),
+                groups,
+            })
         };
         assert_eq!(
             built(&groups),
@@ -1018,6 +1053,7 @@ mod tests {
             unshown: &[],
             open: &HashSet::new(),
             shut: &HashSet::new(),
+            kept: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert!(rows.iter().any(|r| matches!(r, Row::Fold { .. })), "{rows:?}");

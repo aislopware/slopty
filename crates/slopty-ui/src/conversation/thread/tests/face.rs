@@ -967,7 +967,6 @@ fn a_requests_card_leaves_the_edits_to_the_thread(cx: &mut TestAppContext) {
     let chip = cx.debug_bounds("thread-changes").expect("the edits on the composer");
     assert!(!card.contains(&chip.center()), "outside the card");
     assert!(cx.debug_bounds("request-changes").is_none(), "nothing of them on the card");
-    assert!(cx.debug_bounds("thread-edited").is_none(), "nor in a row of the tray");
 
     let asked = super::asked(cx, &view);
     cx.simulate_click(chip.center(), Modifiers::none());
@@ -1009,7 +1008,6 @@ fn a_created_file_alone_still_opens_the_review(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
     let chip = cx.debug_bounds("thread-changes").expect("the way to the review");
-    assert!(cx.debug_bounds("thread-edited").is_none(), "said once, over the composer");
 
     let asked = super::asked(cx, &view);
     cx.simulate_click(chip.center(), Modifiers::none());

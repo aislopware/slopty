@@ -409,3 +409,80 @@ fn a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end(cx: &mut
     let after = view.read_with(cx, |v, _| v.keys().to_vec());
     assert_eq!(before, after, "the name opened the file, not the call");
 }
+
+/// The latest turn ends in the files it changed: a card under its answer, its count and
+/// lines, and a way to the review. With the turn's review come, Keep takes each file into what
+/// the person has kept, as the review showed it, and the card goes.
+#[gpui::test]
+fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut TestAppContext) {
+    use slopty_proto::thread::detail::EditDetail;
+    use slopty_proto::thread::wire::{FileDiff, Intent, Pick, Review, ReviewScope, ThreadFrame};
+    use slopty_proto::thread::{Cap, Patch};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps.push(Cap::named(Cap::SNAPSHOTS));
+    state.turns = vec![turn(1, TurnState::Complete)];
+    let patch = Patch { added: 2, removed: 1, ..Patch::default() };
+    let edit = ToolDetail::Edit(EditDetail {
+        path: "/w/src/a.rs".to_owned(),
+        edits: 1,
+        replace_all: false,
+        patch: patch.clone(),
+    });
+    state.items = vec![
+        user("u", 1),
+        call("e", 1, kind::EDIT, Some(edit), None),
+        item("a", 1, ItemBody::Text(Clipped::whole("Done."))),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let card = "Changed 1 file, 2 added, 1 removed";
+    assert!(tree.iter().any(|n| n.is("Group", Some(card))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Button", Some("Review src/a.rs"))), "{tree:#?}");
+    assert!(cx.debug_bounds("changes-keep").is_none(), "no Keep before the turn's review");
+    let asked: Vec<ReviewScope> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Review { scope, .. }) => Some(scope.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, [ReviewScope::Turn(TurnId(1))], "the turn's own review, once");
+
+    let review = Review {
+        scope: ReviewScope::Turn(TurnId(1)),
+        from: None,
+        to: None,
+        files: vec![FileDiff {
+            path: "src/a.rs".to_owned(),
+            from: Some("old".to_owned()),
+            to: Some("new".to_owned()),
+            binary: false,
+            patch,
+        }],
+        absent: None,
+    };
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(review)), cx));
+    cx.run_until_parked();
+    let keep = cx.debug_bounds("changes-keep").expect("Keep, once the review came").center();
+    assert!(cx.debug_bounds("changes-undo").is_some(), "and Undo");
+    cx.simulate_click(keep, Modifiers::none());
+    cx.run_until_parked();
+    let kept: Vec<Intent> = super::intents(&sent);
+    let pick = Pick {
+        path: "src/a.rs".to_owned(),
+        from: Some("old".to_owned()),
+        stamp: Some("new".to_owned()),
+        hunks: Vec::new(),
+    };
+    assert_eq!(kept, [Intent::Keep(pick)], "each file as the review showed it");
+    let rows = view.read_with(cx, |v, _| v.rows().to_vec());
+    assert!(!rows.iter().any(|r| matches!(r, Row::Changes { .. })), "the card goes: {rows:?}");
+}

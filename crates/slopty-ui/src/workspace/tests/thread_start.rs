@@ -1827,7 +1827,11 @@ fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppC
             .drain()
             .into_iter()
             .filter_map(|m| match m {
-                ClientMsg::Thread(ThreadRequest::Review { thread: t, scope }) if t == thread => {
+                // The thread's own card of its last turn's changes asks its turn; the review
+                // tile's asks are the rest.
+                ClientMsg::Thread(ThreadRequest::Review { thread: t, scope })
+                    if t == thread && !matches!(scope, ReviewScope::Turn(_)) =>
+                {
                     Some(scope)
                 }
                 _ => None,

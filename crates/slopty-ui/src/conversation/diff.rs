@@ -322,43 +322,6 @@ pub fn detab(text: &str, spans: Option<&[Span]>) -> (String, Option<Vec<Span>>) 
     (out, spans)
 }
 
-/// One row of a side-by-side diff: the old line on the left, the new on the right.
-pub type Pair<'a> = (Option<&'a Line>, Option<&'a Line>);
-
-/// A block's lines paired for side by side: context beside itself, a run of removals beside
-/// the run of additions that follows it, row for row, the shorter side padded.
-#[must_use]
-pub fn pairs(block: &Block) -> Vec<Pair<'_>> {
-    fn flush<'a>(out: &mut Vec<Pair<'a>>, removed: &mut Vec<&'a Line>, added: &mut Vec<&'a Line>) {
-        let rows = removed.len().max(added.len());
-        for ix in 0..rows {
-            out.push((removed.get(ix).copied(), added.get(ix).copied()));
-        }
-        removed.clear();
-        added.clear();
-    }
-    let mut out = Vec::with_capacity(block.lines.len());
-    let mut removed: Vec<&Line> = Vec::new();
-    let mut added: Vec<&Line> = Vec::new();
-    for line in &block.lines {
-        match line.kind {
-            Kind::Removed => {
-                if !added.is_empty() {
-                    flush(&mut out, &mut removed, &mut added);
-                }
-                removed.push(line);
-            }
-            Kind::Added => added.push(line),
-            Kind::Context => {
-                flush(&mut out, &mut removed, &mut added);
-                out.push((Some(line), Some(line)));
-            }
-        }
-    }
-    flush(&mut out, &mut removed, &mut added);
-    out
-}
-
 /// Lines of a diff quoted into a message: where they are, then the lines as a fenced diff.
 ///
 /// Where they are is "In `src/x.rs` lines 12–18:", by the new file's numbers, the old file's
@@ -450,28 +413,6 @@ mod tests {
         let removed = blocks[0].lines.iter().find(|l| l.kind == Kind::Removed).unwrap();
         assert!(
             removed.spans.as_ref().unwrap().iter().any(|s| s.token == highlight::Token::String)
-        );
-    }
-
-    /// Side by side, a removal sits beside the addition that replaced it and context beside
-    /// itself; an uneven run pads the shorter side.
-    #[test]
-    fn a_removal_pairs_with_its_replacement() {
-        let patch = hunk(&[" a", "-b", "-c", "+B", " d", "+e"]);
-        let blocks = blocks("x.txt", &patch);
-        let rows: Vec<(Option<&str>, Option<&str>)> = pairs(&blocks[0])
-            .into_iter()
-            .map(|(l, r)| (l.map(|l| l.text.as_str()), r.map(|r| r.text.as_str())))
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                (Some("a"), Some("a")),
-                (Some("b"), Some("B")),
-                (Some("c"), None),
-                (Some("d"), Some("d")),
-                (None, Some("e")),
-            ]
         );
     }
 

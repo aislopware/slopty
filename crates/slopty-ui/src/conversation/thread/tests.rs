@@ -551,6 +551,7 @@ fn timing_of_the_thread_path() {
             unshown: &[],
             open: &open,
             shut: &shut,
+            kept: &shut,
             groups: &groups,
         })));
     });
@@ -562,6 +563,7 @@ fn timing_of_the_thread_path() {
             unshown: &[],
             open: &all,
             shut: &shut,
+            kept: &shut,
             groups: &groups,
         })));
     });
