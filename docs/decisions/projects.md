@@ -2078,3 +2078,42 @@ follow-up)
   - It reads the worktree, not the thread, so it opens whether or not the agent runs or has a
     tile here. A second "Review" goes to the tile already open.
   - Test: `workspace::tests::projects::a_finished_task_is_reviewed_from_the_board`.
+
+- ✅ **A new worktree runs the repository's setup** (2026-10-06,
+  `.research/worktree-setup-2026-10-06.md`, readiness R4's second half). A fresh worktree has
+  the tracked files and what `.worktreeinclude` copies, but no `node_modules`, no generated
+  code and no local database, so an agent's first minutes went on setting up what the person
+  had already written a setup for, in another tool's file.
+  - **Read, never a file of our own.** No setup file is shared between tools. The worktree's
+    own checkout is read for the first of `setup::SOURCES` whose setup is not empty:
+    `.conductor/settings.toml` (`[scripts] setup`), `conductor.json` (`scripts.setup`),
+    `.codex/environments/environment.toml` (`[setup] script`), `.cursor/worktrees.json`
+    (`setup-worktree-unix`, else `setup-worktree`: commands, or a script under `.cursor/`),
+    `.superset/config.json` (`setup`), `.superset/setup.sh`, then `t3.json` (the scripts marked
+    `runOnWorktreeCreate`). The Codex app writes an empty script by default, so empty never
+    counts. Sources are never merged. A file that does not parse is passed over. Orca's
+    `orca.yaml`, the rarest, is not read: it would take a YAML parser for one tool.
+  - **How it runs.** After `.worktreeinclude`'s copies, in the worktree, with stdin closed:
+    the person's login shell, interactive (their `PATH` and toolchains, as project scripts and
+    verifiers), then `bash -e` (the shell those files are written for), so the first command
+    that fails stops it. A list of commands is joined with `&&`. It is told its places as
+    `SLOPTY_ROOT_PATH`, `_WORKSPACE_PATH`, `_WORKSPACE_NAME` and `_DEFAULT_BRANCH`, the same under
+    `CONDUCTOR_` (which Orca copies), and its own tool's names (`ROOT_WORKTREE_PATH`,
+    `SUPERSET_*`, `T3CODE_*`). It has no timeout, as none of those tools has one; its process
+    group goes when the start is dropped.
+  - **Once, and only in a worktree Slopty made.** A new worktree's git directory holds
+    `slopty-setup-pending` until its setup succeeds or is passed over, so a worktree made
+    another way, or one reopened after its setup, starts at once. A start sent again while the
+    setup runs (after a reconnect) waits on the worktree's lock rather than running it twice.
+  - **It holds the start.** Nothing starts in the worktree until the setup succeeds: a
+    thread, a terminal opened in a worktree, a spawned agent, a task's thread. A failure keeps
+    the worktree. A client's start answers `Outcome::SetupFailed { setup, code }` with where
+    the setup came from and its last `Setup::TAIL` lines. While it runs, the client is sent
+    `WorkerMsg::SettingUp` with the same, a few times a second at most. Starting again runs it
+    again; `NewWorktree::setup` false starts without it, for good. An orchestrated start fails
+    with the same words and lines, for the board and the orchestrator to read.
+  - Tests: `repo::setup` (each tool's form and the order, the environment, output as a
+    terminal last drew it, `bash -e` in the worktree stopping at its first failure), and
+    `repo::worktrees::a_new_worktree_runs_its_setup_once_it_succeeds` (a failure kept and run
+    again, a success not rerun, a pass-over for good). The goldens `outcome_setup_failed` and
+    `link_worker_setting_up`. The start tile's side is still to come.

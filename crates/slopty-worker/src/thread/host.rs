@@ -746,6 +746,12 @@ impl Host {
                 let held = PendingState::Held { reason: format!("Its agent cannot {}", cap.0) };
                 set_scheduled(&mut inner, thread, intent, |p| p.state = held);
             }
+            Outcome::SetupFailed { setup, .. } => {
+                let reason = format!("Its setup from {} failed", setup.from);
+                set_scheduled(&mut inner, thread, intent, |p| {
+                    p.state = PendingState::Held { reason }
+                });
+            }
         }
     }
 

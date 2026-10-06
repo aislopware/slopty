@@ -18,7 +18,7 @@ mod golden_thread {
     use slopty_proto::thread::wire::{
         AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, NewWorktree, Outcome,
         Page, PastSession, PastSessions, Pick, PromptHit, PullSeen, PullStands, Review,
-        ReviewScope, Start, TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
+        ReviewScope, Setup, Start, TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
@@ -478,6 +478,16 @@ mod golden_thread {
             }),
         );
         snap("outcome_unsupported", &done(Outcome::Unsupported { cap: Cap::named(Cap::SET_MODE) }));
+        snap(
+            "outcome_setup_failed",
+            &done(Outcome::SetupFailed {
+                setup: Setup {
+                    from: "conductor.json".to_owned(),
+                    tail: vec!["bun install".to_owned(), "error: lockfile had changes".to_owned()],
+                },
+                code: Some(1),
+            }),
+        );
     }
 
     #[test]
@@ -872,6 +882,16 @@ mod golden_thread {
         snap(
             "link_worker_intent_done",
             &WorkerMsg::IntentDone(IntentDone { id: intent(), outcome: Outcome::Accepted }),
+        );
+        snap(
+            "link_worker_setting_up",
+            &WorkerMsg::SettingUp {
+                id: intent(),
+                setup: Setup {
+                    from: ".cursor/worktrees.json".to_owned(),
+                    tail: vec!["Resolving packages".to_owned()],
+                },
+            },
         );
         snap(
             "link_worker_sessions",

@@ -1637,7 +1637,7 @@ impl Hub {
             Runner::Claude { prompt, mut args } => {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| {
                     args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
-                    NewWorktree { name, base: Some(base) }
+                    NewWorktree { name, base: Some(base), setup: true }
                 });
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
                 let agent = AgentKind::ClaudeCode;
@@ -1681,14 +1681,18 @@ impl Hub {
                     worktree: worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                         name,
                         base: Some(base),
+                        setup: true,
                     }),
                 };
                 (open, None)
             }
             // Its adapter gives it Slopty's tools and its role through the agent's own doors.
             Runner::Agent { agent, prompt, model, args } => {
-                let worktree = worktree
-                    .map(|Worktree::Worker { name, base }| NewWorktree { name, base: Some(base) });
+                let worktree = worktree.map(|Worktree::Worker { name, base }| NewWorktree {
+                    name,
+                    base: Some(base),
+                    setup: true,
+                });
                 let start = Start {
                     agent,
                     cwd,

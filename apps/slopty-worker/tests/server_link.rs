@@ -1208,6 +1208,7 @@ mod tests {
             worktree: Some(NewWorktree {
                 name: "slopty-demo-1".to_owned(),
                 base: Some("main".to_owned()),
+                setup: true,
             }),
         };
         let opened_in = async || {

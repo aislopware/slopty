@@ -328,6 +328,14 @@ pub enum WorkerMsg {
     Threads(thread::wire::TableFrame),
     /// How an intent this client sent went (`ClientMsg::Thread`'s `Intent` and `Start`).
     IntentDone(thread::wire::IntentDone),
+    /// A `Start` this client sent waits on its new worktree's setup, which has said this so
+    /// far; sent again as it goes, a few times a second at most, until its `IntentDone`.
+    SettingUp {
+        /// The start.
+        id: thread::IntentId,
+        /// Where the setup came from, and its last lines.
+        setup: thread::wire::Setup,
+    },
     /// An agent's past sessions in a folder (`ClientMsg::Thread`'s `Sessions`).
     Sessions(thread::wire::PastSessions),
     /// The answer to `ClientMsg::FolderPage`.
@@ -388,6 +396,7 @@ impl WorkerMsg {
             Self::AgentBranch(_) => "AgentBranch",
             Self::Threads(_) => "Threads",
             Self::IntentDone(_) => "IntentDone",
+            Self::SettingUp { .. } => "SettingUp",
             Self::Sessions(_) => "Sessions",
             Self::FolderPage { .. } => "FolderPage",
             Self::FsDone { .. } => "FsDone",

@@ -18,7 +18,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Start, TableFrame,
+    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Setup, Start, TableFrame,
     ThreadFrame, ThreadHits, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
@@ -574,13 +574,23 @@ impl Following {
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
             // An agent is looked for and starts, in a terminal or not, in the worktree it
-            // names once that is made: on a task of its own.
+            // names once that is made and set up, the setup said as it goes: on a task of its
+            // own.
             ThreadRequest::Start { id, mut start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
                 let out = at.out.clone();
                 at.tasks.spawn(async move {
-                    let outcome = match worktrees::enter(&mut start).await {
+                    // What a setup says is drawn over again, so one lost to a full link is not
+                    // missed.
+                    let said = |setup: &Setup| {
+                        let msg = WorkerMsg::SettingUp { id, setup: setup.clone() };
+                        let _full = out.try_send(msg);
+                    };
+                    let outcome = match worktrees::enter(&mut start, &said).await {
                         Ok(_) => begin(&threads, id, start).await,
+                        Err(worktrees::Failed::Setup(failed)) => {
+                            Outcome::SetupFailed { setup: failed.setup, code: failed.code }
+                        }
                         Err(failed) => refused(failed.to_string()),
                     };
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;

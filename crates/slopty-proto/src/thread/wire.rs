@@ -273,14 +273,34 @@ pub struct NewWorktree {
     /// from `origin`'s copy when that holds every commit of the clone's own, so the worktree
     /// is current without losing work not yet pushed.
     pub base: Option<String>,
+    /// Whether the repository's own setup runs in it before anything starts there, once: the
+    /// first setup file of another tool's that the worktree's checkout has (`conductor.json`,
+    /// `.cursor/worktrees.json` and the like). `false` starts without it, as the person asked
+    /// after a setup failed.
+    pub setup: bool,
 }
 
 impl NewWorktree {
-    /// The worktree `name`, from the branch the clone has checked out.
+    /// The worktree `name`, from the branch the clone has checked out, set up.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
-        Self { name: name.into(), base: None }
+        Self { name: name.into(), base: None, setup: true }
     }
+}
+
+/// A repository's setup in a new worktree, running or failed ([`Outcome::SetupFailed`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Setup {
+    /// The file it was read from, relative to the worktree's root: `conductor.json`.
+    pub from: String,
+    /// Its last lines of output, stdout and stderr as they came, the newest last; at most
+    /// [`Setup::TAIL`].
+    pub tail: Vec<String>,
+}
+
+impl Setup {
+    /// How many of its last lines a setup carries.
+    pub const TAIL: usize = 12;
 }
 
 /// Something a client asks a thread to do.
@@ -506,6 +526,15 @@ pub enum Outcome {
     Unsupported {
         /// What it lacks.
         cap: Cap,
+    },
+    /// A start's worktree was made, but the repository's setup in it failed: the worktree is
+    /// kept, and the start can be tried again, or made without the setup
+    /// ([`NewWorktree::setup`]).
+    SetupFailed {
+        /// What ran, and what it said last.
+        setup: Setup,
+        /// Its exit status; `None` when a signal ended it.
+        code: Option<i32>,
     },
 }
 

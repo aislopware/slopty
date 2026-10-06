@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use slopty_proto::agent::Worktree;
-use slopty_proto::thread::wire::{NewWorktree, Start};
+use slopty_proto::thread::wire::{NewWorktree, Setup, Start};
 
 use super::bundle::{self, branch_ref};
 use super::{common_dir, git_dir};
@@ -37,6 +37,8 @@ pub enum Failed {
     Uncommitted(String),
     /// Anything else, in words.
     Other(String),
+    /// The worktree was made, but the repository's setup in it failed.
+    Setup(super::setup::Failed),
 }
 
 impl std::fmt::Display for Failed {
@@ -44,6 +46,17 @@ impl std::fmt::Display for Failed {
         match self {
             Self::NotOne(why) | Self::Busy(why) | Self::Uncommitted(why) | Self::Other(why) => {
                 f.write_str(why)
+            }
+            Self::Setup(failed) => {
+                write!(f, "the setup from {} ", failed.setup.from)?;
+                match failed.code {
+                    Some(code) => write!(f, "exited {code}")?,
+                    None => f.write_str("was stopped")?,
+                }
+                match failed.setup.tail.last() {
+                    Some(last) => write!(f, ": {last}"),
+                    None => Ok(()),
+                }
             }
         }
     }
@@ -148,6 +161,7 @@ pub async fn make(
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     if fresh {
         carry_ignored(git, &clone, &path).await;
+        super::setup::mark_pending(&path);
     }
     Ok(Made { path, branch, clone, clone_branch })
 }
@@ -251,23 +265,31 @@ async fn carry_ignored(git: &Path, clone: &Path, tree: &Path) {
 /// # Errors
 /// [`Failed::NotOne`] for a `cwd` in no repository or a name that is no plain name, and
 /// [`Failed::Other`] for a machine with no git or a git that failed.
-pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
+pub async fn enter(
+    start: &mut Start,
+    said: &(dyn Fn(&Setup) + Sync),
+) -> Result<Option<Worktree>, Failed> {
     let Some(asked) = start.worktree.take() else { return Ok(None) };
-    let (at, made) = open(&start.cwd, asked).await?;
+    let (at, made) = open(&start.cwd, asked, said).await?;
     start.cwd = at;
     Ok(Some(made))
 }
 
-/// Make or reopen the worktree `asked` names ([`make`]) from the clone `cwd` is in.
+/// Make or reopen the worktree `asked` names ([`make`]) from the clone `cwd` is in, and set it
+/// up ([`set_up`]), saying the setup's last lines to `said` while it runs.
 ///
 /// It is trusted for the agent, and the answer says where `cwd` stands in it (its root when
 /// that folder is not in it) and what it is. [`enter`] starts a thread there; a spawned
 /// agent's own `--worktree <name>` opens it.
 ///
 /// # Errors
-/// As [`enter`].
-pub async fn open(cwd: &str, asked: NewWorktree) -> Result<(String, Worktree), Failed> {
-    let NewWorktree { name, base } = asked;
+/// As [`enter`], and [`Failed::Setup`] for a setup that failed; the worktree stays.
+pub async fn open(
+    cwd: &str,
+    asked: NewWorktree,
+    said: &(dyn Fn(&Setup) + Sync),
+) -> Result<(String, Worktree), Failed> {
+    let NewWorktree { name, base, setup } = asked;
     let git =
         crate::changes::git().ok_or_else(|| Failed::Other("this machine has no git".to_owned()))?;
     let cwd = crate::file::expand_home(Path::new(cwd));
@@ -286,6 +308,13 @@ pub async fn open(cwd: &str, asked: NewWorktree) -> Result<(String, Worktree), F
     })
     .await
     .map_err(|e| Failed::Other(e.to_string()))?;
+    let places = super::setup::Places {
+        root: &made.clone,
+        tree: &made.path,
+        name: &name,
+        base: base.as_deref().or(made.clone_branch.as_deref()),
+    };
+    set_up(&places, setup, said).await?;
     let text = |p: &Path| p.to_string_lossy().into_owned();
     let worktree = Worktree {
         name,
@@ -295,6 +324,32 @@ pub async fn open(cwd: &str, asked: NewWorktree) -> Result<(String, Worktree), F
         original_branch: made.clone_branch,
     };
     Ok((text(&at), worktree))
+}
+
+/// Run the repository's setup ([`super::setup::find`]) in the worktree `at` names, once: only
+/// in one Slopty made whose setup has not yet succeeded or been passed over, so a worktree made
+/// another way, or reopened after its setup, starts at once. `run` false passes it over, as the
+/// person asked. Under the worktree's lock, so a start sent again while it runs waits for it.
+///
+/// # Errors
+/// [`Failed::Setup`] for a setup that failed; the worktree still waits for it.
+async fn set_up(
+    at: &super::setup::Places<'_>,
+    run: bool,
+    said: &(dyn Fn(&Setup) + Sync),
+) -> Result<(), Failed> {
+    let held = super::setup::lock(at.tree);
+    let _held = held.lock().await;
+    if !super::setup::pending(at.tree) {
+        return Ok(());
+    }
+    let found = if run { super::setup::find(at.tree) } else { None };
+    if let Some(found) = found {
+        tracing::info!(from = found.from, tree = %at.tree.display(), "a new worktree is set up");
+        super::setup::run(&found, at, said).await.map_err(Failed::Setup)?;
+    }
+    super::setup::settled(at.tree);
+    Ok(())
 }
 
 /// The main checkout of the repository `cwd` is in, and where `cwd` stands in its own
@@ -658,11 +713,11 @@ mod tests {
         };
 
         let mut plain = start(&clone, None);
-        assert_eq!(enter(&mut plain).await.expect("nothing to make"), None);
+        assert_eq!(enter(&mut plain, &|_| {}).await.expect("nothing to make"), None);
         assert_eq!(plain, start(&clone, None), "left as it is");
 
         let mut deep = start(&clone.join("web"), Some("claude-1"));
-        let made = enter(&mut deep).await.expect("made").expect("a worktree");
+        let made = enter(&mut deep, &|_| {}).await.expect("made").expect("a worktree");
         let tree = root.join(".claude/worktrees/claude-1");
         assert_eq!(made.path, tree.to_string_lossy());
         assert_eq!(made.original_cwd, root.to_string_lossy());
@@ -674,18 +729,56 @@ mod tests {
         assert_eq!(deep.worktree, None, "taken by the worker");
 
         let mut beside = start(&tree.join("web/src"), Some("claude-2"));
-        let made = enter(&mut beside).await.expect("made").expect("a worktree");
+        let made = enter(&mut beside, &|_| {}).await.expect("made").expect("a worktree");
         let sibling = root.join(".claude/worktrees/claude-2");
         assert_eq!(made.path, sibling.to_string_lossy(), "beside it, not inside it");
         assert_eq!(beside.cwd, sibling.join("web/src").to_string_lossy());
 
         let elsewhere = tmp.path().join("notes");
         std::fs::create_dir_all(&elsewhere).expect("mkdir");
-        let refused = enter(&mut start(&elsewhere, Some("claude-3"))).await;
+        let refused = enter(&mut start(&elsewhere, Some("claude-3")), &|_| {}).await;
         assert!(
             matches!(&refused, Err(Failed::NotOne(why)) if why.contains("no git repository")),
             "{refused:?}"
         );
+    }
+
+    /// A new worktree runs the repository's setup before it is answered, once: a setup that
+    /// fails keeps the worktree and runs again when it is opened again, one that succeeded
+    /// does not, and one the person passed over never runs there.
+    #[tokio::test]
+    async fn a_new_worktree_runs_its_setup_once_it_succeeds() {
+        if crate::changes::git().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        let setup = r#"{"scripts":{"setup":"echo \"$SLOPTY_WORKSPACE_NAME\" >> \"$SLOPTY_ROOT_PATH/runs\"\ntest -f ok"}}"#;
+        std::fs::write(clone.join("conductor.json"), setup).expect("write");
+        std::fs::write(clone.join(".gitignore"), "runs\n").expect("write");
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", "c0"]);
+        let cwd = clone.to_string_lossy().into_owned();
+        let asked = |name: &str, setup| NewWorktree { name: name.to_owned(), base: None, setup };
+        let runs = || std::fs::read_to_string(clone.join("runs")).unwrap_or_default();
+
+        let failed = open(&cwd, asked("w1", true), &|_| {}).await;
+        let Err(Failed::Setup(failed)) = failed else { panic!("{failed:?}") };
+        assert_eq!((failed.setup.from.as_str(), failed.code), ("conductor.json", Some(1)));
+        assert_eq!(runs(), "w1\n");
+        let tree = std::fs::canonicalize(&clone).expect("real").join(".claude/worktrees/w1");
+        assert!(tree.is_dir(), "the worktree is kept");
+
+        std::fs::write(tree.join("ok"), "").expect("write");
+        open(&cwd, asked("w1", true), &|_| {}).await.expect("set up on the second try");
+        open(&cwd, asked("w1", true), &|_| {}).await.expect("reopened");
+        assert_eq!(runs(), "w1\nw1\n", "run again after it failed, not after it succeeded");
+
+        open(&cwd, asked("w2", false), &|_| {}).await.expect("made without its setup");
+        open(&cwd, asked("w2", true), &|_| {}).await.expect("reopened");
+        assert_eq!(runs(), "w1\nw1\n", "passed over for good");
     }
 
     /// A worktree with a terminal in it, or anything not committed, is kept; the checkout

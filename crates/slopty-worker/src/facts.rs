@@ -574,9 +574,7 @@ pub(crate) async fn run(
     let mut child = command.spawn().ok()?;
     // Declared after the child, so it drops first: the group is killed while its leader is
     // unreaped, and so still this child's.
-    let mut group = Group(
-        child.id().and_then(|id| i32::try_from(id).ok()).and_then(rustix::process::Pid::from_raw),
-    );
+    let mut group = Group::of(&child);
     let mut stdout = child.stdout.take()?;
     let finished = tokio::time::timeout(wait, async {
         let mut kept = Vec::new();
@@ -585,7 +583,7 @@ pub(crate) async fn run(
         tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await.ok()?;
         let status = child.wait().await.ok()?;
         // Reaped: its id may name another group from now on.
-        group.0 = None;
+        group.reaped();
         Some(Ran { ok: status.success(), out: text_of(&kept) })
     })
     .await;
@@ -593,7 +591,24 @@ pub(crate) async fn run(
 }
 
 /// A child's process group, killed whole when dropped unless the child was reaped.
-struct Group(Option<rustix::process::Pid>);
+pub(crate) struct Group(Option<rustix::process::Pid>);
+
+impl Group {
+    /// The group `child` leads.
+    pub(crate) fn of(child: &tokio::process::Child) -> Self {
+        Self(
+            child
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .and_then(rustix::process::Pid::from_raw),
+        )
+    }
+
+    /// Its leader was reaped: its id may name another group from now on, so it is not killed.
+    pub(crate) const fn reaped(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for Group {
     fn drop(&mut self) {

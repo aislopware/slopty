@@ -408,7 +408,7 @@ impl Orchestrator {
                 }
                 let cwd = match (worktree, cwd) {
                     (Some(asked), Some(clone)) => Some(
-                        crate::repo::worktrees::open(&clone, asked)
+                        crate::repo::worktrees::open(&clone, asked, &|_| {})
                             .await
                             .map_err(|failed| worktree_failed(&failed))?
                             .0,
@@ -476,7 +476,7 @@ impl Orchestrator {
                 }
                 // Made, or reopened as it is, for the agent's own `--worktree <name>` to open.
                 if let Some(asked) = worktree {
-                    crate::repo::worktrees::open(&spawn.cwd, asked)
+                    crate::repo::worktrees::open(&spawn.cwd, asked, &|_| {})
                         .await
                         .map_err(|failed| worktree_failed(&failed))?;
                 }
@@ -548,7 +548,7 @@ impl Orchestrator {
                     Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
                 })?;
                 let mut start = *start;
-                let made = crate::repo::worktrees::enter(&mut start)
+                let made = crate::repo::worktrees::enter(&mut start, &|_| {})
                     .await
                     .map_err(|failed| worktree_failed(&failed))?;
                 let thread = threads.start(TaskThread { start, seat, env, role }).await?;
@@ -659,7 +659,9 @@ impl Orchestrator {
                         ErrorCode::Unsupported,
                         format!("this thread's agent cannot be answered here ({})", cap.0),
                     )),
-                    wire::Outcome::Started { .. } => Err(unexpected()),
+                    wire::Outcome::Started { .. } | wire::Outcome::SetupFailed { .. } => {
+                        Err(unexpected())
+                    }
                 }
             }
             Verb::CaptureStill { worker, target } => {
@@ -1018,15 +1020,7 @@ impl Orchestrator {
                     .collect();
                 let removed = crate::repo::worktrees::remove(git, &worktree, &landed, &cwds)
                     .await
-                    .map_err(|failed| {
-                        use crate::repo::worktrees::Failed;
-                        let code = match &failed {
-                            Failed::NotOne(_) => ErrorCode::Invalid,
-                            Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
-                            Failed::Other(_) => ErrorCode::Failed,
-                        };
-                        Failure::new(code, failed.to_string())
-                    })?;
+                    .map_err(|failed| worktree_failed(&failed))?;
                 let crate::repo::worktrees::Removed { branch, branch_removed } = removed;
                 Ok(Outcome::WorktreeRemoved { branch, branch_removed })
             }
@@ -1096,6 +1090,11 @@ fn worktree_failed(failed: &crate::repo::worktrees::Failed) -> Failure {
         Failed::NotOne(_) => ErrorCode::Invalid,
         Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
         Failed::Other(_) => ErrorCode::Failed,
+        // The board and the orchestrator read why: the setup's last lines go with it.
+        Failed::Setup(setup) => {
+            let said = setup.setup.tail.join("\n");
+            return Failure::new(ErrorCode::Failed, format!("{failed}\n{said}"));
+        }
     };
     Failure::new(code, failed.to_string())
 }

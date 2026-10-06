@@ -3659,7 +3659,8 @@ fn apply_link_event(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_),
+            | WorkerMsg::Handoff(_)
+            | WorkerMsg::SettingUp { .. },
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

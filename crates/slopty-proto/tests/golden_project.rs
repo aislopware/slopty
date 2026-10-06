@@ -489,6 +489,7 @@ mod golden_project {
             worktree: Some(NewWorktree {
                 name: "slopty-slopty-6".to_owned(),
                 base: Some("main".to_owned()),
+                setup: true,
             }),
         };
         snap(

@@ -28,6 +28,8 @@ png.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# A repository's setup read from another tool's TOML (`repo::setup`).
+toml.workspace = true
 # The hunks of a review over turn snapshots (`repo::snapshot`).
 similar.workspace = true
 slopty-agent.workspace = true
