@@ -39,7 +39,7 @@ use slopty_proto::thread::attention::{
     Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, Subject,
     ThreadAt, Via,
 };
-use slopty_proto::thread::wire::{TableFrame, ThreadRow};
+use slopty_proto::thread::wire::{PullSeen, TableFrame, ThreadRow};
 use slopty_proto::thread::{AgentId, AskId, Liveness, Phase, Request, ThreadId, Wait};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
@@ -898,7 +898,11 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice
             let term = seat_of(row).map(|session| TermRef { worker: now.at.worker, session });
             term.and_then(|t| projects.working_on(t)).is_some_and(|(_, task)| task.is_some())
         };
-        if kind == NoticeKind::Finished && task_agent() {
+        // A task's pull request is the project's to tell of ([`tell_project`]), once.
+        let by_pull = kind == NoticeKind::NeedsYou
+            && row.requests.is_empty()
+            && row.status.phase != Phase::NeedsYou;
+        if (kind == NoticeKind::Finished || by_pull) && task_agent() {
             continue;
         }
         let family: Vec<&ThreadRow> =
@@ -930,9 +934,13 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice
 fn text(kind: NoticeKind, row: &ThreadRow) -> String {
     let wait = row.status.wait.as_ref().map(|w| w.text.clone()).filter(|t| !t.is_empty());
     match kind {
-        NoticeKind::NeedsYou => {
-            row.requests.first().map(|r| r.title.clone()).or(wait).unwrap_or_default()
-        }
+        NoticeKind::NeedsYou => row
+            .requests
+            .first()
+            .map(|r| r.title.clone())
+            .or(wait)
+            .or_else(|| row.pull.as_ref().filter(|p| p.stands.needs_you()).map(PullSeen::line))
+            .unwrap_or_default(),
         NoticeKind::Failed | NoticeKind::Finished | NoticeKind::Project => {
             wait.or_else(|| row.last_line.clone()).unwrap_or_default()
         }

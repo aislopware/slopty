@@ -17,8 +17,8 @@ mod golden_thread {
     };
     use slopty_proto::thread::wire::{
         AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, NewWorktree, Outcome,
-        Page, PastSession, PastSessions, Pick, PromptHit, Review, ReviewScope, Start, TableFrame,
-        ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
+        Page, PastSession, PastSessions, Pick, PromptHit, PullSeen, PullStands, Review,
+        ReviewScope, Start, TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
@@ -286,6 +286,7 @@ mod golden_thread {
             Action::ToReview(true),
             Action::GoalSet(Some(goal())),
             Action::ScreensSet(vec![screen()]),
+            Action::PullSeen(Some(pull_seen())),
         ] {
             state.apply(&action);
         }
@@ -660,8 +661,23 @@ mod golden_thread {
                 },
             ]),
             Action::ScreensSet(Vec::new()),
+            Action::PullSeen(Some(pull_seen())),
+            Action::PullSeen(None),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
+    }
+
+    /// A branch's pull request with a failed check, as the worker sums it up.
+    fn pull_seen() -> PullSeen {
+        PullSeen {
+            number: 42,
+            url: "https://github.com/o/r/pull/42".to_owned(),
+            title: "Fix the login".to_owned(),
+            stands: PullStands::ChecksFailed,
+            failed: 1,
+            failed_first: Some("lint".to_owned()),
+            running: 1,
+        }
     }
 
     /// Every typed tool detail, and the user message's parts.

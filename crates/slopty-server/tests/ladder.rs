@@ -84,6 +84,7 @@ mod tests {
             caps: Vec::new(),
             facts: BTreeMap::new(),
             to_review: false,
+            pull: None,
             meters: Meters::default(),
             updated_ms: WallMs::from_millis(since),
             cwd: None,

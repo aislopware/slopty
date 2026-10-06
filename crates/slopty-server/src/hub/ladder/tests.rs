@@ -37,6 +37,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         caps: Vec::new(),
         facts: BTreeMap::new(),
         to_review: false,
+        pull: None,
         meters: Meters::default(),
         updated_ms: WallMs::from_millis(since),
         cwd: None,
@@ -332,6 +333,69 @@ async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
     rank(vec![moved(&orchestrator, Phase::Done, 5_000)]);
     let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
     assert_eq!(kinds, [NoticeKind::Finished], "the orchestrator's own still says so");
+}
+
+/// A thread's pull request lifts it while it rests: a failed check needs the person, said in
+/// the pull request's words, and one ready to merge is to review. While the agent works it
+/// stays working. A task's agent's pull request is the project's to tell of, so it sends none.
+#[tokio::test]
+async fn a_resting_thread_s_pull_request_lifts_it() {
+    use slopty_proto::thread::wire::{PullSeen, PullStands};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (shell, building, orchestrating) = (SessionId::new(), SessionId::new(), SessionId::new());
+    let worker = WorkerId::new();
+    let sessions = vec![summary(shell), summary(building), summary(orchestrating)];
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
+    let term = |session| TermRef { worker, session };
+    create(&hub, Some(term(orchestrating))).await;
+    let build = task(&hub).await;
+    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
+    let mut desk = Client::sit(&hub, "mac");
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let pull = |stands| PullSeen {
+        number: 42,
+        url: "https://github.com/o/r/pull/42".to_owned(),
+        title: "Fix the login".to_owned(),
+        stands,
+        failed: u32::from(stands == PullStands::ChecksFailed),
+        failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),
+        running: 0,
+    };
+    let mine = row(Phase::Done, 1_000, Some(shell));
+    let builder = row(Phase::Done, 1_000, Some(building));
+    lease.handle(snapshot(vec![mine.clone(), builder.clone()]));
+    hub.rank_ladder();
+    let rank = |rows: Vec<ThreadRow>| {
+        lease.handle(delta(rows));
+        hub.rank_ladder();
+        hub.ladder()
+    };
+    let at = |row: &ThreadRow| ThreadAt { worker, thread: row.id };
+    let with = |row: &ThreadRow, phase, stands| ThreadRow {
+        pull: Some(pull(stands)),
+        ..moved(row, phase, 2_000)
+    };
+
+    let ladder = rank(vec![with(&mine, Phase::Working, PullStands::ChecksFailed)]);
+    assert_eq!(ladder.rung(at(&mine)), Some(Rung::Working), "its agent may be on it");
+    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::ChecksFailed)]);
+    assert_eq!(ladder.rung(at(&mine)), Some(Rung::NeedsYou));
+    let heard = desk.notices();
+    let said: Vec<(NoticeKind, &str)> = heard.iter().map(|n| (n.kind, n.text.as_str())).collect();
+    assert_eq!(
+        said,
+        [(NoticeKind::NeedsYou, "#42: lint failed")],
+        "work that ends on a failed check needs you"
+    );
+    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::Ready)]);
+    assert_eq!(ladder.rung(at(&mine)), Some(Rung::ToReview), "ready to merge");
+    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::Waiting)]);
+    assert_eq!(ladder.rung(at(&mine)), Some(Rung::Idle));
+
+    let ladder = rank(vec![with(&builder, Phase::Done, PullStands::ChecksFailed)]);
+    assert_eq!(ladder.rung(at(&builder)), Some(Rung::NeedsYou));
+    assert!(desk.notices().is_empty(), "the project tells of a task's checks");
 }
 
 /// A project's held-up work is a notice about the project, one per timeline entry, routed by the

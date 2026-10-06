@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
-use super::wire::ThreadRow;
+use super::wire::{PullStands, ThreadRow};
 use super::{Phase, ThreadId};
 use crate::orchestration::TermRef;
 use crate::project::{ProjectId, TaskId};
@@ -56,8 +56,14 @@ impl Rung {
             Phase::Failed => Self::Failed,
             Phase::Working => Self::Working,
             Phase::Waiting => Self::Waiting,
-            Phase::Idle | Phase::Done | Phase::Stopped if row.to_review => Self::ToReview,
-            Phase::Idle | Phase::Done | Phase::Stopped => Self::Idle,
+            // At rest, its pull request may wait on the person (a check failed, changes asked
+            // for, a conflict) or be ready to merge.
+            Phase::Idle | Phase::Done | Phase::Stopped => match &row.pull {
+                Some(pull) if pull.stands.needs_you() => Self::NeedsYou,
+                Some(pull) if matches!(pull.stands, PullStands::Ready) => Self::ToReview,
+                _ if row.to_review => Self::ToReview,
+                _ => Self::Idle,
+            },
         }
     }
 

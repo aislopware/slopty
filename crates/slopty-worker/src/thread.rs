@@ -32,6 +32,7 @@ pub mod host;
 pub mod intents;
 pub mod log;
 pub mod pi;
+pub mod pulls;
 pub mod review;
 pub mod rewind;
 pub mod schedule;

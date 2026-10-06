@@ -2172,3 +2172,27 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `every_adapter_takes_a_message_sent_now_or_after_the_turn` (`crates/slopty-agent/tests/delivery.rs`,
     each adapter's own caps against the worker's first check); `comments_to_an_agent_with_no_steer_go_queued`
     (the review tile).
+
+- ✅ **A thread's pull request is watched** (2026-10-06, `.research/readiness-2026-10-07.md` rank
+  7). Only a project task's pull request was read again (`Hub::watch_checks`); a thread's was
+  asked for when the commit sheet or the review opened and with every push, and nothing polled.
+  A check failing, changes asked for, or a pull request ready to merge never reached *Needs
+  you*, and a Codex, pi or ACP tile never showed its pull request at all, since the header's came
+  from Claude Code's status line alone.
+  - *On the worker* (`thread::pulls`): every 15 s it reads the pull requests that fall due, with
+    the person's own gh ([`repo::pull::status`]), one read per checkout and branch however many
+    threads share it. Due again in a minute while a check runs or one of its threads works, in
+    five once settled, in ten after no pull request or an answer gh could not give (diri's
+    cadence is a minute in front and five behind). A checkout on its repository's default
+    branch (`origin/HEAD`, else `main` or `master`), a detached one, a thread that ended over
+    three days ago and a worker without gh are never asked about.
+  - *On the wire*: what the forge said is summed up in a `PullSeen` (number, page, title,
+    `PullStands`, the failed checks counted and the first named, those running) and put on the
+    thread with `Action::PullSeen` when it changed, so its row carries it to every client and
+    to the server.
+  - *On the ladder* (`Rung::of`, shared by the server and the clients): at rest, a pull request
+    whose check failed, whose reviewers asked for changes or that conflicts needs the person,
+    and one ready to merge is to review. While the agent works it stays working: it may be on
+    it. The notice says the pull request's line ("#42: lint failed"). A project task's agent
+    sends none: its pull request is the project's to tell of (`tell_project`), once.
+  - Tests: `thread::pulls::tests` (two), `hub::ladder::tests::a_resting_thread_s_pull_request_lifts_it`.

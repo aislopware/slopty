@@ -675,10 +675,89 @@ pub struct ThreadRow {
     pub facts: BTreeMap<String, String>,
     /// Whether its tree holds changes the person has not kept ([`super::Action::ToReview`]).
     pub to_review: bool,
+    /// Its branch's pull request, as the worker last read it ([`super::Action::PullSeen`]).
+    pub pull: Option<PullSeen>,
     /// Its meters: model, mode, context, cost, the plan's rate windows.
     pub meters: super::Meters,
     /// When it last changed.
     pub updated_ms: WallMs,
+}
+
+/// A thread's pull request in a line: what a list shows of it and what the attention ladder
+/// reads, the worker's summary of the forge's own answer ([`crate::git::PullStatus`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PullSeen {
+    /// Its number.
+    pub number: u32,
+    /// Its page.
+    pub url: String,
+    /// Its title.
+    pub title: String,
+    /// Where it stands.
+    pub stands: PullStands,
+    /// How many of its checks failed.
+    pub failed: u32,
+    /// The first of them, by name.
+    pub failed_first: Option<String>,
+    /// How many still run.
+    pub running: u32,
+}
+
+/// Where a pull request stands, as the person reads it: the first that holds, in this order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum PullStands {
+    /// Merged.
+    Merged,
+    /// Closed without a merge.
+    Closed,
+    /// Still a draft.
+    Draft,
+    /// It conflicts with its base.
+    Conflicted,
+    /// A check failed.
+    ChecksFailed,
+    /// Its reviewers asked for changes.
+    ChangesRequested,
+    /// Checks still run.
+    Running,
+    /// Waiting on a review, or anything else the forge holds it for.
+    Waiting,
+    /// Nothing stands between it and a merge.
+    Ready,
+}
+
+impl PullStands {
+    /// Whether it waits on the person: a check failed, changes were asked for, or it
+    /// conflicts.
+    #[must_use]
+    pub const fn needs_you(self) -> bool {
+        matches!(self, Self::Conflicted | Self::ChecksFailed | Self::ChangesRequested)
+    }
+}
+
+impl PullSeen {
+    /// What it says of itself in a line: "#42: lint failed", "#42 is ready to merge".
+    #[must_use]
+    pub fn line(&self) -> String {
+        let n = self.number;
+        match self.stands {
+            PullStands::Merged => format!("#{n} merged"),
+            PullStands::Closed => format!("#{n} closed"),
+            PullStands::Draft => format!("#{n} is a draft"),
+            PullStands::Conflicted => format!("#{n} conflicts with its base"),
+            PullStands::ChecksFailed => match (&self.failed_first, self.failed) {
+                (Some(first), 1) => format!("#{n}: {first} failed"),
+                (Some(first), more) => {
+                    format!("#{n}: {first} and {} more failed", more.saturating_sub(1))
+                }
+                (None, more) => format!("#{n}: {more} checks failed"),
+            },
+            PullStands::ChangesRequested => format!("#{n}: changes requested"),
+            PullStands::Running => format!("#{n}: checks running"),
+            PullStands::Waiting => format!("#{n} waits on a review"),
+            PullStands::Ready => format!("#{n} is ready to merge"),
+        }
+    }
 }
 
 /// An open request, small enough for a list, a notification or the inbox to answer.

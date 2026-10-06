@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 
-use super::wire::{Page, RequestCard, TableFrame, ThreadRow};
+use super::wire::{Page, PullSeen, RequestCard, TableFrame, ThreadRow};
 use super::{
     Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item,
     ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
@@ -51,6 +51,8 @@ pub struct ThreadState {
     pub goal: Option<Goal>,
     /// The windows and displays its agent drives ([`Action::ScreensSet`]).
     pub screens: Vec<AgentScreen>,
+    /// Its branch's pull request ([`Action::PullSeen`]).
+    pub pull: Option<PullSeen>,
 }
 
 impl ThreadState {
@@ -72,6 +74,7 @@ impl ThreadState {
             to_review: false,
             goal: None,
             screens: Vec::new(),
+            pull: None,
         }
     }
 
@@ -144,6 +147,7 @@ impl ThreadState {
             Action::ToReview(to_review) => self.to_review = *to_review,
             Action::GoalSet(goal) => self.goal.clone_from(goal),
             Action::ScreensSet(screens) => self.screens.clone_from(screens),
+            Action::PullSeen(pull) => self.pull.clone_from(pull),
         }
     }
 
@@ -256,6 +260,7 @@ impl ThreadState {
             caps: self.meta.caps.clone(),
             facts: self.meta.facts.clone(),
             to_review: self.to_review,
+            pull: self.pull.clone(),
             meters: self.meters.clone(),
             updated_ms,
         }

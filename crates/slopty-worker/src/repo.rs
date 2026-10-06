@@ -89,7 +89,7 @@ fn git_dir(root: &Path) -> Option<PathBuf> {
 
 /// The git directory every worktree of `root`'s repository shares, where its config lives:
 /// a worktree's own git directory names it in `commondir`; any other is its own.
-fn common_dir(root: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
     let own = git_dir(root)?;
     match std::fs::read_to_string(own.join("commondir")) {
         Ok(common) if !common.trim().is_empty() => Some(own.join(common.trim())),

@@ -1258,6 +1258,9 @@ pub enum Action {
     /// The windows and displays on the worker its agent drives, the latest first; empty once
     /// it drives none.
     ScreensSet(Vec<AgentScreen>),
+    /// The pull request of the branch its folder has checked out, as the worker last read it
+    /// from the forge; `None` once that branch has none.
+    PullSeen(Option<wire::PullSeen>),
 }
 
 /// A window or display on the thread's worker that its agent drives.
