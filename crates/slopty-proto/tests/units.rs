@@ -137,4 +137,43 @@ mod units {
         assert_eq!(failed.id(), 3);
         assert_eq!(WorkerMsg::Search(failed).kind(), "Search");
     }
+
+    /// A note's Allow and Deny answer only an approval offering a plain allow and a deny; the
+    /// deny they send is the plain one, else the first.
+    #[test]
+    fn a_notes_buttons_answer_only_a_plain_yes_or_no() {
+        use slopty_core::WallMs;
+        use slopty_proto::thread::wire::RequestCard;
+        use slopty_proto::thread::{AskId, Choice, Effect, Request, once};
+        let choice = |id: &str, effect, scope: Option<&str>, stops| Choice {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            effect,
+            scope: scope.map(str::to_owned),
+            stops,
+        };
+        let card = |kind: &str, options| RequestCard {
+            id: AskId("toolu_1".to_owned()),
+            item: None,
+            kind: kind.to_owned(),
+            title: "Run cargo test?".to_owned(),
+            options,
+            opened_ms: WallMs::ZERO,
+        };
+        let always = choice("always", Effect::Allow, Some("this session"), false);
+        let yes = choice("yes", Effect::Allow, None, false);
+        let stop = choice("stop", Effect::Deny, None, true);
+        let no = choice("no", Effect::Deny, None, false);
+        let ask = card(Request::APPROVAL, vec![always.clone(), yes, stop.clone(), no]);
+        assert!(ask.answerable());
+        assert_eq!(once(&ask.options, true).map(|c| c.id.as_str()), Some("yes"));
+        assert_eq!(once(&ask.options, false).map(|c| c.id.as_str()), Some("no"), "the plain one");
+        assert_eq!(
+            once(std::slice::from_ref(&stop), false).map(|c| c.id.as_str()),
+            Some("stop"),
+            "else the first"
+        );
+        assert!(!card(Request::APPROVAL, vec![always, stop]).answerable(), "no plain allow");
+        assert!(!card(Request::QUESTION, ask.options).answerable(), "a question");
+    }
 }

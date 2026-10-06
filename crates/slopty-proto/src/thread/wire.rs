@@ -678,6 +678,18 @@ pub struct RequestCard {
     pub opened_ms: WallMs,
 }
 
+impl RequestCard {
+    /// Whether it is a yes or no that "Allow" and "Deny" answer whole, where it is shown: an
+    /// approval offering a plain allow and a deny ([`super::once`]). A note's buttons, on the
+    /// phone or in the app, answer only such a request.
+    #[must_use]
+    pub fn answerable(&self) -> bool {
+        self.kind == super::Request::APPROVAL
+            && super::once(&self.options, true).is_some()
+            && super::once(&self.options, false).is_some()
+    }
+}
+
 /// Past sessions: the answer to [`ThreadRequest::Sessions`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PastSessions {

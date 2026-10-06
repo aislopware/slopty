@@ -27,7 +27,7 @@ use gpui::Context;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::thread::wire::{Intent, RequestCard};
-use slopty_proto::thread::{AskId, Choice, Effect, Request, ThreadId};
+use slopty_proto::thread::{AskId, ThreadId};
 
 use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 use crate::workspace::{WorkspaceEvent, WorkspaceView};
@@ -69,23 +69,11 @@ pub(in crate::workspace) struct Approvals {
     wake: Option<gpui::Task<()>>,
 }
 
-/// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole: an
-/// approval offering a plain allow and a deny.
+/// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole
+/// ([`RequestCard::answerable`]).
 #[must_use]
 pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
-    card.kind == Request::APPROVAL
-        && request_choice(&card.options, true).is_some()
-        && request_choice(&card.options, false).is_some()
-}
-
-/// The choice of `options` that allows (`allow`) or denies the call once and no more: the
-/// plain allow; the plain deny, else the first.
-fn request_choice(options: &[Choice], allow: bool) -> Option<&Choice> {
-    if allow {
-        options.iter().find(|c| c.effect == Effect::Allow && c.scope.is_none())
-    } else {
-        crate::conversation::thread::view::denying::plain_deny(options)
-    }
+    card.answerable()
 }
 
 impl Approvals {
@@ -108,7 +96,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let open = self.thread_request(thread).filter(|a| a.id == *ask);
-        let choice = open.filter(|a| answerable(a)).and_then(|a| request_choice(&a.options, allow));
+        let choice = open
+            .filter(|a| answerable(a))
+            .and_then(|a| slopty_proto::thread::once(&a.options, allow));
         let Some(choice) = choice.map(|c| c.id.clone()) else {
             tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
             return false;

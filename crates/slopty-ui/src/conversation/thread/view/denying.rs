@@ -16,7 +16,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{AskId, Choice, Effect, Request};
+use slopty_proto::thread::{AskId, Choice, Request};
 
 use super::ThreadView;
 use crate::colors::hsla;
@@ -43,13 +43,7 @@ pub fn deny_choice(request: &Request) -> Option<&Choice> {
     plain_deny(&request.options)
 }
 
-/// The deny of `options` that turns the call down once and no more: the plain one, else the
-/// first.
-#[must_use]
-pub fn plain_deny(options: &[Choice]) -> Option<&Choice> {
-    let denies = || options.iter().filter(|c| c.effect == Effect::Deny);
-    denies().find(|c| c.scope.is_none() && !c.stops).or_else(|| denies().next())
-}
+pub use slopty_proto::thread::plain_deny;
 
 impl ThreadView {
     /// Write the reason `ask` is denied with `choice`: the field takes the keyboard.
