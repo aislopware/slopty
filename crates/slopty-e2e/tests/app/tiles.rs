@@ -623,7 +623,7 @@ async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
     drv.type_text(&format!("cd '{}' && pwd", project.display())).await.unwrap();
     drv.keys("enter").await.unwrap();
     drv.wait_for("the shell in the project", STEP, |d| {
-        d.rows_containing("project").iter().any(|r| r.trim().ends_with("/project"))
+        d.lines_containing("project").iter().any(|r| r.trim().ends_with("/project"))
     })
     .await
     .unwrap();

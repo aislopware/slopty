@@ -94,7 +94,7 @@ mod tests {
         fleet
             .driver
             .wait_for(&format!("{expect} from {name}'s shell"), STEP, |d| {
-                d.rows_containing(expect).iter().any(|r| r.trim() == expect)
+                d.lines_containing(expect).iter().any(|r| r.trim() == expect)
             })
             .await
             .unwrap();

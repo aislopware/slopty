@@ -854,6 +854,9 @@ pub struct TerminalInfo {
     pub at_prompt: bool,
     /// The visible rows, top to bottom, trailing spaces trimmed.
     pub rows: Vec<String>,
+    /// The visible rows joined into the lines the program wrote, where the terminal
+    /// soft-wrapped one over several rows, trailing spaces trimmed.
+    pub lines: Vec<String>,
     /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
     /// starts a new one); `None` before the first frame.
     pub epoch: Option<u32>,
@@ -1138,12 +1141,13 @@ impl Dump {
         self.terminals.iter().all(|t| !t.at_prompt || t.reads_a_line())
     }
 
-    /// Every visible terminal row that contains `needle`.
+    /// Every visible terminal line that contains `needle`, a line the terminal wrapped over
+    /// several rows taken whole, so a needle is found at any window width.
     #[must_use]
-    pub fn rows_containing(&self, needle: &str) -> Vec<&str> {
+    pub fn lines_containing(&self, needle: &str) -> Vec<&str> {
         self.terminals
             .iter()
-            .flat_map(|t| t.rows.iter())
+            .flat_map(|t| t.lines.iter())
             .filter(|r| r.contains(needle))
             .map(String::as_str)
             .collect()
@@ -1239,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn dump_helpers_find_rows_and_items() {
+    fn dump_helpers_find_lines_and_items() {
         let dump = Dump {
             items: vec![ItemInfo {
                 kind: "terminal".into(),
@@ -1247,12 +1251,13 @@ mod tests {
                 ..ItemInfo::default()
             }],
             terminals: vec![TerminalInfo {
-                rows: vec!["$ echo hi".into(), "hi".into(), String::new()],
+                lines: vec!["$ echo hi".into(), "hi".into(), String::new(), "% '/tmp/a b'".into()],
                 ..TerminalInfo::default()
             }],
             ..Dump::default()
         };
-        assert_eq!(dump.rows_containing("hi"), ["$ echo hi", "hi"]);
+        assert_eq!(dump.lines_containing("hi"), ["$ echo hi", "hi"]);
+        assert_eq!(dump.lines_containing("a b'"), ["% '/tmp/a b'"]);
         assert_eq!(dump.item("terminal").unwrap().center(), (60.0, 45.0));
         assert!(dump.item("note").is_none());
     }

@@ -727,7 +727,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
     drv.keys("enter").await.unwrap();
     let dump = drv
         .wait_for("the shell in the drop directory", STEP, |d| {
-            d.rows_containing("~/drop-here %").len() == 1
+            d.lines_containing("~/drop-here %").len() == 1
         })
         .await
         .unwrap();

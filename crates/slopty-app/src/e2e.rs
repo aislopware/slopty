@@ -1249,6 +1249,7 @@ impl Workspace {
                             .get(usize::from(cursor.row))
                             .is_some_and(|line| line.mark.is_prompt()),
                     rows: terminal.rows(),
+                    lines: terminal.lines(),
                     epoch: terminal.state().epoch(),
                     agent: view.agent(session).map(|(status, _)| agent_line(status).to_owned()),
                     agent_detail: view.agent(session).map(|(_, said)| said),

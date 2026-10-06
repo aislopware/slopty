@@ -2489,6 +2489,28 @@ impl TerminalView {
             .collect()
     }
 
+    /// The visible rows joined into the lines the program wrote, trailing spaces trimmed: a row
+    /// the terminal soft-wrapped onto the one above continues that line, so text that wrapped
+    /// at the window's width is found whole. What a self-test searches.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for row in self.state.view() {
+            let (text, continues) = row.line.map_or_else(
+                || (String::new(), false),
+                |l| (l.text(), l.flags.contains(LineFlags::WRAPPED)),
+            );
+            match lines.last_mut() {
+                Some(last) if continues => last.push_str(&text),
+                _ => lines.push(text),
+            }
+        }
+        for line in &mut lines {
+            line.truncate(line.trim_end().len());
+        }
+        lines
+    }
+
     /// Program title (OSC 0/2), if set.
     #[must_use]
     pub fn title(&self) -> Option<&str> {

@@ -504,7 +504,7 @@ mod tests {
         b.type_text("echo after-a-$((6*7))").await.unwrap();
         b.keys("enter").await.unwrap();
         b.wait_for("B's echo with A dead", STEP, |d| {
-            d.rows_containing("after-a-42").iter().any(|r| r.trim() == "after-a-42")
+            d.lines_containing("after-a-42").iter().any(|r| r.trim() == "after-a-42")
         })
         .await
         .unwrap();
@@ -521,7 +521,7 @@ mod tests {
         let da = a
             .wait_for("A caught up", STEP, |d| {
                 flooding(d)
-                    && d.rows_containing("after-a-42").iter().any(|r| r.trim() == "after-a-42")
+                    && d.lines_containing("after-a-42").iter().any(|r| r.trim() == "after-a-42")
             })
             .await
             .unwrap();
@@ -613,7 +613,7 @@ mod tests {
         b.type_text("echo phone-$((6*7))").await.unwrap();
         b.keys("enter").await.unwrap();
         a.wait_for("the phone's echo on the Mac", STEP, |d| {
-            d.rows_containing("phone-42").iter().any(|r| r.trim() == "phone-42")
+            d.lines_containing("phone-42").iter().any(|r| r.trim() == "phone-42")
         })
         .await
         .unwrap();

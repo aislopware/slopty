@@ -153,7 +153,7 @@ mod tests {
         // a frame rendered between the two is a different picture.
         let dump = drv
             .wait_for("the echo and the next prompt", STEP, |d| {
-                d.rows_containing("e2e-42").iter().any(|r| r.trim() == "e2e-42")
+                d.lines_containing("e2e-42").iter().any(|r| r.trim() == "e2e-42")
                     && d.a11y_node("Terminal", None).is_some_and(|g| {
                         g.value
                             .as_deref()
@@ -163,7 +163,7 @@ mod tests {
             .await
             .unwrap();
         // The command line itself is echoed by the shell above the output.
-        assert!(!dump.rows_containing("echo e2e-").is_empty(), "{dump:#?}");
+        assert!(!dump.lines_containing("echo e2e-").is_empty(), "{dump:#?}");
         let cursor = dump.terminals[0].cursor;
         assert!(cursor[1] >= 2, "cursor moved below the output: {cursor:?}");
         slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
@@ -202,7 +202,7 @@ mod tests {
         // the echo is gone and the cursor is back where a fresh prompt puts it.
         drv.keys("cmd-k").await.unwrap();
         drv.wait_for("the screen to clear", STEP, |d| {
-            d.rows_containing("e2e-42").is_empty()
+            d.lines_containing("e2e-42").is_empty()
                 && d.terminals[0].cursor[1] == prompt_row
                 && d.terminals[0].rows.iter().any(|r| !r.trim().is_empty())
         })
@@ -362,7 +362,7 @@ mod tests {
         stack
             .driver
             .wait_for("the agent's terminal", STEP, |d| {
-                d.items.len() == 2 && !d.rows_containing("fake claude in ").is_empty()
+                d.items.len() == 2 && !d.lines_containing("fake claude in ").is_empty()
             })
             .await
             .unwrap();
@@ -778,7 +778,7 @@ mod tests {
         drv.type_text(&format!("echo {tag}-$((6*7))")).await.unwrap();
         drv.keys("enter").await.unwrap();
         let want = format!("{tag}-42");
-        drv.wait_for(tag, STEP, |d| d.rows_containing(&want).iter().any(|r| r.trim() == want))
+        drv.wait_for(tag, STEP, |d| d.lines_containing(&want).iter().any(|r| r.trim() == want))
             .await
             .unwrap();
     }
@@ -857,7 +857,7 @@ mod tests {
         drv.keys("enter").await.unwrap();
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         drv.wait_for("the shell in the drop directory", STEP, |d| {
-            d.rows_containing(&name).iter().any(|r| r.trim().ends_with(&*name))
+            d.lines_containing(&name).iter().any(|r| r.trim().ends_with(&*name))
         })
         .await
         .unwrap()
@@ -887,7 +887,7 @@ mod tests {
 
         let dump = drv
             .wait_for("the quoted path typed at the prompt", STEP, |d| {
-                !d.rows_containing("drop-here/report 1.txt'").is_empty()
+                !d.lines_containing("drop-here/report 1.txt'").is_empty()
                     && d.terminals[0].upload.is_none()
             })
             .await
@@ -932,7 +932,7 @@ mod tests {
         // that stream in order: once their echo is back, it watches.
         drv.type_text("clipboard-watched").await.unwrap();
         drv.wait_for("the keys behind the watch echoed", STEP, |d| {
-            !d.rows_containing("clipboard-watched").is_empty()
+            !d.lines_containing("clipboard-watched").is_empty()
         })
         .await
         .unwrap();
@@ -1005,7 +1005,7 @@ mod tests {
         .unwrap();
         drv.type_text("clipboard-watched").await.unwrap();
         drv.wait_for("the keys behind the watch echoed", STEP, |d| {
-            !d.rows_containing("clipboard-watched").is_empty()
+            !d.lines_containing("clipboard-watched").is_empty()
         })
         .await
         .unwrap();
@@ -1080,7 +1080,7 @@ mod tests {
 
         let dump = drv
             .wait_for("the quoted path typed at the prompt", STEP, |d| {
-                !d.rows_containing("paste-here/notes 2.txt'").is_empty()
+                !d.lines_containing("paste-here/notes 2.txt'").is_empty()
                     && d.terminals[0].upload.is_none()
             })
             .await
@@ -1131,7 +1131,7 @@ mod tests {
         drv.keys("cmd-v").await.unwrap();
         drv.type_text("after-the-picture").await.unwrap();
         drv.wait_for("the line typed after the paste echoed", STEP, |d| {
-            !d.rows_containing("after-the-picture").is_empty()
+            !d.lines_containing("after-the-picture").is_empty()
         })
         .await
         .unwrap();
@@ -1175,7 +1175,7 @@ mod tests {
         .unwrap();
         drv.type_text("clipboard-watched").await.unwrap();
         drv.wait_for("the keys behind the watch echoed", STEP, |d| {
-            !d.rows_containing("clipboard-watched").is_empty()
+            !d.lines_containing("clipboard-watched").is_empty()
         })
         .await
         .unwrap();
@@ -1282,7 +1282,9 @@ mod tests {
         let mut client = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
         client.write_all(b"through-the-tunnel\n").await.unwrap();
         drv.wait_for("nc to print what came through", STEP, |d| {
-            d.rows_containing("through-the-tunnel").iter().any(|r| r.trim() == "through-the-tunnel")
+            d.lines_containing("through-the-tunnel")
+                .iter()
+                .any(|r| r.trim() == "through-the-tunnel")
         })
         .await
         .unwrap();

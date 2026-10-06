@@ -179,7 +179,7 @@ mod tests {
         stack
             .driver
             .wait_for("the command's output back over the shaped link", STEP, |d| {
-                !d.rows_containing("MESH-42").is_empty()
+                !d.lines_containing("MESH-42").is_empty()
             })
             .await
             .unwrap();
@@ -287,7 +287,7 @@ mod tests {
         stack
             .driver
             .wait_for("worker A still streaming", STEP, |d| {
-                !d.rows_containing("STILL-ALIVE").is_empty()
+                !d.lines_containing("STILL-ALIVE").is_empty()
             })
             .await
             .unwrap();
@@ -326,7 +326,7 @@ mod tests {
         stack
             .driver
             .wait_for("the reattached shell answers over the shaped link", STEP, |d| {
-                !d.rows_containing("RE-42").is_empty()
+                !d.lines_containing("RE-42").is_empty()
             })
             .await
             .unwrap();

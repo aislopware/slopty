@@ -35,7 +35,7 @@ async fn watched(drv: &mut Driver) {
     .unwrap();
     drv.type_text("clipboard-watched").await.unwrap();
     drv.wait_for("the keys behind the watch echoed", STEP, |d| {
-        !d.rows_containing("clipboard-watched").is_empty()
+        !d.lines_containing("clipboard-watched").is_empty()
     })
     .await
     .unwrap();

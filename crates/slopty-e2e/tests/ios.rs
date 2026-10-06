@@ -38,8 +38,8 @@ mod tests {
     /// The first shell still shows its echo: its rows survive the resizes the soft keyboard
     /// and the columns put it through (fewer rows trim blank rows at the bottom first).
     fn echo_on_screen(d: &Dump) -> bool {
-        !d.rows_containing("echo ios-").is_empty()
-            && d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
+        !d.lines_containing("echo ios-").is_empty()
+            && d.lines_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
     }
 
     /// Tap the middle of the `role` node labelled `label`.
@@ -154,7 +154,7 @@ mod tests {
             .wait_for("the echo and the next prompt, the connect notice gone", STEP, |d| {
                 d.notice.is_none()
                     && d.terminals.iter().any(|t| t.cursor_shape == "Bar")
-                    && d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
+                    && d.lines_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
                     && d.a11y_node("Terminal", None).is_some_and(|g| {
                         g.value
                             .as_deref()
@@ -163,7 +163,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!dump.rows_containing("echo ios-").is_empty(), "{dump:#?}");
+        assert!(!dump.lines_containing("echo ios-").is_empty(), "{dump:#?}");
 
         // The frame the app draws, from its own renderer, against this device's golden.
         let frame = drv.render(&render_path).await.unwrap();
