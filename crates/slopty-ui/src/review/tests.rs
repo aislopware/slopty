@@ -610,7 +610,7 @@ fn reviews_asked(sent: &Sent) -> Vec<ReviewScope> {
     sent.borrow()
         .iter()
         .filter_map(|m| match m {
-            ClientMsg::Thread(ThreadRequest::Review { scope, .. }) => Some(*scope),
+            ClientMsg::Thread(ThreadRequest::Review { scope, .. }) => Some(scope.clone()),
             _ => None,
         })
         .collect()

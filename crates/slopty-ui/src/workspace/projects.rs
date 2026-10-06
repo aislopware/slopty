@@ -735,6 +735,7 @@ impl WorkspaceView {
     ) {
         let project = project.clone();
         let verb = match action {
+            TaskAction::Review => return self.review_task(&project, task, cx),
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::PushAgain => Verb::TaskPush { project, task },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
@@ -767,6 +768,24 @@ impl WorkspaceView {
             }
         };
         self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// "Review" on a finished task: its worktree's changes on its machine, the whole branch
+    /// since it left the project's target, which is what its merge brings, in a tile of their
+    /// own beside the board. It reads the worktree itself, so it opens
+    /// whether or not the task's agent still runs, or has a tile here.
+    fn review_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+        let board = self.projects.mirror.get(project);
+        let Some(((worker, path), target)) =
+            board.and_then(|b| Some((b.worktree(task)?, b.project.target.clone())))
+        else {
+            return self.show_notice(format!("#{task} has no worktree to review"), cx);
+        };
+        let key = worker_key(worker);
+        if !self.workers.contains_key(&key) {
+            return self.show_notice(format!("#{task}'s machine is not linked here"), cx);
+        }
+        self.open_changes(key, path, Some(target), cx);
     }
 
     /// The person's words from a board's line to its orchestrator. The server keeps them on
@@ -904,7 +923,7 @@ impl WorkspaceView {
         self.last_start = Some(last);
         let item = ItemId::new();
         let starting = super::starting::Starting::new(worker, agent, cwd, None);
-        self.open_starting(item, starting.in_worktree(worktree, item), cx);
+        self.open_starting(item, starting.in_worktree(worktree), cx);
         self.send_start(item, None, cx);
         self.projects.orchestrating = Some(item);
     }

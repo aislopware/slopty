@@ -168,7 +168,7 @@ impl WorkspaceView {
         use slopty_proto::items::ItemKind;
         let tile = self.focused()?;
         let path = match &self.item(tile)?.kind {
-            ItemKind::Folder { path } | ItemKind::Changes { path } => path.clone(),
+            ItemKind::Folder { path } | ItemKind::Changes { path, .. } => path.clone(),
             ItemKind::Terminal { session } => self.summary(*session)?.repo.clone()?,
             _ => return None,
         };
@@ -184,8 +184,25 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some((key, path)) = self.changes_here() else { return };
+        self.open_changes(key, path, None, cx);
+    }
+
+    /// The changes of `path` on `key`, in their own tile, against `against` when it names a
+    /// branch (the whole branch since it left it); the one open there already for that folder
+    /// and branch takes the focus instead.
+    pub(super) fn open_changes(
+        &mut self,
+        key: WorkerKey,
+        path: String,
+        against: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let open = self.layout.tiles().find_map(|t| match &self.item(t)?.kind {
-            ItemKind::Changes { path: p } if t.worker == key && *p == path => Some(t.item),
+            ItemKind::Changes { path: p, against: a }
+                if t.worker == key && *p == path && *a == against =>
+            {
+                Some(t.item)
+            }
             _ => None,
         });
         if let Some(item) = open {
@@ -194,7 +211,7 @@ impl WorkspaceView {
         }
         let item = Item {
             id: ItemId::new(),
-            kind: ItemKind::Changes { path },
+            kind: ItemKind::Changes { path, against },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
@@ -205,22 +222,27 @@ impl WorkspaceView {
 
     /// Make the view of each folder's changes tile, and let go of those whose tile is gone.
     pub(super) fn sync_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tiled: Vec<(ItemId, WorkerKey, String)> = self
+        let tiled: Vec<(ItemId, WorkerKey, String, Option<String>)> = self
             .layout
             .tiles()
             .filter_map(|t| match &self.item(t)?.kind {
-                ItemKind::Changes { path } => Some((t.item, t.worker, path.clone())),
+                ItemKind::Changes { path, against } => {
+                    Some((t.item, t.worker, path.clone(), against.clone()))
+                }
                 _ => None,
             })
             .collect();
-        for (item, key, path) in &tiled {
+        for (item, key, path, against) in &tiled {
             if self.reviews.changes.contains_key(item) {
                 continue;
             }
             let hub = self.thread_hub(*key, cx);
             let theme = self.theme.clone();
             let path = path.clone();
-            let view = cx.new(|cx| ReviewView::folder(hub, path, theme, window, cx));
+            let view = cx.new(|cx| match against.clone() {
+                Some(branch) => ReviewView::branch(hub, path, branch, theme, window, cx),
+                None => ReviewView::folder(hub, path, theme, window, cx),
+            });
             let key = *key;
             let hearing = cx.subscribe(&view, move |this, view, event: &ReviewEvent, cx| {
                 this.heard_review(key, &view, event, cx);

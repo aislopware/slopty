@@ -68,17 +68,20 @@ impl Scope {
             Self::LastTurn => state.last_turn().map(|t| ReviewScope::Turn(t.id)),
             Self::SinceReviewed => Some(ReviewScope::Kept),
             Self::AllTurns => first.map(ReviewScope::Since),
-            Self::Uncommitted | Self::WholeBranch => self.wire_alone(),
+            Self::Uncommitted | Self::WholeBranch => self.wire_alone(None),
         }
     }
 
-    /// What to ask the worker for with no thread: a working tree's span; `None` for a span
-    /// of a thread's turns.
+    /// What to ask the worker for with no thread: a working tree's span, the whole branch
+    /// since it left `branch` where one is named, else its base; `None` for a span of a
+    /// thread's turns.
     #[must_use]
-    pub const fn wire_alone(self) -> Option<ReviewScope> {
+    pub fn wire_alone(self, branch: Option<&str>) -> Option<ReviewScope> {
         match self {
             Self::Uncommitted => Some(ReviewScope::WorkingTree(Against::Head)),
-            Self::WholeBranch => Some(ReviewScope::WorkingTree(Against::Base)),
+            Self::WholeBranch => Some(ReviewScope::WorkingTree(
+                branch.map_or(Against::Base, |b| Against::Branch(b.to_owned())),
+            )),
             Self::LastTurn | Self::SinceReviewed | Self::AllTurns => None,
         }
     }

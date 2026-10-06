@@ -36,7 +36,7 @@ use super::model::{
 use super::recap::{Recap, RecapKind};
 use super::{
     AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, MergeTask, OpenNode, PushTask,
-    ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowTerminal,
+    ResolveConflicts, RetryTask, ReviewTask, RunTaskOn, SelectNext, SelectPrevious, ShowTerminal,
     StopTaskAgent, TellOrchestrator, TogglePush,
 };
 use crate::a11y::tab_stop;
@@ -464,10 +464,15 @@ impl ProjectView {
         let sp = theme.spacing;
         let machine =
             crate::icons::machine(self.seen.workers.get(&place.worker).and_then(|w| w.form));
-        let (glyph, tone) = match place.how {
-            PlaceHow::Runs => (machine, s.text_secondary),
-            PlaceHow::Ran => (machine, s.text_muted),
-            PlaceHow::Pinned => (Symbol::Lock, s.text_muted),
+        // The machine it runs on wears its own colour on its glyph; one it ran on is muted.
+        let (glyph, tone, ink) = match place.how {
+            PlaceHow::Runs => {
+                // The workspace's key for the worker, so its colour is the navigator's.
+                let key = slopty_client::layout::WorkerKey::new(place.worker.as_uuid().as_u128());
+                (machine, s.text_secondary, crate::kit::machine_ink(theme, key, false))
+            }
+            PlaceHow::Ran => (machine, s.text_muted, s.text_muted),
+            PlaceHow::Pinned => (Symbol::Lock, s.text_muted, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
         let id = format!("{prefix}-{}-where", node_key(node));
@@ -490,7 +495,7 @@ impl ProjectView {
             .text_size(self.z(theme.roles().metadata.size))
             .text_color(hsla(tone))
             .child(
-                icon(theme, glyph, IconSize::Inline, hsla(tone))
+                icon(theme, glyph, IconSize::Inline, hsla(ink))
                     .size(self.z(theme.typography.icon())),
             )
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
@@ -618,6 +623,7 @@ pub(super) fn switch(
 /// What an action does, as "nothing to …" and "stand on a task to …" say it.
 const fn verb_of(action: TaskAction) -> &'static str {
     match action {
+        TaskAction::Review => "review",
         TaskAction::Merge => "merge",
         TaskAction::Retry => "retry",
         TaskAction::RunOn => "choose where it runs",
@@ -2159,6 +2165,9 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &OpenNode, _w, cx| this.open_picked(cx)))
             .on_action(cx.listener(|this, _: &RunTaskOn, _w, cx| {
                 this.act_on_picked(TaskAction::RunOn, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReviewTask, _w, cx| {
+                this.act_on_picked(TaskAction::Review, cx);
             }))
             .on_action(cx.listener(|this, _: &MergeTask, _w, cx| {
                 this.act_on_picked(TaskAction::Merge, cx);

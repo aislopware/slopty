@@ -31,6 +31,8 @@ gpui::actions!(
         OpenNode,
         /// Choose the worker the task the keyboard stands on runs on.
         RunTaskOn,
+        /// Review the whole branch of the task the keyboard stands on, before it merges.
+        ReviewTask,
         /// Ask for the merge of the task the keyboard stands on.
         MergeTask,
         /// Check the task the keyboard stands on again from the start.
@@ -75,6 +77,7 @@ const WORKSPACE: &[Option<&str>] = &[Some("Workspace && !Screen")];
 pub fn key_bindings() -> Vec<crate::keymap::Command> {
     use crate::keymap::{Command, Scope};
     vec![
+        Command::new(Scope::Project, "review_task", ReviewTask, &["v"], BOARD),
         Command::new(Scope::Project, "merge_task", MergeTask, &["m"], BOARD),
         Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
         Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
@@ -101,6 +104,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
     };
     vec![
         line("Start a project here", Box::new(StartProject)),
+        line("Review the task", Box::new(ReviewTask)),
         line("Merge the task", Box::new(MergeTask)),
         line("Retry the task", Box::new(RetryTask)),
         line("Tell the task's agent to fix CI", Box::new(FixCi)),

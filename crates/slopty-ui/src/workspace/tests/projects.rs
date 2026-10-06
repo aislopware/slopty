@@ -151,9 +151,10 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(3))), "the board's keys");
 
-    let terminal = selector("face-terminal", orchestrator_tile.item);
-    let at = cx.debug_bounds(terminal).expect("the switch's terminal").center();
-    cx.simulate_click(at, Modifiers::none());
+    // Turned to its terminal, as the header's face toggle and ⌘J do.
+    view.update_in(cx, |v, _w, cx| {
+        v.set_face(orchestrator, super::super::faces::Face::Terminal, cx);
+    });
     cx.run_until_parked();
     assert!(!shown(&view, cx, orchestrator));
     assert!(cx.debug_bounds("project").is_none());
@@ -718,8 +719,11 @@ fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAp
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let key = studio.key;
-    let agents = [AgentId::CLAUDE_CODE, AgentId::PI]
-        .map(|a| InstalledAgent { agent: AgentId::named(a), version: "1.0".to_owned() });
+    let agents = [AgentId::CLAUDE_CODE, AgentId::PI].map(|a| InstalledAgent {
+        agent: AgentId::named(a),
+        version: "1.0".to_owned(),
+        offers: slopty_proto::thread::Offers::default(),
+    });
     let caps = WorkerCaps { agents: agents.to_vec(), ..healthy() };
     view.update_in(cx, |v, _w, cx| {
         v.set_worker_caps(key, caps, cx);
@@ -1372,6 +1376,58 @@ fn the_board_talks_to_its_orchestrator(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape down");
     let picked = b.read_with(cx, |b, _| b.picked());
     assert_eq!(picked, Some(Some(TaskId(2))), "the board has its keys back");
+}
+
+/// A finished task is shown before it merges: "Review" leads its row, Merge second, and opens
+/// its worktree's changes on its machine as a tile of their own, though its agent has ended and
+/// has no tile here. "v" does the same from the keyboard, and goes to the tile already open.
+#[gpui::test]
+fn a_finished_task_is_reviewed_from_the_board(cx: &mut TestAppContext) {
+    use slopty_proto::items::ItemKind;
+
+    use crate::project::ReviewTask;
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let mut done = on(card(7, "Ship the parser", TaskState::Done), worker, SessionId::new());
+    if let Some(a) = done.assignment.as_mut() {
+        a.ended_ms = Some(fixtures::AT);
+    }
+    done.worktree = Some("/w/slopty/.claude/worktrees/ship-the-parser".to_owned());
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", done, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let review = cx.debug_bounds("project-card-review-7").expect("Review on the row");
+    let merge = cx.debug_bounds("project-card-merge-7").expect("and Merge");
+    assert!(review.left() < merge.left(), "Review first");
+
+    click(cx, "project-card-review-7");
+    let opened = |view: &Entity<WorkspaceView>, cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| {
+            v.items()
+                .filter_map(|(_, item)| match &item.kind {
+                    ItemKind::Changes { path, .. } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(opened(&view, cx), ["/w/slopty/.claude/worktrees/ship-the-parser"]);
+
+    let b = board(&view, cx, orchestrator);
+    for _ in 0..8 {
+        if b.read_with(cx, |b, _| b.picked()) == Some(Some(TaskId(7))) {
+            break;
+        }
+        b.update(cx, |b, cx| b.select_by(1, cx));
+    }
+    assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(7))));
+    cx.dispatch_action(ReviewTask);
+    cx.run_until_parked();
+    assert_eq!(opened(&view, cx).len(), 1, "the open tile takes the focus, no second one");
 }
 
 /// Every card says where it is at a glance: the worker and its system, a pinned one's card

@@ -257,6 +257,8 @@ pub struct ReviewView {
     /// The tile's body at rest, under its header, in points.
     height: f32,
     scope: Scope,
+    /// The branch a folder's whole branch is compared with; its base when `None`.
+    branch: Option<String>,
     /// The scope asked for, and over which turn: asked again when the thread moves to a new
     /// turn.
     asked: Option<ReviewScope>,
@@ -345,7 +347,7 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::of(hub, Reviewed::Thread(thread), theme, window, cx)
+        Self::of(hub, Reviewed::Thread(thread), None, theme, window, cx)
     }
 
     /// The review of the folder `path`'s changes from `hub`'s machine, with no thread: what is
@@ -357,12 +359,27 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::of(hub, Reviewed::Folder(path), theme, window, cx)
+        Self::of(hub, Reviewed::Folder(path), None, theme, window, cx)
+    }
+
+    /// A folder's whole branch since it left `branch`, as a finished task's review shows what
+    /// its merge into the project's target would bring; the scope bar can still turn it to
+    /// what is not committed.
+    pub fn branch(
+        hub: Entity<ThreadHub>,
+        path: String,
+        branch: String,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::of(hub, Reviewed::Folder(path), Some(branch), theme, window, cx)
     }
 
     fn of(
         hub: Entity<ThreadHub>,
         reviewed: Reviewed,
+        branch: Option<String>,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -403,7 +420,12 @@ impl ReviewView {
             zoom: 1.0,
             width: 0.0,
             height: 0.0,
-            scope: if folder { Scope::Uncommitted } else { Scope::default() },
+            scope: match (folder, &branch) {
+                (true, Some(_)) => Scope::WholeBranch,
+                (true, None) => Scope::Uncommitted,
+                (false, _) => Scope::default(),
+            },
+            branch,
             asked: None,
             model: Model::default(),
             blocks: HashMap::new(),
@@ -534,8 +556,8 @@ impl ReviewView {
         let thread = match &self.reviewed {
             Reviewed::Thread(thread) => *thread,
             Reviewed::Folder(path) => {
-                let (path, scope) = (path.clone(), self.scope.wire_alone());
-                let Some(ReviewScope::WorkingTree(against)) = scope else { return };
+                let (path, scope) = (path.clone(), self.scope.wire_alone(self.branch.as_deref()));
+                let Some(ReviewScope::WorkingTree(against)) = scope.clone() else { return };
                 self.asked = scope;
                 let op = GitOp::Changes { against };
                 let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&path, op, cx));
@@ -547,13 +569,14 @@ impl ReviewView {
             return;
         };
         let held = self.reviewing.is_some() || self.model.has_findings();
-        let Some(scope) = self.pinned.filter(|_| held).or_else(|| self.scope.wire(state)) else {
+        let pinned = self.pinned.clone().filter(|_| held);
+        let Some(scope) = pinned.or_else(|| self.scope.wire(state)) else {
             return;
         };
         if self.asked.as_ref() == Some(&scope) {
             return;
         }
-        self.asked = Some(scope);
+        self.asked = Some(scope.clone());
         self.hub.update(cx, |hub, cx| hub.ask_review(thread, scope, cx));
     }
 
@@ -669,7 +692,7 @@ impl ReviewView {
     /// The worker's review came: a thread's on its stream, a folder's from its repository.
     fn reviewed(&mut self, cx: &mut Context<Self>) {
         let hub = self.hub.read(cx);
-        let review = match (&self.reviewed, self.scope.wire_alone()) {
+        let review = match (&self.reviewed, self.scope.wire_alone(self.branch.as_deref())) {
             (Reviewed::Thread(thread), _) => hub.review(*thread).cloned(),
             (Reviewed::Folder(path), Some(ReviewScope::WorkingTree(against))) => {
                 hub.git().repo(path).and_then(|r| r.changes.get(&against)).cloned()
@@ -845,7 +868,7 @@ impl ReviewView {
             .and_then(Mirror::state)
             .and_then(|s| s.last_turn().map(|t| t.id));
         let Some(intent) = self.intent(Intent::Review { from, to }, cx) else { return };
-        self.pinned = self.asked;
+        self.pinned.clone_from(&self.asked);
         self.came = None;
         self.reviewing = Some(Reviewing { intent, after, agent });
         cx.notify();

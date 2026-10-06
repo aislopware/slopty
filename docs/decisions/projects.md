@@ -2055,3 +2055,18 @@ follow-up)
     Merged folding and opening), the board tests that click rows, stages and checks by their
     selectors (unchanged: `project-card-<n>`, `project-lane-<lane>`), and the goldens
     `project-lanes`, `project-lanes-dark` and `project-live-lanes`.
+
+- ✅ **A finished task is reviewed from its row before it merges** (2026-10-06,
+  `.research/readiness-2026-10-07.md` R8). Merge was offered on a change the person had not been
+  shown. The only way to it went through the task's agent tile and its thread's review, which
+  fails once the agent has ended or its tile is on another client. That is the usual state of a
+  task finished hours ago, or of one seen from the phone.
+  - **"Review" leads a Ready to merge row**, with Merge second (`TaskAction::Review`, `v` on
+    the board, "Review the task" in the palette). It opens the task's worktree as a folder's
+    changes on its machine (`ItemKind::Changes { path, against: Some(target) }`), so the commit
+    sheet and who wrote each line are there too. It shows the whole branch since it left the
+    project's target (`Against::Branch`), which is what the merge brings. The scope bar can
+    still turn it to what is not committed.
+  - It reads the worktree, not the thread, so it opens whether or not the agent runs or has a
+    tile here. A second "Review" goes to the tile already open.
+  - Test: `workspace::tests::projects::a_finished_task_is_reviewed_from_the_board`.

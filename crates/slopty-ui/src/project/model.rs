@@ -233,6 +233,8 @@ impl Lane {
 /// What the person does to a task from its card or row ([`Board::actions`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TaskAction {
+    /// Show its whole branch against the project's target, before it merges.
+    Review,
     /// Ask for its merge.
     Merge,
     /// Check it again from the start, and merge it if it passes.
@@ -259,6 +261,7 @@ impl TaskAction {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Review => "Review",
             Self::Merge => "Merge",
             Self::Retry => "Retry",
             Self::RunOn => "Run on\u{2026}",
@@ -281,6 +284,7 @@ impl TaskAction {
     #[must_use]
     pub fn selector(self, prefix: &str, task: TaskId) -> String {
         let word = match self {
+            Self::Review => "review",
             Self::Merge => "merge",
             Self::Retry => "retry",
             Self::RunOn => "run-on",
@@ -578,6 +582,15 @@ impl Board {
         }
     }
 
+    /// The worktree `task`'s work is in, with the machine it is on: where its review reads
+    /// its branch, whether or not its agent still runs.
+    #[must_use]
+    pub fn worktree(&self, task: TaskId) -> Option<(WorkerId, String)> {
+        let card = self.tasks.get(&task)?;
+        let path = card.worktree.as_ref().filter(|p| !p.trim().is_empty())?;
+        Some((card.assignment.as_ref()?.term.worker, path.clone()))
+    }
+
     /// Where `node` runs, ran last, is pinned to or would start, with the worktree and branch
     /// its work is in and why it went there: the board's map of the fleet, row by row.
     #[must_use]
@@ -688,7 +701,8 @@ impl Board {
     }
 
     /// What the person can do to `task` from the board, besides opening its agent:
-    /// - merge a finished task the queue does not hold, as no check queued it;
+    /// - review a finished task's whole branch against the target, then merge it, when the queue
+    ///   does not hold it, as no check queued it;
     /// - retry what failed on its way to the target (its branch home, its verifier, its merge),
     ///   which checks it afresh.
     ///
@@ -729,6 +743,10 @@ impl Board {
             out.push(TaskAction::ResolveConflicts);
         }
         if card.state == TaskState::Done && card.merge.is_none() {
+            // What merges is shown first, whether or not its agent still runs.
+            if self.worktree(task).is_some() {
+                out.push(TaskAction::Review);
+            }
             out.push(TaskAction::Merge);
         }
         let retried = |kind: StepKind| match kind {
@@ -816,7 +834,8 @@ impl Board {
                     crate::kit::first_line(why)
                 ))
             }
-            TaskAction::Merge
+            TaskAction::Review
+            | TaskAction::Merge
             | TaskAction::RunOn
             | TaskAction::Retry
             | TaskAction::PushAgain
