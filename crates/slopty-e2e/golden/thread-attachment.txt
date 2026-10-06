@@ -12,6 +12,9 @@ Image │ Claude Code
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Do these steps in order, using the named tools, then reply "done". 1)…
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

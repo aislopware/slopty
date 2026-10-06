@@ -1,4 +1,4 @@
-Window │ Ship the project board
+Window │ studio
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -21,16 +21,17 @@ Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 Group │ Where
-Button │ Ship the project board
+Button │ studio
+TabList
+Tab │ Terminal
+Button │ Close tab
+Tab │ Orchestrator
+Button │ Close tab
+Tab │ #1 Mirror the server's projects
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ Claude Code Orchestrator
 Image │ Claude Code
@@ -68,15 +69,5 @@ Button │ Merge #6
 List │ Merged
 Button │ Show Merged 1
 MultilineTextInput │ Message the orchestrator
-Button │ Send
-Group │ #1 Mirror the server's projects
-Heading │ Claude Code #1 Mirror the server's projects
-Image │ Claude Code
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
 Button │ Send
 Status │ #5 Check the wire goldens: its verifier failed

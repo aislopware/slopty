@@ -5,6 +5,9 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

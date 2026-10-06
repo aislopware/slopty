@@ -1,4 +1,4 @@
-Window │ New workspace
+Window │ Slopty
 Label │ Slopty
 Heading │ Choose where to work
 Button │ Use this Mac

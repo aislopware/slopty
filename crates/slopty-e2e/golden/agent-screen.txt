@@ -15,6 +15,10 @@ Button │ Terminal
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Check the editor
+Image │ Working
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

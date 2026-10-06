@@ -4,6 +4,9 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Terminal
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

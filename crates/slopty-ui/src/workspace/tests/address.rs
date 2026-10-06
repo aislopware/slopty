@@ -125,6 +125,28 @@ fn the_address_is_a_button_at_rest_and_a_field_when_clicked(cx: &mut TestAppCont
     assert!(!nodes.iter().any(|n| n.is("Button", Some("Address"))), "the field is the place");
 }
 
+/// A page shown in a pane of tabs keeps its address in the row after the tabs, a button that
+/// a click turns into the field, as a lone tile's header does.
+#[gpui::test]
+fn a_tabbed_page_keeps_its_address_after_the_tabs(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = page(&view, cx, &fake, Some("dev server"));
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
+    one_pane(&view, cx, &[shell, tile]);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    let place = nodes.iter().find(|n| n.is("Button", Some("Address"))).expect("the place");
+    assert_eq!(place.value.as_deref(), Some(HOME), "{nodes:#?}");
+    let tab = cx.debug_bounds(selector("tab", tile.item)).expect("its tab");
+    let at = cx.debug_bounds(selector("place", tile.item)).expect("drawn");
+    assert!(at.left() >= tab.right(), "after the tabs: {at:?} {tab:?}");
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(field(&view, cx), Some((HOME.to_owned(), HOME.to_owned())));
+}
+
 /// Another client's new address for the page moves this client's page too: the item is the
 /// one address they share.
 #[gpui::test]

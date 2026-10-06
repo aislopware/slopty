@@ -1,23 +1,23 @@
-Window │ project
+Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
 Button │ Search
 Button │ New agent
 Group │ Where
-Button │ project
+Button │ e2e-worker
+TabList
+Tab │ main.rs
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Group │ main.rs
 Heading │ file main.rs
-Button │ Drag the file out
+Tab │ Terminal
+Button │ Close tile
+Tab │ main.rs
 Label │ Edited
+Button │ Close tile
 Label │ project
 Button │ Close tile
 Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited

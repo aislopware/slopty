@@ -18,6 +18,10 @@ Image │ Needs you
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Image │ Needs you
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Status │ 1 new

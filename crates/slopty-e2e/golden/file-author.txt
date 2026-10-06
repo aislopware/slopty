@@ -1,4 +1,4 @@
-Window │ src
+Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -19,7 +19,11 @@ Button │ Close tile
 Button │ Terminal
 Button │ Close tile
 Group │ Where
-Button │ src
+Button │ e2e-worker
+TabList
+Tab │ refresh.rs
+Image │ Done
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
@@ -29,30 +33,14 @@ Label │ ~
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
-Group │ Retry the refresh
-Heading │ Claude Code Retry the refresh
-Image │ Claude Code
-Button │ Commit on repo
-Status │ Turn finished
-Image │ Done
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-Article │ You: Make the refresh retry with one idempotency key
-Button │ Branch from here
-Button │ Copy message
-Button │ Worked 31 s: Edited refresh.rs
-Article │ The refresh now retries three times with one key, and saves the token.
-Button │ Copy message
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
-Button │ Review the changes
-Button │ Send
 Group │ refresh.rs
 Heading │ file refresh.rs
-Button │ Drag the file out
-Label │ src
+Tab │ Retry the refresh
+Image │ Claude Code
+Image │ Done
+Button │ Close tile
+Tab │ refresh.rs
+Button │ Close tile
 Button │ Close tile
 Document │ File $SCRATCH/repo/src/refresh.rs │ 6 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/repo/src/refresh.rs │ pub fn refresh(client: &Client, token: &Token) -> Result<Token> {⏎    let key = IdempotencyKey::new();⏎    let fresh = retry(3, || client.post_with("/refresh", token, &key))?;⏎    store.save(&fresh)?;⏎    Ok(fresh)⏎} (focused)

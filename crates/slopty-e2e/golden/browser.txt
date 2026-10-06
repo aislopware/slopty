@@ -5,17 +5,18 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Slopty test page
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Group │ Slopty test page
 Heading │ browser Slopty test page
+Tab │ Terminal
+Button │ Close tile
+Tab │ Slopty test page
+Button │ Close tile
 Button │ Address │ http://127.0.0.1:$PORT/
 Button │ Close tile
 Document │ Page http://127.0.0.1:$PORT/ │ Slopty test page

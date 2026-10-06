@@ -1,4 +1,4 @@
-Window │ Ship the project board
+Window │ studio
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
@@ -22,16 +22,18 @@ Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 Group │ Where
-Button │ Ship the project board
+Button │ studio
+TabList
+Tab │ Terminal
+Button │ Close tab
+Tab │ Orchestrator
+Button │ Close tab
+Tab │ #1 Read a pull request's checks
+Image │ Working
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ Claude Code Orchestrator
 Image │ Claude Code
@@ -48,6 +50,7 @@ Heading │ Working
 ListItem │ Read a pull request's checks, Working, studio · macOS, worktree-slopty-board-1, PR #42, 1 of 4 checks fail, Changes requested
 Image │ Working
 Label │ PR #42
+Label │ worktree-slopty-board-1
 Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
 Button │ Fix CI #1
 Button │ Address comments #1
@@ -58,16 +61,4 @@ Heading │ Up next
 ListItem │ Draw the pipeline row, Up next
 Image │ Up next
 MultilineTextInput │ Message the orchestrator
-Button │ Send
-Group │ #1 Read a pull request's checks
-Heading │ Claude Code #1 Read a pull request's checks
-Image │ Claude Code
-Status │ Working
-Image │ Working
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
 Button │ Send

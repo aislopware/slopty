@@ -12,6 +12,9 @@ Image │ Claude Code
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ The header clips its chips on a narrow window, as here.
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

@@ -3,6 +3,9 @@ Group │ Workspace
 Button │ Navigator
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Terminal 2
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

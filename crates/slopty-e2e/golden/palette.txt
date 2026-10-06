@@ -5,26 +5,21 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Terminal
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
-Label │ ~
+Tab │ Terminal
+Button │ Close tile
+Tab │ RELEASE.md
+Button │ Close tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
-Group │ RELEASE.md
-Heading │ file RELEASE.md
-Button │ Drag the file out
-Label │ home
-Button │ Show source
-Button │ Close tile
-Document │ File $SCRATCH/home/RELEASE.md │ 5 lines, Markdown
-Document │ Preview of $SCRATCH/home/RELEASE.md │ # Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
-CheckBox │ Done: build the bundle
-CheckBox │ To do: notarise
-CheckBox │ To do: tag
 Group │ Terminal 2
 Heading │ terminal Terminal 2
 Button │ Close tile
@@ -40,6 +35,6 @@ ListBoxOption │ RELEASE.md home
 Heading │ Machines
 ListBoxOption │ e2e-worker
 Heading │ Commands
-ListBoxOption │ New terminal ⌘T
-ListBoxOption │ New agent… ⇧⌘T
+ListBoxOption │ New terminal ⇧⌘T
+ListBoxOption │ New agent ⌘T
 Label │ ↑↓ Move · Esc Close · ↩ Go to

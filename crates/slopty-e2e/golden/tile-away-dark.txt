@@ -1,10 +1,13 @@
-Window │ New workspace
+Window │ e2e-worker
 Group │ Workspace (focused)
 Button │ Navigator
 Button │ Search
 Button │ New agent
 Group │ Where
-Button │ New workspace
+Button │ e2e-worker
+TabList
+Tab
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

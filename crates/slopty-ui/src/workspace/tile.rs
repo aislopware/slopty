@@ -1326,15 +1326,21 @@ impl WorkspaceView {
             let states = (!kind_states.is_empty()).then(|| actions(kind_states));
             let branch = branch.into_iter().map(|(_, _, el)| el);
             let tabs = self.render_tabs(placed, cx);
-            // What the tabs leave is the header's; the tile's controls end it.
+            // What the tabs leave is the header's: the shown tile's context first (where it
+            // is, a page's address, its machine), which gives way before anything after it;
+            // the tile's controls end it.
             let rest = div()
-                .flex_none()
+                .flex_initial()
+                .min_w_0()
                 .h_full()
                 .flex()
                 .items_center()
                 .justify_end()
                 .gap(px(theme.spacing.sm))
+                .pl(px(theme.spacing.sm))
                 .pr(px(theme.spacing.inset()))
+                .when_some(place, gpui::ParentElement::child)
+                .when_some(worker, gpui::ParentElement::child)
                 .children(branch)
                 .when_some(upload, gpui::ParentElement::child)
                 .children(states)
@@ -1593,6 +1599,19 @@ impl WorkspaceView {
                 let title = self.tile_title(item);
                 let label = SharedString::from(title.clone());
                 let name = self.header_name(tab, id, title);
+                // A file with an edit not yet on disk says so after its name, in its tab as in a
+                // lone tile's header.
+                let unsaved = self.file_facts(id).unsaved.then(|| {
+                    div()
+                        .id("unsaved")
+                        .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
+                        .role(Role::Label)
+                        .aria_label(EDITED)
+                        .flex_none()
+                        .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
+                        .text_color(hsla(s.text_muted))
+                        .child(ChromeText::new(EDITED, px(theme.typography.small())))
+                });
                 let close_id = format!("tab-close-{}", id.as_uuid());
                 let close = tab_look::close(theme, close_id, CLOSE_TILE, true, TAB_GROUP).on_click(
                     cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)),
@@ -1655,6 +1674,7 @@ impl WorkspaceView {
                         )
                         .child(slot)
                         .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
+                        .children(unsaved)
                         .children(state)
                         .child(close)
                         .into_any_element(),

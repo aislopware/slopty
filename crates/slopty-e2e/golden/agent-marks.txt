@@ -31,23 +31,21 @@ Image │ Working
 Button │ Close tile
 Group │ Where
 Button │ atlas
+TabList
+Tab │ Claude Code
+Image │ Needs you
+Button │ Close tab
+Tab │ Claude Code 2
+Image │ Working
+Button │ Close tab
+Tab │ pi
+Button │ Close tab
+Tab │ Codex
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Status │ 1 new
 Button │ More
-Group │ Claude Code
-Heading │ Claude Code
-Image │ Claude Code
-Button │ Commit on atlas
-Status │ Needs approval: Wants to run a command
-Image │ Needs you
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
-Button │ Send
 Group │ opencode
 Heading │ opencode
 Button │ Commit on atlas
@@ -71,19 +69,6 @@ Group │ Thread
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Send
-Group │ pi
-Heading │ pi
-Image │ pi
-Button │ Commit on atlas
-Button │ Close tile
-Group │ Thread
-Heading │ What should pi do in atlas?
-MultilineTextInput │ Message
-Button │ Add to the message
-Label │ Model, Canned
-Label │ Effort, Medium
-Button │ Continue in the terminal
 Button │ Send
 Status │ Claude Code needs approval
 Image │ Needs you

@@ -6,16 +6,17 @@ Button │ New agent
 Group │ Where
 Button │ e2e-worker
 TabList
-Tab │ Terminal
+Tab │ Terminal 2
 Button │ Close tab
 Button │ New
-Group │ Status
-Button │ Server offline
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
+Group │ Terminal 2
+Heading │ terminal Terminal 2
+Tab │ Terminal
+Button │ Close tile
+Tab │ Terminal 2
+Button │ Close tile
 Button │ Close tile
 Group (focused)
-Terminal │ shell │ ~ %
+Terminal │ shell

@@ -140,6 +140,42 @@ fn edited_follows_the_title(cx: &mut TestAppContext) {
     assert!(place.left() > edited.right(), "the directory after them: {place:?} {edited:?}");
 }
 
+/// A file in a pane of tabs says "Edited" in its tab, after its name, as a lone tile's header
+/// does.
+#[gpui::test]
+fn a_files_tab_says_edited(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let path = "/w/notes.txt";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 2);
+    one_pane(&view, cx, &[shell, tile]);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Notes".to_owned(),
+        size: 8,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+        editorconfig: Vec::new(),
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_none(), "nothing to say yet");
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    let tab = bounds(cx, selector("tab", tile.item));
+    let edited = bounds(cx, selector("unsaved", tile.item));
+    assert!(tab.left() < edited.left() && edited.right() <= tab.right(), "{tab:?} {edited:?}");
+    assert!(
+        tree(cx)
+            .iter()
+            .any(|n| n.role == "Label" && n.label.as_deref() == Some(super::tile::EDITED))
+    );
+}
+
 /// A Markdown file's header carries the toggle between its preview and its source, which the
 /// file opens on the preview; a click swaps the body and the toggle's words.
 #[gpui::test]

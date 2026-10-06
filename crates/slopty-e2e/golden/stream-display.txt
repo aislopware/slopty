@@ -1,18 +1,18 @@
 Window │ e2e-worker
-Group │ Workspace (focused)
 Button │ Navigator
 Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Display 1
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Heading │ display Display 1
+Tab │ Terminal
+Button │ Close tile
+Tab │ Display 1
+Button │ Close tile
 Button │ Close tile

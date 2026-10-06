@@ -5,6 +5,11 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ drop-here
+TabList
+Tab │ drop-here
+Button │ Close tab
+Tab │ nc -l 47310
+Button │ Close tab
 Button │ New
 Group │ Status
 Button │ 1 port
@@ -16,10 +21,4 @@ Button │ Stop upload │ ↑ 0%
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~/drop-here %
-Group │ nc -l 47310
-Heading │ terminal nc -l 47310
-Label │ ~/drop-here
-Button │ Close tile
-Group
-Terminal │ shell
 Status │ Port 47310 is taken here; forwarded on 47311

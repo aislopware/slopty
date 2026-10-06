@@ -1,23 +1,22 @@
-Window │ project
+Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
 Button │ Search
 Button │ New agent
 Group │ Where
-Button │ project
+Button │ e2e-worker
+TabList
+Tab │ screenshot
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
 Group │ screenshot
 Heading │ file screenshot
-Button │ Drag the file out
-Label │ project
+Tab │ Terminal
+Button │ Close tile
+Tab │ screenshot
+Button │ Close tile
 Button │ Close tile
 Document │ File $SCRATCH/project/screenshot │ image/png, 1600 × 900, 23 KB (focused)
 Image │ image/png, 1600 × 900, 23 KB

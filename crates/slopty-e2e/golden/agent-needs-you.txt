@@ -5,6 +5,10 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Fix the login redirect
+Image │ Needs you
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Status │ 1 new
