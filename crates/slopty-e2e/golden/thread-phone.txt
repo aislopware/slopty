@@ -1,7 +1,7 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Heading │ terminal Do these steps in order with the named tools, then reply "done". 1) Read…, Needs approval: Run touch refused.txt
+Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…, Needs approval: Run touch refused.txt
 Image │ Claude Code
 Image │ Needs you
 Button │ Needs you

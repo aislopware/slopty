@@ -8,5 +8,6 @@ Button │ Needs you
 Button │ More
 Group │ e2e-worker
 Heading │ e2e-worker
-Status │ Reconnecting…
+Status │ e2e-worker is unreachable
+Button │ Wake
 Button │ Retry now

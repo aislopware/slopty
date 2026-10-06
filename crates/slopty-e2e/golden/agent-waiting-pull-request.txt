@@ -7,7 +7,7 @@ Button │ New
 Button │ Needs you
 Button │ More
 Group │ Claude Code
-Heading │ terminal Claude Code
+Heading │ Claude Code
 Image │ Claude Code
 Label │ ~
 Link │ Pull request 1234, approved

@@ -544,7 +544,25 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
     }
 }
 
+/// A tile's heading as it is spoken: its kind or agent, then its title, the lead left out where
+/// the title already says it ("Claude Code 2", a twin, not "Claude Code Claude Code 2").
+pub(super) fn spoken_heading(kind: &str, title: &str) -> String {
+    let said = title == kind || title.strip_prefix(kind).is_some_and(|rest| rest.starts_with(' '));
+    if said { title.to_owned() } else { format!("{kind} {title}") }
+}
+
 impl WorkspaceView {
+    /// The word a tile's spoken heading leads with: the agent's name where the tile wears its
+    /// mark ([`kind_icon`]), as the person sees it, else its kind ([`kind_name`]). Only what is
+    /// said changes: twins are numbered, and tiles grouped, by their kind.
+    pub(super) fn spoken_kind(&self, item: &Item) -> String {
+        let runs = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::Thread { .. });
+        match self.item_agent(item).filter(|_| runs) {
+            Some(agent) => crate::conversation::thread::view::agent_label(&AgentId::named(agent)),
+            None => kind_name(item).to_owned(),
+        }
+    }
+
     /// What a tile's title is placed by, the same in its header, its navigator row and its
     /// palette line: where a shell is, the folder a file is in, a page's address when the
     /// title is not it. A window or display has none. Kept with
@@ -1087,17 +1105,13 @@ impl WorkspaceView {
         let id = item.id;
         let k = chrome.k;
         let focused = placed.focused;
-        let kind = kind_name(item);
+        let kind = self.spoken_kind(item);
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
         };
         let ink = title_ink(theme, focused);
-        let heading = SharedString::from(if kind == title {
-            title.clone()
-        } else {
-            format!("{kind} {title}")
-        });
+        let heading = SharedString::from(spoken_heading(&kind, &title));
         // Every header sits on its body's surface with nothing between them, focused or not, so
         // a tile reads as one piece and the strip as content, not as rows of bands. A page or a
         // remote picture is another program's surface, never quite the content's, so a hairline

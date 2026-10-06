@@ -685,7 +685,7 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
 }
 
 /// A phone's bar names the focused tile, so its drawer names the workspace: a heading in the
-/// drawer's top row, in the panel title's role, on the edge of the section headings below it,
+/// drawer's top row, as the bar's title is set, on the edge of the section headings below it,
 /// that follows the active workspace. A desktop's navigator leaves that row to the window's
 /// controls.
 #[gpui::test]
@@ -702,8 +702,11 @@ fn a_phone_drawer_names_the_workspace(cx: &mut TestAppContext) {
     let field = cx.debug_bounds("nav-filter-field").expect("the filter");
     let section = cx.debug_bounds("nav-workspaces").expect("the section");
     assert!(title.bottom() <= field.top(), "in the top row, over the filter");
-    let role = view.read_with(cx, |v, _| v.theme.roles().panel_title);
-    assert!((title.size.height - px(role.line)).abs() < px(0.5), "a panel's title: {title:?}");
+    let role = view.read_with(cx, |v, _| titlebar::phone_title_role(&v.theme));
+    assert!(
+        (title.size.height - px(role.line)).abs() < px(0.5),
+        "an inline navigation title: {title:?}"
+    );
     let inset = px(Theme::default().spacing.inset());
     let edge = section.left() + inset;
     assert!((title.left() - edge).abs() < px(0.5), "on the headings' edge: {title:?} {edge:?}");

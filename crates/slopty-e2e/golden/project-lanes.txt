@@ -32,7 +32,7 @@ Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
-Heading │ terminal Orchestrator
+Heading │ Claude Code Orchestrator
 Image │ Claude Code
 RadioGroup │ Face
 RadioButton │ Thread
@@ -63,7 +63,7 @@ ListItem │ Write the decision, Merged
 MultilineTextInput │ Message the orchestrator
 Button │ Send
 Group │ #1 Mirror the server's projects
-Heading │ terminal #1 Mirror the server's projects
+Heading │ Claude Code #1 Mirror the server's projects
 Image │ Claude Code
 RadioGroup │ Face
 RadioButton │ Thread

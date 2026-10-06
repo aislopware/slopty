@@ -959,8 +959,8 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
 }
 
 /// On a phone the bar is the focused tile's, as a navigation bar names its screen: its kind and
-/// its title, in the panel title's role, a step above the rows as the drawer's title is, and
-/// the tile draws no header of its own, so the screen keeps one bar.
+/// its title, as an inline navigation title, a step above the rows by weight as the drawer's is,
+/// and the tile draws no header of its own, so the screen keeps one bar.
 /// There is no "+": the tile's own rows lead the "…" menu, then what "+" opened.
 #[gpui::test]
 fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
@@ -980,8 +980,11 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("phone-title").expect("the focused tile's title");
     assert!(cx.debug_bounds("breadcrumb").is_none(), "the title alone, no breadcrumb");
-    let role = view.read_with(cx, |v, _| v.theme.roles().panel_title);
-    assert!((name.size.height - px(role.line)).abs() < px(0.5), "a panel's title: {name:?}");
+    let role = view.read_with(cx, |v, _| titlebar::phone_title_role(&v.theme));
+    assert!(
+        (name.size.height - px(role.line)).abs() < px(0.5),
+        "an inline navigation title: {name:?}"
+    );
     click(cx, "more");
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
@@ -1169,4 +1172,62 @@ fn shells_that_read_alike_are_named_by_their_last_command(cx: &mut TestAppContex
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
     let make = lines.iter().find(|(title, ..)| title == "make").expect("its row");
     assert!(!make.1.contains("make"), "said once: {make:?}");
+}
+
+/// A tile that wears an agent's mark is announced by its agent, as it shows: its header's
+/// heading, and on a phone the bar's, lead with the agent's name, where a shell's lead with
+/// "terminal". Twins are still numbered by their kind.
+#[gpui::test]
+fn an_agents_tile_is_announced_by_its_agent(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+    cx.run_until_parked();
+    let title = |tile: TileRef, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.item(tile).map(|i| v.tile_title(i))).expect("its title")
+    };
+    let (agent_title, shell_title) = (title(agent, cx), title(shell, cx));
+    let label = crate::conversation::thread::view::agent_label(&state.meta.agent);
+    let headings: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "Heading").filter_map(|n| n.label).collect();
+    let spoken = format!("{label} {agent_title}");
+    assert!(headings.iter().any(|h| h.starts_with(&spoken)), "{spoken:?} in {headings:#?}");
+    let plain = format!("terminal {shell_title}");
+    assert!(headings.iter().any(|h| h.starts_with(&plain)), "{plain:?} in {headings:#?}");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(agent, cx));
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    let bar = tree(cx).into_iter().find(|n| {
+        n.role == "Heading" && n.label.as_deref().is_some_and(|l| l.starts_with(&spoken))
+    });
+    assert!(bar.is_some(), "the phone's bar says it the same way");
+}
+
+/// A heading leads with the tile's kind or agent unless its title already says it: a twin
+/// numbered "Claude Code 2" is not "Claude Code Claude Code 2".
+#[gpui::test]
+fn a_heading_never_says_its_agent_twice(_cx: &mut TestAppContext) {
+    use crate::workspace::tile::spoken_heading;
+    assert_eq!(spoken_heading("Claude Code", "Claude Code 2"), "Claude Code 2");
+    assert_eq!(spoken_heading("pi", "pi"), "pi");
+    assert_eq!(spoken_heading("Claude Code", "Fix the login"), "Claude Code Fix the login");
+    assert_eq!(spoken_heading("pi", "pilot run"), "pi pilot run", "a word, not a prefix");
 }

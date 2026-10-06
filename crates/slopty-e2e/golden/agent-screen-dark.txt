@@ -25,7 +25,7 @@ Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Check the editor
-Heading │ terminal Check the editor
+Heading │ Claude Code Check the editor
 Image │ Claude Code
 Image │ Working
 RadioGroup │ Face

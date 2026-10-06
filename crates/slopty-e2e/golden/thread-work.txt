@@ -15,7 +15,7 @@ Button │ New
 Button │ Needs you
 Button │ More
 Group │ The header clips its chips on a narrow window, as here.
-Heading │ terminal The header clips its chips on a narrow window, as here.
+Heading │ Claude Code The header clips its chips on a narrow window, as here.
 Image │ Claude Code
 Label │ ~
 RadioGroup │ Face

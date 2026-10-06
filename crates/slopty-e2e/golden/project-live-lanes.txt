@@ -33,7 +33,7 @@ Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
-Heading │ terminal Orchestrator
+Heading │ Claude Code Orchestrator
 Image │ Claude Code
 RadioGroup │ Face
 RadioButton │ Thread
@@ -62,7 +62,7 @@ ListItem │ Draw the pipeline row, Up next
 MultilineTextInput │ Message the orchestrator
 Button │ Send
 Group │ #1 Read a pull request's checks
-Heading │ terminal #1 Read a pull request's checks
+Heading │ Claude Code #1 Read a pull request's checks
 Image │ Claude Code
 Link │ Pull request 42, changes requested
 Label │ Worktree slopty-board-1 on worktree-slopty-board-1

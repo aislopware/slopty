@@ -15,7 +15,7 @@ Button │ New
 Button │ Needs you
 Button │ More
 Group │ scenario:bash run echo hi
-Heading │ terminal scenario:bash run echo hi
+Heading │ Claude Code scenario:bash run echo hi
 Image │ Claude Code
 Label │ ~
 RadioGroup │ Face

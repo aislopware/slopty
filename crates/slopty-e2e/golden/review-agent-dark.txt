@@ -19,7 +19,7 @@ Button │ New
 Button │ Needs you
 Button │ More
 Group │ Retry the refresh
-Heading │ terminal Retry the refresh
+Heading │ Claude Code Retry the refresh
 Image │ Claude Code
 Image │ Done
 RadioGroup │ Face

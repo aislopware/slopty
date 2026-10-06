@@ -616,7 +616,8 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
         .map(|t| t.session.clone())
         .expect("the second shell");
     stack.play_hook(&second, "SessionStart", r#","source":"startup""#).await.unwrap();
-    let heading = format!("terminal {TITLED_AGENT}");
+    // An agent's tile is announced by its agent.
+    let heading = format!("Claude Code {TITLED_AGENT}");
     stack
         .driver
         .wait_for("the second agent, titled", STEP, |d| {

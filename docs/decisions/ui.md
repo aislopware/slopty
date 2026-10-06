@@ -7551,3 +7551,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   place does too, so renaming moves nothing. Test:
   `workspace::tests::tiles::a_phone_bar_is_a_navigation_bar` checks its line height. Golden:
   `thread-phone`; the iOS phone goldens that show the bar are retaken on the simulator.
+- ✅ **An agent's tile is announced by its agent** (2026-10-06, from the simulator review of the
+  phone bar). The spoken heading put the tile's kind first, so a Claude Code tile was read as
+  "terminal Fix the login", which is not what the person sees: the tile wears the agent's
+  mark. Where a tile wears an agent's mark (`kind_icon`'s rule), the heading now leads with
+  the agent's name (`agent_label`), else with the kind. The lead is dropped where the title
+  already says it, so a twin is "Claude Code 2" and not "Claude Code Claude Code 2". Only what
+  is spoken changes: twins are numbered, and tiles grouped, by their kind
+  (`WorkspaceView::spoken_kind`, `tile::spoken_heading`). Tests:
+  `workspace::tests::tiles::an_agents_tile_is_announced_by_its_agent`,
+  `a_heading_never_says_its_agent_twice`. The agent goldens' words moved with it.
+- ✅ **A phone's titles are inline navigation titles** (2026-10-06, amends the two panel title
+  entries above). In the panel title's role the bar's title came out at about 2.5 times its
+  16 pt icon: a large title squeezed into a 44 pt bar, cut short early. Both the bar's title and
+  the drawer's now take `titlebar::phone_title_role`: the task title's size (17/22 on touch)
+  in the strong weight, which is iOS's 17 pt semibold inline title. They stand a step above
+  the 17 pt rows by weight, not by size. Tests: `a_phone_bar_is_a_navigation_bar`,
+  `a_phone_drawer_names_the_workspace`. Golden: `thread-phone`; the iOS phone goldens are
+  retaken on the simulator.

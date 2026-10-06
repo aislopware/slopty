@@ -2621,6 +2621,7 @@ mod tests {
                     "Role::Heading",
                     "APP_NAME",
                     "pub fn title(",
+                    "fn phone_title_role(",
                 ];
                 if !near.into_iter().any(|l| title.iter().any(|t| l.contains(t))) {
                     wrong.push(format!("{file}:{line_no}: the strong weight off a title"));

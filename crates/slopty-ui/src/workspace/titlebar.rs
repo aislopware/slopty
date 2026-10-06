@@ -465,10 +465,9 @@ impl WorkspaceView {
     }
 
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
-    /// (or its agent's mark) before its name and how it is doing after, in the panel title's
-    /// role, so it stands above the rows a finger's larger type sets, as the drawer's title
-    /// does. The tile has no header of its own on a phone, so its rows are the bar's "…". With
-    /// no tile focused it names the workspace.
+    /// (or its agent's mark) before its name and how it is doing after, as an inline navigation
+    /// title ([`phone_title_role`]), as the drawer's title is. The tile has no header of its own on
+    /// a phone, so its rows are the bar's "…". With no tile focused it names the workspace.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
         let theme = &self.theme;
@@ -495,9 +494,9 @@ impl WorkspaceView {
             })
             .map(super::agents::agent_status_text)
             .or_else(|| state.map(|st| st.label().to_owned()));
-        // Named as its header would be on a wider screen: its kind, then its title.
-        let kind = super::tile::kind_name(item);
-        let named = if kind == title { title.clone() } else { format!("{kind} {title}") };
+        // Named as its header would be on a wider screen: its agent or its kind, then its title.
+        let kind = self.spoken_kind(item);
+        let named = super::tile::spoken_heading(&kind, &title);
         let label = match said {
             Some(said) => format!("{named}, {said}"),
             None => named,
@@ -506,7 +505,7 @@ impl WorkspaceView {
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
         // Renamed, the field takes the title's place, as it does in a header.
         if let Some(field) = self.rename_field(tile, id) {
-            return kit::typed(div(), theme.roles().panel_title, 1.0)
+            return kit::typed(div(), phone_title_role(theme), 1.0)
                 .id("phone-renaming")
                 .flex_1()
                 .min_w_0()
@@ -817,9 +816,20 @@ impl WorkspaceView {
     }
 }
 
-/// A phone bar's heading: one line in the panel title's role, giving way at its end.
+/// A phone's title's type: an iOS inline navigation title, the size of the task title's role
+/// (17 pt on touch) in the strong weight, so it stands a step above the rows beside it by weight
+/// and not by size. The panel title's 20 pt was a large title squeezed into a 44 pt bar. The
+/// drawer's title takes it too.
+pub(super) fn phone_title_role(theme: &slopty_theme::Theme) -> slopty_theme::TypeRole {
+    slopty_theme::TypeRole {
+        weight: slopty_theme::Typography::STRONG_WEIGHT,
+        ..theme.roles().task_title
+    }
+}
+
+/// A phone bar's heading: one line as an inline navigation title, giving way at its end.
 fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stateful<gpui::Div> {
-    kit::typed(div(), theme.roles().panel_title, 1.0)
+    kit::typed(div(), phone_title_role(theme), 1.0)
         .id("phone-title")
         .debug_selector(|| "phone-title".to_owned())
         .role(Role::Heading)
