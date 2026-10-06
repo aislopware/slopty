@@ -724,6 +724,9 @@ pub struct WorkspaceView {
     past_places: HashMap<WorkerKey, Vec<agent_start::PastPlace>>,
     /// The folder step that is up.
     folder_step: Option<agent_start::FolderStep>,
+    /// The asks for past sessions with no words still out, by machine and agent (every agent's
+    /// when `None`): one at a time each ([`Self::ask_past_places`]).
+    listing: HashSet<(WorkerKey, Option<slopty_proto::thread::AgentId>)>,
     /// The tiles of threads on their way.
     starting: starting::Starts,
     /// Each worker's items kept on this device.
@@ -1033,6 +1036,7 @@ impl WorkspaceView {
             sessions_asked: None,
             past_places: HashMap::new(),
             folder_step: None,
+            listing: HashSet::new(),
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
             faces_dirty: true,

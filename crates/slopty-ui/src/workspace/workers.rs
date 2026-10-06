@@ -309,6 +309,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let now = self.away_clock(cx);
+        // An ask the link took with it is never answered: the next one goes.
+        self.listing.retain(|(worker, _)| *worker != key);
         let Some(w) = self.workers.get_mut(&key) else { return };
         let unanswered = w.fs_ops.lost();
         let said: Vec<String> =

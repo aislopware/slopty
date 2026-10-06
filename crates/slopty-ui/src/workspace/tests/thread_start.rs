@@ -497,7 +497,7 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
         })
         .collect();
     let ask = (Some(codex.clone()), None, String::new());
-    assert_eq!(asked, [ask.clone(), ask], "the folder step asks for the folders, then the step");
+    assert_eq!(asked, [ask], "the folder step's ask, still out, is the session step's");
     assert_eq!(step_lines(&view, cx), Vec::<String>::new());
     assert!(cx.debug_bounds("palette-empty").is_some(), "{READING_SESSIONS}");
 
@@ -614,7 +614,7 @@ fn a_past_session_is_found_by_what_was_asked_in_it(cx: &mut TestAppContext) {
     cx.simulate_input("resume");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(asked(&mut studio), ["", ""], "the folder step's list, then the session step's");
+    assert_eq!(asked(&mut studio), [""], "the list, with no words: one ask for both steps");
     view.update_in(cx, |v, _w, cx| {
         let listed = vec![
             session("019a", "the parser drops a token"),
@@ -1254,6 +1254,72 @@ fn every_start_offers_where_threads_and_past_sessions_worked(cx: &mut TestAppCon
     let sent = starts(&mut studio);
     let [(_, agent, cwd, _)] = sent.as_slice() else { panic!("one start: {sent:?}") };
     assert_eq!((agent, cwd.as_str()), (&claude, "/w/atlas"), "the usual agent, there");
+}
+
+/// The folder step and "Resume a past session…" list the same thing, so one ask goes for both:
+/// while the folder step's is out the session step sends none, and its answer feeds both, the
+/// session step's lines and the places. Once it is answered, the next step asks again.
+#[gpui::test]
+fn one_ask_for_past_sessions_feeds_the_folder_and_session_steps(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{PastSession, PastSessions};
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let codex = AgentId::named(AgentId::CODEX);
+    let key = studio.key;
+    let asks = |fake: &mut Fake| {
+        fake.drain()
+            .into_iter()
+            .filter(|m| {
+                matches!(m, ClientMsg::Thread(ThreadRequest::Sessions { cwd: None, query, .. })
+                    if query.is_empty())
+            })
+            .count()
+    };
+    studio.drain();
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(asks(&mut studio), 1, "the folder step asks");
+    cx.simulate_input("resume");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(asks(&mut studio), 0, "the session step waits on the same ask");
+
+    let answer = PastSessions {
+        agent: Some(codex.clone()),
+        cwd: None,
+        query: String::new(),
+        sessions: vec![PastSession {
+            agent: codex.clone(),
+            native: "019c".to_owned(),
+            cwd: Some("/w/late".to_owned()),
+            title: Some("Port the parser".to_owned()),
+            updated_ms: Some(WallMs::from_millis(5_000)),
+            thread: None,
+            resume: Vec::new(),
+            facts: BTreeMap::new(),
+            prompts: Vec::new(),
+        }],
+        absent: None,
+        cut: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.past_sessions(key, answer, cx));
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Port the parser"], "the session step lists it");
+    let places = view.read_with(cx, |v, cx| v.recent_places(Some(&codex), cx));
+    assert!(places.iter().any(|p| p.cwd == "/w/late"), "and the places have its folder");
+
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(asks(&mut studio), 1, "answered, the next step asks again");
 }
 
 /// A folder's changes tile on `/w/atlas`, on a studio with `agents` where a Codex thread last

@@ -466,9 +466,14 @@ impl WorkspaceView {
     }
 
     /// Ask `key` for its agents' past sessions with no words, `agent`'s alone when given: the
-    /// folders they ran in are places a start offers. A machine out of reach is not asked.
-    pub(super) fn ask_past_places(&self, key: WorkerKey, agent: Option<&AgentId>) {
+    /// folders they ran in are places a start offers, and the session step lists them. One
+    /// such ask is out per machine and agent at a time: while one is, its answer feeds every
+    /// step waiting, and nothing more is sent. A machine out of reach is not asked.
+    pub(super) fn ask_past_places(&mut self, key: WorkerKey, agent: Option<&AgentId>) {
         if !self.workers.get(&key).is_some_and(super::Worker::is_linked) {
+            return;
+        }
+        if !self.listing.insert((key, agent.cloned())) {
             return;
         }
         self.send(
@@ -527,15 +532,7 @@ impl WorkspaceView {
             self.show_notice(text, cx);
             return;
         }
-        self.send(
-            worker,
-            ClientMsg::Thread(ThreadRequest::Sessions {
-                agent: Some(agent.clone()),
-                cwd: None,
-                query: String::new(),
-                limit: SESSIONS_LISTED,
-            }),
-        );
+        self.ask_past_places(worker, Some(&agent));
         self.open_step(Vec::new(), PICK_SESSION, window, cx);
         if let Some(palette) = self.palette.clone() {
             palette.update(cx, |p, cx| p.set_empty(READING_SESSIONS, cx));
@@ -607,8 +604,11 @@ impl WorkspaceView {
     /// is also where the starts' places learn the folders they ran in. An answer nothing waits on,
     /// for another step, or for words the field no longer says, is dropped.
     pub fn past_sessions(&mut self, key: WorkerKey, past: PastSessions, cx: &mut Context<Self>) {
-        if past.cwd.is_none() && past.query.is_empty() && past.absent.is_none() {
-            self.keep_past_places(key, past.agent.as_ref(), &past.sessions, cx);
+        if past.cwd.is_none() && past.query.is_empty() {
+            self.listing.remove(&(key, past.agent.clone()));
+            if past.absent.is_none() {
+                self.keep_past_places(key, past.agent.as_ref(), &past.sessions, cx);
+            }
         }
         let Some(asked) = self.sessions_asked.as_mut() else {
             return;

@@ -8519,4 +8519,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A place on the empty workspace starts the machine's usual agent there, and opens a shell
     only where the machine has no agent. "New terminal" as a second way into each place needs
     a control on the row, which waits for the tiling and MonoCode design pass.
-  - Test: `workspace::tests::thread_start::every_start_offers_where_threads_and_past_sessions_worked`.
+  - One wordless ask is out per machine and agent at a time. "Resume a past session…" opened
+    while the folder step's is out sends none, and that answer feeds both the session step
+    and the places. A dropped link lets the next ask go.
+  - Tests: `workspace::tests::thread_start::every_start_offers_where_threads_and_past_sessions_worked`,
+    `…::one_ask_for_past_sessions_feeds_the_folder_and_session_steps`.
