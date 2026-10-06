@@ -937,8 +937,7 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
 }
 
 /// In the overview the words line up with the panes: a workspace's name and the "New
-/// workspace" glyph start on the edge of the glyphs the pane covers lead with, and the active
-/// block's ring is in the text's tone, not the accent.
+/// workspace" glyph start on the edge of the glyphs the pane covers lead with.
 #[gpui::test]
 fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -956,10 +955,6 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     let new = cx.debug_bounds("overview-new-workspace").expect("the place for the next");
     let pad = Theme::default().spacing.sm;
     assert!((f32::from(new.left()) + pad - edge).abs() < 0.5, "its glyph on {edge}: {new:?}");
-    let theme = Theme::default();
-    let ring = crate::colors::hsla_alpha(theme.surfaces.text, alpha::RING);
-    let quads = cx.update(|window, _| window.painted_quads());
-    assert!(quads.iter().any(|q| q.border_color == ring), "the ring in the text's tone");
 }
 
 /// On a phone the bar is the focused tile's, as a navigation bar names its screen: its kind and

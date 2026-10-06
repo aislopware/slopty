@@ -1814,6 +1814,26 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::palette_threads::the_palette_asks_every_linked_workers_threads_once_the_field_rests`
     and `workspace::tests::palette_threads::the_palette_asks_no_threads_for_commands_or_a_single_character`.
 
+- ✅ **The overview holds work, not boxes** (2026-10-06, `.research/elegance-icons-2026-10-06.md`
+  §5.8, `.research/status-color-2026-10-06.md` §7.2; amends "The overview is a map of work"
+  above). The active block was lifted and then ringed by a hairline outside a gap (Geist's
+  double ring). Inside it, each tile was a band-filled well with a rule over its quote: a box
+  in a ring in a box.
+  - **No ring.** The active block keeps `kit::elevate` alone: its hairline and its shade.
+    Its name is in the text's ink at 13/500, and the others' names are in the secondary ink.
+    `overview_ring` and `OVERVIEW_GAP` are deleted.
+  - **The summaries have no fill of their own.** A summed-up tile sits on the block's content
+    ground, padded `spacing.md` from its edges, so its words still start on the panes'
+    glyphs' edge. Tiles are parted by the space their words keep. The quote sits
+    `spacing.sm` under the facts with no rule, and a pictured tile's label has no rule over it.
+  - **Cost.** No different. Drawing 20 mixed tiles with the ring, fills and rules back, under a
+    temporary switch, gave the same opening frames (`docs/MEASUREMENTS.md`, "the overview
+    without its ring").
+  - Tests: `workspace::tests::strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one`
+    (no edge rings either block, and no accent edge). The ring check is gone from
+    `workspace::tests::tiles::the_overview_words_start_on_the_panes_glyphs`. Goldens:
+    `overview`, `overview-dark`.
+
 - ✅ **A new worktree starts current, from its base, with the ignored files it needs**
   (2026-10-06, `.research/readiness-2026-10-07.md` ranks 3, 4 and 5). A worktree made from
   `origin/HEAD` as last fetched was stale, lacked the person's commits not yet pushed, ignored

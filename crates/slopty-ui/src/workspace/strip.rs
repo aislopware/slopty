@@ -151,7 +151,7 @@ pub(super) struct Drawn {
 pub(super) enum Handed {
     Shell { zoom: f32, covered: bool, zooming: bool },
     Face { zoom: f32, width: f32 },
-    Board { zoom: f32, width: f32 },
+    Board { zoom: f32 },
     Review { zoom: f32, width: f32, height: f32 },
     Stream { painted: f32 },
     Text { zoom: f32, pad: f32, size: f32 },
@@ -893,8 +893,9 @@ impl WorkspaceView {
     /// The overview's blocks, under the tiles: each workspace with tiles is one block on the
     /// content's surface holding its panes flush, a base unit wider all round so its corners
     /// (`radii.lg`, the radius of what floats) clear theirs, with a hairline. Only the active
-    /// one floats: it takes the one elevation and a 1.5 pt accent edge flush with it, as a
-    /// selected thumbnail has. A shadow under every block would say they all float. Each name
+    /// one floats: it takes the one elevation and nothing more, no ring round it, so the map is
+    /// blocks of work rather than a box in a ring in a box. A shadow under every block would
+    /// say they all float. Its name is in the text's ink, the others' in the secondary. Each name
     /// sits above its block at the medium weight, then in the meta size the machines it is on
     /// (where they are not its name) and the next thing in it that needs the person, so a
     /// glance says which workspace deserves attention before it is opened. The empty
@@ -985,11 +986,8 @@ impl WorkspaceView {
                 .opacity(fade)
                 .map(|el| {
                     if here {
-                        // Where you are: lifted, and a hairline in the text's tone outside a
-                        // gap of the strip's own ground, Geist's double ring, since green means
-                        // "done" and a heavy flush outline read as the old chosen-card tell.
-                        let ring = overview_ring(theme);
-                        kit::elevate(el, theme).outline_ring(ring)
+                        // Where you are: lifted, its hairline and its shade alone.
+                        kit::elevate(el, theme)
                     } else {
                         el.border(kit::HAIR).border_color(hsla(s.border))
                     }
@@ -1234,7 +1232,12 @@ impl WorkspaceView {
                     .cursor_pointer()
                     .hover(|st| st.bg(hsla(s.hover)))
                     .active(|st| st.bg(hsla(s.pressed)))
-                    .child(crate::palette::icon_slot(theme, Symbol::ServerRack, muted))
+                    .child(crate::palette::lead_slot(
+                        theme,
+                        crate::icons::machine(w.caps.as_ref().map(|c| c.form)),
+                        hsla(s.text_secondary),
+                        1.0,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -1351,7 +1354,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|st| st.bg(hsla(s.hover)))
             .active(|st| st.bg(hsla(s.pressed)))
-            .child(crate::palette::icon_slot(theme, icon, hsla(s.text_muted)))
+            .child(crate::palette::icon_slot(theme, icon, hsla(s.text_secondary)))
             .child(
                 div()
                     .flex_1()
@@ -1396,7 +1399,7 @@ impl WorkspaceView {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let icon_ink = if primary { s.text } else { s.text_muted };
+        let icon_ink = if primary { s.text } else { s.text_secondary };
         let row = kit::row(theme, kit::Row::One)
             .id(id)
             .debug_selector(move || id.to_owned())
@@ -1436,16 +1439,6 @@ impl WorkspaceView {
             });
         crate::a11y::tab_stop(row, s.focus)
     }
-}
-
-/// The gap between the active overview block and its ring, in points.
-pub(super) const OVERVIEW_GAP: f32 = 2.0;
-
-/// The ring round the active overview block: a hairline of the text at `alpha::RING` outside
-/// [`OVERVIEW_GAP`].
-pub(super) fn overview_ring(theme: &slopty_theme::Theme) -> gpui::Outline {
-    let color = hsla_alpha(theme.surfaces.text, alpha::RING);
-    gpui::Outline { color, width: kit::HAIR, offset: px(OVERVIEW_GAP) }
 }
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and

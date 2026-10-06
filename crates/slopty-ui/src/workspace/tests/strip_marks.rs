@@ -189,26 +189,24 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         let hairline = quads_at(cx, at).iter().any(|q| q.border_widths.top.0 > 0.0);
         assert!(hairline, "a hairline round {at:?}");
     }
-    let ring = f32::from(crate::kit::hair_painted(scale));
-    let gap = strip::OVERVIEW_GAP;
-    let ring_color = crate::colors::hsla_alpha(theme.surfaces.text, slopty_theme::alpha::RING);
+    // Nothing rings a block: an edge painted outside one, the old double ring, is gone.
     let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let reach = 2.0 * (gap + ring);
         quads.iter().any(|q| {
-            q.border_color == ring_color
-                && (q.border_widths.top.0 / scale - ring).abs() < 0.01
-                && (q.bounds.size.width.0 / scale - f32::from(at.size.width) - reach).abs() < 0.5
-                && (q.bounds.origin.y.0 / scale - f32::from(at.origin.y) + reach / 2.0).abs() < 0.5
+            let edge = q.border_widths.top.0 > 0.0;
+            let width = q.bounds.size.width.0 / scale;
+            let left = q.bounds.origin.x.0 / scale;
+            let past = width - f32::from(at.size.width);
+            edge && past > 0.5 && past < 8.0 && left < f32::from(at.left()) - 0.25
         })
     };
     let active = view.read_with(cx, |v, _| v.layout.active_workspace());
     assert_eq!(active, 1, "the tile moved down and the focus with it");
-    assert!(ringed(cx, second), "the text-toned edge round the active one");
+    assert!(!ringed(cx, second), "the active one floats on its elevation alone");
     let accent = crate::colors::hsla(theme.surfaces.accent);
     let green = cx.update(|w, _| w.painted_quads()).iter().any(|q| q.border_color == accent);
     assert!(!green, "green stays a meaning: no accent edge");
-    assert!(!ringed(cx, first), "and only that one");
+    assert!(!ringed(cx, first), "nor any other");
 
     let pane = shells
         .iter()

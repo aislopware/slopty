@@ -91,7 +91,8 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let id = item.id;
         let (mark, _) = self.tile_marks(placed.tile, item);
-        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text_muted), 1.0);
+        let lead =
+            crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text_secondary), 1.0);
         let state = mark
             .filter(|m| *m != Status::Idle)
             .map(|m| crate::icons::status_mark(theme, Some(m), 1.0));
@@ -117,8 +118,8 @@ impl WorkspaceView {
             .children(state)
     }
 
-    /// A tile of words summed up over its body once the overview has landed, on a well of its
-    /// own: its name row at the task-title size; three lines of facts, each always saying
+    /// A tile of words summed up over its body once the overview has landed, on the block's
+    /// ground: its name row at the task-title size; three lines of facts, each always saying
     /// something (how it stands, what it did last, where it is); then a few lines of its own
     /// text in its body's face, clipped to the card, the text's end at its foot where the text
     /// grows at its end.
@@ -166,18 +167,13 @@ impl WorkspaceView {
             .child(doing)
             .child(place);
         let tail = digest.filter(|d| !d.tail.is_empty()).map(|d| self.miniature_tail(id, d));
-        let gap = px(theme.spacing.xxs);
-        // A well set into the block's surface, so each tile reads as its own place on the map
-        // with no outline round it.
-        let card = crate::kit::inset(div(), theme)
+        // On the block's own ground, no fill and no outline of its own: the tiles are parted
+        // by the space their words keep from their edges, so the block holds work, not boxes.
+        let card = div()
             .id(SharedString::from(format!("miniature-summary-{}", id.as_uuid())))
             .absolute()
-            .top(gap)
-            .left(gap)
-            .right(gap)
-            .bottom(gap)
-            .p(px(theme.spacing.md - theme.spacing.xxs))
-            .rounded(px(theme.radii.md))
+            .inset_0()
+            .p(px(theme.spacing.md))
             .flex()
             .flex_col()
             .gap(px(theme.spacing.xs))
@@ -200,10 +196,11 @@ impl WorkspaceView {
         )
     }
 
-    /// A summary's own text: the lines its digest copied, in the body's face, quiet, under a
-    /// hairline, filling what the card has left and clipped to it. A file's first lines hang
-    /// from the top, as do a few rows of a shell, as a fresh screen's do; more of a shell's rows
-    /// or an agent's words stand on the card's foot, so the newest is the one never clipped.
+    /// A summary's own text: the lines its digest copied, in the body's face, quiet, a base
+    /// unit under the facts, filling what the card has left and clipped to it. A file's first lines
+    /// hang from the top, as do a few rows of a shell, as a fresh screen's do; more of a
+    /// shell's rows or an agent's words stand on the card's foot, so the newest is the one
+    /// never clipped.
     fn miniature_tail(&self, id: ItemId, digest: &Digest) -> gpui::Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -213,10 +210,7 @@ impl WorkspaceView {
             .debug_selector(move || format!("shapes-tail-{}", id.as_uuid()))
             .flex_1()
             .min_h_0()
-            .mt(px(theme.spacing.xs))
-            .pt(px(theme.spacing.sm))
-            .border_t(crate::kit::HAIR)
-            .border_color(hsla(s.border_subtle))
+            .mt(px(theme.spacing.sm))
             .flex()
             .flex_col()
             .when(digest.from_end && digest.tail.len() > TAIL_HANGS, gpui::Styled::justify_end)
@@ -615,8 +609,6 @@ impl WorkspaceView {
             .font_family(t.ui_family.clone())
             .text_size(px(t.small()))
             .bg(hsla(theme.content()))
-            .border_t(crate::kit::HAIR)
-            .border_color(hsla(s.border_subtle))
             .child(name.flex_none().max_w_2_3())
             .children(meta);
         let words = SharedString::from(format!("miniature-in-{}", id.as_uuid()));
