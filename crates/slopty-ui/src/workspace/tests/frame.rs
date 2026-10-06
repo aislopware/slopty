@@ -688,12 +688,13 @@ fn a_slow_round_trip_shows_on_the_right_edge_and_holds_still(cx: &mut TestAppCon
     assert_eq!(moved.top() - row.top(), rtt.top() - header.top(), "on the row's line");
 }
 
-/// On touch a machine's "+" and "…" and a project's "+" stand at rest, after the readouts,
-/// since a finger has no hover; with a pointer they wait for it, over the readouts.
+/// On touch a header keeps only its chevron, at rest after the readouts, since a finger has no
+/// hover: a machine's "+" and "…" and a project's "+" are its long press's menu, which leads
+/// with "New shell here" and opens one there. With a pointer they wait for it.
 #[gpui::test]
-fn a_finger_finds_the_navigators_actions_at_rest(cx: &mut TestAppContext) {
+fn a_finger_finds_a_headers_actions_in_its_menu(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
+    let mut studio = connect(&view, cx, 1, "studio");
     let key = studio.key;
     let (_, atlas) = palette::shell_in(&view, cx, &studio, 1, "/w/atlas", true);
     view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_millis(31)), cx));
@@ -709,14 +710,28 @@ fn a_finger_finds_the_navigators_actions_at_rest(cx: &mut TestAppContext) {
     let touch = Theme { density: slopty_theme::Density::TOUCH, ..Theme::default() };
     view.update(cx, |v, cx| v.set_theme(touch, cx));
     cx.run_until_parked();
-    let at = |cx: &mut VisualTestContext, what: &str| {
-        let selector = leak(format!("{what}-{key}"));
-        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    let drawn = |cx: &mut VisualTestContext, what: &str| {
+        cx.debug_bounds(leak(format!("{what}-{key}"))).is_some()
     };
-    let (rtt, add, menu) = (at(cx, "nav-rtt"), at(cx, "nav-new-shell"), at(cx, "nav-machine-menu"));
-    assert!(rtt.right() <= add.left() + px(0.5), "after the readout: {rtt:?} {add:?}");
-    assert!(add.right() <= menu.left() + px(0.5), "then the menu: {add:?} {menu:?}");
-    assert!(cx.debug_bounds(add_here).is_some(), "a project's \"+\" at rest");
+    assert!(drawn(cx, "nav-rtt"), "the readout at rest");
+    assert!(!drawn(cx, "nav-new-shell"), "no \"+\" on a finger's header");
+    assert!(!drawn(cx, "nav-machine-menu"), "no \"…\" either");
+    assert!(cx.debug_bounds(add_here).is_none(), "nor a project's \"+\"");
+    let header = cx.debug_bounds(leak(format!("nav-worker-{key}"))).expect("the header");
+
+    cx.simulate_mouse_down(header.center(), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let rows: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
+    assert_eq!(rows.first().map(String::as_str), Some("New shell here"), "{rows:?}");
+    let _seen = studio.drain();
+    click(cx, "menu-New shell here");
+    let sent = studio.drain();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, ClientMsg::OpenSession { spec: o, .. } if o.command.is_empty())),
+        "a shell on that machine: {sent:?}"
+    );
 }
 
 /// A pinned round trip is what every readout shows, whatever the link measures, and only for

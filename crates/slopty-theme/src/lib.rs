@@ -646,16 +646,18 @@ pub struct TypeRoles {
     /// What a piece of work is called where it is the thing to act on: a task, a request
     /// put to the person. 14/20 at the medium weight.
     pub task_title: TypeRole,
-    /// A section's heading in a list or a panel: 13/18 at the strong weight.
+    /// A section's heading in a list or a panel: 12/16 at the medium weight, drawn a tier under
+    /// the words it heads, as a list's label is in t3code and zeron. It leads its group by its
+    /// place and its tone, not by bold.
     pub section: TypeRole,
-    /// A panel's or a dialog's title: 16/22 at the strong weight.
+    /// A panel's or a dialog's title: 15/20 at the strong weight.
     pub panel_title: TypeRole,
-    /// What is read at length, at [`Typography::prose_size`]: 15/24.
+    /// What is read at length, at [`Typography::prose_size`]: 14/22.
     pub prose: TypeRole,
-    /// A page's heading inside the window: 22/28 at the strong weight.
+    /// A page's heading inside the window: 20/26 at the strong weight.
     pub page_heading: TypeRole,
-    /// The heading of a page that is the whole window, the first run: 26/32 at the strong
-    /// weight.
+    /// The heading of a page that is the whole window, the first run: 26/32 at the medium
+    /// weight, SF's Display cut. Without letter spacing the strong weight read loose.
     pub first_run: TypeRole,
 }
 
@@ -682,15 +684,15 @@ impl Typography {
             chrome: role((0.0, 6.0), (4.0, 5.0), regular),
             action: role((0.0, 6.0), (4.0, 5.0), medium),
             task_title: role((1.0, 6.0), (4.0, 5.0), medium),
-            section: role((0.0, 5.0), (2.0, 5.0), strong),
-            panel_title: role((3.0, 6.0), (7.0, 5.0), strong),
+            section: role((-1.0, 4.0), (0.0, 5.0), medium),
+            panel_title: role((2.0, 5.0), (6.0, 5.0), strong),
             prose: TypeRole {
                 size: prose,
                 line: (prose * self.prose_line_height).round(),
                 weight: regular,
             },
-            page_heading: role((9.0, 6.0), (11.0, 6.0), strong),
-            first_run: role((13.0, 6.0), (15.0, 6.0), strong),
+            page_heading: role((7.0, 6.0), (9.0, 6.0), strong),
+            first_run: role((13.0, 6.0), (15.0, 6.0), medium),
         }
     }
 }
@@ -710,7 +712,7 @@ impl Default for Typography {
             prose_line_height: 1.6,
             ui_family: ".SystemUIFont".to_owned(),
             ui_size: 13.0,
-            prose_size: 15.0,
+            prose_size: 14.0,
         }
     }
 }
@@ -863,6 +865,13 @@ pub mod alpha {
     /// About as far as Notion's light overlay (0.24 of a near-black), so the sheet leads and the
     /// work behind it keeps its own warm material rather than turning a flat grey.
     pub const SCRIM_ON_PAPER: f32 = 0.20;
+    /// The work under a dark floating sidebar (a phone's drawer): half a modal's.
+    ///
+    /// The sidebar is a way through the work, not a question over it, as iOS dims only lightly
+    /// under the sidebar it floats over a compact window.
+    pub const SCRIM_ASIDE: f32 = 0.22;
+    /// The work under a light floating sidebar, in the warm ink.
+    pub const SCRIM_ASIDE_ON_PAPER: f32 = 0.10;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
     /// The docked navigator's canvas over the system's sidebar material (macOS).
@@ -1588,6 +1597,8 @@ pub struct Elevation {
     pub shade: Rgb,
     /// How much the scrim under a modal dims the window.
     pub scrim: f32,
+    /// How much the scrim under a floating sidebar dims the window: lighter than a modal's.
+    pub aside: f32,
     /// The shadow under an `elevated` surface, tightest first: a contact layer, then softer
     /// ones; [`Shadow::NONE`] fills the slots a mode does not use.
     pub shadow: [Shadow; 3],
@@ -1609,6 +1620,7 @@ impl Elevation {
     pub const DARK: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
+        aside: alpha::SCRIM_ASIDE,
         shadow: [
             Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.1 },
             // Drawn in by 10, so it falls below the sheet (6 to the sides, none above) where
@@ -1633,6 +1645,7 @@ impl Elevation {
     pub const LIGHT: Self = Self {
         shade: Rgb::hex(0x221f19),
         scrim: alpha::SCRIM_ON_PAPER,
+        aside: alpha::SCRIM_ASIDE_ON_PAPER,
         // Geist's menu and modal shape, a notch firmer for the half-point ring: a contact, a
         // near layer, then a soft one drawn in so it falls below the sheet, not round it.
         shadow: [
@@ -2380,18 +2393,19 @@ mod tests {
         assert_eq!(at(desk.chrome), (13.0, 19.0, 400.0));
         assert_eq!(at(desk.action), (13.0, 19.0, 500.0));
         assert_eq!(at(desk.task_title), (14.0, 20.0, 500.0));
-        assert_eq!(at(desk.section), (13.0, 18.0, 600.0));
-        assert_eq!(at(desk.panel_title), (16.0, 22.0, 600.0));
-        assert_eq!(at(desk.prose), (15.0, 24.0, 400.0));
-        assert_eq!(at(desk.page_heading), (22.0, 28.0, 600.0));
-        assert_eq!(at(desk.first_run), (26.0, 32.0, 600.0));
+        assert_eq!(at(desk.section), (12.0, 16.0, 500.0));
+        assert_eq!(at(desk.panel_title), (15.0, 20.0, 600.0));
+        assert_eq!(at(desk.prose), (14.0, 22.0, 400.0));
+        assert_eq!(at(desk.page_heading), (20.0, 26.0, 600.0));
+        assert_eq!(at(desk.first_run), (26.0, 32.0, 500.0));
         let touch = t.roles(true);
         assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
         assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
         assert_eq!(at(touch.task_title), (17.0, 22.0, 500.0));
-        assert_eq!(at(touch.section), (15.0, 20.0, 600.0));
-        assert_eq!(at(touch.panel_title), (20.0, 25.0, 600.0));
-        assert_eq!(at(touch.first_run), (28.0, 34.0, 600.0));
+        assert_eq!(at(touch.section), (13.0, 18.0, 500.0));
+        assert_eq!(at(touch.panel_title), (19.0, 24.0, 600.0));
+        assert_eq!(at(touch.prose), (16.0, 26.0, 400.0));
+        assert_eq!(at(touch.first_run), (28.0, 34.0, 500.0));
         let larger = Typography { ui_size: 15.0, ..Typography::default() }.roles(false);
         assert_eq!(at(larger.task_title), (16.0, 22.0, 500.0), "it follows the chrome size");
         assert_eq!(larger.prose, desk.prose, "prose keeps its own size");

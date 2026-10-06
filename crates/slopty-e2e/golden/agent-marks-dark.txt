@@ -87,6 +87,6 @@ Label │ Model, Canned
 Label │ Effort, Medium
 Button │ Continue in the terminal
 Button │ Send
-Status │ atlas needs approval
+Status │ Claude Code needs approval
 Image │ Needs you
 Button │ Go

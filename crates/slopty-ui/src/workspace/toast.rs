@@ -124,8 +124,11 @@ pub(super) enum ToastKind {
         tile: TileRef,
         /// Its state, whose mark leads the line.
         status: crate::icons::Status,
-        /// What happened there, led by the tile's name.
-        line: String,
+        /// What happened there ("needs approval"), after the tile's name. The name is read as
+        /// the notice is drawn, not as it is raised: a tile that comes to need the person may
+        /// learn its agent or its thread's name a moment later, and the notice then says what
+        /// its row and its header say.
+        what: String,
     },
 }
 
@@ -321,7 +324,23 @@ impl WorkspaceView {
     #[must_use]
     pub fn toast_text(&self) -> Option<String> {
         let shown = self.toast.as_ref()?.shown.iter().rev().find(|shown| !shown.leaving)?;
-        Some(toast_line(&shown.what))
+        Some(self.toast_line(&shown.what))
+    }
+
+    /// What a notice says. A tile's notice leads with the tile's name as it is now.
+    fn toast_line(&self, what: &ToastKind) -> String {
+        match what {
+            ToastKind::Closed { title, .. } => format!("Closed {title}"),
+            ToastKind::Said(text) | ToastKind::Failed(text) | ToastKind::OldUnsaved(text) => {
+                text.clone()
+            }
+            ToastKind::Offered(offer) => offer.line(),
+            ToastKind::Attention { tile, what, .. } => match self.item(*tile) {
+                Some(item) => format!("{} {what}", self.tile_title(item)),
+                None => what.clone(),
+            },
+            ToastKind::Trashed { line, .. } => line.clone(),
+        }
     }
 
     /// The "closed" toast goes with its offer: `seq` for one closing, `None` for any.
@@ -338,7 +357,7 @@ impl WorkspaceView {
     fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let line = toast_line(&shown.what);
+        let line = self.toast_line(&shown.what);
         let action = |id: &'static str, label: &'static str| {
             let el = div()
                 .id(id)
@@ -524,10 +543,12 @@ impl WorkspaceView {
         if !self.app_active || self.drawn.on_screen.borrow().contains(&tile.item) {
             return;
         }
-        let Some(title) = self.item(tile).map(|i| self.tile_title(i)) else { return };
+        if self.item(tile).is_none() {
+            return;
+        }
         self.dismiss_attention(tile);
-        let line = format!("{title} {what}");
-        self.show_toast(ToastKind::Attention { tile, status, line }, cx);
+        let what = what.to_owned();
+        self.show_toast(ToastKind::Attention { tile, status, what }, cx);
     }
 
     /// The word about `tile` has been followed, or a newer one replaces it.
@@ -728,19 +749,7 @@ impl WorkspaceView {
     #[must_use]
     pub(super) fn toast_texts(&self) -> Vec<String> {
         self.toast.as_ref().map_or_else(Vec::new, |t| {
-            t.shown.iter().filter(|s| !s.leaving).map(|s| toast_line(&s.what)).collect()
+            t.shown.iter().filter(|s| !s.leaving).map(|s| self.toast_line(&s.what)).collect()
         })
-    }
-}
-
-/// What a notice says.
-fn toast_line(what: &ToastKind) -> String {
-    match what {
-        ToastKind::Closed { title, .. } => format!("Closed {title}"),
-        ToastKind::Said(text) | ToastKind::Failed(text) | ToastKind::OldUnsaved(text) => {
-            text.clone()
-        }
-        ToastKind::Offered(offer) => offer.line(),
-        ToastKind::Attention { line, .. } | ToastKind::Trashed { line, .. } => line.clone(),
     }
 }

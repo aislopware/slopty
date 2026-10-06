@@ -8096,3 +8096,44 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `faces::the_toggle_picks_the_face_and_a_plain_shell_has_none`,
     `page_chrome::back_and_forward_show_only_with_history_that_way`,
     `handoffs::an_agents_pull_request_rides_on_its_header_while_the_agent_runs`.
+
+- ✅ **A phone's drawer floats as iOS 26's sidebar does** (2026-10-06,
+  `.research/elegance-icons-2026-10-06.md` §5.11). The drawer was a plain sheet to the window's
+  edges over a modal's scrim. A large title repeated the workspace's name, a *Workspaces*
+  section listed the one workspace, "New workspace" was a row of its own, and each machine's
+  head showed its chevron, "+" and "…" all at once.
+  - **Floating.** The panel stands a small step (`spacing.sm`) in from the safe area's top
+    and leading edges and from the window's bottom edge. Its corners are `radii.lg`, it is
+    rimmed all round, and it wears the floating elevation (`kit::elevate`). Its rows clear the
+    home indicator. The scrim under it is the elevation's shade at `Elevation::aside` (0.22
+    dark, 0.10 light, `kit::aside_scrim`), half a modal's, because the work is one tap away.
+    Laid over an iPad's frame, the navigator still meets the window's edges.
+  - **No large title, no lights row.** The search field is the drawer's first row. The bar
+    beside the drawer already names where the person is.
+  - **Workspaces only from two.** With one workspace the section says nothing the bar doesn't.
+    "New workspace" is the bar's "+" menu's, and the row is deleted.
+  - **A finger's head keeps its chevron.** A machine's "+" and "…" and a project's "+" are its
+    long press's menu. The machine's menu now leads with "New shell here", as the project's
+    does.
+  - **Touch chrome at 17 pt.** A lead, an icon button's symbol and an inline glyph take their
+    words' type role (`IconSize::Lead` is the chrome role's size and `Inline` the metadata
+    role's). The rows they sit in (navigator rows, the filter, menu rows, the dialog shell,
+    buttons, meta and section labels) take the same roles. A pointer's sizes are unchanged;
+    a finger's are 17 pt chrome, 13 pt metadata and 17 pt leads in a 20 pt slot.
+  - **Follow-up: true glass.** The drawer stands on the elevated surface for now. iOS's own
+    material under a floating panel needs window composition in gpui-fast, the track upstream
+    as zed#62379. When that lands, the drawer takes the platform material as the docked Mac
+    navigator does.
+  - Tests: `workspace::tests::nav_rows::{a_phone_drawer_floats_clear_of_the_edges,
+    a_phone_drawer_lists_the_workspaces_once_there_are_two}`,
+    `workspace::tests::nav_list::the_phone_drawer_runs_through_the_home_indicator_band`,
+    `workspace::tests::frame::a_finger_finds_a_headers_actions_in_its_menu`,
+    `workspace::tests::nav_projects::on_a_phone_the_drawer_lists_the_projects_then_the_workers`,
+    `kit::tests` (the aside scrim is lighter than a modal's).
+- ✅ **A tile's notice names the tile as it is drawn** (2026-10-06). A "needs you" notice kept
+  the tile's name from the moment it was raised. A thread that comes to ask in the same table
+  row that names it got there before the tile's title was worked out again, so the notice read
+  the shell's directory ("atlas needs approval") while its row and header read the thread. The
+  notice now keeps the tile and what happened, and reads the tile's title each time it is
+  drawn.
+  - Test: `workspace::tests::toasts::a_tiles_notice_reads_the_name_the_tile_comes_to_have`.

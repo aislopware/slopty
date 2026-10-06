@@ -13,15 +13,8 @@ Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md (focused)
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Navigation │ Navigator
-Heading │ e2e-ios-worker
 TextInput │ Filter
-Heading │ Workspaces
-Button │ e2e-ios-worker, 2 tiles
-Button │ New workspace
-Heading │ Machines
 Button │ e2e-ios-worker
-Button │ New shell on e2e-ios-worker
-Button │ Machine actions, e2e-ios-worker
 Button │ Terminal
 Button │ Close tile
 Button │ scratch

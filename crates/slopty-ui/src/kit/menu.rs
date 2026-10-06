@@ -556,7 +556,7 @@ fn row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_size(px(theme.typography.ui_size))
+                .text_size(px(theme.roles().chrome.size))
                 .text_color(hsla(ink))
                 .child(item.label.clone()),
         )

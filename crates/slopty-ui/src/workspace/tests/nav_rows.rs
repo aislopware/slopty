@@ -736,27 +736,43 @@ fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
     assert_eq!(age.as_deref(), Some("2m"), "from its rest: {lines:#?}");
 }
 
-/// A phone's title bar has no tabs, so its drawer heads the list with *Workspaces*: a row per
-/// workspace, and "New workspace", which goes to the empty one the layout keeps last. A
-/// desktop's navigator has no such section. The active workspace is said by its name's tone,
+/// A phone's title bar has no tabs, so its drawer heads the list with *Workspaces* once there
+/// are two: a row per workspace, above the workers. With one, the bar names where the person
+/// is and the section says nothing more. "New workspace" is the bar's "+" menu's, not a row.
+/// A desktop's navigator has no such section. The active workspace is said by its name's tone,
 /// not a fill: the focused tile's row is the list's one selection, so two rows never both read
 /// as selected.
 #[gpui::test]
-fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
+fn a_phone_drawer_lists_the_workspaces_once_there_are_two(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     assert!(!shown(cx, "nav-workspaces"), "the title bar's tabs say it on a desktop");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    let heading = cx.debug_bounds("nav-workspaces").expect("the section heads the drawer");
-    let space = cx.debug_bounds("nav-space-0").expect("the workspace's row");
-    let new = cx.debug_bounds("nav-new-space").expect("and a way to a new one");
+    assert!(shown(cx, "navigator"), "the drawer is out");
+    assert!(!shown(cx, "nav-workspaces"), "one workspace: the bar names it");
+    assert!(!shown(cx, "nav-new-space"), "a new one is the bar's \"+\" menu's");
+
+    view.update_in(cx, |v, _w, cx| {
+        let last = v.layout.workspaces().len().saturating_sub(1);
+        v.go_to_workspace(last, cx);
+    });
+    cx.run_until_parked();
+    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let heading = cx.debug_bounds("nav-workspaces").expect("two: the section heads the drawer");
+    let (first, second) = (
+        cx.debug_bounds("nav-space-0").expect("the first workspace's row"),
+        cx.debug_bounds("nav-space-1").expect("the second's"),
+    );
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the worker");
-    assert!(heading.bottom() <= space.top() && space.bottom() <= new.top(), "in that order");
-    assert!(new.bottom() <= worker.top(), "above the workers");
+    assert!(heading.bottom() <= first.top() && first.bottom() <= second.top(), "in order");
+    assert!(second.bottom() <= worker.top(), "above the workers");
+    assert!(!shown(cx, "nav-new-space"), "still no row for a new one");
     let plate = view.read_with(cx, |v, _| v.navigator_plate()).expect("the selection's plate");
     let focused = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the focused row");
     assert!((plate.top() - focused.top()).abs() < px(0.5), "under the focused tile: {plate:?}");
@@ -767,55 +783,52 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
         let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
         window.painted_quads().into_iter().any(|q| {
             fills.contains(&q.background)
-                && near(q.bounds.origin.y.0, space.origin.y)
-                && near(q.bounds.size.height.0, space.size.height)
+                && near(q.bounds.origin.y.0, second.origin.y)
+                && near(q.bounds.size.height.0, second.size.height)
         })
     });
     assert!(!filled, "the active workspace's row has no fill of its own");
-    click(cx, "nav-new-space");
-    let (active, last) = view.read_with(cx, |v, _| {
-        (v.layout().active_workspace(), v.layout().workspaces().len().saturating_sub(1))
-    });
-    assert_eq!(active, last, "the empty workspace kept last");
+    click(cx, "nav-space-0");
+    assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 0, "its row goes there");
 }
 
-/// A phone's bar names the focused tile, so its drawer names the workspace: a heading in the
-/// drawer's top row, as the bar's title is set, on the edge of the section headings below it,
-/// that follows the active workspace. A desktop's navigator leaves that row to the window's
-/// controls.
+/// A phone's drawer floats as iOS 26's sidebar does: clear of the window's leading and bottom
+/// edges by the small step and of the status bar by the same, its search field its first row,
+/// with no large title and no row of window controls above it, over a scrim lighter than a
+/// modal's.
 #[gpui::test]
-fn a_phone_drawer_names_the_workspace(cx: &mut TestAppContext) {
+fn a_phone_drawer_floats_clear_of_the_edges(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    assert!(!shown(cx, "nav-workspace-title"), "the title bar names it on a desktop");
-    cx.simulate_resize(size(px(390.0), px(844.0)));
+    let (w, h) = (px(390.0), px(844.0));
+    cx.simulate_resize(size(w, h));
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    let title = cx.debug_bounds("nav-workspace-title").expect("the drawer names the workspace");
-    let field = cx.debug_bounds("nav-filter-field").expect("the filter");
-    let section = cx.debug_bounds("nav-workspaces").expect("the section");
-    assert!(title.bottom() <= field.top(), "in the top row, over the filter");
-    let role = view.read_with(cx, |v, _| titlebar::phone_title_role(&v.theme));
-    assert!(
-        (title.size.height - px(role.line)).abs() < px(0.5),
-        "an inline navigation title: {title:?}"
-    );
-    let inset = px(Theme::default().spacing.inset());
-    let edge = section.left() + inset;
-    assert!((title.left() - edge).abs() < px(0.5), "on the headings' edge: {title:?} {edge:?}");
-    let name = view.read_with(cx, |v, _| v.workspace_name());
-    assert_eq!(name, "studio", "named for the work in it");
-    let headed = |cx: &mut VisualTestContext, name: &str| {
-        tree(cx).into_iter().any(|n| n.is("Heading", Some(name)))
+    let theme = Theme::default();
+    let step = px(theme.spacing.sm);
+    let panel = cx.debug_bounds("navigator").expect("the drawer is out");
+    let near = |a: Pixels, b: Pixels| (a - b).abs() < px(0.5);
+    assert!(near(panel.left(), step), "clear of the leading edge: {panel:?}");
+    assert!(near(panel.top(), step), "clear of the top (no status bar here): {panel:?}");
+    assert!(near(h - panel.bottom(), step), "clear of the bottom: {panel:?}");
+    assert!(w - panel.right() > step, "the strip still shows past it: {panel:?}");
+    assert!(!shown(cx, "nav-lights-row"), "no row of window controls");
+    assert!(!shown(cx, "nav-workspace-title"), "no large title");
+    let field = cx.debug_bounds("nav-filter-field").expect("the search field");
+    // The step in from the panel's hairline rim.
+    let below = field.top() - panel.top();
+    assert!(below >= step && below <= step + px(1.0), "its first row: {field:?} {panel:?}");
+    let headed = tree(cx).into_iter().any(|n| n.is("Heading", Some("studio")));
+    assert!(!headed, "the workspace's name is the bar's, not a heading here");
+    let (aside, modal) = (crate::kit::aside_scrim(&theme), crate::kit::scrim(&theme));
+    let painted = |cx: &mut VisualTestContext, dim: gpui::Hsla| {
+        let dim = gpui::Background::from(dim);
+        cx.update(|window, _| window.painted_quads().into_iter().any(|q| q.background == dim))
     };
-    assert!(headed(cx, "studio"), "a heading a screen reader reads");
-    click(cx, "nav-new-space");
-    assert!(!shown(cx, "nav-workspace-title"), "going there closed the drawer");
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    assert!(headed(cx, NEW_WORKSPACE), "it follows the active workspace");
+    assert!(painted(cx, aside), "the lighter scrim");
+    assert!(!painted(cx, modal), "not a modal's");
 }
 
 /// A shell whose directory is in `repo` on `branch`, as its worker reports it.

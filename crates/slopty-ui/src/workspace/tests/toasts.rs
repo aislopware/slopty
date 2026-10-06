@@ -128,3 +128,55 @@ fn a_failure_stays_until_dismissed_and_copies(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(up(cx), ["two"], "dismissed");
 }
+
+/// A tile's "needs you" notice names the tile as it is when drawn, not as it was when raised.
+/// An agent's thread comes to ask in the same table row that names it, before the tile's title
+/// is worked out again, so a notice that kept the name it was raised with said the shell's
+/// directory while the row and the header said the thread.
+#[gpui::test]
+fn a_tiles_notice_reads_the_name_the_tile_comes_to_have(cx: &mut TestAppContext) {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::wire::{RequestCard, TableFrame};
+    use slopty_proto::thread::{AskId, Cursor, Request};
+
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(600.0), px(500.0)));
+    let studio = connect(&view, cx, 1, "studio");
+    let [(away, away_tile), _, _] = three_shells(&view, cx, &studio);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let title = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.item(away_tile).map(|i| v.tile_title(i))).expect("the tile")
+    };
+    let before = title(cx);
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(away);
+    let mut row = state.row(WallMs::ZERO);
+    row.requests = vec![RequestCard {
+        id: AskId("ask-1".to_owned()),
+        item: None,
+        kind: Request::APPROVAL.to_owned(),
+        title: "Run `cargo test`".to_owned(),
+        options: Vec::new(),
+        opened_ms: WallMs::ZERO,
+    }];
+    // The worker's table heard empty first, so the thread is one that comes to need.
+    let heard = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: Vec::new() };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(studio.key, cx);
+        v.thread_table(studio.key, &heard, cx);
+    });
+    cx.run_until_parked();
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 2 }, rows: vec![row] };
+    view.update_in(cx, |v, _w, cx| v.thread_table(studio.key, &table, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let after = title(cx);
+    assert_ne!(after, before, "the thread's name reached the tile");
+    let said = view.read_with(cx, |v, _| v.toast_texts());
+    let line = said.first().cloned().expect("the corner says it");
+    assert!(line.starts_with(&after) && !line.starts_with(&before), "{line:?}, not {before:?}");
+    let drawn = tree(cx).into_iter().any(|n| n.is("Status", Some(line.as_str())));
+    assert!(drawn, "and says it to a screen reader");
+}

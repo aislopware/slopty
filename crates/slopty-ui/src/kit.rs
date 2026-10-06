@@ -776,6 +776,13 @@ pub fn scrim(theme: &Theme) -> Hsla {
     hsla_alpha(theme.elevation.shade, theme.elevation.scrim)
 }
 
+/// The scrim under a floating sidebar (a phone's drawer): the same shade, lighter than a
+/// modal's, since the work under it is one tap away.
+#[must_use]
+pub fn aside_scrim(theme: &Theme) -> Hsla {
+    hsla_alpha(theme.elevation.shade, theme.elevation.aside)
+}
+
 /// Where every overlay's top sits, as a share of the window's height below its safe area.
 ///
 /// The palette, the pickers, the settings and the add-worker dialog open at one place, so
@@ -834,21 +841,19 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .flex()
         .flex_col()
         .rounded(px(theme.radii.lg))
-        .text_size(px(theme.typography.ui_size))
+        .text_size(px(theme.roles().chrome.size))
         .font_family(theme.typography.ui_family.clone())
         .text_color(hsla(theme.surfaces.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
-/// A dialog's or a panel's title: the title size at the strong weight, in `text`.
+/// A dialog's or a panel's title: the panel title role (15/20 at the strong weight), in `text`.
 ///
 /// The strong weight is for titles like this one and for headings; a row, a tab or a name that
 /// has to stand out takes the medium weight.
 #[must_use]
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(px(theme.typography.title()))
-        .font_weight(FontWeight(Typography::STRONG_WEIGHT))
+    typed(div(), theme.roles().panel_title, 1.0)
         .text_color(hsla(theme.surfaces.text))
         .child(text.into())
 }
@@ -982,15 +987,16 @@ fn ring_inside(theme: &Theme) -> BoxShadow {
 pub fn button(
     theme: &Theme,
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     kind: ButtonKind,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
+    let label = label.into();
     let el = div()
         .id(id)
         .debug_selector(move || id.to_owned())
         .role(gpui::accesskit::Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .flex_none()
         .flex()
         .items_center()
@@ -998,7 +1004,7 @@ pub fn button(
         .h(px(theme.density.control))
         .when(kind != ButtonKind::Link, |el| el.px(px(theme.spacing.md)))
         .rounded(px(theme.radii.sm))
-        .text_size(px(theme.typography.ui_size))
+        .text_size(px(theme.roles().action.size))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .cursor_pointer()
         .child(label);
@@ -1156,19 +1162,20 @@ pub fn typed<E: Styled>(el: E, role: slopty_theme::TypeRole, k: f32) -> E {
 /// in `text_muted`; a status word then takes its tone's colour over it.
 #[must_use]
 pub fn meta<E: Styled>(el: E, theme: &Theme) -> E {
-    el.text_size(px(theme.typography.small())).text_color(hsla(theme.surfaces.text_muted))
+    el.text_size(px(theme.roles().metadata.size)).text_color(hsla(theme.surfaces.text_muted))
 }
 
 /// A section's label: a group's head that the rows under it still lead, as Linear's are.
 ///
-/// `small()` at the medium weight in `text_secondary`, never upper case. Muted and regular, it
+/// The metadata role's size (12, a finger's 13) at the medium weight in `text_secondary`, never
+/// upper case. Muted and regular, it
 /// sank to the level of the facts on the rows and every section read as one run; the strong
 /// weight stays for one thing per region, so a head never rivals the names under it.
 #[must_use]
 pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
-        .text_size(px(theme.typography.small()))
+        .text_size(px(theme.roles().metadata.size))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .text_color(hsla(theme.surfaces.text_secondary))
         .child(text.into())
@@ -1232,7 +1239,7 @@ fn square_icon(
         .child(
             crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Lead)
                 .weight(crate::icons::Weight::Medium)
-                .slot(px(theme.typography.icon_large() * k), hsla(ink)),
+                .slot(px(crate::icons::IconSize::Lead.slot(theme) * k), hsla(ink)),
         );
     crate::a11y::tab_stop(el, s.focus)
 }
@@ -1912,10 +1919,10 @@ mod tests {
         if named || line.contains(".shadow(") {
             return Some("a shadow of its own, not `kit::elevate`, `kit::card` or `kit::rests`");
         }
-        let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.shade"];
+        let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.aside", "elevation.shade"];
         dim.iter()
             .any(|token| line.contains(token))
-            .then_some("a scrim of its own, not `kit::scrim`")
+            .then_some("a scrim of its own, not `kit::scrim` or `kit::aside_scrim`")
     }
 
     #[test]
@@ -3056,6 +3063,7 @@ mod tests {
             assert!(edge.iter().all(|l| l.color == white && l.offset.y > px(0.0)), "{edge:?}");
             assert_eq!(edge.len(), usize::from(dark), "{variant:?}: the lit edge is dark's");
             assert!((scrim(&theme).a - theme.elevation.scrim).abs() < f32::EPSILON);
+            assert!(aside_scrim(&theme).a < scrim(&theme).a, "{variant:?}: a sidebar dims less");
         }
     }
 

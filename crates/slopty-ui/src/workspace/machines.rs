@@ -24,6 +24,9 @@ pub(super) const STOP_SHARING_CLIPBOARD: &str = "Unshare clipboard";
 /// A machine row's way to share the clipboard with it again.
 pub(super) const SHARE_CLIPBOARD: &str = "Share clipboard";
 
+/// A machine row's way to a new shell on it, in its home.
+pub(super) const NEW_SHELL_HERE: &str = "New shell here";
+
 /// A machine row's way to its settings file.
 pub(super) const EDIT_SETTINGS: &str = "Edit settings";
 
@@ -190,7 +193,18 @@ impl WorkspaceView {
         });
         let update = self.update_run(key, cx);
         let connect = host.connect.filter(|_| !w.status.is_up());
+        // Its header's "+" under the pointer, here for a finger, which has no hover.
+        let shell = w.link.is_some().then(|| {
+            let entity = entity.clone();
+            let run: MenuRun = std::rc::Rc::new(move |_window, cx| {
+                let _gone = entity.update(cx, |this, cx| {
+                    this.open_session_on(key, None, Vec::new(), None, cx);
+                });
+            });
+            run
+        });
         [
+            shell.map(|run| entry(MenuGroup::Tiles, NEW_SHELL_HERE, run)),
             update.map(|run| entry(MenuGroup::Connections, crate::add_worker::UPDATE, run)),
             connect.map(|run| entry(MenuGroup::Connections, "Connect", run)),
             host.wake.map(|run| entry(MenuGroup::Connections, "Wake", run)),

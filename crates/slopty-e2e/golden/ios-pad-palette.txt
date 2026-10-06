@@ -1,6 +1,8 @@
 Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ e2e-ios-worker
 Button │ New
@@ -9,16 +11,11 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
-Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ scratch
 Heading │ file scratch
 Label │ home
-Button │ Show preview
-Button │ Fullscreen tile
-Button │ Close tile
 Document │ File $SCRATCH/home/note-$MOMENT.md │ 1 line, Markdown, not on disk
 Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md

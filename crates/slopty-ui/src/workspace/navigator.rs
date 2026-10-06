@@ -664,7 +664,7 @@ pub(super) fn row(
         .gap(px(spacing.xs))
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        .text_size(px(theme.typography.ui_size))
+        .text_size(px(theme.roles().chrome.size))
         .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
     tab_stop(el, s.focus)
 }
@@ -998,8 +998,6 @@ enum NavRow {
     Agent(NavAgent),
     /// A workspace, on a phone, whose title bar has no tabs.
     Space(NavSpace),
-    /// "New workspace", the last of *Workspaces*.
-    NewSpace,
     Worker(NavHeader),
     Group(NavGroup),
     Board(NavBoard),
@@ -1030,7 +1028,6 @@ impl NavRow {
             | Self::Earlier(..)
             | Self::EarlierMore(_)
             | Self::Space(_)
-            | Self::NewSpace
             | Self::Vacant(_)
             | Self::Nothing => (false, false),
         };
@@ -1049,7 +1046,6 @@ impl NavRow {
             Self::Heading { .. }
             | Self::Agent(_)
             | Self::Space(_)
-            | Self::NewSpace
             | Self::Earlier(..)
             | Self::EarlierMore(_)
             | Self::Vacant(_)
@@ -2293,8 +2289,8 @@ impl WorkspaceView {
     /// past them at the far leading edge, the navigator's toggle, where the title bar keeps it
     /// while the navigator is hidden: it never moves. At its trailing end, inside the panel,
     /// "Search" and "New agent", as Apple's Notes and Mail keep a sidebar's actions on its top
-    /// row. A phone's drawer has neither, and its row names the active workspace
-    /// ([`Self::drawer_title`]).
+    /// row. A phone's drawer has no such row: it floats below the status bar, its filter its
+    /// first row, with no large title, as iOS 26's floating sidebar opens on its search field.
     ///
     /// The filter is hidden at rest, so the list is the panel's first row. "Search", ⌘F with
     /// the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard shows it
@@ -2315,9 +2311,6 @@ impl WorkspaceView {
         let toggle = (!self.workers.is_empty() && self.nav.drawn == Some(Mode::Docked))
             .then(|| self.navigator_toggle(cx));
         let drawer = self.nav.drawn == Some(Mode::Drawer);
-        // On a section heading's edge, so the name stands over *Workspaces* below it.
-        let leading = if drawer { spacing.inset() } else { leading };
-        let title = drawer.then(|| self.drawer_title(theme));
         // Its actions, at the row's end inside the panel's width.
         let actions = (!drawer && !self.workers.is_empty()).then(|| {
             div()
@@ -2347,7 +2340,7 @@ impl WorkspaceView {
                     Input::new(input)
                         .appearance(false)
                         .px_0()
-                        .text_size(px(theme.typography.ui_size))
+                        .text_size(px(theme.roles().chrome.size))
                         .aria_label("Filter"),
                 )
         });
@@ -2391,7 +2384,12 @@ impl WorkspaceView {
             .children(scope)
             .children(input)
             .children(clear);
-        let row = div().flex_none().px(px(spacing.sm)).pb(px(spacing.xs)).child(field);
+        let row = div()
+            .flex_none()
+            .px(px(spacing.sm))
+            .when(drawer, |row| row.pt(px(spacing.sm)))
+            .pb(px(spacing.xs))
+            .child(field);
         let reveals = self.nav.filter.reveals;
         let filter = self.navigator_filter_shown().then(|| {
             if drawer || reveals == 0 || !kit::motion(cx) {
@@ -2403,52 +2401,27 @@ impl WorkspaceView {
             row.with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
                 .into_any_element()
         });
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .debug_selector(|| "nav-lights-row".to_owned())
-                    .h(px(titlebar_height(theme)) + safe.top)
-                    .pt(safe.top)
-                    .pl(px(leading))
-                    .pr(px(spacing.sm))
-                    .flex()
-                    .items_center()
-                    .children(toggle)
-                    .children(title)
-                    .children(actions),
-            )
-            .children(filter)
+        let lights = (!drawer).then(|| {
+            div()
+                .debug_selector(|| "nav-lights-row".to_owned())
+                .h(px(titlebar_height(theme)) + safe.top)
+                .pt(safe.top)
+                .pl(px(leading))
+                .pr(px(spacing.sm))
+                .flex()
+                .items_center()
+                .children(toggle)
+                .children(actions)
+        });
+        div().flex_none().flex().flex_col().children(lights).children(filter)
     }
 
-    /// A phone's drawer's title: the active workspace's name, as the bar beside it names the
-    /// focused tile, set as that bar's title is ([`super::titlebar::phone_title_role`]), so it
-    /// reads as the drawer's heading and not as one more row. The phone's bar gave the name up
-    /// to the tile, so opening the drawer is going one level up. Switching is *Workspaces*'s
-    /// job below it; this only says where the person is.
-    fn drawer_title(&self, theme: &Theme) -> Stateful<Div> {
-        let name = SharedString::from(self.workspace_name_at(self.layout.active_workspace()));
-        kit::typed(div(), super::titlebar::phone_title_role(theme), 1.0)
-            .id("nav-workspace-title")
-            .debug_selector(|| "nav-workspace-title".to_owned())
-            .role(Role::Heading)
-            .aria_label(name.clone())
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_color(hsla(theme.surfaces.text))
-            .child(name)
-    }
-
-    /// Every row the list holds this frame: on a phone *Workspaces*, then *Needs you* while an
-    /// agent or a thread waits, *To review* while a turn ended unseen, then the projects, each
-    /// header with its tiles unless it is folded, then the workers, each with what belongs to
-    /// no project. A section's heading shows only under another section. While the filter
-    /// holds something, a fold hides nothing; under a scope, only its project's rows are left.
+    /// Every row the list holds this frame: on a phone *Workspaces* while there are two, then
+    /// *Needs you* while an agent or a thread waits, *To review* while a turn ended unseen,
+    /// then the projects, each header with its tiles unless it is folded, then the workers,
+    /// each with what belongs to no project. A section's heading shows only under another
+    /// section. While the filter holds something, a fold hides nothing; under a scope, only its
+    /// project's rows are left.
     ///
     /// The two attention sections list every one, its tile's row in view or not: they are what
     /// the bell counts and opens, and a waiting row is where its yes or no is answered.
@@ -2567,22 +2540,22 @@ impl WorkspaceView {
     }
 
     /// *Workspaces*, as a phone's drawer heads its list: each workspace the title bar would tab,
-    /// named, with its tile count, and "New workspace" unless the active one is that new one.
+    /// named, with its tile count. Only while there are two: one workspace is where the person
+    /// already is, and the bar names it. "New workspace" is the bar's "+" menu's.
     fn space_rows(&self) -> Vec<NavRow> {
         let active = self.layout.active_workspace();
-        let spaces: Vec<NavRow> = self
-            .tabbed_workspaces()
-            .into_iter()
-            .map(|ix| {
-                let (_, tiles) = self.workspace_rollup(ix);
-                let name = self.workspace_name_at(ix);
-                NavRow::Space(NavSpace { ix, name, tiles, active: ix == active })
-            })
-            .collect();
-        let fresh = self.layout.workspaces().get(active).is_some_and(|ws| ws.columns().is_empty());
+        let tabbed = self.tabbed_workspaces();
+        if tabbed.len() < 2 {
+            return Vec::new();
+        }
+        let spaces = tabbed.into_iter().map(|ix| {
+            let (_, tiles) = self.workspace_rollup(ix);
+            let name = self.workspace_name_at(ix);
+            NavRow::Space(NavSpace { ix, name, tiles, active: ix == active })
+        });
         let heading =
             NavRow::Heading { selector: "nav-workspaces".into(), text: "Workspaces".into() };
-        std::iter::once(heading).chain(spaces).chain((!fresh).then_some(NavRow::NewSpace)).collect()
+        std::iter::once(heading).chain(spaces).collect()
     }
 
     /// Draw the navigator again when the soonest age it shows changes: at its next minute (or
@@ -2638,7 +2611,6 @@ impl WorkspaceView {
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
             Some(NavRow::Space(space)) => self.space_row(space, cx),
-            Some(NavRow::NewSpace) => self.new_space_row(cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Group(group)) => self.group_header(group, cx),
             Some(NavRow::Board(board)) => self.board_row(board, cx),
@@ -2701,10 +2673,14 @@ impl WorkspaceView {
                 }
             })
             .size_full()
-            .pl(if mode == Mode::Docked { px(0.0) } else { safe.left })
-            // Laid over the frame it runs through the home indicator's band; its rows stop
-            // above it.
-            .when(mode != Mode::Docked, |panel| panel.pb(safe.bottom))
+            // Laid over the frame it runs under the leading safe area and through the home
+            // indicator's band, and its rows clear both. A phone's drawer floats inside the
+            // safe area's leading edge, its bottom a step above the window's.
+            .map(|panel| match mode {
+                Mode::Docked => panel,
+                Mode::Overlay => panel.pl(safe.left).pb(safe.bottom),
+                Mode::Drawer => panel.pb((safe.bottom - px(theme.spacing.sm)).max(px(0.0))),
+            })
             .flex()
             .flex_col()
             // The bars' surface: the navigator is chrome, one surface with them, and the panel
@@ -2714,10 +2690,14 @@ impl WorkspaceView {
             .border_r(kit::HAIR)
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
-            // Over the frame it floats, as every floating layer does. It meets the window's
-            // top, left and bottom edges, so only its trailing edge carries the hairline.
-            .when(mode != Mode::Docked, |panel| {
-                kit::elevate(panel, theme).border_0().border_r(kit::HAIR)
+            // Over the frame it floats, as every floating layer does. Over a wider frame it
+            // meets the window's top, left and bottom edges, so only its trailing edge carries
+            // the hairline; a phone's drawer stands clear of every edge, rimmed all round and
+            // rounded as a sheet is.
+            .map(|panel| match mode {
+                Mode::Docked => panel,
+                Mode::Overlay => kit::elevate(panel, theme).border_0().border_r(kit::HAIR),
+                Mode::Drawer => kit::elevate(panel, theme).rounded(px(theme.radii.lg)),
             })
             // Esc in the filter empties it, hides it and hands the keyboard back; with it empty,
             // Esc lets go of the scope.
@@ -2801,7 +2781,7 @@ impl WorkspaceView {
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
                     crate::icons::Drawn::new(theme, glyph, IconSize::Lead)
-                        .slot(px(theme.typography.icon_large()), hsla(ink)),
+                        .slot(px(IconSize::Lead.slot(theme)), hsla(ink)),
                 )
                 .child(badge);
             tab_stop(el, s.focus)
@@ -3095,27 +3075,12 @@ impl WorkspaceView {
         row.into_any_element()
     }
 
-    /// "New workspace", the last row of the phone's *Workspaces*: the empty workspace the
-    /// layout always keeps last.
-    fn new_space_row(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = self.nav_theme();
-        let s = &theme.surfaces;
-        let text = super::strip::NEW_WORKSPACE;
-        row(theme, kit::Row::One, "nav-new-space", "nav-new-space".to_owned(), text.into(), false)
-            .text_color(hsla(s.text_secondary))
-            .child(crate::palette::lead_slot(theme, Symbol::Plus, hsla(s.text_secondary), 1.0))
-            .child(title(text, hsla(s.text_secondary)))
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                let last = this.layout.workspaces().len().saturating_sub(1);
-                this.go_to_workspace(last, cx);
-            }))
-            .into_any_element()
-    }
-
     /// A worker's header: the server icon (crossed out, in the warn fill, while it is away),
     /// the name, then on the right edge what is wrong with its link or its round trip when it
-    /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron
-    /// and "+" take the readouts' place; nothing moves when either shows.
+    /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron,
+    /// "+" and "…" take the readouts' place; nothing moves when either shows. A finger has no
+    /// hover, so on touch the chevron stands at rest after the readouts and "+" and "…" are the
+    /// long press's: the menu "…" opens, which leads with "New shell here".
     fn worker_header(&self, worker: &NavHeader, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = self.nav_theme();
         let s = &theme.surfaces;
@@ -3129,9 +3094,9 @@ impl WorkspaceView {
             worker.warning.as_ref().map(|warning| format!(", {warning}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        // A group's head: the name at the section's strong weight, and the machine by its form
-        // beside it at the same weight, in its own colour; muted only while away.
-        let strong = theme.roles().section.weight;
+        // A group's head: the name at the medium weight, a name and not a title, and the machine
+        // by its form beside it at the same weight, in its own colour; muted only while away.
+        let strong = theme.roles().action.weight;
         let machine = |ink: Rgb| {
             crate::palette::lead_slot_weighted(
                 theme,
@@ -3210,6 +3175,7 @@ impl WorkspaceView {
                 }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
         let side = theme.typography.icon_large();
+        let touch = theme.density == slopty_theme::Density::TOUCH;
         // A worker on another build: Update in place of its readouts, at rest too, since it
         // links again only once updated.
         let update = self.update_run(key, cx).map(|run| {
@@ -3222,7 +3188,7 @@ impl WorkspaceView {
                 .px(px(theme.spacing.xs))
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
-                .text_size(px(theme.typography.small()))
+                .text_size(px(theme.roles().metadata.size))
                 .text_color(hsla(s.accent))
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(crate::add_worker::UPDATE)
@@ -3234,7 +3200,7 @@ impl WorkspaceView {
                 }));
             tab_stop(el, s.focus)
         });
-        let add = worker.linked.then(|| {
+        let add = (worker.linked && !touch).then(|| {
             let el = div()
                 .id(SharedString::from(format!("nav-new-shell-{key}")))
                 .debug_selector(move || format!("nav-new-shell-{key}"))
@@ -3257,7 +3223,7 @@ impl WorkspaceView {
             tab_stop(el, s.focus)
         });
         // "…": what the machine says of itself and what can be done to it, hung from here.
-        let menu = {
+        let menu = (!touch).then(|| {
             let kind = super::titlebar::MenuKind::Machine(key);
             let at = Rc::clone(&self.anchors.at);
             let measure = canvas(
@@ -3295,7 +3261,7 @@ impl WorkspaceView {
                     this.toggle_menu(kind, window, cx);
                 }));
             tab_stop(el, s.focus)
-        };
+        });
         // Under the pointer, or while its menu is up: the chevron, "+" and "…" in their fixed
         // places over the readouts. Each is hidden on its own, not by the strip that holds
         // them, so the keyboard's stop shows where it is: a hidden parent hides its children
@@ -3305,8 +3271,7 @@ impl WorkspaceView {
         // never joins the keyboard's ring. Its own focus shows it, not `in_focus`, which is
         // true inside any focused ancestor: the workspace holding the keyboard would bring out
         // every row's actions.
-        // A finger has no hover: on touch they stand at rest, after the readouts.
-        let touch = theme.density == slopty_theme::Density::TOUCH;
+        // A finger has no hover: on touch the chevron stands at rest, after the readouts.
         let revealed = |el: Stateful<Div>, shown: bool| {
             el.when(!shown && !touch, |el| el.opacity(0.0))
                 .group_hover(group.clone(), |st| st.opacity(1.0))
@@ -3323,7 +3288,7 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xxs))
             .child(chevron)
             .children(add.map(|add| revealed(add, menu_up)))
-            .child(revealed(menu, menu_up));
+            .children(menu.map(|menu| revealed(menu, menu_up)));
         let rest =
             if touch { rest } else { rest.group_hover(group.clone(), gpui::Styled::invisible) }
                 .when(menu_up && !touch, gpui::Styled::invisible);
@@ -3331,7 +3296,7 @@ impl WorkspaceView {
             .debug_selector(move || format!("nav-worker-slot-{key}"))
             .relative()
             .flex_none()
-            .min_w(px(machine_actions_width(theme)))
+            .min_w(px(if touch { side } else { machine_actions_width(theme) }))
             .h(px(side))
             .flex()
             .items_center()
@@ -3368,6 +3333,7 @@ impl WorkspaceView {
     /// another listed has its name, then on the right edge the machines it spans, led by what
     /// its tiles add up to while it is folded. Under the pointer the chevron and "+" (a new shell
     /// in its clone) take the readouts' place; nothing moves when either shows. A click folds it.
+    /// On touch the chevron stands at rest and "+" is the long press's.
     fn group_header(&self, group: &NavGroup, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = self.nav_theme();
         let s = &theme.surfaces;
@@ -3381,8 +3347,8 @@ impl WorkspaceView {
             group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        // The name at the section's strong weight, its glyph beside it at the same weight.
-        let strong = theme.roles().section.weight;
+        // The name at the medium weight, its glyph beside it at the same weight.
+        let strong = theme.roles().action.weight;
         let lead = crate::palette::lead_slot_weighted(
             theme,
             group.glyph,
@@ -3433,7 +3399,7 @@ impl WorkspaceView {
             }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
         let side = theme.typography.icon_large();
-        let add = group.new_shell.clone().map(|(worker, cwd)| {
+        let add = group.new_shell.clone().filter(|_| !touch).map(|(worker, cwd)| {
             let add_key = key.clone();
             let el = div()
                 .id(SharedString::from(format!("nav-group-new-shell-{key}")))
@@ -3456,7 +3422,7 @@ impl WorkspaceView {
                 }));
             tab_stop(el, s.focus)
         });
-        // A finger has no hover: on touch they stand at rest, after the place.
+        // A finger has no hover: on touch the chevron stands at rest, after the place.
         let hover = div()
             .when(!touch, |el| {
                 el.absolute()
@@ -3475,7 +3441,7 @@ impl WorkspaceView {
         let trailing = div()
             .relative()
             .flex_shrink(1.0)
-            .min_w(px(header_actions_width(theme)))
+            .min_w(px(if touch { side } else { header_actions_width(theme) }))
             .h(px(side))
             .flex()
             .items_center()
@@ -3646,7 +3612,7 @@ impl WorkspaceView {
             .h(px(kit::Row::One.height(theme)))
             .flex()
             .items_center()
-            .text_size(px(theme.typography.small()))
+            .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(theme.surfaces.text_muted))
             .hover(move |st| st.text_color(hover))
             .child(words)

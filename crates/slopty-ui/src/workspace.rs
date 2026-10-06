@@ -2175,7 +2175,17 @@ impl WorkspaceView {
             ParentElement as _, Styled as _, px,
         };
         let safe = window.insets().effective();
-        let width = px(self.navigator_panel_width(mode, window)) + safe.left;
+        // A phone's drawer floats as iOS 26's sidebar does: inset from the safe area's top and
+        // leading edges and from the window's bottom, its corners rounded, over a lighter scrim.
+        // Laid over a wider frame, the panel meets the window's edges and runs under the
+        // leading safe area, which its rows clear.
+        let floats = mode == navigator::Mode::Drawer;
+        let inset = px(self.theme.spacing.sm);
+        let width = if floats {
+            px(self.navigator_panel_width(mode, window))
+        } else {
+            px(self.navigator_panel_width(mode, window)) + safe.left
+        };
         // Not cached: a cached view is built again whenever a view in it is, and a scroll of
         // the rows' view inside it then rebuilt the panel and its filter field.
         let panel = gpui::div().h_full().w(width).flex().child(panel);
@@ -2184,7 +2194,12 @@ impl WorkspaceView {
             Animation::new(slopty_theme::Motion::DEFAULT.sheet).with_easing(crate::kit::drawer())
         };
         let moves = self.animate && crate::kit::motion(cx);
-        let scrim = gpui::div().absolute().inset_0().bg(crate::kit::scrim(&self.theme));
+        let dim = if floats {
+            crate::kit::aside_scrim(&self.theme)
+        } else {
+            crate::kit::scrim(&self.theme)
+        };
+        let scrim = gpui::div().absolute().inset_0().bg(dim);
         let scrim = if moves {
             scrim
                 .with_animation("navigator-scrim", sheet(), gpui::Styled::opacity)
@@ -2192,17 +2207,24 @@ impl WorkspaceView {
         } else {
             scrim.into_any_element()
         };
+        let (top, bottom, left) = if floats {
+            (safe.top + inset, inset, safe.left + inset)
+        } else {
+            (px(0.0), px(0.0), px(0.0))
+        };
         let drawn = gpui::div()
+            .debug_selector(|| "navigator-sheet".to_owned())
             .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
+            .top(top)
+            .bottom(bottom)
+            .left(left)
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .child(panel);
         let drawn = if moves {
+            // From wholly past the leading edge, its shadow with it.
             drawn
                 .with_animation("navigator-slide", sheet(), move |el, t| {
-                    el.left(-width * (1.0 - t))
+                    el.left(left - (width + left) * (1.0 - t))
                 })
                 .into_any_element()
         } else {

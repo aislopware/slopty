@@ -276,8 +276,9 @@ impl Render for Phone {
     }
 }
 
-/// On a phone the drawer and its scrim run to the window's bottom edge, over the band below
-/// the workspace, not only to the workspace's.
+/// On a phone the drawer's scrim runs to the window's bottom edge, over the band below the
+/// workspace, not only to the workspace's, and the drawer floats into the band, a step clear
+/// of the window's bottom edge.
 #[gpui::test]
 fn the_phone_drawer_runs_through_the_home_indicator_band(cx: &mut TestAppContext) {
     runs_through_the_band(cx, (390.0, 844.0), navigator::Mode::Drawer);
@@ -290,8 +291,9 @@ fn the_overlaid_navigator_runs_through_the_home_indicator_band(cx: &mut TestAppC
     runs_through_the_band(cx, (700.0, 900.0), navigator::Mode::Overlay);
 }
 
-/// Open the navigator in a window of `(w, h)` over the band, where it sits in `mode`: it and
-/// its scrim end at the window's bottom edge.
+/// Open the navigator in a window of `(w, h)` over the band, where it sits in `mode`: its scrim
+/// ends at the window's bottom edge, and so does the panel laid over a frame; a phone's drawer
+/// ends a step above it, past the workspace's bottom, and starts a step below the top.
 fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navigator::Mode) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -321,9 +323,12 @@ fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navi
     let drawer = cx.debug_bounds("navigator").expect("the drawer is open");
     let scrim = cx.debug_bounds("navigator-away").expect("over its scrim");
     assert!((f32::from(workspace.bottom()) - (h - BAND)).abs() < 0.5, "{workspace:?}");
-    assert!((f32::from(drawer.bottom()) - h).abs() < 0.5, "to the bottom: {drawer:?}");
-    assert!((f32::from(scrim.bottom()) - h).abs() < 0.5, "the scrim too: {scrim:?}");
-    assert!(drawer.top() == workspace.top(), "from the top: {drawer:?}");
+    let clear = if mode == navigator::Mode::Drawer { Theme::default().spacing.sm } else { 0.0 };
+    assert!((f32::from(drawer.bottom()) - (h - clear)).abs() < 0.5, "to the bottom: {drawer:?}");
+    assert!(drawer.bottom() > workspace.bottom(), "into the band: {drawer:?}");
+    assert!((f32::from(scrim.bottom()) - h).abs() < 0.5, "the scrim to the edge: {scrim:?}");
+    let top = f32::from(workspace.top()) + clear;
+    assert!((f32::from(drawer.top()) - top).abs() < 0.5, "from the top: {drawer:?}");
 }
 
 /// A wheel over the navigator's list composites its scroll layer where GPUI compiles layers in.

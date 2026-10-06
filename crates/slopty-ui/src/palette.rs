@@ -181,7 +181,7 @@ pub(crate) fn field_row(
             Input::new(input)
                 .appearance(false)
                 .px_0()
-                .text_size(px(theme.typography.title()))
+                .text_size(px(theme.roles().panel_title.size))
                 .aria_label(label),
         )
 }
@@ -1189,7 +1189,7 @@ pub(crate) fn lead_slot_weighted(
     k: f32,
 ) -> gpui::Stateful<gpui::Div> {
     let mark = mark.into();
-    let large = px(theme.typography.icon_large() * k);
+    let large = px(IconSize::Lead.slot(theme) * k);
     let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).weight(weight).slot(large, ink);
     div()
         .id("lead")

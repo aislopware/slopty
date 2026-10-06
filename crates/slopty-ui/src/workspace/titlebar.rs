@@ -528,8 +528,8 @@ impl WorkspaceView {
 
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
     /// (or its agent's mark) before its name and how it is doing after, as an inline navigation
-    /// title ([`phone_title_role`]), as the drawer's title is. The tile has no header of its own on
-    /// a phone, so its rows are the bar's "…". With no tile focused it names the workspace.
+    /// title ([`phone_title_role`]). The tile has no header of its own on a phone, so its rows
+    /// are the bar's "…". With no tile focused it names the workspace.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
         let theme = &self.theme;

@@ -166,8 +166,8 @@ fn a_thread_with_no_tile_lists_under_its_project_and_opens_its_tile(cx: &mut Tes
     );
 }
 
-/// On a phone the drawer lists the workspaces, then the projects, then the workers with what
-/// is in no project.
+/// On a phone the drawer lists the projects, then the workers with what is in no project; with
+/// one workspace, no *Workspaces* above them.
 #[gpui::test]
 fn on_a_phone_the_drawer_lists_the_projects_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -182,12 +182,12 @@ fn on_a_phone_the_drawer_lists_the_projects_then_the_workers(cx: &mut TestAppCon
     let group = view
         .read_with(cx, |v, _| v.project_groups().group_of(atlas).map(|g| g.key.clone()))
         .expect("atlas's group");
+    assert!(cx.debug_bounds("nav-workspaces").is_none(), "one workspace: the bar names it");
     let order = [
-        top(cx, "nav-workspaces"),
         top(cx, "nav-projects"),
         top(cx, leak(format!("nav-group-{group}"))),
         top(cx, "nav-workers"),
         top(cx, leak(format!("nav-worker-{}", studio.key))),
     ];
-    assert!(order.is_sorted(), "workspaces, projects, then workers: {order:?}");
+    assert!(order.is_sorted(), "projects, then workers: {order:?}");
 }

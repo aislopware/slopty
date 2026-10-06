@@ -159,8 +159,10 @@ pub enum IconSize {
     /// Beside a row's facts, the metadata role: their point size, never under
     /// [`SYMBOL_FLOOR`], in [`slopty_theme::Typography::icon`]'s slot.
     Inline,
-    /// A row's lead, an icon button, or standing beside a title: the chrome's size in
-    /// [`slopty_theme::Typography::icon_large`]'s slot.
+    /// A row's lead, an icon button, or standing beside a title: the chrome role's size, in a
+    /// slot as much past it as [`slopty_theme::Typography::icon_large`] is past the chrome
+    /// size. A finger's chrome is 17 pt, so on touch a lead is 17 pt in a 20 pt slot, as an iOS
+    /// row's symbol is its body text's size.
     Lead,
 }
 
@@ -189,8 +191,14 @@ impl IconSize {
     #[must_use]
     pub fn slot(self, theme: &Theme) -> f32 {
         match self {
-            Self::Inline => theme.typography.icon(),
-            Self::Lead => theme.typography.icon_large(),
+            Self::Inline => {
+                let ty = &theme.typography;
+                theme.roles().metadata.size + (ty.icon() - ty.small())
+            }
+            Self::Lead => {
+                let ty = &theme.typography;
+                theme.roles().chrome.size + (ty.icon_large() - ty.ui_size)
+            }
         }
     }
 
@@ -198,8 +206,8 @@ impl IconSize {
     #[must_use]
     pub fn point(self, theme: &Theme) -> f32 {
         match self {
-            Self::Inline => theme.typography.small().max(SYMBOL_FLOOR),
-            Self::Lead => theme.typography.ui_size.max(SYMBOL_FLOOR),
+            Self::Inline => theme.roles().metadata.size.max(SYMBOL_FLOOR),
+            Self::Lead => theme.roles().chrome.size.max(SYMBOL_FLOOR),
         }
     }
 }
@@ -291,7 +299,7 @@ impl Drawn {
     pub fn notice(theme: &Theme, mark: impl Into<Mark>) -> Self {
         let slot = crate::kit::NOTICE_MARK;
         Self {
-            ratio: theme.typography.heading() / slot,
+            ratio: theme.roles().page_heading.size / slot,
             ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot,
             weight: Weight::Light,
             scale: Scale::Large,
@@ -827,7 +835,7 @@ pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyE
         Some(symbol) => Drawn::notice(theme, symbol)
             .slot(px(crate::kit::NOTICE_MARK * k), color)
             .into_any_element(),
-        None => status_icon(theme, status, px(theme.typography.heading() * k), color),
+        None => status_icon(theme, status, px(theme.roles().page_heading.size * k), color),
     }
 }
 
@@ -1473,7 +1481,8 @@ mod tests {
         let weight = |role: TypeRole| Drawn::beside(&theme, Symbol::Doc, role).weight;
         assert_eq!(weight(roles.chrome), Weight::Regular);
         assert_eq!(weight(roles.action), Weight::Medium);
-        assert_eq!(weight(roles.section), Weight::Semibold);
+        assert_eq!(weight(roles.section), Weight::Medium);
+        assert_eq!(weight(roles.panel_title), Weight::Semibold);
         assert_eq!(IconSize::beside(&theme, roles.chrome), IconSize::Lead);
         assert_eq!(IconSize::beside(&theme, roles.metadata), IconSize::Inline);
         let lead = IconSize::Lead;

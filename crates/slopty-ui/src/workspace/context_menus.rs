@@ -280,7 +280,8 @@ impl WorkspaceView {
             let run: Run = Rc::new(move |this, _w, cx| {
                 this.open_session_on(worker, Some(cwd.clone()), Vec::new(), None, cx);
             });
-            entries.push(Self::entry(MenuGroup::Tiles, "New shell here", String::new(), run, cx));
+            let label = super::machines::NEW_SHELL_HERE;
+            entries.push(Self::entry(MenuGroup::Tiles, label, String::new(), run, cx));
         }
         let folded = self.nav.folded.contains(key);
         let fold = key.clone();

@@ -300,7 +300,11 @@ mod tests {
             .await
             .unwrap();
         let [nav_x, _, nav_w, _] = shown.a11y_node("Navigation", Some("Navigator")).unwrap().bounds;
-        assert!(nav_x.abs() < 1.0 && nav_w < shown.window.width * 0.9, "{nav_x} {nav_w}");
+        // A phone's drawer floats a small step in from the edge; an iPad's panel meets it.
+        assert!(
+            (-1.0..=9.0).contains(&nav_x) && nav_w < shown.window.width * 0.9,
+            "{nav_x} {nav_w}"
+        );
         golden(drv, &dir, dev, "navigator", None).await;
         // A shell is titled by what it runs or where it stands, so its row is found by the
         // name its tile goes by, as a screen reader says it: the group holding the terminal.

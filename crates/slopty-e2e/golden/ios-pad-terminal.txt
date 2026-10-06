@@ -1,6 +1,8 @@
 Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ e2e-ios-worker
 Button │ New
@@ -9,8 +11,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
-Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
 Button │ Escape
