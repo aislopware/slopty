@@ -2671,6 +2671,10 @@ mod worker_tests {
         let mut h = Harness::start_on(HELD);
         let mut packetizer = Packetizer::new(HELD);
         packetizer.set_parity_permille(0);
+        // Before the keyframe goes in: the stuck clock starts once its submission does, so a
+        // lower bound read from here holds however long the waits below take (read after them,
+        // it came out 1.95 s on a busy runner, CI run 37466070059).
+        let held_at = Instant::now();
         for d in packetize(&mut packetizer, true, 1_000) {
             h.route(d);
         }
@@ -2681,7 +2685,6 @@ mod worker_tests {
         // queue's places, and one frame more than the test means is dropped (CI run
         // 37351025187, on a busy three-core runner).
         h.wait_for("the decode thread holding it", FOR_THE_MACHINE, |_| hold::waiting(HELD));
-        let held_at = Instant::now();
         let refreshes = h.handle.stats().refreshes;
         let queue = u64::try_from(DECODE_QUEUE).unwrap_or(u64::MAX);
         for n in 0..queue + OVER {
