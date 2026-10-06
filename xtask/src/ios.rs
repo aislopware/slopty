@@ -203,22 +203,18 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let derived = out.join("derived");
     let xcode_sdk = sdk.xcode_sdk();
     let project = out.join(format!("{PRODUCT}.xcodeproj"));
-    let mut xcodebuild = cmd!(
+    let xcodebuild = cmd!(
         sh,
         "xcodebuild -quiet -project {project} -scheme {PRODUCT} -sdk {xcode_sdk} -configuration {configuration} -derivedDataPath {derived}"
     );
-    match sdk {
-        Sdk::Simulator => xcodebuild = xcodebuild.arg("CODE_SIGNING_ALLOWED=NO"),
-        Sdk::Device => {
-            let team = std::env::var("SLOPTY_TEAM_ID")
-                .context("set SLOPTY_TEAM_ID to your Apple Developer team id for device builds")?;
-            xcodebuild = xcodebuild
-                .arg(format!("DEVELOPMENT_TEAM={team}"))
-                .arg("CODE_SIGN_STYLE=Automatic")
-                .arg("-allowProvisioningUpdates");
-        }
-    }
-    step("xcodebuild", &xcodebuild.arg("build"))?;
+    let team = match sdk {
+        Sdk::Simulator => None,
+        Sdk::Device => Some(
+            std::env::var("SLOPTY_TEAM_ID")
+                .context("set SLOPTY_TEAM_ID to your Apple Developer team id for device builds")?,
+        ),
+    };
+    step("xcodebuild", &xcodebuild.args(signing_args(team.as_deref())).arg("build"))?;
     let app = derived
         .join("Build")
         .join("Products")
@@ -307,6 +303,21 @@ impl Linked<'_> {
         }
         flags
     }
+}
+
+/// What `xcodebuild` is told about signing: a device's build is signed by `team`; the
+/// simulator's is told nothing, so the spec's ad hoc identity signs it and Xcode embeds the
+/// entitlements (the shared Keychain group, the push environment) in each binary's
+/// `__entitlements` section. Turning signing off there (`CODE_SIGNING_ALLOWED=NO`) dropped them,
+/// and the extension could not read the key the app kept.
+fn signing_args(team: Option<&str>) -> Vec<String> {
+    team.map_or_else(Vec::new, |team| {
+        vec![
+            format!("DEVELOPMENT_TEAM={team}"),
+            "CODE_SIGN_STYLE=Automatic".to_owned(),
+            "-allowProvisioningUpdates".to_owned(),
+        ]
+    })
 }
 
 /// The `XcodeGen` spec: the application target wrapping `app`'s static library, and the
@@ -588,7 +599,7 @@ fn first_device(sh: &Shell) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Linked, Sdk, native_static_libs, newest_runtime, project_spec};
+    use super::{Linked, Sdk, native_static_libs, newest_runtime, project_spec, signing_args};
 
     #[test]
     fn the_link_line_is_the_frameworks_rustc_lists_and_other_diagnostics_are_shown() {
@@ -643,6 +654,10 @@ mod tests {
         let release = project_spec(Sdk::Device, true, "/t/link.o".into(), &app, &notify);
         assert!(release.contains("aps-environment: production"));
         assert!(!release.contains("CODE_SIGN_IDENTITY"), "a team signs a device's build");
+        assert!(signing_args(None).is_empty(), "the simulator's build is signed, ad hoc");
+        assert!(
+            signing_args(Some("ABCDE12345")).contains(&"DEVELOPMENT_TEAM=ABCDE12345".to_owned())
+        );
     }
 
     #[test]
