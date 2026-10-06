@@ -467,3 +467,32 @@ fn the_screens_are_the_last_said() {
     state.apply(&Action::ScreensSet(Vec::new()));
     assert_eq!(state.screens, []);
 }
+
+/// A message for now steers where the agent can, and queues only where it cannot steer but can
+/// queue; one for after the turn queues wherever the agent queues. An agent that says neither is
+/// sent a steer for its worker to answer.
+#[test]
+fn a_message_goes_now_or_after_the_turn_by_what_the_agent_can_do() {
+    let with =
+        |caps: &[&str]| ThreadMeta { caps: caps.iter().map(|c| Cap::named(c)).collect(), ..meta() };
+    let both = with(&[Cap::STEER, Cap::QUEUE]);
+    assert_eq!(
+        (both.delivery_now(), both.delivery_after_turn()),
+        (Delivery::Steer, Delivery::Queue)
+    );
+    let queues = with(&[Cap::QUEUE, Cap::INTERRUPT]);
+    assert_eq!(
+        (queues.delivery_now(), queues.delivery_after_turn()),
+        (Delivery::Queue, Delivery::Queue)
+    );
+    let steers = with(&[Cap::STEER]);
+    assert_eq!(
+        (steers.delivery_now(), steers.delivery_after_turn()),
+        (Delivery::Steer, Delivery::Steer)
+    );
+    let neither = with(&[]);
+    assert_eq!(
+        (neither.delivery_now(), neither.delivery_after_turn()),
+        (Delivery::Steer, Delivery::Steer)
+    );
+}

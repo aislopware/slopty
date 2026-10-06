@@ -353,6 +353,27 @@ impl ThreadMeta {
         self.caps.iter().any(|c| c.0 == cap)
     }
 
+    /// How a message the person sends now goes: into the turn under way, where the agent takes a
+    /// message mid-turn ([`Cap::STEER`]); else queued for the turn's end ([`Cap::QUEUE`]), which
+    /// at rest goes at once. An agent that says neither is sent a steer, and its worker says what
+    /// it can do. Every sender of a message meant for now asks this rather than choosing.
+    #[must_use]
+    pub fn delivery_now(&self) -> Delivery {
+        if !self.can(Cap::STEER) && self.can(Cap::QUEUE) {
+            Delivery::Queue
+        } else {
+            Delivery::Steer
+        }
+    }
+
+    /// How a message meant for when the agent rests goes: queued where the agent queues
+    /// ([`Cap::QUEUE`]), so it never cuts into a turn under way; else as a steer. A scheduled
+    /// message, the agent's own review and a project seat's message go this way.
+    #[must_use]
+    pub fn delivery_after_turn(&self) -> Delivery {
+        if self.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer }
+    }
+
     /// The thread this one is an aside of ([`Self::ASIDE_FACT`]), while it is one.
     #[must_use]
     pub fn aside_of(&self) -> Option<ThreadId> {

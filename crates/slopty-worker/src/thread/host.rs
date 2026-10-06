@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame, ThreadRow};
 use slopty_proto::thread::{
-    Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Pending,
-    PendingState, Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
+    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Pending, PendingState, Phase,
+    ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -707,8 +707,7 @@ impl Host {
                 match when(pending, now) {
                     When::Now => {
                         let meta = &hosted.log.state().meta;
-                        let delivery =
-                            if meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+                        let delivery = meta.delivery_after_turn();
                         let send = slopty_proto::thread::wire::Intent::Send {
                             text: pending.text.clone(),
                             attachments: pending.attachments.clone(),

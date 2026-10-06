@@ -894,7 +894,16 @@ impl ReviewView {
             return;
         }
         let Some((text, batch)) = self.model.message() else { return };
-        let send = Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() };
+        // Sent now, as the thread's own composer sends (`ThreadMeta::delivery_now`).
+        let delivery = self.own().and_then(|thread| {
+            let hub = self.hub.read(cx);
+            hub.threads().mirror(thread).and_then(Mirror::state).map(|s| s.meta.delivery_now())
+        });
+        let send = Intent::Send {
+            text,
+            delivery: delivery.unwrap_or(Delivery::Steer),
+            attachments: Vec::new(),
+        };
         let Some(id) = self.intent(send, cx) else { return };
         self.sending = Some((id, batch));
         self.came = None;

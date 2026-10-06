@@ -725,9 +725,6 @@ impl ThreadView {
         self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
     }
 
-    /// How ↵ sends: into the turn under way, where the agent takes a message mid-turn; else
-    /// queued for the turn's end ([`Cap::QUEUE`]), which at rest goes at once. An agent that
-    /// says neither is sent a steer and its worker says what it can do.
     /// ⌥↑: the last waiting message that can still change takes the composer, as its line's
     /// Edit does; nothing when none can.
     fn edit_last_queued(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -757,11 +754,9 @@ impl ThreadView {
         }
     }
 
+    /// How ↵ sends: as the thread's agent takes a message now (`ThreadMeta::delivery_now`).
     fn send_now(&self, cx: &App) -> Delivery {
-        match self.state(cx).map(|st| &st.meta) {
-            Some(meta) if !meta.can(Cap::STEER) && meta.can(Cap::QUEUE) => Delivery::Queue,
-            _ => Delivery::Steer,
-        }
+        self.state(cx).map_or(Delivery::Steer, |st| st.meta.delivery_now())
     }
 
     /// Send the draft, led by what was attached: now, into the turn under way (↵), or once it

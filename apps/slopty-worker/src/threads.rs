@@ -742,7 +742,7 @@ async fn review(
         return once(outcome);
     }
     let text = format!("/{} {}", slopty_agent::observed::REVIEW_COMMAND, range.dots());
-    let delivery = if state.meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+    let delivery = state.meta.delivery_after_turn();
     act_as(who, threads, thread, id, &Intent::Send { text, delivery, attachments: Vec::new() })
 }
 
@@ -1384,8 +1384,7 @@ impl Threads {
             *ThreadId::derived(&["seat delivery", &seat.to_string(), &batch.to_string()]).as_uuid(),
         );
         let decided = self.host.intent(thread, id, |state| {
-            let delivery =
-                if state.meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+            let delivery = state.meta.delivery_after_turn();
             let intent = Intent::Send { text: text.to_owned(), delivery, attachments: Vec::new() };
             if !state.meta.can(intent.needs()) {
                 return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());

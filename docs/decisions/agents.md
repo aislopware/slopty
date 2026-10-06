@@ -2128,3 +2128,18 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     recording); `a_message_queued_while_pi_works_waits_on_the_worker` (hold, change, send now,
     take back, and the stop's hold) and `a_message_queued_behind_an_extensions_command_goes` in
     `crates/slopty-worker/tests/pi.rs`.
+
+- ✅ **How a message goes is the thread's to say, by two named rules** (2026-10-06;
+  `ThreadMeta::delivery_now`, `ThreadMeta::delivery_after_turn` in `crates/slopty-proto/src/thread.rs`).
+  - **Now.** A message the person sends now steers where the agent takes a message mid-turn, and
+    is queued where it cannot steer but can queue (ACP). The composer, "Interrupt and send", the
+    aside's question and a review's comments all ask this rule.
+  - **After the turn.** A message meant for when the agent rests is queued wherever the agent
+    queues, else steered: a scheduled message, the agent's own review and a project seat's
+    message.
+  - **Why.** Each sender used to write its rule out. The review tile wrote "steer" for every
+    agent, so a review's comments to an ACP thread were always refused as unsupported.
+  - Tests: `a_message_goes_now_or_after_the_turn_by_what_the_agent_can_do` (slopty-proto);
+    `every_adapter_takes_a_message_sent_now_or_after_the_turn` (`crates/slopty-agent/tests/delivery.rs`,
+    each adapter's own caps against the worker's first check); `comments_to_an_agent_with_no_steer_go_queued`
+    (the review tile).

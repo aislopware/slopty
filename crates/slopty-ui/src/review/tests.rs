@@ -256,6 +256,31 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-comment-0").is_none());
 }
 
+/// The comments go as the thread's composer sends a message now: an agent that takes no
+/// message mid-turn but queues (ACP's) is sent them queued, never as a steer it would refuse.
+#[gpui::test]
+fn comments_to_an_agent_with_no_steer_go_queued(cx: &mut TestAppContext) {
+    let (_view, hub, sent, cx) = tile(cx, 800.0);
+    let mut state = fixtures::thread("edit");
+    state.meta.caps = [Cap::APPROVALS, Cap::INTERRUPT, Cap::QUEUE, Cap::SNAPSHOTS]
+        .iter()
+        .map(|c| Cap::named(c))
+        .collect();
+    let thread = state.meta.id;
+    let snapshot =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, state: Box::new(state) };
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot, cx));
+    cx.run_until_parked();
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    click(cx, "review-send");
+    let sent = intents(&sent);
+    let [Intent::Send { delivery, .. }] = sent.as_slice() else { panic!("one message: {sent:?}") };
+    assert_eq!(*delivery, Delivery::Queue);
+}
+
 /// With comments waiting, the foot shows its three buttons where they fit. In a narrow tile
 /// the send stays whole inside the tile and the other two go behind "More", never cut at the
 /// tile's edge.
