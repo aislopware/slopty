@@ -531,8 +531,9 @@ impl WorkspaceView {
             })
             .filter_map(|id| {
                 let worker = self.workers.get(&worker_key(id))?;
-                let os = worker.caps.as_ref().map(|c| c.os);
-                Some((id, WorkerSeen { name: worker.name.clone(), os }))
+                let caps = worker.caps.as_ref();
+                let (os, form) = (caps.map(|c| c.os), caps.map(|c| c.form));
+                Some((id, WorkerSeen { name: worker.name.clone(), os, form }))
             })
             .collect();
         let now = crate::clock::now(cx);

@@ -1,10 +1,11 @@
 //! The board: one project drawn in its orchestrator's tile.
 //!
 //! A header names the project and where its work lands, over a bar of how much of it has
-//! merged. Under it, the orchestrator while it waits on the person, then the lanes in their
-//! order, each task in the one its state puts it in, what needs the person first; at its foot,
-//! the message to the orchestrator, in the frame a thread's composer has. Every card whose
-//! agent runs somewhere opens that agent's tile with a click or ↩.
+//! merged. Under it, one grouped list, as Linear's issues are: the lanes in their order, what
+//! needs the person first (the orchestrator leading it while it waits on them), each a head
+//! over a row per task in it; at its foot, the message to the orchestrator, in the frame a
+//! thread's composer has. Every row whose agent runs somewhere opens that agent's tile with a
+//! click or ↩.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -40,7 +41,8 @@ use super::{
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{IconSize, Phase, Status, Symbol, icon, status_icon};
+use crate::icons::{GitGlyph, IconSize, Mark, Phase, Status, Symbol, icon, status_icon};
+use crate::kit::Priority;
 use crate::kit::progress::Progress;
 use crate::palette::{Plate, age_label, dotted};
 
@@ -54,8 +56,6 @@ pub(crate) const NO_TASKS_HINT: &str =
     "The orchestrator splits the goal into tasks; each shows here as it is made.";
 /// What a board whose project the server no longer has says.
 pub(crate) const PROJECT_GONE: &str = "This project is no longer on the server";
-/// The heading over what waits on the person.
-pub(crate) const NEEDS_YOU: &str = "Needs you";
 /// What the orchestrator's line under it says when its agent names no question.
 const WAITING_ON_YOU: &str = "Waiting on you";
 /// What the orchestrator's row is called.
@@ -69,13 +69,10 @@ pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
 /// The "Run on" picker's close button.
 pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
-/// The least a lane is wide at zoom 1: the tile takes as many across as fit. Wide enough that
-/// a card's title reads on two lines beside its mark rather than as an ellipsis.
-const LANE_W: f32 = 280.0;
 /// How far a card that arrives travels up into its place, at zoom 1.
 const ARRIVE: f32 = 4.0;
-/// The least the board's name narrows to in its header, in ems of the chrome's text, before
-/// its progress leaves.
+/// The least the board's name narrows to in its header, and a row's title in its row, in ems
+/// of the chrome's text, before its progress, or the row's facts, leave.
 const TITLE_FLOOR_EM: f32 = 8.0;
 
 /// The most facts a row's or a card's second line holds: two separators.
@@ -180,6 +177,8 @@ pub struct WorkerSeen {
     pub name: String,
     /// Its system, once it has said.
     pub os: Option<slopty_proto::server::Os>,
+    /// What machine it is, once it has said: the glyph its place wears.
+    pub form: Option<slopty_proto::server::Form>,
 }
 
 /// What the workspace hands a board: the project and what the board names it by.
@@ -214,7 +213,8 @@ pub struct ProjectView {
     /// The card the keyboard stands on.
     picked: Option<Node>,
     zoom: f32,
-    width: f32,
+    /// The person opened *Merged*, which otherwise folds to its head.
+    merged_open: bool,
     theme: Theme,
     /// The theme a hover hint draws by, shared by every hint the board makes.
     hint_theme: Rc<Theme>,
@@ -260,7 +260,7 @@ impl ProjectView {
             seen: Seen::default(),
             picked: None,
             zoom: 1.0,
-            width: 0.0,
+            merged_open: false,
             hint_theme: Rc::new(theme.clone()),
             theme,
             focus: cx.focus_handle(),
@@ -314,17 +314,11 @@ impl ProjectView {
         }
     }
 
-    /// The zoom it is drawn at and its tile's width at rest, in points.
-    pub fn set_layout(&mut self, zoom: f32, width: f32, cx: &mut Context<Self>) {
-        let across = lanes_across;
-        if (self.zoom - zoom).abs() > f32::EPSILON
-            || across(self.width, zoom) != across(width, zoom)
-        {
+    /// The zoom it is drawn at. Its rows fit their own width as they are laid out.
+    pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        if (self.zoom - zoom).abs() > f32::EPSILON {
             self.zoom = zoom;
-            self.width = width;
             cx.notify();
-        } else {
-            self.width = width;
         }
     }
 
@@ -414,10 +408,17 @@ impl ProjectView {
         )));
     }
 
-    /// Every card the keyboard can stand on, in the order the lanes draw them.
+    /// Every row the keyboard can stand on, in the order the lanes draw them; a folded
+    /// lane's are not drawn.
     fn picks(&self) -> Vec<Node> {
         let Some(board) = &self.seen.board else { return Vec::new() };
-        board.lanes().into_iter().flat_map(|(_, tasks)| tasks).map(Some).collect()
+        board
+            .lanes()
+            .into_iter()
+            .filter(|(lane, tasks)| !self.folded(board, *lane, tasks))
+            .flat_map(|(_, tasks)| tasks)
+            .map(Some)
+            .collect()
     }
 
     fn worker_name(&self, worker: WorkerId) -> String {
@@ -461,9 +462,11 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
+        let machine =
+            crate::icons::machine(self.seen.workers.get(&place.worker).and_then(|w| w.form));
         let (glyph, tone) = match place.how {
-            PlaceHow::Runs => (Symbol::ServerRack, s.text_secondary),
-            PlaceHow::Ran => (Symbol::ServerRack, s.text_muted),
+            PlaceHow::Runs => (machine, s.text_secondary),
+            PlaceHow::Ran => (machine, s.text_muted),
             PlaceHow::Pinned => (Symbol::Lock, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
@@ -484,11 +487,11 @@ impl ProjectView {
             .px(self.z(sp.xxs))
             .rounded(self.z(theme.radii.sm))
             .overflow_hidden()
-            .text_size(self.z(theme.typography.small()))
+            .text_size(self.z(theme.roles().metadata.size))
             .text_color(hsla(tone))
             .child(
                 icon(theme, glyph, IconSize::Inline, hsla(tone))
-                    .size(self.z(theme.typography.small())),
+                    .size(self.z(theme.typography.icon())),
             )
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
             .map(crate::kit::hint_timing)
@@ -538,14 +541,6 @@ impl ProjectView {
 }
 
 // ----- drawing ---------------------------------------------------------------------------------
-
-/// How many lanes a tile `width` points wide, drawn at `zoom`, sets side by side: as many as
-/// fit at [`LANE_W`], one at the least. They share the width equally and keep their order,
-/// left to right and then down.
-pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
-    let lanes = u16::try_from(Lane::ALL.len()).unwrap_or(u16::MAX);
-    (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
-}
 
 /// The push toggle's one name, said as pressed or not.
 pub(crate) const PUSH: &str = "Push after each merge";
@@ -721,16 +716,13 @@ impl ProjectView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_size(self.z(theme.typography.title()))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .map(|el| crate::kit::typed(el, theme.roles().panel_title, self.zoom))
             .text_color(hsla(s.text))
             .child(SharedString::from(project.title.clone()));
         // The name, then how far along it is and what runs, then its controls. Where the board
         // is narrow the running count leaves first, then the name narrows to its floor, and
         // only then does the progress leave: the bar under the name says it too. The dot
         // between the two readouts goes with the count, so it never parts nothing.
-        let lead = icon(theme, Symbol::RectangleSplit3x1, IconSize::Inline, hsla(s.text_secondary))
-            .size(self.z(theme.typography.icon()));
         let parted = progress.is_some();
         let live = readout("project-live", live);
         let live = if parted {
@@ -747,21 +739,16 @@ impl ProjectView {
         let mut title = crate::kit::priority_row("project-header")
             .h(self.z(crate::kit::icon_button_side(theme)))
             .gap(self.z(sp.xs))
-            .item("lead", crate::kit::Priority::ESSENTIAL, lead)
             .title(name, self.z(theme.typography.ui_size * TITLE_FLOOR_EM))
             .end();
         if let Some(progress) = progress {
-            title = title.item(
-                "progress",
-                crate::kit::Priority::MEDIUM,
-                readout("project-progress", progress),
-            );
+            title = title.item("progress", Priority::MEDIUM, readout("project-progress", progress));
         }
         let title = title
-            .item("live", crate::kit::Priority::LOW, live)
-            .item("checks", crate::kit::Priority::ESSENTIAL, checks_toggle)
-            .item("push", crate::kit::Priority::ESSENTIAL, push_toggle)
-            .item("terminal", crate::kit::Priority::ESSENTIAL, terminal);
+            .item("live", Priority::LOW, live)
+            .item("checks", Priority::ESSENTIAL, checks_toggle)
+            .item("push", Priority::ESSENTIAL, push_toggle)
+            .item("terminal", Priority::ESSENTIAL, terminal);
         let meta = div()
             .id("project-place")
             .debug_selector(|| "project-place".to_owned())
@@ -845,8 +832,12 @@ impl ProjectView {
                     .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             } else if held && ix == 0 {
                 crate::kit::solid_pressable(el, theme)
-            } else {
+            } else if ix == 0 {
                 crate::kit::secondary(el, theme)
+            } else {
+                // One box to a row: what follows the first reads as a control beside it.
+                el.text_color(hsla(s.text_secondary))
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             };
             tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
@@ -877,80 +868,27 @@ impl ProjectView {
             .child(bar)
     }
 
-    /// The orchestrator while it waits on the person, over the lanes: never below a fold. Each
-    /// task has its card in the *Needs you* lane; the orchestrator has none. Inset to the
-    /// lanes' edges, so the band stands in the column as a card does.
-    fn needs_you(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
+    /// The orchestrator while it waits on the person: the first row of *Needs you*, what it
+    /// asks on the line under it. Each task waiting on the person has its own row there.
+    fn orchestrator_row(&self, board: &Board, cx: &Context<Self>) -> Option<AnyElement> {
         let agent = self.agent(board, None).filter(|a| a.status == Status::NeedsYou)?;
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
+        let s = &self.theme.surfaces;
         let asks = agent.asks.clone().unwrap_or_else(|| WAITING_ON_YOU.to_owned());
         let key = "project-needs-orchestrator";
-        let row = div()
-            .id(key)
-            .debug_selector(move || key.to_owned())
+        let line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
+            .h(self.row_height())
+            .gap(self.z(self.theme.spacing.sm))
+            .item("mark", Priority::ESSENTIAL, self.mark(Some(Phase::NeedsYou)))
+            .title(self.row_title(ORCHESTRATOR.to_owned()), self.title_floor());
+        let el = self
+            .row_frame(key.to_owned(), said(&[ORCHESTRATOR, &asks]), false)
             .role(Role::Button)
-            .aria_label(said(&[ORCHESTRATOR, &asks]))
-            .flex()
-            .items_start()
-            .gap(self.z(sp.sm))
-            .px(self.z(sp.sm))
-            .py(self.z(sp.xs))
-            .rounded(self.z(theme.radii.sm))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.selected)))
-            .child(
-                div()
-                    .flex_none()
-                    .h(self.z(theme.density.row * 0.9))
-                    .flex()
-                    .items_center()
-                    .child(self.mark(Some(Phase::NeedsYou))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .h(self.z(theme.density.row * 0.9))
-                            .flex()
-                            .items_center()
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                            .child(ORCHESTRATOR),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(self.z(theme.typography.small()))
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(asks)),
-                    ),
-            );
-        let row = tab_stop(row, s.focus).on_click(cx.listener(|_this, _ev, _w, cx| {
+            .child(line)
+            .children(self.detail(vec![self.asks_line(key, asks)]));
+        let el = tab_stop(el, s.focus).on_click(cx.listener(|_this, _ev, _w, cx| {
             cx.emit(ProjectEvent::Open(None));
         }));
-        Some(
-            div()
-                .id("project-needs-you")
-                .debug_selector(|| "project-needs-you".to_owned())
-                .role(Role::Group)
-                .aria_label(NEEDS_YOU)
-                .flex_none()
-                .mx(self.z(sp.inset() - sp.xs))
-                .mb(self.z(sp.xs))
-                .p(self.z(sp.xxs))
-                .rounded(self.z(theme.radii.md))
-                .map(|el| crate::kit::raised(el, theme))
-                .child(self.heading("project-needs-heading", NEEDS_YOU).px(self.z(sp.sm)))
-                .child(row),
-        )
+        Some(el.into_any_element())
     }
 
     /// What changed since this client last looked, over what needs the person: a line per
@@ -1025,8 +963,8 @@ impl ProjectView {
         let s = &theme.surfaces;
         let (glyph, tone) = match kind {
             Some(kind) if kind.needs_you() => (recap_icon(kind), s.warn),
-            Some(kind) => (recap_icon(kind), s.text_muted),
-            None => (Symbol::Clock, s.text_muted),
+            Some(kind) => (recap_icon(kind), s.text_secondary),
+            None => (Mark::Symbol(Symbol::Clock), s.text_muted),
         };
         let key = id.to_owned();
         div()
@@ -1056,22 +994,6 @@ impl ProjectView {
                     .text_color(hsla(s.text_secondary))
                     .child(SharedString::from(text)),
             )
-    }
-
-    /// A quiet label over a group of rows, on the column their marks stand in.
-    fn heading(&self, id: &'static str, text: &'static str) -> Stateful<Div> {
-        let theme = &self.theme;
-        div()
-            .id(id)
-            .debug_selector(move || id.to_owned())
-            .role(Role::Heading)
-            .aria_label(text)
-            .px(self.z(theme.spacing.inset()))
-            .pt(self.z(theme.spacing.xs))
-            .pb(self.z(theme.spacing.xxs))
-            .text_size(self.z(theme.typography.small()))
-            .text_color(hsla(theme.surfaces.text_muted))
-            .child(text)
     }
 
     /// A phase's glyph in its fixed slot at the board's zoom, named by the phase; with none,
@@ -1116,6 +1038,7 @@ impl ProjectView {
         card: Option<&TaskCard>,
         check: Option<&Check<'_>>,
         piped: bool,
+        asked: bool,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(card) = card {
@@ -1151,14 +1074,11 @@ impl ProjectView {
             {
                 parts.push(words);
             }
-            if let Some(status) = card.status.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(status) = card.status.as_deref().filter(|s| !asked && !s.is_empty()) {
                 parts.push(crate::kit::first_line(status).to_owned());
             }
         }
         if let Some(card) = card {
-            if let Some(branch) = card.branch.as_ref().filter(|_| !piped) {
-                parts.push(branch.clone());
-            }
             if let Some((words, _)) = pull_words(card).filter(|_| !piped) {
                 parts.push(words);
             }
@@ -1194,82 +1114,29 @@ impl ProjectView {
         Some(Check::Verdict { run, term })
     }
 
-    /// A verifier's run or verdict under a task: its mark and word, the commits it judged and
-    /// how it ended, the way to its terminal, and for a failure the last lines it printed.
+    /// A failed verdict under its task's row: its mark and word, the commits it judged, the
+    /// way to its terminal, and in an inset the last lines it printed.
     fn check_block(&self, key: &str, check: &Check<'_>, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
         // A verdict names the verifier: a task its failure sent back is Up next, and a bare
         // "Failed" there read as the Failed lane, which is a task given up.
-        // The glyph wears its hue's mark step and the word stays neutral, a failure's excepted.
-        let (glyph, ink, tone, word, detail, tail) = match check {
-            Check::Running { line, .. } => (
-                None,
-                Status::Working.ink(theme),
-                s.text_muted,
-                "Verifying",
-                line.clone(),
-                Vec::new(),
-            ),
-            Check::Verdict { run, .. } if run.passed => (
-                Some(Symbol::CheckmarkCircle),
-                s.success_fill,
-                s.text_secondary,
-                "Verifier passed",
-                verdict_detail(run),
-                Vec::new(),
-            ),
-            Check::Verdict { run, .. } => (
-                Some(Symbol::XmarkCircle),
-                s.error_fill,
-                s.error,
-                "Verifier failed",
-                verdict_detail(run),
-                verdict_tail(run, TAIL_LINES),
-            ),
+        let (detail, tail) = match check {
+            Check::Verdict { run, .. } => (verdict_detail(run), verdict_tail(run, TAIL_LINES)),
+            Check::Running { line, .. } => (line.clone(), Vec::new()),
         };
-        let output = check.term().map(|term| {
-            let id = format!("{key}-output");
-            let selector = id.clone();
-            let link = div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::Link)
-                .aria_label("Show the verifier's output")
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xxs))
-                .px(self.z(sp.xxs))
-                .rounded(self.z(theme.radii.sm))
-                .cursor_pointer()
-                .text_color(hsla(s.text_muted))
-                .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
-                .child(
-                    icon(theme, Symbol::Terminal, IconSize::Inline, hsla(s.text_muted))
-                        .size(self.z(theme.typography.icon())),
-                )
-                .child("Output");
-            tab_stop(link, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
-                cx.stop_propagation();
-                cx.emit(ProjectEvent::Output(term));
-            }))
-        });
+        let output = check.term().map(|term| self.output_link(key, term, cx));
         let head = div()
             .flex()
             .items_center()
             .gap(self.z(sp.xs))
             .min_w_0()
-            .child(match glyph {
-                Some(glyph) => icon(theme, glyph, IconSize::Inline, hsla(ink))
-                    .size(self.z(theme.typography.icon()))
-                    .into_any_element(),
-                None => {
-                    status_icon(theme, Status::Working, self.z(theme.typography.icon()), hsla(ink))
-                }
-            })
-            .child(div().flex_none().text_color(hsla(tone)).child(word))
+            .child(
+                icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(s.error_fill))
+                    .size(self.z(theme.typography.icon())),
+            )
+            .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
             .child(
                 crate::kit::tabular(div())
                     .flex_1()
@@ -1293,7 +1160,7 @@ impl ProjectView {
                 .px(self.z(sp.sm))
                 .py(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
-                .bg(hsla(s.panel))
+                .map(|el| crate::kit::inset(el, theme))
                 // What the program printed, in the face a terminal and a tool's output use, at
                 // the facts' size and a reading line, so why it failed is read, not squinted at.
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
@@ -1322,70 +1189,141 @@ impl ProjectView {
             .children(tail)
     }
 
-    /// The lanes in their order, left to right and then down, as many across as the tile fits
-    /// at [`LANE_W`] ([`lanes_across`]), sharing its width. A lane keeps its place however tall
-    /// its neighbours grow, so the work reads in one direction; narrower than two lanes, they
-    /// are sections down one column. The board never scrolls sideways: a sideways swipe moves
-    /// the strip.
+    /// The lanes as one grouped list, in their order, the most urgent first, as Linear's
+    /// grouped issues are: a lane's head (its glyph, its name, its count) over its rows, the
+    /// groups parted by space alone. *Merged* folds to its head while nothing in it needs the
+    /// person. The board never scrolls sideways: a sideways swipe moves the strip.
     fn board(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let lanes = board.lanes();
-        if lanes.is_empty() {
-            return vec![self.empty(NO_TASKS, NO_TASKS_HINT)];
-        }
+        let mut orchestrator = self.orchestrator_row(board, cx);
         let sp = self.theme.spacing;
-        let across = usize::from(lanes_across(self.width, self.zoom)).clamp(1, lanes.len());
-        let grid = div()
-            .grid()
-            .grid_cols(u16::try_from(across).unwrap_or(1))
-            .items_start()
-            .gap_x(self.z(sp.sm))
-            .gap_y(self.z(sp.lg))
+        let mut groups = Vec::new();
+        if orchestrator.is_some() && !lanes.iter().any(|(lane, _)| *lane == Lane::NeedsYou) {
+            groups.push(self.lane(board, Lane::NeedsYou, Vec::new(), orchestrator.take(), cx));
+        }
+        let empty = lanes.is_empty();
+        for (lane, tasks) in lanes {
+            let lead = if lane == Lane::NeedsYou { orchestrator.take() } else { None };
+            groups.push(self.lane(board, lane, tasks, lead, cx));
+        }
+        if empty {
+            groups.push(self.empty(NO_TASKS, NO_TASKS_HINT));
+        }
+        let list = div()
+            .flex()
+            .flex_col()
+            .gap(self.z(sp.lg))
             .px(self.z(sp.inset() - sp.xs))
-            .pt(self.z(sp.sm))
-            .children(lanes.into_iter().map(|(lane, tasks)| self.lane(board, lane, tasks, cx)));
-        vec![grid.into_any_element()]
+            .pt(self.z(sp.xs))
+            .children(groups);
+        vec![list.into_any_element()]
     }
 
-    /// What a card says besides its title: its check, the stages of its way to the target the
-    /// check's own block does not say, and its second line.
-    fn card_facts<'a>(&self, board: &'a Board, card: &'a TaskCard) -> CardFacts<'a> {
+    /// Whether `lane` folds to its head: *Merged*, while the person has not opened it and
+    /// none of its tasks has anything for them to do (a push that failed).
+    fn folded(&self, board: &Board, lane: Lane, tasks: &[TaskId]) -> bool {
+        lane == Lane::Merged
+            && !self.merged_open
+            && tasks.iter().all(|task| board.actions(*task).is_empty())
+    }
+
+    /// What a row says besides its title: its check, the stages of its way to the target the
+    /// check does not say, and its facts.
+    fn card_facts<'a>(&self, board: &'a Board, card: &'a TaskCard, asked: bool) -> CardFacts<'a> {
         let check = Self::check(board, card);
         let mut stages = board.pipeline(card.id);
         if check.is_some() {
             stages.retain(|stage| stage.kind != StageKind::Verifier);
         }
-        let meta = self.node_meta(board, Some(card), check.as_ref(), !stages.is_empty());
+        let meta = self.node_meta(board, Some(card), check.as_ref(), !stages.is_empty(), asked);
         CardFacts { check, stages, meta }
     }
 
-    /// One lane: its heading with its count, then its cards.
+    /// One lane: its head, then its rows, `lead` first (the orchestrator waiting on the
+    /// person). A folding lane's head is the button that opens it.
     fn lane(
         &self,
         board: &Board,
         lane: Lane,
         tasks: Vec<TaskId>,
+        lead: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
+        let s = &theme.surfaces;
         let sp = theme.spacing;
-        let count = tasks.len();
+        let roles = theme.roles();
+        let count = tasks.len().saturating_add(usize::from(lead.is_some()));
+        let folds = lane == Lane::Merged && tasks.iter().all(|t| board.actions(*t).is_empty());
+        let folded = self.folded(board, lane, &tasks);
+        let head_id = format!("project-lane-{}-head", lane.selector());
+        let selector = head_id.clone();
+        let glyph =
+            Phase::of(lane).glyph(theme, self.z(IconSize::beside_slot(theme, roles.metadata)));
         let head = div()
+            .id(SharedString::from(head_id.clone()))
+            .debug_selector(move || selector)
+            .flex_none()
+            .h(self.z(theme.density.row))
             .flex()
             .items_center()
-            .gap(self.z(sp.xs))
+            .gap(self.z(sp.sm))
             .px(self.z(sp.xs))
-            .pb(self.z(sp.xs))
-            .text_size(self.z(theme.typography.small()))
-            .child(Phase::of(lane).glyph(theme, self.z(theme.typography.small())))
-            .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(lane.title()))
+            .rounded(self.z(theme.radii.sm))
+            .child(self.slot().child(glyph))
             .child(
-                crate::kit::tabular(div())
-                    .text_color(hsla(theme.surfaces.text_muted))
-                    .child(SharedString::from(count.to_string())),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(sp.xs))
+                    .child(
+                        crate::kit::label(theme, lane.title())
+                            .text_size(self.z(roles.metadata.size)),
+                    )
+                    .child(
+                        crate::kit::tabular(div())
+                            .text_size(self.z(roles.metadata.size))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(count.to_string())),
+                    )
+                    .when(folds, |el| {
+                        el.child(crate::kit::Disclosure::new(
+                            format!("{head_id}-fold"),
+                            !folded,
+                            theme,
+                            self.z(theme.typography.icon()),
+                            hsla(s.text_muted),
+                        ))
+                    }),
             );
-        let cards = tasks.into_iter().filter_map(|task| {
-            let card = board.tasks.get(&task)?;
-            Some(self.card(board, card, cx))
+        let head = if folds {
+            let what = if folded { "Show" } else { "Hide" };
+            let head = head
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("{what} {} {count}", lane.title())))
+                .aria_expanded(!folded)
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.hover)));
+            tab_stop(head, s.focus)
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    this.merged_open = !this.merged_open;
+                    if !this.merged_open
+                        && let Some(Some(task)) = this.picked
+                        && this.seen.board.as_ref().and_then(|b| b.lane(task)) == Some(Lane::Merged)
+                    {
+                        this.picked = None;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            head.role(Role::Heading).aria_label(lane.title()).into_any_element()
+        };
+        let rows = (!folded).then(|| {
+            tasks.into_iter().filter_map(|task| {
+                let card = board.tasks.get(&task)?;
+                Some(self.row(board, card, cx))
+            })
         });
         let selector = format!("project-lane-{}", lane.selector());
         div()
@@ -1396,148 +1334,313 @@ impl ProjectView {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(self.z(sp.xs))
-            .p(self.z(sp.xs))
-            .rounded(self.z(theme.radii.lg))
             .child(head)
-            .children(cards)
+            .children(lead)
+            .children(rows.into_iter().flatten())
             .into_any_element()
     }
 
-    /// One task on the board: its number and its title on up to two lines, then, a step
-    /// below, what moves it on, where it runs, its way to the target, its check and what the
-    /// person can do. The title is the text ink at the task's size; the facts are the
-    /// secondary ink, so what the task is reads before how it stands.
-    fn card(&self, board: &Board, card: &TaskCard, cx: &Context<Self>) -> AnyElement {
+    /// A row's height: Linear's 32 on the Mac, a finger's row on a touch screen.
+    fn row_height(&self) -> gpui::Pixels {
+        let theme = &self.theme;
+        self.z(theme.spacing.xxl.max(theme.density.row))
+    }
+
+    /// The least a row's title narrows to before its facts leave.
+    fn title_floor(&self) -> gpui::Pixels {
+        self.z(self.theme.typography.ui_size * TITLE_FLOOR_EM)
+    }
+
+    /// The column a row's mark and a lane's glyph stand in.
+    fn slot(&self) -> Div {
+        div()
+            .flex_none()
+            .size(self.z(self.theme.typography.icon_large()))
+            .flex()
+            .items_center()
+            .justify_center()
+    }
+
+    /// A row's title: the action role (13, medium) in the text ink, on one line, ending in an
+    /// ellipsis when its facts leave it less than its width.
+    fn row_title(&self, text: String) -> Div {
+        crate::kit::typed(div(), self.theme.roles().action, self.zoom)
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(hsla(self.theme.surfaces.text))
+            .child(SharedString::from(text))
+    }
+
+    /// A row's frame, `key` its name: no edge and no fill at rest, the hover's wash under the
+    /// pointer, the selection while the keyboard stands on it.
+    fn row_frame(&self, key: String, label: SharedString, picked: bool) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let selector = key.clone();
+        div()
+            .id(SharedString::from(key))
+            .debug_selector(move || selector)
+            .role(Role::ListItem)
+            .aria_label(label)
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .px(self.z(theme.spacing.xs))
+            .rounded(self.z(theme.radii.sm))
+            .cursor_pointer()
+            .when(picked, |el| crate::kit::selected(el, theme, true))
+            .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.hover))))
+    }
+
+    /// What stands under a row's line, from its number's edge: what it asks, what holds it,
+    /// a failed check's last lines, the "Run on" picker. Nothing, most of the time.
+    fn detail(&self, parts: Vec<AnyElement>) -> Option<Div> {
+        let theme = &self.theme;
+        let sp = theme.spacing;
+        (!parts.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(self.z(sp.xs))
+                .min_w_0()
+                .pl(self.z(theme.typography.icon_large() + sp.sm))
+                .pb(self.z(sp.sm))
+                .children(parts)
+        })
+    }
+
+    /// What an agent asks the person, as a row's second line in the secondary ink.
+    fn asks_line(&self, key: &str, asks: String) -> AnyElement {
+        let id = format!("{key}-asks");
+        crate::kit::typed(div(), self.theme.roles().metadata, self.zoom)
+            .debug_selector(move || id)
+            .min_w_0()
+            .line_clamp(2)
+            .text_color(hsla(self.theme.surfaces.text_secondary))
+            .child(SharedString::from(asks))
+            .into_any_element()
+    }
+
+    /// One of a row's facts at its trailing end: words in the facts' size and the muted ink,
+    /// after a glyph when it has one, on one line.
+    fn fact(&self, id: String, glyph: Option<Mark>, words: String) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let roles = theme.roles();
+        let selector = id.clone();
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector)
+            .role(Role::Label)
+            .aria_label(SharedString::from(words.clone()))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xxs))
+            .whitespace_nowrap()
+            .text_size(self.z(roles.metadata.size))
+            .text_color(hsla(s.text_muted))
+            .children(glyph.map(|glyph| {
+                crate::icons::beside(theme, glyph, roles.metadata, hsla(s.text_secondary))
+                    .size(self.z(IconSize::beside_slot(theme, roles.metadata)))
+            }))
+            .child(SharedString::from(words))
+    }
+
+    /// A check that is not a failure, as a fact: the verifier at work, or its pass, with the
+    /// way to its terminal. A failure stands under the row with its last lines.
+    fn check_fact(&self, key: &str, check: &Check<'_>, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let side = self.z(theme.typography.icon());
+        let (glyph, word, label) = match check {
+            Check::Running { line, .. } => (
+                status_icon(theme, Status::Working, side, hsla(Status::Working.ink(theme))),
+                "Verifying",
+                format!("Verifying, {line}"),
+            ),
+            Check::Verdict { run, .. } => (
+                icon(theme, Symbol::CheckmarkCircle, IconSize::Inline, hsla(s.success_fill))
+                    .size(side)
+                    .into_any_element(),
+                "Verified",
+                format!("Verifier passed {}", verdict_detail(run)),
+            ),
+        };
+        let output = check.term().map(|term| self.output_link(key, term, cx));
+        let selector = format!("{key}-check");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .role(Role::Group)
+            .aria_label(SharedString::from(label))
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xxs))
+            .whitespace_nowrap()
+            .text_size(self.z(theme.roles().metadata.size))
+            .text_color(hsla(s.text_muted))
+            .child(glyph)
+            .child(word)
+            .children(output)
+    }
+
+    /// The way to a verifier's terminal.
+    fn output_link(&self, key: &str, term: TermRef, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let id = format!("{key}-output");
+        let selector = id.clone();
+        let link = div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector)
+            .role(Role::Link)
+            .aria_label("Show the verifier's output")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xxs))
+            .px(self.z(theme.spacing.xxs))
+            .rounded(self.z(theme.radii.sm))
+            .cursor_pointer()
+            .text_color(hsla(s.text_muted))
+            .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
+            .child(
+                icon(theme, Symbol::Terminal, IconSize::Inline, hsla(s.text_secondary))
+                    .size(self.z(theme.typography.icon())),
+            )
+            .child("Output");
+        tab_stop(link, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
+            cx.stop_propagation();
+            cx.emit(ProjectEvent::Output(term));
+        }))
+    }
+
+    /// One task on the board, a row: its mark, its number and its title, then at the trailing
+    /// end its facts (what moves it on, its check, its way to the target, its branch, where it
+    /// runs) and what the person can do. What needs reading goes under it: the question its
+    /// agent asks, a stage holding it, a failed check's last lines.
+    fn row(&self, board: &Board, card: &TaskCard, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let node = Some(card.id);
         let picked = self.picked() == Some(node);
         let own = Lane::of(card.state);
-        // The card leads with its lane's phase, or, while an agent works the task, with what
+        // The row leads with its lane's phase, or, while an agent works the task, with what
         // the agent says of itself; a task waiting on its own background work wears the dashed
         // ring.
         let lane_phase = match card.state {
             TaskState::Waiting => Phase::Waiting,
             state => Phase::of(Lane::of(state)),
         };
-        let live = self.agent(board, node).map(|a| a.status);
+        let agent = self.agent(board, node);
+        let live = agent.map(|a| a.status);
         let phase = Some(match live {
             Some(status) if card.state.follows_the_agent() => lane_phase.with_agent(status),
             _ => lane_phase,
         });
         let key = format!("project-card-{}", card.id);
-        let CardFacts { check, stages, meta } = self.card_facts(board, card);
-        let held = stages.iter().any(|stage| stage.holds)
-            || matches!(&check, Some(Check::Verdict { run, .. }) if !run.passed);
-        let place = self.where_chip(board, node, "project-card", cx);
-        let placed = board.place(node);
-        let reason = placed.as_ref().and_then(|p| p.why.clone());
+        // What its agent asks, while the task waits on the person: its own word, else the
+        // status the task was left with.
+        let asks = (own == Lane::NeedsYou || live == Some(Status::NeedsYou))
+            .then(|| {
+                agent
+                    .and_then(|a| a.asks.clone())
+                    .or_else(|| card.status.as_deref().filter(|s| !s.is_empty()).map(str::to_owned))
+            })
+            .flatten();
+        let CardFacts { check, stages, meta } = self.card_facts(board, card, asks.is_some());
+        let failed = matches!(&check, Some(Check::Verdict { run, .. }) if !run.passed);
+        let held = stages.iter().any(|stage| stage.holds) || failed;
         let place_words =
             self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
-        let pipeline = self.pipeline_row(&key, &stages);
-        let block = check.as_ref().map(|c| self.check_block(&key, c, cx));
-        let arrive = ElementId::Name(format!("{key}-in").into());
-        let selector = key.clone();
+        let reason = board.place(node).and_then(|p| p.why);
         let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
         let label = said(&[
             &card.title,
             state_word(card.state),
+            asks.as_deref().unwrap_or(""),
             &place_words,
             reason.as_deref().unwrap_or(""),
             &meta,
             &along.join(", "),
         ]);
-        // Where it runs and why it went there, on a line of its own: what the fleet map is
-        // made of, card by card.
-        let where_line = place.map(|chip| {
-            div()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xs))
-                .min_w_0()
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .child(chip)
-                .children(reason.map(|why| {
-                    let id = format!("{key}-why");
-                    div()
-                        .debug_selector(move || id)
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(SharedString::from(why))
-                }))
-        });
-        // The title's line: the mark and the number stand on its first.
-        let roles = theme.roles();
-        let line = self.z(roles.task_title.line);
-        let first_line = |el: Div| el.flex_none().h(line).flex().items_center();
-        let title = div()
-            .flex()
-            .items_start()
-            .gap(self.z(sp.xs))
-            .min_w_0()
-            .child(first_line(div()).child(self.mark(phase)))
-            .child(
-                first_line(crate::kit::tabular(div()))
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(format!("#{}", card.id))),
-            )
-            .child(
-                crate::kit::typed(div(), roles.task_title, self.zoom)
-                    .flex_1()
-                    .min_w_0()
-                    .line_clamp(2)
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(card.title.clone())),
-            );
-        let meta = (!meta.is_empty()).then(|| {
-            crate::kit::typed(div(), roles.metadata, self.zoom)
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_color(hsla(s.text_secondary))
-                .child(dotted(theme, meta))
-                .into_any_element()
-        });
-        let facts: Vec<AnyElement> = meta
+        let (loud, quiet): (Vec<Stage>, Vec<Stage>) = stages
             .into_iter()
-            .chain(where_line.map(IntoElement::into_any_element))
-            .chain(pipeline.map(IntoElement::into_any_element))
-            .chain(block.map(IntoElement::into_any_element))
+            .filter(|stage| stage.kind != StageKind::Branch)
+            .partition(|stage| stage.holds || stage.failed);
+
+        let number = crate::kit::tabular(div())
+            .flex_none()
+            .whitespace_nowrap()
+            .text_size(self.z(theme.roles().metadata.size))
+            .text_color(hsla(s.text_muted))
+            .child(SharedString::from(format!("#{}", card.id)));
+        let mut line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
+            .h(self.row_height())
+            .gap(self.z(sp.sm))
+            .item("mark", Priority::ESSENTIAL, self.mark(phase))
+            .item("number", Priority::ESSENTIAL, number)
+            .title(self.row_title(card.title.clone()), self.title_floor())
+            .end();
+        if !meta.is_empty() {
+            let meta = div()
+                .whitespace_nowrap()
+                .text_size(self.z(theme.roles().metadata.size))
+                .text_color(hsla(s.text_muted))
+                .child(dotted(theme, meta));
+            line = line.item("meta", Priority::LOW, meta);
+        }
+        if let Some(check) = check.as_ref().filter(|_| !failed) {
+            line = line.item("check", Priority::HIGH, self.check_fact(&key, check, cx));
+        }
+        for stage in quiet {
+            let rank = match stage.kind {
+                StageKind::Queue => Priority(160),
+                StageKind::ToDos => Priority::LOW,
+                _ => Priority::MEDIUM,
+            };
+            let id = format!("{key}-{}", stage.kind.word());
+            line = line.item(stage.kind.word(), rank, self.fact(id, None, stage.words));
+        }
+        if let Some(branch) = &card.branch {
+            let fact =
+                self.fact(format!("{key}-branch"), Some(GitGlyph::Branch.into()), branch.clone());
+            line = line.item("branch", Priority(96), fact);
+        }
+        if let Some(why) = reason {
+            line = line.item("why", Priority::LOW, self.fact(format!("{key}-why"), None, why));
+        }
+        if let Some(chip) = self.where_chip(board, node, "project-card", cx) {
+            line = line.item("where", Priority(144), chip);
+        }
+        if let Some(actions) = self.actions(board, card.id, "project-card", held, cx) {
+            line = line.item("actions", Priority::ESSENTIAL, actions);
+        }
+
+        let detail: Vec<AnyElement> = asks
+            .map(|asks| self.asks_line(&key, asks))
+            .into_iter()
+            .chain(self.pipeline_row(&key, &loud).map(IntoElement::into_any_element))
+            .chain(
+                check
+                    .as_ref()
+                    .filter(|_| failed)
+                    .map(|c| self.check_block(&key, c, cx).into_any_element()),
+            )
             .chain(
                 self.run_on_block(card.id, "project-card", cx).map(IntoElement::into_any_element),
             )
-            // Last, on a line of their own: a lane is too narrow for a title and its buttons.
-            .chain(
-                self.actions(board, card.id, "project-card", held, cx)
-                    .map(IntoElement::into_any_element),
-            )
             .collect();
-        let facts = (!facts.is_empty())
-            .then(|| div().flex().flex_col().gap(self.z(sp.xs)).min_w_0().children(facts));
-        let el = crate::kit::card(theme)
-            .id(SharedString::from(key))
-            .debug_selector(move || selector)
-            .role(Role::ListItem)
-            .aria_label(label)
-            .flex()
-            .flex_col()
-            .gap(self.z(sp.sm))
-            .p(self.z(sp.md))
-            .rounded(self.z(theme.radii.md))
-            .cursor_pointer()
-            .when(picked, |el| crate::kit::selected(el, theme, true))
-            .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.selected))))
+        let arrive = ElementId::Name(format!("{key}-in").into());
+        let el = self
+            .row_frame(key, label, picked)
             .when(own == Lane::Merged, |el| el.opacity(alpha::STRONG))
-            .child(title)
-            .children(facts);
+            .child(line)
+            .children(self.detail(detail));
         let el = tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
             this.picked = Some(node);
             cx.emit(ProjectEvent::Open(node));
@@ -2024,16 +2127,16 @@ const fn recap_word(kind: RecapKind) -> &'static str {
 }
 
 /// A recap line's mark: the one its timeline entries draw.
-const fn recap_icon(kind: RecapKind) -> Symbol {
+const fn recap_icon(kind: RecapKind) -> Mark {
     match kind {
-        RecapKind::VerifyFailed | RecapKind::StepFailed => Symbol::XmarkCircle,
-        RecapKind::Conflicts => Symbol::ArrowTriangleBranch,
-        RecapKind::ChecksFailed => Symbol::ArrowTrianglePull,
-        RecapKind::AgentEnded => Symbol::Power,
-        RecapKind::Merged => Symbol::ArrowTriangleMerge,
-        RecapKind::Verified => Symbol::CheckmarkCircle,
-        RecapKind::Started => Symbol::Terminal,
-        RecapKind::Created => Symbol::Plus,
+        RecapKind::VerifyFailed | RecapKind::StepFailed => Mark::Symbol(Symbol::XmarkCircle),
+        RecapKind::Conflicts => Mark::Git(GitGlyph::Branch),
+        RecapKind::ChecksFailed => Mark::Git(GitGlyph::PullRequest),
+        RecapKind::AgentEnded => Mark::Symbol(Symbol::Power),
+        RecapKind::Merged => Mark::Git(GitGlyph::Merge),
+        RecapKind::Verified => Mark::Symbol(Symbol::CheckmarkCircle),
+        RecapKind::Started => Mark::Symbol(Symbol::Terminal),
+        RecapKind::Created => Mark::Symbol(Symbol::Plus),
     }
 }
 
@@ -2117,28 +2220,27 @@ impl Render for ProjectView {
         };
         let body = self.board(&board, cx);
         let composer = self.composer_row(&board, window, cx);
-        let keys =
-            keys.children(self.recap(&board, cx)).children(self.needs_you(&board, cx)).child(
-                self.scroll_fade(
-                    div()
-                        .id("project-body")
-                        .debug_selector(|| "project-body".to_owned())
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .child(self.plate.under(theme))
-                        .child(
-                            div()
-                                .id("project-scroll")
-                                .size_full()
-                                .overflow_y_scroll()
-                                .track_scroll(&self.scroll)
-                                .pt(self.z(theme.spacing.xs))
-                                .pb(self.z(theme.spacing.md))
-                                .children(body),
-                        ),
-                ),
-            );
+        let keys = keys.children(self.recap(&board, cx)).child(
+            self.scroll_fade(
+                div()
+                    .id("project-body")
+                    .debug_selector(|| "project-body".to_owned())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.plate.under(theme))
+                    .child(
+                        div()
+                            .id("project-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .pt(self.z(theme.spacing.xs))
+                            .pb(self.z(theme.spacing.md))
+                            .children(body),
+                    ),
+            ),
+        );
         // The header and the checks panel sit over the board's keys, as the line to the
         // orchestrator sits under them: a letter typed into a field there is a letter.
         root.child(self.header(&board, cx))

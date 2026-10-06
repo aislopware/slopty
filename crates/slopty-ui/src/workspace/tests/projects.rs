@@ -372,11 +372,12 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project").is_none());
 }
 
-/// The orchestrator waiting on the person stands over the lanes, inside the column the lanes
-/// stand in, never over the tile's edge; a task waiting on them says it in its own lane, not
-/// in the band too. The lanes share the tile's width equally, however many there are.
+/// The board is one grouped list, as Linear's issues are: each lane a head over its rows, down
+/// one column as wide as the body, in their order. The orchestrator waiting on the person leads
+/// *Needs you*, its question on the line under it, so it is said once. A row with nothing under
+/// it is one line, 32 pt, inside the tile. *Merged* folds to its head until it is opened.
 #[gpui::test]
-fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
+fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
@@ -385,41 +386,46 @@ fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
             AgentEvent { detail: Some("Merge #1 now?".into()), ..blocked(orchestrator) },
             cx,
         );
+        let merged = card(4, "Write the decision", TaskState::Merged);
+        v.project_update(11, task_changed("board", merged, None), cx);
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
-    let band = cx.debug_bounds("project-needs-you").expect("the orchestrator waits on you");
+    let at = |cx: &mut VisualTestContext, s: &str| {
+        cx.debug_bounds(Box::leak(s.to_owned().into_boxed_str()))
+    };
     let tile = view.read_with(cx, |v, _| v.tile_bounds(orchestrator_tile)).expect("drawn");
-    let lanes: Vec<Bounds<Pixels>> = ["needs-you", "working", "up-next"]
-        .map(|lane| {
-            let id: &'static str = Box::leak(format!("project-lane-{lane}").into_boxed_str());
-            cx.debug_bounds(id).expect("drawn")
-        })
-        .into();
-    assert!(band.left() > tile.left() + px(0.5), "inside the tile: {band:?} in {tile:?}");
-    assert!(
-        (band.left() - lanes[0].left()).abs() < px(0.5),
-        "on the lanes' left edge: {band:?}, {:?}",
-        lanes[0]
-    );
-    assert!(cx.debug_bounds("project-needs-orchestrator").is_some());
-    assert!(
-        cx.debug_bounds("project-needs-project-node-2").is_none(),
-        "#2 says it in its lane, not in the band too"
-    );
+    let body = at(cx, "project-body").expect("drawn");
+    let lanes: Vec<Bounds<Pixels>> = ["needs-you", "working", "up-next", "merged"]
+        .iter()
+        .map(|lane| at(cx, &format!("project-lane-{lane}")).expect("drawn"))
+        .collect();
+    let inset = px(Theme::default().spacing.inset());
+    for (above, below) in lanes.iter().zip(lanes.iter().skip(1)) {
+        assert!((above.left() - below.left()).abs() < px(0.5), "one column: {lanes:?}");
+        assert!((above.size.width - below.size.width).abs() < px(0.5), "{lanes:?}");
+        assert!(below.top() >= above.bottom(), "in their order, down: {lanes:?}");
+    }
+    assert!(lanes[0].left() - body.left() <= inset, "{lanes:?} in {body:?}");
+    assert!(body.right() - lanes[0].right() <= inset, "as wide as the body: {lanes:?}");
 
-    let body = cx.debug_bounds("project-body").expect("drawn");
-    let width = lanes[0].size.width;
-    assert!(
-        // Within a pixel: the grid snaps each cell's edges to the pixel grid.
-        lanes.iter().all(|l| (l.size.width - width).abs() <= px(1.0)),
-        "one width for every lane: {lanes:?}"
-    );
-    let right = lanes.iter().map(Bounds::right).fold(px(0.0), Pixels::max);
-    assert!(
-        body.right() - right <= px(Theme::default().spacing.inset()),
-        "no lane-wide gap at the right: {lanes:?} in {body:?}"
-    );
+    let asks = at(cx, "project-needs-orchestrator").expect("the orchestrator waits on you");
+    assert!(lanes[0].contains(&asks.center()), "it leads Needs you: {asks:?}");
+    let task = at(cx, "project-card-2").expect("drawn");
+    assert!(asks.bottom() <= task.top(), "before the task waiting on you");
+    assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
+    let one = at(cx, "project-card-3").expect("drawn");
+    assert!((one.size.height - px(32.0)).abs() < px(0.5), "a row is 32 pt: {one:?}");
+    for row in ["project-card-1", "project-card-2", "project-card-3"] {
+        let row = at(cx, row).expect("drawn");
+        assert!(row.left() >= tile.left() && row.right() <= tile.right(), "{row:?} in {tile:?}");
+    }
+
+    assert!(at(cx, "project-card-4").is_none(), "Merged folds to its head");
+    click(cx, "project-lane-merged-head");
+    assert!(at(cx, "project-card-4").is_some(), "its head opens it");
+    click(cx, "project-lane-merged-head");
+    assert!(at(cx, "project-card-4").is_none(), "and folds it again");
 }
 
 /// A verifier shows on its task's card: a run under way, or its verdict and the commits judged,

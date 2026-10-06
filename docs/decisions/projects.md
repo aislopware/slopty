@@ -2018,3 +2018,40 @@ follow-up)
     `as_many_lanes_stand_across_as_fit_at_the_zoom` (280 pt). The board tests click through a
     `reveal` that scrolls a card into the body first, as a person would, because cards are
     taller now.
+
+- ✅ **The board is a grouped list** (2026-10-06, `.research/elegance-icons-2026-10-06.md` §5.2
+  and §5.7; supersedes "Lanes keep their places" and "A card reads as a task" above). Lanes in
+  a grid of bordered cards read as a dashboard of boxes. The board is now one column, as
+  Linear's grouped issues are.
+  - **A lane is a head over its rows.** The head is the lane's glyph, its name at 12/500 in the
+    secondary ink (`kit::label`) and its count, muted. Lanes are parted by space alone
+    (`spacing.lg`), with no rule and no frame. `lanes_across`, `LANE_W` and the board's width
+    are gone. The tile hands the board only its zoom (`ProjectView::set_zoom`).
+  - **A task is a row, not a card.** A row is 32 pt tall (a finger's row on touch), with no
+    edge and no fill at rest, the hover wash under the pointer and the selection where the
+    keyboard stands. It holds the mark, `#n` muted, and the title at 13/500. At the trailing
+    end are its facts, the muted metadata role: what moves it on, its check (Verifying or
+    Verified, with Output), its quiet stages, the branch with the git glyph, why it was pinned,
+    the machine it runs on (its form's glyph), and its actions. Each row is a
+    `kit::priority_row`. The title keeps a floor of 8 ems. The least needed fact leaves first
+    (to-dos, the meta words, the branch, then the place), so a row fits a 312 pt column with no
+    wrapping. Only the first action is a button with an edge: the solid when it frees a held
+    task, the secondary otherwise (Merge). The rest, and the controls of the task stood on, are
+    ghost words.
+  - **What needs reading stands under the row**, from the number's edge: what the task's
+    agent asks (its own word, else the status the task was left with), the stages that hold
+    it or failed, a failed verifier's head with its last lines in an inset (`kit::inset`), and
+    the "Run on" picker. Nothing, most of the time.
+  - **The orchestrator waiting on the person leads *Needs you*.** Its own raised band over the
+    lanes is gone, so "Needs you" is said once. Its question sits on the line under it.
+  - **Merged folds to its head**, "Merged 1" with a disclosure, until the person opens it.
+    It stays open while a merged task has something to do (a push that failed). The keyboard
+    skips the rows of a folded lane.
+  - **The board's title is the panel title** (16/600). Its lead glyph is gone: the tile's
+    header already says what the tile is.
+  - The only boxes left are the failure's inset and the first action's button.
+  - Tests: `the_board_is_one_grouped_list` (one column as wide as the body, the lanes in
+    order, the orchestrator leading Needs you with its question, a row 32 pt inside the tile,
+    Merged folding and opening), the board tests that click rows, stages and checks by their
+    selectors (unchanged: `project-card-<n>`, `project-lane-<lane>`), and the goldens
+    `project-lanes`, `project-lanes-dark` and `project-live-lanes`.

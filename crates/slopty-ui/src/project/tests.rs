@@ -232,7 +232,6 @@ fn every_board_word_is_sentence_case() {
     let lanes = Lane::ALL.map(Lane::title);
     for text in words.iter().chain(&lanes).chain(&[
         super::view::NO_TASKS,
-        super::view::NEEDS_YOU,
         super::view::ORCHESTRATOR,
         super::view::PROJECT_GONE,
     ]) {
@@ -260,20 +259,6 @@ fn a_row_names_a_state_as_its_lane_does() {
         assert_eq!(state_word(state), Lane::of(state).title(), "{state:?}");
     }
     assert_eq!(state_word(TaskState::Waiting), "Waiting");
-}
-
-/// As many lanes stand side by side as fit at 280 pt each at the zoom they are drawn at, one at
-/// the least and never more than there are lanes.
-#[test]
-fn as_many_lanes_stand_across_as_fit_at_the_zoom() {
-    use super::view::lanes_across;
-    assert_eq!(lanes_across(560.0, 1.0), 2);
-    assert_eq!(lanes_across(559.0, 1.0), 1, "narrower than two: sections down one column");
-    assert_eq!(lanes_across(0.0, 1.0), 1, "before the first layout");
-    assert_eq!(lanes_across(560.0, 2.0), 1, "a zoomed board's lanes are wider");
-    assert_eq!(lanes_across(1120.0, 2.0), 2);
-    assert_eq!(lanes_across(1200.0, 1.0), 4);
-    assert_eq!(lanes_across(10_000.0, 1.0), 7, "one column per lane at most");
 }
 
 /// A board unchanged by an update keeps its address, so handing it over again costs a pointer.
