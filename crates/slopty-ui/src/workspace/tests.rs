@@ -1620,6 +1620,7 @@ mod relaunch;
 mod remote;
 mod retained;
 mod review_tile;
+mod rooms;
 mod save_copy;
 mod search;
 mod shell_drag;

@@ -71,6 +71,16 @@ fn setup(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Setup {
     }
 }
 
+/// The worker, the orchestrator's tile of [`setup`]'s project and its session, for other
+/// modules' tests.
+pub(super) fn orchestrator(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+) -> (Fake, TileRef, SessionId) {
+    let Setup { fake, orchestrator: (tile, session), .. } = setup(view, cx);
+    (fake, tile, session)
+}
+
 fn board(
     view: &Entity<WorkspaceView>,
     cx: &VisualTestContext,

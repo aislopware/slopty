@@ -159,3 +159,56 @@ fn the_thread_view_takes_the_keyboard_from_the_tui_it_replaces(cx: &mut TestAppC
     });
     assert!(thread_has_it, "the thread view has it now");
 }
+
+/// A tile showing a thread says where its agent works after the title, the checkout then the
+/// branch, in its header; the shell's directory beside the title would say it again, so it
+/// goes.
+#[gpui::test]
+fn a_thread_tile_says_its_checkout_and_branch_in_its_header(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/src/slopty"));
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    state.meta.cwd = "/src/slopty".to_owned();
+    state.meta.facts.insert("branch".to_owned(), "responsive-headers".to_owned());
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.thread_table(key, &table, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let snapshot = slopty_proto::thread::wire::ThreadFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 40 },
+        state: Box::new(state),
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, snapshot, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    let checkout = cx.debug_bounds(selector("thread-checkout", tile.item)).expect("the checkout");
+    let branch = cx.debug_bounds(selector("thread-branch", tile.item)).expect("the branch");
+    assert!(header.contains(&checkout.center()) && header.contains(&branch.center()));
+    let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
+    assert!(name.right() <= checkout.left(), "after the title: {name:?} {checkout:?}");
+    assert!(checkout.right() <= branch.left(), "the checkout, then the branch");
+    assert!(cx.debug_bounds(selector("place", tile.item)).is_none(), "said once");
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref() == Some("slopty")
+            || n.label.as_deref() == Some("Commit on slopty")),
+        "{nodes:#?}"
+    );
+}

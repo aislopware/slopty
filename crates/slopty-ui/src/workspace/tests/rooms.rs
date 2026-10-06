@@ -1,0 +1,270 @@
+//! Nothing a tile draws lies past its edges, whatever room its column gives it: each kind of
+//! tile is laid out at the narrow, regular and wide widths a column takes, and every node of
+//! its accessibility tree is checked against the tile's own bounds (`docs/decisions/ui.md`,
+//! "How surfaces adapt to their room").
+
+use std::collections::HashMap;
+
+use gpui::accesskit::{Node as AkNode, NodeId};
+use slopty_proto::agent::{AgentBranch, PullRequest, Worktree};
+use slopty_proto::folder::{FolderEntry, Listing};
+use slopty_proto::orchestration::FileKind;
+use slopty_proto::thread::Cursor;
+use slopty_proto::thread::wire::TableFrame;
+
+use super::*;
+
+/// The widths a column is checked at: the least a column takes, beside a board, a phone's,
+/// the narrow edge, a half and the wide edge.
+const WIDTHS: [f32; 6] = [280.0, 312.0, 360.0, 420.0, 560.0, 720.0];
+
+/// A tile's height while it is checked.
+const HIGH: f32 = 800.0;
+
+fn settle(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// `tile` beside a shell of its own column, so its header is its own and not the title bar's,
+/// in a window wide enough for both at any of [`WIDTHS`].
+fn beside(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, tile: TileRef) {
+    cx.simulate_resize(size(px(1600.0), px(HIGH)));
+    opens(view, cx, fake, SessionId::new(), fake.me, 99);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    settle(cx);
+}
+
+/// `tile`'s column dragged to `width`, as its divider is.
+fn at_width(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef, width: f32) {
+    for _ in 0..4 {
+        let got =
+            view.read_with(cx, |v, _| v.tile_bounds(tile)).map_or(0.0, |b| f32::from(b.size.width));
+        if (got - width).abs() < 0.5 {
+            return;
+        }
+        let column = column_of(view, cx, tile);
+        view.update_in(cx, |v, _w, cx| {
+            v.layout.resize_begin(column);
+            v.layout.resize_update(width - got);
+            v.layout.resize_end();
+            v.focus_tile(tile, cx);
+            cx.notify();
+        });
+        settle(cx);
+    }
+    panic!("the tile never came to {width} pt");
+}
+
+/// Every node under `tile`'s group that reaches past its left or right edge, by role and
+/// label, with its bounds.
+fn escaped(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) -> Vec<String> {
+    cx.update(|window, _| window.set_a11y_active(true));
+    settle(cx);
+    let at = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("the tile is drawn");
+    let (left, right) = (f32::from(at.left()), f32::from(at.right()));
+    cx.update(|window, _| {
+        let Some(update) = window.a11y_tree() else { return vec!["no tree".to_owned()] };
+        let nodes: HashMap<NodeId, &AkNode> = update.nodes.iter().map(|(id, n)| (*id, n)).collect();
+        let scale = window.scale_factor().max(0.01);
+        #[expect(clippy::cast_possible_truncation, reason = "window points")]
+        let x =
+            |node: &AkNode| node.bounds().map(|r| ((r.x0 as f32) / scale, (r.x1 as f32) / scale));
+        let near = |a: f32, b: f32| (a - b).abs() < 1.0;
+        // The outermost group the tile's bounds frame, found from the root down: its body's
+        // groups have the same bounds.
+        let mut order = vec![update.tree.as_ref().map(|t| t.root)];
+        let mut group = None;
+        while let Some(Some(id)) = order.pop() {
+            let Some(node) = nodes.get(&id) else { continue };
+            if format!("{:?}", node.role()) == "Group"
+                && x(node).is_some_and(|(x0, x1)| near(x0, left) && near(x1, right))
+            {
+                group = Some((id, node));
+                break;
+            }
+            order.extend(node.children().iter().rev().map(|c| Some(*c)));
+        }
+        let Some((root, _)) = group else { return vec!["no group for the tile".to_owned()] };
+        let mut out = Vec::new();
+        let mut seen = 0_usize;
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(node) = nodes.get(&id) else { continue };
+            let span = x(node).filter(|(x0, x1)| x1 > x0);
+            seen = seen.saturating_add(usize::from(span.is_some()));
+            if let Some((x0, x1)) = span
+                && (x0 < left - 0.5 || x1 > right + 0.5)
+            {
+                out.push(format!(
+                    "{:?} {:?} spans {x0:.1}..{x1:.1} in {left:.1}..{right:.1}",
+                    node.role(),
+                    node.label().unwrap_or_default(),
+                ));
+            }
+            stack.extend(node.children().iter().copied());
+        }
+        // A tile says at least its header's name and a control: fewer means the tree is not
+        // the tile's, and the check would pass on nothing.
+        if seen < 3 {
+            out.push(format!("only {seen} nodes under the tile"));
+        }
+        out
+    })
+}
+
+/// `tile`, beside another column, at each of [`WIDTHS`]: nothing escapes it.
+fn contained(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    tile: TileRef,
+    kind: &str,
+) {
+    beside(view, cx, fake, tile);
+    let mut wrong = Vec::new();
+    for width in WIDTHS {
+        at_width(view, cx, tile, width);
+        wrong
+            .extend(escaped(view, cx, tile).into_iter().map(|e| format!("{kind} at {width}: {e}")));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// An agent at work in a shell, with its pull request and its worktree on the header.
+fn agent_with_chips(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+) -> (TileRef, SessionId) {
+    let session = SessionId::new();
+    let tile = opens(view, cx, fake, session, fake.me, 1);
+    let branch = AgentBranch {
+        session,
+        pr: Some(PullRequest {
+            number: 12_345,
+            url: "https://github.com/o/r/pull/12345".to_owned(),
+            review: None,
+            merge_request: false,
+        }),
+        worktree: Some(Worktree {
+            name: "responsive-tile-headers".to_owned(),
+            path: "/r/.claude/worktrees/responsive-tile-headers".to_owned(),
+            branch: Some("worktree-responsive-tile-headers".to_owned()),
+            original_cwd: "/r".to_owned(),
+            original_branch: Some("main".to_owned()),
+        }),
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.agent_branch(branch, cx);
+    });
+    settle(cx);
+    (tile, session)
+}
+
+/// A shell, an agent's shell with its chips, the agent's thread, a board, a file, a folder and
+/// a column of three tabs: at every width a column takes, nothing any of them draws lies past
+/// the tile's edges. A clipped send button or a chip run under the next column fails here.
+#[gpui::test]
+fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    contained(&view, cx, &studio, shell, "a shell");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let (agent, _) = agent_with_chips(&view, cx, &studio);
+    contained(&view, cx, &studio, agent, "an agent's shell");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let (agent, session) = agent_with_chips(&view, cx, &studio);
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    settle(cx);
+    assert!(view.read_with(cx, |v, _| v.face_shown(session)), "on its thread");
+    contained(&view, cx, &studio, agent, "an agent's thread");
+
+    let (view, cx) = still_workspace(app);
+    let (studio, orchestrator, session) = projects::orchestrator(&view, cx);
+    view.update_in(cx, |v, _w, cx| {
+        v.focus_tile(orchestrator, cx);
+        v.show_face(session, false, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-j");
+    settle(cx);
+    assert!(view.read_with(cx, |v, _| v.board_shown(session)), "on its board");
+    contained(&view, cx, &studio, orchestrator, "a board");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let path = "/w/a-file-whose-name-runs-on-past-any-narrow-column.md";
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Notes\n\nA line long enough to wrap in a narrow column, and then some more.\n"
+            .to_owned(),
+        size: 80,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+        editorconfig: Vec::new(),
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.file_read(key, path, &text, cx));
+    settle(cx);
+    contained(&view, cx, &studio, file, "a file");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let folder = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/proj".into() }, 1);
+    let entry = |name: &str, kind: FileKind| FolderEntry {
+        name: name.to_owned(),
+        kind,
+        link: false,
+        hidden: false,
+        size: 1_234,
+        items: (kind == FileKind::Dir).then_some(2),
+        modified_ms: WallMs::from_millis(1_700_000_000_000),
+    };
+    let listing = Listing::Listed {
+        dir: "/w/proj".to_owned(),
+        entries: vec![
+            entry("src", FileKind::Dir),
+            entry("a-file-whose-name-runs-on-past-any-narrow-column.rs", FileKind::File),
+        ],
+        total: 2,
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.folder_listed(key, "/w/proj", &listing, cx));
+    settle(cx);
+    contained(&view, cx, &studio, folder, "a folder");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let tabs: Vec<TileRef> = (1..=3)
+        .map(|version| opens(&view, cx, &studio, SessionId::new(), studio.me, version))
+        .collect();
+    view.update_in(cx, |v, _w, cx| {
+        for tab in tabs.iter().skip(1) {
+            v.focus_tile(*tab, cx);
+            v.layout.consume_or_expel_window_left();
+        }
+        v.layout.toggle_tabbed();
+        cx.notify();
+    });
+    settle(cx);
+    let last = *tabs.last().expect("three tabs");
+    contained(&view, cx, &studio, last, "a column of three tabs");
+}

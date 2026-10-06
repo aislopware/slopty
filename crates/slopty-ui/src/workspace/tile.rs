@@ -17,10 +17,10 @@ use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::Review;
+use slopty_proto::agent::{Review, Worktree};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
-use slopty_proto::thread::AgentId;
+use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Theme, Typography};
 
 use super::actions::{AddWindow, CloseItem, FullscreenTile};
@@ -45,6 +45,23 @@ pub(super) const SHAPES_BELOW: f32 = 0.5;
 
 /// A page's way back or forward.
 type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
+
+/// The open fact a thread's row names its branch by.
+const BRANCH_FACT: &str = "branch";
+
+/// Where a thread's agent works, for its tile's header ([`WorkspaceView::header_place`]).
+#[derive(Clone, Debug)]
+struct HeaderPlace {
+    /// The checkout's folder name.
+    checkout: Option<String>,
+    /// Its branch.
+    branch: Option<String>,
+    /// The checkout is a repository, so a press opens the commit sheet.
+    commits: bool,
+}
+
+/// A pull request's place in a header: it outlasts the checkout and the branch beside it.
+const PR_PRIORITY: kit::Priority = kit::Priority(kit::Priority::MEDIUM.0 + 16);
 
 /// The widest a page's address gets beside its title, in points at zoom 1: the title is what
 /// tells tiles apart, the address only says where.
@@ -1268,8 +1285,26 @@ impl WorkspaceView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element()
         });
-        let branch =
-            agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
+        // A tile showing a thread says where its agent works after the title, the checkout and
+        // its branch, which open the commit sheet; the shell's directory would say it again.
+        // Read from the worker's table as the workspace keeps it, never from the thread view:
+        // what a render reads it redraws with, and the view redraws on every step of its
+        // working mark.
+        let thread = match &item.kind {
+            ItemKind::Terminal { session } if self.face_shown(*session) => {
+                self.session_thread(*session)
+            }
+            ItemKind::Thread { thread } => Some(*thread),
+            _ => None,
+        };
+        let thread_place = thread.and_then(|thread| self.header_place(thread));
+        let worktree = agent.and_then(|(session, _)| self.branch_of(session)?.worktree.clone());
+        let mut branch = thread_place.clone().map_or_else(Vec::new, |at| {
+            self.place_chips(placed.tile, at, worktree.as_ref(), chrome, cx)
+        });
+        branch.extend(
+            agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome)),
+        );
         let kind_actions = self.header_actions(tile, item, chrome, cx);
         let silenced = self.silenced(tile, item, chrome, cx);
         let face = match agent {
@@ -1351,6 +1386,7 @@ impl WorkspaceView {
         // not it. Muted, in the UI face as every header's context
         // is, with no separator: the colour tells it from the title.
         let place = match &item.kind {
+            _ if thread_place.is_some() => None,
             ItemKind::Terminal { .. } => {
                 self.tile_place(item).and_then(|p| place_beside(p, &title))
             }
@@ -1847,6 +1883,103 @@ impl WorkspaceView {
         }
     }
 
+    /// Where `thread`'s agent works, from its worker's table: the checkout by its folder's
+    /// name and the branch; `None` while neither is known.
+    fn header_place(&self, thread: ThreadId) -> Option<HeaderPlace> {
+        let place = self.thread_place(thread);
+        let checkout = place
+            .and_then(|p| p.cwd.as_deref())
+            .and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        let branch = self
+            .thread_facts(thread)
+            .and_then(|facts| facts.get(BRANCH_FACT))
+            .filter(|b| !b.is_empty())
+            .cloned();
+        let commits = place.is_some_and(|p| p.repo.is_some());
+        (checkout.is_some() || branch.is_some()).then_some(HeaderPlace {
+            checkout,
+            branch,
+            commits,
+        })
+    }
+
+    /// Where a thread's agent works, as header items after the title: the checkout by its
+    /// folder's name, then the branch with its glyph, each a press away from the commit sheet
+    /// when the place is a repository. What the worktree's chip says already is left out. They
+    /// stay while a long title narrows to its floor; then the branch leaves, then the checkout,
+    /// which names the work's project, and the pull request last.
+    fn place_chips(
+        &self,
+        tile: TileRef,
+        at: HeaderPlace,
+        worktree: Option<&Worktree>,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Vec<(&'static str, kit::Priority, gpui::AnyElement)> {
+        let id = tile.item;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = chrome.k;
+        let checkout = at.checkout.filter(|c| worktree.is_none_or(|t| t.name != *c));
+        let branch =
+            at.branch.filter(|b| worktree.is_none_or(|t| t.branch.as_deref() != Some(b.as_str())));
+        let chip = |part: &'static str, glyph: Option<Symbol>, words: String| {
+            let muted = hsla(s.text_muted);
+            let said = SharedString::from(words.clone());
+            let el = div()
+                .id(part)
+                .debug_selector(move || format!("{part}-{}", id.as_uuid()))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs * k))
+                .px(px(theme.spacing.xxs * k))
+                .rounded(px(theme.radii.xs * k))
+                .text_color(muted)
+                .children(glyph.map(|glyph| {
+                    crate::icons::icon(theme, glyph, IconSize::Inline, muted)
+                        .size(px(theme.typography.small() * k))
+                }))
+                .child(
+                    ChromeText::new(words, px(theme.typography.small()), k)
+                        .fill()
+                        .zooming(chrome.zooming),
+                );
+            if !at.commits {
+                return el.role(Role::Label).aria_label(said).into_any_element();
+            }
+            tab_stop(
+                el.role(Role::Button)
+                    .aria_label(SharedString::from(format!("Commit on {said}")))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
+                    .active(move |el| el.bg(hsla(s.pressed))),
+                s.focus,
+            )
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                cx.stop_propagation();
+                let view = this.item(tile).and_then(|item| match item.kind {
+                    ItemKind::Terminal { session } => this.thread_face(session),
+                    ItemKind::Thread { .. } => this.thread_item(item.id),
+                    _ => None,
+                });
+                if let Some(view) = view.cloned() {
+                    view.update(cx, |v, cx| v.open_commit(window, cx));
+                }
+            }))
+            .into_any_element()
+        };
+        checkout
+            .map(|c| ("checkout", kit::Priority::MEDIUM, chip("thread-checkout", None, c)))
+            .into_iter()
+            .chain(branch.map(|b| {
+                let glyph = Some(Symbol::ArrowTriangleBranch);
+                ("branch", kit::Priority::MEDIUM, chip("thread-branch", glyph, b))
+            }))
+            .collect()
+    }
+
     /// An agent's pull request and worktree, as the worker last said: the request's number
     /// in words toned by its review (green approved, red changes asked, muted draft), a click
     /// away from its page; and the worktree's name, quiet, its branch in the hint. Words, not
@@ -1929,7 +2062,7 @@ impl WorkspaceView {
                 .into_any_element()
         });
         // The request stays while the title narrows; the worktree's name goes first.
-        pr.map(|pr| ("pr", kit::Priority::MEDIUM, pr))
+        pr.map(|pr| ("pr", PR_PRIORITY, pr))
             .into_iter()
             .chain(worktree.map(|tree| ("worktree", kit::Priority::LOW, tree)))
             .collect()
