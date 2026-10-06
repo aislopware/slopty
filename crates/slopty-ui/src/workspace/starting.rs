@@ -25,7 +25,8 @@ use gpui::{
 };
 use slopty_client::layout::{Placed, Placement, TileRef, WorkerKey};
 use slopty_core::ItemId;
-use slopty_proto::thread::{AgentId, ThreadId};
+use slopty_proto::thread::wire::{Setup, Start};
+use slopty_proto::thread::{AgentId, IntentId, ThreadId};
 
 use super::WorkspaceView;
 use super::actions::StartThread;
@@ -174,6 +175,15 @@ impl Starts {
         self.tiles.get(&item)
     }
 
+    /// `item`'s start went as `start`: kept to send again as it was, and its last setup's
+    /// words gone with the start they were for.
+    pub(super) fn kept_start(&mut self, item: ItemId, start: Start) {
+        if let Some(starting) = self.tiles.get_mut(&item) {
+            starting.last = Some(start);
+            starting.setup = None;
+        }
+    }
+
     /// The composer writing start `item`'s first message, while it is written: what a drop on
     /// its tile or files picked for it attach to.
     pub(super) fn composer(&self, item: ItemId) -> Option<Target> {
@@ -223,6 +233,25 @@ pub(super) struct Starting {
     pub draft: Option<Drafting>,
     /// Whether the start went to the machine.
     pub sent: bool,
+    /// The start as it last went, to send again as it was after its worktree's setup failed:
+    /// the same worktree, which the worker reopens.
+    pub last: Option<Start>,
+    /// Its new worktree's setup, running or failed, as the machine last said.
+    pub setup: Option<SetupSeen>,
+}
+
+/// A new worktree's setup, as its start tile says it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum SetupSeen {
+    /// Running: where it came from and its newest lines.
+    Running(Setup),
+    /// Failed, with the code it ended with when it ended with one.
+    Failed {
+        /// Where it came from and its last lines.
+        setup: Setup,
+        /// Its exit code.
+        code: Option<i32>,
+    },
 }
 
 /// What a draft chose for its start ([`Starting::chosen`]).
@@ -260,6 +289,8 @@ impl Starting {
             chosen: Chosen { model: None, mode: None, effort: None, attachments: Vec::new() },
             draft,
             sent: false,
+            last: None,
+            setup: None,
         }
     }
 
@@ -497,11 +528,60 @@ impl WorkspaceView {
             && let Some(drafting) = &starting.draft
         {
             starting.sent = false;
+            starting.setup = None;
             drafting.draft.update(cx, Draft::unsent);
         } else if self.starting.tiles.remove(&item).is_some() {
             self.drop_starting_tile(TileRef { worker: key, item }, cx);
         }
         self.show_notice(why, cx);
+    }
+
+    /// `key` is setting up the new worktree of start `id`: its tile says where the setup came
+    /// from and its newest line, each word replacing the last.
+    pub fn thread_setting_up(
+        &mut self,
+        key: WorkerKey,
+        id: IntentId,
+        setup: Setup,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.start_item(key, id) else { return };
+        let Some(starting) = self.starting.tiles.get_mut(&item) else { return };
+        starting.setup = Some(SetupSeen::Running(setup));
+        cx.notify();
+    }
+
+    /// The new worktree of `item`'s start failed its setup: the tile keeps the draft, as a
+    /// refusal does, and says how it failed with its last lines, to try again or start
+    /// without it. A start with no draft keeps its tile for the same.
+    pub(super) fn setup_failed(
+        &mut self,
+        item: ItemId,
+        setup: Setup,
+        code: Option<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(starting) = self.starting.tiles.get_mut(&item) else { return };
+        starting.sent = false;
+        starting.setup = Some(SetupSeen::Failed { setup, code });
+        if let Some(drafting) = &starting.draft {
+            drafting.draft.update(cx, Draft::unsent);
+        }
+        cx.notify();
+    }
+
+    /// Send `item`'s start again as it last went, to the same worktree, with its setup run
+    /// again when `setup`, else started without it.
+    pub(super) fn start_again(&mut self, item: ItemId, setup: bool, cx: &mut Context<Self>) {
+        let Some(starting) = self.starting.tiles.get(&item) else { return };
+        let Some(mut start) = starting.last.clone() else { return };
+        if let Some(worktree) = &mut start.worktree {
+            worktree.setup = setup;
+        }
+        if let Some(drafting) = &starting.draft {
+            drafting.draft.update(cx, Draft::resent);
+        }
+        self.send_start_as(item, start, cx);
     }
 
     /// The link to `key` went: a start sent there may never be answered, so its tile goes and
@@ -595,9 +675,31 @@ impl WorkspaceView {
                     .child(div().flex_1().min_w_0().overflow_hidden().child(title.clone()))
                     .children(status.map(|st| crate::icons::status_mark(theme, Some(st), k)))
             });
+        // The new worktree's setup, while it runs in place of the rest, and once it failed over
+        // the draft given back.
+        let setup = starting.setup.as_ref().filter(|_| !shapes).map(|seen| {
+            let running = matches!(seen, SetupSeen::Running(_));
+            (running, self.setup_view(seen, id, k, cx))
+        });
+        let (setting_up, failed) = match setup {
+            Some((true, view)) => (Some(view), None),
+            Some((false, view)) => (None, Some(view)),
+            None => (None, None),
+        };
         // The thread's own composer under the tile's header, which names the agent.
         let body = (!shapes).then(|| {
-            if let Some(drafting) = &starting.draft {
+            if let Some(view) = setting_up {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(theme.spacing.lg * k))
+                    .child(view)
+                    .into_any_element()
+            } else if let Some(drafting) = &starting.draft {
                 let view = &drafting.view;
                 let width = placed.target.w;
                 let handed = Handed::Face { zoom: k, width };
@@ -662,10 +764,131 @@ impl WorkspaceView {
                     }))
                 })
                 .map(|el| {
-                    let inside = div().flex().flex_col().child(header).children(body);
+                    let inside =
+                        div().flex().flex_col().child(header).children(failed).children(body);
                     kit::panel(el, theme, self.stand(k), inside)
                 })
                 .into_any_element(),
         )
     }
+
+    /// What a start tile says of its new worktree's setup. Running: where it came from, under
+    /// the working mark, and its newest line in the terminal's face, one line. Failed: how,
+    /// its last lines in an inset as a failed check's are, and the ways on: try again in the
+    /// same worktree, or start there without it.
+    fn setup_view(
+        &self,
+        seen: &SetupSeen,
+        id: ItemId,
+        k: f32,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        let line = |text: &str| {
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(SharedString::from(text.to_owned()))
+        };
+        match seen {
+            SetupSeen::Running(setup) => {
+                let mark =
+                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary), k);
+                let title = format!("Setting up from {}", setup.from);
+                let newest = setup.tail.last().map(|l| {
+                    line(l)
+                        .id("setup-line")
+                        .debug_selector(move || format!("setup-line-{}", id.as_uuid()))
+                        .role(Role::Label)
+                        .aria_label(SharedString::from(l.clone()))
+                        .max_w_full()
+                        .font_family(mono.clone())
+                        .text_size(px(theme.typography.small() * k))
+                        .text_color(hsla(s.text_muted))
+                });
+                div()
+                    .id("setting-up")
+                    .debug_selector(move || format!("setting-up-{}", id.as_uuid()))
+                    .role(Role::Status)
+                    .aria_label(SharedString::from(title.clone()))
+                    .max_w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(theme.spacing.sm * k))
+                    .child(kit::notice(theme, k, mark, title, None))
+                    .children(newest)
+                    .into_any_element()
+            }
+            SetupSeen::Failed { setup, code } => {
+                let mark = crate::icons::notice_status(theme, Status::Failed, hsla(s.error), k);
+                let title = format!("Setup from {} failed", setup.from);
+                let detail = code.map(|c| SharedString::from(format!("exit {c}")));
+                let tail = (!setup.tail.is_empty()).then(|| {
+                    div()
+                        .id("setup-tail")
+                        .debug_selector(move || format!("setup-tail-{}", id.as_uuid()))
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .px(px(theme.spacing.sm * k))
+                        .py(px(theme.spacing.xs * k))
+                        .rounded(px(theme.radii.sm * k))
+                        .map(|el| kit::inset(el, theme))
+                        .font_family(mono.clone())
+                        .text_size(px(theme.typography.small() * k))
+                        .line_height(gpui::relative(theme.typography.markdown_line_height))
+                        .text_color(hsla(s.text_secondary))
+                        .children(setup.tail.iter().map(|l| line(l)))
+                });
+                let again =
+                    kit::button(theme, "setup-again", TRY_AGAIN, kit::ButtonKind::Secondary)
+                        .on_click(
+                            cx.listener(move |this, _ev, _w, cx| this.start_again(id, true, cx)),
+                        );
+                let without =
+                    kit::button(theme, "setup-skip", WITHOUT_SETUP, kit::ButtonKind::Ghost)
+                        .on_click(
+                            cx.listener(move |this, _ev, _w, cx| this.start_again(id, false, cx)),
+                        );
+                let said = match code {
+                    Some(c) => format!("{title}, exit {c}"),
+                    None => title.clone(),
+                };
+                div()
+                    .id("setup-failed")
+                    .debug_selector(move || format!("setup-failed-{}", id.as_uuid()))
+                    .role(Role::Group)
+                    .aria_label(SharedString::from(said))
+                    .w_full()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(theme.spacing.sm * k))
+                    .px(px(theme.spacing.inset() * k))
+                    .py(px(theme.spacing.md * k))
+                    .child(kit::notice(theme, k, mark, title, detail))
+                    .children(tail)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(theme.spacing.sm * k))
+                            .child(again)
+                            .child(without),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
 }
+
+/// The failed setup's way to run it again, in the same worktree.
+pub(super) const TRY_AGAIN: &str = "Try again";
+
+/// The failed setup's way to start the agent in its worktree as it is.
+pub(super) const WITHOUT_SETUP: &str = "Start without setup";

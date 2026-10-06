@@ -232,4 +232,11 @@ impl Draft {
         self.sent = false;
         cx.notify();
     }
+
+    /// The start went again as it was, after its worktree's setup failed: the thread says it
+    /// is starting once more, its message kept as the start holds it.
+    pub fn resent(&mut self, cx: &mut Context<Self>) {
+        self.sent = true;
+        cx.notify();
+    }
 }

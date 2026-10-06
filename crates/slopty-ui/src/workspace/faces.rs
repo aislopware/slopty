@@ -419,8 +419,6 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(starting) = self.starting.get(item) else { return };
-        let key = starting.worker;
-        let id = IntentId::new();
         let start = Start {
             agent: starting.agent.clone(),
             cwd: starting.cwd.clone(),
@@ -436,7 +434,22 @@ impl WorkspaceView {
             attachments: starting.chosen.attachments.clone(),
             args: starting.args.clone(),
         };
+        self.send_start_as(item, start, cx);
+    }
+
+    /// The tile of the start `key` was sent as intent `id`, while it is unanswered.
+    pub(super) fn start_item(&self, key: WorkerKey, id: IntentId) -> Option<ItemId> {
+        let (at, _, item) = self.faces.threads.starts.get(&id)?;
+        (*at == key).then_some(*item)
+    }
+
+    /// Send `start` for the thread on its way in `item`'s tile, under a new intent, and keep it
+    /// to send again as it was ([`Self::start_again`]).
+    pub(super) fn send_start_as(&mut self, item: ItemId, start: Start, cx: &mut Context<Self>) {
+        let Some(key) = self.starting.get(item).map(|s| s.worker) else { return };
+        let id = IntentId::new();
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
+        self.starting.kept_start(item, start.clone());
         self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));
         self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
         self.starting_sent(item, cx);
@@ -815,11 +828,10 @@ impl WorkspaceView {
             match &done.outcome {
                 Outcome::Started { thread } => self.start_landed(key, item, *thread, &agent, cx),
                 Outcome::Refused { reason } => self.start_failed(key, item, reason.clone(), cx),
-                // A setup that failed is said as a refusal until the start tile shows it.
-                Outcome::Unsupported { .. }
-                | Outcome::SetupFailed { .. }
-                | Outcome::Done
-                | Outcome::Accepted => {
+                Outcome::SetupFailed { setup, code } => {
+                    self.setup_failed(item, setup.clone(), *code, cx);
+                }
+                Outcome::Unsupported { .. } | Outcome::Done | Outcome::Accepted => {
                     let text = format!(
                         "{} can\u{2019}t start {}",
                         self.worker_name(key),

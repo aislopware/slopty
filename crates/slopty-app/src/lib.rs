@@ -3651,6 +3651,9 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Sessions(past)) => {
             view.update(cx, |v, cx| v.past_sessions(key, past, cx));
         }
+        LinkEvent::Control(WorkerMsg::SettingUp { id, setup }) => {
+            view.update(cx, |v, cx| v.thread_setting_up(key, id, setup, cx));
+        }
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
@@ -3659,8 +3662,7 @@ fn apply_link_event(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_)
-            | WorkerMsg::SettingUp { .. },
+            | WorkerMsg::Handoff(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

@@ -955,6 +955,124 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     assert_eq!(last, at.saturating_add(1), "the other run in the column right of it");
 }
 
+/// A new worktree's setup on its start tile: while it runs, where it came from and its newest
+/// line; once it failed, how, with its last lines and two ways on. "Start without setup" sends
+/// the same start again, to the same worktree, without the setup; "Try again" with it.
+#[gpui::test]
+fn a_start_tile_says_its_worktrees_setup_and_takes_it_again(cx: &mut TestAppContext) {
+    use slopty_proto::thread::IntentId;
+    use slopty_proto::thread::wire::Setup;
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let session = SessionId::new();
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Terminal { session },
+        name: None,
+        facts: BTreeMap::new(),
+    };
+    let summary =
+        SessionSummary { repo: Some("/w/atlas".to_owned()), ..summary(session, Some("/w/atlas")) };
+    let (key, by) = (studio.key, studio.me);
+    view.update_in(cx, |v, _window, cx| {
+        v.session_opened(key, summary, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Add(item) }, cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("new worktree");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let tile = view.read_with(cx, |v, _| v.focused()).expect("the start's tile").item;
+    cx.simulate_input("try the other layout");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let starts = |studio: &mut Fake| -> Vec<(IntentId, Start)> {
+        studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Start { id, start }) => Some((id, *start)),
+                _ => None,
+            })
+            .collect()
+    };
+    let sent = starts(&mut studio);
+    let [(first, start)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    let name = start.worktree.as_ref().expect("a worktree").name.clone();
+    let at = |what: &str| format!("{what}-{}", tile.as_uuid());
+    let shows = |cx: &mut VisualTestContext, what: &str| {
+        cx.debug_bounds(Box::leak(at(what).into_boxed_str())).is_some()
+    };
+
+    let setup = |tail: &[&str]| Setup {
+        from: "conductor.json".to_owned(),
+        tail: tail.iter().map(|l| (*l).to_owned()).collect(),
+    };
+    for lines in [&["npm install"][..], &["npm install", "added 312 packages"]] {
+        let said = setup(lines);
+        view.update_in(cx, |v, _w, cx| v.thread_setting_up(key, *first, said, cx));
+        settle(cx);
+    }
+    cx.update(|window, _| window.set_a11y_active(true));
+    settle(cx);
+    assert!(shows(cx, "setting-up"), "where the setup came from");
+    assert!(shows(cx, "setup-line"), "and its newest line");
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Status", Some("Setting up from conductor.json"))));
+    let words: Vec<String> = tree.iter().filter_map(|n| n.label.clone()).collect();
+    assert!(words.iter().any(|w| w == "added 312 packages"), "the newest: {words:?}");
+    assert!(!words.iter().any(|w| w == "npm install"), "one line, the newest only");
+
+    let failed = IntentDone {
+        id: *first,
+        outcome: Outcome::SetupFailed { setup: setup(&["npm ERR! missing script"]), code: Some(1) },
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_done(key, &failed, cx));
+    settle(cx);
+    assert!(!shows(cx, "setting-up"), "it ran");
+    assert!(shows(cx, "setup-failed"), "it failed, said on the tile");
+    assert!(shows(cx, "setup-tail"), "with its last lines");
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Group", Some("Setup from conductor.json failed, exit 1"))),
+        "how"
+    );
+    assert!(cx.debug_bounds("thread-composer").is_some(), "the draft given back");
+    let press = |cx: &mut VisualTestContext, what: &'static str| {
+        let button = cx.debug_bounds(what).expect(what);
+        cx.simulate_click(button.center(), Modifiers::none());
+        settle(cx);
+    };
+
+    press(cx, "setup-skip");
+    let sent = starts(&mut studio);
+    let [(skip, again)] = sent.as_slice() else { panic!("sent again: {sent:?}") };
+    assert_ne!(skip, first, "under a new intent");
+    let worktree = again.worktree.as_ref().expect("a worktree");
+    assert_eq!((worktree.name.as_str(), worktree.setup), (name.as_str(), false));
+    assert_eq!(again.prompt.as_deref(), Some("try the other layout"), "the same start");
+    assert!(!shows(cx, "setup-failed"), "starting again");
+
+    let failed = IntentDone {
+        id: *skip,
+        outcome: Outcome::SetupFailed { setup: setup(&["boom"]), code: None },
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_done(key, &failed, cx));
+    settle(cx);
+    press(cx, "setup-again");
+    let sent = starts(&mut studio);
+    let [(_, again)] = sent.as_slice() else { panic!("sent again: {sent:?}") };
+    let worktree = again.worktree.as_ref().expect("a worktree");
+    assert_eq!((worktree.name.as_str(), worktree.setup), (name.as_str(), true), "set up again");
+}
+
 /// A start in the folder itself offers no other agents: two would share one tree.
 #[gpui::test]
 fn a_start_in_the_folder_runs_on_one_agent(cx: &mut TestAppContext) {
