@@ -407,14 +407,14 @@ async fn a_workspace_of_panes_in_both_themes() {
     // ⌥⇧⌘→ moves `cat` out to a pane of its own on the right, ⌥⌘← goes back to the left pane,
     // which shows the checklist, and ⌥⌘[ its tab before, the shell.
     drv.keys("cmd-alt-shift-right").await.unwrap();
-    drv.wait_for("two panes", STEP, |d| d.items.iter().any(|i| i.pos[2] == 1)).await.unwrap();
+    drv.wait_for("two panes", STEP, |d| d.panes_on_show() == 2).await.unwrap();
     drv.keys("cmd-alt-left").await.unwrap();
     drv.keys("cmd-alt-[").await.unwrap();
     let dump = drv
         .wait_for("the first shell focused", STEP, |d| {
             d.items
                 .iter()
-                .any(|i| i.active && i.kind == "terminal" && i.pos[2] == 0 && i.bounds[2] > 0.0)
+                .any(|i| i.active && i.kind == "terminal" && i.pane == [0] && i.bounds[2] > 0.0)
         })
         .await
         .unwrap();
@@ -887,7 +887,7 @@ async fn a_pane_of_two_draws_its_tab_row() {
     let dump = drv
         .wait_for("one pane of two tabs", STEP, |d| {
             d.items.len() == 2
-                && d.items.iter().all(|i| i.pos == d.items[0].pos)
+                && d.items.iter().all(|i| i.same_pane(&d.items[0]))
                 && d.items.iter().find(|i| i.active).is_some_and(|i| d.pane_tabs(i).len() == 2)
         })
         .await
@@ -912,7 +912,7 @@ async fn a_half_screen_and_the_least_window_keep_their_chrome_whole() {
     drv.ok(&Command::Resize { width: 756.0, height: 900.0 }).await.unwrap();
     first_shell(drv).await;
     drv.open(&["cat"], 1).await.unwrap();
-    drv.wait_for("a second pane", STEP, |d| d.items.iter().any(|i| i.pos[2] == 1)).await.unwrap();
+    drv.wait_for("a second pane", STEP, |d| d.panes_on_show() == 2).await.unwrap();
     at_rest(drv).await;
     drv.keys("cmd-b").await.unwrap();
     drv.wait_for("the navigator over the panes", STEP, |d| {

@@ -749,6 +749,42 @@ fn apply(
             );
             Reply::Ok
         }
+        Command::DragTo { x, y } => {
+            let _moved = window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(x), px(y)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
+        Command::Press { x, y } => {
+            let _down = window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(x), px(y)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
+        Command::Release { x, y } => {
+            let _up = window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(x), px(y)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            Reply::Ok
+        }
         Command::PinClock { at_ms } => {
             slopty_ui::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
             // Nothing that showed a time was told: every view is built again.
@@ -1188,21 +1224,24 @@ impl Workspace {
         let names: std::collections::HashMap<_, _> =
             view.workers().map(|(key, name, _)| (key, name.to_owned())).collect();
         let layout = view.layout();
-        // A tile's place as indices: its project, its tab in the project, and its pane in the
-        // tab in reading order.
-        let place = |pos: slopty_client::layout::Pos| {
+        // A tile's place as indices: its project, its tab in the project, its pane's path in
+        // the tab's tree, and its place among the pane's tabs.
+        let place = |tile: slopty_client::layout::TileRef| {
+            let pos = layout.position(tile)?;
             let project = layout.projects().get(pos.project)?;
             let tab_at = project.tabs().iter().position(|t| t.id() == pos.tab)?;
             let tab = project.tabs().get(tab_at)?;
-            let pane = tab.panes().position(|p| p.id() == pos.pane)?;
-            Some([pos.project, tab_at, pane])
+            let pane = tab.root().path_of(pos.pane)?;
+            let index = tab.pane(pos.pane)?.tiles().iter().position(|t| *t == tile)?;
+            Some((pos.project, tab_at, pane, index))
         };
-        let mut tiles: Vec<_> = layout
-            .tiles()
-            .filter_map(|tile| layout.position(tile).and_then(place).map(|pos| (pos, tile)))
-            .collect();
-        tiles.sort_by_key(|(pos, _)| *pos);
-        for (pos, tile) in tiles {
+        dump.shown = layout
+            .shown_index()
+            .and_then(|p| layout.projects().get(p).map(|project| [p, project.shown_index()]));
+        let mut tiles: Vec<_> =
+            layout.tiles().filter_map(|tile| place(tile).map(|at| (at, tile))).collect();
+        tiles.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for ((project, tab, pane, index), tile) in tiles {
             let Some(item) = view.item(tile) else { continue };
             let (kind, session) = match &item.kind {
                 ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
@@ -1277,7 +1316,10 @@ impl Workspace {
                 kind: kind.to_owned(),
                 worker: names.get(&tile.worker).cloned().unwrap_or_default(),
                 session,
-                pos,
+                project,
+                tab,
+                pane,
+                index,
                 bounds,
                 active: view.focused() == Some(tile),
                 file,
@@ -1345,6 +1387,7 @@ impl Workspace {
                         .map(|f| [f.port.number, f.local.unwrap_or(0)])
                         .collect(),
                     upload: view.upload_on(tile).map(|(_, u)| u.label()),
+                    resizes: terminal.state().resizes(),
                     grid: terminal.metrics().map(|m| {
                         let (x, y) = (f32::from(m.origin.x), f32::from(m.origin.y));
                         [x, y, f32::from(m.cell_width), f32::from(m.line_height)]

@@ -15680,3 +15680,46 @@ cargo test -p slopty-ui --release --lib --no-run
 # measure::measure_a_frame_over_a_large_registry, measure::measure_a_stream_frame_beside_the_chrome
 # (before: chrome::measure_a_frame_of_motion_beside_the_chrome in place of the sash drag)
 ```
+
+## 2026-10-07 — a sash held and carried beside five flooding shells, in the app
+
+This is the live measurement the tiling study owed before the panes landed (its §5). The app and
+the daemons were built from the tree of step 9, over `5a4fe11e`, with the e2e feature. The run
+was on the M1 Max, whose display is Parsec's virtual 1920 × 1080 at 60 Hz, so a frame's period
+is 16.7 ms.
+
+The scenario:
+
+- The window is 1500 × 1000 pt with the navigator put away (its 40 pt rail stays). It holds the
+  first, interactive shell and five shells printing as fast as they can.
+- The room rule puts them in two panes side by side, the right one split below; three panes are
+  drawn, and the other shells wait as tabs.
+- The sash between the two columns is pressed, then carried 160 pt either way and back as a
+  triangle wave, a step every 8 ms for 5 s (60 steps a leg, 5.3 pt a step), then let go.
+- The frame probe times every frame drawn while it moves. Each terminal counts the PTY sizes it
+  asked the worker for.
+
+Draw time in ms, p50 / p95 / p99 / max:
+
+| run | draw | frames | over 16.7 ms | steps | sizes asked (all / busiest shell) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1.0 / 1.1 / 1.2 / 1.2 | 300 | 0 | 299 | 599 / 200 |
+| 2 | 1.0 / 1.1 / 1.2 / 1.2 | 301 | 0 | 300 | 602 / 201 |
+| 3 | 1.0 / 1.1 / 1.2 / 1.2 | 301 | 0 | 300 | 602 / 201 |
+
+- **The worst frame is 1.2 ms, against the study's budget of 8.3 ms** (no frame past a 120 Hz
+  period). For comparison, the strip's guarded scenario, a pane stepped through 20 streaming
+  shells, drew at 0.9 / 2.3 / 2.6 ms with a 3.0 ms max (2026-10-02, "renderer: text drawn
+  antialiased").
+- **Every display slot got a frame, and none was dropped.**
+- **A shell asks for a size only when its whole cell count changes.** The busiest shell asked
+  200 times over 299 steps, once per 8 pt of the 1 600 pt the sash travelled, which is about
+  one column's width. All three drawn shells change width with the sash, so the 600 sizes are
+  three shells at that rate. `smooth.rs` asserts that no shell asks on every step.
+- **What this does not measure.** The display here is 60 Hz, so whether a frame lands within a
+  120 Hz period on a ProMotion screen is inferred from the draw time, not observed.
+
+```sh
+cargo xtask e2e smooth --filter 'test(a_sash_drag_beside_five_flooding_shells_on_the_mac)'
+# and again, with what that built: --no-build
+```

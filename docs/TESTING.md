@@ -41,8 +41,9 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker
    through the directory as every app does (`harness::Stack`; a first-run stack's app is pointed
    at the server through its panel, `Stack::connect_server`), and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
-   dump, render). `dump` is the structured state (tiles, focus, whether the overview is open,
-   terminal rows, and `a11y`: the accessibility tree as role/label/value/focused/bounds in
+   dump, render). `dump` is the structured state (tiles, each with its project, tab, pane path and place
+   among the pane's tabs, the project and tab on show, focus, terminal rows and the PTY sizes
+   each asked for, and `a11y`: the accessibility tree as role/label/value/focused/bounds in
    reading order, from the frame that painted the state in the same dump);
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden`, and what the same frame says in words (its accessibility tree's

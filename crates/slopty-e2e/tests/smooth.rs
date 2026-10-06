@@ -155,11 +155,11 @@ mod tests {
     /// `run`: each step draws another streaming shell in the pane's place.
     async fn pan(drv: &mut Driver, run: Duration) -> FrameInfo {
         let d = drv.dump().await.unwrap();
-        let mut panes: std::collections::BTreeMap<[usize; 3], Vec<&str>> =
+        let mut panes: std::collections::BTreeMap<slopty_e2e::Place, Vec<&str>> =
             std::collections::BTreeMap::new();
         for item in &d.items {
             if let Some(session) = item.session.as_deref() {
-                panes.entry(item.pos).or_default().push(session);
+                panes.entry(item.place()).or_default().push(session);
             }
         }
         let fullest = panes.values().max_by_key(|s| s.len()).expect("a pane of shells");
@@ -231,7 +231,7 @@ mod tests {
         drv.keys("cmd-1").await.unwrap();
         drv.wait_for("a shell on the first tab focused", STEP, |d| {
             d.focused.starts_with("terminal:")
-                && d.items.iter().any(|i| i.active && i.pos[1] == 0 && i.kind == "terminal")
+                && d.items.iter().any(|i| i.active && i.tab == 0 && i.kind == "terminal")
         })
         .await
         .unwrap();
@@ -485,6 +485,120 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
             stack.shutdown().await;
             assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
         }
+    }
+
+    /// The window of the sash scenario, its navigator put away: two panes side by side with
+    /// 210 pt each above a pointer's least width to give the sash, the second split below.
+    const SASH_WINDOW: (f32, f32) = (1500.0, 1000.0);
+    /// Flooding shells beside the sash drag.
+    const SASH_FLOODS: u32 = 5;
+    /// How often a held sash drag steps: a 120 Hz display's frame.
+    const DRAG_STEP: Duration = Duration::from_millis(8);
+    /// How far either side of where it was pressed the sash is carried.
+    const DRAG_SWING: f32 = 160.0;
+    /// Drag steps from one end of the swing to the other.
+    const DRAG_LEG: u32 = 60;
+
+    /// The sash between the first two panes side by side in the tab on show: the window point
+    /// in the gap between them, halfway down where both stand.
+    fn sash(d: &Dump) -> Option<(f32, f32)> {
+        let drawn: Vec<_> = d.on_show().filter(|i| i.bounds[2] > 0.0).collect();
+        drawn.iter().find_map(|a| {
+            let [ax, ay, aw, ah] = a.bounds;
+            drawn.iter().find_map(|b| {
+                let [bx, by, _, bh] = b.bounds;
+                let (top, bottom) = (ay.max(by), (ay + ah).min(by + bh));
+                let beside = bx > ax + aw - 1.0 && bx - (ax + aw) < 8.0 && bottom - top > 100.0;
+                beside.then(|| (f32::midpoint(ax + aw, bx), f32::midpoint(top, bottom)))
+            })
+        })
+    }
+
+    /// Every resize the terminals asked for so far.
+    fn resizes(d: &Dump) -> u64 {
+        d.terminals.iter().map(|t| t.resizes).sum()
+    }
+
+    /// The most resizes any one terminal asked for between `before` and `after`.
+    fn most_resizes(before: &Dump, after: &Dump) -> u64 {
+        after
+            .terminals
+            .iter()
+            .map(|t| {
+                let was = before.terminal(&t.session).map_or(0, |b| b.resizes);
+                t.resizes.saturating_sub(was)
+            })
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// Carry the sash at `at` back and forth by [`DRAG_SWING`] for `run`, a step every
+    /// [`DRAG_STEP`], then let it go where it was pressed: the frames drawn, and the steps.
+    async fn swing(drv: &mut Driver, at: (f32, f32), run: Duration) -> (FrameInfo, u32) {
+        let (x, y) = at;
+        drv.press(x, y).await.unwrap();
+        drv.frames_reset().await.unwrap();
+        let mut clock = clock(DRAG_STEP);
+        let start = Instant::now();
+        let mut step = 0_u32;
+        while start.elapsed() < run {
+            clock.tick().await;
+            // A triangle wave over the swing: out to one side, across, and back.
+            let phase = step % (DRAG_LEG * 2);
+            let leg = if phase < DRAG_LEG { phase } else { DRAG_LEG * 2 - phase };
+            #[expect(clippy::cast_precision_loss, reason = "a step count well under 2^24")]
+            let along = (leg as f32 / DRAG_LEG as f32).mul_add(2.0, -1.0);
+            drv.drag_to(x + along * DRAG_SWING, y).await.unwrap();
+            step = step.saturating_add(1);
+        }
+        let frames = drv.dump().await.unwrap().frames;
+        drv.release(x, y).await.unwrap();
+        (frames, step)
+    }
+
+    /// The panes' own motion: a sash held and carried back and forth for [`RUN`] beside
+    /// [`SASH_FLOODS`] flooding shells, the panes on both sides resized at every step. What it
+    /// costs a frame, and how many PTY sizes it asks for (one per whole change of a shell's
+    /// cell count, `TerminalView::fitted`), go to MEASUREMENTS (2026-10-07, the sash drag).
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
+    async fn a_sash_drag_beside_five_flooding_shells_on_the_mac() {
+        let mut stack = Stack::launch_with("e2e-smooth-sash", &[MOVING]).await.unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: SASH_WINDOW.0, height: SASH_WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        drv.keys("cmd-b").await.unwrap();
+        let before = load(drv, SASH_FLOODS.saturating_add(1)).await;
+        let d = drv
+            .wait_for("two panes side by side", STEP, |d| {
+                d.panes_on_show() >= 2 && sash(d).is_some()
+            })
+            .await
+            .unwrap();
+        let at = sash(&d).expect("a sash");
+        let drawn = d.on_show().filter(|i| i.bounds[2] > 0.0).count();
+        let asked = resizes(&d);
+        let (frames, steps) = swing(drv, at, RUN).await;
+        let after = drv.dump().await.unwrap();
+        let sent = resizes(&after).saturating_sub(asked);
+        let most = most_resizes(&d, &after);
+        measure(
+            &format!(
+                "(m) mac: a sash dragged beside {SASH_FLOODS} flooding shells, {drawn} panes \
+                 drawn, {steps} steps, {sent} resizes asked, {most} by the busiest shell"
+            ),
+            &frames,
+        );
+        stack.shutdown().await;
+        assert_floods_advanced(&before, &after);
+        assert!(frames.frames >= 100, "too few frames to judge: {frames:?}");
+        assert!(sent > 0, "the drag resized nothing: {after:#?}");
+        // A step carries the sash less than a cell, so a shell asks for a size only on the
+        // steps that change its whole cell count, never on every one.
+        assert!(
+            most < u64::from(steps),
+            "a resize for every step ({most} for {steps}): sizes must follow whole cells"
+        );
     }
 
     /// Typing into a shell with [`BUSY`] streaming beside it: the view cache's numbers, a frame

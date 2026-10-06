@@ -5,16 +5,18 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ project
+TabList
+Tab │ project
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
 Group │ project
-Heading │ terminal project
-Button │ Close tile
-Group
-Terminal │ shell │ $SCRATCH/project %
-Group │ project
 Heading │ folder project
+Tab │ project
+Button │ Close tile
+Tab │ project
+Button │ Close tile
 Button │ Enclosing folder
 Button │ Close tile
 Group │ Folder $SCRATCH/project │ 3 items (focused)

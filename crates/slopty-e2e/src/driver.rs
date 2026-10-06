@@ -158,6 +158,33 @@ impl Driver {
         self.ok(&Command::Drag { x, y, to_x, to_y, command: false }).await
     }
 
+    /// Press the primary button at a window point and hold it: a drag's start.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn press(&mut self, x: f32, y: f32) -> Result<()> {
+        self.ok(&Command::Press { x, y }).await
+    }
+
+    /// Move the pointer with the button held since [`Self::press`]: a step of a drag.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn drag_to(&mut self, x: f32, y: f32) -> Result<()> {
+        self.ok(&Command::DragTo { x, y }).await
+    }
+
+    /// Let the button held since [`Self::press`] go at a window point.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn release(&mut self, x: f32, y: f32) -> Result<()> {
+        self.ok(&Command::Release { x, y }).await
+    }
+
     /// [`Self::drag`] with ⌘ held: on a terminal path, the file is dragged out of the app.
     ///
     /// # Errors

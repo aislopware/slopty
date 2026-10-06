@@ -228,7 +228,7 @@ mod tests {
             ta.title,
             ta.size[0],
             ta.size[1],
-            ia.pos
+            ia.place()
         );
         assert!(lag <= PROPAGATION_LIMIT, "B lagged A by {lag:?}: {db:#?}");
         assert!(ta.driving, "the opener drives: {ta:#?}");
@@ -237,7 +237,7 @@ mod tests {
         // (e) The layout is per client: A's new shell took A's focus in a pane of its own,
         // while on B it came in as a background tab without taking B's. A moving it left, into
         // the first's pane, changes nothing on B; the items stay the same set on both.
-        let on_a = |d: &Dump| d.item_for_session(&session).map(|i| (i.pos, i.active));
+        let on_a = |d: &Dump| d.item_for_session(&session).map(|i| (i.place(), i.active));
         let (pos_a, active_a) = on_a(&da).unwrap();
         let (pos_b, active_b) = on_a(&db).unwrap();
         assert!(active_a, "A's own open takes A's focus: {da:#?}");
@@ -245,14 +245,14 @@ mod tests {
         a.keys("cmd-alt-shift-left").await.unwrap();
         let da = a
             .wait_for("the tile moved on A", STEP, |d| {
-                d.item_for_session(&session).is_some_and(|i| i.pos != pos_a)
+                d.item_for_session(&session).is_some_and(|i| i.place() != pos_a)
             })
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let db = b.dump().await.unwrap();
         assert_eq!(
-            db.item_for_session(&session).map(|i| i.pos),
+            db.item_for_session(&session).map(slopty_e2e::ItemInfo::place),
             Some(pos_b),
             "B's layout did not move with A's"
         );

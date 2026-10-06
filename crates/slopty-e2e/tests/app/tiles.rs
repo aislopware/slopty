@@ -539,7 +539,7 @@ async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
     let opener = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == popup);
     let opened = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == second);
     let (opener, opened) = (opener.unwrap(), opened.unwrap());
-    assert_eq!(opened.pos, opener.pos, "on its opener's pane: {opener:?} {opened:?}");
+    assert!(opened.same_pane(&opener), "on its opener's pane: {opener:?} {opened:?}");
 
     let alert = "Hello from the second page";
     drv.wait_for("the alert, a sheet in the tile", STEP, |d| {
@@ -659,10 +659,11 @@ async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
         .unwrap();
     let at = folder_at(&dump).unwrap();
     assert!(at.ends_with("/project"), "{at}");
-    // Titled by its name, as the shell beside it is by the same directory: two kinds, so no
-    // number tells them apart.
-    assert!(dump.a11y_node("Heading", Some("folder project")).is_some(), "{:#?}", dump.a11y);
-    assert!(dump.a11y_node("Heading", Some("terminal project")).is_some(), "{:#?}", dump.a11y);
+    // A tab of the shell's pane, there being no room beside it at this size, titled by its
+    // name as the shell is by the same directory: two kinds, so no number tells them apart.
+    let tabs = dump.pane_tabs(dump.item("folder").unwrap());
+    let titles: Vec<_> = tabs.iter().map(|t| t.label.as_deref()).collect();
+    assert_eq!(titles, [Some("project"), Some("project")], "{:#?}", dump.a11y);
     assert!(dump.a11y_node("Button", Some("Enclosing folder")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "folder").await;
 
@@ -699,7 +700,7 @@ async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
     let folder = dump.item("folder").unwrap();
     let file = dump.item("file").unwrap();
     // No room at this size for a pane beside the folder's, so a tab of it.
-    assert_eq!(file.pos, folder.pos, "on the folder's pane: {folder:?} {file:?}");
+    assert!(file.same_pane(folder), "on the folder's pane: {folder:?} {file:?}");
     assert!(file.active, "the file tile has the focus");
     stack.shutdown().await;
 }

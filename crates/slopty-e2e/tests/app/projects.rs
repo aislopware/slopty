@@ -297,8 +297,7 @@ what moves its task on; the rest waits under it until it needs reading.\n\n- Dra
 /// run's path shows) a tab of the file's pane, which has no room to split again; light and
 /// dark. Every tile lies inside the window.
 async fn panes_on_the_agent_s_tab(stack: &mut ProjectStack, agent: &str) {
-    let agent_at =
-        |d: &Dump| d.items.iter().find(|i| i.session.as_deref() == Some(agent)).map(|i| i.pos);
+    let agent_at = |d: &Dump| d.items.iter().find(|i| i.session.as_deref() == Some(agent)).cloned();
     let notes = stack.path("repo").join("NOTES.md");
     std::fs::write(&notes, NOTES).unwrap();
     let notes = notes.to_string_lossy().into_owned();
@@ -309,8 +308,8 @@ async fn panes_on_the_agent_s_tab(stack: &mut ProjectStack, agent: &str) {
             let (Some(file), Some(at)) = (d.item("file"), agent_at(d)) else { return false };
             file.active
                 && file.file.as_ref().is_some_and(|f| f.lines > 0)
-                && file.pos[..2] == at[..2]
-                && file.pos[2] != at[2]
+                && file.same_tab(&at)
+                && !file.same_pane(&at)
         })
         .await
         .unwrap();
@@ -322,7 +321,7 @@ async fn panes_on_the_agent_s_tab(stack: &mut ProjectStack, agent: &str) {
         .wait_for("a shell on the notes' pane", STEP, |d| {
             let Some(file) = d.item("file") else { return false };
             shells(d) > before
-                && d.items.iter().any(|i| i.active && i.kind == "terminal" && i.pos == file.pos)
+                && d.items.iter().any(|i| i.active && i.kind == "terminal" && i.same_pane(file))
         })
         .await
         .unwrap();

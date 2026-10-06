@@ -262,13 +262,21 @@ mod tests {
                 && y + h <= dump.window.height,
             "the first in view: {dump:#?}"
         );
-        assert_eq!(second.pos, first.pos, "one pane: {dump:#?}");
+        assert!(
+            second.project == first.project && !second.same_tab(&first),
+            "a title tab of its own, in the project: {dump:#?}"
+        );
         assert!(second.bounds[2] <= 0.0, "the tab behind is not drawn: {dump:#?}");
 
-        // A click on the second's tab on the pane's header shows it with the keyboard; ⌥⌘]
+        // A click on the second's title tab, above the panes, shows it with the keyboard; ⇧⌘]
         // goes round to the first again.
-        let tabs = dump.pane_tabs(&first);
-        assert_eq!(tabs.len(), 2, "a tab per shell: {:#?}", dump.a11y);
+        let mut tabs: Vec<_> = dump
+            .a11y
+            .iter()
+            .filter(|n| n.role == "Tab" && n.bounds[1] + n.bounds[3] <= first.bounds[1] + 0.5)
+            .collect();
+        tabs.sort_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]));
+        assert_eq!(tabs.len(), 2, "a title tab per shell: {:#?}", dump.a11y);
         let [tx, ty, tw, th] = tabs[1].bounds;
         drv.click(tx + tw / 2.0, ty + th / 2.0).await.unwrap();
         drv.wait_for("the click to show the second shell", STEP, |d| {
@@ -276,9 +284,9 @@ mod tests {
         })
         .await
         .unwrap();
-        drv.keys("cmd-alt-]").await.unwrap();
+        drv.keys("cmd-shift-]").await.unwrap();
         let dump = drv
-            .wait_for("⌥⌘] round to the first", STEP, |d| {
+            .wait_for("⇧⌘] round to the first", STEP, |d| {
                 d.focused == format!("terminal:{session}")
             })
             .await
@@ -424,19 +432,15 @@ mod tests {
         crate::gallery::first_shell(drv).await;
 
         // The note comes from the command palette: ⌘⇧P, "new note", ↩ — the same action the
-        // shortcut runs, once the palette is gone and the keyboard is back.
+        // shortcut runs, once the palette is gone and the keyboard is back. An empty field
+        // lists the tiles and machines first (`palette::brief`), so the command is typed for.
         drv.keys("cmd-shift-p").await.unwrap();
-        let dump = drv
-            .wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
             .await
             .unwrap();
-        assert!(
-            dump.a11y_node("ListBoxOption", Some("New note ⇧⌘N")).is_some(),
-            "the lines carry their keys: {:#?}",
-            dump.a11y
-        );
         drv.type_text("new note").await.unwrap();
-        // The best match first, the one ↩ runs: a looser one may follow it.
+        // The best match first, the one ↩ runs, its line carrying its keys: a looser one may
+        // follow it.
         drv.wait_for("the note first", STEP, |d| {
             let first = d.a11y.iter().find(|n| n.role == "ListBoxOption");
             first.and_then(|n| n.label.as_deref()) == Some("New note ⇧⌘N")
@@ -459,7 +463,7 @@ mod tests {
         assert!(md && !file.previewing, "{file:?}");
         let shell = dump.item("terminal").unwrap().clone();
         assert!(note.active, "{dump:#?}");
-        assert_eq!(note.pos, shell.pos, "{dump:#?}");
+        assert!(note.same_pane(&shell), "{dump:#?}");
         let whole = note.bounds;
 
         // ⌥⇧⌘→ moves the note out into a pane of its own on the right, the shell's pane on
@@ -471,7 +475,8 @@ mod tests {
                     return false;
                 };
                 note.active
-                    && note.pos[2] != shell.pos[2]
+                    && note.same_tab(shell)
+                    && !note.same_pane(shell)
                     && note.bounds[0] >= shell.bounds[0] + shell.bounds[2] - 1.0
             })
             .await

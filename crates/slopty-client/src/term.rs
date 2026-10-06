@@ -152,6 +152,8 @@ pub struct TermState {
     driving: bool,
     resync_pending: bool,
     frames: u64,
+    /// The sizes asked of the worker ([`Self::resize`]).
+    resizes: u64,
     /// The command running since the worker said its block's output started, with the prompt
     /// it was typed at.
     running: Option<(LineIndex, String)>,
@@ -278,6 +280,7 @@ impl TermState {
             driving: false,
             resync_pending: false,
             frames: 0,
+            resizes: 0,
             running: None,
             images: BTreeMap::new(),
             image_bytes: 0,
@@ -1309,8 +1312,15 @@ impl TermState {
         runs
     }
 
+    /// How many sizes it asked the worker for: what a sash drag costs the PTY.
+    #[must_use]
+    pub const fn resizes(&self) -> u64 {
+        self.resizes
+    }
+
     /// The client's size changed: resize locally for immediate feedback and ask the worker.
     pub fn resize(&mut self, size: TermSize) -> Vec<Effect> {
+        self.resizes = self.resizes.saturating_add(1);
         self.size = size;
         self.screen.resize(size.cols, size.rows);
         vec![Effect::Request(TermRequest::Resize(size))]

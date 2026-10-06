@@ -276,10 +276,10 @@ mod tests {
         // once the take-back offer for the closed shell has gone (it lasts five seconds).
         let dump =
             drv.wait_for("the undo offer to lapse", STEP, |d| d.notice.is_none()).await.unwrap();
-        // The soft keyboard came and went with each field, and the note halved the shell's
-        // width: a shell shrunk by rows keeps what it showed.
+        // The soft keyboard came and went with each field, and the note took its place beside
+        // the shell, or over it on a phone: a shell resized keeps what it showed.
         assert!(echo_on_screen(&dump), "{:#?}", dump.terminals);
-        golden(drv, &dir, dev, "columns", None).await;
+        golden(drv, &dir, dev, "panes", None).await;
         // The palette as the phone reaches it, from "…".
         open_palette(drv).await;
         golden(drv, &dir, dev, "palette", None).await;

@@ -18,9 +18,10 @@
 //! window's look. A
 //! menu fades in as it drops 4 pt from its button, at once under Reduce Motion.
 //!
-//! On a phone the bar is a navigation bar: the workspace's name alone, as the breadcrumb's
-//! first segment says it (the body's size, the medium weight), and what "+" opens folded into
-//! "…". It has no room for the readouts, and its notices hang under its middle.
+//! On a phone the bar is a navigation bar: the focused tile's title (else the project's name),
+//! which opens the tab's other panes and the project's tabs while there are some
+//! ([`MenuKind::Switch`]), and what "+" opens folded into "…". It has no room for the
+//! readouts, and its notices hang under its middle.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 

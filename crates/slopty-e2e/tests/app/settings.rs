@@ -13,10 +13,20 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// Where the pointer rests before a golden, over nothing that answers a hover.
 const PARK: (f32, f32) = (1.0, 1.0);
 
-/// Click the centre of the node with `role` and `label`.
+/// Click the centre of the node with `role` and `label` in the Settings dialog: a pane's
+/// own tab behind it may share a section's name ("Terminal").
 async fn press(drv: &mut Driver, dump: &Dump, role: &str, label: &str) {
-    let [x, y, w, h] =
-        dump.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{label}")).bounds;
+    let [dx, dy, dw, dh] = dump.a11y_node("Dialog", Some("Settings")).expect("the dialog").bounds;
+    let inside = |b: [f32; 4]| {
+        let [x, y, w, h] = b;
+        x >= dx - 0.5 && y >= dy - 0.5 && x + w <= dx + dw + 0.5 && y + h <= dy + dh + 0.5
+    };
+    let [x, y, w, h] = dump
+        .a11y
+        .iter()
+        .find(|n| n.role == role && n.label.as_deref() == Some(label) && inside(n.bounds))
+        .unwrap_or_else(|| panic!("{label} in the dialog: {:#?}", dump.a11y))
+        .bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
 

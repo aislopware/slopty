@@ -224,6 +224,29 @@ pub enum Command {
         /// Window y in points.
         y: f32,
     },
+    /// Press the primary button at a window point and hold it: a drag's start, whose steps
+    /// are [`Command::DragTo`]s and whose end is a [`Command::Release`].
+    Press {
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
+    },
+    /// Move the pointer with the primary button held since a [`Command::Press`]: a step of a
+    /// drag.
+    DragTo {
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
+    },
+    /// Let the primary button go at a window point.
+    Release {
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
+    },
     /// Draw every time readout (a turn's elapsed time, a record's stamp, an author's age) as at
     /// `at_ms`, Unix milliseconds, from now on, or by the system's clock again for `None`: a
     /// golden that shows a time then holds the same one whenever it is taken.
@@ -623,8 +646,10 @@ pub struct Dump {
     /// `none`.
     pub focused: String,
     /// The name of the project on show.
-    #[serde(default)]
     pub project: String,
+    /// The project on show and its tab on show, by index ([`ItemInfo::project`],
+    /// [`ItemInfo::tab`]); `None` with nothing on show.
+    pub shown: Option<[usize; 2]>,
     /// The theme is the dark variant (`[theme] appearance`, or the system's under `system`).
     pub dark: bool,
     /// Every tile, project by project, tab by tab, pane by pane in reading order.
@@ -816,10 +841,15 @@ pub struct ItemInfo {
     pub worker: String,
     /// Session id for terminals.
     pub session: Option<String>,
-    /// Its place: its project, its tab in the project and its pane in the tab, in reading
-    /// order. Its bounds say where the pane lies.
-    #[serde(default)]
-    pub pos: [usize; 3],
+    /// Its project, by index in the projects' order.
+    pub project: usize,
+    /// Its tab, by index among its project's tabs.
+    pub tab: usize,
+    /// Its pane: the path from the tab's split tree's root, a child's index at each split
+    /// (empty where the tab is one pane). Its bounds say where the pane lies.
+    pub pane: Vec<usize>,
+    /// Its place among its pane's tabs.
+    pub index: usize,
     /// Window rect: x, y, w, h in points (where to click); zero when it is not drawn.
     pub bounds: [f32; 4],
     /// The focused tile.
@@ -829,6 +859,18 @@ pub struct ItemInfo {
     pub file: Option<FileItemInfo>,
     /// A browser tile's page, read from the web view itself.
     pub browser: Option<BrowserItemInfo>,
+}
+
+/// A pane, as [`ItemInfo::place`] says where an item is: what a test keeps to see whether an
+/// item moved, or lies in the same pane as another.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Place {
+    /// The project, by index.
+    pub project: usize,
+    /// The tab, by index in its project.
+    pub tab: usize,
+    /// The pane's path in the tab's tree.
+    pub pane: Vec<usize>,
 }
 
 /// A browser tile.
@@ -935,6 +977,9 @@ pub struct TerminalInfo {
     /// row height. Where a test points at a cell.
     #[serde(default)]
     pub grid: Option<[f32; 4]>,
+    /// The sizes this client asked the worker for the session's PTY: one per whole change of
+    /// its cell count.
+    pub resizes: u64,
 }
 
 impl TerminalInfo {
@@ -1207,6 +1252,20 @@ impl Dump {
         self.items.iter().find(|i| i.kind == kind)
     }
 
+    /// The items of the tab on show, pane by pane.
+    pub fn on_show(&self) -> impl Iterator<Item = &ItemInfo> {
+        self.items.iter().filter(|i| self.shown == Some([i.project, i.tab]))
+    }
+
+    /// The panes of the tab on show that hold an item.
+    #[must_use]
+    pub fn panes_on_show(&self) -> usize {
+        let mut panes: Vec<&[usize]> = self.on_show().map(|i| i.pane.as_slice()).collect();
+        panes.sort_unstable();
+        panes.dedup();
+        panes.len()
+    }
+
     /// The terminal showing `session`.
     #[must_use]
     pub fn terminal(&self, session: &str) -> Option<&TerminalInfo> {
@@ -1244,6 +1303,24 @@ impl Dump {
 }
 
 impl ItemInfo {
+    /// The pane it is in.
+    #[must_use]
+    pub fn place(&self) -> Place {
+        Place { project: self.project, tab: self.tab, pane: self.pane.clone() }
+    }
+
+    /// It is in the same pane as `other`.
+    #[must_use]
+    pub fn same_pane(&self, other: &Self) -> bool {
+        self.place() == other.place()
+    }
+
+    /// It is in the same tab as `other`, in whichever pane.
+    #[must_use]
+    pub const fn same_tab(&self, other: &Self) -> bool {
+        self.project == other.project && self.tab == other.tab
+    }
+
     /// The window point at the middle of the item.
     #[must_use]
     pub const fn center(&self) -> (f32, f32) {

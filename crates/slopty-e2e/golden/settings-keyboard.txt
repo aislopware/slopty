@@ -5,6 +5,9 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Terminal
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
@@ -29,10 +32,14 @@ Heading │ Keyboard
 Button │ Done
 TabPanel │ Keyboard
 Heading │ General
-ListItem │ New terminal │ ⌘T, ⌘N
-Button │ Keys for New terminal │ ⌘T, ⌘N
-ListItem │ New agent… │ ⇧⌘T
-Button │ Keys for New agent… │ ⇧⌘T
+ListItem │ New agent │ ⌘T
+Button │ Keys for New agent │ ⌘T
+ListItem │ New terminal │ ⇧⌘T
+Button │ Keys for New terminal │ ⇧⌘T
+ListItem │ New agent…
+Button │ Keys for New agent…
+ListItem │ Show or hide the tab's terminal │ ⌥⌘T
+Button │ Keys for Show or hide the tab's terminal │ ⌥⌘T
 ListItem │ New note │ ⇧⌘N
 Button │ Keys for New note │ ⇧⌘N
 ListItem │ Add a window or display │ ⌘O
@@ -47,8 +54,6 @@ ListItem │ Review changes
 Button │ Keys for Review changes
 ListItem │ Remove this worktree
 Button │ Keys for Remove this worktree
-ListItem │ Open last offered page
-Button │ Keys for Open last offered page
 ListItem │ Save a copy…
 Button │ Keys for Save a copy…
 ListItem │ Close tile │ ⌘W
@@ -99,12 +104,6 @@ ListItem │ Name this tile │ ⌘E
 Button │ Keys for Name this tile │ ⌘E
 ListItem │ Search in files │ ⇧⌘F
 Button │ Keys for Search in files │ ⇧⌘F
-ListItem │ Into the column on the left │ ⌘[
-Button │ Keys for Into the column on the left │ ⌘[
-ListItem │ Into the column on the right │ ⌘]
-Button │ Keys for Into the column on the right │ ⌘]
-ListItem │ Focus mode │ ⇧⌘↩
-Button │ Keys for Focus mode │ ⇧⌘↩
 ListItem │ Larger text │ ⌘=, ⇧⌘=
 Button │ Keys for Larger text │ ⌘=, ⇧⌘=
 ListItem │ Smaller text │ ⌘-
@@ -140,76 +139,70 @@ Button │ Keys for Update the server
 ListItem │ Show machines in Finder
 Button │ Keys for Show machines in Finder
 Heading │ Layout
-ListItem │ Column to the left │ ⌥⌘←
-Button │ Keys for Column to the left │ ⌥⌘←
-ListItem │ Column to the right │ ⌥⌘→
-Button │ Keys for Column to the right │ ⌥⌘→
-ListItem │ Tile or workspace above │ ⌥⌘↑
-Button │ Keys for Tile or workspace above │ ⌥⌘↑
-ListItem │ Tile or workspace below │ ⌥⌘↓
-Button │ Keys for Tile or workspace below │ ⌥⌘↓
-ListItem │ Move column left │ ⌥⇧⌘←
-Button │ Keys for Move column left │ ⌥⇧⌘←
-ListItem │ Move column right │ ⌥⇧⌘→
-Button │ Keys for Move column right │ ⌥⇧⌘→
+ListItem │ Split right with a terminal │ ⌘D
+Button │ Keys for Split right with a terminal │ ⌘D
+ListItem │ Split down with a terminal │ ⇧⌘D
+Button │ Keys for Split down with a terminal │ ⇧⌘D
+ListItem │ Pane to the left │ ⌥⌘←
+Button │ Keys for Pane to the left │ ⌥⌘←
+ListItem │ Pane to the right │ ⌥⌘→
+Button │ Keys for Pane to the right │ ⌥⌘→
+ListItem │ Pane above │ ⌥⌘↑
+Button │ Keys for Pane above │ ⌥⌘↑
+ListItem │ Pane below │ ⌥⌘↓
+Button │ Keys for Pane below │ ⌥⌘↓
+ListItem │ Move tile left │ ⌥⇧⌘←
+Button │ Keys for Move tile left │ ⌥⇧⌘←
+ListItem │ Move tile right │ ⌥⇧⌘→
+Button │ Keys for Move tile right │ ⌥⇧⌘→
 ListItem │ Move tile up │ ⌥⇧⌘↑
 Button │ Keys for Move tile up │ ⌥⇧⌘↑
 ListItem │ Move tile down │ ⌥⇧⌘↓
 Button │ Keys for Move tile down │ ⌥⇧⌘↓
-ListItem │ Move column to the start │ ⌥⇧⌘↖
-Button │ Keys for Move column to the start │ ⌥⇧⌘↖
-ListItem │ Move column to the end │ ⌥⇧⌘↘
-Button │ Keys for Move column to the end │ ⌥⇧⌘↘
-ListItem │ Workspace above │ ⌥⌘⇞
-Button │ Keys for Workspace above │ ⌥⌘⇞
-ListItem │ Workspace below │ ⌥⌘⇟
-Button │ Keys for Workspace below │ ⌥⌘⇟
-ListItem │ Next column width │ ⌘R
-Button │ Keys for Next column width │ ⌘R
-ListItem │ Fullscreen tile │ ⌃⌘F
-Button │ Keys for Fullscreen tile │ ⌃⌘F
-ListItem │ Center column │ ⌥⌘C
-Button │ Keys for Center column │ ⌥⌘C
-ListItem │ Tabbed column │ ⌥⌘T
-Button │ Keys for Tabbed column │ ⌥⌘T
-ListItem │ Overview │ ⌥⌘O
-Button │ Keys for Overview │ ⌥⌘O
-ListItem │ Focus column 1 │ ⌘1
-Button │ Keys for Focus column 1 │ ⌘1
-ListItem │ Focus column 2 │ ⌘2
-Button │ Keys for Focus column 2 │ ⌘2
-ListItem │ Focus column 3 │ ⌘3
-Button │ Keys for Focus column 3 │ ⌘3
-ListItem │ Focus column 4 │ ⌘4
-Button │ Keys for Focus column 4 │ ⌘4
-ListItem │ Focus column 5 │ ⌘5
-Button │ Keys for Focus column 5 │ ⌘5
-ListItem │ Focus column 6 │ ⌘6
-Button │ Keys for Focus column 6 │ ⌘6
-ListItem │ Focus column 7 │ ⌘7
-Button │ Keys for Focus column 7 │ ⌘7
-ListItem │ Focus column 8 │ ⌘8
-Button │ Keys for Focus column 8 │ ⌘8
-ListItem │ Focus column 9 │ ⌘9
-Button │ Keys for Focus column 9 │ ⌘9
-ListItem │ First workspace │ ⌥⌘1
-Button │ Keys for First workspace │ ⌥⌘1
-ListItem │ Focus workspace 2 │ ⌥⌘2
-Button │ Keys for Focus workspace 2 │ ⌥⌘2
-ListItem │ Focus workspace 3 │ ⌥⌘3
-Button │ Keys for Focus workspace 3 │ ⌥⌘3
-ListItem │ Focus workspace 4 │ ⌥⌘4
-Button │ Keys for Focus workspace 4 │ ⌥⌘4
-ListItem │ Focus workspace 5 │ ⌥⌘5
-Button │ Keys for Focus workspace 5 │ ⌥⌘5
-ListItem │ Focus workspace 6 │ ⌥⌘6
-Button │ Keys for Focus workspace 6 │ ⌥⌘6
-ListItem │ Focus workspace 7 │ ⌥⌘7
-Button │ Keys for Focus workspace 7 │ ⌥⌘7
-ListItem │ Focus workspace 8 │ ⌥⌘8
-Button │ Keys for Focus workspace 8 │ ⌥⌘8
-ListItem │ Focus workspace 9 │ ⌥⌘9
-Button │ Keys for Focus workspace 9 │ ⌥⌘9
+ListItem │ Zoom pane │ ⇧⌘↩
+Button │ Keys for Zoom pane │ ⇧⌘↩
+ListItem │ Equalize panes
+Button │ Keys for Equalize panes
+ListItem │ Previous project │ ⌥⌘⇞
+Button │ Keys for Previous project │ ⌥⌘⇞
+ListItem │ Next project │ ⌥⌘⇟
+Button │ Keys for Next project │ ⌥⌘⇟
+ListItem │ Previous tab │ ⇧⌘[
+Button │ Keys for Previous tab │ ⇧⌘[
+ListItem │ Next tab │ ⇧⌘]
+Button │ Keys for Next tab │ ⇧⌘]
+ListItem │ Last tab │ ⌘9
+Button │ Keys for Last tab │ ⌘9
+ListItem │ Back │ ⌘[
+Button │ Keys for Back │ ⌘[
+ListItem │ Forward │ ⌘]
+Button │ Keys for Forward │ ⌘]
+ListItem │ Previous tab in the pane │ ⌥⌘[
+Button │ Keys for Previous tab in the pane │ ⌥⌘[
+ListItem │ Next tab in the pane │ ⌥⌘]
+Button │ Keys for Next tab in the pane │ ⌥⌘]
+ListItem │ Other tabs…
+Button │ Keys for Other tabs…
+ListItem │ Close other tabs
+Button │ Keys for Close other tabs
+ListItem │ Move to project…
+Button │ Keys for Move to project…
+ListItem │ First tab │ ⌘1
+Button │ Keys for First tab │ ⌘1
+ListItem │ Select tab 2 │ ⌘2
+Button │ Keys for Select tab 2 │ ⌘2
+ListItem │ Select tab 3 │ ⌘3
+Button │ Keys for Select tab 3 │ ⌘3
+ListItem │ Select tab 4 │ ⌘4
+Button │ Keys for Select tab 4 │ ⌘4
+ListItem │ Select tab 5 │ ⌘5
+Button │ Keys for Select tab 5 │ ⌘5
+ListItem │ Select tab 6 │ ⌘6
+Button │ Keys for Select tab 6 │ ⌘6
+ListItem │ Select tab 7 │ ⌘7
+Button │ Keys for Select tab 7 │ ⌘7
+ListItem │ Select tab 8 │ ⌘8
+Button │ Keys for Select tab 8 │ ⌘8
 Heading │ Terminal
 ListItem │ Copy │ ⌘C
 Button │ Keys for Copy │ ⌘C
