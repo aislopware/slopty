@@ -310,8 +310,10 @@ pub enum Intent {
         /// What it says now.
         text: String,
     },
-    /// Send a queued message now, into the turn under way, as a steer would go
-    /// ([`Cap::STEER`]); with no turn under way it starts one.
+    /// Send a queued message now: into the turn under way, as a steer would go, where the agent
+    /// takes one ([`Cap::STEER`]), else first after stopping that turn, as a send by interrupt
+    /// would ([`Delivery::Interrupt`]); with no turn under way it starts one. Any thread that
+    /// holds messages takes it ([`Cap::QUEUE`]).
     Promote {
         /// The intent that sent it.
         pending: IntentId,
@@ -451,11 +453,12 @@ impl Intent {
     #[must_use]
     pub const fn needs(&self) -> &'static str {
         match self {
-            Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
+            Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
             Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
-            | Self::Edit { .. } => Cap::QUEUE,
+            | Self::Edit { .. }
+            | Self::Promote { .. } => Cap::QUEUE,
             Self::Send { delivery: Delivery::Interrupt, .. } | Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,

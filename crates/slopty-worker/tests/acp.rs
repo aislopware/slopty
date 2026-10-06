@@ -277,6 +277,48 @@ mod acp {
         assert_eq!(cancels, 1, "stopped once");
     }
 
+    /// "Send now" on a message held for an agent with no steer of its own goes as one sent by
+    /// interrupt does: the turn under way stops, and the held message goes next, under the
+    /// intent that queued it, as the person's.
+    #[tokio::test]
+    async fn a_held_message_sent_now_stops_the_turn_and_goes_next() {
+        let rig = Rig::new();
+        let lines = lines("turns.jsonl");
+        let resent = lines[4..13].iter().map(|l| l.replace("Say hello.", "Say hello instead."));
+        let composed: Vec<String> =
+            lines[..13].iter().chain(&lines[35..44]).cloned().chain(resent).collect();
+        rig.replay_lines(&composed);
+        let (acp, _served) = rig.serve();
+        let outcome = acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let act = |id, intent: &Intent| -> Outcome {
+            let decide = |s: &ThreadState| (acp.decide(s, id, intent, rig.by()), Vec::new());
+            rig.host.intent(thread, id, decide).unwrap()
+        };
+        let promote = |pending| Intent::Promote { pending };
+        assert_eq!(promote(IntentId::new()).needs(), Cap::QUEUE);
+
+        rig.send(&acp, thread, "Remove it again.");
+        rig.until(thread, "the call's ask", asking(1)).await;
+        let queued = IntentId::new();
+        let held = Intent::Send {
+            text: "Say hello instead.".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![],
+        };
+        assert_eq!(act(queued, &held), Outcome::Done);
+        rig.until(thread, "the message held", |s: &ThreadState| s.pending.len() == 1).await;
+        assert_eq!(act(IntentId::new(), &promote(queued)), Outcome::Done);
+        let state =
+            rig.until(thread, "the message's turn", turn_ended(3, TurnState::Complete)).await;
+        assert_eq!(state.turns[1].state, TurnState::Interrupted, "the turn under way stopped");
+        assert!(state.pending.is_empty(), "it went");
+        let (text, intent) = users(&state).pop().unwrap();
+        assert_eq!((text.as_str(), intent), ("Say hello instead.", Some(queued)), "as queued");
+        assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
+    }
+
     /// The person's stop holds what is queued: the turn is cancelled, the message queued says it
     /// waits on the stop, and no prompt follows once the cancelled turn ends. Their next message
     /// lets it go first, and theirs after it, each as its own turn.

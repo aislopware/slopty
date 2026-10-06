@@ -115,6 +115,10 @@ enum ThreadAsk {
         intent: IntentId,
         text: String,
     },
+    /// Send the message held for `intent` now, first after stopping the turn under way.
+    Promote {
+        intent: IntentId,
+    },
     Interrupt,
     Answer {
         ask: AskId,
@@ -255,12 +259,15 @@ impl Acp {
                     ThreadAsk::Send { text, attachments, intent }
                 }
             }
-            Intent::Withdraw { pending } | Intent::Edit { pending, .. }
+            Intent::Withdraw { pending }
+            | Intent::Edit { pending, .. }
+            | Intent::Promote { pending }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
                 return refused("That message is not waiting");
             }
             Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
+            Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
             Intent::Edit { pending, text } => {
                 ThreadAsk::Edit { intent: *pending, text: text.clone() }
             }
