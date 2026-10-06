@@ -282,6 +282,28 @@ fn cmd_shift_o_lists_the_symbols_narrows_them_and_goes_to_one(cx: &mut TestAppCo
     assert!(text(&view, cx).contains("fn x()"), "the editor has the keyboard again");
 }
 
+/// The symbols list keeps to the file's room: its own measure where the file is wide, the
+/// file's width less its margins in a column beside a board, never past the file's edge.
+#[gpui::test]
+fn the_symbols_list_keeps_inside_a_narrow_file(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
+    arrives(&view, cx, text_read("fn main() {}", true, 1));
+    for width in [800.0_f32, 300.0, 200.0] {
+        cx.simulate_resize(gpui::size(px(width), px(500.0)));
+        select(&view, cx, 0..0);
+        keys(cx, "cmd-shift-o");
+        assert!(view.read_with(cx, |v, _| v.listing_symbols()), "{width}: listing");
+        let list = cx.debug_bounds("file-symbols").expect("the symbols list");
+        assert!(f32::from(list.left()) >= 0.0, "{width}: inside the file's left edge {list:?}");
+        assert!(f32::from(list.right()) <= width, "{width}: inside its right edge {list:?}");
+        if width >= 800.0 {
+            let measure = Theme::default().typography.ui_size * 24.0;
+            assert!((f32::from(list.size.width) - measure).abs() < 0.5, "its own measure {list:?}");
+        }
+        keys(cx, "escape");
+    }
+}
+
 #[gpui::test]
 fn cmd_d_adds_the_next_match_and_cmd_shift_l_takes_every_one(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/src/lib.rs");

@@ -2,7 +2,7 @@
 //! the thread says when the worker turns it down: a refusal in words, a denial with a reason,
 //! the agent's own TUI for a request, an exited agent taken up again, and one asleep woken.
 
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, TestAppContext, px};
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{Intent, IntentDone, Outcome, ThreadRequest};
@@ -171,6 +171,47 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
         intents(&sent),
         [Intent::Answer { ask: AskId("a".to_owned()), choice: "stop".to_owned(), message: None }]
     );
+}
+
+/// In a column beside a board (312 pt) long answers wrap among themselves rather than push
+/// the primary out of the card: every answer stands inside the card, and the one solid ends
+/// the last line.
+#[gpui::test]
+fn long_answers_wrap_inside_a_narrow_card(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Choice, Effect};
+
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let mut asks = approval("a");
+    let choice = |id: &str, label: &str, effect| Choice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    asks.options = vec![
+        choice("session", "Yes, and don't ask again for this command", Effect::Answer),
+        choice("deny", "No, and tell Codex what to do differently", Effect::Deny),
+        choice("allow", "Yes, run it once", Effect::Allow),
+    ];
+    state.requests = vec![asks];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(px(312.0), px(600.0)));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let card = cx.debug_bounds("request-a").expect("the card");
+    let answers = ["answer-a-session", "answer-a-deny", "answer-a-allow"];
+    for answer in answers {
+        let b = cx.debug_bounds(answer).unwrap_or_else(|| panic!("{answer} is on show"));
+        assert!(b.left() >= card.left() && b.right() <= card.right(), "{answer} {b:?} in {card:?}");
+    }
+    let allow = cx.debug_bounds("answer-a-allow").expect("allow");
+    let session = cx.debug_bounds("answer-a-session").expect("the session's answer");
+    assert!(allow.top() >= session.bottom(), "they wrap: {session:?} over {allow:?}");
 }
 
 /// A Codex request with nothing to answer here is handed to Codex's own TUI: the button says

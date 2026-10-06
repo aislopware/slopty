@@ -91,8 +91,46 @@ const ADD_TO_MESSAGE: &str = "Add to message";
 /// The foot's way to keep every file as it is.
 const MARK_REVIEWED: &str = "Mark reviewed";
 
-/// How wide a letter of the foot's words is, as a share of their size.
-const FOOT_LETTER: f32 = 0.55;
+/// About how wide a letter of the findings' words is, as a share of their size: how tall the
+/// band would be drawn whole is guessed from it before it is laid out.
+const LETTER: f32 = 0.55;
+
+/// What the review says while the change is read.
+const READING: &str = "Reading the changes\u{2026}";
+
+/// The empty review's way to the widest span of its kind.
+const fn widen_words(scope: Scope) -> &'static str {
+    match scope {
+        Scope::WholeBranch => "Show the whole branch",
+        Scope::LastTurn | Scope::SinceReviewed | Scope::AllTurns | Scope::Uncommitted => {
+            "Show all turns"
+        }
+    }
+}
+
+/// The foot's "Add to message", by its key in its row.
+const FOOT_ADD: &str = "add";
+
+/// The foot's "Mark reviewed", by its key in its row.
+const FOOT_MARK: &str = "mark";
+
+/// What the other spans give way to in the scope bar: only Commit outranks them.
+const SCOPE_PRIORITY: kit::Priority = kit::Priority(176);
+
+/// The scope bar's refresh, by its key in its row.
+const BAR_REFRESH: &str = "refresh";
+
+/// The scope bar's way to the agent's own review.
+const BAR_AGENT: &str = "agent";
+
+/// The scope bar's pull request.
+const BAR_PULL: &str = "pull";
+
+/// The scope bar's way to the commit sheet.
+const BAR_COMMIT: &str = "commit";
+
+/// The words of the way to the commit sheet.
+const COMMIT: &str = "Commit\u{2026}";
 
 /// What the tile tells its host.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -251,6 +289,12 @@ pub struct ReviewView {
     adds: u64,
     /// The foot's "More" menu is open.
     more_open: bool,
+    /// What the foot left out at its last layout, which its "More" offers.
+    foot_dropped: kit::Dropped,
+    /// The scope bar's "More" menu is open.
+    scopes_open: bool,
+    /// What the scope bar left out at its last layout, which its "More" offers.
+    scopes_dropped: kit::Dropped,
     /// The agent's own review, while it runs.
     reviewing: Option<Reviewing>,
     /// How the last one came out, until the person lets it go.
@@ -371,6 +415,9 @@ impl ReviewView {
             adding: None,
             adds: 0,
             more_open: false,
+            foot_dropped: kit::Dropped::default(),
+            scopes_open: false,
+            scopes_dropped: kit::Dropped::default(),
             reviewing: None,
             came: None,
             pinned: None,
@@ -1220,49 +1267,133 @@ impl ReviewView {
         crate::a11y::tab_stop(el, s.focus)
     }
 
+    /// The switch of spans, then the bar's actions at its end: one row that fits the tile
+    /// (`kit::priority_row`), each item at its shaped width. The span on show and the refresh
+    /// never leave; the pull request, the agent's review, the other spans and Commit leave in
+    /// that order and wait behind "More" (`docs/decisions/ui.md`, "How surfaces adapt to their
+    /// room").
     fn scope_bar(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
+        let mut row = kit::priority_row("review-scope-row")
+            .h_full()
+            .gap(self.z(theme.spacing.xxs))
+            .dropped(&self.scopes_dropped);
+        for scope in self.scopes().iter().copied() {
+            let on = scope == self.scope;
+            let id = format!("review-scope-{scope:?}");
+            let selector = id.clone();
+            let tab = div()
+                .id(ElementId::Name(id.into()))
+                .debug_selector(move || selector)
+                .role(Role::Tab)
+                .aria_label(scope.label())
+                .aria_selected(on)
+                .flex_none()
+                .whitespace_nowrap()
+                .px(self.z(theme.spacing.sm))
+                .py(self.z(theme.spacing.xxs))
+                .rounded(self.z(theme.radii.sm))
+                .cursor_pointer()
+                .when(on, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .when(!on, |el| {
+                    el.text_color(hsla(s.text_secondary))
+                        .hover(move |el| el.text_color(hsla(s.text)))
+                })
+                .child(scope.label())
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)));
+            let priority = if on { kit::Priority::ESSENTIAL } else { SCOPE_PRIORITY };
+            row = row.item(scope.label(), priority, tab);
+        }
+        let mut row = row.end();
+        if let Some(refresh) = self.refresh_part(cx) {
+            row = row.item(BAR_REFRESH, kit::Priority::ESSENTIAL, refresh);
+        }
+        if let Some(review) = self.review_part(cx) {
+            row = row.item(BAR_AGENT, kit::Priority(144), review);
+        }
+        if let Some(pull) = self.pull_part(cx) {
+            row = row.item(BAR_PULL, kit::Priority(112), pull);
+        }
+        if let Some(commit) = self.commit_part(cx) {
+            row = row.item(BAR_COMMIT, kit::Priority::HIGH, commit);
+        }
         div()
             .id("review-scopes")
             .role(Role::TabList)
             .flex_none()
             .w_full()
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xxs))
+            .h(self.z(theme.density.header))
             .px(self.z(theme.spacing.md))
-            .min_h(self.z(theme.density.header))
             .border_b(kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
-            .children(self.scopes().iter().copied().map(|scope| {
-                let on = scope == self.scope;
-                let id = format!("review-scope-{scope:?}");
-                let selector = id.clone();
-                div()
-                    .id(ElementId::Name(id.into()))
-                    .debug_selector(move || selector)
-                    .role(Role::Tab)
-                    .aria_label(scope.label())
-                    .aria_selected(on)
-                    .px(self.z(theme.spacing.sm))
-                    .py(self.z(theme.spacing.xxs))
-                    .rounded(self.z(theme.radii.sm))
-                    .cursor_pointer()
-                    .when(on, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                    .when(!on, |el| {
-                        el.text_color(hsla(s.text_secondary))
-                            .hover(move |el| el.text_color(hsla(s.text)))
-                    })
-                    .child(scope.label())
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)))
-            }))
-            .child(div().flex_1())
-            .children(self.refresh_part(cx))
-            .children(self.review_part(cx))
-            .children(self.git_part(cx))
+            .child(row.menu(self.scopes_more(cx)))
             .into_any_element()
+    }
+
+    /// "More" at the scope bar's end, while something left it, and its menu while open: what
+    /// left, each doing what it does in the bar.
+    fn scopes_more(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let button = kit::icon_button(theme, "review-scopes-more", Symbol::Ellipsis, "More")
+            .aria_expanded(self.scopes_open)
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.scopes_open = !this.scopes_open;
+                cx.notify();
+            }));
+        let this = cx.entity().downgrade();
+        let menu = self.scopes_open.then(|| {
+            let mut menu = kit::Menu::new();
+            let dropped = self.scopes_dropped.keys();
+            for scope in self.scopes().iter().copied() {
+                if !dropped.iter().any(|k| k == scope.label()) {
+                    continue;
+                }
+                let to = this.clone();
+                let key = format!("{scope:?}");
+                menu.push(kit::MenuItem::new(key, scope.label(), move |_w, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.scopes_open = false;
+                        this.set_scope(scope, cx);
+                    });
+                }));
+            }
+            if dropped.iter().any(|k| k == BAR_AGENT)
+                && self.reviewing.is_none()
+                && let Some((_, name)) = self.door_of(cx)
+            {
+                let to = this.clone();
+                let words = format!("Review with {name}");
+                menu.push(kit::MenuItem::new("agent", words, move |_w, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.scopes_open = false;
+                        this.review_with_agent(cx);
+                    });
+                }));
+            }
+            if dropped.iter().any(|k| k == BAR_PULL || k == BAR_COMMIT) {
+                let to = this.clone();
+                menu.push(kit::MenuItem::new("commit", COMMIT, move |window, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.scopes_open = false;
+                        this.open_commit(window, cx);
+                    });
+                }));
+            }
+            let panel = kit::MenuPanel::new("review-scopes-more", "More", Rc::new(menu), theme, {
+                move |window, cx| {
+                    let _gone = this.update(cx, |this, cx| {
+                        this.scopes_open = false;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    });
+                }
+            });
+            gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopRight).child(panel))
+                .with_priority(crate::palette::Layer::Submenu.priority())
+        });
+        div().relative().flex_none().child(button).children(menu).into_any_element()
     }
 
     /// The spans the switch offers: a thread's turns, or a folder's working tree.
@@ -1404,14 +1535,14 @@ impl ReviewView {
     }
 
     /// About how tall the findings are drawn whole, in points at rest: each piece of their
-    /// words in lines of the band's width at [`FOOT_LETTER`] of the small size a letter.
+    /// words in lines of the band's width at [`LETTER`] of the small size a letter.
     fn findings_height(&self) -> f32 {
         let theme = &self.theme;
         let (sp, size) = (theme.spacing, theme.typography.small());
         let line = size * theme.typography.markdown_line_height;
         // The band's pads, a row's, the icon and the ✕ either side of the words, and their gaps.
         let inset = (sp.md + sp.sm + theme.typography.icon() + sp.xs) * 2.0;
-        let per_line = ((self.width - inset) / (size * FOOT_LETTER)).max(1.0);
+        let per_line = ((self.width - inset) / (size * LETTER)).max(1.0);
         let lines = |words: &str| {
             let letters = f32::from(u16::try_from(words.chars().count()).unwrap_or(u16::MAX));
             (letters / per_line).ceil().max(1.0)
@@ -1621,9 +1752,9 @@ impl ReviewView {
             .on_click(then)
     }
 
-    /// At the scope bar's end: the branch's pull request where it stands, and the way to the
-    /// commit sheet.
-    fn git_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    /// The branch's pull request, once this client has heard of it: its number and where it
+    /// stands, which open the commit sheet.
+    fn pull_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let repo = self.repo(cx)?;
@@ -1651,18 +1782,15 @@ impl ReviewView {
                 .child(div().text_color(hsla(tone)).child(SharedString::from(words)))
                 .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
         });
+        pull.map(IntoElement::into_any_element)
+    }
+
+    /// The way to the commit sheet on the reviewed repository.
+    fn commit_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.repo(cx)?;
         Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .children(pull)
-                .child(
-                    self.action("review-commit".to_owned(), "Commit\u{2026}", false).on_click(
-                        cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)),
-                    ),
-                )
+            self.action("review-commit".to_owned(), COMMIT, false)
+                .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
                 .into_any_element(),
         )
     }
@@ -2101,8 +2229,9 @@ impl ReviewView {
     }
 
     /// The foot: what to do with the comments ("Add to message", "Send N comments") and
-    /// "Mark reviewed". What does not fit the tile's width goes behind "More" beside the send,
-    /// which always shows.
+    /// "Mark reviewed", one row that fits the tile at the buttons' shaped widths
+    /// (`kit::priority_row`). The send never leaves; "Mark reviewed", then "Add to message",
+    /// go behind "More" when there is no room for them.
     fn foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -2114,75 +2243,60 @@ impl ReviewView {
             n => format!("Send {n} comments"),
         };
         let mark = !self.model.listed().is_empty();
-        let fits = self.foot_fits(n > 0, &send_words, mark);
         let selector = "review-send";
-        let add = || {
-            self.action("review-add".to_owned(), ADD_TO_MESSAGE, false)
-                .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)))
-        };
-        let marked = || {
-            self.action("review-mark".to_owned(), MARK_REVIEWED, n == 0)
-                .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx)))
-        };
-        let more = (!fits).then(|| self.foot_more(n > 0, mark, cx));
+        let mut row = kit::priority_row("review-foot-row")
+            .h_full()
+            .gap(self.z(theme.spacing.sm))
+            .dropped(&self.foot_dropped)
+            .end();
+        if n > 0 {
+            let add = self
+                .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
+            let send = div()
+                .id(selector)
+                .debug_selector(move || selector.to_owned())
+                .role(Role::Button)
+                .aria_label(SharedString::from(send_words.clone()))
+                .flex_none()
+                .whitespace_nowrap()
+                .px(self.z(theme.spacing.md))
+                .py(self.z(theme.spacing.xs))
+                .rounded(self.z(theme.radii.sm))
+                .map(|el| kit::solid_pressable(el, theme))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .cursor_pointer()
+                .child(SharedString::from(send_words))
+                .on_click(cx.listener(|this, _ev, _w, cx| this.send_comments(cx)));
+            row = row.item(FOOT_ADD, kit::Priority(160), add).item(
+                "send",
+                kit::Priority::ESSENTIAL,
+                send,
+            );
+        }
+        if mark {
+            let marked = self
+                .action("review-mark".to_owned(), MARK_REVIEWED, n == 0)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx)));
+            // With nothing to send it is the foot's one action, and stays.
+            let priority = if n == 0 { kit::Priority::ESSENTIAL } else { kit::Priority::MEDIUM };
+            row = row.item(FOOT_MARK, priority, marked);
+        }
         div()
             .flex_none()
             .w_full()
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.sm))
+            .h(self.z(kit::Row::Two.height(theme)))
             .px(self.z(theme.spacing.md))
-            .min_h(self.z(kit::Row::Two.height(theme)))
             .border_t(kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
-            .child(div().flex_1())
-            .when(n > 0 && fits, |el| el.child(add()))
-            .when(n > 0, |el| {
-                el.child(
-                    div()
-                        .id(selector)
-                        .debug_selector(move || selector.to_owned())
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(send_words.clone()))
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .px(self.z(theme.spacing.md))
-                        .py(self.z(theme.spacing.xs))
-                        .rounded(self.z(theme.radii.sm))
-                        .map(|el| kit::solid_pressable(el, theme))
-                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        .cursor_pointer()
-                        .child(SharedString::from(send_words))
-                        .on_click(cx.listener(|this, _ev, _w, cx| this.send_comments(cx))),
-                )
-            })
-            .when(mark && (fits || n == 0), |el| el.child(marked()))
-            .children(more)
+            .child(row.menu(self.foot_more(cx)))
             .into_any_element()
     }
 
-    /// Whether the foot's buttons all fit the tile at rest: each one's words at about
-    /// [`FOOT_LETTER`] of the small size a letter, with its pads, the gaps between them and
-    /// the foot's own pads. With no comments "Mark reviewed" stands alone and always fits.
-    fn foot_fits(&self, comments: bool, send: &str, mark: bool) -> bool {
-        if !comments {
-            return true;
-        }
-        let theme = &self.theme;
-        let (sp, letter) = (theme.spacing, theme.typography.small() * FOOT_LETTER);
-        let words = |w: &str| f32::from(u16::try_from(w.chars().count()).unwrap_or(u16::MAX));
-        let add = words(ADD_TO_MESSAGE).mul_add(letter, sp.sm * 2.0);
-        let send = words(send).mul_add(letter, sp.md * 2.0);
-        let mut needed = sp.md.mul_add(2.0, add + send + sp.sm);
-        if mark {
-            needed += words(MARK_REVIEWED).mul_add(letter, sp.sm * 2.0) + sp.sm;
-        }
-        needed <= self.width
-    }
-
-    /// "More" at the foot's end, and its menu while open: the foot's buttons that did not fit.
-    fn foot_more(&self, comments: bool, mark: bool, cx: &Context<Self>) -> AnyElement {
+    /// "More" at the foot's end, while something left it, and its menu while open: the foot's
+    /// buttons that did not fit.
+    fn foot_more(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let button = kit::icon_button(theme, "review-more", Symbol::Ellipsis, "More")
             .aria_expanded(self.more_open)
@@ -2193,13 +2307,13 @@ impl ReviewView {
         let this = cx.entity().downgrade();
         let menu = self.more_open.then(|| {
             let mut menu = kit::Menu::new();
-            if comments {
+            if self.foot_dropped.contains(FOOT_ADD) {
                 let to = this.clone();
                 menu.push(kit::MenuItem::new("add", ADD_TO_MESSAGE, move |_w, cx| {
                     let _gone = to.update(cx, Self::add_to_message);
                 }));
             }
-            if mark {
+            if self.foot_dropped.contains(FOOT_MARK) {
                 let to = this.clone();
                 menu.push(kit::MenuItem::new("mark", MARK_REVIEWED, move |_w, cx| {
                     let _gone = to.update(cx, Self::mark_reviewed);
@@ -2223,29 +2337,47 @@ impl ReviewView {
     fn body(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let empty = |words: String| {
+        let k = self.zoom;
+        // What the tile says instead of a diff, one block in its middle (`kit::notice`), with
+        // the one next step where there is one.
+        let empty = |mark: AnyElement, words: String, next: Option<AnyElement>| {
             div()
                 .id("review-empty")
                 .debug_selector(|| "review-empty".to_owned())
                 .role(Role::Status)
                 .aria_label(SharedString::from(words.clone()))
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(words))
+                .child(kit::notice(theme, k, mark, words, None).children(next))
                 .into_any_element()
         };
+        let diff_mark =
+            || kit::notice_mark(theme, Symbol::PlusForwardslashMinus, k).into_any_element();
         let Some(review) = self.model.review() else {
-            return empty("Reading the changes…".to_owned());
+            let reading = crate::icons::notice_status(
+                theme,
+                crate::icons::Status::Running,
+                hsla(s.text_muted),
+                k,
+            );
+            return empty(reading.into_any_element(), READING.to_owned(), None);
         };
         if let Some(why) = &review.absent {
-            return empty(why.clone());
+            return empty(diff_mark(), why.clone(), None);
         }
         if review.files.is_empty() {
-            return empty(self.scope.nothing().to_owned());
+            // The widest span of the kind is the one next step from a narrower one that holds
+            // nothing: the change may lie in an earlier turn, or already be committed.
+            let widest = self.scopes().last().copied().filter(|widest| *widest != self.scope);
+            let next = widest.map(|widest| {
+                kit::notice_action(theme, "review-widen", widen_words(widest))
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(widest, cx)))
+                    .into_any_element()
+            });
+            return empty(diff_mark(), self.scope.nothing().to_owned(), next);
         }
         div()
             .flex_1()

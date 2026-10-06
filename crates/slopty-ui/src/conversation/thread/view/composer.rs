@@ -46,6 +46,34 @@ pub(super) struct Whereabouts {
     pub removed: u32,
 }
 
+/// Where a thread's agent works, for the tile's header to say after the title
+/// ([`ThreadView::place_of`]).
+///
+/// The checkout by its folder's name and the branch, and whether a press opens the commit
+/// sheet ([`ThreadView::open_commit`]) on that repository.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ThreadPlace {
+    /// The checkout's folder name.
+    pub checkout: Option<String>,
+    /// Its branch, when the worker says.
+    pub branch: Option<String>,
+    /// The place is a repository a press can commit in.
+    pub commits: bool,
+}
+
+impl ThreadView {
+    /// Where the agent works, for the tile's header; `None` while nothing is known of it.
+    #[must_use]
+    pub fn place_of(&self, cx: &App) -> Option<ThreadPlace> {
+        let here = self.where_it_works(cx);
+        (here.checkout.is_some() || here.branch.is_some()).then(|| ThreadPlace {
+            checkout: here.checkout,
+            branch: here.branch,
+            commits: self.repo(cx).is_some(),
+        })
+    }
+}
+
 /// The fact that names how far a thread's sandbox reaches (Codex's), as the worker sets it.
 const SANDBOX: &str = "sandbox";
 
@@ -220,7 +248,7 @@ impl ThreadView {
             return Some(div().child("Handing over once it rests").into_any_element());
         }
         Some(
-            self.button("thread-handoff", "Continue in the terminal", ButtonKind::Ghost)
+            self.button("thread-handoff", HANDOFF, ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, _w, cx| {
                     let _id = this.intent(Intent::Handoff, cx);
                 }))
@@ -246,43 +274,33 @@ impl ThreadView {
             .child(kit::fit_label(format!("thread-fact-{name}"), words, theme).fixed())
     }
 
-    /// Where the thread works, in the composer's toolbar after its chips: the checkout, its
-    /// branch, and what the thread changed (which opens the review). It takes the room between
-    /// the chips and the meter and gives it up first, so the controls never shift.
-    ///
-    /// A row of its own over the field made the shell two strata; folded into the toolbar the
-    /// composer is one shell with no internal line.
-    ///
-    /// No mark of the agent at work: the thread's own working line says it in words, with
-    /// how long, and an unlabelled ring in the card's corner said nothing more.
-    fn where_facts(&self, cx: &Context<Self>) -> Div {
+    /// Where the thread works, in the composer's foot after its chips: the checkout and its
+    /// branch, which open the commit sheet on that repository. Whole or not at all: it leaves
+    /// the foot before it would fade to a glyph.
+    fn place(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let here = self.where_it_works(cx);
-        // While a request is on show its card's head says what changed; one place at a time.
-        let changes = self
-            .shown_waiting(cx)
-            .is_none()
-            .then(|| {
-                let edited = self.state(cx).map(activity::edited).unwrap_or_default();
-                self.changes_chip("thread-changes", (here.added, here.removed), &edited, cx)
-            })
-            .flatten();
+        if here.checkout.is_none() && here.branch.is_none() {
+            return None;
+        }
         let place = div()
-            .min_w_0()
-            .flex_shrink_1()
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.sm))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
             // The checkout by its name alone: a folder's glyph before it said nothing its name
             // and its place do not. The branch keeps its glyph, the one cue that tells a
             // branch's name from a folder's.
-            .children(here.checkout.map(|c| self.fact("checkout", None, c).flex_shrink_1()))
-            .children(here.branch.map(|b| {
-                self.fact("branch", Some(Symbol::ArrowTriangleBranch), b).flex_shrink_1()
-            }));
-        // Where it works opens the commit sheet on that repository.
-        let place = if self.repo(cx).is_some() {
+            .children(here.checkout.map(|c| self.fact("checkout", None, c)))
+            .children(
+                here.branch.map(|b| self.fact("branch", Some(Symbol::ArrowTriangleBranch), b)),
+            );
+        if self.repo(cx).is_none() {
+            return Some(place.into_any_element());
+        }
+        Some(
             crate::a11y::tab_stop(
                 place
                     .id("thread-git")
@@ -297,24 +315,19 @@ impl ThreadView {
                     .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
                 s.focus,
             )
-            .into_any_element()
-        } else {
-            place.into_any_element()
-        };
-        div()
-            .debug_selector(|| "thread-where".to_owned())
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            .child(place)
-            .children(self.pull_chip(cx))
-            .children(changes)
-            .children(self.screen_chip(cx))
+            .into_any_element(),
+        )
+    }
+
+    /// What the thread changed, in the foot; while a request is on show its card's head says
+    /// it instead, one place at a time.
+    fn changes(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.shown_waiting(cx).is_some() {
+            return None;
+        }
+        let here = self.where_it_works(cx);
+        let edited = self.state(cx).map(activity::edited).unwrap_or_default();
+        self.changes_chip("thread-changes", (here.added, here.removed), &edited, cx)
     }
 
     /// What the thread changed, `(added, removed)` lines, as counts that open the review;
@@ -374,7 +387,7 @@ impl ThreadView {
                     .id(id)
                     .debug_selector(move || id.to_owned())
                     .role(Role::Button)
-                    .aria_label("Review the changes")
+                    .aria_label(REVIEW_CHANGES)
                     .flex_none()
                     // A name gives up width before the place does; counts never.
                     .when(named, |el| el.flex_shrink_1().min_w_0())
@@ -720,7 +733,7 @@ impl ThreadView {
         let typed = !self.composer.read(cx).value().trim().is_empty();
         let ready = offered && typed && self.working(cx) && !self.composing.editing();
         ready.then(|| {
-            self.button("thread-interrupt-send", "Interrupt and send", ButtonKind::Ghost)
+            self.button("thread-interrupt-send", INTERRUPT_SEND, ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, window, cx| {
                     this.submit(Delivery::Interrupt, window, cx);
                 }))
@@ -855,26 +868,74 @@ impl ThreadView {
             .child(
                 div()
                     .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.xxs))
                     .px(self.z(theme.spacing.sm))
                     .pb(self.z(theme.spacing.sm))
                     .pt(self.z(theme.spacing.xs))
-                    .when(!editing, |el| el.child(self.add_button(cx)))
-                    .children(self.model_chip(cx))
-                    .children(self.effort_chip(cx))
-                    .children(self.mode_chip(cx))
-                    .children(self.tasks_chip(cx))
-                    .child(self.where_facts(cx))
-                    .children(self.meter(cx))
-                    .children(self.handoff_button(cx))
-                    .children(self.interrupt_send(cx))
-                    .child(self.send_button(cx)),
+                    .child(self.composer_foot(editing, cx)),
             )
             .into_any_element()
     }
+
+    /// The composer's foot, one row that fits the room it is given (`kit::priority_row`): the
+    /// "+" and the send never leave; the rest leave the least needed first (the handoff, the
+    /// place, the screen, the pull request, the mode, effort and work, the changes, the meter,
+    /// the model) and wait in the "+" menu, so Send never leaves the card
+    /// (`docs/decisions/ui.md`, "How surfaces adapt to their room").
+    fn composer_foot(&self, editing: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let row = kit::priority_row("thread-foot")
+            .h(self.z(theme.density.control))
+            .gap(self.z(theme.spacing.xxs))
+            .dropped(&self.foot_dropped);
+        let item =
+            |row: kit::PriorityRow, (key, priority): (&'static str, kit::Priority), el| match el {
+                Some(el) => row.item(key, priority, el),
+                None => row,
+            };
+        let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
+        let row = item(row, FOOT_MODEL, self.model_chip(cx));
+        let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
+        let row = item(row, FOOT_MODE, self.mode_chip(cx));
+        let row = item(row, FOOT_TASKS, self.tasks_chip(cx));
+        let row = item(row, FOOT_PLACE, self.place(cx));
+        let row = item(row, FOOT_PULL, self.pull_chip(cx));
+        let row = item(row, FOOT_CHANGES, self.changes(cx));
+        let row = item(row, FOOT_SCREEN, self.screen_chip(cx));
+        let row = item(row.end(), FOOT_METER, self.meter(cx));
+        let row = item(row, FOOT_HANDOFF, self.handoff_button(cx));
+        let row = item(row, FOOT_INTERRUPT, self.interrupt_send(cx));
+        let row = item(row, FOOT_SEND, Some(self.send_button(cx)));
+        row.into_any_element()
+    }
 }
+
+/// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
+/// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
+const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
+/// The model.
+const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));
+/// How full the context is.
+const FOOT_METER: (&str, kit::Priority) = ("meter", kit::Priority(160));
+/// "Interrupt and send", while something is typed during a turn.
+const FOOT_INTERRUPT: (&str, kit::Priority) = ("interrupt", kit::Priority(152));
+/// What the thread changed, the way to the review.
+const FOOT_CHANGES: (&str, kit::Priority) = ("changes", kit::Priority(144));
+/// The effort.
+const FOOT_EFFORT: (&str, kit::Priority) = ("effort", kit::Priority::MEDIUM);
+/// The mode.
+const FOOT_MODE: (&str, kit::Priority) = ("mode", kit::Priority::MEDIUM);
+/// The background work.
+const FOOT_TASKS: (&str, kit::Priority) = ("tasks", kit::Priority::MEDIUM);
+/// The branch's pull request.
+const FOOT_PULL: (&str, kit::Priority) = ("pull", kit::Priority(112));
+/// The agent's screen.
+const FOOT_SCREEN: (&str, kit::Priority) = ("screen", kit::Priority(96));
+/// Where it works: the checkout and the branch, whole or not at all.
+const FOOT_PLACE: (&str, kit::Priority) = ("place", kit::Priority::LOW);
+/// "Continue in the terminal".
+const FOOT_HANDOFF: (&str, kit::Priority) = ("handoff", kit::Priority(48));
+/// The send.
+const FOOT_SEND: (&str, kit::Priority) = ("send", kit::Priority::ESSENTIAL);
 
 impl ThreadView {
     /// The "+" at the foot's start and the menu it opens: attach files, then the two menus
@@ -961,6 +1022,7 @@ impl ThreadView {
                 });
             }));
         }
+        self.left_out(&mut menu, cx);
         let panel = kit::MenuPanel::new(
             ADD_MENU,
             ADD_LABEL,
@@ -979,6 +1041,134 @@ impl ThreadView {
             .into_any_element()
     }
 }
+
+impl ThreadView {
+    /// What the foot left out for want of room, at the "+" menu's end after a separator, each
+    /// doing what its chip does ([`Self::composer_foot`]). The mode and the effort are in the menu
+    /// already.
+    fn left_out(&self, menu: &mut kit::Menu, cx: &Context<Self>) {
+        let dropped = self.foot_dropped.keys();
+        let this = cx.entity().downgrade();
+        let state = self.state(cx);
+        let mut rows: Vec<kit::MenuItem> = Vec::new();
+        // The place and the pull request both open the commit sheet: one row for the two.
+        let mut commit = false;
+        for key in &dropped {
+            let to = this.clone();
+            let row = match key.as_ref() {
+                k if k == FOOT_MODEL.0 => state
+                    .filter(|st| st.meta.can(Cap::SET_MODEL) && !st.meta.models.is_empty())
+                    .map(|st| {
+                        let name = model_said(&st.meters)
+                            .unwrap_or_else(|| agent_name(&st.meta.agent).to_owned());
+                        kit::MenuItem::new("model", MODEL, move |_w, cx| {
+                            let _gone = to.update(cx, |this, cx| {
+                                this.add_open = false;
+                                this.toggle_models(cx);
+                            });
+                        })
+                        .detail(name)
+                    }),
+                k if k == FOOT_METER.0 => state.map(|st| {
+                    let words = meter_words(&st.meters, crate::clock::now(cx));
+                    let first = words.into_iter().next().unwrap_or_else(|| CONTEXT.to_owned());
+                    kit::MenuItem::new("meter", first, move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            this.meter_open = true;
+                            cx.notify();
+                        });
+                    })
+                }),
+                k if k == FOOT_TASKS.0 => state.map(|st| {
+                    kit::MenuItem::new(
+                        "tasks",
+                        super::tray::tasks_words(&st.tasks),
+                        move |_w, cx| {
+                            let _gone = to.update(cx, |this, cx| {
+                                this.add_open = false;
+                                this.tasks_open = true;
+                                cx.notify();
+                            });
+                        },
+                    )
+                }),
+                k if k == FOOT_CHANGES.0 => {
+                    let thread = self.thread;
+                    Some(kit::MenuItem::new("changes", REVIEW_CHANGES, move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            cx.emit(ThreadViewEvent::Review { thread });
+                            cx.notify();
+                        });
+                    }))
+                }
+                k if k == FOOT_PLACE.0 || k == FOOT_PULL.0 => {
+                    (self.repo(cx).is_some() && !std::mem::replace(&mut commit, true)).then(|| {
+                        kit::MenuItem::new("commit", COMMIT, move |window, cx| {
+                            let _gone = to.update(cx, |this, cx| {
+                                this.add_open = false;
+                                this.open_commit(window, cx);
+                            });
+                        })
+                    })
+                }
+                k if k == FOOT_SCREEN.0 => self.agent_screen(cx).map(|screen| {
+                    let words = format!("Watch {}", super::screens::short(&screen));
+                    kit::MenuItem::new("screen", words, move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            this.watch_screen(cx);
+                        });
+                    })
+                }),
+                k if k == FOOT_HANDOFF.0 => {
+                    Some(kit::MenuItem::new("handoff", HANDOFF, move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            let _id = this.intent(Intent::Handoff, cx);
+                        });
+                    }))
+                }
+                k if k == FOOT_INTERRUPT.0 => {
+                    Some(kit::MenuItem::new("interrupt", INTERRUPT_SEND, move |window, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            this.submit(Delivery::Interrupt, window, cx);
+                        });
+                    }))
+                }
+                _ => None,
+            };
+            rows.extend(row);
+        }
+        if rows.is_empty() {
+            return;
+        }
+        menu.separate();
+        for row in rows {
+            menu.push(row);
+        }
+    }
+}
+
+/// The "+" menu's row that lists the agent's models, while the foot has no room for the chip.
+const MODEL: &str = "Model";
+
+/// The "+" menu's row for the meter, before the agent has said how full its context is.
+const CONTEXT: &str = "Context";
+
+/// The "+" menu's row that opens the review, while the foot has no room for the changes.
+const REVIEW_CHANGES: &str = "Review the changes";
+
+/// The "+" menu's row that opens the commit sheet, while the foot has no room for the place.
+const COMMIT: &str = "Commit\u{2026}";
+
+/// The words of the way to hand the session to the agent's own TUI.
+const HANDOFF: &str = "Continue in the terminal";
+
+/// The words of the way to stop the turn and send the draft.
+const INTERRUPT_SEND: &str = "Interrupt and send";
 
 /// The selector of the composer's "+".
 pub(crate) const ADD_BUTTON: &str = "thread-attach";

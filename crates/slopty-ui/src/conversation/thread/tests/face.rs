@@ -17,6 +17,7 @@ use slopty_proto::thread::{
 use super::{approval, hub, intents, snapshot, view};
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
+use crate::conversation::thread::view::ThreadView;
 
 fn live_turn() -> Turn {
     Turn {
@@ -970,12 +971,24 @@ fn a_requests_card_carries_the_turns_edits_once(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("request-changes").is_none(), "with the card gone, so are they");
 }
 
-/// A turn that only created a file has no line counted (the agent's result carries no diff
-/// for a file made whole), and the composer's way to the review still stands, naming the file.
+/// A turn whose edits counted no line (an agent that reports none) still has the composer's
+/// way to the review, naming the file it wrote.
 #[gpui::test]
 fn a_created_file_alone_still_opens_the_review(cx: &mut TestAppContext) {
+    use slopty_proto::thread::ItemBody;
+    use slopty_proto::thread::detail::ToolDetail;
     let (hub, _sent) = hub(cx, None);
-    let state = fixtures::thread("tools");
+    let mut state = fixtures::thread("tools");
+    let mut uncounted = 0_u32;
+    for item in &mut state.items {
+        if let ItemBody::Tool(call) = &mut item.body
+            && let Some(ToolDetail::Write(write)) = &mut call.detail
+        {
+            (write.patch.added, write.patch.removed) = (0, 0);
+            uncounted = uncounted.saturating_add(1);
+        }
+    }
+    assert_eq!(uncounted, 1, "the recorded session writes one file");
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
@@ -993,4 +1006,75 @@ fn a_created_file_alone_still_opens_the_review(cx: &mut TestAppContext) {
         )),
         "it opens the review"
     );
+}
+
+/// The composer's foot fits the room it is given: in a column beside a board (312 pt) the send
+/// stays inside the card, the "+" stays, and what left the foot waits in the "+" menu, each
+/// doing what its chip does. With room, nothing leaves and the menu holds only its own rows.
+#[gpui::test]
+fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::thread("tools");
+    state.meters.mode = Some("plan".to_owned());
+    state.meters.effort = Some("high".to_owned());
+    state.meters.context_window = Some(200_000);
+    state.meters.context_tokens = Some(120_000);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let chips = ["thread-model", "thread-effort", "thread-mode", "thread-tasks", "thread-meter"];
+    for chip in chips.iter().chain(&["thread-changes"]) {
+        assert!(cx.debug_bounds(chip).is_some(), "with room, {chip} stands in the foot");
+    }
+    let open_plus = |cx: &mut VisualTestContext| {
+        let add = cx.debug_bounds("thread-attach").expect("the + button").center();
+        cx.simulate_click(add, Modifiers::none());
+        cx.run_until_parked();
+    };
+    open_plus(cx);
+    assert!(cx.debug_bounds("thread-add-menu-tasks").is_none(), "nothing left the foot");
+    open_plus(cx);
+
+    cx.simulate_resize(gpui::size(px(312.0), px(600.0)));
+    cx.run_until_parked();
+    let card = cx.debug_bounds("thread-composer").expect("the composer");
+    let send = cx.debug_bounds("thread-send").expect("the send stays");
+    assert!(send.right() <= card.right() && send.left() >= card.left(), "{send:?} in {card:?}");
+    let add = cx.debug_bounds("thread-attach").expect("the + stays");
+    assert!(add.right() <= send.left(), "the + leads, the send ends");
+    let gone: Vec<&str> = chips.into_iter().filter(|c| cx.debug_bounds(c).is_none()).collect();
+    assert!(gone.contains(&"thread-tasks"), "312 pt holds the foot only by leaving some out");
+    open_plus(cx);
+    for chip in gone {
+        let row = match chip {
+            "thread-tasks" => Some("thread-add-menu-tasks"),
+            "thread-meter" => Some("thread-add-menu-meter"),
+            _ => None,
+        };
+        if let Some(row) = row {
+            assert!(cx.debug_bounds(row).is_some(), "{chip} left for the + menu's {row}");
+        }
+    }
+}
+
+/// The tile's header reads where the agent works from the thread: the checkout by its folder's
+/// name, the branch the worker says, and that a press commits there.
+#[gpui::test]
+fn the_thread_says_its_place_for_the_header(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::thread("tools");
+    state.meta.cwd = "/work/atlas".to_owned();
+    state.meta.facts.insert("branch".to_owned(), "fix-login".to_owned());
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    assert_eq!(view.read_with(cx, ThreadView::place_of), None, "nothing known yet");
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let place = view.read_with(cx, ThreadView::place_of).expect("a place");
+    assert_eq!(place.checkout.as_deref(), Some("atlas"));
+    assert_eq!(place.branch.as_deref(), Some("fix-login"));
+    assert!(place.commits, "a press commits there");
 }

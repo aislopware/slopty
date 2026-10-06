@@ -7740,3 +7740,83 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `no_words_are_cut_mid_glyph`, `no_ellipsis_is_asked_around_chrome_text` and
     `a_chip_of_words_has_a_bound`, each with its self-test. The files that do not obey yet
     are listed in each lint as awaiting their owner's next change.
+
+- ✅ **The tile header, the tabs, the board's header, the breadcrumb and the notices fit their
+  room** (2026-10-06, `.research/responsive-2026-10-06.md`, defects 1, 3, 4, 9 and 10). Each had
+  a row of chips that never shrank beside a title that took all the shrinking, so a narrow
+  column showed chips and no name.
+  - **A tile's header** is one priority row in place of the 480 pt stopgap. The lead glyph and
+    the title stay. The title keeps at least a third of the header. The worktree leaves
+    first, then the worker, then the pull request. The state, an upload and the
+    finished mark stay longest. At rest a focused tile with no readouts shows its controls.
+    Otherwise they are an overlay on the header's ground that shows on hover over the
+    readouts it hides, and keeps no room while hidden.
+  - **Tabs** in a narrow column shrink to their mark and a few letters, and the row scrolls
+    sideways, keeping the tab on show in view.
+  - **The board's header** keeps its name and its three controls. The running count leaves
+    first. Then the name narrows to a floor (8 em), and only then does the progress leave,
+    since the bar under the name says it too. The dot between the two goes with the count.
+  - **The breadcrumb** keeps the workspace and "+". The worker leaves first, then the
+    checkout. The branch is its title and ends in an ellipsis.
+  - **The title bar's notices** are as wide as they are where the bar has room. Where it has
+    not, the newest stays whole (and narrows with an ellipsis only once the older are gone).
+    The older go behind a count ("+1") that opens them under it. None is cut off unseen. The
+    same holds for a tile's own notices.
+  - **Facts parted by dots** are a `kit::facts_row`. Facts are set into lines as words are,
+    and a dot is drawn only between two facts on one line, so no line starts or ends in a dot.
+    A board card's pipeline stages are one, which ended a wrapped line in a dot before.
+  - `kit::priority_row` measures its items before layout, so a row sized by its content
+    (`fit_content`) has its width in the same frame. It gives its items the text style it was
+    given, as a `div` does.
+  - Tests: `kit::facts::tests::{facts_set_into_lines_with_dots_only_between_facts_on_a_line,
+    a_wrapped_fact_row_never_ends_or_starts_a_line_with_a_separator}`,
+    `workspace::tests::chrome::the_notices_the_bar_has_no_room_for_go_behind_a_count_that_opens_them`,
+    `workspace::tests::tiles::{a_narrow_header_keeps_its_title_and_shortens_its_place,
+    the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves}`. The mid-glyph lint now
+    waits only on `terminal/view.rs` (the link preview).
+
+- ✅ **The composer, the answers, the review's bars and the symbols list fit their room**
+  (2026-10-06, `.research/responsive-2026-10-06.md`, defects 2, 5, 11 and 12). Each of these
+  had been laid out for a roomy column, and in a column beside a board (312 pt) Send, the
+  primary answer, the span switch's words and the symbols list ran past the tile's edge.
+  - **The composer's foot** is one `kit::priority_row`. The "+" and the send never leave. The
+    rest leave the least needed first: the handoff, the place, the agent's screen, the pull
+    request, the mode, effort and background work, the changes, "Interrupt and send", the
+    meter, then the model. What left waits in the "+" menu after a separator and does what its
+    chip does there. The place is whole or gone, never faded to a glyph. When an edited
+    file's lines are uncounted, the changes chip names the file under a pencil, so the review
+    stays one click away.
+  - **A request's answers wrap.** Where they do not fit beside the standing grants, they take
+    a line of their own and wrap among themselves, ending at the trailing edge with the one
+    solid last. An answer is never wider than the card: a long one wraps its words, which the
+    person reads whole before choosing.
+  - **The review's scope bar and foot** are priority rows at the shaped widths of their words,
+    in place of a guess of 0.55 em a letter. In the bar, the span on show and the refresh
+    never leave; the pull request, the agent's review, the other spans and Commit leave in
+    that order and wait behind "More". In the foot the send never leaves; "Mark reviewed",
+    then "Add to message", go behind "More".
+  - **The symbols list** takes its width from the file through `kit::room_query`: 24 em of the
+    chrome where the file has room, the file's width less its margins where it has not.
+  - Tests: `conversation::thread::tests::face::{a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus,
+    a_created_file_alone_still_opens_the_review}`,
+    `conversation::thread::tests::doors::long_answers_wrap_inside_a_narrow_card`,
+    `review::tests::{a_narrow_foot_keeps_the_send_and_folds_the_rest,
+    a_narrow_scope_bar_keeps_the_span_on_show}` and
+    `file::tests::editing::the_symbols_list_keeps_inside_a_narrow_file`.
+
+- ✅ **An empty state is a title, not a footnote** (2026-10-06,
+  `.research/elegance-icons-2026-10-06.md` §5 item 10). `kit::notice` set what is so at 12 pt
+  in `text_secondary` under a 28 pt mark, a footnote to its own glyph.
+  - **The title** is the task title role (14/20 at the medium weight) in the text's ink. **The
+    detail** is the chrome role in `text_secondary`. Both keep to a measure of 26 ems
+    (`kit::NOTICE_MEASURE`) where the tile is wide, and to the tile less its margins where it
+    is narrow, wrapping and never cut, so the block fits any room.
+  - **One next step, where there is an obvious one** (`kit::notice_action`, a secondary
+    button under the words). An empty span of a review offers the widest span of its kind:
+    "Show all turns" for a thread, "Show the whole branch" for a folder. The widest span offers
+    none. An empty folder offers "New shell here", a shell on its machine at the folder. A new
+    thread offers none, since its composer is right there. The review's reading,
+    absent and empty states are notices now, with the diff glyph, where they were a muted line.
+  - Tests: `review::tests::{an_empty_review_names_its_span, an_empty_span_offers_the_widest}`
+    (the latter at 312 pt) and `workspace::tests::folders::an_empty_folder_offers_a_shell_in_it`. Goldens: `agent-marks*`, `project-lanes*`, `file-too-large` and
+    every tile that says it has nothing to show.

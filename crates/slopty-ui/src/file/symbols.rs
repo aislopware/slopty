@@ -251,14 +251,13 @@ impl FileView {
                 .into_any_element()
             }
         };
-        div()
+        let popover = div()
             .id("file-symbols")
             .debug_selector(|| "file-symbols".to_owned())
             .key_context(SYMBOLS_CTX)
             .absolute()
             .top(px(spacing.sm))
             .right(px(spacing.sm))
-            .w(px(320.0))
             .flex()
             .flex_col()
             .gap(px(spacing.xs))
@@ -281,10 +280,28 @@ impl FileView {
             .child(div().px(px(spacing.xs)).child(Input::new(&list.input).aria_label(GO_TO_SYMBOL)))
             .child(
                 div().id("file-symbol-list").role(Role::ListBox).aria_label("Symbols").child(body),
-            )
-            .into_any_element()
+            );
+        // Its width is the file's to give: a list of names at its own measure where the file
+        // has room, the file's width less its margins where it has not (a column beside a
+        // board), never past the file's edge (`docs/decisions/ui.md`, "How surfaces adapt to
+        // their room").
+        let measure = theme.typography.ui_size * SYMBOLS_EMS;
+        let margin = spacing.sm;
+        crate::kit::room_query(theme, move |room, size, _window, _cx| {
+            let room_left = margin.mul_add(-2.0, f32::from(size.width)).max(0.0);
+            let width = if room.is_narrow() { room_left } else { measure.min(room_left) };
+            popover.w(px(width))
+        })
+        .absolute()
+        .top_0()
+        .left_0()
+        .into_any_element()
     }
 }
+
+/// How wide the symbols list is where the file has room, in ems of the chrome's size: about
+/// 320 pt at 13 pt.
+const SYMBOLS_EMS: f32 = 24.0;
 
 /// The terminal's mono family, which the editor draws code in.
 fn theme_mono(theme: &slopty_theme::Theme) -> SharedString {

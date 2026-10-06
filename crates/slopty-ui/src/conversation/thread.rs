@@ -24,6 +24,7 @@ pub mod rows;
 pub mod view;
 
 pub use hub::{HubEvent, ThreadHub};
+pub use view::composer::ThreadPlace;
 pub use view::{ThreadView, ThreadViewEvent};
 
 #[cfg(test)]

@@ -39,5 +39,6 @@ Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ 1 finished
 Button │ Commit
+Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send

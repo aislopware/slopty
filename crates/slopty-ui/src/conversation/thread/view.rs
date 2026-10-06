@@ -106,7 +106,7 @@ const BUBBLE_CHARS: usize = 480;
 mod aside;
 mod asking;
 mod branch;
-mod composer;
+pub(crate) mod composer;
 mod composing;
 mod decision;
 pub mod denying;
@@ -231,6 +231,8 @@ pub struct ThreadView {
     denials_open: Option<AskId>,
     /// The composer's "+" menu is open: attach files, commands, files and symbols.
     add_open: bool,
+    /// What the composer's foot left out at its last layout, which the "+" menu offers.
+    foot_dropped: kit::Dropped,
     /// What the composer says before anything is typed, as last set.
     placeholder: String,
     /// The agent's terminal comes into view once the thread names one: the person asked for
@@ -387,6 +389,7 @@ impl ThreadView {
             denying: None,
             denials_open: None,
             add_open: false,
+            foot_dropped: kit::Dropped::default(),
             placeholder: composer::PLACEHOLDER.to_owned(),
             reveal_terminal: false,
             marks: Cell::default(),

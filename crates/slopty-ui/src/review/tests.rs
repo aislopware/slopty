@@ -281,12 +281,16 @@ fn comments_to_an_agent_with_no_steer_go_queued(cx: &mut TestAppContext) {
     assert_eq!(*delivery, Delivery::Queue);
 }
 
-/// With comments waiting, the foot shows its three buttons where they fit. In a narrow tile
-/// the send stays whole inside the tile and the other two go behind "More", never cut at the
-/// tile's edge.
+/// With comments waiting, the foot shows its three buttons where they fit, at their shaped
+/// widths. Narrower, "Mark reviewed" goes behind "More" first, then "Add to message"; the send
+/// stays whole inside the tile, and "More" offers exactly what left.
 #[gpui::test]
 fn a_narrow_foot_keeps_the_send_and_folds_the_rest(cx: &mut TestAppContext) {
-    for (width, fits) in [(800.0, true), (360.0, false)] {
+    for (width, shown) in [
+        (800.0, &["review-add", "review-mark"][..]),
+        (360.0, &["review-add"][..]),
+        (240.0, &[][..]),
+    ] {
         let (_view, _hub, _sent, cx) = tile(cx, width);
         click(cx, "review-line-1-0-2");
         cx.simulate_input("Why new?");
@@ -295,13 +299,54 @@ fn a_narrow_foot_keeps_the_send_and_folds_the_rest(cx: &mut TestAppContext) {
         let drawn = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s);
         let send = drawn(cx, "review-send").expect("the send always shows");
         assert!(f32::from(send.right()) <= width, "{width}: the send inside the tile {send:?}");
+        let left: Vec<&str> =
+            ["review-add", "review-mark"].into_iter().filter(|p| !shown.contains(p)).collect();
         for part in ["review-add", "review-mark"] {
-            assert_eq!(drawn(cx, part).is_some(), fits, "{width}: {part}");
+            assert_eq!(drawn(cx, part).is_some(), shown.contains(&part), "{width}: {part}");
         }
-        assert_eq!(drawn(cx, "review-more").is_some(), !fits, "{width}: More");
+        assert_eq!(drawn(cx, "review-more").is_some(), !left.is_empty(), "{width}: More");
         for part in ["review-add", "review-mark", "review-more"] {
             if let Some(b) = drawn(cx, part) {
                 assert!(f32::from(b.right()) <= width, "{width}: {part} inside the tile {b:?}");
+            }
+        }
+        if !left.is_empty() {
+            click(cx, "review-more");
+            for part in left {
+                let row = if part == "review-add" { "review-more-add" } else { "review-more-mark" };
+                assert!(drawn(cx, row).is_some(), "{width}: {part} waits behind More");
+            }
+        }
+    }
+}
+
+/// In a column beside a board the scope bar keeps the span on show and its refresh, each word
+/// whole on one line, and the rest leave for "More", which offers them; with room every span
+/// shows.
+#[gpui::test]
+fn a_narrow_scope_bar_keeps_the_span_on_show(cx: &mut TestAppContext) {
+    const SCOPES: [(&str, &str); 3] = [
+        ("review-scope-LastTurn", "review-scopes-more-LastTurn"),
+        ("review-scope-SinceReviewed", "review-scopes-more-SinceReviewed"),
+        ("review-scope-AllTurns", "review-scopes-more-AllTurns"),
+    ];
+    for (width, all) in [(800.0, true), (200.0, false)] {
+        let (_view, _hub, _sent, cx) = tile(cx, width);
+        let scopes: Vec<_> = SCOPES.iter().map(|(s, row)| (*s, *row, cx.debug_bounds(s))).collect();
+        let shown = scopes.iter().filter(|(.., b)| b.is_some()).count();
+        assert!(shown >= 1, "{width}: the span on show stays");
+        assert_eq!(shown == scopes.len(), all, "{width}: {scopes:?}");
+        for (scope, _, b) in &scopes {
+            if let Some(b) = b {
+                assert!(f32::from(b.right()) <= width, "{width}: {scope} inside {b:?}");
+                assert!(f32::from(b.size.height) < 24.0, "{width}: {scope} on one line {b:?}");
+            }
+        }
+        assert_eq!(cx.debug_bounds("review-scopes-more").is_some(), !all, "{width}: More");
+        if !all {
+            click(cx, "review-scopes-more");
+            for (scope, row, _) in scopes.iter().filter(|(.., b)| b.is_none()) {
+                assert!(cx.debug_bounds(row).is_some(), "{width}: {scope} waits behind More");
             }
         }
     }
@@ -758,6 +803,23 @@ fn an_empty_review_names_its_span(cx: &mut TestAppContext) {
         let rest: String = text.chars().skip(1).collect();
         assert!(!rest.chars().any(char::is_uppercase), "sentence case: {text:?}");
     }
+}
+
+/// An empty span says so as one block in the tile's middle, and offers the widest span of its
+/// kind as the one next step, which switches to it; the widest span offers none. In a column
+/// beside a board the block keeps inside the tile.
+#[gpui::test]
+fn an_empty_span_offers_the_widest(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = tile(cx, 312.0);
+    let thread = view.read_with(cx, |view, _cx| view.thread()).expect("a thread's review");
+    let nothing = Review { files: Vec::new(), ..review() };
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(nothing)), cx));
+    cx.run_until_parked();
+    let widen = cx.debug_bounds("review-widen").expect("the way to every turn");
+    let empty = cx.debug_bounds("review-empty").expect("the empty state");
+    assert!(empty.contains(&widen.center()) && f32::from(widen.right()) <= 312.0, "{widen:?}");
+    click(cx, "review-widen");
+    assert_eq!(view.read_with(cx, |v, _| v.scope()), super::model::Scope::AllTurns);
 }
 
 /// A file's own menu, by a right click on its row in the list or on its head: Keep, Open and

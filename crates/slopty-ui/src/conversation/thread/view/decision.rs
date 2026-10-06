@@ -127,15 +127,24 @@ impl ThreadView {
                 .key_context(crate::conversation::REQUEST_CTX)
                 .w_full()
                 .flex()
+                // Where the answers do not fit beside the rest they take a line of their own,
+                // and wrap among themselves, ending at the trailing edge with the one solid
+                // last: a long answer never pushes the primary out of the card.
+                .flex_wrap()
                 .items_center()
-                .gap(self.z(theme.spacing.md))
+                .justify_end()
+                .gap_x(self.z(theme.spacing.md))
+                .gap_y(self.z(theme.spacing.sm))
                 .children(leading)
                 .child(div().flex_1().min_w_0().children(standing))
                 .child(
                     div()
                         .flex_none()
+                        .max_w_full()
                         .flex()
+                        .flex_wrap()
                         .items_center()
+                        .justify_end()
                         .gap(self.z(theme.spacing.sm))
                         .children(row),
                 )
@@ -211,10 +220,12 @@ impl ThreadView {
         div()
             .relative()
             .flex_none()
+            .max_w_full()
             .flex()
             .items_stretch()
             .gap(kit::HAIR)
-            .child(deny.rounded_r(self.z(0.0)))
+            // A long deny gives way to its chevron, wrapping its words.
+            .child(deny.flex_shrink_1().min_w_0().rounded_r(self.z(0.0)))
             .child(chevron)
             .children(menu)
             .into_any_element()

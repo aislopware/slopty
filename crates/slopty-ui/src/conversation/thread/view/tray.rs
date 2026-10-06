@@ -619,10 +619,13 @@ impl ThreadView {
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(scope))
         });
+        // Never wider than the card: an answer too long for its line wraps its words, which
+        // the person reads whole before choosing.
         self.button_frame(id, label, kind)
+            .max_w_full()
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.sm))
-            .child(div().flex_none().child(SharedString::from(words)))
+            .child(div().min_w_0().text_center().child(SharedString::from(words)))
             .children(scope)
     }
 
