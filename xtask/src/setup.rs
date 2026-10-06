@@ -23,7 +23,8 @@ const TOOLS: &[(&str, &str)] = &[
     ("samply", "0.13.1"),
     ("git-cliff", "2.14.2"),
     ("committed", "1.1.11"),
-    // `cargo xtask linux`: cross-links the Linux worker with zig.
+    // `cargo xtask linux`: cross-links the Linux worker with zig; Linux clippy compiles each
+    // triple's C with it.
     ("cargo-zigbuild", "0.23.4"),
     // `cargo xtask fuzz` and `deep fuzz`: libFuzzer builds of `fuzz/` (on nightly).
     ("cargo-fuzz", "0.13.2"),

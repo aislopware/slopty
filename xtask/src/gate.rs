@@ -121,7 +121,9 @@ impl LaneId {
                 "committed",
             ],
             Self::Tests | Self::Linux => &["cargo-nextest"],
-            Self::ClippyHost | Self::ClippyIos | Self::ClippyLinux | Self::Rustdoc => &[],
+            // Linux clippy compiles each triple's C with zig (`tools::lint_linux`).
+            Self::ClippyLinux => &["cargo-zigbuild"],
+            Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => &[],
         }
     }
 }
@@ -1266,7 +1268,8 @@ pub fn lint_linux(sh: &Shell) -> Result<()> {
     both(crates, lint_linux_xtask(sh))
 }
 
-/// Clippy for Linux on xtask, which the deep checks run on Linux runners.
+/// Clippy for Linux on xtask, which the deep checks run on Linux runners: through
+/// `cargo-zigbuild`, as the crates are (`tools::lint_linux`).
 fn lint_linux_xtask(sh: &Shell) -> Result<()> {
     let targets: Vec<String> = crate::tools::LINUX_TRIPLES
         .iter()
@@ -1274,8 +1277,7 @@ fn lint_linux_xtask(sh: &Shell) -> Result<()> {
         .collect();
     quiet_step(
         "clippy linux-gnu (x86_64 + aarch64), xtask",
-        cmd!(sh, "cargo clippy -p xtask {targets...} --all-targets -- -D warnings")
-            .env("CARGO_FEATURE_NO_NEON", "1"),
+        cmd!(sh, "cargo-zigbuild clippy -p xtask {targets...} --all-targets -- -D warnings"),
     )
 }
 

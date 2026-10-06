@@ -151,11 +151,6 @@ jobs:
       # runner's shared rate limit in a third of the test lanes, timed out and compiled nextest
       # from source: 5 to 8 minutes instead of 3 seconds (.research/dev-speed-2026-10-05.md).
       # The job's own token is read-only.
-      # Clippy never links, but build scripts compile C for each Linux triple. The Mac lane this
-      # replaced did that with clang, a cross compiler for every target; Ubuntu's `cc` is gcc,
-      # which builds for the runner's own triple only.
-      - if: matrix.lane == 'clippy-linux'
-        run: echo CC=clang >> "$GITHUB_ENV"
       - run: cargo xtask setup --lane ${{ matrix.lane }}
         env:
           GITHUB_TOKEN: ${{ github.token }}

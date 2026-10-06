@@ -1225,3 +1225,18 @@ more full-window layer.
   its native host and its WKWebView lived until the window drew again, and WebKit refused to
   delete a forgotten worker's page store as in use. The records hold `AnyWeakView` now, and a
   gap that cannot upgrade builds the view around it. Upstream has nothing open on it.
+
+- ✅ **Linux clippy compiles the build scripts' C with zig** (2026-10-06). The server's push
+  client is rustls on ring (`docs/decisions/platform.md`). ring compiles C for its target, and
+  it has no path without a C compiler. Plain `cargo clippy` for `x86_64-unknown-linux-musl` on
+  this Mac failed to find `x86_64-linux-musl-gcc`. The `aarch64-unknown-linux-gnu` cross build
+  on CI's `x86_64` Ubuntu runner has no C toolchain of its own either.
+  - Linux clippy now runs through `cargo-zigbuild clippy` (`tools::lint_linux`, and xtask's own
+    in `gate::lint_linux_xtask`), with zig as the C compiler for every triple. zig ships every
+    target's libc headers. Every lane that compiles already sets zig up for libghostty-vt, and
+    `cargo xtask setup --lane clippy-linux` installs the pinned `cargo-zigbuild`.
+  - This replaces two workarounds. `CARGO_FEATURE_NO_NEON` existed only because this Mac had no
+    C toolchain for Linux, and now blake3 compiles its NEON C for `aarch64` with zig. CI's
+    `CC=clang` is gone too (the entry "Linux clippy runs on a Linux runner" above).
+  - Checked here: musl clippy for the server, and both glibc triples for the server and xtask,
+    pass with blake3's NEON object built by zig.

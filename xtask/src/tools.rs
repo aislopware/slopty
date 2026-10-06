@@ -1,6 +1,6 @@
 //! Shared helpers: repo root discovery, tool presence, target triples.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use camino::Utf8PathBuf;
 use xshell::{Shell, cmd};
 
@@ -67,7 +67,17 @@ pub const LINUX_UNTESTED: [&str; 4] =
 /// [`LINUX_CRATES`] on [`LINUX_TRIPLES`], with its tests unless it is one of
 /// [`LINUX_UNTESTED`], and the [`SERVER_CRATES`] among them on [`SERVER_TRIPLE`]. Without the
 /// workspace hack: its features pull in the client's GPUI, which no Linux build takes.
+///
+/// It runs through `cargo-zigbuild`, with zig as the C compiler for each triple. Clippy never
+/// links, but build scripts compile C for the target: ring's, under the server's rustls, has no
+/// path without it, and blake3's NEON for `aarch64`. Neither this Mac nor an `x86_64` Ubuntu
+/// runner has a C toolchain for every one of these triples; zig is one, and every lane that
+/// compiles has it already.
 pub fn lint_linux(sh: &Shell, crates: &[&str]) -> Result<()> {
+    ensure!(
+        has(sh, "cargo-zigbuild"),
+        "cargo-zigbuild lints for Linux with zig's C compiler: `cargo binstall cargo-zigbuild`"
+    );
     let picked = |keep: &dyn Fn(&str) -> bool| -> Vec<String> {
         crates
             .iter()
@@ -87,16 +97,12 @@ pub fn lint_linux(sh: &Shell, crates: &[&str]) -> Result<()> {
         }
         let all_targets = all_targets.then_some("--all-targets");
         let targets = &targets;
-        // blake3 compiles its NEON C for aarch64, and this Mac has no C toolchain for Linux.
-        // Clippy never links, so its pure-Rust path (the `no_neon` feature, which its build
-        // script reads from this variable) lints the same Rust.
         quiet_step(
             &format!("clippy linux-gnu (x86_64 + aarch64), {label}"),
             cmd!(
                 sh,
-                "cargo clippy --keep-going {set...} {targets...} {all_targets...} -- -D warnings"
-            )
-            .env("CARGO_FEATURE_NO_NEON", "1"),
+                "cargo-zigbuild clippy --keep-going {set...} {targets...} {all_targets...} -- -D warnings"
+            ),
         )?;
     }
     let server = picked(&|c| SERVER_CRATES.contains(&c));
@@ -105,7 +111,7 @@ pub fn lint_linux(sh: &Shell, crates: &[&str]) -> Result<()> {
             &format!("clippy {SERVER_TRIPLE}"),
             cmd!(
                 sh,
-                "cargo clippy --keep-going {server...} --target {SERVER_TRIPLE} -- -D warnings"
+                "cargo-zigbuild clippy --keep-going {server...} --target {SERVER_TRIPLE} -- -D warnings"
             ),
         )?;
     }
