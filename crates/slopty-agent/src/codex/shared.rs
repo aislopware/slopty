@@ -229,7 +229,7 @@ const EFFORT_KEY: &str = "model_reasoning_effort";
 ///
 /// # Errors
 ///
-/// When `mode` is none of [`MODES`], in words.
+/// When `mode` is no approval policy Slopty offers, in words.
 pub fn start(
     cwd: &str,
     model: Option<&str>,

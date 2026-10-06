@@ -688,7 +688,7 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let repo = root.join("demo");
         std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q"]);
+        git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
         git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
         let (server, _daemons, worker) = fleet(&root, "").await;
@@ -897,11 +897,10 @@ mod tests {
         .await;
         assert_eq!(seen["cwd"].as_str().map(PathBuf::from), Some(cloned.clone()));
 
-        // The agent's work: a commit on its branch in a worktree of the clone, as Claude Code's
-        // `--worktree` makes it.
+        // The agent's work: a commit on its branch in the worktree of the clone the worker made
+        // for it, which Claude Code's `--worktree` reopens.
         let tree = cloned.join(".claude/worktrees/slopty-demo-1");
-        let tree_text = tree.to_string_lossy().into_owned();
-        git_out(&cloned, &["worktree", "add", "-q", "-b", branch, &tree_text, "origin/main"]);
+        assert_eq!(git_out(&tree, &["branch", "--show-current"]), branch);
         std::fs::write(tree.join("work.txt"), "done\n").unwrap();
         git_out(&tree, &["add", "."]);
         git_out(&tree, &["commit", "-q", "-m", "the work"]);
@@ -1116,11 +1115,7 @@ mod tests {
         let agent = spawned.assignment.unwrap().term;
         let cloned = linux_home.join("slopty/clones/example.com/o/demo");
         let tree = cloned.join(".claude/worktrees/slopty-demo-1");
-        let tree_text = tree.to_string_lossy().into_owned();
-        git_out(
-            &cloned,
-            &["worktree", "add", "-q", "-b", ACROSS_BRANCH, &tree_text, "origin/main"],
-        );
+        assert_eq!(git_out(&tree, &["branch", "--show-current"]), ACROSS_BRANCH, "made for it");
         Across {
             _dir: dir,
             root,
