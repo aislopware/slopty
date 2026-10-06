@@ -88,6 +88,9 @@ pub const CTX: &str = "FolderView";
 
 /// What a folder with nothing in it says.
 pub(crate) const EMPTY_FOLDER: &str = "Empty folder";
+
+/// An empty folder's one next step: a shell in it.
+pub(crate) const NEW_SHELL: &str = "New shell here";
 /// What a folder tile says when a file is at its path.
 pub(crate) const NOT_A_FOLDER: &str = "Not a folder";
 /// What a folder tile says when the worker could not list its path, over the reason.
@@ -142,6 +145,8 @@ pub enum FolderViewEvent {
     UploadHere,
     /// The agent's worktree the folder is in, at this root, is to go.
     RemoveWorktree(String),
+    /// A shell is to open in this directory: an empty folder's one next step.
+    NewShell(String),
     /// This entry is to be brought down and saved with the Files app.
     SaveToFiles {
         /// Its path on the worker.
@@ -807,6 +812,7 @@ impl FolderView {
         icon: Symbol,
         title: impl Into<SharedString>,
         detail: Option<SharedString>,
+        next: Option<AnyElement>,
     ) -> AnyElement {
         let id = self.id.as_uuid();
         let k = self.zoom;
@@ -818,13 +824,16 @@ impl FolderView {
             .flex()
             .items_center()
             .justify_center()
-            .child(crate::kit::notice(
-                theme,
-                k,
-                crate::kit::notice_mark(theme, icon, k),
-                title,
-                detail,
-            ))
+            .child(
+                crate::kit::notice(
+                    theme,
+                    k,
+                    crate::kit::notice_mark(theme, icon, k),
+                    title,
+                    detail,
+                )
+                .children(next),
+            )
             .into_any_element()
     }
 
@@ -1209,12 +1218,13 @@ impl Render for FolderView {
         let body: Vec<AnyElement> = match self.listing() {
             // Blank while an answer in time would fill it; past the grace, a word.
             None if !crate::screen::past_grace("folder-reading", window, cx) => Vec::new(),
-            None => vec![self.notice(Symbol::Folder, crate::file::READING, None)],
-            Some(Listing::NotFolder) => vec![self.notice(Symbol::Doc, NOT_A_FOLDER, None)],
+            None => vec![self.notice(Symbol::Folder, crate::file::READING, None, None)],
+            Some(Listing::NotFolder) => vec![self.notice(Symbol::Doc, NOT_A_FOLDER, None, None)],
             Some(Listing::Missing { error }) => vec![self.notice(
                 Symbol::TextMagnifyingglass,
                 CANNOT_LIST,
                 Some(SharedString::from(error.clone())),
+                None,
             )],
             Some(Listing::Listed { dir, entries, total }) => {
                 let mut body = vec![self.path_bar(dir, *total, cx)];
@@ -1223,7 +1233,15 @@ impl Render for FolderView {
                 let none_made = made.is_empty();
                 body.extend(made.into_iter().enumerate().map(|(n, name)| self.made_row(n, name)));
                 if entries.is_empty() && none_made {
-                    body.push(self.notice(Symbol::Folder, EMPTY_FOLDER, None));
+                    // Nothing to open here: a shell in it is the one next step.
+                    let path = self.path.clone();
+                    let shell =
+                        crate::kit::notice_action(&self.theme, "folder-new-shell", NEW_SHELL)
+                            .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                                cx.emit(FolderViewEvent::NewShell(path.clone()));
+                            }))
+                            .into_any_element();
+                    body.push(self.notice(Symbol::Folder, EMPTY_FOLDER, None, Some(shell)));
                 } else {
                     body.push(self.list(entries.len(), cx));
                     body.extend(self.foot(entries.len(), *total));

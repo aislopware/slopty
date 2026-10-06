@@ -251,6 +251,9 @@ impl WorkspaceView {
                 FolderViewEvent::RemoveWorktree(root) => {
                     this.remove_worktree_at(worker, root, cx);
                 }
+                FolderViewEvent::NewShell(dir) => {
+                    this.open_session_on(worker, Some(dir.clone()), Vec::new(), None, cx);
+                }
                 FolderViewEvent::SaveToFiles { path, folder } => {
                     let ask = FilesAsk::Export { worker, path: path.clone(), folder: *folder };
                     this.ask_files(&ask, cx);

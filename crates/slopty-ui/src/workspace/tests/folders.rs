@@ -770,3 +770,26 @@ fn a_right_click_on_a_row_offers_what_its_keys_do(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("folder-menu").is_none(), "Esc closes it");
     assert_eq!(folder_path(&view, cx, tile), "/w", "and opens nothing");
 }
+
+/// An empty folder says so and offers its one next step: a shell in it, opened on the folder's
+/// machine at the folder.
+#[gpui::test]
+fn an_empty_folder_offers_a_shell_in_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let _tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/empty".into() }, 1);
+    answer(&view, cx, &studio, "/w/empty", &listed("/w/empty", Vec::new()));
+    studio.drain();
+    let shell = cx.debug_bounds("folder-new-shell").expect("the way to a shell here");
+    cx.simulate_click(shell.center(), Modifiers::none());
+    cx.run_until_parked();
+    let opened: Vec<Option<String>> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::OpenSession { spec, .. } => Some(spec.cwd),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, [Some("/w/empty".to_owned())]);
+}
