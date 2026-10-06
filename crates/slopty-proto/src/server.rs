@@ -10,7 +10,7 @@
 //! that each side sends its role's messages, framed by [`crate::codec`] like the rest.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 
 use crate::RequestId;
 use crate::orchestration::{HubEvent, IdempotencyKey, Outcome, Verb};
@@ -259,9 +259,15 @@ pub enum ToServer {
     /// A client says where the person is on it, on every change
     /// ([`crate::thread::attention::Presence`]).
     Presence(crate::thread::attention::Presence),
-    /// A phone the server may push to while the person is at no client and it is not
-    /// listening; `None` takes it back: notes turned off, or the phone leaving the server.
-    PushDevice(Option<crate::push::PushDevice>),
+    /// The phone the client `client` is, which the server may push to while the person is at
+    /// no client and it is not listening; `None` takes it back, on any link: notes turned off,
+    /// or the phone leaving the server.
+    PushDevice {
+        /// The client, by the identity it keeps, so the phone is known after its link is gone.
+        client: ClientId,
+        /// Where and how to push to it.
+        device: Option<crate::push::PushDevice>,
+    },
 }
 
 /// Server → dialer.

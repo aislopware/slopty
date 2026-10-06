@@ -1097,16 +1097,16 @@ mod golden_thread {
         use slopty_proto::server::ToServer;
         use slopty_proto::thread::AskId;
         use slopty_proto::thread::attention::{Notice, NoticeKind, Subject, ThreadAt};
+        let client = ClientId::from_uuid(Uuid::from_u128(0xc11e));
         let device = PushDevice {
-            client: ClientId::from_uuid(Uuid::from_u128(0xc11e)),
             token: "0f".repeat(32),
             key: [7; 32],
             sandbox: true,
             topic: "dev.aislopware.slopty".to_owned(),
             quiet_ms: 30_000,
         };
-        snap("push_device", &ToServer::PushDevice(Some(device)));
-        snap("push_device_gone", &ToServer::PushDevice(None));
+        snap("push_device", &ToServer::PushDevice { client, device: Some(device) });
+        snap("push_device_gone", &ToServer::PushDevice { client, device: None });
         let worker = WorkerId::from_uuid(Uuid::from_u128(0x3011));
         let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
         let notice = Notice {

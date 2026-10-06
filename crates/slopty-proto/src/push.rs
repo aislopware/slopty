@@ -7,17 +7,14 @@
 //! linked client would have posted.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::ClientId;
 
 use crate::thread::AskId;
 use crate::thread::attention::Notice;
 
 /// A phone the server may push to, as it tells the server on every link and whenever its token
-/// changes.
+/// changes ([`crate::server::ToServer::PushDevice`], which names the client).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PushDevice {
-    /// The client, by the identity it keeps, so the phone is known after its link is gone.
-    pub client: ClientId,
     /// Its device token from APNs, in hex.
     pub token: String,
     /// The public half of its X25519 key, which bodies are sealed to.
