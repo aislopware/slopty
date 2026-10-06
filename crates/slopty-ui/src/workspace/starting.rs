@@ -201,6 +201,16 @@ impl Starts {
         Some(self.tiles.get(&item)?.draft.as_ref()?.view.clone())
     }
 
+    /// The link to `key`'s threads came up: the drafts of its starts ask for their folders'
+    /// branches, if they have not had them ([`ThreadView::ask_branches`]).
+    pub(super) fn linked(&self, key: WorkerKey, cx: &mut gpui::App) {
+        for starting in self.tiles.values().filter(|s| s.worker == key) {
+            if let Some(drafting) = &starting.draft {
+                drafting.view.update(cx, ThreadView::ask_branches);
+            }
+        }
+    }
+
     /// `key` found `paths` under `root` for `query`: the composers of its starts that asked
     /// list them in their `@` menus.
     pub(super) fn found(
@@ -231,6 +241,9 @@ pub(super) struct Starting {
     pub args: Vec<String>,
     /// It starts in a new worktree of its own, made from the clone `cwd` is in.
     pub worktree: bool,
+    /// The branch that worktree starts from, as its draft chose; the clone's checked-out one
+    /// when `None`.
+    pub base: Option<String>,
     /// The pull request that worktree checks out, by number: its review opens beside the
     /// thread once it lands ([`super::pull_review`]).
     pub pull: Option<u32>,
@@ -294,6 +307,7 @@ impl Starting {
             cwd,
             args: Vec::new(),
             worktree: false,
+            base: None,
             pull: None,
             chosen: Chosen { model: None, mode: None, effort: None, attachments: Vec::new() },
             draft,
@@ -384,7 +398,13 @@ impl WorkspaceView {
     fn start_place(&self, worker: WorkerKey, cwd: &str, worktree: bool) -> Place {
         let folder = super::tile::place_name(cwd, None, self.home_of(worker))
             .unwrap_or_else(|| "~".to_owned());
-        Place { folder: Some(folder), machine: self.worker_name(worker), worktree, pull: None }
+        Place {
+            folder: Some(folder),
+            machine: self.worker_name(worker),
+            worktree,
+            pull: None,
+            base: None,
+        }
     }
 
     /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
@@ -471,8 +491,11 @@ impl WorkspaceView {
             self.show_notice(text, cx);
             return;
         }
-        let DraftSent { text, attachments, model, mode, effort, also } = sent;
-        let (cwd, worktree, pull) = (starting.cwd.clone(), starting.worktree, starting.pull);
+        let DraftSent { text, attachments, model, mode, effort, also, worktree, base } = sent;
+        // Where the draft's place chip left it.
+        starting.worktree = worktree;
+        starting.base.clone_from(&base);
+        let (cwd, pull) = (starting.cwd.clone(), starting.pull);
         let chips = slopty_client::starts::Chips {
             model: model.clone(),
             mode: mode.clone(),
@@ -507,6 +530,7 @@ impl WorkspaceView {
             let run = ItemId::new();
             let mut starting = Starting::new(worker, agent, cwd.clone(), None).in_worktree(true);
             starting.pull = pull;
+            starting.base.clone_from(&base);
             starting.chosen.attachments.clone_from(&attachments);
             self.place_starting(run, starting, true, cx);
             self.send_start(run, prompt.clone(), cx);
@@ -806,8 +830,11 @@ impl WorkspaceView {
                 }
                 div().flex_1().min_h_0().w_full().child(view.clone()).into_any_element()
             } else {
-                let place =
-                    self.start_place(starting.worker, &starting.cwd, starting.worktree).said();
+                let place = Place {
+                    base: starting.base.clone(),
+                    ..self.start_place(starting.worker, &starting.cwd, starting.worktree)
+                }
+                .said();
                 let mark =
                     crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary));
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));

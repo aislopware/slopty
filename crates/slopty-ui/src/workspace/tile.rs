@@ -85,7 +85,7 @@ const TAB_MAX: f32 = 200.0;
 /// pointer can find, not a sliver.
 const TAB_MIN: f32 = 120.0;
 
-/// The group a header's window controls (fullscreen, close) hover with: they show while the
+/// The group a header's controls (its actions and close) hover with: they show while the
 /// pointer is on the header itself, not anywhere over the body.
 const HEADER_GROUP: &str = "tile-header";
 

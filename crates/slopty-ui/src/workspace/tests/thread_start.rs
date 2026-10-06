@@ -957,6 +957,135 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     assert_eq!(panes, 1, "the other run in a pane of its own beside it");
 }
 
+/// The place chip as a control: a draft in a repository's folder asks the machine for its
+/// branches as it opens, and once they come its place chip switches it to a new worktree of
+/// that folder, whose base chip lists the branches, the default first. The start goes in a new
+/// worktree from the branch picked, and the question says so. Back in the folder, the pick
+/// goes. A draft opened while the threads' link is down asks once it comes up.
+#[gpui::test]
+fn the_place_chip_starts_a_worktree_from_a_branch_picked(cx: &mut TestAppContext) {
+    use slopty_proto::git::{Branch, Branches, GitDone, GitOp, GitOutcome};
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let session = SessionId::new();
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Terminal { session },
+        name: None,
+        facts: BTreeMap::new(),
+    };
+    let summary =
+        SessionSummary { repo: Some("/w/atlas".to_owned()), ..summary(session, Some("/w/atlas")) };
+    let (key, by) = (studio.key, studio.me);
+    view.update_in(cx, |v, _window, cx| {
+        v.session_opened(key, summary, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Add(item) }, cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.dispatch_action(NewAgent);
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx).first().map(String::as_str), Some("w/atlas"), "the folder");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.update(|window, _| window.set_a11y_active(true));
+    settle(cx);
+    let roles = |cx: &mut VisualTestContext, label: &str| -> Vec<String> {
+        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        tree.iter().filter(|n| n.label.as_deref() == Some(label)).map(|n| n.role.clone()).collect()
+    };
+    let place = "Place, in atlas on studio";
+    assert_eq!(roles(cx, place), ["Label"], "words, until the branches come");
+    let reads = |fake: &mut Fake| {
+        let msgs = fake.drain();
+        msgs.iter().filter(|m| matches!(m, ClientMsg::Git { op: GitOp::Branches, .. })).count()
+    };
+    assert_eq!(reads(&mut studio), 0, "nothing goes while the threads' link is down");
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    settle(cx);
+    let asked: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Git { request, repo, op: GitOp::Branches } => Some((request, repo)),
+            _ => None,
+        })
+        .collect();
+    let [(request, repo)] = asked.as_slice() else { panic!("one read: {asked:?}") };
+    assert_eq!(repo, "/w/atlas", "of the draft's folder");
+    let branch = |name: &str, local, committed| Branch {
+        name: name.to_owned(),
+        local,
+        remote: true,
+        committed,
+    };
+    let branches = Branches {
+        current: Some("feature".to_owned()),
+        default: Some("main".to_owned()),
+        list: vec![
+            branch("feature", true, 30),
+            branch("develop", false, 20),
+            branch("main", true, 10),
+        ],
+        more: 0,
+    };
+    let done = GitOutcome::Done(GitDone::Branches(Box::new(branches)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    settle(cx);
+    assert_eq!(roles(cx, place), ["Button"], "a switch once they came");
+    assert!(cx.debug_bounds("thread-base").is_none(), "no base in the folder itself");
+
+    let click = |cx: &mut VisualTestContext, what: &str| {
+        let at = cx.debug_bounds(Box::leak(what.to_owned().into_boxed_str())).expect(what);
+        cx.simulate_click(at.center(), Modifiers::none());
+        settle(cx);
+    };
+    click(cx, "thread-place");
+    click(cx, "thread-menu-1");
+    assert_eq!(roles(cx, "Base branch, feature"), ["Button"], "from the one checked out");
+    click(cx, "thread-base");
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let listed: Vec<_> =
+        tree.iter().filter(|n| n.role == "ListBoxOption").filter_map(|n| n.label.clone()).collect();
+    assert_eq!(listed, ["main", "feature", "develop"], "the default, the checked out, the rest");
+    click(cx, "thread-menu-2");
+    let asked = "What should Codex do in a new worktree of atlas from develop?";
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Heading", Some(asked))), "the question says where");
+    // Back in the folder the base goes with the worktree; a new worktree again starts from
+    // the branch checked out until one is picked.
+    click(cx, "thread-place");
+    click(cx, "thread-menu-0");
+    assert!(cx.debug_bounds("thread-base").is_none(), "no base in the folder itself");
+    click(cx, "thread-place");
+    click(cx, "thread-menu-1");
+    assert_eq!(roles(cx, "Base branch, feature"), ["Button"], "the pick went with it");
+    click(cx, "thread-base");
+    click(cx, "thread-menu-2");
+
+    cx.simulate_input("port the parser");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<Start> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
+            _ => None,
+        })
+        .collect();
+    let [start] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    let worktree = start.worktree.as_ref().expect("in a new worktree");
+    assert_eq!(worktree.base.as_deref(), Some("develop"), "from the branch picked");
+    assert!(worktree.name.starts_with("port-the-parser-"), "{}", worktree.name);
+    assert_eq!(start.cwd, "/w/atlas");
+}
+
 /// A new worktree's setup on its start tile: while it runs, where it came from and its newest
 /// line; once it failed, how, with its last lines and two ways on. "Start without setup" sends
 /// the same start again, to the same worktree, without the setup; "Try again" with it.

@@ -493,11 +493,11 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
     assert_eq!(away, 2, "both headers say away: {nodes:#?}");
 }
 
-/// A double-click on the header's empty part fills the screen with its tile, as ⌃⌘F does and
-/// a Mac's title bar zooms its window; one on its name names it. Close, under the pointer, does
+/// A double-click on the header's empty part zooms its pane over the tab, as ⇧⌘↩ does and a
+/// Mac's title bar zooms its window; one on its name names it. Close, under the pointer, does
 /// what ⌘W does.
 #[gpui::test]
-fn the_header_fills_the_screen_names_and_closes_its_tile(cx: &mut TestAppContext) {
+fn the_header_zooms_names_and_closes_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     let _first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -509,7 +509,7 @@ fn the_header_fills_the_screen_names_and_closes_its_tile(cx: &mut TestAppContext
     let name = cx.debug_bounds(selector("name", second.item)).expect("its name");
     let empty = point(name.right() + px(24.0), name.center().y);
     double_click(cx, empty);
-    assert!(width(cx) > before + 100.0, "fullscreen: {before} → {}", width(cx));
+    assert!(width(cx) > before + 100.0, "zoomed: {before} → {}", width(cx));
     let name = cx.debug_bounds(selector("name", second.item)).expect("drawn");
     double_click(cx, name.center());
     let renaming = view.read_with(cx, |v, _| v.rename.as_ref().map(|r| r.tile));

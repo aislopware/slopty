@@ -7,6 +7,10 @@
 //! and its attachments ([`DraftSent`]). The chips offer what the machine says a new thread of
 //! the agent can start with (`InstalledAgent::offers`): its models, modes, efforts and
 //! commands. Where it offers none, the chip offers nothing and the agent starts as it would.
+//!
+//! The place chip switches where it starts, in a folder that is a repository: in the folder
+//! itself or in a new worktree of it, and the branch that worktree starts from
+//! (`docs/decisions/agents.md`, "A start picks its worktree's base branch").
 
 use gpui::{Context, EventEmitter};
 use slopty_core::WallMs;
@@ -29,6 +33,11 @@ pub struct DraftSent {
     /// The other agents the same message starts on, each in a new worktree of its own
     /// ([`Draft::toggle_also`]), at their defaults.
     pub also: Vec<AgentId>,
+    /// It starts in a new worktree of its folder ([`Draft::set_worktree`]).
+    pub worktree: bool,
+    /// The branch that worktree starts from, by name; the clone's checked-out one when `None`
+    /// ([`Draft::set_base`]).
+    pub base: Option<String>,
 }
 
 /// Where a thread works, by name: its folder's, its machine's, and whether it is a new
@@ -43,17 +52,25 @@ pub struct Place {
     pub worktree: bool,
     /// The pull request that worktree checks out, by number.
     pub pull: Option<u32>,
+    /// The branch that worktree starts from, when one was chosen; the clone's checked-out one
+    /// else. A pull request's worktree checks the pull request out instead.
+    pub base: Option<String>,
 }
 
 impl Place {
     /// Where, as the question over an empty thread asks it: "in slopty", "in a new worktree of
-    /// slopty"; nothing when the folder is not known.
+    /// slopty", "in a new worktree of slopty from develop"; nothing when the folder is not
+    /// known.
     #[must_use]
     pub fn within(&self) -> Option<String> {
         let folder = self.folder.as_deref()?;
         let with = self.pull.map(|n| format!("with #{n} ")).unwrap_or_default();
+        let from = match (&self.base, self.pull) {
+            (Some(base), None) => format!(" from {base}"),
+            _ => String::new(),
+        };
         Some(if self.worktree {
-            format!("{with}in a new worktree of {folder}")
+            format!("{with}in a new worktree of {folder}{from}")
         } else {
             format!("in {folder}")
         })
@@ -79,8 +96,8 @@ pub struct Draft {
     sent: bool,
     /// First messages sent before, newest first: what ↑ brings back.
     recall: Vec<String>,
-    /// The other agents the machine can start the same message on beside it, for a start in a
-    /// new worktree; none for one in the folder itself, where two agents would share a tree.
+    /// The other agents the machine can start the same message on beside it, offered while it
+    /// starts in a new worktree ([`Self::others`]).
     others: Vec<AgentId>,
     /// Those of [`Self::others`] chosen to run it too, in the order chosen.
     also: Vec<AgentId>,
@@ -166,22 +183,37 @@ impl Draft {
     }
 
     /// The same draft, offering to start its message on `others` too, each in a worktree of
-    /// its own; offered only when it starts in a new worktree itself.
+    /// its own, while it starts in a new worktree itself.
     #[must_use]
     pub fn with_others(self, others: Vec<AgentId>) -> Self {
         let mine = self.state.meta.agent.clone();
-        let others = if self.place.worktree {
-            others.into_iter().filter(|a| *a != mine).collect()
-        } else {
-            Vec::new()
-        };
+        let others = others.into_iter().filter(|a| *a != mine).collect();
         Self { others, ..self }
     }
 
-    /// The other agents it can start its message on as well.
+    /// The other agents it can start its message on as well: none while it starts in the
+    /// folder itself, where two agents would share a tree.
     #[must_use]
     pub fn others(&self) -> &[AgentId] {
-        &self.others
+        if self.place.worktree { &self.others } else { &[] }
+    }
+
+    /// Start in a new worktree of the folder, or in the folder itself. In the folder, no other
+    /// agent runs the message too and no base is kept.
+    pub fn set_worktree(&mut self, worktree: bool, cx: &mut Context<Self>) {
+        self.place.worktree = worktree;
+        if !worktree {
+            self.also.clear();
+            self.place.base = None;
+        }
+        cx.notify();
+    }
+
+    /// Its new worktree starts from branch `base`; from the clone's checked-out one when
+    /// `None`.
+    pub fn set_base(&mut self, base: Option<String>, cx: &mut Context<Self>) {
+        self.place.base = base;
+        cx.notify();
     }
 
     /// The other agents chosen to run its message too.
@@ -245,6 +277,8 @@ impl Draft {
                     mode: meters.mode.clone(),
                     effort: meters.effort.clone(),
                     also: self.also.clone(),
+                    worktree: self.place.worktree,
+                    base: self.place.base.clone().filter(|_| self.place.worktree),
                 });
             }
             _ => return,

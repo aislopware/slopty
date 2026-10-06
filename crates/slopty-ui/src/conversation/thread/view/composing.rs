@@ -11,6 +11,11 @@
 //!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says. The
 //!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`), and the effort
 //!   chip with how hard its model can think (`Intent::SetEffort`).
+//! - **Place.** A draft in a folder that is a repository switches where it starts from its place
+//!   chip: in the folder itself or in a new worktree of it. In a new worktree, its base chip lists
+//!   the branches the clone knows (`GitOp::Branches`, asked once as the draft opens), the default
+//!   and the one checked out first, the rest newest first; the one picked is the worktree's base
+//!   (`NewWorktree::base`).
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
 //!   go up through the workspace to the worker's attachment directory, for every agent; each shows
 //!   as a chip ([`crate::conversation::chips`]) until the message goes, which carries their paths
@@ -37,6 +42,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::RopeExt as _;
+use slopty_proto::git::{Branch, Branches};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
 
@@ -74,6 +80,32 @@ pub(super) enum MenuRows {
     Modes(Vec<Mode>),
     /// How hard the model can be set to think, opened from the effort chip.
     Efforts(Vec<Effort>),
+    /// Where a draft starts, opened from its place chip: [`PLACES`] rows, the folder itself
+    /// then a new worktree of it.
+    Places,
+    /// The branches its new worktree can start from, opened from its base chip, in the order
+    /// [`bases`] gives them.
+    Bases(Arc<Branches>),
+}
+
+/// The rows of a draft's place menu: in the folder itself, in a new worktree of it.
+const PLACES: usize = 2;
+
+/// The branches of `branches` in the order a base menu lists them: `origin`'s default first,
+/// then the one checked out, then the rest as the worker gave them, the newest first.
+pub(super) fn bases(branches: &Branches) -> Vec<&Branch> {
+    let lead = |b: &&Branch| {
+        if branches.default.as_ref() == Some(&b.name) {
+            0
+        } else if branches.current.as_ref() == Some(&b.name) {
+            1
+        } else {
+            2
+        }
+    };
+    let mut listed: Vec<&Branch> = branches.list.iter().collect();
+    listed.sort_by_key(lead);
+    listed
 }
 
 impl MenuRows {
@@ -85,6 +117,8 @@ impl MenuRows {
             Self::Models(models) => models.len(),
             Self::Modes(modes) => modes.len(),
             Self::Efforts(efforts) => efforts.len(),
+            Self::Places => PLACES,
+            Self::Bases(branches) => branches.list.len(),
         }
     }
 }
@@ -126,6 +160,10 @@ pub(super) struct Composing {
     modes: bool,
     /// The effort chip's menu is open.
     efforts: bool,
+    /// A draft's place chip's menu is open.
+    places: bool,
+    /// A draft's base chip's menu is open.
+    bases: bool,
     /// What the composer says above the field until the draft changes: an attachment it cannot
     /// take, a message waiting for its uploads.
     notice: Option<String>,
@@ -207,6 +245,12 @@ impl ThreadView {
         if self.composing.efforts {
             let efforts = self.state(cx).map(|s| s.meta.efforts.clone()).unwrap_or_default();
             return (!efforts.is_empty()).then_some(MenuRows::Efforts(efforts));
+        }
+        if self.composing.places {
+            return self.place_switch(cx).map(|_| MenuRows::Places);
+        }
+        if self.composing.bases {
+            return self.base_switch(cx).map(MenuRows::Bases);
         }
         match self.menu_token(cx)? {
             Token::Command { query } => {
@@ -340,7 +384,8 @@ impl ThreadView {
 
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.composing.models || self.composing.modes || self.composing.efforts {
+        let c = &self.composing;
+        if c.models || c.modes || c.efforts || c.places || c.bases {
             self.close_chip_menus();
             cx.notify();
             return true;
@@ -382,6 +427,25 @@ impl ThreadView {
                 self.composing.efforts = false;
                 let _id = self.intent(Intent::SetEffort { effort: effort.id.clone() }, cx);
                 // The keyboard goes back to the field, to write on or send.
+                self.focus(window, cx);
+                cx.notify();
+                return;
+            }
+            (MenuRows::Places, _) => {
+                self.composing.places = false;
+                if let Some(draft) = &self.draft {
+                    draft.update(cx, |d, cx| d.set_worktree(ix > 0, cx));
+                }
+                self.focus(window, cx);
+                cx.notify();
+                return;
+            }
+            (MenuRows::Bases(branches), _) => {
+                let Some(base) = bases(&branches).get(ix).map(|b| b.name.clone()) else { return };
+                self.composing.bases = false;
+                if let Some(draft) = &self.draft {
+                    draft.update(cx, |d, cx| d.set_base(Some(base), cx));
+                }
                 self.focus(window, cx);
                 cx.notify();
                 return;
@@ -506,6 +570,8 @@ impl ThreadView {
             MenuRows::Models(_) => "Models",
             MenuRows::Modes(_) => "Modes",
             MenuRows::Efforts(_) => "Effort",
+            MenuRows::Places => "Place",
+            MenuRows::Bases(_) => "Base branch",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
         };
         let body: Vec<AnyElement> = match &rows {
@@ -550,6 +616,19 @@ impl ThreadView {
                     .iter()
                     .enumerate()
                     .map(|(ix, model)| self.model_row(ix, model, now.as_deref(), cx))
+                    .collect()
+            }
+            MenuRows::Places => self.place_rows(cx),
+            MenuRows::Bases(branches) => {
+                let now = self.draft_base(cx);
+                bases(branches)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, branch)| {
+                        let said = base_said(branches, branch);
+                        let row = (&branch.name, &branch.name, Some(said.as_str()));
+                        self.named_row(ix, row, now.as_deref(), cx)
+                    })
                     .collect()
             }
         };
@@ -663,6 +742,8 @@ impl ThreadView {
         self.composing.models = false;
         self.composing.modes = false;
         self.composing.efforts = false;
+        self.composing.places = false;
+        self.composing.bases = false;
         self.composing.selected = 0;
     }
 
@@ -722,6 +803,70 @@ impl ThreadView {
             )
             .when(current, |el| el.child(self.icon(Symbol::Checkmark, s.text_secondary)))
             .into_any_element()
+    }
+
+    /// A draft's place chip's menu open or shut; open, the keyboard walks it from its first
+    /// row.
+    pub(super) fn toggle_places(&mut self, cx: &mut Context<Self>) {
+        let open = !self.composing.places;
+        self.close_chip_menus();
+        self.composing.places = open;
+        cx.notify();
+    }
+
+    /// A draft's base chip's menu open or shut; open, the keyboard walks it from its first
+    /// row.
+    pub(super) fn toggle_bases(&mut self, cx: &mut Context<Self>) {
+        let open = !self.composing.bases;
+        self.close_chip_menus();
+        self.composing.bases = open;
+        cx.notify();
+    }
+
+    /// The branches of the repository a draft's folder is in, when it can switch where it
+    /// starts: a draft not sent, with no pull request to check out, whose folder the machine
+    /// read as a repository ([`super::super::git::Repo::branches`]).
+    pub(super) fn place_switch(&self, cx: &App) -> Option<Arc<Branches>> {
+        let draft = self.draft.as_ref()?.read(cx);
+        if draft.sent() || draft.place().pull.is_some() {
+            return None;
+        }
+        let cwd = &draft.state().meta.cwd;
+        self.hub.read(cx).git().repo(cwd)?.branches.clone()
+    }
+
+    /// The branches a draft's new worktree can start from, while it starts in one.
+    pub(super) fn base_switch(&self, cx: &App) -> Option<Arc<Branches>> {
+        let worktree = self.draft.as_ref()?.read(cx).place().worktree;
+        self.place_switch(cx).filter(|b| worktree && !b.list.is_empty())
+    }
+
+    /// The branch a draft's new worktree starts from: the one chosen, else the one its clone
+    /// has checked out.
+    pub(super) fn draft_base(&self, cx: &App) -> Option<String> {
+        let chosen = self.draft.as_ref()?.read(cx).place().base.clone();
+        chosen.or_else(|| self.place_switch(cx)?.current.clone())
+    }
+
+    /// The place menu's rows: the folder itself, on the branch its clone has checked out, then
+    /// a new worktree of it; a check on where the draft starts.
+    fn place_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let Some(draft) = &self.draft else { return Vec::new() };
+        let place = draft.read(cx).place().clone();
+        let folder = place.folder.clone().unwrap_or_else(|| "the folder".to_owned());
+        let current = self.place_switch(cx).and_then(|b| b.current.clone());
+        let on = current.map_or_else(|| "its checked-out commit".to_owned(), |b| format!("on {b}"));
+        let rows = [
+            (FOLDER_ROW.to_owned(), format!("In {folder}"), on),
+            (WORKTREE_ROW.to_owned(), NEW_WORKTREE.to_owned(), "a branch of its own".to_owned()),
+        ];
+        let now = if place.worktree { WORKTREE_ROW } else { FOLDER_ROW };
+        rows.iter()
+            .enumerate()
+            .map(|(ix, (id, label, said))| {
+                self.named_row(ix, (id, label, Some(said.as_str())), Some(now), cx)
+            })
+            .collect()
     }
 
     /// The model chip's menu open or shut; open, the keyboard walks it from its first row.
@@ -1097,4 +1242,24 @@ impl ThreadView {
                 .into_any_element(),
         )
     }
+}
+
+/// The place menu's row for the folder itself, by its id.
+const FOLDER_ROW: &str = "folder";
+
+/// The place menu's row for a new worktree, by its id.
+const WORKTREE_ROW: &str = "worktree";
+
+/// The place menu's row for a new worktree, as it reads.
+pub(super) const NEW_WORKTREE: &str = "In a new worktree";
+
+/// What a base menu says of `branch` beside its name: `origin`'s default, the one checked out,
+/// or that only `origin` has it, in that order of note.
+fn base_said(branches: &Branches, branch: &Branch) -> String {
+    let marks = [
+        (branches.default.as_ref() == Some(&branch.name)).then_some("default"),
+        (branches.current.as_ref() == Some(&branch.name)).then_some("checked out"),
+        (!branch.local).then_some("on origin"),
+    ];
+    marks.into_iter().flatten().collect::<Vec<_>>().join(" \u{b7} ")
 }

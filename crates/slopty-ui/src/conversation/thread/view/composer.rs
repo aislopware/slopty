@@ -11,7 +11,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled, div, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
@@ -347,9 +347,12 @@ impl ThreadView {
 
     /// Where an empty thread works, before its model: "studio · slopty", the question over
     /// the composer asking what to do there. Once the thread has rows its tile's header says it.
+    /// A draft in a repository switches there between the folder and a new worktree of it
+    /// ([`Self::place_switch`]).
     fn place_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let (_, place) = self.hero(cx)?;
         let theme = &self.theme;
+        let s = theme.surfaces;
         let words = match &place.folder {
             Some(folder) if place.worktree => format!(
                 "{}{}new worktree of {folder}",
@@ -361,12 +364,56 @@ impl ThreadView {
             }
             None => place.machine.clone(),
         };
+        let chip = self
+            .chip("thread-place", format!("Place, {}", place.said()))
+            .text_color(hsla(s.text_muted))
+            .child(kit::fit_label("thread-place-words", words, theme));
+        if self.place_switch(cx).is_none() {
+            return Some(chip.role(Role::Label).into_any_element());
+        }
         Some(
-            self.chip("thread-place", place.said())
-                .role(Role::Label)
-                .text_color(hsla(theme.surfaces.text_muted))
-                .child(kit::fit_label("thread-place-words", words, theme))
+            self.chip_switch(chip, cx.listener(|this, _ev, _w, cx| this.toggle_places(cx)))
                 .into_any_element(),
+        )
+    }
+
+    /// The branch a draft's new worktree starts from, beside its place: "from main", a menu of
+    /// the branches its clone knows ([`Self::base_switch`]).
+    fn base_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.base_switch(cx)?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let base = self.draft_base(cx).unwrap_or_else(|| "HEAD".to_owned());
+        let chip = self
+            .chip("thread-base", format!("Base branch, {base}"))
+            .text_color(hsla(s.text_muted))
+            .child(self.icon(Symbol::ArrowTriangleBranch, s.text_muted))
+            .child(kit::fit_label("thread-base-name", format!("from {base}"), theme));
+        Some(
+            self.chip_switch(chip, cx.listener(|this, _ev, _w, cx| this.toggle_bases(cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// `chip` as a switch: a button that brightens under the pointer, its disclosure after it,
+    /// `click` opening its menu; a stop for the keyboard.
+    fn chip_switch(
+        &self,
+        chip: gpui::Stateful<Div>,
+        click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> gpui::Stateful<Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        crate::a11y::tab_stop(
+            chip.role(Role::Button)
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .child(
+                    crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                        .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                )
+                .on_click(click),
+            s.focus,
         )
     }
 
@@ -778,6 +825,7 @@ impl ThreadView {
             };
         let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
         let row = item(row, FOOT_PLACE, self.place_chip(cx));
+        let row = item(row, FOOT_BASE, self.base_chip(cx));
         let row = item(row, FOOT_MODEL, self.model_chip(cx));
         let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
@@ -802,8 +850,10 @@ fn outlined<E: Styled>(el: E, theme: &Theme) -> E {
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
 /// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
-/// Where an empty thread works: the first to leave.
+/// Where an empty thread works: among the first to leave.
 const FOOT_PLACE: (&str, kit::Priority) = ("place", kit::Priority(40));
+/// The branch a draft's new worktree starts from: the first to leave.
+const FOOT_BASE: (&str, kit::Priority) = ("base", kit::Priority(32));
 /// The model.
 const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));
 /// How full the context is.
@@ -1032,6 +1082,28 @@ impl ThreadView {
                         })
                         .detail(name)
                     }),
+                k if k == FOOT_PLACE.0 => self.place_switch(cx).and_then(|_| {
+                    let (_, place) = self.hero(cx)?;
+                    Some(
+                        kit::MenuItem::new("place", PLACE, move |_w, cx| {
+                            let _gone = to.update(cx, |this, cx| {
+                                this.add_open = false;
+                                this.toggle_places(cx);
+                            });
+                        })
+                        .detail(place.within().unwrap_or_default()),
+                    )
+                }),
+                k if k == FOOT_BASE.0 => self.base_switch(cx).map(|_| {
+                    let base = self.draft_base(cx).unwrap_or_else(|| "HEAD".to_owned());
+                    kit::MenuItem::new("base", BASE_BRANCH, move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.add_open = false;
+                            this.toggle_bases(cx);
+                        });
+                    })
+                    .detail(base)
+                }),
                 k if k == FOOT_METER.0 => state.map(|st| {
                     let words = meter_words(&st.meters, crate::clock::now(cx));
                     let first = words.into_iter().next().unwrap_or_else(|| CONTEXT.to_owned());
@@ -1117,6 +1189,14 @@ impl ThreadView {
 
 /// The "+" menu's row that lists the agent's models, while the foot has no room for the chip.
 const MODEL: &str = "Model";
+
+/// The "+" menu's row that switches where a draft starts, while the foot has no room for its
+/// place chip.
+const PLACE: &str = "Place";
+
+/// The "+" menu's row that lists the branches a draft's new worktree can start from, while the
+/// foot has no room for its base chip.
+const BASE_BRANCH: &str = "Base branch";
 
 /// The "+" menu's row for the meter, before the agent has said how full its context is.
 const CONTEXT: &str = "Context";

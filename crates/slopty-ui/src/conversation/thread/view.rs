@@ -28,6 +28,7 @@ use gpui_kit::component::input::{self, InputEvent, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
+use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
     AgentId, AskId, Cap, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
@@ -353,7 +354,26 @@ impl ThreadView {
         let mut view = Self::made(hub, thread, Some(draft), theme, window, cx);
         view.settle_placeholder(window, cx);
         view.rebuild(cx);
+        view.ask_branches(cx);
         view
+    }
+
+    /// A draft asks for the branches of the repository its folder is in, if it is one, for its
+    /// place chip to offer a new worktree of it and that worktree's base: as it opens, and
+    /// again when its machine's link comes up, until they came. Only what the clone knows is
+    /// read, so they come at once.
+    pub fn ask_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = &self.draft else { return };
+        let draft = draft.read(cx);
+        if draft.sent() {
+            return;
+        }
+        let cwd = draft.state().meta.cwd.clone();
+        let hub = self.hub.read(cx);
+        if !hub.linked() || hub.git().repo(&cwd).is_some_and(|r| r.branches.is_some()) {
+            return;
+        }
+        let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&cwd, GitOp::Branches, cx));
     }
 
     fn made(
@@ -390,6 +410,8 @@ impl ThreadView {
                 this.aside_started(*intent, *thread, cx);
             }
             HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
+            // A draft's place chip reads its folder's branches.
+            HubEvent::Git(_) if this.draft.is_some() => cx.notify(),
             _ => {}
         });
         let watching = cx.observe(&composer, |_, _, cx| cx.notify());
@@ -1098,9 +1120,7 @@ impl ThreadView {
             return;
         }
         if let Some(repo) = self.repo(cx) {
-            let _asked = self
-                .hub
-                .update(cx, |hub, cx| hub.git_op(&repo, slopty_proto::git::GitOp::PullStatus, cx));
+            let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&repo, GitOp::PullStatus, cx));
         }
     }
 
@@ -2240,7 +2260,7 @@ impl ThreadView {
         let repo = row.and_then(|r| r.repo.as_deref());
         let folder = folder_name(&state.meta.cwd, repo);
         let machine = hub.worker().to_owned();
-        Some((vec![agent], Place { folder, machine, worktree: false, pull: None }))
+        Some((vec![agent], Place { folder, machine, worktree: false, pull: None, base: None }))
     }
 
     /// The question over an empty thread's composer, at the reading column's width.
@@ -2791,6 +2811,7 @@ mod tests {
             machine: "studio".to_owned(),
             worktree,
             pull: None,
+            base: None,
         };
         let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(
@@ -2810,6 +2831,17 @@ mod tests {
         assert_eq!(
             hero_words(&names(&["Claude Code"]), &pull),
             "What should Claude Code do with #123 in a new worktree of atlas?"
+        );
+        let based = Place { base: Some("develop".to_owned()), ..place(Some("atlas"), true) };
+        assert_eq!(
+            hero_words(&names(&["Codex"]), &based),
+            "What should Codex do in a new worktree of atlas from develop?"
+        );
+        let both = Place { pull: Some(123), ..based };
+        assert_eq!(
+            hero_words(&names(&["Codex"]), &both),
+            "What should Codex do with #123 in a new worktree of atlas?",
+            "a pull request's worktree checks it out, not the base"
         );
         assert_eq!(place(Some("slopty"), false).said(), "in slopty on studio");
     }

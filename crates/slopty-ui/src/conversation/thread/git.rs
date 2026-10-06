@@ -326,6 +326,9 @@ fn missed(
             };
             repo.changes.insert(against.clone(), Arc::new(review));
         }
+        // Branches that could not be read (not a repository, out of reach) leave a start's
+        // place as words: there is no worktree to make of it.
+        GitOp::Branches => {}
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -336,7 +339,7 @@ const fn refused(why: String) -> Said {
 
 /// Whether `op` changes the repository or its pull request, rather than reads it.
 const fn changes(op: &GitOp) -> bool {
-    !matches!(op, GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. })
+    !matches!(op, GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. } | GitOp::Branches)
 }
 
 /// A file's status in git's letters as the person reads it: the working tree's letter where it
@@ -479,6 +482,42 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A read of the branches is a read: what the last change said stays, nothing reads as
+    /// busy, and no status is asked after it. Its answer is kept; a miss says nothing under
+    /// the buttons.
+    #[test]
+    fn a_branches_read_changes_nothing_and_is_kept() {
+        use slopty_proto::git::{Branch, Branches};
+
+        let mut book = GitBook::default();
+        let (commit, _) =
+            book.ask("/w/r", GitOp::Commit { paths: Vec::new(), message: "m".into() });
+        let done = GitDone::Committed { commit: "abc".to_owned(), branch: None, files: 1 };
+        let _then = book.answer(commit, GitOutcome::Done(done));
+        let (read, msg) = book.ask("/w/r", GitOp::Branches);
+        assert_eq!(ops(&[msg]), [GitOp::Branches]);
+        assert_eq!(book.busy("/w/r"), None, "a read is not busy");
+        let branch = Branch { name: "main".to_owned(), local: true, remote: true, committed: 1 };
+        let listed = Branches {
+            current: Some("main".to_owned()),
+            default: Some("main".to_owned()),
+            list: vec![branch],
+            more: 0,
+        };
+        let answered = GitOutcome::Done(GitDone::Branches(Box::new(listed.clone())));
+        let (_, then) = book.answer(read, answered).expect("ours");
+        assert!(then.is_empty(), "no status after a read: {then:?}");
+        let repo = book.repo("/w/r").expect("asked of");
+        assert_eq!(repo.branches.as_deref(), Some(&listed));
+        assert!(matches!(repo.said, Some((_, Said::Committed { .. }))), "the commit still says");
+
+        let (missed, _) = book.ask("/w/x", GitOp::Branches);
+        let refused = GitOutcome::Refused { why: "not a repository".to_owned() };
+        let _then = book.answer(missed, refused);
+        let repo = book.repo("/w/x").expect("asked of");
+        assert_eq!((repo.branches.as_ref(), repo.said.as_ref()), (None, None));
     }
 
     /// A commit asked "and push" pushes only once it is made, and every change asks the status

@@ -553,6 +553,12 @@ impl ThreadHub {
 
     // ----- git ---------------------------------------------------------------------------
 
+    /// Whether the link to the worker is up, so what is asked goes now.
+    #[must_use]
+    pub const fn linked(&self) -> bool {
+        self.threads.linked()
+    }
+
     /// The git ops asked of this worker's repositories, and what each last said.
     #[must_use]
     pub const fn git(&self) -> &GitBook {

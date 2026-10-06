@@ -2238,6 +2238,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     list comes at once; the worktree's own start still fetches its base for a moment, as before.
   - The worker reads it with `git for-each-ref` over `refs/heads` and `refs/remotes/origin`
     (`repo::branches`). Other remotes' branches are not offered: a base is fetched from `origin`.
+  - *In the composer*: a draft asks for its folder's branches as it opens, and again when its
+    machine's thread link comes up if it opened before. Once they come, the folder is a
+    repository and the place chip is a switch: in the folder itself, or in a new worktree of it.
+    In a new worktree a base chip follows ("from main"). Its menu lists `origin`'s default first,
+    then the branch checked out, then the rest newest first. The pick is the start's
+    `NewWorktree::base`; without one the worktree starts from the branch checked out, as before.
+    The question over the composer says where ("in a new worktree of atlas from develop"). Back
+    in the folder, the pick and the other agents ticked to run the message too both go, since
+    two agents would share one tree. A start on a pull request keeps its place as words: it
+    checks the pull request out, not a base. Out of room, both chips wait in the "+" menu.
+  - The read is a read in the client's git book (`GitBook`): it clears nothing the last commit
+    said, never reads as busy and asks no status after it. A miss (not a repository, out of
+    reach) leaves the place as words.
   - Tests: `repo::branches::tests::{a_branch_both_have_is_listed_once,
     a_clone_lists_its_branches_and_origins}`, the `client_git_branches` and
-    `worker_git_branches` goldens.
+    `worker_git_branches` goldens, `git::tests::a_branches_read_changes_nothing_and_is_kept`
+    and `workspace::tests::thread_start::the_place_chip_starts_a_worktree_from_a_branch_picked`.

@@ -448,11 +448,14 @@ impl WorkspaceView {
                     pull: Some(number),
                     ..NewWorktree::named(super::pull_review::worktree_of(number, item))
                 },
-                None => NewWorktree::named(super::starting::worktree_name(
-                    prompt.as_deref(),
-                    &starting.agent,
-                    item,
-                )),
+                None => NewWorktree {
+                    base: starting.base.clone(),
+                    ..NewWorktree::named(super::starting::worktree_name(
+                        prompt.as_deref(),
+                        &starting.agent,
+                        item,
+                    ))
+                },
             }),
             prompt,
             model: starting.chosen.model.clone(),
@@ -803,11 +806,13 @@ impl WorkspaceView {
         hub.update(cx, |hub, cx| hub.git_done(request, outcome, cx));
     }
 
-    /// The link to `key` is up: its threads catch up from where they stand, and the folders
-    /// its agents' past sessions ran in are asked for, for the starts to offer.
+    /// The link to `key` is up: its threads catch up from where they stand, its drafts ask for
+    /// their folders' branches, and the folders its agents' past sessions ran in are asked
+    /// for, for the starts to offer.
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+        self.starting.linked(key, cx);
         self.ask_past_places(key, None);
     }
 
