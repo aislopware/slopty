@@ -61,7 +61,12 @@ define_class!(
         ) -> bool {
             init_logging();
             slopty_platform::notify::install();
-            slopty_platform::notify::pushed::register();
+            // A self-test plays the app delegate and hands the app its device token: a real
+            // one from APNs (which a simulator on Apple silicon gets) would replace it in the
+            // Keychain while the test seals to its own, and the push would not open.
+            if !slopty_app::self_test() {
+                slopty_platform::notify::pushed::register();
+            }
             true
         }
 
