@@ -8,7 +8,9 @@
 //!
 //! A frame counts as matching when at most `tolerance` of its pixels differ by more than
 //! [`CHANNEL_SLACK`] in any channel: font hinting, the RTT readout and a blinking cursor
-//! move a few hundred pixels, a broken layout moves a few hundred thousand. Pass `--accept`
+//! move a few hundred pixels, a broken layout moves a few hundred thousand. A pixel on an edge
+//! that each picture's neighbourhood explains also matches ([`edge_explained`]): one macOS
+//! rasterises a glyph's edge a shade apart from another's. Pass `--accept`
 //! to write missing and failing goldens, or `--accept-all` to rewrite every golden (via
 //! `SLOPTY_E2E_ACCEPT=changed` and `SLOPTY_E2E_ACCEPT=all`).
 
@@ -22,6 +24,15 @@ use image::{Rgba, RgbaImage};
 /// Small, because a theme's surfaces sit close together: `canvas` and `panel` are 11 apart in
 /// the light theme, and at 24 a band moved from one to the other still matched.
 pub const CHANNEL_SLACK: u8 = 4;
+
+/// The most a glyph's edge may be shaded apart between two macOS releases and still match,
+/// when both pictures' neighbourhoods explain it ([`edge_explained`]).
+///
+/// CI's macOS 26 renders against this Mac's goldens (CI e2e run 37390615720): of `thread`'s
+/// 1 655 pixels more than [`CHANNEL_SLACK`] apart, 1 628 were within 64 and none past 150,
+/// while a changed title or path moved its pixels by up to 240. A word swapped for another
+/// moves ink against ground, 150 to 255 apart, so it still counts.
+pub const EDGE_SLACK: u8 = 64;
 
 /// Fraction of a Mac golden's pixels allowed to differ.
 ///
@@ -225,7 +236,12 @@ pub fn compare_masked(
         let fade = |c: u8| (c / 3).saturating_add(170);
         let faded = Rgba([fade(pixel[0]), fade(pixel[1]), fade(pixel[2]), 255]);
         let same = golden.get_pixel_checked(x, y).is_some_and(|g| {
-            pixel.0.iter().zip(g.0.iter()).all(|(a, b)| a.abs_diff(*b) <= CHANNEL_SLACK)
+            let apart = pixel.0.iter().zip(g.0.iter()).map(|(a, b)| a.abs_diff(*b)).max();
+            let apart = apart.unwrap_or(0);
+            apart <= CHANNEL_SLACK
+                || (apart <= EDGE_SLACK
+                    && edge_explained(*pixel, golden, x, y)
+                    && edge_explained(*g, actual, x, y))
         });
         if same {
             diff.put_pixel(x, y, faded);
@@ -235,6 +251,34 @@ pub fn compare_masked(
         }
     }
     (Diff { differing, total }, diff)
+}
+
+/// Whether `pixel` lies, in every channel, within the range of `other`'s 3 × 3 neighbourhood
+/// around `(x, y)`, give or take [`CHANNEL_SLACK`].
+///
+/// A glyph's edge is coverage between its ink and its ground, and macOS 26 and 27 shade it a
+/// little apart: CI's renders of `thread` differed from this Mac's in 0.23 % of their pixels, all
+/// on glyph edges, with the same words (CI e2e run 37390615720). Such a pixel lies between
+/// colours both pictures have beside it, so asked both ways it is explained. A line or a word
+/// that came or went is not: where one picture has a colour the other has nowhere near, one of
+/// the two asks fails.
+fn edge_explained(pixel: Rgba<u8>, other: &RgbaImage, x: u32, y: u32) -> bool {
+    let (w, h) = other.dimensions();
+    let (mut low, mut high) = ([u8::MAX; 4], [u8::MIN; 4]);
+    for ny in y.saturating_sub(1)..=y.saturating_add(1).min(h.saturating_sub(1)) {
+        for nx in x.saturating_sub(1)..=x.saturating_add(1).min(w.saturating_sub(1)) {
+            let Some(near) = other.get_pixel_checked(nx, ny) else { continue };
+            for (c, v) in near.0.iter().enumerate() {
+                if let (Some(lo), Some(hi)) = (low.get_mut(c), high.get_mut(c)) {
+                    *lo = (*lo).min(*v);
+                    *hi = (*hi).max(*v);
+                }
+            }
+        }
+    }
+    pixel.0.iter().zip(low.iter().zip(high.iter())).all(|(v, (lo, hi))| {
+        *v >= lo.saturating_sub(CHANNEL_SLACK) && *v <= hi.saturating_add(CHANNEL_SLACK)
+    })
 }
 
 /// Luma buckets of [`luma_histogram`].
@@ -709,6 +753,32 @@ mod tests {
         assert_eq!(diff.differing, 2);
         assert_eq!(image.get_pixel(0, 0), &Rgba([220, 30, 30, 255]));
         assert_ne!(image.get_pixel(1, 1), &Rgba([220, 30, 30, 255]));
+    }
+
+    /// An edge a shade apart, between colours both pictures have beside it, matches; a thin line
+    /// that went, and a word's ink where the other has ground, still count.
+    #[test]
+    fn a_glyphs_edge_shaded_apart_matches_and_a_lost_line_does_not() {
+        let ground = [240, 240, 240];
+        let ink = [40, 40, 40];
+        let mut golden = solid(5, 5, ground);
+        for y in 0..5 {
+            golden.put_pixel(1, y, Rgba([ink[0], ink[1], ink[2], 255]));
+            golden.put_pixel(2, y, Rgba([140, 140, 140, 255]));
+        }
+        let mut actual = golden.clone();
+        for y in 0..5 {
+            actual.put_pixel(2, y, Rgba([180, 180, 180, 255]));
+        }
+        assert_eq!(compare(&actual, &golden).0.differing, 0, "an edge shaded 40 apart");
+
+        let lost = solid(5, 5, ground);
+        let (diff, _) = compare(&lost, &golden);
+        assert_eq!(diff.differing, 10, "the line and its edge went");
+
+        let mut inked = golden.clone();
+        inked.put_pixel(3, 2, Rgba([ink[0], ink[1], ink[2], 255]));
+        assert_eq!(compare(&inked, &golden).0.differing, 1, "ink where the golden has ground");
     }
 
     #[test]

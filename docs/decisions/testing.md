@@ -1120,8 +1120,8 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   shows how long the turn has run, counted from the transcript's fixed 2026-10-04 stamps to the
   wall clock, so it read "6h 38m" when the golden was taken and "11h 26m" a few hours later,
   with digits of other widths each hour. Every readout of a time (a turn's elapsed time, a
-  record's stamp, a limit's reset, an author's age, a project's time at work, an agent's age in
-  the navigator) now reads `slopty_ui::clock::now`. That is the system clock unless
+  record's stamp, a limit's reset, an author's age, an agent's age in the navigator) now reads
+  `slopty_ui::clock::now`. That is the system clock unless
   `Command::PinClock` pins it, and the test pins it a minute after its transcript's first record.
   What is kept or sent (a backup's time, a visit counted) still reads the system clock. The
   same pin holds the working marks still: under Reduce Motion a working mark and companion
@@ -1176,3 +1176,18 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     taller mode, and a test that passes only on some screens is not a test.
   - Test: `main_thread::a_self_test_window_keeps_its_size_on_a_short_screen` (AppKit fits a plain
     window into a screen too short for it; the kept class does not). No window is shown.
+- ✅ **A glyph's edge shaded apart on another macOS still matches** (2026-10-06, from CI e2e
+  run 37390615720, the first that drew every golden at its size). CI's macOS shades a glyph's
+  edge a little apart from this Mac's: `thread` differed in 0.23 % of its pixels, all on glyph
+  edges, with the same words.
+  - A pixel within `CHANNEL_SLACK` still matches as before. One up to `EDGE_SLACK` (64) apart
+    matches only when it is explained both ways. Each picture's pixel lies, in every channel,
+    within the range of the other picture's 3 × 3 neighbourhood around it
+    (`snapshot::edge_explained`). An edge's coverage lies between colours both pictures have
+    beside it. A line or a word that came or went does not, so one of the two asks fails.
+  - Not a looser tolerance: raising `MAC_TOLERANCE` or `CHANNEL_SLACK` would let a lost hairline
+    or a recoloured word through as well.
+  - The self-test's roots (a folder a test opens, whose path a render shows) are made under
+    `/private/tmp` on macOS and not `TMPDIR`. A runner's `TMPDIR` is another length, and `folder`
+    drew another path (`harness::roots_parent`).
+  - Test: `snapshot::tests::a_glyphs_edge_shaded_apart_matches_and_a_lost_line_does_not`.

@@ -72,9 +72,17 @@ const KEPT_MARK: &str = ".kept-for-inspection";
 /// What every stack's root and lock is named from, in the temporary directory.
 const ROOTS: &str = "slopty-e2e-";
 
+/// Where the stacks' roots are made: one path on every Mac. A root's path shows in the
+/// renders (a shell's prompt, a folder's path bar), and `TMPDIR` is a per-user
+/// `/var/folders/…` path, so a golden taken on one Mac never matched another's render
+/// (CI e2e run 37390615720, `folder`). The name under it is already the test's own.
+fn roots_parent() -> PathBuf {
+    if cfg!(target_os = "macos") { PathBuf::from("/private/tmp") } else { std::env::temp_dir() }
+}
+
 impl StackDir {
     fn new(prefix: &str) -> Result<Self> {
-        let parent = std::env::temp_dir();
+        let parent = roots_parent();
         sweep(&parent);
         // libtest runs each test on a thread named for it.
         let test = std::thread::current().name().filter(|name| *name != "main").map(fnv1a);
@@ -93,7 +101,7 @@ impl StackDir {
                 return Ok(Self { dir, lock: Some((lock, lock_path)) });
             }
         }
-        let dir = tempfile::Builder::new().prefix(prefix).tempdir()?;
+        let dir = tempfile::Builder::new().prefix(prefix).tempdir_in(&parent)?;
         Ok(Self { dir, lock: None })
     }
 
