@@ -1290,14 +1290,15 @@ impl ReviewView {
     }
 
     /// The agent's own review: the way to ask it, where the agent has a door and there is a
-    /// change on show, or that it runs. A tile too narrow for the words beside the scopes shows
-    /// the agent's mark alone, its words in a hint.
+    /// change on show, or that it runs. Its words name the agent, so no mark stands beside
+    /// them; a tile too narrow for the words beside the scopes shows the conversation's glyph
+    /// alone, its words in a hint.
     fn review_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (_, name) = self.door_of(cx)?;
-        let mark = self.agent_mark(cx);
         let roomy = self.width >= LIST_FROM;
+        let mark = (!roomy).then(|| self.icon(crate::icons::AGENT, s.text_secondary));
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
             if roomy {
@@ -1350,25 +1351,9 @@ impl ReviewView {
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-            .child(mark)
+            .children(mark)
             .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
         Some(crate::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
-    }
-
-    /// The thread's agent's mark at the size of an icon, beside what it wrote or does: its
-    /// own, or the neutral glyph for an agent with none or not yet known.
-    fn agent_mark(&self, cx: &App) -> AnyElement {
-        let theme = &self.theme;
-        let mark = self.door_of(cx).map_or_else(
-            || crate::icons::AGENT.into(),
-            |(agent, _)| crate::icons::Mark::agent(&agent.0),
-        );
-        crate::icons::symbol(
-            theme,
-            mark,
-            self.z(theme.typography.icon()),
-            hsla(theme.surfaces.text_secondary),
-        )
     }
 
     /// Above the diff: how the agent's own review came out, and its findings that have no line
@@ -1476,7 +1461,6 @@ impl ReviewView {
             .items_center()
             .gap(self.z(theme.spacing.xs))
             .cursor_pointer()
-            .child(self.agent_mark(cx))
             .child(
                 div()
                     .min_w_0()
@@ -1521,7 +1505,6 @@ impl ReviewView {
     fn came_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let agent = self.door_of(cx).map(|(agent, _)| agent);
         self.came.as_ref().map(|came| {
             let tone = if came.refused.is_some() { s.error } else { s.text_secondary };
             div()
@@ -1532,7 +1515,6 @@ impl ReviewView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.sm))
                 .py(self.z(theme.spacing.xs))
-                .children(agent.as_ref().map(|_| self.agent_mark(cx)))
                 .child(
                     div()
                         .id("review-came-words")
@@ -2031,7 +2013,6 @@ impl ReviewView {
         let id = format!("review-uncomment-{ix}");
         let selector = id.clone();
         let ranged = comment.end > comment.line;
-        let agent = comment.by.as_ref().and_then(|_| self.door_of(cx)).map(|(agent, _)| agent);
         let (title, rest) = match &comment.by {
             Some(_) => {
                 comment.body.split_once('\n').map_or((comment.body.as_str(), ""), |(t, r)| (t, r))
@@ -2040,10 +2021,9 @@ impl ReviewView {
         };
         self.note()
             .debug_selector(move || format!("review-comment-{ix}"))
-            .child(match &agent {
-                Some(_) => self.agent_mark(cx),
-                None => self.icon(Symbol::TextBubble, s.text_muted),
-            })
+            // A finding and a person's comment wear the same glyph: a finding's bold first
+            // line, and the banner over the diff, say whose it is.
+            .child(self.icon(Symbol::TextBubble, s.text_muted))
             .when(ranged, |el| {
                 el.child(
                     kit::tabular(div())

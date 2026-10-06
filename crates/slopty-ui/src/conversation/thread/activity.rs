@@ -246,7 +246,7 @@ fn background(state: &ThreadState) -> Vec<Background<'_>> {
 ///
 /// Only an edit that was made counts: one still asked for, refused, failed or running has
 /// changed nothing yet, so the tray's "Review" would open on nothing.
-fn edited(state: &ThreadState) -> Vec<Edited> {
+pub(in crate::conversation::thread) fn edited(state: &ThreadState) -> Vec<Edited> {
     let Some(turn) = state.last_turn() else { return Vec::new() };
     let mut out: Vec<Edited> = Vec::new();
     for item in state.items.iter().rev().take_while(|i| i.turn == turn.id) {

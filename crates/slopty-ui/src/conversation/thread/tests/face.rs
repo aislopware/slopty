@@ -873,3 +873,124 @@ fn a_goal_is_one_quiet_line_with_its_budget(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-goal").is_none(), "gone with the goal");
 }
+
+/// The agent's default mode goes unsaid on the composer's foot, and a mode it is not in shows
+/// as its chip; the "+" menu switches it either way.
+#[gpui::test]
+fn the_default_mode_goes_unsaid_and_the_plus_menu_switches_it(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Mode;
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps = vec![Cap::named(Cap::SET_MODE)];
+    let mode = |id: &str, label: &str| Mode {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        description: None,
+    };
+    state.meta.modes = vec![mode("default", "Default"), mode("plan", "Plan")];
+    state.meters.mode = Some("default".to_owned());
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-mode").is_none(), "the default goes unsaid");
+
+    let add = cx.debug_bounds("thread-attach").expect("the + button").center();
+    cx.simulate_click(add, Modifiers::none());
+    cx.run_until_parked();
+    let modes = cx.debug_bounds("thread-add-menu-modes").expect("Mode in the + menu").center();
+    cx.simulate_click(modes, Modifiers::none());
+    cx.run_until_parked();
+    let plan = cx.debug_bounds("thread-menu-1").expect("the modes are listed").center();
+    cx.simulate_click(plan, Modifiers::none());
+    assert_eq!(intents(&sent), [Intent::SetMode { mode: "plan".to_owned() }]);
+
+    state.meters.mode = Some("plan".to_owned());
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-mode").is_some(), "a mode it is not in by default shows");
+}
+
+/// The meter is its ring alone while the context is under half full, and says its share in
+/// figures from half full on.
+#[gpui::test]
+fn the_meter_says_its_share_from_half_full(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meters.context_window = Some(200_000);
+    state.meters.context_tokens = Some(60_000);
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter").is_some(), "the meter, a ring");
+    assert!(cx.debug_bounds("thread-meter-figure").is_none(), "30 %: the ring alone");
+
+    state.meters.context_tokens = Some(120_000);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter-figure").is_some(), "60 %: in figures too");
+}
+
+/// While a request is on show, what the turn edited rides its card's head and opens the
+/// review; the composer's chip and a row of its own in the tray stay away, so the edits are
+/// said once.
+#[gpui::test]
+fn a_requests_card_carries_the_turns_edits_once(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::thread("edit");
+    let thread = state.meta.id;
+    state.requests = vec![approval("a")];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    let head = cx.debug_bounds("request-changes").expect("the edits on the card's head");
+    let card = cx.debug_bounds("request-a").expect("the card");
+    assert!(card.contains(&head.center()), "inside it");
+    assert!(cx.debug_bounds("thread-changes").is_none(), "not on the composer as well");
+    assert!(cx.debug_bounds("thread-edited").is_none(), "nor in a row of the tray");
+
+    let asked = super::asked(cx, &view);
+    cx.simulate_click(head.center(), Modifiers::none());
+    assert!(
+        asked.borrow().iter().any(|e| matches!(
+            e,
+            crate::conversation::thread::view::ThreadViewEvent::Review { .. }
+        )),
+        "it opens the review"
+    );
+
+    state.requests.clear();
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("request-changes").is_none(), "with the card gone, so are they");
+}
+
+/// A turn that only created a file has no line counted (the agent's result carries no diff
+/// for a file made whole), and the composer's way to the review still stands, naming the file.
+#[gpui::test]
+fn a_created_file_alone_still_opens_the_review(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let chip = cx.debug_bounds("thread-changes").expect("the way to the review");
+    assert!(cx.debug_bounds("thread-edited").is_none(), "said once, over the composer");
+
+    let asked = super::asked(cx, &view);
+    cx.simulate_click(chip.center(), Modifiers::none());
+    assert!(
+        asked.borrow().iter().any(|e| matches!(
+            e,
+            crate::conversation::thread::view::ThreadViewEvent::Review { .. }
+        )),
+        "it opens the review"
+    );
+}

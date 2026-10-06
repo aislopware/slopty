@@ -2053,7 +2053,7 @@ async fn showcase_a_claude_code_thread_mid_turn() {
 
     // What the thread changed, in a review tile beside it.
     let drv = &mut stack.driver;
-    if click(drv, "Button", "Review").await {
+    if click(drv, "Button", "Review the changes").await {
         wait(drv, "the review tile", |d| d.items.iter().any(|i| i.kind == "review")).await;
         drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
         both(&mut stack, "claude-review").await;

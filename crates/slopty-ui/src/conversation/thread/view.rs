@@ -2019,8 +2019,9 @@ impl ThreadView {
                 if bar.waiting().next().is_some() {
                     return None;
                 }
-                let mark = crate::icons::Mark::agent(&state.meta.agent.0);
-                let mark = kit::notice_mark(theme, mark, k);
+                // A conversation's glyph, not the agent's mark: the title names the agent, and
+                // the tile's header wears its mark already.
+                let mark = kit::notice_mark(theme, crate::icons::AGENT, k);
                 let title = format!("New {} thread", agent_label(&state.meta.agent));
                 let detail = new_thread_place(
                     &state.meta.cwd,

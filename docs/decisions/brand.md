@@ -284,8 +284,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     drawn; GPUI's own SVG path draws at twice the size and halves it, which cost the edges at
     1x. pi is filled cell by cell on whole pixels.
   - **Sized by the ink, centred on it.** A radial mark's ink box is its slot less the
-    smallest space (16 → 14 pt in a row's lead, 14 → 12 pt in the composer's chip, 28 → 24 pt
-    in an empty thread's notice). pi's square reads larger than a radial mark as wide, so it
+    smallest space: 16 → 14 pt in a row's lead (the navigator's, the tile header's, the
+    picker's), the one place a mark is drawn now. pi's square reads larger than a radial mark as wide, so it
     takes 0.86 of that on whole cells of at least two pixels (3 px cells, 12 px, in a row at
     1x). The mask is the ink box, so centring it centres the ink, and its origin is rounded to
     the device's grid. No weight: a filled silhouette does not thicken with a selected row's

@@ -579,8 +579,9 @@ async fn the_empty_workspace_says_how_to_begin() {
 }
 
 /// The blocked agent's thread holds what it asks: the tray saying what the tool does, with the
-/// way to answer in the terminal. The worker puts it there a grace after the hook, so a golden
-/// taken before it would hold a thread that has not caught up.
+/// way to answer in the terminal, its one answer when the hook offers none to press here. The
+/// worker puts it there a grace after the hook, so a golden taken before it would hold a
+/// thread that has not caught up.
 fn asked_in_its_thread(d: &Dump) -> bool {
     d.a11y_node("Dialog", Some("Wants to run a command")).is_some()
         && d.a11y_node("Button", Some("Answer in the terminal")).is_some()

@@ -250,9 +250,7 @@ async fn a_subagent_has_a_thread_of_its_own() {
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
     drv.wait_for("the settled turn", STEP, |d| {
-        thread_shows(d)
-            && button_starts(d, "Worked")
-            && labels(d, "Group").iter().any(|l| l.starts_with("Edits"))
+        thread_shows(d) && button_starts(d, "Worked") && has(d, "Button", "Review the changes")
     })
     .await
     .unwrap();
@@ -1306,10 +1304,10 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     played.refresh_turn(&stack).await;
 
     let drv = &mut stack.driver;
-    drv.wait_for("the thread", STEP, |d| thread_shows(d) && button_starts(d, "Review"))
+    drv.wait_for("the thread", STEP, |d| thread_shows(d) && has(d, "Button", "Review the changes"))
         .await
         .unwrap();
-    click(drv, "Button", "Review").await;
+    click(drv, "Button", "Review the changes").await;
     drv.wait_for("the review tile with its door", STEP, |d| {
         d.items.iter().any(|i| i.kind == "review") && has(d, "Button", "Review with Claude Code")
     })

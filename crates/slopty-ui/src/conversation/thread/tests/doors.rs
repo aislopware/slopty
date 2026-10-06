@@ -117,8 +117,8 @@ fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
 }
 
 /// An approval is one decision: Deny and Allow side by side a base unit apart, the solid last;
-/// "Deny and stop" waits behind the deny's chevron and answers from there; the standing grant
-/// stands under the row with its reach written out whole, never in the row.
+/// "Deny and stop" waits behind the deny's chevron and answers from there, and so does
+/// answering in the terminal; the standing grant leads the same row from its other end.
 #[gpui::test]
 fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext) {
     use slopty_proto::thread::{Choice, Effect};
@@ -141,6 +141,7 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
         choice("allow", "Allow", Effect::Allow, None, false),
     ];
     state.requests = vec![asks];
+    state.meta.terminal = Some(SessionId::new());
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
@@ -155,12 +156,15 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
     let gap = f32::from(allow.left() - chevron.right());
     assert!((gap - 8.0).abs() < 0.5, "a base unit apart: {gap}");
     assert!(cx.debug_bounds("answer-a-stop").is_none(), "the other denial waits in its menu");
-    let standing = bounds(cx, "standing-a");
-    assert!(standing.top() >= allow.bottom(), "the standing grant under the row");
-    assert!(standing.contains(&bounds(cx, "answer-a-always").center()), "and only there");
+    let always = bounds(cx, "answer-a-always");
+    assert!(always.right() <= deny.left(), "the standing grant leads the row");
+    assert!(always.top() < deny.bottom() && deny.top() < always.bottom(), "on the same row");
+    assert!(bounds(cx, "standing-a").contains(&always.center()), "and only there");
+    assert!(cx.debug_bounds("release-a").is_none(), "the terminal waits in the menu");
 
     click(cx, "denials-a");
     cx.run_until_parked();
+    assert!(cx.debug_bounds("denials-menu-a-release").is_some(), "Answer in the terminal");
     click(cx, "denials-menu-a-stop");
     cx.run_until_parked();
     assert_eq!(

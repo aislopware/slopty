@@ -7674,3 +7674,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::nav_rows::the_filter_waits_hidden_until_search_its_keys_or_typing`,
     `tab_strip::the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`, and
     `keymap::tests::the_files_chord_wins_over_a_deeper_default`, which counts the navigator's ⌘F.
+
+- ✅ **The request is one card with one row of answers; the composer's foot keeps four things**
+  (2026-10-06, `.research/elegance-icons-2026-10-06.md` §3.6 and §5 items 3, 4 and 6). Supersedes the
+  "From now on" section of "A request is one decision" and "The way to the terminal stands on
+  the request's title line".
+  - **One foot row.** Deny▾ and Allow stand at the right as before. A grant that lasts leads
+    the same row from the left: its words on a quiet button, its reach after it in words at
+    the metadata size, wrapping rather than cut. The "From now on" heading is gone; a screen
+    reader hears the group as "Grants that last".
+  - **Answering in the terminal waits behind the deny's chevron**, last in "Other ways to
+    deny" after a hairline. It was a third answer on the title's line. With nothing to answer
+    here it is still the card's one answer, and with no plain deny to hang it from it leads
+    the row.
+  - **The edits are said once.** While a request is on show, what the turn changed rides its
+    card's head after the title and opens the review; the composer's changes chip stands aside.
+    Otherwise the composer's chip says it. The tray's "Edits" row shows only where there is no
+    composer (a subagent's thread). The chip is the one door to the review, so it never hangs
+    on the counts: a turn whose edits counted no line (a file Claude Code created whole, whose
+    result carries an empty diff) shows a pencil and the file's name, or how many files.
+  - **The composer's foot** is "+", the model, then the place, the meter and send. The model
+    is its name alone: the agent's mark leads the tile's header. The mode and the effort show
+    only when the agent is not at its default ("default" by id or name), and a mode or effort
+    it names none of goes unsaid; the "+" menu holds "Mode" and "Effort" under a hairline, so
+    their switches are always one press away. The meter is its ring alone under half full; from
+    50 % its share is in figures too, and from 80 % it takes the warning tone.
+  - **A new thread's empty state wears the conversation glyph**, not the agent's mark: its
+    title names the agent.
+  - **The review wears no agent mark.** "Review with Claude Code", the band of findings and
+    what came name the agent in words; a finding and a person's comment share the comment
+    glyph, the finding's bold first line saying whose it is. A tile too narrow for the words
+    shows the conversation glyph with the words in its hint. An agent's mark now leads only
+    the navigator's row, the tile's header and the new-agent picker.
+  - Tests: `conversation::thread::tests::doors::an_approval_is_allow_and_deny_with_the_rest_set_apart`,
+    `review::tests::the_agents_findings_become_comments_and_notes_sent_as_one`,
+    `conversation::thread::tests::face::{the_default_mode_goes_unsaid_and_the_plus_menu_switches_it,
+    the_meter_says_its_share_from_half_full, a_requests_card_carries_the_turns_edits_once,
+    a_created_file_alone_still_opens_the_review}`.

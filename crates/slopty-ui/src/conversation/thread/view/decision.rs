@@ -1,13 +1,16 @@
-//! A request's answers, composed as one decision: what is asked, then Allow and Deny side by
-//! side, the other ways to deny in a menu named for them, and any standing grant in a section
-//! of its own that says how far it reaches.
+//! A request's answers, composed as one decision on one foot row: Deny and Allow at its right,
+//! the other ways to deny (and the way back to the agent's own prompt) in a menu named for
+//! them, and any standing grant at its left, its reach written out whole.
 //!
 //! A row of five like buttons ("Always allow /work; accept edits mode", "Deny", "Deny…", "Deny
 //! and stop", "Allow") made the person read every one to find the two that matter, and put a
 //! standing grant at the same weight as this once. Now the usual answers are the row's last two,
 //! the solid one last as a dialog's default is, a base unit apart. What turns the request down
-//! some other way waits behind the deny's chevron. A grant that holds past this once never sits
-//! in that row: it stands under it, its reach written out whole.
+//! some other way waits behind the deny's chevron, and so does answering in the terminal, which
+//! sat on the title's line as a third choice. A grant that holds past this once never sits
+//! beside them: it leads the row from the other end, in a quiet button whose reach follows in
+//! words. A section of its own under the row, headed "From now on", made the card two decisions
+//! tall.
 
 use std::rc::Rc;
 
@@ -31,8 +34,8 @@ pub(crate) const OTHER_DENIALS: &str = "Other ways to deny";
 /// The menu's row that denies with the person's reason.
 pub(crate) const WITH_A_REASON: &str = "Deny with a reason\u{2026}";
 
-/// What the standing grants are headed by.
-pub(crate) const STANDING: &str = "From now on";
+/// What the standing grants are named by, for a screen reader.
+pub(crate) const STANDING: &str = "Grants that last";
 
 /// A request's answers, sorted by where each goes.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,35 +91,35 @@ pub(super) fn answer_scope(choice: &Choice) -> Option<&str> {
 }
 
 impl ThreadView {
-    /// `request`'s answers as one decision ([module](self)), or the reason's field while the
-    /// person writes why it is denied. `release` is the way back to the agent's own prompt,
-    /// which leads the row where the request is answered under its call.
-    pub(super) fn decision(
-        &self,
-        request: &Request,
-        release: Option<AnyElement>,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
+    /// `request`'s answers as one decision on one row ([module](self)), or the reason's field
+    /// while the person writes why it is denied. The way back to the agent's own prompt waits
+    /// behind the deny's chevron; with no plain deny to hang it from, it leads the row.
+    pub(super) fn decision(&self, request: &Request, cx: &Context<Self>) -> Option<AnyElement> {
         if let Some(row) = self.deny_row(request, cx) {
             return Some(row);
         }
         let theme = &self.theme;
         let arranged = arrange(&request.options);
-        if arranged.front.is_empty() && arranged.standing.is_empty() && release.is_none() {
+        let plain = plain_deny(&request.options).map(|c| c.id.clone());
+        let hung =
+            plain.is_some() && arranged.front.iter().any(|(c, _)| Some(&c.id) == plain.as_ref());
+        let release = self.release_words(cx);
+        let leading = if hung { None } else { self.release_button(request, cx) };
+        if arranged.front.is_empty() && arranged.standing.is_empty() && leading.is_none() {
             return None;
         }
-        let plain = plain_deny(&request.options).map(|c| c.id.clone());
         let mut row: Vec<AnyElement> = Vec::new();
         for (choice, kind) in &arranged.front {
             let button = self.choice_button(request, choice, *kind, cx);
             if plain.as_deref() == Some(choice.id.as_str()) {
-                row.push(self.deny_split(request, button, &arranged.denials, cx));
+                let release = release.clone();
+                row.push(self.deny_split(request, button, &arranged.denials, release, cx));
             } else {
                 row.push(button.into_any_element());
             }
         }
         let standing = (!arranged.standing.is_empty())
-            .then(|| self.standing_section(request, &arranged.standing, cx).into_any_element());
+            .then(|| self.standing_grants(request, &arranged.standing, cx).into_any_element());
         let id = request.id.0.clone();
         Some(
             div()
@@ -124,20 +127,18 @@ impl ThreadView {
                 .key_context(crate::conversation::REQUEST_CTX)
                 .w_full()
                 .flex()
-                .flex_col()
-                .gap(self.z(theme.spacing.sm))
+                .items_center()
+                .gap(self.z(theme.spacing.md))
+                .children(leading)
+                .child(div().flex_1().min_w_0().children(standing))
                 .child(
                     div()
-                        .w_full()
+                        .flex_none()
                         .flex()
-                        .flex_wrap()
                         .items_center()
                         .gap(self.z(theme.spacing.sm))
-                        .children(release)
-                        .child(div().flex_1())
                         .children(row),
                 )
-                .children(standing)
                 .into_any_element(),
         )
     }
@@ -160,16 +161,18 @@ impl ThreadView {
     }
 
     /// The plain deny joined to a chevron that opens the other ways to deny: with a reason,
-    /// and every other deny the agent offers. A deny with no other way stands alone.
+    /// every other deny the agent offers, and `release`, the way back to the agent's own prompt.
+    /// A deny with no other way stands alone.
     fn deny_split(
         &self,
         request: &Request,
         deny: gpui::Stateful<Div>,
         denials: &[&Choice],
+        release: Option<String>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let why = deny_choice(request).map(|c| c.id.clone());
-        if why.is_none() && denials.is_empty() {
+        if why.is_none() && denials.is_empty() && release.is_none() {
             return deny.into_any_element();
         }
         let theme = &self.theme;
@@ -204,7 +207,7 @@ impl ThreadView {
                     cx.notify();
                 }))
         };
-        let menu = open.then(|| self.denials_menu(request, why, denials, cx));
+        let menu = open.then(|| self.denials_menu(request, why, denials, release, cx));
         div()
             .relative()
             .flex_none()
@@ -218,12 +221,14 @@ impl ThreadView {
     }
 
     /// The other ways to deny, hung from the deny's chevron: with a reason first, then each
-    /// other deny in the agent's order, its reach in its words.
+    /// other deny in the agent's order, its reach in its words, and last, apart, the way back
+    /// to the agent's own prompt.
     fn denials_menu(
         &self,
         request: &Request,
         why: Option<String>,
         denials: &[&Choice],
+        release: Option<String>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let this = cx.entity().downgrade();
@@ -244,6 +249,17 @@ impl ThreadView {
                 let _gone = to.update(cx, |this, cx| this.answer(ask, id, cx));
             }));
         }
+        if let Some(words) = release {
+            menu.separate();
+            let (to, ask) = (this.clone(), ask.clone());
+            menu.push(kit::MenuItem::new("release", words, move |_w, cx| {
+                let ask = ask.clone();
+                let _gone = to.update(cx, |this, cx| {
+                    this.denials_open = None;
+                    this.release(ask, cx);
+                });
+            }));
+        }
         let panel = kit::MenuPanel::new(
             format!("denials-menu-{}", ask.0),
             OTHER_DENIALS,
@@ -262,10 +278,10 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The grants that hold past this once, under the row and apart from it: headed "From now
-    /// on", each its words and then its reach written out whole in the readable size, never
-    /// cut, since that reach is what the person grants.
-    fn standing_section(
+    /// The grants that hold past this once, leading the row from its other end: each a quiet
+    /// button in its words, then its reach written out whole in the readable size, wrapping
+    /// rather than cut, since that reach is what the person grants.
+    fn standing_grants(
         &self,
         request: &Request,
         standing: &[&Choice],
@@ -280,14 +296,10 @@ impl ThreadView {
             .role(Role::Group)
             .aria_label(STANDING)
             .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xs))
-            .child(
-                kit::typed(div(), theme.roles().metadata, self.zoom)
-                    .text_color(hsla(s.text_muted))
-                    .child(STANDING),
-            )
+            .gap(self.z(theme.spacing.xxs))
             .children(standing.iter().map(|choice| {
                 let reach = choice.scope.as_deref().map(str::trim).filter(|r| !r.is_empty());
                 let (ask, id) = (request.id.clone(), choice.id.clone());
@@ -298,22 +310,24 @@ impl ThreadView {
                         label,
                         ButtonKind::Ghost,
                     )
+                    .flex_none()
                     .child(SharedString::from(choice.label.clone()))
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.answer(ask.clone(), id.clone(), cx);
                     }));
                 div()
                     .w_full()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.sm))
+                    .gap(self.z(theme.spacing.xs))
                     .child(button)
                     .children(reach.map(|reach| {
                         div()
                             .min_w_0()
                             .flex_1()
                             .whitespace_normal()
-                            .map(|el| kit::typed(el, theme.roles().chrome, self.zoom))
+                            .map(|el| kit::typed(el, theme.roles().metadata, self.zoom))
                             .text_color(hsla(s.text_secondary))
                             .child(SharedString::from(reach.to_owned()))
                     }))

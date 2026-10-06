@@ -112,8 +112,7 @@ impl ThreadView {
         let answers =
             self.answered_inline(ix).then(|| self.shown_waiting(cx).cloned()).flatten().and_then(
                 |request| {
-                    let release = self.release_button(&request, cx);
-                    self.decision(&request, release, cx)
+                    self.decision(&request, cx)
                         .map(|d| div().w_full().py(self.z(self.theme.spacing.xs)).child(d))
                 },
             );

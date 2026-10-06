@@ -18,12 +18,12 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{BackgroundTask, Cap, Delivery, Drive, ItemId, Request};
+use slopty_proto::thread::{AskId, BackgroundTask, Cap, Delivery, Drive, ItemId, Request};
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, ThreadViewEvent, tail};
 use crate::colors::hsla;
-use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
+use crate::conversation::thread::activity::{Activity, Asked, Edit, Edited, STEP_DONE};
 use crate::conversation::thread::hub::Refusal;
 use crate::conversation::thread::questions;
 use crate::conversation::thread::rows::Row;
@@ -259,10 +259,10 @@ impl ThreadView {
         let waiting: Vec<&Asked<'_>> = bar.waiting().collect();
         let at = self.asked_at.min(waiting.len().saturating_sub(1));
         let placement = self.marks.get().asked.map_or(Placement::Tray, |(_, p)| p);
-        let request = waiting
-            .get(at)
-            .filter(|_| placement != Placement::Inline)
-            .map(|current| self.request_card(current.request, at, waiting.len(), placement, cx));
+        let request = waiting.get(at).filter(|_| placement != Placement::Inline).map(|current| {
+            let asked = (current.request, at, waiting.len());
+            self.request_card(asked, placement, &bar.edited, cx)
+        });
         // Each kind of thing stands in a group of its own, a base unit of space between groups,
         // so a row never reads as belonging to the group above it. Space, not a rule: rules
         // between rows read as a stack of boxes.
@@ -276,7 +276,9 @@ impl ThreadView {
                 .collect(),
         );
         groups.push(bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect());
-        if !bar.edited.is_empty() {
+        // Over the composer the edits are its changes chip, or the request card's head while
+        // one is on show: a row of their own here said them a second time.
+        if !bar.edited.is_empty() && !tucked {
             groups.push(vec![self.edited_section(&bar.edited, cx)]);
         }
         let paused = bar.queue.iter().any(|q| q.stopped).then(|| self.paused_line());
@@ -564,25 +566,33 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The way back to the agent's own prompt: an agent whose prompt runs in a terminal takes
-    /// the request back there, and one whose own TUI can join the thread beside Slopty
-    /// ([`Cap::LIVE_TUI`] with no terminal yet: Codex) has it opened on the thread first. Its
-    /// one solid when nothing else answers it here. The terminal comes into view.
+    /// The way back to the agent's own prompt, in words: an agent whose prompt runs in a
+    /// terminal takes the request back there, and one whose own TUI can join the thread beside
+    /// Slopty ([`Cap::LIVE_TUI`] with no terminal yet: Codex) has it opened on the thread first.
+    pub(super) fn release_words(&self, cx: &App) -> Option<String> {
+        release_words(&self.state(cx)?.meta)
+    }
+
+    /// Hand request `ask` back to the agent's own prompt, which comes into view.
+    pub(super) fn release(&mut self, ask: AskId, cx: &mut Context<Self>) {
+        let _id = self.intent(Intent::Release { ask }, cx);
+        self.show_terminal(cx);
+    }
+
+    /// [`Self::release_words`] as a button: the one solid when nothing else answers the
+    /// request here.
     pub(super) fn release_button(
         &self,
         request: &Request,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let words = release_words(&self.state(cx)?.meta)?;
+        let words = self.release_words(cx)?;
         let only_way = request.options.is_empty() && request.questions.is_empty();
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
         let release = request.id.clone();
         Some(
             self.answer_button(format!("release-{}", release.0), (words, None), kind)
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    let _id = this.intent(Intent::Release { ask: release.clone() }, cx);
-                    this.show_terminal(cx);
-                }))
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.release(release.clone(), cx)))
                 .into_any_element(),
         )
     }
@@ -616,16 +626,16 @@ impl ThreadView {
             .children(scope)
     }
 
-    /// The request on show, in the tray: what it asks, its answers under a hairline, "2 of 5"
-    /// with the way to the others, and the way back to its call when that is scrolled away.
-    /// An approval is answered only by a press, so a stray key cannot answer it; questions are
-    /// a questionnaire, which the keyboard walks once it is in it.
+    /// The request on show, in the tray, one card: what it asks on its head row, with what the
+    /// turn has `edited` so far, "2 of 5" with the way to the others, and the way back to its
+    /// call when that is scrolled away; then the command, then one row of answers. An approval
+    /// is answered only by a press, so a stray key cannot answer it; questions are a
+    /// questionnaire, which the keyboard walks once it is in it.
     fn request_card(
         &self,
-        request: &Request,
-        at: usize,
-        of: usize,
+        (request, at, of): (&Request, usize, usize),
         placement: Placement,
+        edited: &[Edited],
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
@@ -728,8 +738,12 @@ impl ThreadView {
                 .child(asking.questions().element(theme, answers))
                 .into_any_element();
             (None, Some(body))
+        } else if request.options.is_empty() {
+            // Nothing to answer here: the way back to the agent's prompt is the card's one
+            // answer, on its head row.
+            (release, None)
         } else {
-            let body = self.decision(request, None, cx).map(|decision| {
+            let body = self.decision(request, cx).map(|decision| {
                 div()
                     .flex_none()
                     .px(self.z(theme.spacing.md))
@@ -737,8 +751,9 @@ impl ThreadView {
                     .child(decision)
                     .into_any_element()
             });
-            (release, body)
+            (None, body)
         };
+        let changes = self.changes_chip("request-changes", edited_counts(edited), edited, cx);
         div()
             .id(ElementId::Name(format!("request-{id}").into()))
             .debug_selector(move || format!("request-{id}"))
@@ -769,6 +784,7 @@ impl ThreadView {
                             .text_color(hsla(s.text))
                             .child(SharedString::from(title)),
                     )
+                    .children(changes)
                     .children(counter.map(|c| {
                         kit::tabular(div())
                             .flex_none()
@@ -861,16 +877,10 @@ impl ThreadView {
         div().w_full().flex().flex_col().child(head).children(steps).into_any_element()
     }
 
-    fn edited_section(
-        &self,
-        edited: &[crate::conversation::thread::activity::Edited],
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn edited_section(&self, edited: &[Edited], cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (added, removed) = edited.iter().fold((0_u32, 0_u32), |(a, r), e| {
-            (a.saturating_add(e.added), r.saturating_add(e.removed))
-        });
+        let (added, removed) = edited_counts(edited);
         let words = match edited {
             [one] => format!("Edits \u{b7} {}", one.path.rsplit('/').next().unwrap_or(&one.path)),
             many => format!("Edits \u{b7} {} files", many.len()),
@@ -1261,6 +1271,11 @@ pub(super) fn tasks_words<'a>(tasks: impl IntoIterator<Item = &'a BackgroundTask
 
 /// What the way back to the agent's own prompt says: the terminal its prompt runs in, or the
 /// agent's own TUI opened on the thread; `None` where it has neither.
+/// The lines `edited` added and removed, in all.
+fn edited_counts(edited: &[Edited]) -> (u32, u32) {
+    edited.iter().fold((0, 0), |(a, r), e| (a.saturating_add(e.added), r.saturating_add(e.removed)))
+}
+
 fn release_words(meta: &slopty_proto::thread::ThreadMeta) -> Option<String> {
     let joins = meta.can(Cap::LIVE_TUI) && meta.drive.is(Drive::SHARED);
     if joins {

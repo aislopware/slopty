@@ -2,7 +2,8 @@ Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
-TextInput │ Filter
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
@@ -31,13 +32,11 @@ Button │ Copy message
 Button │ Worked 35 s: Edited notes.md · Ran 3 commands · 9 more
 Article │ done
 Button │ Copy message
-Group │ Activity
-Group │ Edits · notes.md
-Button │ Review
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ 1 finished
 Button │ Commit
+Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send

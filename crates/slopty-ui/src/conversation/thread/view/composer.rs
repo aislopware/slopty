@@ -20,6 +20,7 @@ use slopty_theme::{Rgb, Theme};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
+use crate::conversation::thread::activity::{self, Edited};
 use crate::icons::{IconSize, Symbol};
 use crate::kit::{self, ButtonKind};
 
@@ -258,24 +259,15 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let here = self.where_it_works(cx);
-        let thread = self.thread;
-        let changes = kit::changes(theme, here.added, here.removed).map(|counts| {
-            div()
-                .id("thread-changes")
-                .debug_selector(|| "thread-changes".to_owned())
-                .role(Role::Button)
-                .aria_label("Review the changes")
-                .flex_none()
-                .px(self.z(theme.spacing.xs))
-                .rounded(self.z(theme.radii.xs))
-                .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.hover)))
-                .active(move |el| el.bg(hsla(s.pressed)))
-                .child(counts)
-                .on_click(cx.listener(move |_this, _ev, _w, cx| {
-                    cx.emit(ThreadViewEvent::Review { thread });
-                }))
-        });
+        // While a request is on show its card's head says what changed; one place at a time.
+        let changes = self
+            .shown_waiting(cx)
+            .is_none()
+            .then(|| {
+                let edited = self.state(cx).map(activity::edited).unwrap_or_default();
+                self.changes_chip("thread-changes", (here.added, here.removed), &edited, cx)
+            })
+            .flatten();
         let place = div()
             .min_w_0()
             .flex_shrink_1()
@@ -323,6 +315,85 @@ impl ThreadView {
             .children(self.pull_chip(cx))
             .children(changes)
             .children(self.screen_chip(cx))
+    }
+
+    /// What the thread changed, `(added, removed)` lines, as counts that open the review;
+    /// `None` when nothing changed. Its id is `id`.
+    ///
+    /// The review's one door over the composer, so it never hangs on the counts: files the
+    /// last turn `edited` with no line counted (a file created whole, whose result carries no
+    /// diff) are said under a pencil, by one file's name or how many.
+    pub(super) fn changes_chip(
+        &self,
+        id: &'static str,
+        (added, removed): (u32, u32),
+        edited: &[Edited],
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let thread = self.thread;
+        let counted = kit::changes(theme, added, removed);
+        let named = counted.is_none();
+        let counts = counted.or_else(|| {
+            let words = match edited {
+                [] => return None,
+                [one] => one.path.rsplit('/').next().unwrap_or(&one.path).to_owned(),
+                many => format!("{} files", many.len()),
+            };
+            // The pencil tells an edited file's name from the checkout's beside it.
+            Some(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.xs))
+                    .text_color(hsla(s.text_secondary))
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            Symbol::Pencil,
+                            IconSize::Inline,
+                            hsla(s.text_muted),
+                        )
+                        .size(self.z(theme.typography.small())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(words)),
+                    ),
+            )
+        });
+        counts.map(|counts| {
+            crate::a11y::tab_stop(
+                div()
+                    .id(id)
+                    .debug_selector(move || id.to_owned())
+                    .role(Role::Button)
+                    .aria_label("Review the changes")
+                    .flex_none()
+                    // A name gives up width before the place does; counts never.
+                    .when(named, |el| el.flex_shrink_1().min_w_0())
+                    .flex()
+                    .items_center()
+                    .px(self.z(theme.spacing.xs))
+                    .rounded(self.z(theme.radii.xs))
+                    .cursor_pointer()
+                    .text_size(self.z(theme.typography.small()))
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .active(move |el| el.bg(hsla(s.pressed)))
+                    .child(counts)
+                    .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                        cx.emit(ThreadViewEvent::Review { thread });
+                    })),
+                s.focus,
+            )
+            .into_any_element()
+        })
     }
 
     /// The branch's pull request, once this client has heard of it: its number in the tone of
@@ -400,19 +471,10 @@ impl ThreadView {
         let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
         let name =
             model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
-        // The agent's own mark leads the model it runs, in the chip's ink; an agent with no mark
-        // of its own is named by the words alone.
-        let mark = match crate::icons::Mark::agent(&state.meta.agent.0) {
-            mark @ crate::icons::Mark::Agent(_) => Some(
-                crate::icons::icon(theme, mark, IconSize::Inline, hsla(s.text_secondary))
-                    .debug_selector(|| "thread-model-mark".to_owned())
-                    .size(self.z(theme.typography.icon())),
-            ),
-            crate::icons::Mark::Symbol(_) => None,
-        };
+        // The model by its name alone: the agent's mark leads the tile's header, and beside
+        // "Opus 5.5" it only said again whose model it is.
         let chip = self
             .chip("thread-model", format!("Model, {name}"))
-            .children(mark)
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(
@@ -457,7 +519,9 @@ impl ThreadView {
                 .find(|known| known.id == m || known.label == m)
                 .map_or_else(|| sentence(m), |known| known.label.clone())
         });
-        let named = named.or_else(|| switch.then(|| "Mode".to_owned()));
+        // The agent's default mode goes unsaid, and so does a mode it names none of: the "+"
+        // menu holds the switch then ([`Self::add_menu`]).
+        let named = named.filter(|_| !mode.is_some_and(is_default));
         let sandbox = state.meta.facts.get(SANDBOX).map(|f| f.trim()).filter(|f| !f.is_empty());
         let words: Vec<String> = named.into_iter().chain(sandbox.map(sentence)).collect();
         if words.is_empty() {
@@ -518,10 +582,9 @@ impl ThreadView {
                 .find(|known| known.id == e || known.label == e)
                 .map_or_else(|| sentence(e), |known| known.label.clone())
         });
-        if named.is_none() && state.meta.can(Cap::SET_EFFORT) && !switch {
-            return None;
-        }
-        let words = named.or_else(|| switch.then(|| "Effort".to_owned()))?;
+        // The default level goes unsaid, and so does a level it names none of: the "+" menu
+        // holds the switch then ([`Self::add_menu`]).
+        let words = named.filter(|_| !effort.is_some_and(is_default))?;
         let chip =
             self.chip("thread-effort", format!("Effort, {words}")).child(SharedString::from(words));
         if !switch {
@@ -626,11 +689,15 @@ impl ThreadView {
                             theme.typography.small() * self.zoom,
                         )
                     }))
-                    .children(used.map(|u| {
-                        kit::Rolling::new(
-                            "thread-meter-figure",
-                            share(u),
-                            self.z(theme.typography.small()),
+                    // The ring alone says a context well within its window; from half full its
+                    // share is read too, and from 80 % it takes the warning tone.
+                    .children(used.filter(|u| *u >= FIGURE_FROM).map(|u| {
+                        div().debug_selector(|| "thread-meter-figure".to_owned()).child(
+                            kit::Rolling::new(
+                                "thread-meter-figure",
+                                share(u),
+                                self.z(theme.typography.small()),
+                            ),
                         )
                     }))
                     .map(kit::hint_timing)
@@ -868,6 +935,32 @@ impl ThreadView {
             })
             .detail("@"),
         );
+        // The mode and the effort switch here while their chips are away (the default, or one
+        // the agent names none of), and beside them as well.
+        let meta = self.state(cx).map(|state| &state.meta);
+        let modes = meta.is_some_and(|m| m.can(Cap::SET_MODE) && !m.modes.is_empty());
+        let efforts = meta.is_some_and(|m| m.can(Cap::SET_EFFORT) && !m.efforts.is_empty());
+        if modes || efforts {
+            menu.separate();
+        }
+        if modes {
+            let to = this.clone();
+            menu.push(kit::MenuItem::new("modes", MODES, move |_w, cx| {
+                let _gone = to.update(cx, |this, cx| {
+                    this.add_open = false;
+                    this.toggle_modes(cx);
+                });
+            }));
+        }
+        if efforts {
+            let to = this.clone();
+            menu.push(kit::MenuItem::new("efforts", EFFORTS, move |_w, cx| {
+                let _gone = to.update(cx, |this, cx| {
+                    this.add_open = false;
+                    this.toggle_efforts(cx);
+                });
+            }));
+        }
         let panel = kit::MenuPanel::new(
             ADD_MENU,
             ADD_LABEL,
@@ -904,6 +997,10 @@ pub(crate) const COMMANDS: &str = "Commands";
 
 /// The "+" menu's row that names a file or a symbol, as typing "@" does.
 pub(crate) const MENTIONS: &str = "Files and symbols";
+/// The "+" menu's row that lists the agent's modes.
+pub(crate) const MODES: &str = "Mode";
+/// The "+" menu's row that lists how hard the model can think.
+pub(crate) const EFFORTS: &str = "Effort";
 
 /// `draft` with a command begun at its start, and the caret after the "/": the agent reads a
 /// command only from a message's start, and what was written stays as the command's words.
@@ -921,6 +1018,15 @@ fn with_mention(draft: &str, caret: usize) -> (String, usize) {
     let lead = if before.is_empty() || before.ends_with(char::is_whitespace) { "" } else { " " };
     let text = format!("{before}{lead}@{after}");
     (text, caret.saturating_add(lead.len()).saturating_add(1))
+}
+
+/// The share of the context in use from which the meter says it in figures beside its ring.
+const FIGURE_FROM: f64 = 50.0;
+
+/// Whether `name`, a mode or an effort as the agent says it, is the agent's default, which the
+/// composer leaves unsaid.
+pub(super) fn is_default(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("default")
 }
 
 /// The tone the share of the context window in use is drawn in: warn past 80 %, error past
