@@ -1003,6 +1003,153 @@ pub async fn uninstall_worker(session: &Session) -> io::Result<Vec<(Job, bool)>>
     Ok(removed)
 }
 
+/// What the worker keeps under its data directory, each its own: what [`purge_worker`] removes.
+///
+/// The data directory is shared with the app and a server on the same
+/// machine (their layout, caches, settings), so the purge names the worker's paths rather than
+/// taking the directory. `apps/slopty-worker/tests/purge.rs` runs the real daemons on an empty
+/// one and fails when they leave anything this list does not name.
+pub const WORKER_STATE: [&str; 21] = [
+    "worker-id",
+    "input-source",
+    "caps-lock",
+    "items.json",
+    "session.key",
+    "sessions",
+    "threads",
+    "snapshots",
+    "presence",
+    "claude-mod",
+    "pi-gate",
+    "claude-managed",
+    "ssh-terminfo",
+    "shell",
+    "bin/slopty-ptyd",
+    "bin/slopty-worker",
+    "bin/slopty",
+    "run/worker.sock",
+    "run/worker.mod.sock",
+    "run/ptyd.sock",
+    "run/ptyd.custody",
+];
+
+/// The directories a worker shares with the server's install and the app (the copied binaries,
+/// the sockets, the crash reports): a purge removes them only once nothing else is in them.
+const WORKER_EMPTIED: [&str; 3] = ["bin", "run", "crashes"];
+
+/// The programs whose crash reports a purge removes: the worker's two daemons.
+const WORKER_PROGRAMS: [&str; 2] = ["slopty-worker", "slopty-ptyd"];
+
+/// What `slopty --json worker uninstall --purge` removed from a machine, which a remove over
+/// `ssh` reads.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Removed {
+    /// The services taken out, by program.
+    pub services: Vec<String>,
+    /// The files and directories removed, as paths there.
+    pub paths: Vec<String>,
+    /// Whether Slopty's hook entries were taken out of the agent's settings.
+    pub hooks: bool,
+}
+
+/// Remove what the worker keeps on this machine, its services gone already
+/// ([`uninstall_worker`]); the paths removed, in order.
+///
+/// That is its own paths under `data_dir` ([`WORKER_STATE`]), its daemons' crash reports, its
+/// `LaunchAgents`' logs, and the deploy's stage under the home. A directory the purge emptied
+/// goes too; one that holds anything else stays.
+///
+/// Nothing outside those paths is touched: not the data directory's other files (the app's,
+/// a server's, `settings.toml`), and nothing under the home but the logs and the stage.
+///
+/// # Errors
+///
+/// When a path is there and cannot be removed.
+pub fn purge_worker(session: &Session, data_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for path in WORKER_STATE.iter().map(|rel| data_dir.join(rel)) {
+        if remove_path(&path)? {
+            removed.push(path);
+        }
+    }
+    let crashes = data_dir.join("crashes");
+    for entry in std::fs::read_dir(&crashes).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if crash_of_worker(&name.to_string_lossy()) && remove_path(&entry.path())? {
+            removed.push(entry.path());
+        }
+    }
+    for dir in WORKER_EMPTIED {
+        let dir = data_dir.join(dir);
+        if remove_if_empty(&dir)? {
+            removed.push(dir);
+        }
+    }
+    if session.manager == Manager::Launchd {
+        for program in WORKER_PROGRAMS {
+            let log = session.log_file(program);
+            if remove_path(&log)? {
+                removed.push(log);
+            }
+        }
+        let logs = session.log_file("slopty");
+        if let Some(dir) = logs.parent()
+            && remove_if_empty(dir)?
+        {
+            removed.push(dir.to_path_buf());
+        }
+    }
+    let stage = session.home.join(".slopty");
+    if remove_path(&stage.join("deploy"))? {
+        removed.push(stage.join("deploy"));
+    }
+    if remove_if_empty(&stage)? {
+        removed.push(stage);
+    }
+    Ok(removed)
+}
+
+/// Whether a crash report's file name (`<ms>-<pid>-<program>.<ext>…`) is one of the worker's
+/// daemons'.
+fn crash_of_worker(name: &str) -> bool {
+    let mut parts = name.splitn(3, '-');
+    let (Some(_ms), Some(_pid), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    WORKER_PROGRAMS
+        .iter()
+        .any(|program| rest.strip_prefix(program).is_some_and(|after| after.starts_with('.')))
+}
+
+/// Remove `path`, a file, a socket or a directory with all in it; whether it was there.
+fn remove_path(path: &Path) -> io::Result<bool> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(false) };
+    let gone =
+        if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    match gone {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(context(&e, format_args!("remove {}", path.display()))),
+    }
+}
+
+/// Remove `dir` when it is there and empty; whether it went.
+///
+/// # Errors
+///
+/// When it is empty and cannot be removed.
+pub fn remove_if_empty(dir: &Path) -> io::Result<bool> {
+    let empty = std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none());
+    if !empty {
+        return Ok(false);
+    }
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(context(&e, format_args!("remove {}", dir.display()))),
+    }
+}
+
 /// Install the server's service in `session` from `source` and start it, as
 /// [`install_worker`] does the worker's; the definition's path.
 ///
@@ -1290,6 +1437,85 @@ mod tests {
         let again = uninstall_worker(&session).await.unwrap();
         assert_eq!(again, [(WORKER, false), (PTYD, false)], "nothing left to remove");
         assert_eq!(session.state(WORKER), State::Absent, "and nothing installed");
+    }
+
+    /// A purge takes the worker's own paths, its daemons' crash reports and logs and the
+    /// deploy's stage, and leaves what the data directory holds for anything else: the app's
+    /// layout and caches, a server's binary, its socket and its log, the settings. A directory
+    /// it emptied goes; a second purge finds nothing.
+    #[test]
+    fn a_purge_takes_the_workers_own_files_and_leaves_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let data = root.path().join("data");
+        let (session, calls) = stand_in(Manager::Launchd, &home);
+        let write = |path: PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        };
+        for rel in WORKER_STATE {
+            let path = data.join(rel);
+            // A file or a directory of things, as the worker keeps each: either goes whole.
+            if rel.contains('.') || rel.starts_with("bin/") {
+                write(path);
+            } else {
+                write(path.join("held"));
+            }
+        }
+        write(data.join("crashes/1700-42-slopty-worker.native"));
+        write(data.join("crashes/1700-43-slopty-ptyd.json"));
+        write(home.join("Library/Logs/Slopty/slopty-worker.log"));
+        write(home.join("Library/Logs/Slopty/slopty-ptyd.log"));
+        write(home.join(".slopty/deploy/slopty"));
+        let kept = [
+            data.join("settings.toml"),
+            data.join("layout.json"),
+            data.join("thread-cache/7/state"),
+            data.join("bin/slopty-server"),
+            data.join("run/server.sock"),
+            data.join("crashes/1700-44-slopty-app.native"),
+            home.join("Library/Logs/Slopty/slopty-server.log"),
+            home.join("slopty/clones/github.com/o/atlas/README"),
+            home.join(".claude/settings.json"),
+        ];
+        for path in &kept {
+            write(path.clone());
+        }
+
+        let removed = purge_worker(&session, &data).unwrap();
+        for rel in WORKER_STATE {
+            assert!(!data.join(rel).exists(), "{rel} removed");
+        }
+        for path in &kept {
+            assert_eq!(std::fs::read(path).unwrap(), b"x", "{} kept as it was", path.display());
+        }
+        assert!(removed.contains(&data.join("crashes/1700-42-slopty-worker.native")));
+        assert!(!data.join("crashes/1700-43-slopty-ptyd.json").exists(), "ptyd's report");
+        assert!(!home.join("Library/Logs/Slopty/slopty-worker.log").exists(), "its logs");
+        assert!(!home.join(".slopty").exists(), "the stage, emptied, goes");
+        assert!(data.join("run").is_dir() && data.join("bin").is_dir(), "shared, so kept");
+        assert!(calls.try_iter().next().is_none(), "no service manager asked");
+
+        for path in &kept[3..7] {
+            std::fs::remove_file(path).unwrap();
+        }
+        let again = purge_worker(&session, &data).unwrap();
+        let emptied = [
+            data.join("bin"),
+            data.join("run"),
+            data.join("crashes"),
+            home.join("Library/Logs/Slopty"),
+        ];
+        assert_eq!(again, emptied, "only the directories nothing else holds now");
+    }
+
+    #[test]
+    fn a_crash_report_is_the_workers_by_its_program() {
+        assert!(crash_of_worker("1700-42-slopty-worker.native"));
+        assert!(crash_of_worker("1700-42-slopty-ptyd.json.partial.9.0"));
+        for not in ["1700-42-slopty.native", "1700-42-slopty-app.json", "slopty-worker.native"] {
+            assert!(!crash_of_worker(not), "{not}");
+        }
     }
 
     /// A missing daemon stops the install before anything is stopped or written.

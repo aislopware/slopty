@@ -23,8 +23,9 @@ pub enum WorkerCmd {
     /// Run `slopty-ptyd` and `slopty-worker` as services of this session (`LaunchAgents` on macOS,
     /// systemd user units on Linux): they start now and at every login.
     Install(service::InstallOpts),
-    /// Stop the services and remove them (open sessions die with ptyd).
-    Uninstall,
+    /// Stop the services and remove them (open sessions die with ptyd); with `--purge`,
+    /// everything else of the worker's on this machine too.
+    Uninstall(service::UninstallOpts),
     /// Whether the services are installed and running.
     Service,
     /// Put a worker on another machine over `ssh`, or with `--update` replace the one there:
@@ -59,7 +60,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         WorkerCmd::Screens => CtlRequest::Screens,
         WorkerCmd::Wake => CtlRequest::Wake,
         WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir, json).await,
-        WorkerCmd::Uninstall => return service::uninstall().await,
+        WorkerCmd::Uninstall(opts) => return service::uninstall(opts, data_dir, json).await,
         WorkerCmd::Service => return service::status(json),
         WorkerCmd::Deploy(opts) => {
             let source = service::binaries_source(opts.bin_dir())?;

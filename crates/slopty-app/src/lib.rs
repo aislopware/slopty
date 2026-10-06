@@ -4087,8 +4087,9 @@ pub fn open_workspace(
             slopty_platform::dirs::data_dir().join(slopty_client::xfer::ledger::FILE),
             cx,
         );
-        // Each worker's threads, so an agent's thread draws in its first frame.
-        view.set_thread_cache(slopty_platform::dirs::data_dir().join("threads"));
+        // Each worker's threads, so an agent's thread draws in its first frame. Not `threads`:
+        // that is this Mac's worker's own, which reads every folder in it as a thread's log.
+        view.set_thread_cache(slopty_platform::dirs::data_dir().join("thread-cache"));
         // Each worker's items, so a cold launch draws its tiles before it is linked.
         view.set_item_cache(slopty_platform::dirs::data_dir().join("items"));
         view.set_pasteboard(pasteboard());

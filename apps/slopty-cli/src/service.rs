@@ -349,12 +349,89 @@ fn is_the_new_one(health: &Health, expected: &Path, installed: Instant) -> Resul
     Ok(())
 }
 
-/// Stop both services and remove their definitions. Sessions die with `slopty-ptyd`.
-pub async fn uninstall() -> Result<()> {
-    for (job, was) in platform::uninstall_worker(&Session::native()).await? {
-        say_removed(job, was);
+/// `slopty worker uninstall` options.
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub struct UninstallOpts {
+    /// Take everything else of the worker's off this machine too: its own files under the data
+    /// directory, its logs, the deploy's stage, Slopty's hook entries in Claude Code's
+    /// settings and the server it registered with. Repositories, worktrees, the agents' own
+    /// sessions and anything the app or a server keeps here stay.
+    #[arg(long)]
+    purge: bool,
+}
+
+/// Stop both services and remove their definitions, then with `--purge` everything else of
+/// the worker's ([`remove_worker`]). Sessions die with `slopty-ptyd`. With `json`, the
+/// [`platform::Removed`] a remove over `ssh` reads.
+pub async fn uninstall(opts: UninstallOpts, data_dir: &Path, json: bool) -> Result<()> {
+    let removed = remove_worker(&Session::native(), data_dir, opts.purge).await?;
+    if json {
+        println!("{}", serde_json::to_string(&removed)?);
+        return Ok(());
+    }
+    for job in [WORKER, PTYD] {
+        say_removed(job, removed.services.iter().any(|s| s == job.program));
+    }
+    for path in &removed.paths {
+        println!("removed {path}");
+    }
+    if removed.hooks {
+        println!("removed Slopty's hooks from Claude Code's settings");
     }
     Ok(())
+}
+
+/// Take the worker off this machine in `session`: its services, and with `purge` its own
+/// files ([`platform::purge_worker`]), Slopty's relay entries in the agent's settings under the
+/// home (no other entry of them), and the server it registered with. The settings file goes
+/// only when nothing else is left in `data_dir`, and the directory then too.
+///
+/// # Errors
+///
+/// When a service's definition, a file of the worker's or the agent's settings cannot be
+/// changed.
+pub async fn remove_worker(
+    session: &Session,
+    data_dir: &Path,
+    purge: bool,
+) -> Result<platform::Removed> {
+    let mut removed = platform::Removed::default();
+    for (job, was) in platform::uninstall_worker(session).await? {
+        if was {
+            removed.services.push(job.program.to_owned());
+        }
+    }
+    if !purge {
+        return Ok(removed);
+    }
+    let shown = |path: &Path| path.display().to_string();
+    removed.paths = platform::purge_worker(session, data_dir)?.iter().map(|p| shown(p)).collect();
+    let hooks = slopty_agent::hooks::settings_path(&session.home);
+    if hooks.exists() {
+        let outcome = slopty_agent::hooks::uninstall_at(&hooks)
+            .with_context(|| format!("take Slopty's hooks out of {}", hooks.display()))?;
+        removed.hooks = outcome == slopty_agent::hooks::Outcome::Changed;
+    }
+    let settings = slopty_settings::path_in(data_dir);
+    if settings.exists() {
+        if slopty_settings::Settings::load(&settings).settings.worker.server.is_some() {
+            slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Worker, None)
+                .map_err(|e| anyhow!("forget the worker's server: {e}"))?;
+        }
+        let alone = std::fs::read_dir(data_dir)
+            .with_context(|| format!("read {}", data_dir.display()))?
+            .flatten()
+            .all(|entry| entry.path() == settings);
+        if alone {
+            std::fs::remove_file(&settings)
+                .with_context(|| format!("remove {}", settings.display()))?;
+            removed.paths.push(shown(&settings));
+        }
+    }
+    if platform::remove_if_empty(data_dir)? {
+        removed.paths.push(shown(data_dir));
+    }
+    Ok(removed)
 }
 
 fn say_removed(job: platform::Job, was: bool) {
@@ -875,5 +952,82 @@ mod tests {
             asked.iter().any(|c| c == "launchctl bootout gui/501/dev.aislopware.slopty.ptyd"),
             "ptyd restarted: {asked:?}"
         );
+    }
+
+    /// `--purge` takes the worker off a Mac it shares with the app: its services, its own
+    /// files and the server it registered with, and Slopty's relay entries in Claude Code's
+    /// settings. That file comes back byte for byte as the person had it before the install,
+    /// their own hooks in it; the app's files and the rest of the settings stay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purge_takes_the_worker_off_and_leaves_the_persons_own() {
+        use slopty_agent::hooks;
+
+        let stage = Stage::new();
+        let (session, data) = (&stage.session, stage.data());
+        for job in [WORKER, PTYD] {
+            std::fs::create_dir_all(&session.definitions).unwrap();
+            std::fs::write(session.file(job), b"<plist/>").unwrap();
+        }
+        std::fs::write(data.join("worker-id"), b"7").unwrap();
+        std::fs::create_dir_all(data.join("threads/t1")).unwrap();
+        std::fs::write(data.join("layout.json"), b"{}").unwrap();
+        let settings = slopty_settings::path_in(&data);
+        std::fs::write(&settings, "[font]\nmono_size = 15.0 # mine\n").unwrap();
+        save_worker_server(&data, "studio").unwrap();
+        let claude = hooks::settings_path(&session.home);
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        let theirs = serde_json::json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": "/usr/local/bin/guard.sh" }]
+                }],
+                "Stop": [{ "hooks": [{ "type": "command", "command": "say done" }] }]
+            }
+        });
+        hooks::write(&claude, &theirs).unwrap();
+        let before = std::fs::read(&claude).unwrap();
+        let relay = "/Users/me/Library/Application Support/Slopty/bin/slopty";
+        assert_eq!(hooks::install_at(&claude, relay).unwrap(), hooks::Outcome::Changed);
+        assert_ne!(std::fs::read(&claude).unwrap(), before, "the relay went in");
+
+        let removed = remove_worker(session, &data, true).await.unwrap();
+
+        assert_eq!(removed.services, ["slopty-worker", "slopty-ptyd"]);
+        assert!(removed.hooks, "its hooks taken out");
+        assert_eq!(std::fs::read(&claude).unwrap(), before, "the person's settings, byte for byte");
+        assert!(!data.join("worker-id").exists() && !data.join("threads").exists());
+        assert_eq!(std::fs::read(data.join("layout.json")).unwrap(), b"{}", "the app's kept");
+        let text = std::fs::read_to_string(&settings).unwrap();
+        assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
+        let loaded = slopty_settings::Settings::load(&settings).settings;
+        assert_eq!(loaded.worker.server, None, "the server it registered with is forgotten");
+        assert!(data.is_dir(), "the data directory holds the app's");
+    }
+
+    /// A settings file with no relay in it is not written at all, however it is spelled; on a
+    /// machine that is only a worker, the purge leaves no data directory; and without
+    /// `--purge` only the services go.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purge_leaves_a_dedicated_worker_with_nothing() {
+        let stage = Stage::new();
+        let (session, data) = (&stage.session, stage.data());
+        std::fs::write(data.join("worker-id"), b"7").unwrap();
+        save_worker_server(&data, "studio").unwrap();
+        let claude = slopty_agent::hooks::settings_path(&session.home);
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        let spelled = b"{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"slopty hook\"}]}]}}";
+        std::fs::write(&claude, spelled).unwrap();
+
+        let kept = remove_worker(session, &data, false).await.unwrap();
+        assert_eq!(kept, platform::Removed::default(), "nothing installed, nothing purged");
+        assert!(data.join("worker-id").exists(), "its files stay without --purge");
+
+        let removed = remove_worker(session, &data, true).await.unwrap();
+        assert!(!removed.hooks, "no relay of ours there");
+        assert_eq!(std::fs::read(&claude).unwrap(), spelled, "and the file untouched");
+        assert!(!data.exists(), "nothing left: {removed:?}");
+        assert!(removed.paths.contains(&data.display().to_string()));
     }
 }

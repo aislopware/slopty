@@ -1221,3 +1221,45 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `Form::of(os)` is the guess for a worker that says nothing more (`WorkerCaps::bare`).
   - Tests: `slopty-worker` `caps::tests::{the_chassis_type_names_the_form,
     a_mac_is_a_laptop_when_it_has_a_battery}`, the `worker_caps` golden.
+
+- ✅ **A machine is removed whole, and only what is Slopty's goes** (2026-10-06, readiness rank
+  20). A machine could be added but never cleanly taken off: `slopty worker uninstall` stopped
+  the two services and left the rest.
+  - **What goes.** `slopty worker uninstall --purge` (opt-in; the bare form still keeps the
+    worker's identity for a reinstall) removes:
+    - the services, as before;
+    - the worker's own paths under the data directory, by name
+      (`slopty_platform::service::WORKER_STATE`): its id, keys, items, sessions, threads,
+      snapshots, presence, the Claude Code mod and pi gate, the managed Claude artifacts, the
+      shell integration, the ssh terminfo cache, its copied binaries and its sockets;
+    - its two daemons' crash reports, their launchd logs, and the deploy's stage
+      `~/.slopty/deploy`;
+    - Slopty's relay entries in `~/.claude/settings.json`, matched as `slopty hook install`
+      writes them and nothing else. An install then purge gives the file back byte for byte;
+    - `[worker] server`, so a reinstall cannot inherit the old server.
+  - **Why a list, not the directory.** The data directory is shared. On a Mac the app keeps its
+    layout, caches and settings there, and a server installed beside the worker keeps its own
+    binary and socket in the same `bin/` and `run/`. So the purge removes named paths, and a
+    shared directory (`bin`, `run`, `crashes`, `Logs/Slopty`, `~/.slopty`) only once nothing
+    else is in it. `settings.toml` goes only when it is the last thing left, and the data
+    directory then too, so a machine that was only a worker ends with nothing.
+  - **Never touched:** the person's repositories, `~/slopty/clones`, every worktree; the
+    agents' own session stores, installs, logins and credentials; the folder trust Slopty gave
+    Claude Code in `~/.claude.json`; the [worker] choices the person made; anything of the
+    app's or a server's.
+  - **Drift guard.** `apps/slopty-worker/tests/purge.rs` runs the real ptyd and worker from
+    their own service definitions on an empty data directory under a home of its own, has a
+    client open a shell and read the thread table, and fails if the purge leaves anything. It
+    found `run/worker.mod.sock` on its first run.
+  - **Over ssh.** `slopty_deploy::remove` reaches the machine, uploads only this build's CLI,
+    and runs its purge, so the purge is this build's and not that of whatever worker is
+    there. On this Mac it runs in place. It reads back what was removed.
+  - **The app's thread cache moved** from `<data>/threads/<worker>` to `<data>/thread-cache`.
+    This Mac's worker read every folder of its own `threads/` as a thread's log and warned on
+    the app's, and a purge would have taken the cache with it.
+  - Tests: `slopty-platform` `service::tests::a_purge_takes_the_workers_own_files_and_leaves_the_rest`;
+    `slopty-cli` `service::tests::{a_purge_takes_the_worker_off_and_leaves_the_persons_own,
+    a_purge_leaves_a_dedicated_worker_with_nothing}`; `slopty-deploy`
+    `tests::{a_removal_uploads_the_cli_and_runs_its_purge,
+    a_local_removal_runs_in_place_and_a_password_signs_in_once, a_removal_that_cannot_go_says_why}`;
+    `slopty-workerd` `purge::a_purge_leaves_nothing_the_daemons_wrote`.
