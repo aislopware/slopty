@@ -16,36 +16,27 @@ Button │ Review
 Button │ Close tile
 Group │ Where
 Button │ e2e-worker
+TabList
+Tab │ Review
+Image │ Done
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Retry the refresh
-Heading │ Claude Code Retry the refresh
-Image │ Claude Code
-Button │ Commit on repo
-Status │ Turn finished
-Image │ Done
-Button │ Show terminal
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
 Button │ Close tile
-Group │ Thread
-Article │ You: Make the refresh retry with one idempotency key
-Button │ Branch from here
-Button │ Copy message
-Button │ Worked 31 s: Edited refresh.rs
-Article │ The refresh now retries three times with one key, and saves the token.
-Button │ Copy message
-Article │ You: /code-review 48c664d5fdffe6e763626adcf85467fb248381fa...73dcb0e944e34833931f67cb3513d9e6786fb575
-Button │ Branch from here
-Button │ Copy message
-Article │ I reviewed the change and found two things to fix.
-Button │ Copy message
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
-Button │ Review the changes
-Button │ Send
+Group
+Terminal │ shell │ ~ %
 Group │ Review
 Heading │ review Review
+Tab │ Retry the refresh
+Image │ Claude Code
+Image │ Done
+Button │ Close tile
+Tab │ Review
+Button │ Close tile
 Button │ Close tile
 Group │ Review (focused)
 TabList
@@ -55,7 +46,7 @@ Tab │ All turns
 Button │ Review with Claude Code
 Button │ Commit…
 List │ The agent's review
-Status │ Claude Code raised 2 findings
+Button │ Claude Code raised 2 findings
 Button │ Dismiss
 ListItem │ The README still says refresh never retries. README.md:12
 Button │ Let the finding go
@@ -63,7 +54,6 @@ List │ Files
 ListItem │ src/refresh.rs
 Button │ Revert
 Button │ Keep
-Button │ Remove comment
 Button │ Add to message
 Button │ Send 2 comments
 Button │ Mark reviewed
