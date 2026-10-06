@@ -375,6 +375,8 @@ pub enum Check {
     Accessibility,
     /// The tailnet reaches it.
     Tailnet,
+    /// A server started here pushes notes to a pocketed phone.
+    Push,
     /// This app's notifications reach the person.
     Notifications,
     /// Slopty opens at login.
@@ -392,6 +394,7 @@ impl Check {
             Self::ScreenRecording => "Screen Recording",
             Self::Accessibility => "Accessibility",
             Self::Tailnet => "Reachable on your tailnet",
+            Self::Push => "Notes on your phone",
             Self::Notifications => "Notifications",
             Self::Login => "Open at login",
             Self::Finder => "Finder",
@@ -406,6 +409,7 @@ impl Check {
             Self::ScreenRecording => "screen",
             Self::Accessibility => "accessibility",
             Self::Tailnet => "tailnet",
+            Self::Push => "push",
             Self::Notifications => "notifications",
             Self::Login => "login",
             Self::Finder => "finder",
@@ -420,6 +424,7 @@ impl Check {
             Self::ScreenRecording => "this-mac-fix-screen",
             Self::Accessibility => "this-mac-fix-accessibility",
             Self::Tailnet => "this-mac-fix-tailnet",
+            Self::Push => "this-mac-fix-push",
             Self::Notifications => "this-mac-fix-notifications",
             Self::Login => "this-mac-fix-login",
             Self::Finder => "this-mac-fix-finder",
@@ -470,6 +475,8 @@ pub enum Fix {
     EndSessions,
     /// Move Slopty to Applications and open it from there.
     MoveToApplications,
+    /// Open Slopty's settings where a push relay is named.
+    SetUpPush,
 }
 
 impl Fix {
@@ -482,6 +489,7 @@ impl Fix {
             Self::Retry => "Try again",
             Self::EndSessions => "Update anyway",
             Self::MoveToApplications => "Move to Applications",
+            Self::SetUpPush => "Set up",
         }
     }
 }
@@ -676,6 +684,51 @@ pub fn app_lines(flow: &Flow) -> [Line; 3] {
         Some(crate::finder::Step::Failed(why)) => line(Check::Finder, Mark::Advisory, why, None),
     };
     [notes, login, finder]
+}
+
+/// How a server started here reaches a pocketed phone, as `[server.push]` sets it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Push {
+    /// It does not: no relay and no APNs key is named.
+    Off,
+    /// Through the relay the person deployed.
+    Relay,
+    /// Straight to Apple with the person's own APNs key.
+    OwnKey,
+}
+
+impl Push {
+    /// How `settings` send, the key winning when both are set as the server has it.
+    pub const fn of(settings: &slopty_settings::PushSettings) -> Self {
+        if !settings.apns_key.is_empty() {
+            Self::OwnKey
+        } else if !settings.relay.is_empty() {
+            Self::Relay
+        } else {
+            Self::Off
+        }
+    }
+}
+
+/// The line on notes to a pocketed phone, while the server runs on this Mac.
+///
+/// This Mac's settings name how they go; a server elsewhere is set up on its own machine, so
+/// it has no line. Off, the line is quiet and not in the way, with the way to set it up.
+pub fn push_line(flow: &Flow, push: Push) -> Option<Line> {
+    if flow.server != Server::Chosen(Serve::Here) {
+        return None;
+    }
+    let line =
+        |mark, detail: &str, fix| Line { check: Check::Push, mark, detail: detail.to_owned(), fix };
+    Some(match push {
+        Push::Off => line(
+            Mark::Advisory,
+            "Off until you name a push relay. A pocketed phone hears nothing till then.",
+            Some(Fix::SetUpPush),
+        ),
+        Push::Relay => line(Mark::Ok, "Through your relay.", None),
+        Push::OwnKey => line(Mark::Ok, "Straight to Apple with your APNs key.", None),
+    })
 }
 
 /// The Server line: where the server comes from, then how the worker's link to it stands.
@@ -1162,6 +1215,34 @@ mod tests {
 
     /// Before the worker answers only its own line and the server's move; a failed install or a
     /// silent worker is red with a way to try again, and says why.
+    /// The phone line shows only for a server started here, whose settings it reads: off, it is
+    /// quiet with the way to set it up; the key wins over a relay as the server has it.
+    #[test]
+    fn a_server_here_says_how_notes_reach_a_phone() {
+        use slopty_settings::PushSettings;
+        let here = Flow::installing(1, Serve::Here);
+        let off = push_line(&here, Push::of(&PushSettings::default())).expect("a line here");
+        assert_eq!(
+            (off.check, off.mark, off.fix),
+            (Check::Push, Mark::Advisory, Some(Fix::SetUpPush))
+        );
+        assert_eq!(
+            off.status(),
+            slopty_ui::icons::Status::Idle,
+            "quiet, not waiting on the person"
+        );
+        let relay =
+            PushSettings { relay: "https://relay.example".to_owned(), ..PushSettings::default() };
+        assert_eq!(Push::of(&relay), Push::Relay);
+        let both = PushSettings { apns_key: "/k.p8".to_owned(), ..relay };
+        assert_eq!(Push::of(&both), Push::OwnKey);
+        let on = push_line(&here, Push::Relay).expect("a line here");
+        assert_eq!((on.mark, on.fix), (Mark::Ok, None));
+        let joined = Flow::installing(1, Serve::Join(HostAddr::new("mini", 45551)));
+        assert_eq!(push_line(&joined, Push::Off), None, "a server elsewhere is set up there");
+        assert_eq!(push_line(&Flow::looking(1), Push::Off), None, "nor while one is looked for");
+    }
+
     #[test]
     fn the_running_line_follows_the_install() {
         use Mark::{Busy, Missing, Unknown};

@@ -233,6 +233,22 @@ impl SettingsEditor {
         cx.notify();
     }
 
+    /// Show the form on the row for `key` in `table`, with the keyboard on it
+    /// ([`SettingsForm::show_setting`]).
+    pub fn show_setting(
+        &mut self,
+        table: &str,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != Mode::Form {
+            self.show_form(window, cx);
+        }
+        self.form.update(cx, |form, cx| form.show_setting(table, key, window, cx));
+        cx.notify();
+    }
+
     /// The app refused the text: show why, keep editing.
     pub fn set_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.error = Some(error);

@@ -252,6 +252,8 @@ impl Workspace {
                     let caller = task.caller();
                     slot.task = Some(task);
                     ws.view.update(cx, |v, _cx| v.set_server_caller(Some(caller)));
+                    #[cfg(target_os = "ios")]
+                    ws.tell_phone(cx);
                     true
                 }
                 _ => false,

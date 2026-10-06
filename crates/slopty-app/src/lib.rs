@@ -28,6 +28,8 @@ mod invite;
 pub mod menus;
 pub mod net;
 mod presence;
+#[cfg(any(target_os = "ios", test))]
+mod push;
 mod server;
 pub mod settings;
 pub mod ssh;
@@ -572,6 +574,9 @@ pub struct Workspace {
     /// stay up for what arrives just after the phone is pocketed.
     #[cfg(target_os = "ios")]
     grace: Option<slopty_platform::notify::BackgroundGrace>,
+    /// What the server may push to while the phone is pocketed, and when it stops listening.
+    #[cfg(target_os = "ios")]
+    pushing: push::Pushing,
     /// The time iOS grants an app woken in the background by a note's "Allow" or "Deny", held
     /// until the answer is out ([`WorkspaceEvent::TapsSettled`] and [`ANSWER_FLUSH`] after),
     /// so it is not suspended while the answer waits for its link.
@@ -704,6 +709,8 @@ impl Workspace {
             #[cfg(target_os = "ios")]
             grace: None,
             #[cfg(target_os = "ios")]
+            pushing: push::Pushing::default(),
+            #[cfg(target_os = "ios")]
             answer_grace: None,
             answer_flush: None,
             #[cfg(target_os = "ios")]
@@ -713,6 +720,8 @@ impl Workspace {
         this.repoint_this_mac(cx);
         this.ask_this_mac_worker(cx);
         Self::watch_presence(cx);
+        #[cfg(target_os = "ios")]
+        Self::watch_push_tokens(cx);
         this
     }
 
@@ -794,7 +803,8 @@ impl Workspace {
 
     /// The app came to the front or left it: back in front, it says once a run that
     /// notifications are off when a note went unsaid meanwhile. On iOS, leaving holds the
-    /// background grace.
+    /// background grace, and stops the link's notices just before it runs out; either way the
+    /// server hears again what it may push to.
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.attention.set_active(active);
         if active && self.attention.unsaid_while_off() {
@@ -807,6 +817,8 @@ impl Workspace {
             } else {
                 slopty_platform::notify::BackgroundGrace::begin("Slopty keeps its links")
             };
+            self.listen_while(active, cx);
+            self.tell_phone(cx);
         }
     }
 
@@ -837,6 +849,20 @@ impl Workspace {
             }));
         self.settings_editor = Some(editor);
         cx.notify();
+    }
+
+    /// The settings, open on the row for `key` in `table`, with the keyboard in it.
+    fn open_setting(
+        &mut self,
+        table: &str,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(window, cx);
+        if let Some(editor) = &self.settings_editor {
+            editor.update(cx, |e, cx| e.show_setting(table, key, window, cx));
+        }
     }
 
     /// The settings, open on `section`'s page.
@@ -2156,6 +2182,7 @@ impl Workspace {
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
+            this_mac::Fix::SetUpPush => self.open_setting("server.push", "relay", window, cx),
         }
     }
 
@@ -2533,10 +2560,20 @@ impl Workspace {
             let rows = this_mac_entry.into_iter().chain(ssh_entry).collect();
             (group("add-worker-this-mac", "add-worker-this-mac-label", label, rows), None)
         };
-        let cancel = (!welcome).then(|| {
-            button("cancel-add", "Cancel", ButtonKind::Ghost)
-                .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
-        });
+        // This Mac's flow ends on Done, in the foot where Cancel stood, so however long the
+        // checklist runs its last word stays in view.
+        let cancel = if flow.is_some_and(|f| f.listed) {
+            Some(
+                button("this-mac-done", "Done", ButtonKind::Primary)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.close_this_mac(window, cx))),
+            )
+        } else {
+            (!welcome).then(|| {
+                button("cancel-add", "Cancel", ButtonKind::Ghost).on_click(
+                    cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)),
+                )
+            })
+        };
         let ways = div().flex().flex_col().items_start().gap(px(spacing.xs)).children(switch);
         let aside = div().flex().items_start().child(ways).child(div().flex_1()).children(cancel);
         // The question "Use this Mac" asks is the servers found and the address alone.
@@ -2830,8 +2867,10 @@ impl Workspace {
         let session = slopty_platform::service::Session::native();
         let logs = session.logs(slopty_platform::service::WORKER);
         let server_logs = session.logs(slopty_platform::service::SERVER);
+        let push = this_mac::Push::of(&self.settings.server.push);
         let all: Vec<this_mac::Line> = this_mac::checklist(flow, &logs, &server_logs)
             .into_iter()
+            .chain(this_mac::push_line(flow, push))
             .chain(this_mac::app_lines(flow))
             .collect();
         // What a line that holds says of itself waits under Details: the checklist says what
@@ -2863,10 +2902,6 @@ impl Workspace {
                 }),
             )
         });
-        let done = flow.listed.then(|| {
-            kit::button(theme, "this-mac-done", "Done", ButtonKind::Primary)
-                .on_click(cx.listener(|this, _ev, window, cx| this.close_this_mac(window, cx)))
-        });
         // The end of the flow is where a phone joins: this Mac's server is set by now.
         let phone = flow.listed.then(|| {
             let row = phone_row(theme).on_click(
@@ -2895,7 +2930,6 @@ impl Workspace {
                 )
             })
             .children(phone)
-            .when_some(done, |el, done| el.child(div().flex().justify_end().child(done)))
             .into_any_element()
     }
 

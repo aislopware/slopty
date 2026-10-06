@@ -13,6 +13,9 @@ ListItem │ Accessibility
 Image │ Done
 ListItem │ Reachable on your tailnet
 Image │ Done
+ListItem │ Notes on your phone
+Image │ Idle
+Button │ Set up
 ListItem │ Notifications
 Image │ Done
 ListItem │ Open at login

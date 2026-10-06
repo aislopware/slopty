@@ -28,7 +28,7 @@ pub struct Connected {
 }
 
 /// This installation's id on the wire, kept in the data directory.
-fn client_id() -> Result<ClientId> {
+pub(crate) fn client_id() -> Result<ClientId> {
     Ok(slopty_net::known::client_id_in(&slopty_platform::dirs::data_dir())?)
 }
 

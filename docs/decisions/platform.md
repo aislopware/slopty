@@ -884,9 +884,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     zig"). `NSURLSession` would have left the Linux server with no push.
   - **What a send does.** APNs' 410 or `BadDeviceToken` forgets the phone. A 429, a 5xx or a
     provider token being renewed is tried again after 2 s and 10 s, then dropped.
-  - Not yet: the phone's half, the notification extension in `apps/slopty-notify`, the key in
-    the Keychain and the registration (P5); taking a pushed note back once it is answered
-    elsewhere, by a background push (after the main path is green end to end).
+  - **The phone's half.** The app makes the X25519 key on first use. It keeps the key and the
+    device token in the Keychain group it shares with its notification extension, readable
+    after the first unlock and never backed up (`slopty_platform::notify::pushed`). It sends
+    `PushDevice` on every link, on each new token and on each move to or from the front, after
+    reading again whether notes reach the person. While they don't (turned off, or not asked
+    yet), it sends `None`, since a pushed note would not show either. Five seconds before the
+    background grace runs out, or at once when the system grants none, it says
+    `listening: false`. From then on the server pushes and the app posts none of the server's
+    notices (`Attention::set_listening`), so a moment is said once. Back in front, it listens
+    again.
+  - **The extension** (`apps/slopty-notify`, a Rust appex) opens the body with the key and the
+    token and shows `note_of(body)`: the id, words, `userInfo`, category and urgency the app's
+    own note would have, so a tap, Allow and Deny route as they do on a local note. A body that
+    does not open shows APNs' fixed words.
+  - **This Mac's checklist** has a "Notes on your phone" line while the server runs on this
+    Mac, whose settings decide it. While `[server.push]` is off the line is quiet and not in the
+    way, and Set up opens Settings with the keyboard in the relay's field. A server on another
+    machine is set up there, so no line shows for one. The line holds no panel open. The
+    flow's Done moved to the panel's foot, where Cancel stood, so a checklist one line longer
+    still ends with its last word in view at 700 pt.
+  - Not yet: taking a pushed note back once it is answered elsewhere, by a background push
+    (after the main path is green end to end).
   - Tests:
     - `slopty-push`: the seal opens only with the phone's key and token; the relay's checks
       and the APNs request it builds;
@@ -897,4 +916,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       stops listening and a worker's thread needing the person, through a stand-in relay
       running the relay's own checks to a stand-in APNs, both HTTP/2 over TLS on loopback; and
       straight to that APNs with a test `.p8`;
-    - `slopty-relay` `binding::tests::a_token_binds_to_its_first_installs`.
+    - `slopty-relay` `binding::tests::a_token_binds_to_its_first_installs`;
+    - `slopty-ui` `a_pushed_note_is_the_note_the_app_would_post`: the opened note is the
+      app's own, and a phone that stopped listening posts none of the server's notices;
+    - `slopty-client` `the_phone_goes_on_each_change_and_to_each_new_link`;
+    - `slopty-app` `push::tests` (what is sent, and when listening stops) and
+      `this_mac::tests::a_server_here_says_how_notes_reach_a_phone`; `slopty-ui`
+      `settings_form::tests::a_named_setting_opens_on_its_row`.
+
+- ✅ **The Mac window is never narrower than a phone** (2026-10-06,
+  `.research/responsive-2026-10-06.md`, finding 13). No minimum was set, so AppKit let the
+  window shrink below the 375 pt phone the layout is drawn for, and at 300 pt the phone bar's
+  lights, title, bell and "…" ran into each other. The main window now has
+  `window_min_size` 375 × 480 pt (`window::MIN_SIZE`): every size it can take is one the
+  layout was drawn for. A frame kept from a smaller window opens at the floor where it stood.
+  Popped-out streams keep their own sizes. Test: `window::tests::the_window_is_never_narrower_than_a_phone`.

@@ -29,10 +29,32 @@ const LOOK_EVERY: Duration = Duration::from_secs(5);
 const SETTLE: Duration = Duration::from_millis(150);
 
 /// The app's side of the person's presence.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Presenting {
     /// A send is waiting out [`SETTLE`].
     settling: bool,
+    /// Whether the app still hears notices on its link: a phone stops just before the system
+    /// suspends it.
+    listening: bool,
+}
+
+impl Default for Presenting {
+    fn default() -> Self {
+        Self { settling: false, listening: true }
+    }
+}
+
+impl Presenting {
+    /// Whether the app still hears notices on its link, as the next presence says.
+    pub(crate) const fn listening(&self) -> bool {
+        self.listening
+    }
+
+    /// The app stops hearing notices on its link, or hears them again.
+    #[cfg(target_os = "ios")]
+    pub(crate) const fn set_listening(&mut self, listening: bool) {
+        self.listening = listening;
+    }
 }
 
 /// Whether the person is at another of their devices: this client is carried, and another
@@ -82,13 +104,14 @@ impl Workspace {
         else {
             return;
         };
-        caller.presence(present_now(presence));
+        caller.presence(present_now(presence, self.presenting.listening()));
     }
 
     /// Tell the server where the person is, from inside `window`'s own callbacks.
     pub(crate) fn tell_presence_in(&self, window: &Window, cx: &Context<Self>) {
         if let Some(caller) = self.server_caller() {
-            caller.presence(present_now(self.view.read(cx).presence(window)));
+            let presence = self.view.read(cx).presence(window);
+            caller.presence(present_now(presence, self.presenting.listening()));
         }
     }
 
@@ -129,10 +152,12 @@ impl Workspace {
     }
 }
 
-/// `presence` with `active` lowered once this Mac has gone unused past [`AWAY_AFTER`]. On an
-/// iPhone or iPad the system locks the screen itself, which resigns the app.
+/// `presence` as the app says it: `listening` or not, and with `active` lowered once this Mac
+/// has gone unused past [`AWAY_AFTER`]. On an iPhone or iPad the system locks the screen
+/// itself, which resigns the app.
 #[cfg(target_os = "macos")]
-fn present_now(mut presence: Presence) -> Presence {
+fn present_now(mut presence: Presence, listening: bool) -> Presence {
+    presence.listening = listening;
     if slopty_platform::idle::since_input() >= AWAY_AFTER {
         presence.active = false;
     }
@@ -140,7 +165,8 @@ fn present_now(mut presence: Presence) -> Presence {
 }
 
 #[cfg(not(target_os = "macos"))]
-const fn present_now(presence: Presence) -> Presence {
+const fn present_now(mut presence: Presence, listening: bool) -> Presence {
+    presence.listening = listening;
     presence
 }
 

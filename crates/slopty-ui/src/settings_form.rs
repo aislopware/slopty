@@ -210,6 +210,9 @@ pub struct SettingsForm {
     turns: usize,
     /// Each row's place among the page's children, for scrolling it into view.
     placed: Vec<(usize, usize)>,
+    /// The row a page was opened on ([`Self::show_setting`]) until the page is drawn: it takes
+    /// the keyboard instead of the search, and is scrolled into view.
+    reveal: Option<usize>,
     /// The sidebar is gone: every section in one column.
     narrow: bool,
     /// The Keyboard page's lines for the text, read again when the text changes.
@@ -323,6 +326,7 @@ impl SettingsForm {
             moved: None,
             turns: 0,
             placed: Vec::new(),
+            reveal: None,
             narrow: false,
             keys: None,
             words: Vec::new(),
@@ -432,9 +436,12 @@ impl SettingsForm {
         }
     }
 
-    /// Give the search field the keyboard.
+    /// Give the search field the keyboard, or the row the page was opened on.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search.update(cx, |state, cx| state.focus(window, cx));
+        match self.reveal {
+            Some(ix) => self.focus_row(ix, window, cx),
+            None => self.search.update(cx, |state, cx| state.focus(window, cx)),
+        }
     }
 
     /// What takes the keyboard for `section`'s tab in the sidebar.
@@ -846,7 +853,27 @@ impl SettingsForm {
         self.select(section, window, cx);
     }
 
+    /// Show the page of the row for `key` in `table`, with the keyboard on it and the row in
+    /// view: a line elsewhere that says a setting is missing opens on it. Nothing happens when
+    /// this form lists no such row.
+    pub fn show_setting(
+        &mut self,
+        table: &str,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = rows().iter().position(|r| r.table() == table && r.key() == key) else {
+            return;
+        };
+        let Some(section) = rows().get(ix).map(|r| r.section) else { return };
+        self.select(section, window, cx);
+        self.reveal = Some(ix);
+        self.focus_row(ix, window, cx);
+    }
+
     fn select(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal = None;
         if !self.query.is_empty() {
             self.search.update(cx, |state, cx| state.set_value("", window, cx));
             self.query.clear();
@@ -1439,6 +1466,12 @@ impl SettingsForm {
         }
         if children.is_empty() {
             children.push(quiet(&theme, "settings-empty", NO_MATCHES).into_any_element());
+        }
+        // The row a page was opened on comes into view once, on the page's first frame.
+        if let Some(child) =
+            self.reveal.take().and_then(|ix| placed.iter().find(|(row, _)| *row == ix)).map(|p| p.1)
+        {
+            self.scroll.scroll_to_item(child);
         }
         self.placed = placed;
         // What scrolls past an edge fades out per pixel, so a row cut at the edge reads as more
@@ -2183,6 +2216,43 @@ mod tests {
         let top = top.expect("the card's first part, in the hover step");
         assert!((top.corner_radii.top_left.0 / scale - theme.radii.md).abs() < 0.5, "rounded");
         assert!(top.corner_radii.bottom_left.0.abs() < 0.5, "and open below");
+    }
+
+    /// A setting named from elsewhere opens on its page with the keyboard in its field and its
+    /// row in view, however far down the page it lies; a name the form lists no row for
+    /// changes nothing.
+    #[gpui::test]
+    fn a_named_setting_opens_on_its_row(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(360.0)));
+        cx.run_until_parked();
+        let ix = rows()
+            .iter()
+            .position(|r| r.table() == "server.push" && r.key() == "relay")
+            .expect("the relay's row");
+        form.update_in(cx, |form, window, cx| {
+            form.show_setting("no.such", "key", window, cx);
+        });
+        assert_eq!(form.read_with(cx, |form, _| form.section), Section::Appearance, "unmoved");
+        form.update_in(cx, |form, window, cx| {
+            form.show_setting("server.push", "relay", window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        assert_eq!(form.read_with(cx, |form, _| form.section), Section::Network);
+        let field = form.read_with(cx, |form, _| form.fields.get(ix).cloned().flatten());
+        let field = field.expect("the relay is typed into");
+        assert!(
+            cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window)),
+            "the keyboard is in it"
+        );
+        let page = cx.debug_bounds("settings-page").expect("the page");
+        let row = cx.debug_bounds(Box::leak(format!("settings-row-{ix}").into_boxed_str()));
+        let row = row.expect("its row is drawn");
+        assert!(row.top() >= page.top() && row.bottom() <= page.bottom(), "{row:?} in {page:?}");
     }
 
     /// A page taller than the form fades per pixel at the edge more lies past: at its foot from

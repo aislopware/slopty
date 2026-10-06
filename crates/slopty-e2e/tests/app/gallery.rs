@@ -237,6 +237,7 @@ async fn this_mac_walks_its_checklist() {
             "Screen Recording",
             "Accessibility",
             "Reachable on your tailnet",
+            "Notes on your phone",
             "Notifications",
             "Open at login",
             "Finder",
