@@ -7993,3 +7993,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the header's foot; the top fades on a long thread and the foot does not); the bench
     `soft_edge_cost`. Goldens: the thread, review, file and agent renders retaken in the same
     batch.
+
+- ✅ **A machine and a project wear their own colour** (2026-10-06,
+  `.research/status-color-2026-10-06.md` §5.2, build step 4). The person asked for more colour
+  that stays elegant. Apple's sidebars tint their icons. So a machine's glyph and a project's
+  glyph each take one of the theme's eight identity hues (`Surfaces::identity`), and nothing
+  else of theirs does: never the name, the row, a chip or a wash.
+  - **Which hue.** It is the FNV-1a hash of the thing's group key as `GroupKey::as_str` spells
+    it: `machine:<worker id>` for a machine, `project:<project id>` for a project, `repo:…` and
+    `folder:…` for the repositories and folders the navigator lists as projects. Every client,
+    the phone included, spells the same key, so each shows the same colour with no wire change
+    (`kit::identity_ink`, test `a_machine_wears_the_same_colour_on_every_client`, which pins a
+    known worker id's hue).
+  - **Where.** A machine's glyph wears it in the navigator's machine heads and rail, the tile
+    header's worker, the breadcrumb, the palette's workers and the new-agent picker's machines.
+    A project's group glyph wears it in the navigator's heads and rail, and on its board's row
+    and its palette line. Away, a machine's glyph goes grey (`kit::machine_ink`), so a lost
+    machine reads as lost.
+  - **What stays neutral.** A grouping by a branch, an agent or a label (`kit::wears_identity`)
+    keeps the lead's tier. The hues sit at the status fills' lightness and keep 20° from every
+    status hue, so an identity glyph never reads as a state. Shape keeps them apart as well,
+    since an identity is never a circle.
+  - Lint: `kit::tests::identity_colour_stays_on_its_glyph`. The hues are read only in
+    `kit/identity.rs`, and the two inks are called only where a machine's or a project's glyph
+    is drawn.
+- ✅ **A field that speaks to an agent keeps its lines** (2026-10-06,
+  `.research/readiness-2026-10-07.md` R2). A review comment and the reason a request is denied
+  with are read by an agent, and a comment often carries a few lines of suggested code. Both
+  were single-line fields, which dropped a paste's line ends and took no ⇧↵. Each is now a
+  field of several lines that grows to a few rows (eight for a comment, six for a reason) and
+  then scrolls: ↵ adds the comment or denies, ⇧↵ breaks the line, as in the thread's composer.
+  Deny's buttons sit at the field's last line. The written answer to an agent's question goes
+  the same way once the questionnaire takes a field of several lines (the gpui-kit fork).
+  - Tests: `review::tests::a_comment_keeps_its_lines`,
+    `conversation::thread::tests::doors::a_reason_keeps_its_lines`.

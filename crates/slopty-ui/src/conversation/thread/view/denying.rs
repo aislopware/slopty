@@ -1,10 +1,11 @@
-//! "Deny with a reason…": a request turned down with the person's reason, in a line, for the
-//! agent to read. It is the first of the other ways to deny, behind the deny's chevron
+//! "Deny with a reason…": a request turned down with the person's reason, in their words, for
+//! the agent to read. It is the first of the other ways to deny, behind the deny's chevron
 //! (`decision`).
 //!
-//! The request's answers give way to a field and two buttons while the reason is written. ↵ or
-//! Deny sends the plain deny the agent offers ([`deny_choice`]) with the words as the answer's
-//! message; with nothing written it is the plain deny. Each worker carries the words through
+//! The request's answers give way to a field and two buttons while the reason is written. The
+//! field keeps several lines, pasted or broken by ⇧↵. ↵ or Deny sends the plain deny the agent
+//! offers ([`deny_choice`]) with the words as the answer's message; with nothing written it is
+//! the plain deny. Each worker carries the words through
 //! the agent's own door: Claude Code's and pi's denials take a reason, and the others hear it
 //! as the person's next message.
 
@@ -13,7 +14,7 @@ use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AskId, Choice, Request};
@@ -25,11 +26,14 @@ use crate::kit::ButtonKind;
 /// What the reason's field says before anything is written.
 pub const PLACEHOLDER: &str = "Why, for the agent (optional)";
 
+/// The most lines the reason grows to before it scrolls.
+const REASON_ROWS: usize = 6;
+
 /// A request being denied with a reason.
 pub(super) struct Denying {
     ask: AskId,
     choice: String,
-    field: Entity<InputState>,
+    field: Entity<TextareaState>,
     _entered: Subscription,
 }
 
@@ -54,9 +58,14 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let field = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
+        let field = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(PLACEHOLDER)
+                .auto_grow(1, REASON_ROWS)
+                .submit_on_enter(true)
+        });
         let entered = cx.subscribe(&field, |this, _field, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { .. } = event {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.deny(cx);
             }
         });
@@ -97,11 +106,11 @@ impl ThreadView {
                 .aria_label("Deny with a reason")
                 .w_full()
                 .flex()
-                .items_center()
+                .items_end()
                 .gap(self.z(theme.spacing.xs))
                 .child(
                     div().min_w_0().flex_1().text_color(hsla(s.text)).child(
-                        Input::new(&denying.field)
+                        Textarea::new(&denying.field)
                             .with_size(Size::Small)
                             .text_size(self.z(theme.typography.small()))
                             .aria_label("Why"),

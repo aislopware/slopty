@@ -116,6 +116,35 @@ fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
     );
 }
 
+/// A reason keeps its lines: pasted line ends stay and ⇧↵ breaks a line, where ↵ still denies.
+#[gpui::test]
+fn a_reason_keeps_its_lines(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.requests = vec![approval("a")];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    click(cx, "denials-a");
+    click(cx, "denials-menu-a-why");
+    cx.simulate_input("Not on main.\nUse a branch.");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("Then ask again.");
+    assert!(intents(&sent).is_empty(), "⇧↵ only broke the line");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Answer {
+            ask: AskId("a".to_owned()),
+            choice: "deny".to_owned(),
+            message: Some("Not on main.\nUse a branch.\nThen ask again.".to_owned()),
+        }]
+    );
+}
+
 /// An approval is one decision: Deny and Allow side by side a base unit apart, the solid last;
 /// "Deny and stop" waits behind the deny's chevron and answers from there, and so does
 /// answering in the terminal; the standing grant leads the same row from its other end.

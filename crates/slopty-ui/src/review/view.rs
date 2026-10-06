@@ -33,7 +33,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use slopty_client::threads::Mirror;
 use slopty_proto::RequestId;
 use slopty_proto::git::GitOp;
@@ -72,6 +72,10 @@ const FINDINGS_SHARE: f32 = 0.25;
 
 /// How far past the viewport the diff lays rows out.
 const OVERDRAW: f32 = 2048.0;
+
+/// The most lines a comment's field grows to before it scrolls: a suggestion of a few lines
+/// shows whole, as in the thread's composer.
+const COMMENT_ROWS: usize = 8;
 
 /// The foot's send while the comments are on their way.
 pub const SENDING: &str = "Sending…";
@@ -264,7 +268,7 @@ pub struct ReviewView {
     /// The rows the pointer is picking, while it is down.
     marking: Option<Span>,
     drafting: Option<Drafting>,
-    draft: Entity<InputState>,
+    draft: Entity<TextareaState>,
     /// Keeps and put-backs this tile sent, until the worker has acted on them: then the
     /// review is asked for again.
     picks: HashSet<IntentId>,
@@ -364,9 +368,16 @@ impl ReviewView {
         cx: &mut Context<Self>,
     ) -> Self {
         let folder = matches!(reviewed, Reviewed::Folder(_));
-        let draft = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on this line"));
+        // Several lines, kept as pasted: ↵ adds the comment and ⇧↵ breaks the line, as in the
+        // thread's composer.
+        let draft = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Comment on this line")
+                .auto_grow(1, COMMENT_ROWS)
+                .submit_on_enter(true)
+        });
         let writing = cx.subscribe_in(&draft, window, |this, _input, event, window, cx| {
-            if let InputEvent::PressEnter { .. } = event {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.add_comment(window, cx);
             }
         });
@@ -2184,7 +2195,7 @@ impl ReviewView {
             .rounded(self.z(self.theme.radii.sm))
             .debug_selector(|| "review-draft".to_owned())
             .child(self.icon(Symbol::TextBubble, s.text_secondary))
-            .child(div().min_w_0().flex_1().child(Input::new(&self.draft).aria_label("Comment")))
+            .child(div().min_w_0().flex_1().child(Textarea::new(&self.draft).aria_label("Comment")))
             .into_any_element()
     }
 

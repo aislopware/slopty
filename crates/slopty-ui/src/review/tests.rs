@@ -283,6 +283,31 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-comment-0").is_none());
 }
 
+/// A comment keeps its lines: a pasted suggestion keeps its line ends and ⇧↵ breaks a line,
+/// where ↵ still adds the comment. They go to the agent as written.
+#[gpui::test]
+fn a_comment_keeps_its_lines(cx: &mut TestAppContext) {
+    let (_view, _hub, sent, cx) = tile(cx, 800.0);
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("Rather:\n    renewed();");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("Then test it.");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "↵ added it");
+    click(cx, "review-send");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send {
+            text: "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\n\
+                   Rather:\n    renewed();\nThen test it."
+                .to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![]
+        }]
+    );
+}
+
 /// The comments go as the thread's composer sends a message now: an agent that takes no
 /// message mid-turn but queues (ACP's) is sent them queued, never as a steer it would refuse.
 #[gpui::test]
