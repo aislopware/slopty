@@ -2,10 +2,13 @@
 //! or merges its branch's pull request, from the thread's tile or its review's.
 //!
 //! It opens on the changed files, every one ticked, and an empty message: a commit takes the
-//! person's words, so nothing is suggested. Over the files stands the branch's pull request, its
-//! checks most pressing first, and a merge that is offered only while the forge says it is
-//! ready, always for the head the person is looking at. What git or gh said when it refused is
-//! shown in its own words, in the code face, under the buttons.
+//! person's words, so nothing is suggested. On a thread's sheet the agent can be asked to commit
+//! instead ("Ask `<agent>` to commit"): it knows why it changed what it did. The ask is one
+//! message through its own door, after its turn, and the sheet reads the repository again once
+//! the turn it went into ends. Slopty writes no message itself and calls no model. Over the files
+//! stands the branch's pull request, its checks most pressing first, and a merge that is offered
+//! only while the forge says it is ready, always for the head the person is looking at. What git or
+//! gh said when it refused is shown in its own words, in the code face, under the buttons.
 //!
 //! It is drawn over its tile on a scrim of the tile alone, so the rest of the workspace stays
 //! in reach. Its state is the hub's ([`super::git::GitBook`]): two tiles on one repository show
@@ -24,8 +27,11 @@ use gpui::{
 };
 use gpui_kit::component::input::{self, Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
+use slopty_client::threads::Mirror;
 use slopty_proto::RequestId;
 use slopty_proto::git::{CheckBucket, GitOp, GitStatus, PullCheck, PullStanding, PullStatus};
+use slopty_proto::thread::wire::Intent;
+use slopty_proto::thread::{Cap, Delivery, IntentId, ThreadId, TurnState};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::git::{self, Method, Pull, Repo, Said};
@@ -39,6 +45,20 @@ const FILES_SHOWN: usize = 8;
 
 /// Checks shown, the most pressing first, before "+N more checks".
 const CHECKS_SHOWN: usize = 6;
+
+/// What "Ask `<agent>` to commit" sends the thread's agent.
+pub const ASK_TO_COMMIT: &str = "Commit what you changed, with a message saying why.";
+
+/// The agent's ask on its way: what it went as, and the thread's turns when it went, to know
+/// when the turn it went into has ended.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    intent: IntentId,
+    /// The turns the thread had when it was asked.
+    turns: usize,
+    /// It went into the turn under way, as a steer: that turn's end is the answer's.
+    into_turn: bool,
+}
 
 /// What the sheet tells its tile.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,6 +95,12 @@ pub struct CommitSheet {
     delete_branch: bool,
     /// The commit this sheet asked for: its message goes once it is made.
     committing: Option<RequestId>,
+    /// The thread whose agent "Ask `<agent>` to commit" asks; none for a folder's.
+    ask: Option<ThreadId>,
+    /// The agent's ask, until the turn it went into ends.
+    asked: Option<Asked>,
+    /// Why the worker turned the ask down.
+    ask_refused: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -110,11 +136,12 @@ impl CommitSheet {
             cx.new(|cx| TextareaState::new(window, cx).placeholder("Description").auto_grow(3, 8));
         let base = cx.new(|cx| InputState::new(window, cx).placeholder("Base branch"));
         let watched = repo.clone();
-        let hearing = cx.subscribe_in(&hub, window, move |this, _hub, event, window, cx| {
-            if matches!(event, HubEvent::Git(r) if *r == watched) {
-                this.heard(window, cx);
-            }
-        });
+        let hearing =
+            cx.subscribe_in(&hub, window, move |this, _hub, event, window, cx| match event {
+                HubEvent::Git(r) if *r == watched => this.heard(window, cx),
+                HubEvent::Thread(t) if this.ask == Some(*t) => this.ask_moved(cx),
+                _ => {}
+            });
         let typing = [
             cx.observe(&message, |_, _, cx| cx.notify()),
             cx.observe(&title, |_, _, cx| cx.notify()),
@@ -135,12 +162,22 @@ impl CommitSheet {
             methods_open: false,
             delete_branch: true,
             committing: None,
+            ask: None,
+            asked: None,
+            ask_refused: None,
             focus: cx.focus_handle(),
             _subscriptions: std::iter::once(hearing).chain(typing).collect(),
         };
         sheet.refresh(cx);
         sheet.message.update(cx, |m, cx| m.focus(window, cx));
         sheet
+    }
+
+    /// The sheet of `thread`'s repository, its agent offered the commit.
+    #[must_use]
+    pub const fn asking(mut self, thread: ThreadId) -> Self {
+        self.ask = Some(thread);
+        self
     }
 
     /// The folder whose repository it works.
@@ -249,6 +286,59 @@ impl CommitSheet {
         });
     }
 
+    /// The agent the sheet can ask to commit, by name: the thread's, where it takes a message.
+    fn asker(&self, cx: &App) -> Option<String> {
+        let state = self.hub.read(cx).threads().mirror(self.ask?).and_then(Mirror::state)?;
+        let meta = &state.meta;
+        (meta.can(Cap::QUEUE) || meta.can(Cap::STEER))
+            .then(|| super::view::agent_label(&meta.agent))
+    }
+
+    /// Ask the agent to commit what it changed, after its turn where it queues, so the work in
+    /// hand is not cut into.
+    fn ask_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.ask.filter(|_| self.asked.is_none()) else { return };
+        let Some((delivery, turns, active)) = ({
+            let hub = self.hub.read(cx);
+            hub.threads().mirror(thread).and_then(Mirror::state).map(|state| {
+                let active = state.turns.last().is_some_and(|t| t.state == TurnState::Active);
+                (state.meta.delivery_after_turn(), state.turns.len(), active)
+            })
+        }) else {
+            return;
+        };
+        let send =
+            Intent::Send { text: ASK_TO_COMMIT.to_owned(), delivery, attachments: Vec::new() };
+        let intent = self.hub.update(cx, |hub, cx| hub.intent(thread, send, cx));
+        let into_turn = active && delivery == Delivery::Steer;
+        self.asked = Some(Asked { intent, turns, into_turn });
+        self.ask_refused = None;
+        cx.notify();
+    }
+
+    /// The thread moved while the agent was asked: turned down, it says why; once the turn the
+    /// ask went into ends, the repository is read again for what the agent did.
+    fn ask_moved(&mut self, cx: &mut Context<Self>) {
+        let (Some(asked), Some(thread)) = (self.asked, self.ask) else { return };
+        let hub = self.hub.read(cx);
+        let sent = hub.threads().outbox().of(thread).find(|s| s.id == asked.intent);
+        if let Some(why) = sent.filter(|s| s.failed()).map(|s| s.failure().unwrap_or_default()) {
+            self.asked = None;
+            self.ask_refused = Some(why);
+            cx.notify();
+            return;
+        }
+        let Some(state) = hub.threads().mirror(thread).and_then(Mirror::state) else { return };
+        let waiting = state.pending.iter().any(|p| p.intent == asked.intent);
+        let went = asked.into_turn || state.turns.len() > asked.turns;
+        let rests = state.turns.last().is_none_or(|t| t.state != TurnState::Active);
+        if !waiting && went && rests {
+            self.asked = None;
+            self.refresh(cx);
+            cx.notify();
+        }
+    }
+
     fn op(&self, op: GitOp, cx: &mut Context<Self>) {
         if self.busy(cx).is_some() {
             return;
@@ -314,7 +404,7 @@ impl CommitSheet {
     fn button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         kind: ButtonKind,
         off: bool,
     ) -> gpui::Stateful<Div> {
@@ -817,6 +907,8 @@ impl CommitSheet {
                 .is_some_and(|st| st.branch.is_some() && (st.ahead > 0 || st.upstream.is_none()));
         let no_pull = repo.is_some_and(|r| matches!(r.pull, Pull::None));
         let no_gh = repo.is_some_and(|r| r.no_gh.is_some());
+        let asker = self.asker(cx);
+        let asked = self.asked.is_some();
         let second = if push_only {
             self.button("commit-push", "Push", ButtonKind::Secondary, busy)
                 .on_click(cx.listener(|this, _ev, _w, cx| this.op(GitOp::Push, cx)))
@@ -864,6 +956,11 @@ impl CommitSheet {
                             )),
                         )
                     })
+                    .children(asker.as_deref().map(|agent| {
+                        let label = format!("Ask {agent} to commit");
+                        self.button("commit-ask", label, ButtonKind::Ghost, asked || busy)
+                            .on_click(cx.listener(|this, _ev, _w, cx| this.ask_agent(cx)))
+                    }))
                     .child(div().flex_1())
                     .child(second)
                     .child(
@@ -871,7 +968,24 @@ impl CommitSheet {
                             .on_click(cx.listener(|this, _ev, _w, cx| this.commit(false, cx))),
                     ),
             )
+            .children(self.asking_line(asker.as_deref()))
             .children(self.outcome(cx))
+    }
+
+    /// What the agent's ask came to: waited on, or turned down in the worker's words.
+    fn asking_line(&self, agent: Option<&str>) -> Option<AnyElement> {
+        if let Some(why) = &self.ask_refused {
+            let words =
+                if why.is_empty() { "Not sent".to_owned() } else { format!("Not sent: {why}") };
+            return Some(
+                self.said_block("commit-ask-refused", &words, self.theme.surfaces.warn)
+                    .into_any_element(),
+            );
+        }
+        self.asked?;
+        let agent = agent.unwrap_or("The agent");
+        let words = format!("Waiting on {agent}\u{2026}");
+        Some(self.quiet("commit-asked", words).into_any_element())
     }
 
     /// The pull request's title, description, base and draft, and the way to open it.

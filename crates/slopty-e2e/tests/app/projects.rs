@@ -256,12 +256,21 @@ async fn a_project_board_follows_its_orchestration() {
 
     // ↓ walks the cards lane by lane until it stands on task 1, and ↩ opens its agent: its
     // tile is the active one and has the keyboard, on its terminal or its conversation,
-    // whichever it shows.
+    // whichever it shows. The walk is read where it stands before ↩, since an agent opened
+    // may take the board's place and its pick with it.
     let cards: Vec<u32> = project(&d).unwrap().lanes.iter().flat_map(|(_, t)| t.clone()).collect();
     let at = cards.iter().position(|&t| t == 1).unwrap();
     let walk = vec!["down"; at + 1].join(" ");
-    stack.driver.keys(&format!("{walk} enter")).await.unwrap();
-    let d = stack
+    stack.driver.keys(&walk).await.unwrap();
+    stack
+        .driver
+        .wait_for("the walk on task 1", STEP, |d| {
+            d.focused == project_focus && project(d).and_then(|p| p.picked.as_deref()) == Some("1")
+        })
+        .await
+        .unwrap();
+    stack.driver.keys("enter").await.unwrap();
+    stack
         .driver
         .wait_for("task 1's agent with the keyboard", STEP, |d| {
             let active = d
@@ -273,7 +282,6 @@ async fn a_project_board_follows_its_orchestration() {
         })
         .await
         .unwrap();
-    assert_eq!(project(&d).and_then(|p| p.picked.clone()).as_deref(), Some("1"));
 
     narrow_column_beside_the_board(&mut stack, &agent_session).await;
     stack.shutdown().await;

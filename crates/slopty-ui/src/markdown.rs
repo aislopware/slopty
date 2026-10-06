@@ -375,7 +375,8 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
         color: Some(hsla(theme.surfaces.text)),
         ..gpui::HighlightStyle::default()
     };
-    let (title, base) = (theme.typography.title(), theme.typography.ui_size);
+    // The first heading at a panel title's size, each level a point under, none under the body.
+    let (title, base) = (theme.roles().panel_title.size, theme.typography.ui_size);
     TextViewStyle {
         paragraph_gap: gpui::rems(theme.spacing.sm / base),
         heading_base_font_size: px(base * scale),

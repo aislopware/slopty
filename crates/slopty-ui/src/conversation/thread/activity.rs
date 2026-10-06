@@ -106,7 +106,11 @@ pub struct Activity<'a> {
     pub can_stop: bool,
     /// Whether a waiting message can be withdrawn from here.
     pub can_withdraw: bool,
-    /// Whether a waiting message can be sent now from here, into the turn under way.
+    /// Whether a waiting message can be sent now from here: into the turn under way where the
+    /// agent steers, else by stopping the turn and going first. Every agent that holds messages
+    /// takes it ([`Intent::Promote`] needs [`Cap::QUEUE`]).
+    ///
+    /// [`Intent::Promote`]: slopty_proto::thread::wire::Intent::Promote
     pub can_promote: bool,
 }
 
@@ -198,7 +202,7 @@ impl<'a> Activity<'a> {
             },
             can_stop: state.meta.can(Cap::STOP_TASK),
             can_withdraw: state.meta.can(Cap::QUEUE) || state.meta.can(Cap::SCHEDULE),
-            can_promote: state.meta.can(Cap::STEER),
+            can_promote: state.meta.can(Cap::QUEUE),
         }
     }
 

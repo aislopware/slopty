@@ -18,10 +18,11 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FollowMode, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, list, px, relative,
+    AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, FollowMode, FontWeight, InteractiveElement as _,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list, px,
+    relative,
 };
 use gpui_kit::component::input::{self, InputEvent, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
@@ -36,7 +37,7 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use self::composing::Composing;
 use super::commit::{CommitEvent, CommitSheet};
-use super::draft::Draft;
+use super::draft::{Draft, Place};
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
@@ -181,6 +182,11 @@ pub struct ThreadView {
     /// The thread not started yet that this view writes the first message of, drawn on its
     /// own state rather than the hub's ([`super::draft`]).
     draft: Option<Entity<Draft>>,
+    /// The last frame drew the empty thread's question with the composer under it.
+    heroed: bool,
+    /// How many times the composer has docked at the foot after the question, for the move's
+    /// animation; none while it never has.
+    docks: Option<u32>,
     theme: Theme,
     /// The theme, shared with what outlives a frame (a code block's corner).
     shared: Arc<Theme>,
@@ -406,6 +412,8 @@ impl ThreadView {
             hub,
             thread,
             draft,
+            heroed: false,
+            docks: None,
             zoom: 1.0,
             width: 0.0,
             header: true,
@@ -1026,8 +1034,8 @@ impl ThreadView {
             return;
         }
         let Some(repo) = self.repo(cx) else { return };
-        let (hub, theme) = (self.hub.clone(), self.theme.clone());
-        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx));
+        let (hub, theme, thread) = (self.hub.clone(), self.theme.clone(), self.thread);
+        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx).asking(thread));
         let closing =
             cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
                 CommitEvent::Close => {
@@ -2106,11 +2114,12 @@ impl ThreadView {
         )
     }
 
-    /// What a thread with no rows says, centred where its rows would be: a new thread names
-    /// its agent, where it works and its model, and the composer under it is the action; one
-    /// being read says so once the read has taken [`crate::screen::LOADING_GRACE`]. A thread
-    /// whose only row is a request says nothing (the tray is the statement, and the navigator
-    /// says it too), and nor does one out of reach: its tile says so, with what to do about it.
+    /// What a thread with no rows says, centred where its rows would be: a start that went
+    /// says it is starting, and one being read says so once the read has taken
+    /// [`crate::screen::LOADING_GRACE`]. A new thread says nothing here: its question stands
+    /// over the composer ([`Self::hero`]). A thread whose only row is a request says nothing
+    /// either (the tray is the statement, and the navigator says it too), and nor does one out
+    /// of reach: its tile says so, with what to do about it.
     fn empty_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let hub = self.hub.read(cx);
@@ -2118,53 +2127,24 @@ impl ThreadView {
         let notice = match self.state(cx) {
             Some(state) if let Some(draft) = &self.draft => {
                 let draft = draft.read(cx);
-                let agent = agent_label(&state.meta.agent);
-                if draft.sent() {
-                    let mark = crate::icons::notice_status(
-                        theme,
-                        Status::Working,
-                        hsla(theme.surfaces.text_secondary),
-                        k,
-                    );
-                    let said = format!("Starting {agent} {}\u{2026}", draft.place());
-                    let place = SharedString::from(draft.place().to_owned());
-                    kit::notice(theme, k, mark, format!("Starting {agent}"), Some(place))
-                        .id("thread-starting")
-                        .debug_selector(|| "thread-starting".to_owned())
-                        .role(Role::Status)
-                        .aria_label(SharedString::from(said))
-                        .into_any_element()
-                } else {
-                    let mark = kit::notice_mark(theme, crate::icons::AGENT, k);
-                    let model = composer::model_said(&state.meters);
-                    let mut place = draft.place().to_owned();
-                    if let Some(model) = model {
-                        place.push_str(crate::workspace::META_SEPARATOR);
-                        place.push_str(&model);
-                    }
-                    let title = format!("New {agent} thread");
-                    kit::notice(theme, k, mark, title, Some(place.into())).into_any_element()
-                }
-            }
-            Some(state) => {
-                let bar = crate::conversation::thread::activity::Activity::of(
-                    hub.threads(),
-                    self.thread,
-                    state,
-                );
-                if bar.waiting().next().is_some() {
+                if !draft.sent() {
                     return None;
                 }
-                // A conversation's glyph, not the agent's mark: the title names the agent, and
-                // the tile's header wears its mark already.
-                let mark = kit::notice_mark(theme, crate::icons::AGENT, k);
-                let title = format!("New {} thread", agent_label(&state.meta.agent));
-                let detail = new_thread_place(
-                    &state.meta.cwd,
-                    hub.worker(),
-                    composer::model_said(&state.meters).as_deref(),
+                let agent = agent_label(&state.meta.agent);
+                let mark = crate::icons::notice_status(
+                    theme,
+                    Status::Working,
+                    hsla(theme.surfaces.text_secondary),
+                    k,
                 );
-                kit::notice(theme, k, mark, title, Some(detail.into())).into_any_element()
+                let place = draft.place().said();
+                let said = format!("Starting {agent} {place}\u{2026}");
+                kit::notice(theme, k, mark, format!("Starting {agent}"), Some(place.into()))
+                    .id("thread-starting")
+                    .debug_selector(|| "thread-starting".to_owned())
+                    .role(Role::Status)
+                    .aria_label(SharedString::from(said))
+                    .into_any_element()
             }
             None if hub.threads().linked() => crate::screen::AfterGrace::new(
                 SharedString::from(format!("thread-reading-{}", self.thread.as_uuid())),
@@ -2182,7 +2162,7 @@ impl ThreadView {
                 ),
             )
             .into_any_element(),
-            None => return None,
+            Some(_) | None => return None,
         };
         Some(
             div()
@@ -2196,6 +2176,60 @@ impl ThreadView {
                 .child(notice)
                 .into_any_element(),
         )
+    }
+
+    /// The empty thread's agent and where it works, while it asks its first message: a draft
+    /// whose start has not gone, or a thread with no rows and nothing waiting on the person.
+    /// The composer is then the page, under one question ([`hero_words`]).
+    fn hero(&self, cx: &App) -> Option<(String, Place)> {
+        let state = self.state(cx)?;
+        let agent = agent_label(&state.meta.agent);
+        if let Some(draft) = &self.draft {
+            let draft = draft.read(cx);
+            return (!draft.sent()).then(|| (agent, draft.place().clone()));
+        }
+        if !self.rows.is_empty() || self.in_subagent() {
+            return None;
+        }
+        let hub = self.hub.read(cx);
+        let bar =
+            crate::conversation::thread::activity::Activity::of(hub.threads(), self.thread, state);
+        if bar.waiting().next().is_some() {
+            return None;
+        }
+        let row = hub.threads().rows().rows.get(&self.thread);
+        let repo = row.and_then(|r| r.repo.as_deref());
+        let folder = folder_name(&state.meta.cwd, repo);
+        Some((agent, Place { folder, machine: hub.worker().to_owned(), worktree: false }))
+    }
+
+    /// The question over an empty thread's composer, at the reading column's width.
+    fn hero_question(&self, words: String) -> AnyElement {
+        let theme = &self.theme;
+        let gutter = self.gutter();
+        let role = theme.roles().page_heading;
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("thread-hero")
+                    .debug_selector(|| "thread-hero".to_owned())
+                    .role(Role::Heading)
+                    .aria_label(SharedString::from(words.clone()))
+                    .w_full()
+                    .max_w(self.z(2.0_f32.mul_add(gutter, COLUMN)))
+                    .px(self.z(gutter))
+                    .pb(self.z(theme.spacing.lg))
+                    .text_center()
+                    .text_size(self.z(role.size))
+                    .line_height(self.z(role.line))
+                    .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
+                    .text_color(hsla(theme.surfaces.text_secondary))
+                    .child(SharedString::from(words)),
+            )
+            .into_any_element()
     }
 
     fn list_region(&self, cx: &Context<Self>) -> AnyElement {
@@ -2259,6 +2293,22 @@ impl Render for ThreadView {
         let typing = self.composer.focus_handle(cx).contains_focused(window, cx);
         let composer = composes.then(|| self.composer_box(tucked, typing, cx));
         self.keep_keyboard(composes, window, cx);
+        // An empty thread is its composer, centred under its question; the first message docks
+        // it at the foot, moving there unless motion is reduced.
+        let hero = self.hero(cx).filter(|_| composes);
+        if self.heroed && hero.is_none() && composes && kit::motion(cx) {
+            self.docks = Some(self.docks.map_or(0, |n| n.wrapping_add(1)));
+        }
+        self.heroed = hero.is_some();
+        let dock = self.docks.map(|n| {
+            div()
+                .w_full()
+                .with_animation(("thread-dock", n), kit::Pace::Sheet.animation(), |mut el, t| {
+                    el.style().flex_grow = Some(1.0 - t);
+                    el
+                })
+                .into_any_element()
+        });
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())
@@ -2354,9 +2404,21 @@ impl Render for ThreadView {
             .text_color(hsla(s.text))
             .children(header)
             .children(trail)
-            .child(rows)
+            .map(|el| match hero {
+                Some((agent, place)) => el.child(
+                    div()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .child(self.hero_question(hero_words(&agent, &place)))
+                        .child(self.foot(bar, composer)),
+                ),
+                None => el.child(rows).child(self.foot(bar, composer)).children(dock),
+            })
             .children(aside)
-            .child(self.foot(bar, composer))
             .children(viewer)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
             .children(self.message_menu_panel(cx))
@@ -2471,23 +2533,28 @@ struct Bubble {
 /// What a thread with no rows says while the worker reads it.
 pub(crate) const READING: &str = "Reading the thread\u{2026}";
 
-/// Where a new thread works, under its name: "in ~/work on studio · Opus 5.5", each part only
-/// once it is known.
-fn new_thread_place(cwd: &str, worker: &str, model: Option<&str>) -> String {
-    let folder = (!cwd.trim().is_empty()).then(|| crate::workspace::cwd_tail(cwd, None));
-    let mut place = match (folder, worker.is_empty()) {
-        (Some(folder), false) => format!("in {folder} on {worker}"),
-        (Some(folder), true) => format!("in {folder}"),
-        (None, false) => format!("on {worker}"),
-        (None, true) => String::new(),
-    };
-    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
-        if !place.is_empty() {
-            place.push_str(crate::workspace::META_SEPARATOR);
-        }
-        place.push_str(model);
+/// The question over an empty thread: "What should Claude Code do in slopty?", the place left
+/// out while it is not known.
+fn hero_words(agent: &str, place: &Place) -> String {
+    match place.within() {
+        Some(within) => format!("What should {agent} do {within}?"),
+        None => format!("What should {agent} do?"),
     }
-    place
+}
+
+/// A folder's name: its repository's last part, else its own, `~` for the home directory.
+fn folder_name(cwd: &str, repo: Option<&str>) -> Option<String> {
+    let last = |path: &str| {
+        path.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_owned)
+    };
+    if let Some(name) = repo.and_then(last) {
+        return Some(name);
+    }
+    if cwd.trim().is_empty() {
+        return None;
+    }
+    let tail = crate::workspace::cwd_tail(cwd, None);
+    if tail == "~" { Some(tail) } else { last(&tail) }
 }
 
 /// The start of a message too long to show whole at first, cut at a word, with an ellipsis;
@@ -2647,17 +2714,38 @@ mod tests {
     use super::{ACP, agent_name};
 
     /// A thought says how long it took in whole seconds, the one way chrome says it.
-    /// A new thread's place reads "in ~/work on studio · Opus 5.5", each part once known.
+    /// An empty thread asks what its agent should do where it works, by the folder's name:
+    /// the project's, else its own, `~` at home, never a path (a run's temporary home once read
+    /// "in slopty-e2e-94f6a37e/home"), and a new worktree as one.
     #[test]
-    fn a_new_thread_says_where_it_works() {
-        use super::new_thread_place;
+    fn an_empty_thread_asks_what_to_do_where() {
+        use super::super::draft::Place;
+        use super::{folder_name, hero_words};
         assert_eq!(
-            new_thread_place("/Users/w/work", "studio", Some("Opus 5.5")),
-            "in ~/work on studio \u{b7} Opus 5.5"
+            folder_name("/Users/w/oss/slopty/crates", Some("/Users/w/oss/slopty")).as_deref(),
+            Some("slopty")
         );
-        assert_eq!(new_thread_place("", "studio", None), "on studio");
-        assert_eq!(new_thread_place("/srv/app", "", Some(" ")), "in srv/app");
-        assert_eq!(new_thread_place("", "", Some("Opus 5.5")), "Opus 5.5");
+        assert_eq!(
+            folder_name("/var/folders/x/slopty-e2e-94f6a37e/home", None).as_deref(),
+            Some("home")
+        );
+        assert_eq!(folder_name("/Users/w", None).as_deref(), Some("~"));
+        assert_eq!(folder_name("", None), None);
+        let place = |folder: Option<&str>, worktree| Place {
+            folder: folder.map(str::to_owned),
+            machine: "studio".to_owned(),
+            worktree,
+        };
+        assert_eq!(
+            hero_words("Claude Code", &place(Some("slopty"), false)),
+            "What should Claude Code do in slopty?"
+        );
+        assert_eq!(
+            hero_words("Codex", &place(Some("slopty"), true)),
+            "What should Codex do in a new worktree of slopty?"
+        );
+        assert_eq!(hero_words("pi", &place(None, false)), "What should pi do?");
+        assert_eq!(place(Some("slopty"), false).said(), "in slopty on studio");
     }
 
     #[test]

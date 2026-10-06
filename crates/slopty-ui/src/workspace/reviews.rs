@@ -15,6 +15,10 @@
 //! only once the worker or a composer took them. A file's Open, from its own menu, opens it in a
 //! tile on the review's machine, and a line's author opens its thread, from a thread's review
 //! and a folder's alike.
+//!
+//! A folder's comments go to a new agent there ([`WorkspaceView::review_to_new_agent`]): the
+//! agent the folder last ran, its start's composer holding them quoted, to be added to before
+//! ↵ sends them as its first message.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,10 +26,11 @@ use gpui::{AppContext as _, Context, Entity, Subscription, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
-use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::ThreadRow;
+use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
-use super::actions::ReviewChanges;
+use super::actions::{ReviewChanges, StartThread};
 use crate::review::{ReviewEvent, ReviewView};
 
 /// The palette's line that opens a folder's changes.
@@ -159,7 +164,59 @@ impl WorkspaceView {
             }
             ReviewEvent::OpenThread(opens) => self.open_thread_at(*opens, cx),
             ReviewEvent::OpenFile { path } => self.open_file_on(Some(key), path, None, cx),
+            // A folder's alone, heard with the window it starts in (`sync_changes`).
+            ReviewEvent::NewAgent { .. } => {}
         }
+    }
+
+    /// A folder review's comments, `text`, for a new agent in `folder` on `key`'s machine: the
+    /// agent the folder last ran, its start opened with them in its composer. Whether a
+    /// composer took them, for the review: out of reach, or with no agent, they stay.
+    pub(super) fn review_to_new_agent(
+        &mut self,
+        key: WorkerKey,
+        folder: String,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(w) = self.workers.get(&key).filter(|w| w.link.is_none()) {
+            let words = format!("{} is {}", w.name, w.status.text());
+            self.show_notice(words, cx);
+            return false;
+        }
+        let Some(agent) = self.folder_agent(key, &folder, cx).or_else(|| self.agent_for(key))
+        else {
+            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
+            return false;
+        };
+        let start = StartThread { worker: key, agent, cwd: folder, worktree: false };
+        let item = self.begin_start(start, window, cx);
+        let Some(view) = self.starting.draft_view(item) else {
+            return false;
+        };
+        view.update(cx, |v, cx| v.restore_draft(text, window, cx));
+        true
+    }
+
+    /// The agent `folder` on `key` last ran, as its threads say: the newest that worked in the
+    /// folder itself, else in its repository, among those the machine can start.
+    fn folder_agent(&self, key: WorkerKey, folder: &str, cx: &gpui::App) -> Option<AgentId> {
+        let startable = self.startable_on(key);
+        let hub = self.held_hub(key)?.read(cx);
+        let home = self.home_of(key);
+        let folder = full_path(folder, home);
+        let mut rows: Vec<&ThreadRow> = hub
+            .threads()
+            .rows()
+            .rows
+            .values()
+            .filter(|r| r.parent.is_none() && startable.contains(&r.agent))
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
+        let at = |path: Option<&String>| path.is_some_and(|p| full_path(p, home) == folder);
+        let here = rows.iter().find(|r| at(r.cwd.as_ref()));
+        here.or_else(|| rows.iter().find(|r| at(r.repo.as_ref()))).map(|r| r.agent.clone())
     }
 
     /// The folder whose changes "Review changes" opens from the focus: a folder tile's, or the
@@ -244,8 +301,13 @@ impl WorkspaceView {
                 None => ReviewView::folder(hub, path, theme, window, cx),
             });
             let key = *key;
-            let hearing = cx.subscribe(&view, move |this, view, event: &ReviewEvent, cx| {
-                this.heard_review(key, &view, event, cx);
+            let hearing = cx.subscribe_in(&view, window, move |this, view, event, window, cx| {
+                let ReviewEvent::NewAgent { folder, text, id } = event else {
+                    this.heard_review(key, view, event, cx);
+                    return;
+                };
+                let taken = this.review_to_new_agent(key, folder.clone(), text, window, cx);
+                view.update(cx, |v, cx| v.added(*id, taken, cx));
             });
             self.reviews.changes.insert(*item, (view, hearing));
         }
@@ -261,5 +323,17 @@ impl WorkspaceView {
     /// Every folder's changes tile's view.
     pub(super) fn changes_views(&self) -> impl Iterator<Item = &Entity<ReviewView>> {
         self.reviews.changes.values().map(|(view, _)| view)
+    }
+}
+
+/// `path` whole, its leading `~` spelled as `home`, with no trailing `/`: two spellings of one
+/// folder compare equal.
+fn full_path(path: &str, home: Option<&str>) -> String {
+    let path = path.trim_end_matches('/');
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.trim_end_matches('/'))
+        }
+        _ => path.to_owned(),
     }
 }

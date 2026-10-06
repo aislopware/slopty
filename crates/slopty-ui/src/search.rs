@@ -726,7 +726,8 @@ impl ProjectSearch {
                     Input::new(&self.query)
                         .appearance(false)
                         .px_0()
-                        .text_size(px(theme.typography.title()))
+                        // The query heads the panel: a panel title's size, at the field's weight.
+                        .text_size(px(theme.roles().panel_title.size))
                         .aria_label(QUERY_PLACEHOLDER),
                 ),
             )

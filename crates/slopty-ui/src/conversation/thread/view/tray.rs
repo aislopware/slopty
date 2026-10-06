@@ -961,7 +961,6 @@ impl ThreadView {
             (None, false, ..) if !queued.delivery.is_kept() => Some("Sending".to_owned()),
             (None, ..) => super::later::when_words(queued.delivery, crate::clock::now(cx)),
         };
-        let scheduled = queued.delivery.is_kept();
         let open = can_change && queued.on_worker && !queued.withdrawing;
         let editable = open && !queued.going && !self.composing.editing();
         // The words the composer takes: a refused change's, so they are not lost.
@@ -1025,7 +1024,9 @@ impl ThreadView {
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(intent, cx))),
                 )
             })
-            .when(open && (scheduled || queued.stopped) && can_promote && !queued.going, |el| {
+            // Any waiting message can go now, a plain queued one too: the person decides it
+            // cannot wait for the turn to end.
+            .when(open && can_promote && !queued.going, |el| {
                 el.child(
                     self.icon_button(format!("promote-{pending}"), Symbol::ArrowUp, "Send now")
                         .on_click(cx.listener(move |this, _ev, _w, cx| {

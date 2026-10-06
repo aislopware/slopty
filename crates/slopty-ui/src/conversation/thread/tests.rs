@@ -150,26 +150,86 @@ fn an_answer_flips_its_card_in_the_frame_it_is_pressed(cx: &mut TestAppContext) 
     );
 }
 
-/// A new thread says it is new, in the middle of where its rows will be; a thread whose only
-/// row is a request says nothing there, since the request's card says it all.
+/// An empty thread is its composer: centred under one question, what its agent should do in
+/// its folder, with where it works in the composer's foot and no notice in the rows' place. A
+/// thread whose only row is a request asks nothing, since the request's card says it all; and
+/// once the thread has rows the composer docks at the foot with the keyboard still in it (at
+/// once, under Reduce Motion).
 #[gpui::test]
-fn an_empty_thread_says_it_is_new_and_a_request_alone_speaks_for_itself(cx: &mut TestAppContext) {
+fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let state = fixtures::empty();
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.rows().is_empty()));
-    assert!(cx.debug_bounds("thread-empty").is_some(), "a new thread says so");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Heading", Some("What should Claude Code do in w?"))),
+        "the question, by the folder's name"
+    );
+    assert!(cx.debug_bounds("thread-empty").is_none(), "no notice in the rows' place");
+    assert!(cx.debug_bounds("thread-place").is_some(), "where, in the composer's foot");
+    let middle = |cx: &mut VisualTestContext| {
+        let composer = cx.debug_bounds("thread-composer").expect("the composer");
+        composer.bottom() < px(450.0)
+    };
+    assert!(middle(cx), "the composer stands in the middle, not at the foot");
 
-    let mut asking = state;
+    let mut asking = state.clone();
     asking.requests = vec![approval("a")];
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asking, 1), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("request-a").is_some(), "the request is on show");
-    assert!(cx.debug_bounds("thread-empty").is_none(), "and nothing contradicts it");
+    assert!(cx.debug_bounds("thread-hero").is_none(), "and nothing asks over it");
+
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-hero").is_some(), "asked again");
+    let field = view.read_with(cx, gpui::Focusable::focus_handle);
+    let typing = |cx: &mut VisualTestContext| cx.update(|window, _| field.is_focused(window));
+    assert!(typing(cx), "the field has the keyboard");
+    let full = fixtures::thread("edit");
+    let mut moved = full;
+    moved.meta.id = thread;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 3), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-hero").is_none(), "a thread with rows asks nothing");
+    assert!(cx.debug_bounds("thread-place").is_none(), "its header says where");
+    assert!(!middle(cx), "the composer docks at the foot");
+    assert!(typing(cx), "with the keyboard still in it");
+}
+
+/// With motion on, the composer does not jump to the foot after the first message: it sets
+/// off from the middle and moves there over the sheet's time, on wall time, so the test reads
+/// where it starts and, with motion then reduced, where the move ends.
+#[gpui::test]
+fn the_composer_moves_to_the_foot_after_the_first_message(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|_w, cx| cx.set_reduce_motion(false));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let bottom = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.debug_bounds("thread-composer").expect("the composer").bottom()
+    };
+    let mut moved = fixtures::thread("edit");
+    moved.meta.id = thread;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 1), cx));
+    let setting_off = bottom(cx);
+    assert!(setting_off < px(450.0), "it sets off from the middle: {setting_off:?}");
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let landed = bottom(cx);
+    assert!(landed > px(560.0), "and ends at the foot: {landed:?}");
 }
 
 /// On touch a request's answers are a finger's target, 44 points tall, as the theme's touch

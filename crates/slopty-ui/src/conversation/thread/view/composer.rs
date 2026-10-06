@@ -347,6 +347,31 @@ impl ThreadView {
             .text_color(hsla(s.text_secondary))
     }
 
+    /// Where an empty thread works, before its model: "studio · slopty", the question over
+    /// the composer asking what to do there. Once the thread has rows its tile's header says it.
+    fn place_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let (_, place) = self.hero(cx)?;
+        let theme = &self.theme;
+        let words = match &place.folder {
+            Some(folder) if place.worktree => format!(
+                "{}{}new worktree of {folder}",
+                place.machine,
+                crate::workspace::META_SEPARATOR
+            ),
+            Some(folder) => {
+                format!("{}{}{folder}", place.machine, crate::workspace::META_SEPARATOR)
+            }
+            None => place.machine.clone(),
+        };
+        Some(
+            self.chip("thread-place", place.said())
+                .role(Role::Label)
+                .text_color(hsla(theme.surfaces.text_muted))
+                .child(kit::fit_label("thread-place-words", words, theme))
+                .into_any_element(),
+        )
+    }
+
     /// The model chip: the agent's mark and the model's name; a menu of the agent's models
     /// when it can switch.
     fn model_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
@@ -694,7 +719,8 @@ impl ThreadView {
                     .gap(self.z(theme.spacing.xs))
                     .px(self.z(theme.spacing.md))
                     .pt(self.z(theme.spacing.sm))
-                    .text_size(self.z(theme.typography.title()))
+                    // The strips over the field are a row's words.
+                    .text_size(self.z(theme.roles().chrome.size))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.limit_strip(cx))
@@ -749,6 +775,7 @@ impl ThreadView {
                 None => row,
             };
         let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
+        let row = item(row, FOOT_PLACE, self.place_chip(cx));
         let row = item(row, FOOT_MODEL, self.model_chip(cx));
         let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
@@ -767,6 +794,8 @@ impl ThreadView {
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
 /// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
+/// Where an empty thread works: the first to leave.
+const FOOT_PLACE: (&str, kit::Priority) = ("place", kit::Priority(40));
 /// The model.
 const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));
 /// How full the context is.

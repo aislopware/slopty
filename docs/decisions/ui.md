@@ -5962,14 +5962,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **What waits.** A waiting message in the tray says when it goes ("14:35", "Tomorrow
     09:00"), what it waits on ("When “Fix the parser” rests", or "When another thread rests"
     where the table does not name it), or "Draft". A held one says why it is held, as before.
-    A message the worker keeps offers Send now (`Intent::Promote`) where the agent takes one
-    into the turn under way (`Cap::STEER`, the cap the wire puts on Promote), beside Edit and
-    Take back. Take back now also holds where only `Cap::SCHEDULE` does. Each row is a list
+    Every message the worker keeps, a plain queued one too, offers Send now
+    (`Intent::Promote`) wherever the agent queues (`Cap::QUEUE`, the cap the wire puts on
+    Promote), as a quiet icon beside Edit and Take back. An agent that steers takes it into the
+    turn under way, and an ACP agent is stopped and sends it first (amended 2026-10-06: it was
+    held messages on steering agents only, which left ACP and the person's commonest case,
+    a queued message that cannot wait, without it). Take back now also holds where only `Cap::SCHEDULE` does. Each row is a list
     item named by its words and where it stands, so a screen reader hears when it goes.
   - Day words read forward too ("Tomorrow", a weekday within the week, a date past it), so a
     time to come reads as a time gone does.
   - Tests: `conversation::thread::tests::composing::{a_draft_is_sent_later_from_the_clock,
-    a_held_message_says_when_and_goes_now_on_a_press}`,
+    a_held_message_says_when_and_goes_now_on_a_press,
+    a_queued_message_goes_now_on_a_press_with_or_without_a_steer}`,
     `conversation::thread::view::later::tests::{a_held_message_says_when_it_goes,
     the_times_run_forward_from_now}`, `conversation::figures::tests::{tomorrow_at_an_hour_reads_as_tomorrow_then,
     a_message_s_day_reads_by_how_far_back_it_is}`.
@@ -6174,7 +6178,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     while some are not), git's letter in its tone (M, D, A, R, "new" for untracked, an
     unmerged file as git spells it), a rename as "from → to". The list scrolls past eight rows
     (a `uniform_list`, so a status at its 2000-file cap lays out what shows).
-  - **The person's words only.** The message starts empty and nothing is suggested. Commit and
+  - **The person's words only.** The message starts empty and nothing is suggested (amended
+    2026-10-06: the thread's own agent can be asked to commit instead, "The agent commits on
+    the person's ask"; Slopty still writes no message itself). Commit and
     Commit and push stay set back until a file is ticked and a word is written. With nothing to
     commit and the branch ahead of its upstream, or with none, the second button is Push.
     "Commit and push" sends the commit and the push only once the commit is made, never both
@@ -7259,8 +7265,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Words.** A tile's place no longer starts with the agent's name ("Claude Code · ~"): the
     mark says it and the width goes back to the title. The name stays in the mark's
     accessibility label, the agent picker's lines (mark and name, the name being the choice),
-    the composer's model chip (the mark before the model) and the empty thread's notice
-    ("New Codex thread" under the agent's mark at the notice's size).
+    the composer's model chip (the mark before the model) and the empty thread's question
+    ("What should Codex do in slopty?"; the notice it replaced is gone, see "An empty thread is
+    its composer").
   - **A thread is called by its work, whichever agent runs it** (2026-10-06). Every adapter
     fills the thread model's one title alike: the agent's own name for the session where it
     publishes one (Claude Code's summary, a Codex thread's name, a pi session's name, an ACP
@@ -8096,7 +8103,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `faces::the_toggle_picks_the_face_and_a_plain_shell_has_none`,
     `page_chrome::back_and_forward_show_only_with_history_that_way`,
     `handoffs::an_agents_pull_request_rides_on_its_header_while_the_agent_runs`.
-
+- ✅ **A folder's review sends its comments to a new agent there** (2026-10-06,
+  `.research/readiness-2026-10-07.md` R9). A folder's review kept no comments, having no agent
+  to tell. Work done by an agent whose thread is gone, or in a plain `claude` elsewhere, then had
+  no way back: the person saw the problems and typed them again into a new start.
+  - **Comments as a thread's review takes them.** A press or a drag on a folder's lines opens a
+    comment, quoted with its code as for a thread. Keep, put back, "Mark reviewed" and "Add to
+    message" stay a thread's, so a folder's foot shows only while comments wait, with its one
+    action: "Send to a new agent".
+  - **The agent is the one the folder last ran.** The newest thread that worked in the folder
+    itself, else in its repository, among the agents the machine can start; the machine's own
+    choice otherwise. It starts in the folder, so a finished task's branch review starts it in
+    the task's worktree.
+  - **Through the start's composer, not straight to a send.** The start opens with the comments
+    in its composer, to be added to, with the agent's model and mode chips, before ↵ sends them
+    as its first message. They leave the review once the composer holds them, as "Add to
+    message" does. A machine out of reach or with no agent opens nothing, says why, and keeps
+    them.
+  - Tests: `workspace::tests::thread_start::{a_folders_comments_go_to_a_new_agent_there,
+    a_folders_comments_stay_when_no_agent_can_take_them}`.
+- ✅ **The agent commits on the person's ask** (2026-10-06, `.research/readiness-2026-10-07.md`
+  R10). The commit message was always the person's to type. t3code has its provider write commit
+  messages, PR text and branch names. Slopty calls no model itself, but the thread's own agent
+  knows why it changed what it did.
+  - **One ask through its own door.** A thread's commit sheet, from its tile or its review,
+    offers "Ask `<agent>` to commit" beside "Open pull request", a quiet button: the person's
+    message and Commit stay the default. It sends one message, "Commit what you changed, with a
+    message saying why.", after the turn where the agent queues
+    (`ThreadMeta::delivery_after_turn`), so work in hand is not cut into. An agent that takes no
+    message (no `Cap::QUEUE` or `Cap::STEER`) is not offered, and a folder's sheet has no one
+    to ask.
+  - **The sheet reads again when the turn ends.** While it waits it says so ("Waiting on Claude
+    Code…"). Once the message has left the queue and the turn it went into has ended, the
+    sheet asks the status and the pull request again, so it shows the agent's commit. A
+    refusal is said under the buttons in the worker's words, and the ask can go again.
+  - Tests: `conversation::thread::tests::commit::{the_agent_is_asked_to_commit_and_the_sheet_reads_again_after_its_turn,
+    an_ask_to_commit_turned_down_says_why, an_agent_that_takes_no_message_is_not_asked}`.
 - ✅ **A phone's drawer floats as iOS 26's sidebar does** (2026-10-06,
   `.research/elegance-icons-2026-10-06.md` §5.11). The drawer was a plain sheet to the window's
   edges over a modal's scrim. A large title repeated the workspace's name, a *Workspaces*
@@ -8137,3 +8179,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   notice now keeps the tile and what happened, and reads the tile's title each time it is
   drawn.
   - Test: `workspace::tests::toasts::a_tiles_notice_reads_the_name_the_tile_comes_to_have`.
+- ✅ **An empty thread is its composer** (2026-10-06, `.research/premium-foundations-2026-10-06.md`
+  change 8). An empty thread drew a speech-bubble glyph over "New Claude Code thread" and a line
+  of where it worked, centred where its rows would be, with the composer far below at the foot.
+  The line carried a path (a run's temporary home read "in slopty-e2e-94f6a37e/home") and broke
+  "Opus 5.5" over two lines in a narrow tile. The glyph and the notice are deleted.
+  - **The composer is the page.** It stands centred at the reading width under one question in
+    the page heading's size at the regular weight, in the secondary tone: "What should Claude
+    Code do in slopty?" (t3code's "What should we build in {project}?"). The folder goes by its
+    name, the project's when its repository is known, else its own, `~` at home, never a path. A
+    start in a new worktree asks "… in a new worktree of slopty?".
+  - **Where it works sits in the composer's foot**, before the model chip: "studio · slopty", the
+    first of the foot's items to give way. Once the thread has rows its tile's header says it.
+  - **The first message docks the composer at the foot.** It moves there on the sheet's pace,
+    and under Reduce Motion it is there at once. The keyboard stays in the field across the
+    move. A start that went still says "Starting Claude Code" in the rows' place, and a thread
+    whose only row is a request asks nothing, its card being the statement.
+  - Tests: `conversation::thread::tests::{an_empty_thread_is_its_composer_under_a_question,
+    the_composer_moves_to_the_foot_after_the_first_message}`,
+    `conversation::thread::view::tests::an_empty_thread_asks_what_to_do_where`.

@@ -163,8 +163,8 @@ fn a_thread_goes_by_its_agents_tile_everywhere(cx: &mut TestAppContext) {
 
 /// "Review changes" on a folder opens its changes as a tile of their own on its machine, with
 /// no thread: the tile asks the repository for what is not committed and shows it, the whole
-/// branch on a click, with no keep, put back or comments, which are for an agent. A second
-/// ask goes to that tile rather than adding another.
+/// branch on a click, with no keep or put back, which are for an agent, and no foot until a
+/// comment waits. A second ask goes to that tile rather than adding another.
 #[gpui::test]
 fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
     use slopty_proto::RequestId;

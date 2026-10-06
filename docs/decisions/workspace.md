@@ -1587,7 +1587,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     changes of the repository the focused shell stands in, on that machine. If a changes tile is
     already open for that folder, it takes the focus instead. The tile is the review tile with
     no thread (`Reviewed::Folder`). Its switch offers "Uncommitted" and "Whole branch". With no
-    agent to tell, it has no keep, put back, comments, foot or agent review. The commit sheet,
+    agent to tell, it has no keep, put back or agent review. It takes comments, which its foot
+    sends to a new agent in the folder (amended 2026-10-06, `ui.md`, "A folder's review sends
+    its comments to a new agent there"). The commit sheet,
     the pull request and who wrote each line are there as for a thread. Its changes are read
     when asked, so a refresh button stands at the switch's end. They are also read again after
     a commit or merge from its sheet.

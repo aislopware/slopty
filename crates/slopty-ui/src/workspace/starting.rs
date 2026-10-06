@@ -34,7 +34,7 @@ use super::strip::Handed;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
 use crate::conversation::attach::Target;
-use crate::conversation::thread::{Draft, DraftSent, ThreadView, ThreadViewEvent};
+use crate::conversation::thread::{Draft, DraftSent, Place, ThreadView, ThreadViewEvent};
 use crate::draw::Draw;
 use crate::icons::Status;
 use crate::kit;
@@ -201,13 +201,14 @@ impl Starting {
 
 impl WorkspaceView {
     /// Open the tile of the thread `start` asks for, focused, the thread's composer writing
-    /// its first message taking the keyboard: nothing goes to the machine until ↵.
+    /// its first message taking the keyboard: nothing goes to the machine until ↵. The tile's
+    /// item, for what writes into that composer ([`Starts::draft_view`]).
     pub(super) fn begin_start(
         &mut self,
         start: StartThread,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> ItemId {
         let StartThread { worker, agent, cwd, worktree } = start;
         let item = ItemId::new();
         let hub = self.thread_hub(worker, cx);
@@ -227,6 +228,7 @@ impl WorkspaceView {
         let starting = Starting::new(worker, agent, cwd, Some(drafting)).in_worktree(worktree);
         self.open_starting(item, starting, cx);
         self.starting.focus = Some(item);
+        item
     }
 
     /// What a new thread of `agent` can start with on `worker`, as its link said.
@@ -236,16 +238,12 @@ impl WorkspaceView {
         installed.map(|a| a.offers.clone()).unwrap_or_default()
     }
 
-    /// Where a start on `worker` in `cwd` works, as its empty thread says it: "in slopty on
-    /// studio", or "in a new worktree of slopty on studio".
-    fn start_place(&self, worker: WorkerKey, cwd: &str, worktree: bool) -> String {
-        let folder = super::tile::cwd_tail(cwd, self.home_of(worker));
-        let name = self.worker_name(worker);
-        if worktree {
-            format!("in a new worktree of {folder} on {name}")
-        } else {
-            format!("in {folder} on {name}")
-        }
+    /// Where a start on `worker` in `cwd` works, by name: the folder as the tile's header
+    /// says it, the machine, and whether in a new worktree of it.
+    fn start_place(&self, worker: WorkerKey, cwd: &str, worktree: bool) -> Place {
+        let folder = super::tile::place_name(cwd, None, self.home_of(worker))
+            .unwrap_or_else(|| "~".to_owned());
+        Place { folder: Some(folder), machine: self.worker_name(worker), worktree }
     }
 
     /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
@@ -518,7 +516,8 @@ impl WorkspaceView {
                 }
                 div().flex_1().min_h_0().w_full().child(view.clone()).into_any_element()
             } else {
-                let place = self.start_place(starting.worker, &starting.cwd, starting.worktree);
+                let place =
+                    self.start_place(starting.worker, &starting.cwd, starting.worktree).said();
                 let mark =
                     crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary), k);
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));

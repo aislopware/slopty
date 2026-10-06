@@ -25,7 +25,7 @@ pub mod questions;
 pub mod rows;
 pub mod view;
 
-pub use draft::{Draft, DraftSent};
+pub use draft::{Draft, DraftSent, Place};
 pub use hub::{HubEvent, ThreadHub};
 pub use view::{ThreadView, ThreadViewEvent};
 

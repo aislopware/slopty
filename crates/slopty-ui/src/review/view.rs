@@ -11,8 +11,10 @@
 //!
 //! A folder's changes are reviewed the same way with no thread ([`Reviewed::Folder`]): its
 //! working tree against `HEAD` or against the branch's base, read from its repository
-//! (`GitOp::Changes`). With no agent to tell, it keeps no comments and takes no keep or put
-//! back; the commit sheet and who wrote each line are there as for a thread.
+//! (`GitOp::Changes`). It takes comments as a thread's review does, and with no agent to tell,
+//! its foot sends them to a new agent in the folder, quoted into that start's composer to be
+//! added to before it goes ([`ReviewEvent::NewAgent`]). It takes no keep or put back; the
+//! commit sheet and who wrote each line are there as for a thread.
 //!
 //! "Review with `<agent>`" asks the thread's agent for its own review of the change on show,
 //! through its own door ([`Intent::Review`]), where it has one. The tile holds what it shows
@@ -86,6 +88,9 @@ pub const NOT_SENT: &str = "Comments not sent";
 /// The foot's way to put the comments in the thread's draft.
 const ADD_TO_MESSAGE: &str = "Add to message";
 
+/// A folder's foot: its comments start a new agent in the folder.
+pub const SEND_TO_NEW_AGENT: &str = "Send to a new agent";
+
 /// The foot's way to keep every file as it is.
 const MARK_REVIEWED: &str = "Mark reviewed";
 
@@ -144,6 +149,17 @@ pub enum ReviewEvent {
     AddToMessage {
         /// The thread.
         thread: ThreadId,
+        /// The comments as one message.
+        text: String,
+        /// Which hand-over this is, for its answer.
+        id: u64,
+    },
+    /// A folder's comments are for a new agent there: the host opens a start in `folder` with
+    /// `text` in its composer, then says whether one took it ([`ReviewView::added`]). The
+    /// comments stay until one did.
+    NewAgent {
+        /// The folder reviewed, where the agent starts.
+        folder: String,
         /// The comments as one message.
         text: String,
         /// Which hand-over this is, for its answer.
@@ -642,8 +658,15 @@ impl ReviewView {
             return;
         }
         let Some(repo) = self.repo(cx) else { return };
-        let (hub, theme) = (self.hub.clone(), self.theme.clone());
-        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx));
+        let (hub, theme, thread) = (self.hub.clone(), self.theme.clone(), self.own());
+        // A thread's review offers its agent the commit; a folder's has none to ask.
+        let sheet = cx.new(|cx| {
+            let sheet = CommitSheet::new(hub, repo, theme, window, cx);
+            match thread {
+                Some(thread) => sheet.asking(thread),
+                None => sheet,
+            }
+        });
         let closing =
             cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
                 CommitEvent::Close => {
@@ -1037,6 +1060,22 @@ impl ReviewView {
         cx.notify();
     }
 
+    /// A folder's comments go to a new agent there: the host opens its start with them in the
+    /// composer, and says whether one took them ([`Self::added`]).
+    fn send_to_new_agent(&mut self, cx: &mut Context<Self>) {
+        if self.comments_away() {
+            return;
+        }
+        let Reviewed::Folder(folder) = &self.reviewed else { return };
+        let folder = folder.clone();
+        let Some((text, batch)) = self.model.message() else { return };
+        self.adds = self.adds.wrapping_add(1);
+        let id = self.adds;
+        self.adding = Some((id, batch));
+        cx.emit(ReviewEvent::NewAgent { folder, text, id });
+        cx.notify();
+    }
+
     /// Keep a finding as a note beside the comments, as the agent's own review does, and press
     /// "Add to message": what the host does with comments, with no diff to comment on.
     #[cfg(test)]
@@ -1113,10 +1152,6 @@ impl ReviewView {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        // A comment is for an agent to read; a folder's changes have none.
-        if self.own().is_none() {
-            return;
-        }
         let from = self
             .drafting
             .as_ref()
@@ -2244,27 +2279,27 @@ impl ReviewView {
     /// The foot: what to do with the comments ("Add to message", "Send N comments") and
     /// "Mark reviewed", one row that fits the tile at the buttons' shaped widths
     /// (`kit::priority_row`). The send never leaves; "Mark reviewed", then "Add to message",
-    /// go behind "More" when there is no room for them.
+    /// go behind "More" when there is no room for them. A folder's, while comments wait, is
+    /// its one way to send them: to a new agent there.
     fn foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let n = self.model.waiting();
         let away = self.comments_away();
+        let folder = self.own().is_none();
         let send_words = match n {
             _ if away => SENDING.to_owned(),
+            _ if folder => SEND_TO_NEW_AGENT.to_owned(),
             1 => "Send 1 comment".to_owned(),
             n => format!("Send {n} comments"),
         };
-        let mark = !self.model.listed().is_empty();
-        let selector = "review-send";
+        let mark = !folder && !self.model.listed().is_empty();
+        let selector = if folder { "review-send-new" } else { "review-send" };
         let mut row = kit::priority_row("review-foot-row")
             .h_full()
             .gap(self.z(theme.spacing.sm))
             .dropped(&self.foot_dropped)
             .end();
         if n > 0 {
-            let add = self
-                .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
-                .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
             let send = div()
                 .id(selector)
                 .debug_selector(move || selector.to_owned())
@@ -2279,12 +2314,16 @@ impl ReviewView {
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(SharedString::from(send_words))
-                .on_click(cx.listener(|this, _ev, _w, cx| this.send_comments(cx)));
-            row = row.item(FOOT_ADD, kit::Priority(160), add).item(
-                "send",
-                kit::Priority::ESSENTIAL,
-                send,
-            );
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    if folder { this.send_to_new_agent(cx) } else { this.send_comments(cx) }
+                }));
+            if !folder {
+                let add = self
+                    .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
+                row = row.item(FOOT_ADD, kit::Priority(160), add);
+            }
+            row = row.item("send", kit::Priority::ESSENTIAL, send);
         }
         if mark {
             let marked = self
@@ -2461,7 +2500,8 @@ impl Render for ReviewView {
         let band = self.findings_band(cx);
         let body = self.body(cx);
         let door = self.door_of(cx).is_some();
-        let foot = self.own().map(|_| self.foot(cx));
+        // A folder's foot is there only for its comments.
+        let foot = (self.own().is_some() || self.model.waiting() > 0).then(|| self.foot(cx));
         div()
             .id("review")
             .debug_selector(|| "review".to_owned())

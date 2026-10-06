@@ -189,3 +189,120 @@ fn a_refusal_reads_in_git_s_words_and_the_sheet_closes(cx: &mut TestAppContext) 
     click(cx, "commit-close");
     assert!(cx.debug_bounds("commit-sheet").is_none(), "closed");
 }
+
+/// A turn of the agent's, `state` as given.
+fn turn(id: u32, state: slopty_proto::thread::TurnState) -> slopty_proto::thread::Turn {
+    use slopty_proto::thread::{Changed, Turn, TurnId, Usage};
+    Turn {
+        id: TurnId(id),
+        input: None,
+        state,
+        started_ms: slopty_core::WallMs::ZERO,
+        ended_ms: None,
+        usage: Usage::default(),
+        models: Vec::new(),
+        changed: Changed::default(),
+        before: None,
+        after: None,
+    }
+}
+
+/// "Ask `<agent>` to commit" sends the thread's agent one message, queued after its turn so the
+/// work in hand is not cut into, and says it waits. The repository is read again only once the
+/// turn the message went into has ended; the agent's own commit is then what the sheet shows.
+#[gpui::test]
+fn the_agent_is_asked_to_commit_and_the_sheet_reads_again_after_its_turn(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::Intent;
+    use slopty_proto::thread::{Cap, Delivery, TurnState};
+
+    use crate::conversation::thread::commit::ASK_TO_COMMIT;
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    state.meta.caps = vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)];
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
+    let read = asks(&sent).iter().filter(|(_, op)| *op == GitOp::Status).count();
+
+    click(cx, "commit-ask");
+    let said: Vec<Intent> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(slopty_proto::thread::wire::ThreadRequest::Intent {
+                intent, ..
+            }) => Some(intent.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [Intent::Send {
+            text: ASK_TO_COMMIT.to_owned(),
+            delivery: Delivery::Queue,
+            attachments: Vec::new(),
+        }],
+        "one message, after the turn"
+    );
+    assert!(cx.debug_bounds("commit-asked").is_some(), "the sheet says it waits");
+
+    let statuses = |sent: &Sent| asks(sent).iter().filter(|(_, op)| *op == GitOp::Status).count();
+    state.turns = vec![turn(1, TurnState::Active)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
+    cx.run_until_parked();
+    assert_eq!(statuses(&sent), read, "not read while the agent works");
+    state.turns = vec![turn(1, TurnState::Complete)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
+    cx.run_until_parked();
+    assert_eq!(statuses(&sent), read.saturating_add(1), "read again once its turn ended");
+    assert!(cx.debug_bounds("commit-asked").is_none(), "and waits no more");
+}
+
+/// An ask the worker turns down says why under the buttons, and the ask can go again.
+#[gpui::test]
+fn an_ask_to_commit_turned_down_says_why(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cap;
+    use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    state.meta.caps = vec![Cap::named(Cap::QUEUE)];
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    click(cx, "commit-ask");
+    let id = sent
+        .borrow()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent { id, .. }) => Some(*id),
+            _ => None,
+        })
+        .expect("asked");
+    let reason = "The agent is not running".to_owned();
+    hub.update(cx, |hub, cx| {
+        hub.done(&IntentDone { id, outcome: Outcome::Refused { reason } }, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("commit-ask-refused").is_some(), "why, under the buttons");
+    assert!(cx.debug_bounds("commit-asked").is_none());
+}
+
+/// A thread whose agent takes no message has no one to ask: the sheet offers only the
+/// person's commit.
+#[gpui::test]
+fn an_agent_that_takes_no_message_is_not_asked(cx: &mut TestAppContext) {
+    let (_hub, _sent, cx) = opened(cx);
+    assert!(cx.debug_bounds("commit-sheet").is_some());
+    assert!(cx.debug_bounds("commit-ask").is_none(), "nothing to ask");
+}

@@ -730,7 +730,7 @@ fn a_start_is_written_in_the_threads_composer(cx: &mut TestAppContext) {
     };
 
     begin("codex", 2, cx);
-    assert!(cx.debug_bounds("thread-empty").is_some(), "the new thread says where it starts");
+    assert!(cx.debug_bounds("thread-hero").is_some(), "the new thread asks what to do there");
     click("thread-attach", cx);
     assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the + menu is open");
     assert!(cx.debug_bounds("thread-add-menu-modes").is_none(), "Codex: no mode offered");
@@ -911,4 +911,150 @@ fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAp
     let lines = step_lines(&view, cx);
     assert_eq!(lines.first().map(String::as_str), Some("w/atlas"), "its folder first: {lines:?}");
     assert!(lines.contains(&format!("{NEW_WORKTREE} atlas")), "{lines:?}");
+}
+
+/// A folder's changes tile on `/w/atlas`, on a studio with `agents` where a Codex thread last
+/// worked in that folder, with one comment written on its added line.
+fn a_folder_commented<'a>(
+    cx: &'a mut TestAppContext,
+    agents: &[AgentId],
+) -> (Entity<WorkspaceView>, Fake, &'a mut VisualTestContext) {
+    use slopty_core::WallMs;
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+    use slopty_proto::thread::detail::Hunk;
+    use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope, TableFrame};
+    use slopty_proto::thread::{Cursor, Patch};
+
+    use super::super::actions::ReviewChanges;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let mut ran = crate::conversation::thread::fixtures::thread("edit");
+    ran.meta.agent = AgentId::named(AgentId::CODEX);
+    "/w/atlas".clone_into(&mut ran.meta.cwd);
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![ran.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, with_agents(agents), cx);
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    let folder = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
+    settle(cx);
+    studio.drain();
+    cx.dispatch_action(ReviewChanges);
+    settle(cx);
+    let asked = studio.drain().into_iter().find_map(|m| match m {
+        ClientMsg::Git { request, op: GitOp::Changes { .. }, .. } => Some(request),
+        _ => None,
+    });
+    let request = asked.expect("the folder's changes asked");
+    let lines = [" fn main() {", "-    old();", "+    new();", " }"];
+    let file = FileDiff {
+        path: "src/lib.rs".to_owned(),
+        from: Some("old".to_owned()),
+        to: Some("new".to_owned()),
+        binary: false,
+        patch: Patch {
+            hunks: vec![Hunk {
+                old_start: 10,
+                old_lines: 3,
+                new_start: 10,
+                new_lines: 3,
+                heading: None,
+                lines: lines.map(str::to_owned).to_vec(),
+            }],
+            added: 1,
+            removed: 1,
+            clipped_lines: 0,
+            full: None,
+        },
+    };
+    let review = Review {
+        scope: ReviewScope::WorkingTree(Against::Head),
+        from: None,
+        to: None,
+        files: vec![file],
+        absent: None,
+    };
+    let done = GitOutcome::Done(GitDone::Changes(Box::new(review)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, request, done, cx));
+    settle(cx);
+    assert!(cx.debug_bounds("review-send-new").is_none(), "no foot with no comment");
+
+    let line = cx.debug_bounds("review-line-0-0-2").expect("the added line").center();
+    cx.simulate_click(line, Modifiers::none());
+    settle(cx);
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "a folder's review takes comments");
+    (view, studio, cx)
+}
+
+/// The comments waiting on the folder's review.
+fn comments_waiting(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> usize {
+    view.update(cx, |v, cx| v.changes_views().map(|r| r.read(cx).waiting()).sum::<usize>())
+}
+
+/// A folder's review takes comments, and its foot sends them to a new agent there: the agent
+/// the folder last ran (Codex here, not the machine's first, Claude Code), its start in the
+/// folder with the comments quoted in its composer to be added to, and none left on the
+/// review. ↵ starts it with them as its first message.
+#[gpui::test]
+fn a_folders_comments_go_to_a_new_agent_there(cx: &mut TestAppContext) {
+    let agents = [AgentId::named(AgentId::CLAUDE_CODE), AgentId::named(AgentId::CODEX)];
+    let (view, mut studio, cx) = a_folder_commented(cx, &agents);
+    assert!(cx.debug_bounds("review-add").is_none(), "no thread's draft to add to");
+    assert!(cx.debug_bounds("review-mark").is_none(), "and nothing to keep for an agent");
+    let send = cx.debug_bounds("review-send-new").expect("Send to a new agent").center();
+    cx.simulate_click(send, Modifiers::none());
+    settle(cx);
+
+    let quoted = "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\nWhy new?";
+    let start = view.read_with(cx, |v, _| v.focused()).expect("the start's tile");
+    let drafted =
+        view.update(cx, |v, cx| v.starting.draft_view(start.item).map(|d| d.read(cx).draft(cx)));
+    assert_eq!(drafted.as_deref(), Some(quoted), "the comments in the start's composer");
+    assert_eq!(comments_waiting(&view, cx), 0, "none left once the composer took them");
+
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let starts: Vec<Start> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
+            _ => None,
+        })
+        .collect();
+    let [start] = starts.as_slice() else { panic!("one start: {starts:?}") };
+    assert_eq!(start.agent, AgentId::named(AgentId::CODEX), "the agent the folder last ran");
+    assert_eq!(start.cwd, "/w/atlas");
+    assert_eq!(start.prompt.as_deref(), Some(quoted));
+    assert!(start.worktree.is_none(), "in the folder itself");
+}
+
+/// With no agent the machine can start, the send opens nothing, says why, and keeps the
+/// comments on the review to send once there is one.
+#[gpui::test]
+fn a_folders_comments_stay_when_no_agent_can_take_them(cx: &mut TestAppContext) {
+    let (view, mut studio, cx) = a_folder_commented(cx, &[]);
+    let review = view.read_with(cx, |v, _| v.focused()).expect("the review's tile");
+    let send = cx.debug_bounds("review-send-new").expect("Send to a new agent").center();
+    cx.simulate_click(send, Modifiers::none());
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.focused()), Some(review), "no start opened");
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "the comment stays");
+    assert_eq!(comments_waiting(&view, cx), 1);
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some(agent_start::NO_AGENT));
+    let started = studio
+        .drain()
+        .into_iter()
+        .any(|m| matches!(m, ClientMsg::Thread(ThreadRequest::Start { .. })));
+    assert!(!started, "nothing started");
 }

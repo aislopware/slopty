@@ -631,6 +631,29 @@ fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
     assert_eq!(intents(&sent), [Intent::Promote { pending: held.intent }]);
 }
 
+/// A message queued behind the turn under way can go now too, the person deciding it cannot
+/// wait: on an agent that steers, as on one that only queues and is stopped for it (ACP). Both
+/// ask the same `Promote` of the message's own intent.
+#[gpui::test]
+fn a_queued_message_goes_now_on_a_press_with_or_without_a_steer(cx: &mut TestAppContext) {
+    for caps in [vec![Cap::QUEUE, Cap::STEER], vec![Cap::QUEUE, Cap::INTERRUPT]] {
+        let (hub, sent) = hub(cx, None);
+        let mut state = working(state());
+        state.meta.caps = caps.iter().copied().map(Cap::named).collect();
+        let thread = state.meta.id;
+        let queued = waiting("then the docs");
+        state.pending = vec![queued.clone()];
+        hub.update(cx, ThreadHub::connected);
+        let (_view, cx) = view(cx, &hub, thread);
+        hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+        cx.run_until_parked();
+        let now = format!("promote-{}", queued.intent).leak();
+        let at = cx.debug_bounds(now).unwrap_or_else(|| panic!("Send now with {caps:?}")).center();
+        cx.simulate_click(at, Modifiers::none());
+        assert_eq!(intents(&sent), [Intent::Promote { pending: queued.intent }], "{caps:?}");
+    }
+}
+
 /// After the person stops a turn, what waited in the queue is held for them: one line over the
 /// queue says so, each held message can be sent now, and the line goes once the worker lets
 /// them wait for their turn again.

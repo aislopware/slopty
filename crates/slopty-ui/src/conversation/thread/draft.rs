@@ -28,11 +28,47 @@ pub struct DraftSent {
     pub effort: Option<String>,
 }
 
+/// Where a thread works, by name: its folder's, its machine's, and whether it is a new
+/// worktree of that folder.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Place {
+    /// The folder by its name: the project's, else its own, `~` at home; none when unknown.
+    pub folder: Option<String>,
+    /// The machine by its name.
+    pub machine: String,
+    /// In a new worktree of the folder's repository.
+    pub worktree: bool,
+}
+
+impl Place {
+    /// Where, as the question over an empty thread asks it: "in slopty", "in a new worktree of
+    /// slopty"; nothing when the folder is not known.
+    #[must_use]
+    pub fn within(&self) -> Option<String> {
+        let folder = self.folder.as_deref()?;
+        Some(if self.worktree {
+            format!("in a new worktree of {folder}")
+        } else {
+            format!("in {folder}")
+        })
+    }
+
+    /// Where, as a line says it: "in slopty on studio".
+    #[must_use]
+    pub fn said(&self) -> String {
+        match self.within() {
+            Some(within) if self.machine.is_empty() => within,
+            Some(within) => format!("{within} on {}", self.machine),
+            None => format!("on {}", self.machine),
+        }
+    }
+}
+
 /// A thread on its way, until its start goes.
 pub struct Draft {
     state: ThreadState,
-    /// Where it will start, as its empty thread says: "on studio in slopty".
-    place: String,
+    /// Where it will start.
+    place: Place,
     /// The start went: the thread says it is starting until it lands.
     sent: bool,
     /// First messages sent before, newest first: what ↑ brings back.
@@ -58,7 +94,7 @@ impl Draft {
         agent: AgentId,
         cwd: String,
         offers: Offers,
-        place: String,
+        place: Place,
         recall: Vec<String>,
     ) -> Self {
         let Offers { models, modes, efforts, commands } = offers;
@@ -100,7 +136,7 @@ impl Draft {
 
     /// Where it will start.
     #[must_use]
-    pub fn place(&self) -> &str {
+    pub const fn place(&self) -> &Place {
         &self.place
     }
 
