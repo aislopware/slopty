@@ -4,7 +4,8 @@ Slopty is a remote-coding workstation in three roles. **Workers** (macOS; Linux 
 and agents) expose shells, agents, windows and displays. One **server** keeps the worker
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
 iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show the workers'
-items as tiles in one niri-style scrolling workspace, several workers mixed, with Claude Code
+items as tiles in one tiled workspace (projects, their tabs, each tab a split layout of panes),
+several workers mixed, with Claude Code
 agents surfaced as first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
@@ -646,10 +647,10 @@ before the newest-only `watch` channel other readers use. The presenter
 its own thread by GPUI's surface shader, with one picture at most on its way to the glass and
 the newest waiting in a one-picture mailbox. No GPUI frame is drawn for a picture. The view
 places the layer in its own frame at the picture's fitted (or zoomed) rectangle
-(`Window::paint_native`, no hitbox, so the pointer stays GPUI's), clipped by the tile and the
-strip, and draws the pointer, the zoom readout and the ⌘⇧I overlay over its hole; it draws again
-only when those change or the picture's size or chroma does. A tile the strip does not draw
-places no layer, which hides it. A `slopty_client::Pacer` beside the layer owns the one decision
+(`Window::paint_native`, no hitbox, so the pointer stays GPUI's), clipped by the tile and its
+pane, and draws the pointer, the zoom readout and the ⌘⇧I overlay over its hole; it draws again
+only when those change or the picture's size or chroma does. A tile that is not drawn (a
+background tab, a hidden pane, behind its pane's shown tab) places no layer, which hides it. A `slopty_client::Pacer` beside the layer owns the one decision
 left, **present on arrival**: a picture older than the one up is dropped (`late`), one the
 layer's mailbox replaced before the glass is `skipped`. The pacer is also the instrument: the
 layer's report (`on_presented`, the window server's presentation) stops each picture's clock,
@@ -901,8 +902,9 @@ advertise `WorkerCaps::virtual_displays`; Linux says no.
 
 ## 4. Workspace
 
-Every worker's items in one scrollable tiling workspace, niri's model
-(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, file, folder, browser,
+Every worker's items in one tiled workspace: projects, each holding tabs, each tab a split layout
+of panes, after Zed's `PaneGroup` and MonoCode's layout (`docs/decisions/workspace.md`, "Tiling
+replaces the scrolling strip", and the steps after it). Items: terminal, remote window, remote display, file, folder, browser,
 thread, review, changes (`ItemKind` in `crates/slopty-proto/src/items.rs`). An agent in a live
 terminal is shown in that terminal's tile, its thread as the tile's face; a thread tile is for a
 thread with no live terminal, and turns into its terminal's tile in place once it has one
@@ -910,14 +912,34 @@ thread with no live terminal, and turns into its terminal's tile in place once i
 (`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/
 `Sleep`/`Remove`, each op carrying only the field it changes, a refused one answered with a snapshot,
 a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
-optimistic local ops and recognises its own echo by `by == me`. Where each item sits is this
-device's alone: `slopty-client::layout` is a pure niri port (workspaces stacked vertically, one
-empty at the end, each an endless strip of columns of tiles; preset widths 1/3, 1/2, 2/3;
-springs, swipe tracker, overview), saved as `layout.json` in the client's data directory. A
-tile is `(WorkerKey, ItemId)`, so one `slopty-ui::workspace::WorkspaceView` shows every worker
-at once: its own echo opens right of the focus and takes it, anything from elsewhere joins the
-end of the workspace that last held a tile of its project (a tile with no project, that of its
-machine). What a tile's project is comes from `slopty-client::groups`: each tile yields an open
+optimistic local ops and recognises its own echo by `by == me`. Where each item sits is this device's alone.
+`slopty-client::layout::tiling::Tiling` is a pure model of the projects, each keyed by a
+`GroupKey` home (a project, else a repository, a folder or a machine), their tabs, and each tab's
+n-ary split tree (`layout::tree`: splits by row or column with shares, and panes holding tiles as
+their tabs, one shown). Ids are stable across edits, and the tree is normalised after each one.
+It is saved as `layout.json` in the client's data directory, and an old file it cannot read is
+set aside unread. Given the area, the tiling gives back the tab's frame of pane rectangles
+(`TabFrame`), built again only when the tree, the area or the zoom changes. A tile is
+`(WorkerKey, ItemId)`, so one `slopty-ui::workspace::WorkspaceView` shows every worker at once.
+
+Where new work goes:
+
+- **Beside its source.** This client's own echo opens there by the room rule
+  (`Tiling::open_beside`). It goes right while each pane of the row keeps its least width
+  (`Room`: 520 pt with a pointer, 480 pt on touch), else below while both halves keep 300 pt,
+  else it becomes a tab of the source's pane.
+- **Tabs and splits by key.**
+  - ⌘T opens an agent's composer and ⌘⇧T a terminal, each in a tab of its own.
+  - ⌘D and ⌘⇧D split a terminal off right or down.
+  - ⌘⌥T shows or hides the tab's terminal: a pane below the whole tab, a third of its height.
+  - The worker makes a shell, so its place is decided when its item comes, by the ask queued
+    for it on its worker (`workspace::tabs::Opening`).
+- **From elsewhere** (another device, the worker's own list): it arrives as a background tab of
+  its project (`Tiling::arrive`) and moves no focus.
+- **Never moved for it.** A placed tile never moves when its facts change. Only the person moves
+  it: the move keys, a drag, or "Move to project…".
+
+What a tile's project is comes from `slopty-client::groups`: each tile yields an open
 map of facts (`machine`, `kind`, `os`, `agent`, `cwd`, `repo`, `folder`, `branch`, `project`,
 `facts.<key>` from its thread; `slopty-ui::workspace::grouping` assembles them from what the
 client holds), a grouping is a chain of fact keys (by default `project`, `repo`, `folder`,
@@ -934,22 +956,48 @@ navigator groups by project; the machine is a facet"). A worker that drops keeps
 badge starts from its `SessionSummary.agent` when the worker connects or the session opens
 (`WorkspaceView::seed_agents`), so a client that joins late names the running agents and
 their status before any event arrives, and offers the hooks only where the seed's source is not
-a hook; an event always wins over the seed. The view draws only
-tiles near the view (a far terminal prepares no rows), sizes a terminal's grid from the
-tile's resting rect so a spring never resizes a PTY, lets a remote tile's stream go after 5 s
-off screen, and asks for frames only while something moves. Two-finger swipes drag the strip
-(axis locked after 16 pt, vertical scrolls the content under it, momentum after a snap
-swallowed), ⌘⌥ and the wheel step columns, a header drag moves a tile, the gap right of a
-column resizes it, a pinch opens the overview. The keys are niri's on ⌘⌥ (the table is in the
-decision), bound in `Workspace && !Screen`: a focused remote window gets them all, ⌃Tab is the
-way back. The titlebar is the workspace name (the one given, else the project most of its tiles are
-in, else "New workspace"), a dot per column (none for one column), "+" (a menu: with
-several workers, first the worker a new tile goes to; then new terminal, agent, window or
-display, note (a new Markdown file), then a new workspace), the bell and "…"; the status bar under the strip holds
-the readouts. The status bar is never empty: the focused shell's place, branch and working-tree
-changes (`+12 −3`), else the worker's name, and on the right what the focused tile is (a file's
-language and caret, a stream's size and rate, a page's host, a command's running time). A
-shell's title is, first that says something, the command it runs, a title its program set
+a hook; an event always wins over the seed. A project's row in the navigator shows that project on the tab it was left on, a
+tile's row goes to its tab and pane, and the breadcrumb's project menu goes between projects.
+
+The view draws the tab on show (`workspace::area`, `workspace::panes`):
+
+- **Panes.** Each pane is an absolutely placed element at its rectangle, so no nested flex solve
+  weighs siblings against each other. Sashes lie over the edges between panes; a drag on one
+  shares the room out again, and a double-click evens it.
+- **The title bar** holds the project's tabs. Each says the title of its focused work, a mark
+  for each agent in it at work or finished, and its close.
+- **Only what shows costs anything.** A tile in a background tab, in a hidden pane or behind
+  its pane's shown tab builds no element. A terminal sizes its grid from its pane and asks for a
+  PTY size only when its whole cell count changes (`TerminalView::fitted`). A remote tile's
+  stream goes after 5 s off screen, and frames are asked for only while something moves.
+- **Carrying.** A pane's header or tab, a navigator row or a title tab, pressed and moved 4 pt,
+  carries its tile or tab. Within a fifth of a pane's side from an edge it splits that pane;
+  in the middle it joins the pane's tabs; on the title strip it makes or moves a tab; on a
+  project's row it goes to that project.
+- **Zoom.** ⇧⌘↩ zooms the focused pane over the tab, and the docked navigator steps aside until
+  the zoom ends.
+- **Keys.** ⌘⌥ and an arrow focus a pane, and ⌘⌥⇧ and an arrow move the tile, splitting out at
+  the tab's edge. ⌘1–9 pick a tab, ⌘[ and ⌘] go back and forward through the tabs visited, and
+  ⌘⌥[ and ⌘⌥] step a pane's tabs. They are bound in `Workspace && !Screen`, so a focused remote
+  window gets them all, and ⌃Tab is the way back.
+- **The phone's model** applies below 700 pt, or 900 pt on touch, which takes in an iPad in
+  Split View. The focused pane fills the tab, its title is the way to the tab's other panes and
+  the project's tabs, and every new tile is a tab.
+
+The title bar holds, in order:
+
+- the navigator's toggle;
+- the breadcrumb (`project ▾ / checkout ▾ / branch`);
+- the project's tabs, with "+" after them, a menu that with several workers first chooses the
+  worker a new tile goes to, then offers a terminal, an agent, a window or display, or a note
+  (a new Markdown file);
+- the notices about no one tile's work;
+- the readouts, each only while it has something to say (`workspace::readouts`);
+- the bell and "…".
+
+There is no bar along the bottom.
+
+A shell's title is, first that says something, the command it runs, a title its program set
 (not the shell's own name, a path or a `user@host:path` prompt), its repository or directory,
 else "Terminal"; an agent's is its own title, else the agent's name. Its header context then
 says where it is less what the title said (`WorkspaceView::terminal_title`, `shell_context`),
@@ -957,7 +1005,7 @@ and a path under the worker's home, which its `HelloAck` names, reads `~/…`. A
 `RUNNING_AFTER` (3 s) is `Status::Running`: the neutral tone and a calm mark that steps once a
 second, beside its running time, the least of what a rollup counts. A menu that closes hands the keyboard back to the
 focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-worker dialog do. ⌘W on any tile takes it off and offers it
-back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Undo" (toasts sit at the foot of the strip) put the
+back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the notice's "Undo" (in the title bar, `workspace::toast`) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
 untouched and `forget_closed` sends the worker `Close`; every other tile is its item, so the
@@ -1069,11 +1117,10 @@ order.
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
 usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`). The window
 composes it with GPUI's content through a gpui-fast native host: the tile's body is a
-`native_view` element, so the page shows where the strip draws the tile, clipped with it, under
+`native_view` element, so the page shows where its pane draws the tile, clipped with it, under
 a hole GPUI cuts in its own layer, and whatever GPUI draws afterwards (the palette, a menu, a
-toast, a script's dialog, an app dialog) is over the page. A tile drawn scaled (the overview)
-shows the page's last snapshot instead (`takeSnapshot` → PNG → `RenderImage`), since a page laid
-out at that size would reflow, and so does a render, which cannot see a native view. The page's
+notice, a script's dialog, an app dialog) is over the page. A render, which cannot see a native
+view, shows the page's last snapshot instead (`takeSnapshot` → PNG → `RenderImage`). The page's
 keyboard is GPUI's focus on its element (`track_focus`): a click in the page focuses it and its
 tile, the platform's first responder follows GPUI's focus both ways, keys go through GPUI's
 keymap first, and Esc twice gives the keyboard back to the workspace. Undo, redo, cut and select
@@ -1354,30 +1401,27 @@ a list's or a scroll handle's state moved. Every other view is replayed from the
 a view must hear of everything it shows and must not read what changes more often than it
 does. The window's root is `frames::Framed` around the app's root, built again in every frame
 for the frame-time probe and for nothing else. The workspace draws its modal layers and hosts
-two views of its own state, `ChromeView` (title bar, navigator, status bar) and `StripHost` (the
-strip). Both build from a read of the workspace through `draw::Draw`, which stands in for the
+views of its own state: the chrome's (`ChromeView`, one per region: the title bar, the title
+tabs, the navigator and its rows) and the area's (`AreaHost`, the tab on show). They build from a read of the workspace through `draw::Draw`, which stands in for the
 workspace's `Context`: it hands out listeners bound to the workspace and holds back any write
 to another entity until the read is over (`draw::build`), since an update while drawing counts
-as a write and rebuilds whatever read that entity. What the strip lays out each frame (where
-each tile went, the zoom, the tiles on screen, the thumb) lives in cells on `strip::Drawn`,
-which the strip owns, so a frame of motion builds the strip alone. The strip and the chrome
-never read a tile's body, because a terminal changes with every line of output, a stream with
+as a write and rebuilds whatever read that entity. What the area lays out each frame (where
+each tile went, the tiles on screen, the focus it drew, each pane's tab row) lives in cells on
+`area::Drawn`, which the area owns, so a sash drag builds the area alone. The area and the
+chrome never read a tile's body, because a terminal changes with every line of output, a stream with
 every frame and a face with every streamed word. They read `workspace::facts` instead: a copy
 of what they show of each body (a shell's title and command, a stream's first frame and header,
 a face's turn, approval and header chips), taken in the body's observer and passed on only to
-the views that show what changed. The strip hands a body its zoom and size through
-`hand_over`, which compares with what it handed the frame before (`Handed`) rather than reading
+the views that show what changed. The area hands a body its size through `hand_over`, which compares with what it handed the frame before (`Handed`) rather than reading
 the body. The file tile's unsaved mark, a page's address, title, back button and placing, and a
 folder's parent button are facts too, so a caret's blink or a page's load builds the header
-that shows them and not the strip. A frame of motion is asked for once at a time
-(`strip::Drawn::motion`), however many builds and pointer moves ask for the next one.
+that shows them and not the area.
 A shell does not read where the pointer is while it draws, since that is news with every move
 over the window: its element lets the scrollbar go when the window goes inactive or the grid
 moves, and its listeners update the view only when a move changes something in it (a row
 reported to a program, the ⌘-hovered cell, the block hovered), keeping the pointer's place in a
-cell that no build reads as a change. A shell lays out its block headers at the zoom it is
-handed before the frame, so a frame of a spring, which moves or zooms its grid, builds it once
-and not a second time for the metrics its element measured. A value measured while drawing (the strip's width inset, a terminal's fitted grid, a
+cell that no build reads as a change. A value measured while drawing (the workspace's width
+inset, a terminal's fitted grid, a
 stream's painted bounds) is compared in prepaint and, when it moved, sent as a notify after the
 frame (`cx.defer`, or `Window::on_next_frame` on a weak handle), because a notify raised in the
 middle of a draw only marks the view. For the same reason what a view shows is a function of
@@ -1387,14 +1431,14 @@ sets (`screen::past_grace`), and the transcript's edge fades read the list's scr
 it. What a view keeps but does not show is not
 written through the view after a frame: a typed key is timed when its frame reaches the display,
 into a record the terminal shares with its element (`TerminalView::latency_record`), since an
-update of the view there would count as a change and build it again with the strip's next
+update of the view there would count as a change and build it again with the area's next
 frame. Reduce Motion is watched rather than polled: on the Mac an observer of
 `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`, on iOS of
 `UIAccessibilityReduceMotionStatusDidChangeNotification` (`slopty_platform::motion::watch_reduce_motion`),
 and a change reaches the workspace, the icons' spinners, GPUI's own flag (which gpui-kit's
 animations follow) and every window. A
-view the strip moves (a spring, a scroll) is built again in its new place: the fork replays a
-view only where it was drawn.
+view a sash or a drop moves is built again in its new place: the fork replays a view only where
+it was drawn.
 `retained::stale` checks all of it: it draws the same state from scratch and diffs the painted
 quads and sprites against the frame the window showed (TESTING.md, "Retained frames").
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
@@ -1433,7 +1477,7 @@ with its phase, ⌘-scroll forwarded with its ⌘ and ⌘⌥-scroll left to the 
 the picture dropped) is covered headless
 by `pointer_and_scroll_reach_the_worker_in_stream_pixels`. When the remote window changes size, the worker notices
 within 250 ms, restarts the stream at the new size and sends `Geometry`; the workspace re-aspects
-the item. The other way round, a window tile whose column changes size sends `Resize` with the
+the item. The other way round, a window tile whose pane changes size sends `Resize` with the
 size the tile now stands for, at the scale it drew the window at before
 (`WorkspaceView::resize_remote_windows`; a display is letterboxed instead), the worker sets `AXSize` on the matched window off the
 runtime, and the same poll reports what the window took. It is also a text input (`EntityInputHandler`): on iOS a tap raises the soft
@@ -1499,9 +1543,9 @@ Headless `#[gpui::test]`s in `terminal/view.rs` read the
 separators back from `painted_quads()` and drive the bindings with `simulate_keystrokes`.
 
 **Render path and frame time.** One GPUI frame draws the workspace (`WorkspaceView::render`):
-the titlebar, then the strip from the layout's `Frame`, laying out only the tiles that are
-`near` the view (the focused one and any dragged one always), each a header and a cached view
-(`Entity::cached`, so a tile repaints only when its own view is notified), then the overlays
+the title bar, then the tab on show from the tiling's `TabFrame`, laying out only the tiles
+its panes show, each a header (or its pane's tab row) and a cached view (`Entity::cached`, so a
+tile repaints only when its own view is notified), then the overlays
 and the `frames::probe()` element last. The terminal element's prepaint resolves the monospace family
 once per app (the `ShapeCache` global memoises the theme's list; listing the installed fonts
 is a synchronous trip to the font server), reads the view's rows in place — only the rows
@@ -1523,14 +1567,11 @@ under the cursor and the link underline. The predictor's guesses are cells of th
 its text drawn over it in the theme's `cursor_text`. The cursor's blink flag and
 SGR 5 text share one 600 ms clock on the view, started by the first prepared frame that holds
 either and stopped by the first that holds neither (an unfocused cursor is a steady hollow
-block); a keystroke pins the phase on for a half. While the overview's zoom is **in
-motion** the workspace tells every terminal view and chrome label so, and they paint from the nearest rung of
-an eight-per-octave raster ladder stretched to the painted size (`fonts::raster_rung`, the
-fork's `Window::paint_glyph_scaled`) instead of rasterising every glyph at each intermediate
-size; the settled frame paints exact. The item chrome's text — title, pills, badge, block
+block); a keystroke pins the phase on for a half. Nothing in the workspace is drawn scaled, so
+every glyph paints at its own size. The item chrome's text — title, pills, badge, block
 headings — is `slopty_ui::chrome_text::ChromeText`: shaped once at its base size (a per-app
-cache), sized by arithmetic rather than a taffy measure callback, painted glyph by glyph at
-`base × k` with GPUI's baseline and advance arithmetic, ellipsis included. Worker events reach the workspace from the
+cache), sized by arithmetic rather than a taffy measure callback, painted glyph by glyph with
+GPUI's baseline and advance arithmetic, ellipsis included. Worker events reach the workspace from the
 link loop in batches (whatever queued while the last one applied, up to 256, in one update),
 so twenty streaming sessions cost one update per batch; a session itself never sends more than 125 frames a second
 (`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,

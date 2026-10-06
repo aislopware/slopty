@@ -5,7 +5,8 @@ camera, placement and navigation entries of `canvas.md` (the infinite plane, ⌘
 arrange, flights, the minimap, the reading-order walk, presence); the entries there about
 notes, file cards, the palette, naming and agents still hold, read with "tile" for "card".
 
-- ✅ **A scrollable tiling workspace replaces the infinite canvas** (2026-09-24). The canvas
+- ✅ **A scrollable tiling workspace replaces the infinite canvas** (2026-09-24; the strip is
+  superseded 2026-10-06 by "Tiling replaces the scrolling strip" below). The canvas
   asked the human to place, size and find every item by hand, and the camera (zoom, fit,
   arrange, minimap, other clients' outlines) was the price of that freedom. The user asked for
   niri's model instead: each workspace is an endless strip of columns, a column holds one or
@@ -48,7 +49,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   first snapshot of the run is empty is asked for one shell: a new tile goes to the focused
   tile's worker, so without it a newly added worker would have no way in.
 
-- ✅ **The layout is a pure model ported from niri v26.04** (2026-09-24).
+- ✅ **The layout is a pure model ported from niri v26.04** (2026-09-24; superseded 2026-10-06 by
+  "Tiling replaces the scrolling strip" below, and the port deleted in step 3 of its study).
   `slopty_client::layout` (with `layout/spring.rs` and `layout/swipe.rs`) has no clock and no
   toolkit: the caller sets the time and the viewport and reads a `Frame` (every tile's rect,
   its resting rect `target`, whether it is near the view, the strip indicator, whether
@@ -2044,3 +2046,22 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::touch::{a_phone_shows_one_pane_and_its_title_goes_to_the_others,
     an_ipad_splits_by_the_touch_room_and_in_split_view_shows_one_pane}`. The iOS goldens are
     retaken in the simulator lane.
+- ✅ **The dump names projects, tabs and panes; the smooth suite drags a sash** (2026-10-07,
+  step 9 of the study's §4.2).
+  - **Item places.** An item's place in `ItemInfo` is now its project, its tab, its pane's path
+    in the tab's split tree (a child's index at each split), and its place among the pane's
+    tabs. This replaces step 3's interim index of the pane in reading order. `Dump.shown` names
+    the project and tab on show.
+  - **Test helpers.** Tests compare places through `ItemInfo::place`, `same_pane` and
+    `same_tab`, and count panes with `Dump::panes_on_show`. A tree path says which pane is the
+    left one, where a reading-order index changed whenever a split was made above it.
+  - **PTY size counts.** `TerminalInfo.resizes` counts the PTY sizes each shell asked the worker
+    for (`TermState::resizes`), so a drag's cost to the PTYs is a number.
+  - **New test-socket commands.** `Command::Press`, `DragTo` and `Release` hold a drag across
+    several commands, which a sash drag held for seconds needs. `Drag` keeps the one-shot form.
+  - **Live tests brought to the panes.** `settings` presses only inside the Settings dialog,
+    since a pane's own "Terminal" tab shares a section's name. ⌘⇧T's shell is checked as a
+    title tab of its own. The folder test reads its pane's two tabs. The palette test types for
+    "New note", since an empty field lists the tiles first (`palette::brief`).
+  - Tests: `smooth::a_sash_drag_beside_five_flooding_shells_on_the_mac` (numbers in
+    `MEASUREMENTS.md`, 2026-10-07), with the app suite's tests above.
