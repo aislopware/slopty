@@ -37,7 +37,7 @@ slopty-platform.workspace = true
 slopty-tailnet.workspace = true
 slopty-proto.workspace = true
 # Sealing a notice to a phone, and the relay's and APNs' requests (`push`).
-slopty-push.workspace = true
+slopty-push = { workspace = true, features = [ "getrandom" ] }
 slopty-tools.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
