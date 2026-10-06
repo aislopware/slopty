@@ -49,16 +49,17 @@ Button │ Push after each merge
 Button │ Show the orchestrator's terminal
 ProgressIndicator │ 0 of 2 merged │ 0%
 List │ Working
+Heading │ Working
 ListItem │ Read a pull request's checks, Working, studio · macOS, worktree-slopty-board-1, PR #42, 1 of 4 checks fail, Changes requested
 Image │ Working
-Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
-Label │ worktree-slopty-board-1
 Label │ PR #42
-Label │ 1 of 4 checks fail
-Label │ Changes requested
+Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
 Button │ Fix CI #1
 Button │ Address comments #1
+Label │ 1 of 4 checks fail
+Label │ Changes requested
 List │ Up next
+Heading │ Up next
 ListItem │ Draw the pipeline row, Up next
 Image │ Up next
 MultilineTextInput │ Message the orchestrator
