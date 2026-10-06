@@ -6,6 +6,7 @@ Button │ Search
 Button │ New agent
 Heading │ Projects
 Button │ src
+Button │ Fold
 Button │ New shell in src
 Button │ refresh.rs
 Button │ Close tile
@@ -41,6 +42,7 @@ Image │ Done
 Button │ Close tile
 Tab │ refresh.rs
 Button │ Close tile
+Label │ src
 Button │ Close tile
 Document │ File $SCRATCH/repo/src/refresh.rs │ 6 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/repo/src/refresh.rs │ pub fn refresh(client: &Client, token: &Token) -> Result<Token> {⏎    let key = IdempotencyKey::new();⏎    let fresh = retry(3, || client.post_with("/refresh", token, &key))?;⏎    store.save(&fresh)?;⏎    Ok(fresh)⏎} (focused)

@@ -6,6 +6,7 @@ Button │ Search
 Button │ New agent
 Heading │ Projects
 Button │ Ship the project board
+Button │ Fold
 Button │ Board, 0 of 2 merged
 Image │ Working
 Button │ #1 Read a pull request's checks, Working

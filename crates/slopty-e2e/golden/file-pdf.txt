@@ -17,6 +17,7 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ report.pdf
 Button │ Close tile
+Label │ project
 Button │ Close tile
 Document │ File $SCRATCH/project/report.pdf │ PDF, 2 pages, 6 KB (focused)
 Document │ PDF, 2 pages, 6 KB

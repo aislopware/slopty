@@ -17,6 +17,7 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ RELEASE.md
 Button │ Close tile
+Label │ ~
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %

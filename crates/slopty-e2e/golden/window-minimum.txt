@@ -1,6 +1,7 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
+Button │ Panes and tabs
 Heading │ terminal Terminal 2
 Button │ Needs you
 Button │ More
