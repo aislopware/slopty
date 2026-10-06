@@ -4,9 +4,6 @@ Button │ Navigator
 Heading │ file scratch
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Group
-Terminal │ shell │ ~ %
 Group │ scratch
 Document │ File $SCRATCH/home/note-$MOMENT.md │ 1 line, Markdown, not on disk
 Status │ Not on disk: saving makes it
@@ -24,6 +21,6 @@ ListBoxOption │ Name this tile ⌘E
 ListBoxOption │ Open settings ⌘,
 ListBoxOption │ New note ⇧⌘N
 Heading │ Commands
-ListBoxOption │ New terminal ⌘T
+ListBoxOption │ New terminal ⇧⌘T
 TextInput │ Command (focused)
 Button │ Cancel

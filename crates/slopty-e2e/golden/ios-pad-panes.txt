@@ -5,6 +5,9 @@ Button │ Search
 Button │ New agent
 Group │ Where
 Button │ e2e-ios-worker
+TabList
+Tab │ scratch
+Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More

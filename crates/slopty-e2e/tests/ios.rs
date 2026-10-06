@@ -307,18 +307,13 @@ mod tests {
         );
         golden(drv, &dir, dev, "navigator", None).await;
         // A shell is titled by what it runs or where it stands, so its row is found by the
-        // name its tile goes by, as a screen reader says it: the group holding the terminal.
-        // (A phone's bar heads only the focused tile, here the note.)
-        let at = shown
-            .a11y
-            .iter()
-            .position(|n| n.role == "Terminal")
-            .unwrap_or_else(|| panic!("the shell: {:#?}", shown.a11y));
-        let title = shown.a11y[..at]
-            .iter()
-            .rev()
-            .find_map(|n| n.label.clone().filter(|_| n.role == "Group"))
-            .unwrap_or_else(|| panic!("the shell's tile: {:#?}", shown.a11y));
+        // title its tile goes by. A phone draws the focused pane alone, here the note's, so the
+        // shell is found by its terminal's title rather than its drawn tile.
+        let title = shown
+            .terminals
+            .first()
+            .and_then(|t| t.title.clone())
+            .unwrap_or_else(|| panic!("the shell: {:#?}", shown.terminals));
         let row = shown
             .a11y
             .iter()
@@ -548,18 +543,19 @@ mod tests {
         let drv = &mut stack.driver;
         drv.wait_for("the question over the composer", STEP, |d| {
             d.a11y_node("RadioButton", Some("Unified")).is_some()
-                && d.a11y_node("TextInput", Some("Other")).is_some()
+                && d.a11y_node("MultilineTextInput", Some("Other")).is_some()
         })
         .await
         .unwrap();
         // The tap gives the field the keyboard: what the soft keyboard sends lands in it.
-        tap(drv, "TextInput", "Other").await;
-        let other = |d: &Dump| d.a11y_node("TextInput", Some("Other")).is_some_and(|n| n.focused);
+        tap(drv, "MultilineTextInput", "Other").await;
+        let other =
+            |d: &Dump| d.a11y_node("MultilineTextInput", Some("Other")).is_some_and(|n| n.focused);
         let after_tap = drv.wait_for("the field with the keyboard", STEP, other).await;
         assert!(after_tap.is_ok(), "a tap on the field gave it no keyboard: {after_tap:?}");
         drv.ui_insert_text("Unified, split for renames").await.unwrap();
         drv.wait_for("the words in the field", STEP, |d| {
-            d.a11y_node("TextInput", Some("Other"))
+            d.a11y_node("MultilineTextInput", Some("Other"))
                 .is_some_and(|n| n.value.as_deref() == Some("Unified, split for renames"))
         })
         .await

@@ -1,4 +1,4 @@
-Window │ New workspace
+Window
 Label │ Slopty
 Heading │ Connect to a server
 TextInput │ Server address (focused)
