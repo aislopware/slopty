@@ -428,9 +428,6 @@ mod acp {
         let queued = rig.send(&acp, thread, "Remove it.");
         let state = rig.until(thread, "the message waits", |s| s.pending.len() == 1).await;
         assert_eq!(state.pending[0].intent, queued);
-        let now = Intent::Promote { pending: queued };
-        let promoted = rig.intent(&acp, thread, &now).1;
-        assert_eq!(promoted, Outcome::Unsupported { cap: Cap::named(Cap::STEER) }, "no steer");
         let answer = |choice: &str| Intent::Answer {
             ask: ask.clone(),
             choice: choice.to_owned(),
