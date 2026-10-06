@@ -174,7 +174,7 @@ fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
     let theme = Theme::default();
     let scale = cx.update(|window, _| window.scale_factor());
     let content = gpui::Background::from(crate::colors::hsla(theme.content()));
-    let ring = crate::colors::hsla(theme.surfaces.border_subtle);
+    let ring = crate::colors::hsla(theme.surfaces.stroke);
     for tile in [first, window, second] {
         // Each in view in its turn: the strip clips what lies past its edge.
         view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
@@ -252,7 +252,7 @@ fn no_body_is_veiled(cx: &mut TestAppContext) {
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
-    let canvas = Theme::default().surfaces.canvas;
+    let canvas = Theme::default().surfaces.ground;
     let washes: Vec<gpui::Background> = [alpha::FAINT, alpha::TINT, alpha::PRESSED]
         .into_iter()
         .map(|a| crate::colors::hsla_alpha(canvas, a).into())
@@ -340,7 +340,7 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
     assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
-    let ring = crate::colors::hsla(Theme::default().surfaces.border_subtle);
+    let ring = crate::colors::hsla(Theme::default().surfaces.stroke);
     let edges = quads_at(cx, tile);
     let mut edges = edges.iter().filter(|q| q.border_widths.left.0 > 0.0);
     assert!(edges.all(|q| q.border_color == ring), "no outline but the panel's ring");
@@ -389,7 +389,7 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
     };
     let surface = |q: &gpui::Quad| {
         let theme = Theme::default();
-        [theme.content(), theme.surfaces.panel]
+        [theme.content(), theme.surfaces.ground]
             .iter()
             .any(|c| q.background.as_solid() == Some(crate::colors::hsla(*c)))
     };

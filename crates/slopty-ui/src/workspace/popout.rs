@@ -471,7 +471,7 @@ impl Render for PopOutView {
             .key_context(CTX)
             .size_full()
             .flex()
-            .bg(hsla(self.theme.surfaces.canvas))
+            .bg(hsla(self.theme.surfaces.ground))
             .on_action(cx.listener(|this, _: &ToggleOwnWindow, window, cx| {
                 let item = this.item;
                 let _gone = this.workspace.update(cx, |ws, cx| ws.return_tile(item, cx));

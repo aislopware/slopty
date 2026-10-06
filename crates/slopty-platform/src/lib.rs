@@ -43,8 +43,6 @@ pub mod keyboard;
 #[cfg(target_os = "linux")]
 mod linux;
 pub mod login;
-#[cfg(target_os = "macos")]
-pub mod material;
 #[cfg(target_vendor = "apple")]
 pub mod motion;
 #[cfg(target_vendor = "apple")]

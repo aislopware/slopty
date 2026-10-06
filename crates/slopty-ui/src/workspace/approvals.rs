@@ -296,8 +296,8 @@ impl WorkspaceView {
 
         use crate::colors::hsla;
 
-        // The navigator's row: its tones, on glass where it docks there.
-        let theme = self.nav_theme();
+        // The navigator's row: its tones.
+        let theme = &self.theme;
         let s = &theme.surfaces;
         let (_, second_h) = super::navigator::line_heights(theme);
         let button = |id: String, label: &'static str, ink, weight| {

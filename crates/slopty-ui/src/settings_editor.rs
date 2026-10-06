@@ -666,7 +666,7 @@ mod tests {
                 .map(|q| q.background)
                 .collect()
         });
-        let plate = crate::kit::hover_on(&theme, crate::kit::Plane::Canvas);
+        let plate = hsla(theme.surfaces.hover);
         assert!(fills.contains(&gpui::Background::from(plate)), "{plate:?} in {fills:?}");
     }
 

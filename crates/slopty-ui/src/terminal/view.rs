@@ -4725,7 +4725,7 @@ mod tests {
         with_command_blocks(&view, cx);
         let theme = Theme::default();
         let rule = separator_color(&theme);
-        assert_eq!(rule, hsla(theme.surfaces.border_subtle), "the list's quiet hairline");
+        assert_eq!(rule, hsla(theme.surfaces.stroke), "the list's quiet hairline");
         let look = FailedLook::new(&theme, 1.0);
         assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
         assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
@@ -5775,14 +5775,14 @@ mod tests {
             .collect()
     }
 
-    /// A hovered block's facts sit on a chip of the hover wash, except over a failed block,
-    /// where they sit on the band itself: a lighter patch there would cut into the one mark
-    /// that says the command failed.
+    /// A hovered block's facts sit on a raised chip (the card's wash), except over a failed
+    /// block, where they sit on the band itself: a lighter patch there would cut into the one
+    /// mark that says the command failed.
     #[gpui::test]
     fn a_failed_blocks_facts_sit_on_its_band_without_a_chip(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let hover = hsla(Theme::default().surfaces.hover);
+        let hover = hsla(Theme::default().surfaces.card);
         let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
         let chip_fill = |cx: &mut VisualTestContext, row: f32| {
             let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));

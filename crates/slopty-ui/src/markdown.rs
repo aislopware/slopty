@@ -292,7 +292,7 @@ pub fn task_row(
         .flex()
         .items_center()
         .justify_center()
-        .border(px(slopty_theme::stroke::EDGE))
+        .border(px(slopty_theme::stroke::LINE))
         .border_color(if done { hsla(s.solid) } else { hsla(s.control) })
         // A ticked box is the neutral solid with a drawn check in it, as `MonoCode`'s and
         // zeron's are: green would make a done task read as a status, not a choice.
@@ -366,7 +366,7 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let code_block = gpui::StyleRefinement::default()
         .font_family(mono.to_owned())
         .text_size(px(small))
-        .bg(hsla(theme.surfaces.band))
+        .bg(hsla(theme.surfaces.card.over(theme.surfaces.ground)))
         .rounded(px(theme.radii.xs))
         .px(px(theme.spacing.sm * scale))
         .py(px(theme.spacing.xs * scale));

@@ -48,7 +48,7 @@ impl Ink<'_> {
             .overflow_hidden()
             .rounded(self.z(self.theme.radii.sm))
             .border(crate::kit::HAIR)
-            .border_color(hsla(self.theme.surfaces.border_subtle))
+            .border_color(hsla(self.theme.surfaces.stroke))
     }
 
     /// The line's wash, its sign and the sign's tone: muted, the wash says the rest.

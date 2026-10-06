@@ -2843,7 +2843,7 @@ impl ScreenView {
             }
         };
         let fill = hsla(self.theme.surfaces.text);
-        let outline = hsla(self.theme.surfaces.canvas);
+        let outline = hsla(self.theme.surfaces.ground);
         Some(
             div()
                 .absolute()
@@ -3634,7 +3634,7 @@ impl ScreenView {
                 .debug_selector(|| "stream-stats-details-lines".to_owned())
                 .pt(px(theme.spacing.xs))
                 .border_t(kit::HAIR)
-                .border_color(hsla(s.border_subtle))
+                .border_color(hsla(s.stroke))
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
                 .text_size(px(theme.typography.caption()))
                 .text_color(hsla(s.text_muted))

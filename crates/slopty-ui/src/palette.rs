@@ -237,7 +237,6 @@ impl Plate {
         row: E,
         key: impl Hash,
         theme: &Theme,
-        plane: crate::kit::Plane,
     ) -> E {
         let glide = Rc::clone(&self.0);
         let key = key_of(key);
@@ -253,7 +252,7 @@ impl Plate {
                 },
                 move |bounds, (), window, _cx| {
                     if glide.borrow().seated == Some(key) {
-                        crate::kit::paint_chosen(&theme, plane, bounds, radius, window);
+                        crate::kit::paint_chosen(&theme, bounds, radius, window);
                     }
                 },
             )
@@ -265,10 +264,10 @@ impl Plate {
     /// The plate, to lay first in the region the rows scroll in, so it paints under them. It
     /// fills that region and draws only inside it.
     pub(crate) fn under(&self, theme: &Theme) -> impl IntoElement + use<> {
-        self.under_on(theme, crate::kit::Plane::Float, true, None)
+        self.under_on(theme, true, None)
     }
 
-    /// [`Self::under`] for a list on `plane`, on its row at once unless `moves` (as under Reduce
+    /// [`Self::under`], on its row at once unless `moves` (as under Reduce
     /// Motion, for a list whose owner holds its chrome still), and on its owner's clock: the
     /// plate glides by `now`, the instant the owner's frame stands for, so it moves in step
     /// with the owner's other motion (the workspace's springs) and a frame drawn again at that
@@ -278,14 +277,13 @@ impl Plate {
     pub(crate) fn under_on(
         &self,
         theme: &Theme,
-        plane: crate::kit::Plane,
         moves: bool,
         now: Option<Instant>,
     ) -> impl IntoElement + use<> {
         let theme = theme.clone();
         let radius = px(theme.radii.sm);
         self.under_painted(moves, now, move |plate, window| {
-            crate::kit::paint_chosen(&theme, plane, plate, radius, window);
+            crate::kit::paint_chosen(&theme, plate, radius, window);
         })
     }
 
@@ -454,8 +452,8 @@ fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
 /// `rows` (the list and the plate under it) fading out at their foot while more runs on below:
 /// a touch list has no scrollbar, and on a desktop the row the list's height cuts would
 /// otherwise end on the foot's band, read as a row that lost its bottom. The rows fade per
-/// pixel and the sheet's surface stays outside the fade, so it fades over glass as over the
-/// desktop's plate.
+/// pixel and the sheet's surface stays outside the fade, so it fades alike on a phone's sheet
+/// and the desktop's plate.
 fn more_below(theme: &Theme, list: &ListState, rows: gpui::Div) -> gpui::EdgeFadeElement {
     let foot = gpui::Edges { bottom: px(theme.spacing.lg), ..gpui::Edges::default() };
     gpui::edge_fade(rows.debug_selector(|| "palette-rows".to_owned()), gpui::EdgeFade::new(foot))

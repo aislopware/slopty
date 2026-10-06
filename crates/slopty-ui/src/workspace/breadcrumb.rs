@@ -144,7 +144,7 @@ impl WorkspaceView {
         new: Option<AnyElement>,
         cx: &Draw<'_, Self>,
     ) -> AnyElement {
-        let theme = self.frame_theme();
+        let theme = &self.theme;
         let s = theme.surfaces;
         let spacing = theme.spacing;
         let crumbs = self.crumbs();
@@ -284,7 +284,7 @@ impl WorkspaceView {
         label: SharedString,
         cx: &Draw<'_, Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.frame_theme();
+        let theme = &self.theme;
         let s = theme.surfaces;
         let anchors = std::rc::Rc::clone(&self.anchors.at);
         let measure = canvas(
@@ -324,7 +324,7 @@ impl WorkspaceView {
 
     /// A segment that opens nothing: its words, on the same grid as a button's.
     fn words(&self, selector: &'static str, label: SharedString) -> gpui::Stateful<gpui::Div> {
-        let theme = self.frame_theme();
+        let theme = &self.theme;
         div()
             .id(selector)
             .debug_selector(move || selector.to_owned())
@@ -341,7 +341,7 @@ impl WorkspaceView {
 
     /// The chevron of a segment that opens a menu.
     fn chevron(&self) -> gpui::Div {
-        let theme = self.frame_theme();
+        let theme = &self.theme;
         Drawn::disclosure(theme, Symbol::ChevronDown)
             .slot(px(IconSize::Inline.slot(theme)), hsla(theme.surfaces.text_muted))
     }

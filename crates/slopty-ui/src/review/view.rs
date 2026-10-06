@@ -1877,7 +1877,7 @@ impl ReviewView {
             .w(self.z(LIST_WIDTH))
             .h_full()
             .overflow_y_scroll()
-            .bg(hsla(s.panel))
+            .bg(hsla(s.ground))
             .py(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.small()))
             .children(self.model.listed().iter().filter_map(|listed| {
@@ -2271,7 +2271,7 @@ impl ReviewView {
             .flex()
             .items_start()
             .gap(self.z(theme.spacing.xs))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.ground))
             .text_size(self.z(theme.typography.small()))
     }
 

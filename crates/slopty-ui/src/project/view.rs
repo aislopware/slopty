@@ -1354,7 +1354,7 @@ impl ProjectView {
                     div()
                         .min_w_0()
                         .when(ix > 0, |el| {
-                            el.border_t(crate::kit::HAIR).border_color(hsla(s.border_subtle))
+                            el.border_t(crate::kit::HAIR).border_color(hsla(s.stroke))
                         })
                         .child(row)
                 },
@@ -1835,7 +1835,7 @@ impl ProjectView {
             .mb(self.z(sp.sm))
             .p(self.z(sp.md))
             .rounded(self.z(theme.radii.md))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.ground))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_checks(window, cx)))
             .child(label(VERIFIER))
             .child(field)
@@ -2096,7 +2096,7 @@ impl ProjectView {
                 .px(self.z(sp.sm))
                 .py(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
-                .bg(hsla(s.panel))
+                .bg(hsla(s.ground))
                 .text_size(self.z(theme.typography.small()))
                 .child(head)
                 .children(options)

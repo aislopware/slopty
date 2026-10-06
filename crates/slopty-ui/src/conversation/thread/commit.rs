@@ -882,7 +882,7 @@ impl CommitSheet {
     /// A field on the sunk well, the kit's one inset round it.
     fn field(&self, child: impl IntoElement) -> Div {
         let theme = &self.theme;
-        kit::sunk(div(), theme, slopty_theme::stroke::HAIR)
+        kit::sunk(div(), theme, slopty_theme::stroke::LINE)
             .w_full()
             .rounded(px(theme.radii.md))
             .border(kit::HAIR)

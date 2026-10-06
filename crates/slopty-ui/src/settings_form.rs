@@ -965,7 +965,7 @@ impl SettingsForm {
         let keyed = self.tabs.iter().any(|tab| tab.is_focused(window));
         let tabs = Section::ALL.iter().zip(&self.tabs).map(|(&section, handle)| {
             let selected = !searching && section == self.section;
-            let hover = crate::kit::hover_on(theme, crate::kit::Plane::Canvas);
+            let hover = hsla(theme.surfaces.hover);
             let el = div()
                 .id(("settings-section", section.index()))
                 .debug_selector(move || format!("settings-section-{}", section.index()))
@@ -986,7 +986,7 @@ impl SettingsForm {
                     if selected {
                         // The sections lie on the canvas, so the one shown rises off it as a
                         // white plate in light, as the navigator's chosen row does.
-                        crate::kit::selected_on(el, theme, crate::kit::Plane::Canvas, keyed)
+                        crate::kit::selected(el, theme, keyed)
                             .text_color(hsla(s.text))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     } else {
@@ -1014,7 +1014,7 @@ impl SettingsForm {
             .p(px(spacing.sm))
             // The canvas, a tone step from the page and not a rule: the sidebar of the window's
             // own frame, the sections on it as the navigator's rows lie on it.
-            .bg(hsla(s.canvas))
+            .bg(hsla(s.sidebar))
             .child(self.search_field(cx))
             .child(
                 div()
@@ -1785,7 +1785,7 @@ impl SettingsForm {
                         .flex_none()
                         .h(px(theme.typography.small()))
                         .border_l(crate::kit::HAIR)
-                        .border_color(hsla(s.border_subtle))
+                        .border_color(hsla(s.stroke))
                         .when(beside, gpui::Styled::invisible)
                         .into_any_element(),
                 );
@@ -2097,14 +2097,14 @@ fn row_height(theme: &Theme) -> f32 {
 /// The page's children with each run of rows set in one ring, as System Settings groups them:
 /// the hairline that bounds a region (`border`) round the group at `radii.md` with no fill, the
 /// rows the content itself, each parted from the one before by the quieter hairline inside a
-/// region (`border_subtle`), inset to start where the titles do. On near-black the quieter one
+/// region (`stroke`), inset to start where the titles do. On near-black the quieter one
 /// alone left the group's edge all but gone. Each
 /// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
 /// its row with no rule.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
-    let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.border_subtle));
+    let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
     let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
     parts
         .into_iter()
@@ -2341,8 +2341,9 @@ mod tests {
         let first = parts.first().copied().expect("a part");
         assert!(at(cx, "rule", 1).is_none(), "no rule over the first row");
         let rule = at(cx, "rule", 2).expect("a rule over the second");
-        let inset = px(theme.spacing.inset());
-        assert!((rule.left() - first.left() - inset).abs() < px(1.0), "inset to the titles");
+        // The rule starts where the titles do: inside the ring's line, then the inset.
+        let inset = crate::kit::HAIR + px(theme.spacing.inset());
+        assert!((rule.left() - first.left() - inset).abs() < px(0.5), "inset to the titles");
         let footer = at(cx, "footer", parts.len().saturating_add(1)).expect("the group's footer");
         let last = parts.last().copied().expect("a part");
         assert!(footer.top() >= last.bottom() - px(0.5), "under the ring");
@@ -2367,7 +2368,7 @@ mod tests {
         let drawn = quads.iter().find(at_origin(rule)).expect("the rule drawn");
         assert_eq!(
             drawn.background,
-            gpui::Background::from(hsla(theme.surfaces.border_subtle)),
+            gpui::Background::from(hsla(theme.surfaces.stroke)),
             "a rule inside the ring is the quieter hairline"
         );
     }

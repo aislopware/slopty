@@ -1,7 +1,7 @@
 //! Progress, in one language wherever it shows: an upload, a file going up from the composer, a
 //! transfer, an install, a program's report in its terminal.
 //!
-//! A bar ([`Bar`]) is a capsule `spacing.xs` tall: a quiet track (`border_subtle`) and a fill with
+//! A bar ([`Bar`]) is a capsule `spacing.xs` tall: a quiet track (`stroke`) and a fill with
 //! round ends, at least as wide as it is tall, so 1 % is a dot and never a sliver. It never sits on
 //! an edge or a hairline: a line along an edge reads as a stray rule, as the focus line did. A ring
 //! ([`ring`]) is the same language in a round slot, for a chip or a pill where a bar does not fit.
@@ -86,10 +86,10 @@ pub const SHOW_AFTER: Duration = Duration::from_millis(400);
 /// The least opacity of an unknown share's breath.
 pub const BREATH_LOW: f32 = 0.25;
 
-/// The quiet track every bar is drawn on: `border_subtle`.
+/// The quiet track every bar is drawn on: `stroke`.
 #[must_use]
 pub fn track_tone(theme: &Theme) -> Hsla {
-    hsla(theme.surfaces.border_subtle)
+    hsla(theme.surfaces.stroke)
 }
 
 /// The opacity an unknown share's fill shows `since` the spin clock started: from

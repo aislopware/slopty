@@ -691,7 +691,7 @@ impl FileView {
             .debug_selector(move || format!("file-pages-{id}"))
             .relative()
             .size_full()
-            .bg(hsla(s.canvas))
+            .bg(hsla(s.ground))
             .role(Role::Document)
             .aria_label(SharedString::from(summary))
             // A press gives the tile the keyboard, so the keys scroll the pages.

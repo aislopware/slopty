@@ -15535,3 +15535,27 @@ CARGO_TARGET_DIR=target/scratch-panels/target cargo test -p slopty-ui --release 
   workspace::tests::chrome::measure_a_pointer_frame_beside_the_chrome \
   workspace::tests::measure::measure_a_stream_frame_beside_the_chrome
 ```
+
+## 2026-10-06 — the structural line at 1x and 2x
+
+The design system starts from `MonoCode`'s (`docs/decisions/ui.md`, "The design system starts
+from MonoCode's"). Its one structural line is 1 pt at 7 % of the ink. The kit had drawn half a
+point at twice the share. GPUI draws a stroke in whole device pixels, never under one, so half
+a point is one device pixel at both scales: a full point wide at 1x.
+
+The eye takes a thin line's weight as its width times how far it sits off its ground. The
+test weighs each line as its drawn width in points times its distance from the ground in
+CIE L*, on the default dark (#171717) and light (#f7f7f7) grounds.
+
+| line | dark 1x | dark 2x | light 1x | light 2x |
+|---|---|---|---|---|
+| 1 pt at 0.07 (taken) | 7.42 | 7.42 | 5.24 | 5.24 |
+| 0.5 pt at 0.14 | 14.42 | 7.21 | 10.89 | 5.45 |
+
+- The 1 pt line weighs the same at both scales. Half a point matches it at 2x but doubles at
+  1x, so an external 1x display ruled the chrome twice as hard as a Retina one. The ruling of
+  1 pt at 0.07 stands on these numbers, and the test holds them.
+
+```sh
+cargo test -p slopty-theme --lib the_line_weighs_the_same_at_every_scale -- --nocapture
+```

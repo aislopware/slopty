@@ -53,8 +53,8 @@ fn title_leads(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: T
     focused && tile::title_ink(&theme, focused) == theme.surfaces.text
 }
 
-/// With two tiles in view neither header is a band and nothing is drawn over either: both lie
-/// inside their panels' tops, on the content. The focused one's title leads in the primary
+/// With two tiles in view nothing is drawn over either header: both lie inside their panels'
+/// tops, on the one ground. The focused one's title leads in the primary
 /// tone at the medium weight and the other's steps back a tier to the secondary tone at the
 /// regular weight, and both go with the focus. No line, ring or frame says it: the two panels'
 /// edges are drawn alike.
@@ -70,12 +70,10 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContex
 
     let theme = Theme::default();
     let content = crate::colors::hsla(theme.content());
-    let panel = crate::colors::hsla(theme.surfaces.panel);
     for tile in [first, second] {
         let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
         let fills = fills_at(cx, header);
         assert!(fills.contains(&content), "{tile:?} sits on the content: {fills:?}");
-        assert!(!fills.contains(&panel), "{tile:?} is no band");
         let top = Bounds::new(header.origin, size(header.size.width, px(2.0)));
         let over: Vec<_> = fills_at(cx, top).into_iter().filter(|f| *f != content).collect();
         assert!(over.is_empty(), "{tile:?}: nothing drawn along its top: {over:?}");

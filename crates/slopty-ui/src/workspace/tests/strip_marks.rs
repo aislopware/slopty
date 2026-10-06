@@ -169,7 +169,7 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     cx.run_until_parked();
     let theme = Theme::default();
     let pad = theme.spacing.sm;
-    let canvas = crate::colors::hsla(theme.surfaces.canvas);
+    let canvas = crate::colors::hsla(theme.surfaces.ground);
 
     let block = |cx: &mut VisualTestContext, ix: usize| {
         let at = cx.debug_bounds(Box::leak(format!("overview-block-{ix}").into_boxed_str()));

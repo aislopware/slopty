@@ -671,7 +671,7 @@ impl FolderView {
                 .h(px(theme.density.row * k))
                 .px(px(theme.spacing.inset() * k))
                 .border_b(crate::kit::HAIR)
-                .border_color(hsla(theme.surfaces.border_subtle))
+                .border_color(hsla(theme.surfaces.stroke))
                 .child(self.lead(Symbol::FolderBadgePlus, hsla(theme.surfaces.text_secondary)))
                 .children(self.name_field(NEW_FOLDER))
                 .into_any_element(),
@@ -928,7 +928,7 @@ impl FolderView {
             .pl(px((theme.spacing.inset() - theme.spacing.xxs) * k))
             .pr(px(theme.spacing.inset() * k))
             .border_b(crate::kit::HAIR)
-            .border_color(hsla(s.border_subtle))
+            .border_color(hsla(s.stroke))
             .text_size(px(theme.typography.small() * k))
             .child(trail)
             .child(
@@ -1184,7 +1184,7 @@ impl FolderView {
                 .h(px(theme.density.row * k))
                 .px(px(theme.spacing.inset() * k))
                 .border_t(crate::kit::HAIR)
-                .border_color(hsla(theme.surfaces.border_subtle))
+                .border_color(hsla(theme.surfaces.stroke))
                 .text_size(px(theme.typography.small() * k))
                 .child(format!("{shown} of {total} listed"))
                 .into_any_element(),

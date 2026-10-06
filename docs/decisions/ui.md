@@ -4748,8 +4748,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Tokens only at call sites.** Lint-as-tests in `kit` flag a colour literal
     (`chrome_has_no_colour_literals`) and a text size or radius written as a number
     (`chrome_sizes_come_from_the_scale`).
-  - Not taken: in-app backdrop blur (deferred; the system glass ruling stands), and shortcut
-    hints inside controls (keybindings stay in the palette).
+  - Not taken: in-app backdrop blur (the person later ruled every surface solid, in "The
+    design system starts from MonoCode's"), and shortcut hints inside controls (keybindings
+    stay in the palette).
   - Tests: `slopty_theme::tests::the_primary_is_the_neutral_solid`,
     `controls_and_the_words_on_fills_read_in_both_contrasts`,
     `the_accent_is_the_brand_green_and_blue_is_gone`, `the_brand_in_oklch_is_the_brand`,
@@ -5511,7 +5512,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_hairline_is_one_device_pixel_and_a_point_at_more_contrast`, `the_ladder_is_monotonic`
     (each state a step past the last on every plane), `the_washes_stand_off_the_chrome`,
     `a_float_rises_and_its_rows_still_answer_the_pointer`, `chrome_text_clears_wcag_aa`; kit
-    `a_painted_hairline_is_one_device_pixel`, `a_button_is_neutral_and_one_height`; ui
+    `a_painted_line_is_one_point_in_whole_device_pixels`, `a_button_is_neutral_and_one_height`; ui
     `tiles::a_divider_runs_only_between_neighbours` (one device pixel, in the border's colour),
     the terminal's block rule tests.
 
@@ -5681,8 +5682,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Waiting on lane F, built here once pinned:** one reversible value for open and close
     (the gpui-ce port, Apache; it would replace the leaving states stage 3 added), hints on
     keyboard focus, and the paced stream fade.
-  - **Measured first:** the navigator on system glass (only if key-to-glass and the
-    compositor show no cost), and intent prefetch on the navigator.
+  - **Measured first:** intent prefetch on the navigator. (The navigator on system glass
+    landed, then went: the person ruled every surface solid, in "The design system starts from
+    MonoCode's".)
 
 - ✅ **SF's optical size and tracking, measured** (2026-10-03, study §3 #12). The study asked
   whether GPUI sets the system face as Core Text does. A test lays out "Connect to a server"
@@ -7488,7 +7490,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::faces::a_pill_says_the_state_and_a_phone_bar_says_it_all`,
     `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`; e2e
     `conversation::a_phone_opens_on_the_thread`. Golden: `thread-phone`.
-- ✅ **The navigator stands on the system's glass** (2026-10-06, readiness #19). On a Mac the
+- ✅ **The navigator stands on the system's glass** (2026-10-06, readiness #19; superseded the
+  same day by "The design system starts from MonoCode's": the person ruled every surface solid,
+  and the material is deleted). On a Mac the
   docked navigator lies over the system's sidebar material, as Finder's and Mail's sidebars do.
   The material blurs the desktop behind the window, takes a cast of its colour, and goes flat
   while the window is inactive. The rest of the frame stays opaque.
@@ -8542,3 +8546,80 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     now; another one stays at the agent's default.
   - Tests: `slopty_client::starts::tests` (the round trip, and seeding only what is offered);
     `workspace::tests::thread_start::a_relaunch_starts_where_the_last_run_left_off`.
+
+- ✅ **The design system starts from MonoCode's** (2026-10-06, from
+  `.research/monocode-system-2026-10-06.md`, the person's rulings on it, and the tiling ruling
+  in `docs/decisions/workspace.md`). Where an earlier choice of ours was taste, MonoCode's wins.
+  Panes now meet edge to edge on one ground, so the panels, the canvas under them, the finish
+  and the lit rim had nothing left to stand on. This supersedes, by name:
+  - "Premium foundations: tiles stand on the canvas as panels";
+  - "Premium pass from the mockups: a deeper light canvas and one green way on" (its canvas
+    and its finished destructive solid);
+  - "One warm neutral, white floats and raised surfaces";
+  - "Two named elevations, cards on a quiet well, and the lit rim on everything raised";
+  - "Hairlines one device pixel, states that ride on their plane, floats a clear step up";
+  - the finished primary in "Stage 3 of the design-systems study";
+  - "Pills are capsules" in the same entry;
+  - "The navigator stands on the system's glass".
+
+  What it rules:
+  - **Solid surfaces only.** The person dislikes MonoCode's frosted glass, the one part of it
+    not taken. Every surface is solid and opaque, as in Warp and Zed: no vibrancy, no blur, no
+    translucent sheet. The navigator's system material is deleted (`slopty_platform::material`,
+    `alpha::GLASS`, `Surfaces::on_glass`), and the window is always opaque. Floats are their
+    solid ground with a border and a shadow. Only the washes (hover, selection, the card's 3 %)
+    are translucent, and only over that ground.
+  - **One neutral ground.** #171717 in dark and #f7f7f7 in light, with no warm hue:
+    `every_grey_is_a_true_neutral` holds every grey under 0.002 OKLCH chroma. `canvas`,
+    `panel` and `band` are gone. The sidebar is the ground in light and a hair under it in
+    dark (−0.009 L, MonoCode's sidebar value, solid). A selection is the selected wash on every
+    plane (`kit::Plane` is gone). Ink keeps our ladder, made neutral.
+  - **One line.**
+    - `stroke` is the structural line: 1 pt at 7 % of the ink, snapped to device pixels.
+      `border` is ink at 10 % in both variants.
+    - "The structural line at 1x and 2x" in `docs/MEASUREMENTS.md` has the numbers: 1 pt
+      weighs the same at both scales, where half a point doubles at 1x.
+  - **Elevation.**
+    - Gone: `Finish`, `Rim`, `Elevation.rest` and `Sunk.lip`.
+    - What rests (`kit::raised`, `kit::card`) is ink at 3 % inside `border`, with no shadow.
+    - A secondary button is clear inside `border`. Primaries are flat, and a press shows the
+      pressed wash with no scale.
+    - Floats wear Tailwind's shadow-xl and their border. A modal (`kit::modal`: dialogs, adding
+      a worker) wears shadow-2xl at `radii.xl`.
+  - **Destructive is tinted.** The error's wash at 0.20 (0.30 under the pointer) carries the
+    error's word, held to AA over the ground and over a float. `error_solid` is gone.
+  - **Radii by size.**
+    - 0: panes, bars, pane lists, tree and diff rows.
+    - 4: tiny boxes.
+    - 6: buttons, tabs, segments, sidebar rows, chips, code and diff shells.
+    - 8: inputs, the composer, menu items, question cards.
+    - 12: menus, popovers, toasts, cards.
+    - 16 (`radii.xl`): dialogs.
+    - Capsules only for the switch, count badges, dots, the scrollbar thumb and one-line user
+      bubbles.
+  - **Focus** is a 2 pt outline in the accent green, held to 3:1 on every ground.
+  - **Motion.**
+    - Feedback (hover and press) takes 120 ms, eased out (`Motion::feedback`).
+    - A popover opens in 170 ms, fading, scaling from 0.94 and travelling 8 pt from its
+      anchor.
+    - A toast takes 180 ms and a pane's entry 260 ms.
+  - **Type and heights.** Prose is 14/24 and the composer 14/22. `density.bar` is 36 and
+    `density.status` 28; the header stays 40, and rows and controls 28.
+  - **Tiling's pieces** for the panes (`kit::pane`):
+    - `pane_surface` is square on the ground, with nothing of its own.
+    - `sash` is the 1 pt `stroke` line, found across `density.sash` (12 pt), under the resize
+      cursor along its axis.
+    - Under the pointer or in a drag the line steps to the focus green at 2 pt, since only the
+      green clears 3:1 on the ground; a brightened neutral stays near 1.3:1.
+  - The AA floors stand everywhere.
+  - Tests:
+    - `slopty_theme::tests`: `the_window_is_one_ground`, `the_line_weighs_the_same_at_every_scale`,
+      `the_lines_are_monocode_s_shares_in_both_modes`, `the_washes_are_monocode_s_shares`,
+      `a_float_rises_and_its_rows_still_answer_the_pointer`,
+      `the_focus_outline_is_the_green_and_seen_everywhere`, `elevation_and_density`;
+    - `kit::tests`: `the_elevation_is_layers_of_the_shade`, `a_card_rests_on_its_edge`,
+      `a_button_is_neutral_and_one_height`, `the_destructive_button_reads_in_every_state`,
+      `a_floating_surface_is_rounded_lg`, `a_painted_line_is_one_point_in_whole_device_pixels`;
+    - `kit::pane::tests`;
+    - `workspace::tests::frame::the_window_is_one_opaque_ground`,
+      `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`.

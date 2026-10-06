@@ -861,14 +861,14 @@ impl WorkspaceView {
         strip.into_any_element()
     }
 
-    /// What the strip's panels stand on at the zoom `k`: the frame's ground, the canvas or the
-    /// canvas on glass, which covers their corners. A phone's are full-bleed, as its screen
+    /// What the strip's panels stand on at the zoom `k`: the window's one ground, which covers
+    /// their corners. A phone's are full-bleed, as its screen
     /// shows one tile at a time edge to edge. The radius follows the zoom down to the
     /// overview's miniatures ([`super::tile::SHAPES_BELOW`]) and holds there: a miniature wears
     /// its words at the chrome's size, and a corner scaled further reads as square inside the
     /// workspace's round block, so a card and the panel it stands for would not be one shape.
     pub(super) fn stand(&self, k: f32) -> kit::Stand {
-        let ground = self.nav.glass.ground(&self.theme);
+        let ground = hsla(self.theme.surfaces.ground);
         if self.phone {
             kit::Stand::flat(ground)
         } else {
@@ -1057,7 +1057,7 @@ impl WorkspaceView {
                 })
                 // The canvas, lifted or not: the block is the workspace's frame in small, its
                 // panels standing on it as they stand on the strip.
-                .bg(hsla(s.canvas));
+                .bg(hsla(s.ground));
             let ink = if here { s.text } else { s.text_secondary };
             let glance = self.workspace_glance(ix);
             let label = div()

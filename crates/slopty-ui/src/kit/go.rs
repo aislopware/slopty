@@ -24,17 +24,15 @@ pub const fn go_ink(theme: &Theme) -> Rgb {
     theme.surfaces.accent_ink
 }
 
-/// [`go`] that answers the pointer, with the solid's finish.
+/// [`go`] that answers the pointer, flat as the solid is.
 ///
 /// Under the pointer the green lightens a little and pressed more, so its near-black ink keeps
-/// its contrast in both variants, and pressed its point gives way to a shade inside its top.
+/// its contrast in both variants.
 pub fn go_pressable(el: Stateful<Div>, theme: &Theme) -> Stateful<Div> {
     let (hovered, pressed) = go_states(theme);
-    let (rest, held) = super::solid_finish(theme);
     super::eased(go(el, theme))
-        .shadow(rest)
         .hover(move |el| el.bg(hsla(hovered)))
-        .active(move |el| el.bg(hsla(pressed)).shadow(held))
+        .active(move |el| el.bg(hsla(pressed)))
 }
 
 /// The green under the pointer and pressed: given [`alpha::FAINT`] and [`alpha::DIM`] toward

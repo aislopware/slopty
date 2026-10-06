@@ -2683,10 +2683,9 @@ impl Workspace {
             .max_w_full()
             .font_family(ty.ui_family.clone())
             .when(!welcome, |el| {
-                kit::elevate(el, theme)
+                kit::modal(el, theme)
                     .p(px(spacing.xl))
                     .mb(px(spacing.xl))
-                    .rounded(px(radii.lg))
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                         if this.adding.as_ref().is_some_and(|a| a.composing(cx)) {
@@ -3484,7 +3483,7 @@ impl Render for Workspace {
         self.ready_paste_key(window, cx);
         let key_bar = self.key_target.clone().map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
-        let band = if key_bar.is_some() { self.theme.content() } else { surfaces.canvas };
+        let band = if key_bar.is_some() { self.theme.content() } else { surfaces.ground };
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {
@@ -3510,7 +3509,7 @@ impl Render for Workspace {
         root.relative()
             .flex()
             .flex_col()
-            .bg(hsla(surfaces.canvas))
+            .bg(hsla(surfaces.ground))
             .on_action(cx.listener(|this, _: &AddWorker, window, cx| {
                 this.show_add_worker(Panel::Worker, window, cx);
             }))
@@ -3545,7 +3544,7 @@ impl Render for Workspace {
                         el.child(div().w_full().pl(insets.left).pr(insets.right).child(bar))
                     })
                     // The home indicator's band continues what is above it: the key bar on the
-                    // body's surface, else the strip's ground, `canvas`.
+                    // body's surface, else the window's one ground.
                     .child(div().w_full().h(insets.bottom).bg(hsla(band)))
             })
             .when_some(adding, gpui::ParentElement::child)

@@ -32,9 +32,8 @@ pub fn shell<E: Styled>(el: E, theme: &Theme, zoom: f32, capped: bool, focused: 
     let r = px(theme.radii.lg * zoom);
     let el =
         if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(px(theme.radii.lg * zoom)) };
-    let edge = if focused { hsla(s.border) } else { hsla(s.border_subtle) };
-    let el = el.border(super::HAIR).border_color(edge).bg(hsla(s.elevated));
-    super::rests(el, theme, !capped, true)
+    let edge = if focused { hsla(s.border) } else { hsla(s.stroke) };
+    el.border(super::HAIR).border_color(edge).bg(hsla(s.elevated))
 }
 
 /// The send control at `zoom`, under `id`, named `label` and drawn as `glyph`.

@@ -1107,7 +1107,7 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .border(px(slopty_theme::stroke::EDGE))
+            .border(px(slopty_theme::stroke::LINE))
             .border_color(if on { hsla(s.solid) } else { hsla(s.control) })
             .when(on, |b| {
                 kit::solid(b, theme).child(slopty_ui::icons::icon(

@@ -147,7 +147,7 @@ fn picture_chip(
         .rounded(z(theme.radii.sm))
         .overflow_hidden()
         .border(kit::HAIR)
-        .border_color(hsla(s.border_subtle))
+        .border_color(hsla(s.stroke))
         .map(|el| kit::inset(el, theme))
         .child(img(picture).size_full().object_fit(ObjectFit::Cover))
         .children(progress)

@@ -354,7 +354,6 @@ impl ThreadView {
                 .border(kit::HAIR)
                 .border_color(hsla(s.border))
                 .bg(hsla(s.elevated))
-                .map(|el| kit::rests(el, theme, true, true))
                 .overflow_hidden()
                 .mb(self.z(theme.spacing.md))
                 .child(request)
@@ -389,7 +388,6 @@ impl ThreadView {
                 // Tucked over the composer it is the card's head, on the band; the field under
                 // it stays raised, so the tone step parts them with no rule.
                 .map(|el| if tucked { kit::inset(el, theme) } else { el.bg(hsla(s.elevated)) })
-                .map(|el| kit::rests(el, theme, true, !tucked))
                 .overflow_hidden()
                 .child(rest)
         });
@@ -815,7 +813,7 @@ impl ThreadView {
                     el.px(self.z(theme.spacing.sm))
                         .py(self.z(theme.spacing.xs))
                         .rounded(self.z(theme.radii.sm))
-                        .bg(hsla(s.panel))
+                        .bg(hsla(s.ground))
                         .font_family(self.mono())
                         .text_color(hsla(s.text))
                 } else {

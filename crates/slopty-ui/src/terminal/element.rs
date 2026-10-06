@@ -627,7 +627,7 @@ fn head_runs(
 /// bar, and a wash over its head ([`FailedLook`]).
 #[must_use]
 pub(super) fn separator_color(theme: &Theme) -> Hsla {
-    hsla(theme.surfaces.border_subtle)
+    hsla(theme.surfaces.stroke)
 }
 
 /// The view rows a block's hairline goes over: each row a prompt starts on, below a row with a

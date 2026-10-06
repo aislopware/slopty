@@ -134,7 +134,7 @@ fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let theme = Theme::default();
     // From the sheet's outer edge: its hairline and its pad, which with a row's radius make
     // the sheet's.
-    let pad = crate::kit::sheet_pad(&theme) + slopty_theme::stroke::HAIR;
+    let pad = crate::kit::sheet_pad(&theme) + slopty_theme::stroke::LINE;
     assert!((pad + theme.radii.sm - theme.radii.lg).abs() < f32::EPSILON, "concentric");
     let inset = |cx: &mut VisualTestContext, sheet: &'static str, row: &'static str| {
         let (sheet, row) = (

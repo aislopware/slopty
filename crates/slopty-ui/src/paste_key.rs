@@ -72,7 +72,7 @@ mod ios {
         Style {
             mode: Mode::Label,
             foreground: rgba(s.text),
-            background: rgba(s.hover.over(s.panel)),
+            background: rgba(s.hover.over(s.ground)),
             corner_radius: f64::from(theme.radii.sm),
         }
     }

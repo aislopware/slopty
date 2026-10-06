@@ -1335,11 +1335,10 @@ fn a_files_row_says_its_folder_only_beside_a_namesake(cx: &mut TestAppContext) {
     assert_ne!(said.first(), said.get(1), "each by its own folder: {said:?}");
 }
 
-/// Docked on the canvas, a light navigator's selected row rises to the raised surface, white
-/// on the dimmer canvas, with no ring; laid over the frame on a phone, its panel is the raised
-/// surface already, so the row takes the wash.
+/// A light navigator's selected row takes the selected wash wherever the navigator lies: docked
+/// on the sidebar and laid over the frame on a phone alike. On one ground nothing rises to white.
 #[gpui::test]
-fn a_docked_selection_rises_to_white(cx: &mut TestAppContext) {
+fn a_selection_is_the_wash_docked_or_drawn(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -1361,13 +1360,13 @@ fn a_docked_selection_rises_to_white(cx: &mut TestAppContext) {
     };
     let white = crate::colors::hsla(theme.surfaces.elevated);
     let wash = crate::colors::hsla(theme.surfaces.selected);
-    assert!(fill_at(cx, row, white), "the raised surface under the docked selection");
-    assert!(!fill_at(cx, row, wash), "not the grey wash");
+    assert!(fill_at(cx, row, wash), "the wash under the docked selection");
+    assert!(!fill_at(cx, row, white), "nothing rises to white");
 
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row in the drawer");
-    assert!(fill_at(cx, row, wash), "on the drawer's raised panel, the wash");
+    assert!(fill_at(cx, row, wash), "in the drawer, the wash");
 }

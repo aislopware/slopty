@@ -763,7 +763,7 @@ impl ProjectSearch {
             .gap(px(theme.spacing.md))
             .border_t(crate::kit::HAIR)
             .border_b(crate::kit::HAIR)
-            .border_color(hsla(s.border_subtle))
+            .border_color(hsla(s.stroke))
             .text_size(px(theme.typography.small()))
             .when(!files, |row| row.child(self.every_tile()))
             .when(files, |row| {

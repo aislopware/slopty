@@ -1940,7 +1940,6 @@ impl gpui::Render for WorkspaceView {
         }
         // First: a docked navigator narrows the title bar and the strip.
         self.place_navigator(window);
-        self.settle_glass(window);
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
             self.settle_navigator_filter(window, cx);
@@ -1976,10 +1975,7 @@ impl gpui::Render for WorkspaceView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // Clear on glass, where the navigator and the frame lay their own ground on it.
-            .when(!self.nav.glass.shows(), |el| {
-                el.bg(crate::colors::hsla(self.theme.surfaces.canvas))
-            });
+            .bg(crate::colors::hsla(self.theme.surfaces.ground));
         let applies = self.applies();
         let root = Self::register_layout_actions(root, applies, cx);
         // Global: whatever has the focus.
@@ -2130,7 +2126,6 @@ impl WorkspaceView {
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::prelude::FluentBuilder as _;
         use gpui::{IntoElement as _, ParentElement as _, Styled as _, px};
         let safe = window.insets().effective();
         let titlebar = self.chrome.titlebar.clone().cached(
@@ -2192,9 +2187,6 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    // The frame's ground on glass: the title bar and the gutters show the
-                    // material as the navigator does, and only the panels are opaque.
-                    .when(self.nav.glass.shows(), |el| el.bg(self.nav.glass.ground(&self.theme)))
                     .child(titlebar)
                     .child(middle),
             )

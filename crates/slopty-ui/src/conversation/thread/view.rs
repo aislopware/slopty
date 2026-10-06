@@ -1199,7 +1199,7 @@ impl ThreadView {
             ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
             ButtonKind::Go => kit::go_pressable(el.border_color(hsla(s.accent_fill)), theme),
             ButtonKind::Destructive => {
-                kit::destructive_pressable(el.border_color(hsla(s.error_solid)), theme)
+                kit::destructive_pressable(el.border_color(gpui::transparent_black()), theme)
             }
             ButtonKind::Secondary => {
                 kit::secondary(el.border_color(gpui::transparent_black()), theme)
@@ -1267,7 +1267,7 @@ impl ThreadView {
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small() * z))
-            .bg(hsla(theme.surfaces.band))
+            .bg(hsla(theme.surfaces.card.over(theme.surfaces.ground)))
             .rounded(px(theme.radii.md * z))
             .px(px(theme.spacing.md * z))
             .py(px(theme.spacing.sm * z));
@@ -1721,7 +1721,7 @@ impl ThreadView {
                         .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
                         .py(self.z(theme.spacing.xxs))
                         .border_l(kit::HAIR)
-                        .border_color(hsla(s.border_subtle))
+                        .border_color(hsla(s.stroke))
                         .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()
