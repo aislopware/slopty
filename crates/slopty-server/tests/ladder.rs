@@ -178,6 +178,7 @@ mod tests {
             workspace: Some("slopty".to_owned()),
             showing,
             focus: None,
+            listening: true,
         };
         desk.send(ToServer::Presence(presence(vec![tile]))).await;
         let present = desk.present(|list| !list.is_empty()).await;

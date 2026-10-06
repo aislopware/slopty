@@ -52,6 +52,7 @@ pub mod media;
 pub mod orchestration;
 pub mod project;
 pub mod ptyd;
+pub mod push;
 pub mod screen;
 pub mod search;
 pub mod server;

@@ -39,6 +39,7 @@ impl WorkspaceView {
             workspace,
             showing,
             focus: self.focused().and_then(|tile| self.term_ref(tile)),
+            listening: true,
         }
     }
 

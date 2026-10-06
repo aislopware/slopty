@@ -259,6 +259,9 @@ pub enum ToServer {
     /// A client says where the person is on it, on every change
     /// ([`crate::thread::attention::Presence`]).
     Presence(crate::thread::attention::Presence),
+    /// A phone the server may push to while the person is at no client and it is not
+    /// listening; `None` takes it back: notes turned off, or the phone leaving the server.
+    PushDevice(Option<crate::push::PushDevice>),
 }
 
 /// Server → dialer.

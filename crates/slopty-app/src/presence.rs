@@ -149,7 +149,14 @@ mod tests {
     use super::*;
 
     fn presence(seat: Seat, active: bool) -> Presence {
-        Presence { seat, active, workspace: None, showing: Vec::new(), focus: None }
+        Presence {
+            seat,
+            active,
+            workspace: None,
+            showing: Vec::new(),
+            focus: None,
+            listening: true,
+        }
     }
 
     fn client(link: u64, seat: Seat, active: bool) -> Present {

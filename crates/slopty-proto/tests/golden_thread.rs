@@ -1036,10 +1036,12 @@ mod golden_thread {
             workspace: Some("slopty".to_owned()),
             showing: vec![tile],
             focus: Some(tile),
+            listening: true,
         };
         snap("attention_presence", &ToServer::Presence(presence.clone()));
         snap("attention_welcome", &FromServer::Welcome { name: "studio".to_owned(), link: 7 });
-        let handheld = Presence { seat: Seat::Handheld, active: false, ..presence.clone() };
+        let handheld =
+            Presence { seat: Seat::Handheld, active: false, listening: false, ..presence.clone() };
         snap(
             "attention_present",
             &FromServer::Present(vec![
@@ -1084,5 +1086,38 @@ mod golden_thread {
             "attention_threads",
             &ToServer::Threads(TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 3 }, rows }),
         );
+    }
+
+    /// A phone the server may push to, and what is sealed to it.
+    #[test]
+    fn push() {
+        use slopty_core::{ClientId, WorkerId};
+        use slopty_proto::orchestration::TermRef;
+        use slopty_proto::push::{PushBody, PushDevice};
+        use slopty_proto::server::ToServer;
+        use slopty_proto::thread::AskId;
+        use slopty_proto::thread::attention::{Notice, NoticeKind, Subject, ThreadAt};
+        let device = PushDevice {
+            client: ClientId::from_uuid(Uuid::from_u128(0xc11e)),
+            token: "0f".repeat(32),
+            key: [7; 32],
+            sandbox: true,
+            topic: "dev.aislopware.slopty".to_owned(),
+            quiet_ms: 30_000,
+        };
+        snap("push_device", &ToServer::PushDevice(Some(device)));
+        snap("push_device_gone", &ToServer::PushDevice(None));
+        let worker = WorkerId::from_uuid(Uuid::from_u128(0x3011));
+        let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
+        let notice = Notice {
+            kind: NoticeKind::NeedsYou,
+            about: Subject::Thread(ThreadAt { worker, thread: thread() }),
+            tile: Some(TermRef { worker, session }),
+            title: "Fix the ladder".to_owned(),
+            text: "Run cargo test?".to_owned(),
+            worked_ms: None,
+            via: None,
+        };
+        snap("push_body", &PushBody { notice, ask: Some(AskId("toolu_01".to_owned())) });
     }
 }

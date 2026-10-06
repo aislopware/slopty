@@ -175,7 +175,8 @@ impl Client {
     }
 
     pub(in crate::hub) fn at(&self, hub: &Hub, seat: Seat, active: bool, showing: Vec<TermRef>) {
-        let presence = Presence { seat, active, workspace: None, showing, focus: None };
+        let presence =
+            Presence { seat, active, workspace: None, showing, focus: None, listening: true };
         hub.presence(self.seated.link(), presence);
     }
 

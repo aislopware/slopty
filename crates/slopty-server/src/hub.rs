@@ -1439,7 +1439,10 @@ impl Lease {
                 hub.projects_moved(&mut state, moved);
                 hub.threads_ended(&mut state, worker, now);
             }
-            ToServer::Hello { .. } | ToServer::Request { .. } | ToServer::Presence(_) => {
+            ToServer::Hello { .. }
+            | ToServer::Request { .. }
+            | ToServer::Presence(_)
+            | ToServer::PushDevice(_) => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
             }
         }

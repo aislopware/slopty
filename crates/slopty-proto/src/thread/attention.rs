@@ -298,6 +298,10 @@ pub struct Presence {
     pub showing: Vec<TermRef>,
     /// The tile with the keyboard.
     pub focus: Option<TermRef>,
+    /// Whether the client still hears notices on its link. A phone says no just before the
+    /// system suspends it, while its link may still look up, so the server pushes to it
+    /// instead ([`crate::push`]).
+    pub listening: bool,
 }
 
 /// A client and where the person is on it, as the server lists them to every client.

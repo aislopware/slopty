@@ -185,6 +185,7 @@ mod tests {
             workspace: None,
             showing: Vec::new(),
             focus: None,
+            listening: true,
         };
 
         let mut link = welcome(&listener, Vec::new()).await;
