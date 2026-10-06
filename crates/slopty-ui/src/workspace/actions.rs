@@ -39,8 +39,6 @@ actions!(
         /// Free the worktree the focused work is in: a folder's, or a thread's whose agent
         /// has exited.
         RemoveWorktree,
-        /// Open the page a shell last asked to open that was held back in a notice.
-        OpenLastOffer,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -409,7 +407,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Done with this file", Box::new(crate::file::FinishEdit)),
         w(SAVE_A_COPY, Box::new(SaveCopy)),
         w("Open URL…", Box::new(OpenUrl)),
-        w("Open last offered page", Box::new(OpenLastOffer)),
         w("Edit page address", Box::new(EditAddress)),
         w("Page back", Box::new(PageBack)),
         w("Page forward", Box::new(PageForward)),
@@ -526,8 +523,6 @@ pub(super) struct Applies {
     pub streams: bool,
     /// A tile closed a moment ago can be taken back.
     pub undo: bool,
-    /// A page was held back in a notice.
-    pub offer: bool,
     /// A folder, or a shell in a repository: its changes can be reviewed.
     pub changes: bool,
     /// Work in an agent's worktree, which can be removed.
@@ -564,7 +559,6 @@ impl super::WorkspaceView {
                 .is_some_and(|t| self.popouts.holds(t.item) || self.can_pop_out(t.item)),
             streams: !self.screens.is_empty(),
             undo: !self.closed.is_empty(),
-            offer: self.has_offer(),
             changes: self.changes_here().is_some(),
             worktree: self.worktree_here().is_some(),
         }

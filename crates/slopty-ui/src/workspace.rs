@@ -2029,7 +2029,6 @@ impl gpui::Render for WorkspaceView {
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
-            .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
             .when(applies.screen, |el| {
                 el.on_action(cx.listener(Self::toggle_mute))

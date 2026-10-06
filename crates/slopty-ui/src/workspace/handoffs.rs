@@ -21,7 +21,7 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
@@ -33,7 +33,6 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 
 use super::WorkspaceView;
-use super::actions::OpenLastOffer;
 use super::toast::ToastKind;
 use crate::colors::hsla;
 use crate::file::FileView;
@@ -50,8 +49,6 @@ pub(super) struct HandoffState {
     worktrees: HashMap<SessionId, Worktree>,
     /// The shell told it has this client's focus, and on which worker.
     focus: Option<(WorkerKey, SessionId)>,
-    /// The page last held back, for "Open last offered page".
-    last_offer: Option<String>,
 }
 
 /// A page held back in a notice.
@@ -200,7 +197,6 @@ impl WorkspaceView {
     /// Hold back a page in a notice naming its host.
     fn offer_page(&mut self, offer: Offer, cx: &mut Context<Self>) {
         tracing::info!(host = %offer.host, why = ?offer.why, "a page held back");
-        self.handoff.last_offer = Some(offer.url.clone());
         self.show_toast_for(ToastKind::Offered(Box::new(offer)), OFFER_FOR, cx);
     }
 
@@ -215,27 +211,6 @@ impl WorkspaceView {
     ) {
         self.dismiss_offer(worker, id);
         self.open_page(url, cx);
-        cx.notify();
-    }
-
-    /// Whether a page was held back, for "Open last offered page" to open.
-    pub(super) const fn has_offer(&self) -> bool {
-        self.handoff.last_offer.is_some()
-    }
-
-    /// The palette's "Open last offered page".
-    pub fn open_last_offer(
-        &mut self,
-        _: &OpenLastOffer,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(url) = self.handoff.last_offer.clone() else {
-            self.show_notice("No page was offered".to_owned(), cx);
-            return;
-        };
-        self.drop_offers(|offer| offer.url == url);
-        self.open_page(&url, cx);
         cx.notify();
     }
 

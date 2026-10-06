@@ -290,7 +290,6 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
         c(Workspace, "review_changes", ws::ReviewChanges, &[], W),
         c(Workspace, "remove_worktree", ws::RemoveWorktree, &[], W),
-        c(Workspace, "open_last_offer", ws::OpenLastOffer, &[], W),
         c(Workspace, "save_copy", ws::SaveCopy, &[], W),
         c(Workspace, "close_tile", ws::CloseItem, &["cmd-w"], W),
         c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], &[CLOSING]),
