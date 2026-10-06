@@ -539,7 +539,7 @@ async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
     let opener = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == popup);
     let opened = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == second);
     let (opener, opened) = (opener.unwrap(), opened.unwrap());
-    assert!(opened.same_pane(&opener), "on its opener's pane: {opener:?} {opened:?}");
+    assert!(opened.same_pane(opener), "on its opener's pane: {opener:?} {opened:?}");
 
     let alert = "Hello from the second page";
     drv.wait_for("the alert, a sheet in the tile", STEP, |d| {

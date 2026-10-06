@@ -545,10 +545,10 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
             clock.tick().await;
             // A triangle wave over the swing: out to one side, across, and back.
             let phase = step % (DRAG_LEG * 2);
-            let leg = if phase < DRAG_LEG { phase } else { DRAG_LEG * 2 - phase };
+            let leg = if phase < DRAG_LEG { phase } else { phase.abs_diff(DRAG_LEG * 2) };
             #[expect(clippy::cast_precision_loss, reason = "a step count well under 2^24")]
             let along = (leg as f32 / DRAG_LEG as f32).mul_add(2.0, -1.0);
-            drv.drag_to(x + along * DRAG_SWING, y).await.unwrap();
+            drv.drag_to(along.mul_add(DRAG_SWING, x), y).await.unwrap();
             step = step.saturating_add(1);
         }
         let frames = drv.dump().await.unwrap().frames;
