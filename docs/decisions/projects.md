@@ -1332,9 +1332,16 @@ says no time, cost, context or plan figure.*
   (`SLOPTY_PROJECT`), as the server opens a task's. A `codex` the person opens in a tile is
   theirs and starts as typed (fixed 2026-10-05; it had the tools wherever the worker had a
   server, against the prune ruling that tools are for project agents only).
-- A writing task beside a clone runs with Codex's own `--worktree`, so two Codex tasks never
-  edit one checkout. Codex makes and names that worktree itself, so its role tells it to name
-  the branch when it reports done.
+- A writing task beside a clone opens its terminal in a worktree the worker makes from the
+  project's target (`OpenTerminal.worktree`, named for the task, branch `worktree-<name>`), so
+  two Codex tasks never edit one checkout and the work starts where it is to land. Codex's own
+  `--worktree` was dropped for it (2026-10-06): Codex 0.156 makes its managed worktree from
+  the clone's `HEAD` (`codex-rs/tui/src/worktree_startup.rs` asks for no base), which is
+  whatever branch the person left the orchestrator's clone on. A `--worktree` the person
+  passes themselves is still Codex's, and the worker makes none then. Tests:
+  `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (`slopty-server`)
+  and `a_terminal_opens_in_a_worktree_made_from_its_base` (`slopty-workerd`, on a real
+  repository whose clone is on another branch).
 - Its arguments are judged before it starts, as Claude Code's are: only what asks the person no
   less goes through without the person's `permission_flags`. That is the model, images, a
   worktree, a `read-only` or `workspace-write` sandbox, the `untrusted` or `on-request` approval
@@ -1540,8 +1547,9 @@ R2).
   kept. A worktree the worker keeps stays on the card with the reason on the timeline.
 - Only a merged task's worktree is freed. A task given up may be tried again, and Claude
   Code's `--worktree` remakes a missing worktree with `git worktree add -B`, which would reset
-  the kept branch to the base. A Codex task's worktree is not freed yet, since Codex makes and
-  names it itself and no report names where.
+  the kept branch to the base. A Codex task's worktree is not freed yet: the worker makes it now,
+  but the card learns a worktree from the agent's own reports (Claude Code's status line, a
+  thread's start), and a Codex terminal reports none.
 - `RemoveWorktree` is the server's alone: a tool that asks is `Forbidden`.
 - Tests: `a_clean_worktree_goes_and_its_branch_only_once_landed` and
   `a_worktree_in_use_or_not_committed_is_kept` (`slopty-worker`, on real git repositories),

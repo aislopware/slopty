@@ -449,6 +449,7 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     refused(&hub.dispatch(terminal).await, ErrorCode::Limit);
     assert!(rx.try_recv().is_err(), "nothing reached the worker");
@@ -731,6 +732,7 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
             name: None,
             size: None,
             session: Some(chosen_by_caller),
+            worktree: None,
         },
     );
     let open = request(&mut rx).await;
@@ -892,6 +894,7 @@ async fn an_agent_looser_than_allowed_is_closed() {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         },
     );
     let (_, verb) = request(&mut rx).await;
@@ -931,6 +934,7 @@ async fn an_agent_looser_by_its_command_line_is_refused_or_closed() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let by_agent = hub.dispatch_as(Speaker::Agent, None, opening).await;
     assert!(refused(&by_agent, ErrorCode::Limit).contains("--allowedTools"), "{by_agent:?}");
@@ -944,6 +948,7 @@ async fn an_agent_looser_by_its_command_line_is_refused_or_closed() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let asked = spawn_as(&hub, Speaker::Agent, shell);
     let start = request(&mut rx).await;
@@ -1070,6 +1075,7 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let agent = |prompt: &str| Verb::SpawnAgent {
         worker,
@@ -1154,6 +1160,7 @@ async fn an_agent_names_no_environment_that_steers_what_it_starts() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let agent = |env| Verb::SpawnAgent {
         worker: linux,
@@ -1226,6 +1233,7 @@ async fn a_terminal_an_agent_opens_counts_against_the_fleet_bound() {
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let first = spawn_as(&hub, Speaker::Agent, shell());
     let _first_start = request(&mut rx).await;
@@ -1254,6 +1262,7 @@ async fn opened_by(
         name: None,
         size: None,
         session: None,
+        worktree: None,
     };
     let asked = spawn_as(hub, Speaker::Proven(by), shell);
     let start = request(rx).await;
@@ -1535,9 +1544,10 @@ async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
 }
 
 /// A task started with no directory goes beside a clone of the project's repository and starts
-/// in it: an agent that writes in a git worktree of its own, named for the task, one that only
-/// reads in the clone itself. Named no worker, it goes to one with a clone; with none online
-/// and no address to clone from, the refusal says so.
+/// in it: an agent that writes (Claude Code or Codex) in a git worktree of its own the worker
+/// makes from the target, named for the task, one that only reads in the clone itself. Named no
+/// worker, it goes to one with a clone; with none online and no address to clone from, the refusal
+/// says so.
 #[tokio::test]
 async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1577,6 +1587,25 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     );
     let role = args.iter().find(|a| a.starts_with("--append-system-prompt=")).unwrap();
     assert!(role.contains(&format!("a git worktree of your own, {name}")), "{role}");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    // Codex's terminal opens in one the worker makes from the target too: its own `--worktree`
+    // would start from whatever the clone has checked out.
+    linux_lease.handle(ToServer::Facts(installed(&["claude", "codex"])));
+    let codex_task = new_task(&hub, Some(linux)).await;
+    let launch =
+        TaskLaunch { run: Runner::Codex { prompt: None, args: Vec::new() }, ..anywhere.clone() };
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: codex_task, launch });
+    let start = request(&mut linux_rx).await;
+    let Verb::OpenTerminal { cwd, command, worktree, .. } = start.1.clone() else {
+        panic!("{:?}", start.1)
+    };
+    assert_eq!(cwd.as_deref(), Some("/home/c/slopty"));
+    assert!(!command.iter().any(|a| a == "--worktree"), "not Codex's own: {command:?}");
+    let name = format!("slopty-slopty-{codex_task}");
+    assert_eq!(worktree.map(|w| (w.name, w.base)), Some((name.clone(), Some("main".to_owned()))));
+    assert!(command[2].contains(&format!("a git worktree of your own, {name}")), "{command:?}");
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
@@ -1870,7 +1899,7 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
 
 /// A task never goes to a worker that cannot run its agent: a Codex task only where Codex is
 /// installed, pinned or not, and the refusal says so. It opens the person's own `codex` with its
-/// role as developer instructions, in a worktree of its own beside a clone, its brief last; a flag
+/// role as developer instructions, its brief last; a flag
 /// that would loosen what it asks the person is refused unless the person allows it.
 #[tokio::test]
 async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {

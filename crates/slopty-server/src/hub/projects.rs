@@ -586,11 +586,11 @@ struct Place {
 
 /// The git worktree a writing agent works in.
 enum Worktree {
-    /// Codex's, which it makes and names itself (`--worktree`).
-    Codex,
     /// One the worker makes ([`slopty_proto::thread::wire::NewWorktree`]) from the project's
     /// target, so the task's work starts where it is to land: Claude Code's own
-    /// `--worktree <name>` opens it, and any other agent's thread starts in it.
+    /// `--worktree <name>` opens it, Codex's terminal opens in it, and any other agent's thread
+    /// starts in it. Codex's own `--worktree` would start from the clone's `HEAD`, whatever
+    /// branch the person left it on.
     Worker {
         /// Its name, reopened by it.
         name: String,
@@ -640,11 +640,6 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
     }
     if let Some(Place { path, worktree }) = at {
         lines.push(match worktree {
-            Some(Worktree::Codex) => format!(
-                "- You work in a git worktree Codex made for you from the clone at {}. Commit \
-                 your work there, and name its branch when you report done.",
-                plain(path)
-            ),
             Some(Worktree::Worker { name, .. }) => format!(
                 "- You work in a git worktree of your own, {name}, made from the clone at {} \
                  (branch worktree-{name}). Commit your work there, and name that branch when \
@@ -1315,8 +1310,16 @@ impl Hub {
             Caller::Person => None,
         };
         let session = placed.map_or_else(SessionId::new, |(_, term)| term.session);
-        let start =
-            Verb::OpenTerminal { worker, cwd, command, env, name, size, session: Some(session) };
+        let start = Verb::OpenTerminal {
+            worker,
+            cwd,
+            command,
+            env,
+            name,
+            size,
+            session: Some(session),
+            worktree: None,
+        };
         Self::opening(&mut self.inner.state.lock(), caller, from, key.as_ref(), sent, &start);
         if let Some((id, _)) = placed {
             return self.forward_placed(id, key, start).await;
@@ -1597,12 +1600,14 @@ impl Hub {
                 let at = clone.flatten().map(|path| {
                     let worktree = match &launch.run {
                         _ if card.read_only => None,
-                        Runner::Codex { .. } => Some(Worktree::Codex),
                         Runner::Claude { args, .. } if names(args, &WORKTREE_FLAGS) => None,
-                        Runner::Claude { .. } | Runner::Agent { .. } => Some(Worktree::Worker {
-                            name: format!("slopty-{project}-{task}"),
-                            base: record.target.clone(),
-                        }),
+                        Runner::Codex { args, .. } if names(args, &[codex::WORKTREE_FLAG]) => None,
+                        Runner::Claude { .. } | Runner::Codex { .. } | Runner::Agent { .. } => {
+                            Some(Worktree::Worker {
+                                name: format!("slopty-{project}-{task}"),
+                                base: record.target.clone(),
+                            })
+                        }
                         Runner::Command { .. } => None,
                     };
                     Place { path, worktree }
@@ -1630,13 +1635,10 @@ impl Hub {
         let session = Some(term.session);
         let (start, conversation) = match run {
             Runner::Claude { prompt, mut args } => {
-                let worktree = match worktree {
-                    Some(Worktree::Worker { name, base }) => {
-                        args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
-                        Some(NewWorktree { name, base: Some(base) })
-                    }
-                    Some(Worktree::Codex) | None => None,
-                };
+                let worktree = worktree.map(|Worktree::Worker { name, base }| {
+                    args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
+                    NewWorktree { name, base: Some(base) }
+                });
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
                 let agent = AgentKind::ClaudeCode;
                 let spawn = Verb::SpawnAgent {
@@ -1662,31 +1664,31 @@ impl Hub {
                     name: Some(format!("{project} #{task}")),
                     size,
                     session,
+                    worktree: None,
                 };
                 (open, None)
             }
             // The worker gives it Slopty's tools as it opens (`Worker::as_agent`).
             Runner::Codex { prompt, args } => {
-                let in_worktree = matches!(worktree, Some(Worktree::Codex));
                 let open = Verb::OpenTerminal {
                     worker,
                     cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: codex::command(&role, in_worktree, args, prompt),
+                    command: codex::command(&role, args, prompt),
                     env,
                     name: Some(format!("{project} #{task}")),
                     size,
                     session,
+                    worktree: worktree.map(|Worktree::Worker { name, base }| NewWorktree {
+                        name,
+                        base: Some(base),
+                    }),
                 };
                 (open, None)
             }
             // Its adapter gives it Slopty's tools and its role through the agent's own doors.
             Runner::Agent { agent, prompt, model, args } => {
-                let worktree = match worktree {
-                    Some(Worktree::Worker { name, base }) => {
-                        Some(NewWorktree { name, base: Some(base) })
-                    }
-                    Some(Worktree::Codex) | None => None,
-                };
+                let worktree = worktree
+                    .map(|Worktree::Worker { name, base }| NewWorktree { name, base: Some(base) });
                 let start = Start {
                     agent,
                     cwd,

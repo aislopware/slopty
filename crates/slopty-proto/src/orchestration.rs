@@ -293,6 +293,10 @@ pub enum Verb {
         /// is found by it, and a start again under an id the worker already runs answers that
         /// terminal instead of opening a second.
         session: Option<SessionId>,
+        /// A git worktree the worker makes, or reopens as it is, from the clone `cwd` is in at
+        /// its base fetched current ([`crate::thread::wire::NewWorktree`]); the terminal opens
+        /// in it, where `cwd` stood in the clone.
+        worktree: Option<crate::thread::wire::NewWorktree>,
     },
     /// Start an agent's TUI in a new terminal, optionally with a first prompt.
     SpawnAgent {

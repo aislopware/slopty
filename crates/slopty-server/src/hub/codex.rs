@@ -71,19 +71,12 @@ pub(super) fn args_of(argv: &[String]) -> Option<&[String]> {
 }
 
 /// The command line that starts a task's Codex: its role as developer instructions (Codex's
-/// own place for what the person or a tool adds to its prompt), a worktree of its own when it
-/// writes in a clone, the caller's arguments, and its brief as its first prompt.
-pub(super) fn command(
-    role: &str,
-    worktree: bool,
-    args: Vec<String>,
-    prompt: Option<String>,
-) -> Vec<String> {
+/// own place for what the person or a tool adds to its prompt), the caller's arguments, and its
+/// brief as its first prompt. A task that writes in a clone opens in a worktree the worker made
+/// from the project's target, not in one of Codex's own.
+pub(super) fn command(role: &str, args: Vec<String>, prompt: Option<String>) -> Vec<String> {
     let mut command = vec![PROGRAM.to_owned(), "-c".to_owned()];
     command.push(format!("developer_instructions={}", toml_string(role)));
-    if worktree && !args.iter().any(|a| a == WORKTREE_FLAG) {
-        command.push(WORKTREE_FLAG.to_owned());
-    }
     command.extend(args);
     command.extend(prompt.filter(|p| !p.trim().is_empty()));
     command
@@ -165,19 +158,19 @@ mod tests {
     }
 
     /// The role goes as a TOML basic string, escaped as TOML says, before the caller's
-    /// arguments; a worktree is asked for once; the brief is the last word.
+    /// arguments, which are passed as they are; the brief is the last word, and a blank one
+    /// is none.
     #[test]
     fn codex_starts_with_its_role_and_its_brief() {
         let role = "You are \"task 1\"\\n\nline\ttab\u{7}é";
-        let started = command(role, true, words(&["--worktree", "-m", "o3"]), Some("Go.".into()));
+        let started = command(role, words(&["--worktree", "-m", "o3"]), Some("Go.".into()));
         assert_eq!(started[..2], ["codex", "-c"]);
         assert_eq!(
             started[2],
             r#"developer_instructions="You are \"task 1\"\\n\nline\ttab\u0007é""#
         );
         assert_eq!(started[3..], ["--worktree", "-m", "o3", "Go."]);
-        let read_only = command("r", false, Vec::new(), Some("  ".into()));
-        assert_eq!(read_only, ["codex", "-c", "developer_instructions=\"r\""]);
-        assert_eq!(command("r", true, Vec::new(), None)[3], WORKTREE_FLAG);
+        let blank = command("r", Vec::new(), Some("  ".into()));
+        assert_eq!(blank, ["codex", "-c", "developer_instructions=\"r\""]);
     }
 }

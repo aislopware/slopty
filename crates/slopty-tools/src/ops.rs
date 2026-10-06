@@ -134,7 +134,8 @@ pub async fn open<D: Dispatch>(
 ) -> Result<TermRef, ToolError> {
     let worker = res.worker(worker).await?;
     let Spec { cwd, command, env, name, size } = spec;
-    let verb = Verb::OpenTerminal { worker, cwd, command, env, name, size, session: None };
+    let verb =
+        Verb::OpenTerminal { worker, cwd, command, env, name, size, session: None, worktree: None };
     opened(res.dispatch(), key, verb).await
 }
 

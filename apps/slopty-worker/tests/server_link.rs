@@ -179,6 +179,7 @@ mod tests {
             name: Some("link test".to_owned()),
             size: None,
             session: None,
+            worktree: None,
         }
     }
 
@@ -788,6 +789,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(term) = peer.ask(opening).await else { panic!("opened") };
         let early = peer.ask(Verb::SendInput { term, input: text("1\n") }).await;
@@ -1152,6 +1154,92 @@ mod tests {
         let [note] = got.as_slice() else { panic!("one message: {got:?}") };
         let content = note["content"].as_str().unwrap();
         assert!(content.contains("task 7: done"), "only the batch after the prompt: {content}");
+    }
+
+    /// `git -C dir args…` with nobody's config: what it printed.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let ran = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    }
+
+    /// A terminal asked to open in a worktree opens in one the worker made from the clone its
+    /// cwd names, at the base asked for and not at the branch the clone has checked out, as a
+    /// Codex task's does. Asked again under the same name it reopens that one as it is; with no
+    /// cwd there is no clone to make it from, and it is refused.
+    #[tokio::test]
+    async fn a_terminal_opens_in_a_worktree_made_from_its_base() {
+        use slopty_proto::thread::wire::NewWorktree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let clone = dir.path().join("demo");
+        std::fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q", "-b", "main"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "target"]);
+        let main = git(&clone, &["rev-parse", "main"]);
+        git(&clone, &["switch", "-q", "-c", "feature"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "the person's own work"]);
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+
+        let record = dir.path().join("where.txt");
+        let opening = |cwd: Option<&Path>| Verb::OpenTerminal {
+            worker: reg.worker,
+            cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
+            command: ["/bin/sh", "-c", "{ pwd -P; git rev-parse HEAD; } > \"$WHERE\""]
+                .map(String::from)
+                .to_vec(),
+            env: vec![("WHERE".to_owned(), record.to_string_lossy().into_owned())],
+            name: None,
+            size: None,
+            session: None,
+            worktree: Some(NewWorktree {
+                name: "slopty-demo-1".to_owned(),
+                base: Some("main".to_owned()),
+            }),
+        };
+        let lines = async || {
+            let looking = async {
+                loop {
+                    let text = std::fs::read_to_string(&record).unwrap_or_default();
+                    if text.lines().count() == 2 {
+                        return text.lines().map(str::to_owned).collect::<Vec<_>>();
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::time::timeout(STEP, looking).await.expect("the terminal says where it is")
+        };
+
+        let opened = peer.ask(opening(Some(&clone))).await;
+        assert!(matches!(opened, Outcome::Opened(_)), "{opened:?}");
+        let tree = std::fs::canonicalize(&clone).unwrap().join(".claude/worktrees/slopty-demo-1");
+        let seen = lines().await;
+        assert_eq!(seen, [tree.to_string_lossy().into_owned(), main.clone()], "from main");
+        assert_eq!(git(&tree, &["branch", "--show-current"]), "worktree-slopty-demo-1");
+        assert_eq!(git(&clone, &["branch", "--show-current"]), "feature", "the clone untouched");
+
+        git(&tree, &["commit", "-q", "--allow-empty", "-m", "the task's work"]);
+        let work = git(&tree, &["rev-parse", "HEAD"]);
+        std::fs::remove_file(&record).unwrap();
+        let again = peer.ask(opening(Some(&clone))).await;
+        assert!(matches!(again, Outcome::Opened(_)), "{again:?}");
+        assert_eq!(lines().await, [tree.to_string_lossy().into_owned(), work], "reopened as is");
+
+        let nowhere = peer.ask(opening(None)).await;
+        assert!(matches!(nowhere, Outcome::Error { code: ErrorCode::Invalid, .. }), "{nowhere:?}");
     }
 
     /// A kept batch is its own session's to take, by the token the worker made for it: asked

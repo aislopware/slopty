@@ -400,8 +400,27 @@ impl Orchestrator {
             | Verb::WorkingOn { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
-            Verb::OpenTerminal { worker, cwd, command, env, name, size, session } => {
+            Verb::OpenTerminal { worker, cwd, command, env, name, size, session, worktree } => {
                 self.mine(worker)?;
+                let _choosing = self.choosing(session).await;
+                if let Some(running) = self.running(session) {
+                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
+                }
+                let cwd = match (worktree, cwd) {
+                    (Some(asked), Some(clone)) => Some(
+                        crate::repo::worktrees::open(&clone, asked)
+                            .await
+                            .map_err(|failed| worktree_failed(&failed))?
+                            .0,
+                    ),
+                    (Some(_), None) => {
+                        return Err(Failure::new(
+                            ErrorCode::Invalid,
+                            "a terminal opens in a worktree of the clone its cwd names",
+                        ));
+                    }
+                    (None, cwd) => cwd,
+                };
                 let req = OpenSession {
                     size: term_size(size)?,
                     cwd,
@@ -410,10 +429,6 @@ impl Orchestrator {
                     title: name,
                     attach: false,
                 };
-                let _choosing = self.choosing(session).await;
-                if let Some(running) = self.running(session) {
-                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
-                }
                 let handle = self.open_as(session, &req, ORCHESTRATOR).await?;
                 // A command that runs Claude Code is guarded as a spawned agent is from the
                 // start: until its first hook a dialog of its own may be up, and typing would

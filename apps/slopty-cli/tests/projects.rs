@@ -485,6 +485,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("no shell") };
         let term = format!("{}/{}", orchestrator.worker, orchestrator.session);
@@ -702,6 +703,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("no shell") };
         let project = ProjectId::new("demo").unwrap();
@@ -827,6 +829,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
         let project = ProjectId::new("demo").unwrap();
@@ -1062,6 +1065,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
         let project = ProjectId::new("demo").unwrap();
@@ -1392,6 +1396,7 @@ mod tests {
             name: None,
             size: None,
             session: None,
+            worktree: None,
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
         let project = ProjectId::new("demo").unwrap();
