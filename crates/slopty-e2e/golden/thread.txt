@@ -25,7 +25,7 @@ Button │ More
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
 Image │ Claude Code
-Label │ ~
+Label │ work
 RadioGroup │ Face
 RadioButton │ Thread
 RadioButton │ Terminal
@@ -48,6 +48,5 @@ Button │ Allow
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
-Button │ Commit
 Button │ Context 34% of 200k
 Button │ Send

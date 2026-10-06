@@ -18,7 +18,7 @@ Button │ More
 Group │ The header clips its chips on a narrow window, as here.
 Heading │ Claude Code The header clips its chips on a narrow window, as here.
 Image │ Claude Code
-Label │ ~
+Label │ home
 RadioGroup │ Face
 RadioButton │ Thread
 RadioButton │ Terminal
@@ -45,6 +45,5 @@ MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ 1 finished
-Button │ Commit
 Button │ Context 34% of 200k
 Button │ Send

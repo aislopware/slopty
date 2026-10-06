@@ -78,18 +78,18 @@ impl ThreadView {
                     .size(self.z(theme.typography.small())),
             )
             .on_click(cx.listener(|this, _ev, _w, cx| this.watch_screen(cx)));
-        let chip = if self.width >= super::WIDE {
-            chip.child(div().min_w_0().max_w(self.z(WORDS_MAX)).child(kit::fit_label(
-                "thread-screen-words",
-                words,
-                theme,
-            )))
-        } else {
+        let chip = if self.room().is_narrow() {
             let hint_theme = theme.clone();
             kit::hint_timing(chip).tooltip(move |_window, cx| {
                 let theme = std::rc::Rc::new(hint_theme.clone());
                 cx.new(|_| kit::Hint::new(label.clone(), "", theme)).into()
             })
+        } else {
+            chip.child(div().min_w_0().max_w(self.z(WORDS_MAX)).child(kit::fit_label(
+                "thread-screen-words",
+                words,
+                theme,
+            )))
         };
         Some(crate::a11y::tab_stop(chip, s.focus).into_any_element())
     }

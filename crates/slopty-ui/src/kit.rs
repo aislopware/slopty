@@ -1157,17 +1157,18 @@ pub fn meta<E: Styled>(el: E, theme: &Theme) -> E {
     el.text_size(px(theme.typography.small())).text_color(hsla(theme.surfaces.text_muted))
 }
 
-/// A section's label: quiet, so the rows under it lead.
+/// A section's label: a group's head that the rows under it still lead, as Linear's are.
 ///
-/// `small()` in `text_muted`, the regular weight, never upper case. The strong weight stays for
-/// one thing per region; a semibold heading over a semibold name was two strong lines stacked.
+/// `small()` at the medium weight in `text_secondary`, never upper case. Muted and regular, it
+/// sank to the level of the facts on the rows and every section read as one run; the strong
+/// weight stays for one thing per region, so a head never rivals the names under it.
 #[must_use]
 pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
         .text_size(px(theme.typography.small()))
-        .font_weight(FontWeight::NORMAL)
-        .text_color(hsla(theme.surfaces.text_muted))
+        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+        .text_color(hsla(theme.surfaces.text_secondary))
         .child(text.into())
 }
 

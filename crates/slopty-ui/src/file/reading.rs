@@ -28,6 +28,9 @@ use crate::markdown::Segment;
 /// rows already sized.
 const OVERDRAW: f32 = 512.0;
 
+/// The longest line the preview sets, in points at zoom 1: the thread's reading column.
+const MEASURE: f32 = crate::conversation::thread::view::COLUMN;
+
 /// What the header's toggle says while the preview shows.
 pub const SHOW_SOURCE: &str = "Show source";
 /// What the header's toggle says while the source shows.
@@ -252,6 +255,20 @@ impl FileView {
             }
         };
         let gap = if ix == 0 { 0.0 } else { self.theme.spacing.xs * self.zoom };
-        div().pt(px(gap)).child(row).into_any_element()
+        // Centred on the thread's reading measure, so a wide tile keeps lines a reader's eye
+        // can follow back, and a long file reads as an agent's answer does.
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .debug_selector(move || format!("file-measure-{id}-{ix}"))
+                    .w_full()
+                    .max_w(px(MEASURE * self.zoom))
+                    .pt(px(gap))
+                    .child(row),
+            )
+            .into_any_element()
     }
 }

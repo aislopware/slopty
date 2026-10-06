@@ -106,6 +106,28 @@ fn find_in_the_preview_goes_to_the_source(cx: &mut TestAppContext) {
     assert!(read.read_with(cx, |v, _| v.finding()));
 }
 
+/// The preview sets its lines on the thread's reading measure, centred in a wide tile, and
+/// gives way to the tile's own width in a narrow one.
+#[gpui::test]
+fn the_preview_keeps_to_the_reading_measure(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/PLAN.md");
+    arrives(&view, cx, text_read(PLAN, true, 1));
+    let id = uuid(&view, cx);
+    let measure = crate::conversation::thread::view::COLUMN;
+    for width in [1400.0_f32, 400.0] {
+        cx.simulate_resize(gpui::size(px(width), px(500.0)));
+        let line: &'static str = Box::leak(format!("file-measure-{id}-0").into_boxed_str());
+        let line = cx.debug_bounds(line).expect("the first line's measure");
+        let (left, right) = (f32::from(line.left()), f32::from(line.right()));
+        assert!(right - left <= measure + 0.5, "{width}: at most the measure {line:?}");
+        assert!(left >= 0.0 && right <= width, "{width}: inside the tile {line:?}");
+        if width > measure * 1.5 {
+            assert!((right - left - measure).abs() < 0.5, "{width}: the whole measure {line:?}");
+            assert!((left - (width - right)).abs() < 1.0, "{width}: centred {line:?}");
+        }
+    }
+}
+
 /// A file not Markdown has no preview.
 #[gpui::test]
 fn code_has_no_preview(cx: &mut TestAppContext) {

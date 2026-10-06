@@ -76,7 +76,7 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-/// A thread at `/w`, its view open with the commit sheet opened from where it works.
+/// A thread at `/w`, its view open with the commit sheet opened from the "+" menu.
 fn opened(cx: &mut TestAppContext) -> (gpui::Entity<ThreadHub>, Sent, &mut VisualTestContext) {
     let (hub, sent) = hub(cx, None);
     let state = fixtures::empty();
@@ -85,7 +85,8 @@ fn opened(cx: &mut TestAppContext) -> (gpui::Entity<ThreadHub>, Sent, &mut Visua
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-git");
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
     (hub, sent, cx)
 }
 

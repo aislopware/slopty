@@ -18,7 +18,7 @@ Button │ More
 Group │ Do these steps in order, using the named tools, then reply "done". 1)…
 Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
 Image │ Claude Code
-Label │ ~
+Label │ home
 RadioGroup │ Face
 RadioButton │ Thread
 RadioButton │ Terminal
@@ -26,9 +26,9 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Article │ You: Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs…
-Button │ Show more
 Button │ Branch from here
 Button │ Copy message
+Button │ Show more
 Button │ Worked 35 s: Edited notes.md · Ran 3 commands · 9 more
 Article │ done
 Button │ Copy message
@@ -36,7 +36,6 @@ MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ 1 finished
-Button │ Commit
 Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send

@@ -22,6 +22,7 @@ Button │ More
 Group │ Retry the refresh
 Heading │ Claude Code Retry the refresh
 Image │ Claude Code
+Button │ Commit on repo
 Image │ Done
 RadioGroup │ Face
 RadioButton │ Thread
@@ -43,7 +44,6 @@ Button │ Copy message
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Commit
 Button │ Review the changes
 Button │ Send
 Group │ Review

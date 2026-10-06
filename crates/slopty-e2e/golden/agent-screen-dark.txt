@@ -28,6 +28,7 @@ Terminal │ shell │ ~ %
 Group │ Check the editor
 Heading │ Claude Code Check the editor
 Image │ Claude Code
+Label │ home
 Image │ Working
 RadioGroup │ Face
 RadioButton │ Thread
@@ -45,6 +46,5 @@ Status │ Working
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Commit
 Button │ Watch Synthetic editor
 Button │ Stop

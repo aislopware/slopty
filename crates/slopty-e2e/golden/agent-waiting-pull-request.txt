@@ -11,7 +11,7 @@ Button │ More
 Group │ Claude Code
 Heading │ Claude Code
 Image │ Claude Code
-Label │ ~
+Label │ home
 Link │ Pull request 1234, approved
 Label │ Worktree fix-build on worktree-fix-build
 Image │ Waiting
@@ -26,5 +26,4 @@ Status
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
-Button │ Commit
 Button │ Send

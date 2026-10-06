@@ -7751,6 +7751,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     finished mark stay longest. At rest a focused tile with no readouts shows its controls.
     Otherwise they are an overlay on the header's ground that shows on hover over the
     readouts it hides, and keeps no room while hidden.
+  - **A tile showing a thread** says where its agent works after the title: the checkout by
+    its folder's name, then the branch with its glyph. Each is a press away from the commit
+    sheet when the checkout is a repository. They replace the shell's directory beside the
+    title, and the composer's foot no longer says them. They stay while a long title narrows
+    to its floor. Then the branch leaves, then the checkout, and the pull request last. What a
+    worktree's chip says already is left out. The header reads them from the worker's table,
+    as the workspace keeps it, and never from the thread view, whose working mark would
+    otherwise redraw the whole workspace at every step.
+  - **Containment.** `workspace::tests::rooms::nothing_escapes_its_tile_at_any_room` lays out
+    a shell, an agent's shell with its chips, its thread, a board, a file, a folder and a column
+    of three tabs at 280, 312, 360, 420, 560 and 720 pt. No node of a tile's accessibility
+    tree may reach past the tile's edges.
   - **Tabs** in a narrow column shrink to their mark and a few letters, and the row scrolls
     sideways, keeping the tab on show in view.
   - **The board's header** keeps its name and its three controls. The running count leaves
@@ -7820,3 +7832,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `review::tests::{an_empty_review_names_its_span, an_empty_span_offers_the_widest}`
     (the latter at 312 pt) and `workspace::tests::folders::an_empty_folder_offers_a_shell_in_it`. Goldens: `agent-marks*`, `project-lanes*`, `file-too-large` and
     every tile that says it has nothing to show.
+
+- ✅ **Section heads, a thread's turns, and the reading measure** (2026-10-06,
+  `.research/elegance-icons-2026-10-06.md` §5 items 2 and 12).
+  - **A section's head reads as a group's head.** `kit::label` was 12 pt at the regular
+    weight in `text_muted`, the level of the facts on the rows under it, so every section ran
+    into the next. It is 12 pt at the medium weight in `text_secondary` now, as Linear's group
+    heads are. The strong weight stays for one thing per region, so a head never rivals the
+    names under it. The palette's, the pickers', the navigator's and the empty workspace's
+    heads all take it.
+  - **A turn reads as one block.** A person's message opens a turn a large step
+    (`spacing.lg`) under the last. What answers it follows at the small step (`spacing.sm`),
+    and inside the answer a run of calls keeps its tight steps and its paragraph's step round
+    prose. The bubble's actions (the time, the copy, the branch) used to keep a hidden line
+    under the bubble, which pushed the answer away from its question. Under a pointer they wait
+    beside the bubble's foot now. Under a finger they always show, so they keep their line.
+  - **The thread's gutter follows the tile's room** (`kit::Room`) in place of its own 560 pt
+    edge: 48 pt in a wide tile, 24 in a regular one and 16 in a narrow one. The gutter gives
+    way before the words do. The agent's screen chip keeps its words everywhere but in a narrow
+    tile.
+  - **The review reads its room.** The file list sits beside the diff in a wide tile, as it
+    did from 720 pt. The diff shows both sides when what the list leaves is itself a wide room
+    (960 pt of tile at the default chrome, as before). Both edges now move with the chrome size,
+    so no fourth room was needed.
+  - **A Markdown file reads on the thread's measure.** The preview centres its lines on the
+    thread's 736 pt column, so a wide tile keeps lines the eye can follow back, and a long
+    file reads as an agent's answer does.
+  - **The composer stops restating where.** The tile's header says the thread's checkout and
+    branch, so the composer's foot drops its place chip. "Commit…" stays in the "+" menu
+    whenever the thread works in a repository, and no longer only when the foot ran out of
+    room.
+  - Tests: `conversation::thread::tests::steps::{a_question_and_its_answer_read_as_one_turn,
+    the_column_s_gutter_follows_the_tile_s_room}` and
+    `file::tests::reading::the_preview_keeps_to_the_reading_measure`. Goldens: `thread*`,
+    `palette*`, `workspace-navigator*`, `agent-needs-you-navigator`, `project-*`,
+    `empty-workspace` and the wide-reading golden.

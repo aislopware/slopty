@@ -17,7 +17,6 @@ use slopty_proto::thread::{
 use super::{approval, hub, intents, snapshot, view};
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
-use crate::conversation::thread::view::ThreadView;
 
 fn live_turn() -> Turn {
     Turn {
@@ -1057,24 +1056,4 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
             assert!(cx.debug_bounds(row).is_some(), "{chip} left for the + menu's {row}");
         }
     }
-}
-
-/// The tile's header reads where the agent works from the thread: the checkout by its folder's
-/// name, the branch the worker says, and that a press commits there.
-#[gpui::test]
-fn the_thread_says_its_place_for_the_header(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let mut state = fixtures::thread("tools");
-    state.meta.cwd = "/work/atlas".to_owned();
-    state.meta.facts.insert("branch".to_owned(), "fix-login".to_owned());
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    assert_eq!(view.read_with(cx, ThreadView::place_of), None, "nothing known yet");
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    let place = view.read_with(cx, ThreadView::place_of).expect("a place");
-    assert_eq!(place.checkout.as_deref(), Some("atlas"));
-    assert_eq!(place.branch.as_deref(), Some("fix-login"));
-    assert!(place.commits, "a press commits there");
 }

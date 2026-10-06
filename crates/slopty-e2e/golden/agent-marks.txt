@@ -38,7 +38,7 @@ Button │ More
 Group │ Claude Code
 Heading │ Claude Code
 Image │ Claude Code
-Label │ atlas
+Button │ Commit on atlas
 Button │ Needs approval: Wants to run a command
 RadioGroup │ Face
 RadioButton │ Thread
@@ -50,10 +50,10 @@ Status
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Commit
 Button │ Send
 Group │ opencode
 Heading │ opencode
+Button │ Commit on atlas
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
@@ -62,7 +62,6 @@ MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Canned
 Button │ Mode, build
-Button │ Commit
 Button │ Send
 Group │ Claude Code 2
 Heading │ Claude Code 2
@@ -82,6 +81,7 @@ Button │ Send
 Group │ pi
 Heading │ pi
 Image │ pi
+Button │ Commit on atlas
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
@@ -90,7 +90,6 @@ MultilineTextInput │ Message
 Button │ Add to the message
 Label │ Model, Canned
 Label │ Effort, Medium
-Button │ Commit
 Button │ Continue in the terminal
 Button │ Send
 Status │ atlas needs approval

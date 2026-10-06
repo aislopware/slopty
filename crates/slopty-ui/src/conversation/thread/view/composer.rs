@@ -33,47 +33,6 @@ pub(super) fn placeholder(agent: &slopty_proto::thread::AgentId) -> String {
     format!("Ask {}\u{2026}", super::agent_label(agent))
 }
 
-/// Where the agent works, as the composer's top row reads it.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub(super) struct Whereabouts {
-    /// The checkout's folder name.
-    pub checkout: Option<String>,
-    /// Its branch, when the worker says.
-    pub branch: Option<String>,
-    /// Lines added and removed over the thread.
-    pub added: u32,
-    /// And removed.
-    pub removed: u32,
-}
-
-/// Where a thread's agent works, for the tile's header to say after the title
-/// ([`ThreadView::place_of`]).
-///
-/// The checkout by its folder's name and the branch, and whether a press opens the commit
-/// sheet ([`ThreadView::open_commit`]) on that repository.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct ThreadPlace {
-    /// The checkout's folder name.
-    pub checkout: Option<String>,
-    /// Its branch, when the worker says.
-    pub branch: Option<String>,
-    /// The place is a repository a press can commit in.
-    pub commits: bool,
-}
-
-impl ThreadView {
-    /// Where the agent works, for the tile's header; `None` while nothing is known of it.
-    #[must_use]
-    pub fn place_of(&self, cx: &App) -> Option<ThreadPlace> {
-        let here = self.where_it_works(cx);
-        (here.checkout.is_some() || here.branch.is_some()).then(|| ThreadPlace {
-            checkout: here.checkout,
-            branch: here.branch,
-            commits: self.repo(cx).is_some(),
-        })
-    }
-}
-
 /// The fact that names how far a thread's sandbox reaches (Codex's), as the worker sets it.
 const SANDBOX: &str = "sandbox";
 
@@ -122,15 +81,6 @@ pub(super) fn mode_hint(meta: &slopty_proto::thread::ThreadMeta) -> Option<Strin
         .then(|| format!("Change the mode in {}'s own terminal", agent_name(&meta.agent)))
 }
 
-/// The fact that names a thread's branch, as the workers set it.
-const BRANCH: &str = "branch";
-
-/// The last part of `cwd`, the checkout's name; none for an empty one.
-pub(super) fn checkout(cwd: &str) -> Option<String> {
-    let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
-    (!name.is_empty()).then(|| name.to_owned())
-}
-
 /// An open name (a mode, an item's kind) in words, sentence case: `acceptEdits` and
 /// `AcceptEdits` read "Accept edits", `skill-loaded` "Skill loaded".
 pub(super) fn sentence(mode: &str) -> String {
@@ -177,23 +127,12 @@ impl ThreadView {
             .any(|s| s.outcome.is_none() && s.intent == *intent)
     }
 
-    /// Where the agent works: the checkout, its branch, and what the thread changed.
-    pub(super) fn where_it_works(&self, cx: &App) -> Whereabouts {
+    /// What the thread changed, `(added, removed)` lines over the thread, as the worker's
+    /// table counts them.
+    fn changed(&self, cx: &App) -> (u32, u32) {
         let threads = self.hub.read(cx).threads();
-        let row = threads.rows().rows.get(&self.thread);
-        let state = self.state(cx);
-        let branch = state
-            .and_then(|st| st.meta.facts.get(BRANCH))
-            .or_else(|| row.and_then(|r| r.facts.get(BRANCH)))
-            .filter(|b| !b.is_empty())
-            .cloned();
-        let changed = row.map(|r| r.changed).unwrap_or_default();
-        Whereabouts {
-            checkout: state.and_then(|st| checkout(&st.meta.cwd)),
-            branch,
-            added: changed.added,
-            removed: changed.removed,
-        }
+        let changed = threads.rows().rows.get(&self.thread).map(|r| r.changed).unwrap_or_default();
+        (changed.added, changed.removed)
     }
 
     /// In the composer's place while the agent's own TUI holds the session: where it is, and
@@ -256,78 +195,14 @@ impl ThreadView {
         )
     }
 
-    /// A small fact in the composer's toolbar, `name` its id's tail: its mark where it has one,
-    /// then its words.
-    fn fact(&self, name: &str, icon: Option<Symbol>, words: String) -> Div {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        div()
-            .flex_none()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .children(icon.map(|icon| {
-                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted))
-                    .size(self.z(theme.typography.small()))
-            }))
-            .child(kit::fit_label(format!("thread-fact-{name}"), words, theme).fixed())
-    }
-
-    /// Where the thread works, in the composer's foot after its chips: the checkout and its
-    /// branch, which open the commit sheet on that repository. Whole or not at all: it leaves
-    /// the foot before it would fade to a glyph.
-    fn place(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let here = self.where_it_works(cx);
-        if here.checkout.is_none() && here.branch.is_none() {
-            return None;
-        }
-        let place = div()
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .text_size(self.z(theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            // The checkout by its name alone: a folder's glyph before it said nothing its name
-            // and its place do not. The branch keeps its glyph, the one cue that tells a
-            // branch's name from a folder's.
-            .children(here.checkout.map(|c| self.fact("checkout", None, c)))
-            .children(
-                here.branch.map(|b| self.fact("branch", Some(Symbol::ArrowTriangleBranch), b)),
-            );
-        if self.repo(cx).is_none() {
-            return Some(place.into_any_element());
-        }
-        Some(
-            crate::a11y::tab_stop(
-                place
-                    .id("thread-git")
-                    .debug_selector(|| "thread-git".to_owned())
-                    .role(Role::Button)
-                    .aria_label("Commit")
-                    .px(self.z(theme.spacing.xs))
-                    .rounded(self.z(theme.radii.xs))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
-                    .active(move |el| el.bg(hsla(s.pressed)))
-                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
-                s.focus,
-            )
-            .into_any_element(),
-        )
-    }
-
     /// What the thread changed, in the foot; while a request is on show its card's head says
     /// it instead, one place at a time.
     fn changes(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if self.shown_waiting(cx).is_some() {
             return None;
         }
-        let here = self.where_it_works(cx);
         let edited = self.state(cx).map(activity::edited).unwrap_or_default();
-        self.changes_chip("thread-changes", (here.added, here.removed), &edited, cx)
+        self.changes_chip("thread-changes", self.changed(cx), &edited, cx)
     }
 
     /// What the thread changed, `(added, removed)` lines, as counts that open the review;
@@ -897,7 +772,6 @@ impl ThreadView {
         let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
         let row = item(row, FOOT_TASKS, self.tasks_chip(cx));
-        let row = item(row, FOOT_PLACE, self.place(cx));
         let row = item(row, FOOT_PULL, self.pull_chip(cx));
         let row = item(row, FOOT_CHANGES, self.changes(cx));
         let row = item(row, FOOT_SCREEN, self.screen_chip(cx));
@@ -930,8 +804,6 @@ const FOOT_TASKS: (&str, kit::Priority) = ("tasks", kit::Priority::MEDIUM);
 const FOOT_PULL: (&str, kit::Priority) = ("pull", kit::Priority(112));
 /// The agent's screen.
 const FOOT_SCREEN: (&str, kit::Priority) = ("screen", kit::Priority(96));
-/// Where it works: the checkout and the branch, whole or not at all.
-const FOOT_PLACE: (&str, kit::Priority) = ("place", kit::Priority::LOW);
 /// "Continue in the terminal".
 const FOOT_HANDOFF: (&str, kit::Priority) = ("handoff", kit::Priority(48));
 /// The send.
@@ -1051,8 +923,6 @@ impl ThreadView {
         let this = cx.entity().downgrade();
         let state = self.state(cx);
         let mut rows: Vec<kit::MenuItem> = Vec::new();
-        // The place and the pull request both open the commit sheet: one row for the two.
-        let mut commit = false;
         for key in &dropped {
             let to = this.clone();
             let row = match key.as_ref() {
@@ -1103,16 +973,6 @@ impl ThreadView {
                         });
                     }))
                 }
-                k if k == FOOT_PLACE.0 || k == FOOT_PULL.0 => {
-                    (self.repo(cx).is_some() && !std::mem::replace(&mut commit, true)).then(|| {
-                        kit::MenuItem::new("commit", COMMIT, move |window, cx| {
-                            let _gone = to.update(cx, |this, cx| {
-                                this.add_open = false;
-                                this.open_commit(window, cx);
-                            });
-                        })
-                    })
-                }
                 k if k == FOOT_SCREEN.0 => self.agent_screen(cx).map(|screen| {
                     let words = format!("Watch {}", super::screens::short(&screen));
                     kit::MenuItem::new("screen", words, move |_w, cx| {
@@ -1142,6 +1002,16 @@ impl ThreadView {
             };
             rows.extend(row);
         }
+        // The way to commit where the thread works: the tile's header says where, and the
+        // sheet opens from here.
+        if self.repo(cx).is_some() {
+            rows.push(kit::MenuItem::new("commit", COMMIT, move |window, cx| {
+                let _gone = this.update(cx, |this, cx| {
+                    this.add_open = false;
+                    this.open_commit(window, cx);
+                });
+            }));
+        }
         if rows.is_empty() {
             return;
         }
@@ -1161,7 +1031,7 @@ const CONTEXT: &str = "Context";
 /// The "+" menu's row that opens the review, while the foot has no room for the changes.
 const REVIEW_CHANGES: &str = "Review the changes";
 
-/// The "+" menu's row that opens the commit sheet, while the foot has no room for the place.
+/// The "+" menu's row that opens the commit sheet on the repository the thread works in.
 const COMMIT: &str = "Commit\u{2026}";
 
 /// The words of the way to hand the session to the agent's own TUI.
@@ -1253,7 +1123,7 @@ pub(super) fn context_ring(
 
 #[cfg(test)]
 mod tests {
-    use super::{checkout, meter_words, sentence, with_command, with_mention};
+    use super::{meter_words, sentence, with_command, with_mention};
 
     /// The "+" menu begins a command at the message's start and a mention at the caret, set
     /// off from the word before it, with the caret after the sign each time.
@@ -1299,13 +1169,5 @@ mod tests {
         assert_eq!(sentence("bypass-permissions"), "Bypass permissions");
         assert_eq!(sentence("plan"), "Plan");
         assert_eq!(sentence("read_only"), "Read only");
-    }
-
-    /// The checkout reads as its folder's name, a trailing slash or not.
-    #[test]
-    fn a_checkout_reads_as_its_folders_name() {
-        assert_eq!(checkout("/Users/me/src/slopty/").as_deref(), Some("slopty"));
-        assert_eq!(checkout("/Users/me/src/slopty").as_deref(), Some("slopty"));
-        assert_eq!(checkout(""), None);
     }
 }

@@ -71,9 +71,6 @@ pub(crate) const COMPOSER_CTX: &str = "ThreadComposer";
 /// conversation it is about come first, so the rest keeps to a line or two and scrolls.
 const TRAY_ASKING: f32 = 0.12;
 
-/// From this tile width on, the column stands off the tile's edges by the wide gutter.
-const WIDE: f32 = 560.0;
-
 /// How far past the viewport the list lays rows out, as Zed's thread does.
 const OVERDRAW: f32 = 2048.0;
 
@@ -1215,11 +1212,26 @@ impl ThreadView {
         })
     }
 
-    /// The column every row sits in: centred, its text 736 pt at most, 48 pt gutters in a
-    /// wide tile and the narrow ones in a narrow tile.
-    fn column(&self, child: impl IntoElement) -> Div {
+    /// The tile's room, from its width at rest.
+    pub(crate) fn room(&self) -> kit::Room {
+        kit::Room::of(self.width, &self.theme)
+    }
+
+    /// How far the column stands off the tile's edges for its room: 48 pt in a wide tile, 24 in
+    /// a regular one and 16 in a narrow one, so the gutter gives way before the words do.
+    fn gutter(&self) -> f32 {
         let spacing = self.theme.spacing;
-        let gutter = if self.width >= WIDE { spacing.xxxl } else { spacing.lg };
+        match self.room() {
+            kit::Room::Wide => spacing.xxxl,
+            kit::Room::Regular => spacing.xl,
+            kit::Room::Narrow => spacing.lg,
+        }
+    }
+
+    /// The column every row sits in: centred, its text 736 pt at most, inside the room's
+    /// gutters ([`Self::gutter`]).
+    fn column(&self, child: impl IntoElement) -> Div {
+        let gutter = self.gutter();
         div().w_full().flex().justify_center().child(
             div()
                 .w_full()
@@ -1237,7 +1249,7 @@ impl ThreadView {
         let first = ix == 0;
         let (inner, gap) = match &row {
             Row::User { item } => (self.user_row(ix, item, cx), spacing.lg),
-            Row::Text { item } => (self.text_row(ix, item, cx), spacing.md),
+            Row::Text { item } => (self.text_row(ix, item, cx), spacing.sm),
             Row::Reasoning { item } => (self.reasoning_row(ix, item, cx), spacing.xs),
             Row::Tool { item } => (self.tool_row(ix, item, cx), spacing.xxs),
             Row::Note { item } => (self.note_row(ix, item, cx), spacing.xs),
@@ -1259,11 +1271,19 @@ impl ThreadView {
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
         };
-        // A run of calls sits tight, but a run is set apart from the prose round it as a
-        // paragraph is: a call right under an answer sat a few points off it, and the answer
-        // after a run a paragraph away, so the stream's rhythm broke at every change of kind.
-        // A plan is prose, not a call.
+        // Turns group: the person's message opens one a large step under the last, and what
+        // answers it follows at the small step, so a question and its answer read as one block.
+        // Inside the answer a run of calls sits tight, but a run is set apart from the prose
+        // round it as a paragraph is: a call right under an answer sat a few points off it, and
+        // the answer after a run a paragraph away, so the stream's rhythm broke at every change
+        // of kind. A plan is prose, not a call.
         let gap = match ix.checked_sub(1) {
+            Some(before)
+                if !matches!(row, Row::User { .. })
+                    && matches!(self.rows.get(before), Some(Row::User { .. })) =>
+            {
+                spacing.sm
+            }
             Some(before) if self.lined(ix, cx) != self.lined(before, cx) => gap.max(spacing.md),
             _ if self.is_plan(ix, cx) => gap.max(spacing.md),
             _ => gap,
@@ -1319,16 +1339,25 @@ impl ThreadView {
             .gap(self.z(self.theme.spacing.xs))
             .children(branch)
             .child(actions);
+        // Under a pointer the actions wait at the bubble's foot, beside it, so a line kept for
+        // them while they are hidden does not push the answer off its question; under a finger
+        // they always show and keep their own line.
+        let touch = self.theme.density == slopty_theme::Density::TOUCH;
+        let (beside, actions) = if touch { (None, Some(actions)) } else { (Some(actions), None) };
         let choices =
             self.branching.as_ref().filter(|b| b.item == *id).and_then(|_| self.branch_panel(cx));
-        let under = div()
-            .flex()
-            .flex_col()
-            .items_end()
-            .w_full()
-            .children(more)
-            .child(actions)
-            .children(choices);
+        // Nothing under the bubble keeps no line there, not even the column's gap.
+        let under = (more.is_some() || actions.is_some() || choices.is_some()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .w_full()
+                .children(more)
+                .children(actions)
+                .children(choices)
+                .into_any_element()
+        });
         let row = Self::message_menu_press(div(), id, &words, Some(turn), cx);
         let shown = cut.unwrap_or(words);
         row.group(message_group(id))
@@ -1337,7 +1366,7 @@ impl ThreadView {
                 format!("item-{}", id.0),
                 shown,
                 pictures,
-                Some(under.into_any_element()),
+                Bubble { beside: beside.map(IntoElement::into_any_element), under },
                 false,
             ))
             .into_any_element()
@@ -1426,12 +1455,36 @@ impl ThreadView {
         id: String,
         words: String,
         pictures: Option<AnyElement>,
-        under: Option<AnyElement>,
+        around: Bubble,
         faded: bool,
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
+        let words = div()
+            .max_w(relative(BUBBLE))
+            .px(self.z(theme.spacing.md))
+            .py(self.z(theme.spacing.sm))
+            .rounded(self.z(theme.radii.lg))
+            .map(|el| kit::inset(el, theme))
+            .text_size(self.z(theme.typography.prose()))
+            .line_height(relative(theme.typography.prose_line_height))
+            .text_color(hsla(s.text))
+            .whitespace_normal()
+            .when(faded, |el| el.opacity(alpha::STRONG))
+            .child(SharedString::from(words));
+        let line = match around.beside {
+            Some(beside) => div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .items_end()
+                .gap(self.z(theme.spacing.xs))
+                .child(div().flex_none().child(beside))
+                .child(words)
+                .into_any_element(),
+            None => words.into_any_element(),
+        };
         div()
             .id(ElementId::Name(id.clone().into()))
             .debug_selector(move || id)
@@ -1443,21 +1496,8 @@ impl ThreadView {
             .items_end()
             .gap(self.z(theme.spacing.xxs))
             .children(pictures)
-            .child(
-                div()
-                    .max_w(relative(BUBBLE))
-                    .px(self.z(theme.spacing.md))
-                    .py(self.z(theme.spacing.sm))
-                    .rounded(self.z(theme.radii.lg))
-                    .map(|el| kit::inset(el, theme))
-                    .text_size(self.z(theme.typography.prose()))
-                    .line_height(relative(theme.typography.prose_line_height))
-                    .text_color(hsla(s.text))
-                    .whitespace_normal()
-                    .when(faded, |el| el.opacity(alpha::STRONG))
-                    .child(SharedString::from(words)),
-            )
-            .children(under)
+            .child(line)
+            .children(around.under)
             .into_any_element()
     }
 
@@ -1891,7 +1931,7 @@ impl ThreadView {
                 format!("sending-bubble-{}", sent.id),
                 text.clone(),
                 None,
-                Some(under),
+                Bubble { beside: None, under: Some(under) },
                 sent.failure().is_none(),
             ))
             .into_any_element()
@@ -2225,7 +2265,7 @@ impl ThreadView {
     fn foot(&self, bar: Option<AnyElement>, composer: Option<AnyElement>) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        let gutter = if self.width >= WIDE { spacing.xxxl } else { spacing.lg };
+        let gutter = self.gutter();
         let bar = bar.map(|bar| {
             div()
                 .id("thread-tray")
@@ -2314,6 +2354,13 @@ pub(crate) fn agent_label(agent: &AgentId) -> String {
         AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
         _ => agent_name(agent).to_owned(),
     }
+}
+
+/// What sits round a person's bubble: beside its foot (the actions, under a pointer) and under
+/// it (the rest of a long message, the actions under a finger, a branch's choices).
+struct Bubble {
+    beside: Option<AnyElement>,
+    under: Option<AnyElement>,
 }
 
 /// What a thread with no rows says while the worker reads it.

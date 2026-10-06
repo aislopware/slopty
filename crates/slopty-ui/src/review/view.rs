@@ -55,12 +55,6 @@ use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
 use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
-/// How wide the tile has to be, at rest, for its diff to show both sides.
-pub const SPLIT_FROM: f32 = 960.0;
-
-/// How wide the tile has to be for the file list to sit beside the diff.
-const LIST_FROM: f32 = 720.0;
-
 /// The file list's width, in points at zoom 1.
 const LIST_WIDTH: f32 = 240.0;
 
@@ -506,8 +500,15 @@ impl ReviewView {
         }
     }
 
+    /// The tile's room, from its width at rest: a wide one sets the file list beside the diff.
+    fn room(&self) -> kit::Room {
+        kit::Room::of(self.width, &self.theme)
+    }
+
+    /// Whether the diff shows both sides: when what the file list beside it leaves is a wide
+    /// room of its own (960 pt of tile at the default chrome), so neither side is cramped.
     fn split(&self) -> bool {
-        self.width >= SPLIT_FROM
+        kit::Room::of(self.width - LIST_WIDTH, &self.theme).is_wide()
     }
 
     fn z(&self, v: f32) -> gpui::Pixels {
@@ -1428,7 +1429,7 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (_, name) = self.door_of(cx)?;
-        let roomy = self.width >= LIST_FROM;
+        let roomy = self.room().is_wide();
         let mark = (!roomy).then(|| self.icon(crate::icons::AGENT, s.text_secondary));
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
@@ -2384,7 +2385,7 @@ impl ReviewView {
             .min_h_0()
             .w_full()
             .flex()
-            .when(self.width >= LIST_FROM, |el| el.child(self.file_list(cx)))
+            .when(self.room().is_wide(), |el| el.child(self.file_list(cx)))
             .child(
                 div().flex_1().min_w_0().h_full().child(
                     list(

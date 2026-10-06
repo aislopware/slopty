@@ -18,7 +18,7 @@ Button │ More
 Group │ scenario:bash run echo hi
 Heading │ Claude Code scenario:bash run echo hi
 Image │ Claude Code
-Label │ ~
+Label │ home
 RadioGroup │ Face
 RadioButton │ Thread
 RadioButton │ Terminal
@@ -34,5 +34,4 @@ Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Commit
 Button │ Send

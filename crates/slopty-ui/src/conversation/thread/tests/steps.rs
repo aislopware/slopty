@@ -219,6 +219,67 @@ fn a_message_s_copy_puts_its_words_on_the_clipboard(cx: &mut TestAppContext) {
     assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("Count the lines"));
 }
 
+/// Two turns, each a question and its answer, at `width`.
+fn two_turns(
+    cx: &mut TestAppContext,
+    width: f32,
+) -> (gpui::Entity<ThreadView>, &mut gpui::VisualTestContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
+    state.items = vec![
+        user("u1", 1),
+        item("a1", 1, ItemBody::Text(Clipped::whole("Twelve."))),
+        user("u2", 2),
+        item("a2", 2, ItemBody::Text(Clipped::whole("Done."))),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
+    view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    (view, cx)
+}
+
+/// Turns group: an answer follows its question at the small step and the next question opens
+/// at the large one, as the person's actions wait beside the bubble's foot instead of keeping a
+/// hidden line under it.
+#[gpui::test]
+fn a_question_and_its_answer_read_as_one_turn(cx: &mut TestAppContext) {
+    let (_view, cx) = two_turns(cx, 800.0);
+    let spacing = slopty_theme::Theme::default().spacing;
+    let bounds = |cx: &mut gpui::VisualTestContext, id: &'static str| {
+        cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"))
+    };
+    let (u1, a1, u2) = (bounds(cx, "item-u1"), bounds(cx, "item-a1"), bounds(cx, "item-u2"));
+    let within = f32::from(a1.top() - u1.bottom());
+    let between = f32::from(u2.top() - a1.bottom());
+    assert!((within - spacing.sm).abs() < 0.5, "the answer at the small step: {within}");
+    assert!(between >= spacing.lg - 0.5, "the next question at the large one: {between}");
+
+    cx.simulate_mouse_move(u1.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    let copy = bounds(cx, "copy-u1");
+    assert!(copy.top() >= u1.top() && copy.bottom() <= u1.bottom(), "beside the bubble {copy:?}");
+}
+
+/// The column stands off the tile by its room's gutter: wide, regular and narrow.
+#[gpui::test]
+fn the_column_s_gutter_follows_the_tile_s_room(cx: &mut TestAppContext) {
+    let spacing = slopty_theme::Theme::default().spacing;
+    let (view, cx) = two_turns(cx, 800.0);
+    for (width, gutter) in [(800.0, spacing.xxxl), (600.0, spacing.xl), (360.0, spacing.lg)] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
+        view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+        cx.run_until_parked();
+        let answer = cx.debug_bounds("item-a1").expect("the answer");
+        let left = f32::from(answer.left());
+        assert!((left - gutter).abs() < 0.5, "{width}: the gutter {gutter}, at {left}");
+    }
+}
+
 /// A message the person sent into a running turn stands between two folds, each saying what
 /// its stretch of the work did; the turn's time stands on the last. Either opens the turn.
 #[gpui::test]
