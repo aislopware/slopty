@@ -245,7 +245,9 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
 
 /// Below half size a tile in the overview is its miniature: no title in its header, its body as
 /// it stands at the zoom with the grid keeping the keyboard, and a label at chrome size inside
-/// the tile naming it. At rest the header's title is back and the label gone.
+/// the tile naming it. Its corners hold at the radius the miniature zoom gives a panel, so they
+/// stay round inside the workspace's block however far the overview zooms out. At rest the
+/// header's title is back and the label gone.
 #[gpui::test]
 fn a_small_overview_draws_tiles_as_miniatures(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -267,6 +269,15 @@ fn a_small_overview_draws_tiles_as_miniatures(cx: &mut TestAppContext) {
         let label = cx.debug_bounds(selector("shapes-label", t.item)).expect("each one named");
         assert!(pane.contains(&label.center()), "{label:?} inside {pane:?}");
         assert!(label.size.height >= px(12.0), "the label is chrome-sized: {label:?}");
+    }
+    let theme = Theme::default();
+    let (scale, content) =
+        (cx.update(|w, _| w.scale_factor()), crate::colors::hsla(theme.content()));
+    for (_, t) in &shells {
+        let pane = cx.debug_bounds(selector("item", t.item)).expect("the tile");
+        let ground = quads_at(cx, pane).into_iter().find(|q| q.background == content.into());
+        let ground = ground.expect("its surface");
+        near(ground.corner_radii.top_left.0 / scale, theme.radii.md * tile::SHAPES_BELOW);
     }
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();

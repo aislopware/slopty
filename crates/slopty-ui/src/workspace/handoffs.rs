@@ -12,7 +12,7 @@
 //! The shell this client has in front of the person is told to its worker
 //! (`TermRequest::Focus`): the worker routes the next page or edit there, holds Claude Code's
 //! phone pushes while it is looked at, and reports focus to the program (DEC 1004). A coding
-//! agent's pull request and worktree ride on its tile's header.
+//! agent's worktree rides on its tile's header, beside its thread's pull request.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,7 +27,7 @@ use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentBranch;
+use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::handoff::{EditFile, EditOutcome, HandoffEvent, HandoffId, OfferReason, Wary};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
@@ -44,8 +44,10 @@ const OFFER_FOR: std::time::Duration = std::time::Duration::from_secs(20);
 /// What the workspace keeps of the handoffs and the focus it reported.
 #[derive(Default)]
 pub(super) struct HandoffState {
-    /// Each agent session's pull request and worktree, as its worker last said.
-    branches: HashMap<SessionId, AgentBranch>,
+    /// Each agent session's worktree, as its worker last said. Its pull request is its
+    /// thread's (`WorkspaceView::tile_pull`), the one source for every agent, so a pull request
+    /// a status line names is not kept here.
+    worktrees: HashMap<SessionId, Worktree>,
     /// The shell told it has this client's focus, and on which worker.
     focus: Option<(WorkerKey, SessionId)>,
     /// The page last held back, for "Open last offered page".
@@ -72,15 +74,15 @@ pub(super) struct Offer {
 }
 
 impl HandoffState {
-    /// `session` is gone: so is its branch.
+    /// `session` is gone: so is its worktree.
     pub(super) fn forget_session(&mut self, session: SessionId) {
-        self.branches.remove(&session);
+        self.worktrees.remove(&session);
     }
 
     /// How many entries each map holds, for the leak check.
     #[cfg(test)]
     pub(super) fn sizes(&self) -> [(&'static str, usize); 1] {
-        [("handoff.branches", self.branches.len())]
+        [("handoff.worktrees", self.worktrees.len())]
     }
 }
 
@@ -305,21 +307,22 @@ impl WorkspaceView {
         self.drop_offers(|offer| offer.is(worker, id));
     }
 
-    /// A worker said where an agent's branch stands: its tile's chip follows.
+    /// A worker said where an agent's branch stands: its tile's worktree follows.
     pub fn agent_branch(&mut self, branch: AgentBranch, cx: &mut Context<Self>) {
-        if branch.pr.is_none() && branch.worktree.is_none() {
-            self.handoff.branches.remove(&branch.session);
-        } else {
-            self.handoff.branches.insert(branch.session, branch);
+        let changed = match branch.worktree {
+            Some(tree) => self.handoff.worktrees.insert(branch.session, tree.clone()) != Some(tree),
+            None => self.handoff.worktrees.remove(&branch.session).is_some(),
+        };
+        if changed {
+            cx.notify();
         }
-        cx.notify();
     }
 
-    /// Where `session`'s agent branch stands, while an agent runs there.
+    /// The worktree `session`'s agent runs in, while an agent runs there.
     #[must_use]
-    pub fn branch_of(&self, session: SessionId) -> Option<&AgentBranch> {
+    pub fn worktree_of(&self, session: SessionId) -> Option<&Worktree> {
         self.agent_state(session)?;
-        self.handoff.branches.get(&session)
+        self.handoff.worktrees.get(&session)
     }
 
     /// Tell the workers which shell is in front of the person: the focused tile's, while the

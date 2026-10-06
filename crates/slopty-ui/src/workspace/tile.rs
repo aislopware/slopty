@@ -1089,13 +1089,8 @@ impl WorkspaceView {
         let heading = SharedString::from(spoken_heading(&kind, &title));
         // Every header lies inside its panel's top, on the panel's own surface with nothing
         // between it and the body, focused or not, so a tile reads as one piece and the strip
-        // as panels, not as rows of bands. A page or a remote picture is another program's
-        // surface, never quite the content's, so a hairline parts its header from it: there
-        // the two surfaces meet anyway.
-        let foreign = matches!(
-            item.kind,
-            ItemKind::Browser { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
-        );
+        // as panels, not as rows of bands. A page or a remote picture meets the header on
+        // its own edge, with no rule between them: a rule there was the canvas's last divider.
         // At the overview's small zoom the miniature's label names the tile; a band on top of it in
         // another step, and a hairline under only some of them, read as tiles half drawn.
         let shapes = k < SHAPES_BELOW;
@@ -1114,9 +1109,6 @@ impl WorkspaceView {
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
             .cursor_grab()
-            .when(!shapes && foreign, |el| {
-                el.border_b(kit::HAIR).border_color(hsla(s.border_subtle))
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
@@ -1224,7 +1216,7 @@ impl WorkspaceView {
             _ => None,
         };
         let thread_place = thread.and_then(|thread| self.header_place(thread));
-        let worktree = agent.and_then(|(session, _)| self.branch_of(session)?.worktree.clone());
+        let worktree = agent.and_then(|(session, _)| self.worktree_of(session).cloned());
         let mut branch = thread_place.clone().map_or_else(Vec::new, |at| {
             self.place_chips(placed.tile, at, worktree.as_ref(), chrome, cx)
         });
@@ -1648,9 +1640,10 @@ impl WorkspaceView {
     /// A tabbed column's tab row: a tab per tile in the column, each with its leading slot,
     /// its title and a close button that shows on the tab's hover (always on the one shown).
     ///
-    /// The row sits on the content as a single header does. A tab is a row's height and
-    /// radius: the shown one rests on the hover step's fill, the rest are quiet words that take
-    /// it under the pointer, so the tabs read as objects on the header, not as boxes in a band.
+    /// The row lies on the panel as a single header does, and fades at an edge while tabs lie
+    /// hidden past it. A tab is a row's height and radius: the shown one rests on the hover
+    /// step's fill, the rest are quiet words that take it under the pointer, so the tabs read
+    /// as objects on the header, not as boxes in a band.
     fn render_tabs(
         &self,
         placed: &Placed,
@@ -1808,12 +1801,19 @@ impl WorkspaceView {
             if *last != placed.tile.item || (*wide - width).abs() >= 0.5 || wide.is_nan() {
                 *last = placed.tile.item;
                 *wide = width;
-                handle.scroll_to_item(shown_ix);
+                // The first tab is brought in as far as the row's start, its pad with it: a
+                // reveal stops at the tab's own edge, and would leave the pad hidden and faded.
+                if shown_ix == 0 {
+                    handle.set_offset(gpui::point(px(0.0), px(0.0)));
+                } else {
+                    handle.scroll_to_item(shown_ix);
+                }
             }
             handle.clone()
         };
-        div()
+        let row = div()
             .id(SharedString::from(format!("tab-row-{}", first.as_uuid())))
+            .debug_selector(move || format!("tab-row-{}", first.as_uuid()))
             .flex_1()
             .min_w_0()
             .h_full()
@@ -1822,9 +1822,13 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xxs * k))
             .pl(px((theme.spacing.inset() - theme.spacing.xs) * k))
             .overflow_x_scroll()
-            .track_scroll(&handle)
-            .children(tabs)
-            .into_any_element()
+            .track_scroll(&handle);
+        // An edge past which tabs lie hidden fades out per pixel, as deep as they run past it,
+        // so a row cut at its end reads as more tabs, not as a tab cut in half; a row that fits
+        // fades nowhere. The fade is the tabs' own, over the panel's surface and the shown tab's
+        // fill alike, never a wash in a colour of its own.
+        let fade = gpui::EdgeFade::x(px(theme.spacing.xl * k));
+        gpui::edge_fade(row.children(tabs), fade).hidden_by_scroll(&handle).into_any_element()
     }
 
     /// How the tile is doing, in the one status vocabulary: its agent's state (as its thread
@@ -2000,46 +2004,44 @@ impl WorkspaceView {
         session: SessionId,
         chrome: Chrome,
     ) -> Vec<(&'static str, kit::Priority, gpui::AnyElement)> {
-        let Some(branch) = self.branch_of(session) else { return Vec::new() };
+        let Some(tree) = self.worktree_of(session) else { return Vec::new() };
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = chrome.k;
         let hint_theme = std::rc::Rc::new(theme.clone());
-        let worktree = branch.worktree.as_ref().map(|tree| {
-            let muted = hsla(s.text_muted);
-            let hint = tree.branch.as_ref().map_or_else(
-                || format!("Worktree {}", tree.name),
-                |b| format!("Worktree {} on {b}", tree.name),
-            );
-            let (hint, path, hint_theme) =
-                (SharedString::from(hint), SharedString::from(tree.path.clone()), hint_theme);
-            div()
-                .id("worktree")
-                .debug_selector(move || format!("worktree-{}", id.as_uuid()))
-                .role(Role::Label)
-                .aria_label(hint.clone())
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xxs * k))
-                .text_color(muted)
-                .map(kit::hint_timing)
-                .tooltip(move |_window, cx| {
-                    let (hint, path) = (hint.clone(), path.clone());
-                    let theme = std::rc::Rc::clone(&hint_theme);
-                    cx.new(|_| kit::Hint::new(hint, path, theme)).into()
-                })
-                .child(
-                    crate::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
-                        .size(px(IconSize::Inline.slot(theme) * k)),
-                )
-                .child(
-                    ChromeText::new(tree.name.clone(), px(theme.typography.small()), k)
-                        .fill()
-                        .zooming(chrome.zooming),
-                )
-                .into_any_element()
-        });
-        worktree.map(|tree| ("worktree", kit::Priority::LOW, tree)).into_iter().collect()
+        let muted = hsla(s.text_muted);
+        let hint = tree.branch.as_ref().map_or_else(
+            || format!("Worktree {}", tree.name),
+            |b| format!("Worktree {} on {b}", tree.name),
+        );
+        let (hint, path, hint_theme) =
+            (SharedString::from(hint), SharedString::from(tree.path.clone()), hint_theme);
+        let worktree = div()
+            .id("worktree")
+            .debug_selector(move || format!("worktree-{}", id.as_uuid()))
+            .role(Role::Label)
+            .aria_label(hint.clone())
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs * k))
+            .text_color(muted)
+            .map(kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                let (hint, path) = (hint.clone(), path.clone());
+                let theme = std::rc::Rc::clone(&hint_theme);
+                cx.new(|_| kit::Hint::new(hint, path, theme)).into()
+            })
+            .child(
+                crate::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
+                    .size(px(IconSize::Inline.slot(theme) * k)),
+            )
+            .child(
+                ChromeText::new(tree.name.clone(), px(theme.typography.small()), k)
+                    .fill()
+                    .zooming(chrome.zooming),
+            )
+            .into_any_element();
+        vec![("worktree", kit::Priority::LOW, worktree)]
     }
 
     /// The pull request of `item`'s agent's branch, as its thread's row in its worker's table

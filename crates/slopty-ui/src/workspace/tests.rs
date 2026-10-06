@@ -54,6 +54,22 @@ fn still_workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut Visu
     workspace(cx)
 }
 
+/// Whether the last frame docked the navigator, read from the workspace rather than from debug
+/// bounds: a measurement runs in release, where GPUI records none.
+fn navigator_docked(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> bool {
+    view.read_with(cx, |v, _| v.nav.drawn == Some(navigator::Mode::Docked))
+}
+
+/// Where the last frame drew `tile`, from the strip's own placements: in release too, where
+/// GPUI records no debug bounds.
+fn drawn_at(
+    view: &Entity<WorkspaceView>,
+    cx: &VisualTestContext,
+    tile: TileRef,
+) -> Option<Bounds<Pixels>> {
+    view.read_with(cx, |v, _| v.tile_bounds(tile))
+}
+
 fn workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);

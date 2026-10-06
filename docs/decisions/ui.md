@@ -8102,7 +8102,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Touch** has no hover and draws none of them. The header's long press holds the other
     faces, reload, fullscreen and close, and a phone's "…" lists the same rows.
   - **A pull request** is read from the thread's row (`ThreadRow.pull`), for every agent alike,
-    not from Claude Code's status line. Its glyph is drawn by where it stands (open, merged,
+    not from Claude Code's status line. The client keeps only the worktree a status line names
+    and drops its pull request on arrival, so the header has one source (2026-10-06,
+    `.research/readiness-2026-10-07.md` rank 15). Its glyph is drawn by where it stands (open, merged,
     closed, a draft) in that state's ink, then its number. The navigator's row shows it on its
     second line, the glyph inked only where it needs the person or is ready to merge.
   - **The navigator's machine and project heads** set the name at the section role's weight
@@ -8293,11 +8295,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     from the first column and the last row from the window's bottom. The layout keeps its
     columns flush. The frame sets the strip half a gutter in from its sides and bottom, and
     each panel stands half a gutter in from its place, so widths, scrolling and every handler's
-    geometry stay the layout's. A terminal's grid is sized to its panel. The clip is the
-    frame's, so a panel sliding off is cut at the window's edge.
+    geometry stay the layout's. A terminal's grid is sized to its panel. The strip clips its
+    own tiles, so a panel sliding off is cut half a gutter in from the window's edge. Without
+    that clip a frame of motion cost about a quarter of a millisecond more, as every panel
+    past the edge was painted in full (`docs/MEASUREMENTS.md`, the same entry).
   - **No hairlines.** The dividers between tiles and the navigator's and the rail's trailing
     hairline are deleted: the gutter is the edge. A header lies inside its panel's top with no
-    fill and no rule. The focused panel is unmarked; focus stays the title's tone and weight.
+    fill and no rule, a page's or a remote picture's too: the rule they kept under the header
+    was the last divider on the canvas. The focused panel is unmarked; focus stays the title's
+    tone and weight.
+  - **Tabs.** A tabbed column's tab row fades at an edge only where tabs lie hidden past it
+    (`gpui::edge_fade(..).hidden_by_scroll`), so a row that fits has no fade and a scrolled one
+    says which way the rest lies. Showing the first tab scrolls the row home, its leading pad
+    included, so no fade is left at the start.
   - **Handles and drops.** The resize handle sits in the gutter, as tall as the panels, its
     accent line down the gutter's middle. A drop's line runs down the gutter where the column
     opens, and its wash is the panel the tile would stand as, rounded as one.
@@ -8315,7 +8325,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     its screen shows one tile at a time. A Mac window narrower than `phone_below` lays out as a
     phone, so `window-minimum` (375 pt) shows one full-bleed column. The iPad keeps gutters.
   - **The overview.** A workspace's block is the canvas in small, its panels standing on it,
-    and the words above it start on the panels' glyphs.
+    and the words above it start on the panels' glyphs. A panel's radius follows the zoom down
+    to the miniatures' zoom and holds there. A miniature wears its words at the chrome's size,
+    and scaled further, its corners read as square inside the block's round ones.
   - **Glass across the frame.** The material is under the window whenever it can be, not only
     while the navigator docks. The frame lays the canvas on it at `alpha::GLASS` wherever the
     canvas shows: under a docked navigator or the rail, in the title bar (which paints no ground
@@ -8340,8 +8352,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a_panel_stands_on_the_canvas_with_its_corners_covered, a_flat_panel_is_its_surface_alone}`,
     `kit::tests::a_tile_stands_on_a_panel`,
     `workspace::tests::tiles::{a_tile_stands_on_a_panel_and_its_header_on_it,
-    a_gutter_parts_every_neighbour, a_phone_tile_is_full_bleed}`,
+    a_gutter_parts_every_neighbour, a_phone_tile_is_full_bleed,
+    a_tab_row_fades_only_where_tabs_lie_hidden}`,
     `workspace::tests::strip_marks::{the_handle_sits_in_the_gutter_and_resizes_the_column,
+    a_small_overview_draws_tiles_as_miniatures,
     the_drop_line_runs_down_the_gutter_and_a_join_washes_its_panel}`,
     `workspace::tests::frame::on_glass_the_frame_shows_the_material_and_the_panels_stay_opaque`,
     `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight` (the

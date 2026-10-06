@@ -158,22 +158,24 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 
 /// Every tile stands on a panel: the content's surface rounded at `radii.md`, its corners
 /// covered with the canvas it stands on and its ring in the quiet border, the focused one
-/// included. Every header lies inside its panel's top with no fill and no rule of its own:
-/// focus is the title's tone and weight
+/// included. Every header lies inside its panel's top with no fill and no rule of its own, a
+/// remote window's too: focus is the title's tone and weight
 /// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`).
 #[gpui::test]
 fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let remote = ItemKind::Window { window: slopty_core::WindowId(7) };
+    let window = arrives(&view, cx, &fake, remote, 2);
+    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
     assert_eq!(focused(&view, cx), Some(second));
     cx.run_until_parked();
     let theme = Theme::default();
     let scale = cx.update(|window, _| window.scale_factor());
     let content = gpui::Background::from(crate::colors::hsla(theme.content()));
     let ring = crate::colors::hsla(theme.surfaces.border_subtle);
-    for tile in [first, second] {
+    for tile in [first, window, second] {
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         let quads = quads_at(cx, bounds);
         let ground = quads.iter().find(|q| q.background == content).expect("its surface");
@@ -938,6 +940,36 @@ fn a_narrow_tab_row_keeps_its_shown_tab_in_view(cx: &mut TestAppContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert!(tab_in_view(&view, cx, last), "and the last again, once shown");
+}
+
+/// A tab row fades, per pixel, only at an edge past which tabs lie hidden: nowhere while every
+/// tab fits, its leading edge once the shown last tab has scrolled the first ones out, and its
+/// trailing edge once the shown first tab leaves the last ones past it. The panel under the
+/// row never fades.
+#[gpui::test]
+fn a_tab_row_fades_only_where_tabs_lie_hidden(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let tabs = four_tabs(&view, cx);
+    let (first, last) = (tabs[0], tabs[3]);
+    let row: &'static str = Box::leak(format!("tab-row-{}", first.item.as_uuid()).into_boxed_str());
+    let faded = |cx: &mut VisualTestContext| {
+        let at = cx.debug_bounds(row).expect("the tab row");
+        cx.update(|window, _| crate::retained::faded_edges(window, at))
+    };
+    column_at(&view, cx, last, 720.0);
+    assert_eq!(faded(cx), gpui::Edges::default(), "every tab fits: no fade");
+    column_at(&view, cx, last, 312.0);
+    let edges = faded(cx);
+    assert!(edges.left && !edges.right, "the first tabs hidden before it: {edges:?}");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let edges = faded(cx);
+    assert!(!edges.left && edges.right, "the last tabs hidden past it: {edges:?}");
+    let panel = view.read_with(cx, |v, _| v.tile_bounds(first)).expect("the column");
+    let under = cx.update(|window, _| crate::retained::faded_edges(window, panel));
+    assert_eq!(under, gpui::Edges::default(), "the panel does not fade");
 }
 
 /// A tab not shown keeps its close out of its row at rest, so a narrow tab keeps its mark and

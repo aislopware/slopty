@@ -839,6 +839,11 @@ impl WorkspaceView {
             .relative()
             .flex_1()
             .w_full()
+            // The strip clips its own tiles, so a panel sliding off is cut half a gutter in
+            // from the window's edge and the scene drops every primitive past it: without the
+            // clip, a frame of motion costs a quarter of a millisecond more
+            // (`docs/MEASUREMENTS.md`).
+            .overflow_hidden()
             .capture_pinch(cx.listener(Self::pinch))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -857,10 +862,17 @@ impl WorkspaceView {
 
     /// What the strip's panels stand on at the zoom `k`: the frame's ground, the canvas or the
     /// canvas on glass, which covers their corners. A phone's are full-bleed, as its screen
-    /// shows one tile at a time edge to edge.
+    /// shows one tile at a time edge to edge. The radius follows the zoom down to the
+    /// overview's miniatures ([`super::tile::SHAPES_BELOW`]) and holds there: a miniature wears
+    /// its words at the chrome's size, and a corner scaled further reads as square inside the
+    /// workspace's round block, so a card and the panel it stands for would not be one shape.
     pub(super) fn stand(&self, k: f32) -> kit::Stand {
         let ground = self.nav.glass.ground(&self.theme);
-        if self.phone { kit::Stand::flat(ground) } else { kit::Stand::on(&self.theme, ground, k) }
+        if self.phone {
+            kit::Stand::flat(ground)
+        } else {
+            kit::Stand::on(&self.theme, ground, k.max(super::tile::SHAPES_BELOW))
+        }
     }
 
     /// How far a panel stands back from its place in the layout at the zoom `k`, on every
@@ -953,7 +965,7 @@ impl WorkspaceView {
     fn overview_blocks(&self, frame: &Frame, cx: &Draw<'_, Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        // A base unit, so the panes' square corners sit well inside the block's round ones.
+        // A base unit, so the panes' corners sit well inside the block's round ones.
         let pad = theme.spacing.sm;
         let workspaces = self.layout.workspaces();
         let active = self.layout.active_workspace();

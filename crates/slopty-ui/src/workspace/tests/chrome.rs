@@ -64,7 +64,7 @@ fn measure_an_echo_frame_beside_the_chrome(cx: &mut TestAppContext) {
     let sessions = crowd(&view, cx, &studio, 60, 60);
     let last = *sessions.last().expect("a shell");
     let terminal = view.read_with(cx, |v, _| v.terminal(last).cloned()).expect("attached");
-    assert!(cx.debug_bounds("navigator").is_some());
+    assert!(navigator_docked(&view, cx));
     let time = |cx: &mut VisualTestContext, echo: bool| {
         let mut took = Vec::with_capacity(FRAMES);
         for n in 0..WARM + FRAMES {
@@ -104,7 +104,7 @@ fn measure_an_echo_frame_beside_the_chrome(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(terminal_focused(&view, cx, last), "the dense shell has the keyboard");
     let beside = view.read_with(cx, |v, _| v.terminal(neighbour).cloned()).expect("attached");
-    assert!(cx.debug_bounds(selector("item", focused_tile.item)).is_some(), "drawn");
+    assert!(drawn_at(&view, cx, focused_tile).is_some(), "drawn");
     let mut took = Vec::with_capacity(FRAMES);
     let drawn = terminal.read_with(cx, |t, _| t.renders());
     for n in 0..WARM + FRAMES {
@@ -285,7 +285,7 @@ fn measure_a_frame_of_motion_beside_the_chrome(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _sessions = crowd(&view, cx, &studio, 60, 60);
-    assert!(cx.debug_bounds("navigator").is_some());
+    assert!(navigator_docked(&view, cx));
     // From where the layout's clock already stands: setting the workspace up ran on real time
     // (the first symbol drawn in a test binary can take seconds), and a clock held behind it
     // would spend frames catching up before anything moved.
@@ -889,7 +889,7 @@ fn measure_a_pointer_frame_beside_the_chrome(cx: &mut TestAppContext) {
         v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    let body = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+    let body = drawn_at(&view, cx, tile).expect("drawn");
     let strip = view.read_with(cx, |v, _| v.strip_host.entity_id());
     let terminal = view.read_with(cx, |v, _| v.terminal(last).cloned()).expect("attached");
     let mut took = Vec::with_capacity(FRAMES);

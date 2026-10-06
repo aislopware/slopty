@@ -15501,14 +15501,37 @@ three times, p50 in ms:
 
 - The keyboard moving costs about 4 % more, 0.03 to 0.08 ms, in every round. The large
   registry's frame moves within its noise.
-- `measure_a_frame_of_motion_beside_the_chrome`, `measure_an_echo_frame_beside_the_chrome`,
-  `measure_a_pointer_frame_beside_the_chrome` and `measure_a_stream_frame_beside_the_chrome`
-  fail at their first check, that the navigator is drawn, in both arms. They were not used.
+- Four more measurements had stopped running. The motion, echo and pointer ones checked that
+  the navigator was drawn through debug bounds, which a release build does not record, so they
+  failed only in release. The stream one also found its shell in another workspace, as a
+  shell now goes home to its project's workspace. They now read the navigator's drawn mode
+  and the tile's drawn bounds from the view's state, and the stream one moves its shell into
+  a column beside the window first. Both arms run the fixed tests.
+
+| measurement, p50 ms | before | after |
+| --- | --- | --- |
+| a frame of motion, 60 shells + 60 notes, three rounds | 0.972, 0.915, 0.910 | 0.947, 0.963, 0.946 |
+| the workspace's own frame beside the chrome (echo test) | 1.091 | 1.131 |
+| a pointer frame beside the chrome | 0.081 | 0.084 |
+| a stream frame beside the chrome | 0.255 | 0.251 |
+| the shell's echo beside the stream | 0.135 | 0.139 |
+| the workspace's own frame beside the stream | 1.909 | 1.963 |
+
+- Before the strip's clip came back, the frame of motion cost about 1.2 ms after against
+  0.97 before, four rounds in a row. The panels had taken the strip's own `overflow_hidden`
+  away, so panels sliding past the window's edge were painted in full, and every primitive
+  past the edge reached the scene. A variant without the panels' two canvases kept the
+  cost, and one with the clip alone put back removed it. The strip clips again, half a
+  gutter in from the window's edge, and every row above is within its noise.
 
 ```sh
 (cd target/scratch-panels/tree && CARGO_TARGET_DIR=../target cargo test -p slopty-ui --release --lib --no-run)
 CARGO_TARGET_DIR=target/scratch-panels/target cargo test -p slopty-ui --release --lib --no-run
 <binary> --ignored --exact --nocapture --test-threads 1 \
   workspace::tests::chrome::measure_the_keyboard_moving_beside_the_chrome \
-  workspace::tests::measure::measure_a_frame_over_a_large_registry
+  workspace::tests::measure::measure_a_frame_over_a_large_registry \
+  workspace::tests::chrome::measure_a_frame_of_motion_beside_the_chrome \
+  workspace::tests::chrome::measure_an_echo_frame_beside_the_chrome \
+  workspace::tests::chrome::measure_a_pointer_frame_beside_the_chrome \
+  workspace::tests::measure::measure_a_stream_frame_beside_the_chrome
 ```

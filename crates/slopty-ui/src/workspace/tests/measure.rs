@@ -190,12 +190,24 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
             },
             cx,
         );
-        v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("navigator").is_some());
+    // Each shell comes home to its project's workspace, so the last one is moved into a column
+    // of its own just before the window's, in the window's workspace, and drawn beside it.
     let shell_tile = view.read_with(cx, |v, _| v.tile_of_session(shell)).expect("the shell's tile");
-    assert!(cx.debug_bounds(selector("item", shell_tile.item)).is_some(), "the shell is drawn");
+    view.update_in(cx, |v, _w, cx| {
+        let at = v.layout.position(tile).expect("the window is placed");
+        let target = slopty_client::layout::DropTarget::NewColumn {
+            workspace: at.workspace,
+            index: at.column,
+        };
+        v.layout.move_tile(shell_tile, target);
+        v.focus_tile(tile, cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(navigator_docked(&view, cx));
+    assert!(drawn_at(&view, cx, shell_tile).is_some(), "the shell is drawn");
     let screen = view.read_with(cx, |v, _| v.screen(tile.item).cloned()).expect("streaming");
     let picture = core_video::pixel_buffer::CVPixelBuffer::new(
         core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
