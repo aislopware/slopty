@@ -1,0 +1,27 @@
+[package]
+name = "slopty-push"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty's push path: the sealed body, the APNs request, the provider token and the relay's checks"
+
+[lints]
+workspace = true
+
+[features]
+default = [ "getrandom" ]
+# What draws randomness: making keys and sealing. The relay only checks and forwards.
+getrandom = [ "dep:getrandom", "hpke/getrandom" ]
+
+[dependencies]
+blake3.workspace = true
+data-encoding.workspace = true
+ed25519-dalek.workspace = true
+getrandom = { workspace = true, optional = true }
+hpke.workspace = true
+p256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

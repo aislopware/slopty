@@ -7,6 +7,8 @@ extend-ignore-re = [
     "`[0-9A-Fa-f]{6}`",
     # terminfo names ghostty's entry uses: shifted Home and its modifier variants.
     "kHOM[0-9]?",
+    # A PEM body's base64 lines (`slopty_push::provider`'s test key).
+    "(?m)^[A-Za-z0-9+/]{40,}={0,2}$",
 ]
 
 [default.extend-words]

@@ -29,10 +29,15 @@ bstr = { version = "1" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "extern_crate_alloc", "wasm_simd"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
+chacha20 = { version = "0.10", default-features = false, features = ["rng", "xchacha"] }
 chrono = { version = "0.4", features = ["serde"] }
 collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
+crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
+ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
+curve25519-dalek = { version = "5", default-features = false, features = ["digest", "precomputed-tables", "zeroize"] }
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 fastrand = { version = "2", features = ["js"] }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
 form_urlencoded = { version = "1" }
@@ -41,9 +46,12 @@ futures-core = { version = "0.3" }
 futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
+hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
+hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 icu_locale_core = { version = "2", default-features = false, features = ["alloc", "zerovec"] }
 icu_provider = { version = "2", default-features = false, features = ["alloc", "baked"] }
 image = { version = "0.25", default-features = false, features = ["dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
@@ -71,6 +79,7 @@ serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
 stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -84,6 +93,7 @@ writeable = { version = "0.6", default-features = false, features = ["alloc"] }
 yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
+zeroize = { version = "1", default-features = false, features = ["alloc", "zeroize_derive"] }
 zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
 zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
@@ -119,7 +129,6 @@ concurrent-queue = { version = "2" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["runtime_shaders", "wayland", "x11"] }
@@ -142,23 +151,30 @@ objc2-user-notifications = { version = "0.3" }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
+sha2 = { version = "0.11" }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
+ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
+digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
 fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
+sha2 = { version = "0.11" }
+subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
+zeroize = { version = "1", default-features = false, features = ["alloc", "zeroize_derive"] }
 
 [target.aarch64-apple-ios.dependencies]
 concurrent-queue = { version = "2" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -173,22 +189,29 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSLocale", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIGeometry", "UIGraphics", "UIImage", "UIImageConfiguration", "UIImageSymbolConfiguration", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "objc2-core-graphics", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+sha2 = { version = "0.11" }
 
 [target.aarch64-apple-ios.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
+ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
+digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
 fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+sha2 = { version = "0.11" }
+subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
+zeroize = { version = "1", default-features = false, features = ["alloc", "zeroize_derive"] }
 
 [target.aarch64-apple-ios-sim.dependencies]
 concurrent-queue = { version = "2" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -203,14 +226,22 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSLocale", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIGeometry", "UIGraphics", "UIImage", "UIImageConfiguration", "UIImageSymbolConfiguration", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "objc2-core-graphics", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+sha2 = { version = "0.11" }
 
 [target.aarch64-apple-ios-sim.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
+ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
+digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
 fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+sha2 = { version = "0.11" }
+subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
+zeroize = { version = "1", default-features = false, features = ["alloc", "zeroize_derive"] }
 
 ### END HAKARI SECTION

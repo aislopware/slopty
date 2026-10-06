@@ -61,6 +61,12 @@ memchr = "2.8.3"
 # Clipboard and file-transfer digests: equal digests are the same contents (echo backstop,
 # end-to-end file check).
 blake3 = "1.8.7"
+# The push path (`slopty-push`): the seal to the phone, the provider token, the relay's
+# signatures.
+hpke = { version = "0.14.1", default-features = false, features = [ "alloc", "x25519", "chacha" ] }
+ed25519-dalek = "3.0.0"
+p256 = { version = "0.14.0", default-features = false, features = [ "ecdsa", "pem" ] }
+getrandom = "0.4.3"
 # The terminal's shaped-word keys: several times cheaper than SipHash on many short writes
 # (MEASUREMENTS, "the word cache").
 rustc-hash = "2.1.3"
