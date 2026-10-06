@@ -1057,3 +1057,41 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
         }
     }
 }
+
+/// Where pictures live in Photos (iOS), the "+" menu offers its picker right after the Files
+/// one, and picking it asks the workspace to show it; with no Photos to offer, the row is not
+/// there.
+#[gpui::test]
+fn the_add_menu_offers_photos_where_they_live(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::thread("edit");
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let open = |cx: &mut VisualTestContext| {
+        let add = cx.debug_bounds("thread-attach").expect("the + button").center();
+        cx.simulate_click(add, Modifiers::none());
+        cx.run_until_parked();
+    };
+    open(cx);
+    assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the menu is open");
+    assert!(cx.debug_bounds("thread-add-menu-photos").is_none(), "no Photos on the Mac");
+    open(cx);
+
+    view.update(cx, |v, _| v.offer_photos());
+    open(cx);
+    let files = cx.debug_bounds("thread-add-menu-files").expect("Attach files");
+    let photos = cx.debug_bounds("thread-add-menu-photos").expect("Photos");
+    assert!(photos.top() >= files.bottom() - px(0.5), "right after the Files picker");
+    let asked = super::asked(cx, &view);
+    cx.simulate_click(photos.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        *asked.borrow(),
+        [crate::conversation::thread::view::ThreadViewEvent::PickPhotos],
+        "it asks for the Photos picker"
+    );
+    assert!(cx.debug_bounds("thread-add-menu").is_none(), "and the menu closes");
+}

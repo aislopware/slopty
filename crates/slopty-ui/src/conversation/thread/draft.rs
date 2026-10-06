@@ -26,6 +26,9 @@ pub struct DraftSent {
     pub mode: Option<String>,
     /// The effort chosen, by the agent's id; its default when `None`.
     pub effort: Option<String>,
+    /// The other agents the same message starts on, each in a new worktree of its own
+    /// ([`Draft::toggle_also`]), at their defaults.
+    pub also: Vec<AgentId>,
 }
 
 /// Where a thread works, by name: its folder's, its machine's, and whether it is a new
@@ -73,6 +76,11 @@ pub struct Draft {
     sent: bool,
     /// First messages sent before, newest first: what ↑ brings back.
     recall: Vec<String>,
+    /// The other agents the machine can start the same message on beside it, for a start in a
+    /// new worktree; none for one in the folder itself, where two agents would share a tree.
+    others: Vec<AgentId>,
+    /// Those of [`Self::others`] chosen to run it too, in the order chosen.
+    also: Vec<AgentId>,
 }
 
 impl EventEmitter<DraftSent> for Draft {}
@@ -125,7 +133,46 @@ impl Draft {
             created_ms: WallMs::ZERO,
         });
         state.commands = commands;
-        Self { state, place, sent: false, recall }
+        Self { state, place, sent: false, recall, others: Vec::new(), also: Vec::new() }
+    }
+
+    /// The same draft, offering to start its message on `others` too, each in a worktree of
+    /// its own; offered only when it starts in a new worktree itself.
+    #[must_use]
+    pub fn with_others(self, others: Vec<AgentId>) -> Self {
+        let mine = self.state.meta.agent.clone();
+        let others = if self.place.worktree {
+            others.into_iter().filter(|a| *a != mine).collect()
+        } else {
+            Vec::new()
+        };
+        Self { others, ..self }
+    }
+
+    /// The other agents it can start its message on as well.
+    #[must_use]
+    pub fn others(&self) -> &[AgentId] {
+        &self.others
+    }
+
+    /// The other agents chosen to run its message too.
+    #[must_use]
+    pub fn also(&self) -> &[AgentId] {
+        &self.also
+    }
+
+    /// Choose `agent` to run the message too, or no longer; one it does not offer is passed
+    /// over.
+    pub fn toggle_also(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        if !self.others.contains(agent) {
+            return;
+        }
+        if let Some(at) = self.also.iter().position(|a| a == agent) {
+            self.also.remove(at);
+        } else {
+            self.also.push(agent.clone());
+        }
+        cx.notify();
     }
 
     /// The state the view draws.
@@ -172,6 +219,7 @@ impl Draft {
                     model: meters.model_id.clone(),
                     mode: meters.mode.clone(),
                     effort: meters.effort.clone(),
+                    also: self.also.clone(),
                 });
             }
             _ => return,

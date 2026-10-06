@@ -31,6 +31,7 @@ use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
 use super::actions::{ReviewChanges, StartThread};
+use crate::conversation::thread::ThreadView;
 use crate::review::{ReviewEvent, ReviewView};
 
 /// The palette's line that opens a folder's changes.
@@ -50,25 +51,66 @@ pub(super) struct Reviews {
 }
 
 impl WorkspaceView {
-    /// Open the review a thread view asked for since the last frame: go to its tile when one is
-    /// open, else add one on the worker whose agent runs the thread.
+    /// Open the reviews thread views asked for since the last frame, in order: go to each
+    /// one's tile when one is open, else add one on the worker whose agent runs the thread.
     pub(super) fn settle_reviews(&mut self, cx: &mut Context<Self>) {
-        let Some((key, thread, view)) = self.take_review() else { return };
-        self.hear_review(key, thread, &view, cx);
-        if let Some(id) = self.review_item(thread) {
-            self.go_to(id, cx);
-            return;
+        while let Some((key, thread, view)) = self.take_review() {
+            self.hear_review(key, thread, &view, cx);
+            if let Some(id) = self.review_item(thread) {
+                self.go_to(id, cx);
+                continue;
+            }
+            let item = Item {
+                id: ItemId::new(),
+                kind: ItemKind::Review { thread },
+                name: None,
+                facts: std::collections::BTreeMap::new(),
+            };
+            tracing::info!(id = %item.id, %thread, "open review");
+            self.reviews.opening.insert(thread);
+            self.propose(key, ItemOp::Add(item), cx);
+            cx.notify();
         }
-        let item = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Review { thread },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        tracing::info!(id = %item.id, %thread, "open review");
-        self.reviews.opening.insert(thread);
-        self.propose(key, ItemOp::Add(item), cx);
+    }
+
+    /// Open the reviews of `thread`'s runs on `key`, side by side, its own first: every thread
+    /// the same first message started there in a worktree of the same clone ([`runs_of`]).
+    pub(super) fn review_runs(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        let rows: Vec<ThreadRow> = hub.read(cx).threads().rows().rows.values().cloned().collect();
+        let mut runs = runs_of(&rows, thread);
+        runs.retain(|t| *t != thread);
+        runs.insert(0, thread);
+        self.faces_dirty = true;
+        for run in runs {
+            self.ask_review(key, run);
+        }
         cx.notify();
+    }
+
+    /// Tell each thread view how many runs its first message has ([`ThreadView::set_runs`]),
+    /// as its worker's table says.
+    pub(super) fn count_runs(&self, cx: &mut Context<Self>) {
+        let mut views: Vec<(WorkerKey, Entity<ThreadView>)> = Vec::new();
+        for (session, view) in self.thread_faces() {
+            if let Some(key) = self.worker_of_session(*session) {
+                views.push((key, view.clone()));
+            }
+        }
+        for (item, view) in self.thread_items() {
+            if let Some(tile) = self.tile_of(*item) {
+                views.push((tile.worker, view.clone()));
+            }
+        }
+        let mut tables: HashMap<WorkerKey, Vec<ThreadRow>> = HashMap::new();
+        for (key, view) in views {
+            let Some(hub) = self.held_hub(key) else { continue };
+            let rows = tables
+                .entry(key)
+                .or_insert_with(|| hub.read(cx).threads().rows().rows.values().cloned().collect());
+            let runs = runs_of(rows, view.read(cx).thread()).len();
+            view.update(cx, |v, cx| v.set_runs(runs, cx));
+        }
     }
 
     /// Follow the registries: a review whose item is gone lets its thread go.
@@ -336,4 +378,38 @@ fn full_path(path: &str, home: Option<&str>) -> String {
         }
         _ => path.to_owned(),
     }
+}
+
+/// Where a thread's worktree came from, as its runs share it: the folder its clone keeps
+/// worktrees in and the name's words, without the four hex digits that tell runs apart
+/// (`.claude/worktrees/<words>-<hex>`, [`super::starting::worktree_name`]). `None` for a thread
+/// in no such worktree, or one whose name is only its agent's, which no message named.
+fn run_key(row: &ThreadRow) -> Option<(&str, &str)> {
+    const DIR: &str = "/.claude/worktrees/";
+    let path = row.repo.as_deref().or(row.cwd.as_deref())?;
+    let at = path.find(DIR)?;
+    let (clone, rest) = (path.get(..at)?, path.get(at.saturating_add(DIR.len())..)?);
+    let name = rest.split('/').next()?;
+    let (words, hex) = name.rsplit_once('-')?;
+    let tail = hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    let agent: String =
+        row.agent.0.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    (tail && !words.is_empty() && words != agent).then_some((clone, words))
+}
+
+/// The runs `thread`'s first message has among `rows`, itself among them: the threads in
+/// worktrees of the same clone named by the same words ([`run_key`]), subagents aside. Only
+/// `thread` when it has none.
+pub(super) fn runs_of(rows: &[ThreadRow], thread: ThreadId) -> Vec<ThreadId> {
+    let Some(mine) = rows.iter().find(|r| r.id == thread) else { return vec![thread] };
+    let Some(key) = run_key(mine) else { return vec![thread] };
+    let mut runs: Vec<ThreadId> = rows
+        .iter()
+        .filter(|r| r.parent.is_none() && run_key(r) == Some(key))
+        .map(|r| r.id)
+        .collect();
+    if !runs.contains(&thread) {
+        runs.push(thread);
+    }
+    runs
 }

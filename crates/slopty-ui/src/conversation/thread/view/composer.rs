@@ -852,6 +852,17 @@ impl ThreadView {
                 cx.notify();
             });
         }));
+        // A phone's and a tablet's pictures are in Photos, which the Files picker cannot reach.
+        if self.photos {
+            let to = this.clone();
+            menu.push(kit::MenuItem::new("photos", PICK_PHOTOS, move |_w, cx| {
+                let _gone = to.update(cx, |this, cx| {
+                    this.add_open = false;
+                    cx.emit(ThreadViewEvent::PickPhotos);
+                    cx.notify();
+                });
+            }));
+        }
         if !draft.starts_with('/') {
             let to = this.clone();
             menu.push(
@@ -879,6 +890,23 @@ impl ThreadView {
             })
             .detail("@"),
         );
+        self.also_rows(&mut menu, cx);
+        if self.runs > 1 && self.draft.is_none() {
+            let to = this.clone();
+            let thread = self.thread;
+            menu.separate();
+            menu.push(kit::MenuItem::new(
+                "runs",
+                format!("Review the {} runs side by side", self.runs),
+                move |_w, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.add_open = false;
+                        cx.emit(ThreadViewEvent::ReviewRuns { thread });
+                        cx.notify();
+                    });
+                },
+            ));
+        }
         // The mode and the effort switch here while their chips are away (the default, or one
         // the agent names none of), and beside them as well.
         let meta = self.state(cx).map(|state| &state.meta);
@@ -941,6 +969,33 @@ impl ThreadView {
 }
 
 impl ThreadView {
+    /// A start's other agents, after a separator, each ticked while it is to run the same
+    /// message too, in a new worktree of its own: Orca's parallel worktrees, one prompt on
+    /// several agents to compare. Only a draft in a new worktree offers them.
+    fn also_rows(&self, menu: &mut kit::Menu, cx: &Context<Self>) {
+        let Some(draft) = self.draft.clone() else { return };
+        let (others, also) = {
+            let d = draft.read(cx);
+            (d.others().to_vec(), d.also().to_vec())
+        };
+        if others.is_empty() {
+            return;
+        }
+        menu.separate();
+        for agent in others {
+            let on = also.contains(&agent);
+            let label = format!("{ALSO_RUN} {}", super::agent_label(&agent));
+            let to = draft.downgrade();
+            let key = format!("also-{}", agent.0);
+            menu.push(
+                kit::MenuItem::new(key, label, move |_w, cx| {
+                    let _gone = to.update(cx, |d, cx| d.toggle_also(&agent, cx));
+                })
+                .mark(kit::menu::Mark::Check(on)),
+            );
+        }
+    }
+
     /// What the foot left out for want of room, at the "+" menu's end after a separator, each
     /// doing what its chip does ([`Self::composer_foot`]). The mode and the effort are in the menu
     /// already.
@@ -1078,11 +1133,17 @@ const ADD_LABEL: &str = "Add to the message";
 /// The "+" menu's row that picks files to send.
 pub(crate) const ATTACH_FILES: &str = "Attach files\u{2026}";
 
+/// The "+" menu's row that picks photos and videos to send, on iOS.
+pub(crate) const PICK_PHOTOS: &str = "Photos\u{2026}";
+
 /// The "+" menu's row that starts a command, as typing "/" does.
 pub(crate) const COMMANDS: &str = "Commands";
 
 /// The "+" menu's row that names a file or a symbol, as typing "@" does.
 pub(crate) const MENTIONS: &str = "Files and symbols";
+/// The "+" menu's row that starts a draft's message on another agent too: "Also run Codex".
+pub(crate) const ALSO_RUN: &str = "Also run";
+
 /// The "+" menu's row that lists the agent's modes.
 pub(crate) const MODES: &str = "Mode";
 /// The "+" menu's row that lists how hard the model can think.

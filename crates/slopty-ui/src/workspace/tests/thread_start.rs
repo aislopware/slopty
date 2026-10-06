@@ -874,6 +874,107 @@ fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
     assert_eq!(start.cwd, "/w/atlas", "the first folder in it, the most recent shell's");
 }
 
+/// One message on several agents: a start in a new worktree offers the machine's other agents
+/// in its "+" menu, and each one ticked runs the same message too, in a new worktree of its
+/// own, its tile a column of its own right of the first. The question says who will, the
+/// worktrees share the message's words, and the keyboard stays with the first.
+#[gpui::test]
+fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let session = SessionId::new();
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Terminal { session },
+        name: None,
+        facts: BTreeMap::new(),
+    };
+    let summary =
+        SessionSummary { repo: Some("/w/atlas".to_owned()), ..summary(session, Some("/w/atlas")) };
+    let (key, by) = (studio.key, studio.me);
+    view.update_in(cx, |v, _window, cx| {
+        v.session_opened(key, summary, cx);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: ItemOp::Add(item) }, cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_input("new worktree");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let click = |cx: &mut VisualTestContext, what: &str| {
+        let at = cx.debug_bounds(Box::leak(what.to_owned().into_boxed_str())).expect(what);
+        cx.simulate_click(at.center(), Modifiers::none());
+        settle(cx);
+    };
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-also-claude-code");
+    cx.update(|window, _| window.set_a11y_active(true));
+    settle(cx);
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let asked = "What should Codex and Claude Code each do in a new worktree of atlas?";
+    let heads: Vec<_> =
+        tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();
+    assert!(
+        tree.iter().any(|n| n.is("Heading", Some(asked))),
+        "who will, in the question: {heads:?}"
+    );
+    let first = view.read_with(cx, |v, _| v.focused()).expect("the draft's tile");
+
+    cx.simulate_input("try the other layout");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<Start> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
+            _ => None,
+        })
+        .collect();
+    let agents: Vec<&str> = sent.iter().map(|s| s.agent.0.as_str()).collect();
+    assert_eq!(agents, [AgentId::CODEX, AgentId::CLAUDE_CODE], "the first, then the other");
+    let names: Vec<&str> =
+        sent.iter().filter_map(|s| Some(s.worktree.as_ref()?.name.as_str())).collect();
+    assert_eq!(names.len(), 2, "each in a worktree: {sent:?}");
+    assert!(names.iter().all(|n| n.starts_with("try-the-other-layout-")), "{names:?}");
+    assert_ne!(names[0], names[1], "of its own");
+    assert!(sent.iter().all(|s| s.prompt.as_deref() == Some("try the other layout")));
+    assert!(sent.iter().all(|s| s.cwd == "/w/atlas"));
+    let (focused, columns) = view.read_with(cx, |v, _| {
+        let pos = |t| v.layout.position(t).map(|p| p.column);
+        (v.focused(), (pos(first), v.layout.tiles().filter_map(pos).max()))
+    });
+    assert_eq!(focused, Some(first), "the keyboard stays with the first");
+    let (Some(at), Some(last)) = columns else { panic!("placed: {columns:?}") };
+    assert_eq!(last, at.saturating_add(1), "the other run in the column right of it");
+}
+
+/// A start in the folder itself offers no other agents: two would share one tree.
+#[gpui::test]
+fn a_start_in_the_folder_runs_on_one_agent(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    studio.drain();
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let at = cx.debug_bounds("thread-attach").expect("the + button");
+    cx.simulate_click(at.center(), Modifiers::none());
+    settle(cx);
+    assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the menu is open");
+    assert!(cx.debug_bounds("thread-add-menu-also-claude-code").is_none(), "no other agent");
+}
+
 /// The folder step takes a folder typed from its root as a line of its own, and starts there.
 /// A thread's own tile offers a new worktree of the repository its agent works in, as its
 /// worker's table says, with no shell standing there.

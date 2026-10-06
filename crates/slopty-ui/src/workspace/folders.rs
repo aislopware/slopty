@@ -32,6 +32,9 @@ use crate::folder::{FolderView, FolderViewEvent, UploadFromFiles};
 pub(super) enum FilesAsk {
     /// Files picked there go up to this tile, as a drop on it.
     Import(TileRef),
+    /// Photos and videos picked from Photos go up to this tile, as a drop on it. On the Mac,
+    /// whose open panel reaches the Photos library itself, it is the open panel.
+    Photos(TileRef),
     /// This worker file comes down, and is saved where the person chooses.
     Export {
         /// The worker it is on.
@@ -423,13 +426,14 @@ impl WorkspaceView {
         #[cfg(target_os = "ios")]
         match ask {
             FilesAsk::Import(tile) => self.pick_files(*tile, cx),
+            FilesAsk::Photos(tile) => self.pick_photos(*tile, cx),
             FilesAsk::Export { worker, path, folder } => {
                 self.save_to_files(*worker, path, *folder, cx);
             }
         }
         #[cfg(not(target_os = "ios"))]
         match ask {
-            FilesAsk::Import(tile) => Self::open_files(*tile, cx),
+            FilesAsk::Import(tile) | FilesAsk::Photos(tile) => Self::open_files(*tile, cx),
             FilesAsk::Export { worker, path, .. } => {
                 self.bring_down_as(*worker, path.clone(), super::remote::Bringing::Download, cx);
             }
@@ -459,8 +463,25 @@ impl WorkspaceView {
     /// Show the Files picker; what is picked goes up to `tile`.
     #[cfg(target_os = "ios")]
     fn pick_files(&mut self, tile: TileRef, cx: &mut Context<Self>) {
+        if !slopty_platform::file_drop::picker::import(Self::picked_to(tile, cx)) {
+            self.show_failure("The Files picker could not be shown".to_owned(), cx);
+        }
+    }
+
+    /// Show the Photos picker; the photos and videos picked go up to `tile`, as files do.
+    #[cfg(target_os = "ios")]
+    fn pick_photos(&mut self, tile: TileRef, cx: &mut Context<Self>) {
+        if !slopty_platform::file_drop::picker::import_photos(Self::picked_to(tile, cx)) {
+            self.show_failure("The Photos picker could not be shown".to_owned(), cx);
+        }
+    }
+
+    /// Where a picker's files land: up to `tile` as a drop on it ([`Self::files_picked`]), or,
+    /// with the workspace gone, their landing discarded.
+    #[cfg(target_os = "ios")]
+    fn picked_to(tile: TileRef, cx: &Context<Self>) -> Rc<dyn Fn(Dropped)> {
         let (view, app) = (cx.entity().downgrade(), cx.to_async());
-        let sink = Rc::new(move |dropped: Dropped| {
+        Rc::new(move |dropped: Dropped| {
             let mut app = app.clone();
             let landing = dropped.landing.clone();
             if view.update(&mut app, |v, cx| v.files_picked(tile, dropped, cx)).is_err()
@@ -468,10 +489,7 @@ impl WorkspaceView {
             {
                 slopty_platform::file_drop::discard(landing);
             }
-        });
-        if !slopty_platform::file_drop::picker::import(sink) {
-            self.show_failure("The Files picker could not be shown".to_owned(), cx);
-        }
+        })
     }
 
     /// Files the Files picker handed over, landed as a drop's: they go up to `tile` as a drop

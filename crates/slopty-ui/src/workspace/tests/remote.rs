@@ -759,6 +759,11 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     cx.simulate_click(files.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
+
+    // Its Photos row (iOS) asks the same for the Photos picker, for the same tile.
+    face.update(cx, |_, cx| cx.emit(crate::conversation::thread::ThreadViewEvent::PickPhotos));
+    cx.run_until_parked();
+    assert_eq!(asked.borrow().last(), Some(&crate::workspace::folders::FilesAsk::Photos(tile)));
 }
 
 /// The messages sent to the worker's threads: each one's text and attachments.

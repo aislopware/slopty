@@ -596,3 +596,86 @@ fn a_folders_review_opens_the_thread_that_wrote_a_line(cx: &mut TestAppContext) 
     frames(cx);
     assert_eq!(focused(&view, cx), Some(tile), "the thread that wrote it");
 }
+
+/// One message's runs: threads in worktrees of one clone named by the same words. The "+"
+/// menu of one says how many there are and opens all their reviews side by side, its own
+/// first; a thread in another clone, one named by other words and one named only by its agent
+/// are not among them.
+#[gpui::test]
+fn a_messages_runs_are_reviewed_side_by_side(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{AgentId, ThreadId};
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let row = |dir: &str, agent: &str, terminal: Option<SessionId>| {
+        let mut state = crate::conversation::thread::fixtures::thread("edit");
+        state.meta.id = ThreadId::new();
+        state.meta.terminal = terminal;
+        state.meta.agent = AgentId::named(agent);
+        let mut row = state.row(WallMs::ZERO);
+        row.cwd = Some(format!("/w/{dir}"));
+        row.repo = Some(format!("/w/{dir}"));
+        row
+    };
+    let rows = vec![
+        row("atlas/.claude/worktrees/try-the-layout-1a2b", AgentId::CODEX, Some(session)),
+        row("atlas/.claude/worktrees/try-the-layout-3c4d", AgentId::CLAUDE_CODE, None),
+        row("atlas/.claude/worktrees/fix-the-login-5e6f", AgentId::PI, None),
+        row("other/.claude/worktrees/try-the-layout-7a8b", AgentId::PI, None),
+        row("atlas/.claude/worktrees/codex-9c0d", AgentId::CODEX, None),
+    ];
+    let (mine, sibling) = (rows[0].id, rows[1].id);
+    let others: Vec<_> = rows[2..].iter().map(|r| r.id).collect();
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.id = mine;
+    state.meta.terminal = Some(session);
+    let frame = slopty_proto::thread::wire::ThreadFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        state: Box::new(state),
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.thread_table(key, &table, cx);
+        v.focus_tile(agent, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, mine, frame, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    studio.drain();
+
+    let shown = view.read_with(cx, |v, _| (v.face_shown(session), v.session_thread(session)));
+    assert_eq!(shown, (true, Some(mine)), "the agent's tile on its thread");
+    assert!(cx.debug_bounds("thread-composer").is_some(), "its composer");
+    let at = cx.debug_bounds("thread-attach").expect("the + button");
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let runs = cx.debug_bounds("thread-add-menu-runs").expect("the runs' line");
+    cx.simulate_click(runs.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let reviewed: Vec<ThreadId> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::Review { thread }, .. })) => {
+                Some(thread)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reviewed, [mine, sibling], "its own first, then the other run: {others:?}");
+}

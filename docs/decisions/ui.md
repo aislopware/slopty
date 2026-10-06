@@ -8348,3 +8348,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     panels' edges alike),
     `workspace::approvals::tests::an_answer_is_neutral_and_the_yes_leads`,
     `workspace::tests::projects::a_project_s_notice_in_view_says_its_task_alone`.
+
+- ✅ **One message on several agents, each in a worktree of its own** (2026-10-06,
+  `.research/readiness-2026-10-07.md` §4 rank 17, after Orca's parallel worktrees: one prompt
+  fanned across agents, the results compared and the best one kept).
+  - **Where it is offered.** A start in a new worktree lists the machine's other agents in its
+    composer's "+" menu, after a separator, as "Also run Codex" and so on, each ticked while it
+    is chosen. A start in the folder itself offers none, because two agents in one tree would
+    edit the same files. The question over the composer names everyone who will run it: "What
+    should Codex and Claude Code each do in a new worktree of atlas?".
+  - **What ↵ does.** The message starts on the draft's agent with what its chips chose. It
+    then starts on each other agent ticked, at that agent's defaults, with the same files
+    attached, each in a new worktree of its own. Each tile is a column of its own, opened to
+    the right of the one before. The keyboard stays with the run the person wrote. The
+    worktrees share the message's words and differ in their last four hex digits
+    (`try-the-other-layout-1a2b`, `…-3c4d`).
+  - **Runs are found from the worktrees, with nothing kept.** Two threads are runs of one
+    message when they work in worktrees of the same clone named by the same words. That
+    holds across a relaunch and on every client. A worktree named only by its agent (a start
+    with no message) belongs to no set of runs. A thread with runs says so in its "+" menu,
+    "Review the 2 runs side by side", which opens every run's review, its own first, each as a
+    tile beside the last. The person keeps the best one through its commit sheet as usual.
+  - Tests: `workspace::tests::thread_start::{one_message_starts_on_several_agents_each_in_a_worktree,
+    a_start_in_the_folder_runs_on_one_agent}` and
+    `workspace::tests::review_tile::a_messages_runs_are_reviewed_side_by_side`.
+
+- ✅ **Photos beside Files in the composer's "+" menu on iOS** (2026-10-06, readiness rank 13).
+  On a phone or a tablet the pictures are in Photos, which the Files picker cannot reach, so
+  "Photos…" follows "Attach files…" there. What it picks lands as a drop on the tile would, the
+  same path the Files picker takes. A picker that cannot be shown says "The Photos picker could
+  not be shown". The Mac has no such row; its open panel reaches the Photos library itself.
+  Tests: `conversation::thread::tests::face::the_add_menu_offers_photos_where_they_live` and
+  `workspace::tests::remote::a_picture_pasted_into_the_composer_stays_a_chip_until_sent`.

@@ -153,8 +153,17 @@ pub enum ThreadViewEvent {
         /// The chip.
         id: u64,
     },
+    /// Open the reviews of the thread's runs side by side: every thread the same first message
+    /// started in a worktree of the same clone ([`ThreadView::set_runs`]).
+    ReviewRuns {
+        /// The thread.
+        thread: ThreadId,
+    },
     /// Show the system's picker; the files picked are attached as a drop on the tile is.
     PickFiles,
+    /// Show the Photos picker (iOS); the photos and videos picked are attached as a drop on
+    /// the tile is.
+    PickPhotos,
     /// Free the worktree the thread's exited agent worked in, at this root.
     RemoveWorktree(String),
     /// Open the screen the agent drives beside the thread, to watch it and take control.
@@ -185,6 +194,12 @@ pub struct ThreadView {
     /// Its brief came from elsewhere (a project's orchestrator, or its task): it is never asked
     /// what to do, even before its first row.
     briefed: bool,
+    /// Its "+" menu offers the Photos picker beside the Files one: on iOS, where pictures live
+    /// in Photos.
+    photos: bool,
+    /// How many runs the thread's first message has, itself among them: one, or as many as it
+    /// was started on side by side ([`ThreadViewEvent::ReviewRuns`]).
+    runs: usize,
     /// The last frame drew the empty thread's question with the composer under it.
     heroed: bool,
     /// How many times the composer has docked at the foot after the question, for the move's
@@ -416,6 +431,8 @@ impl ThreadView {
             thread,
             draft,
             briefed: false,
+            photos: cfg!(target_os = "ios"),
+            runs: 1,
             heroed: false,
             docks: None,
             zoom: 1.0,
@@ -543,6 +560,21 @@ impl ThreadView {
     pub fn set_briefed(&mut self, briefed: bool, cx: &mut Context<Self>) {
         if self.briefed != briefed {
             self.briefed = briefed;
+            cx.notify();
+        }
+    }
+
+    /// Offer the Photos picker in the "+" menu, as on iOS: a test shows it on the Mac.
+    #[cfg(test)]
+    pub(crate) const fn offer_photos(&mut self) {
+        self.photos = true;
+    }
+
+    /// How many runs its first message has, itself among them: past one, the "+" menu opens
+    /// their reviews side by side.
+    pub fn set_runs(&mut self, runs: usize, cx: &mut Context<Self>) {
+        if self.runs != runs {
+            self.runs = runs;
             cx.notify();
         }
     }
@@ -2195,12 +2227,13 @@ impl ThreadView {
     /// whose start has not gone, or a thread at rest with no rows and nothing waiting on the
     /// person.
     /// The composer is then the page, under one question ([`hero_words`]).
-    fn hero(&self, cx: &App) -> Option<(String, Place)> {
+    fn hero(&self, cx: &App) -> Option<(Vec<String>, Place)> {
         let state = self.state(cx)?;
         let agent = agent_label(&state.meta.agent);
         if let Some(draft) = &self.draft {
             let draft = draft.read(cx);
-            return (!draft.sent()).then(|| (agent, draft.place().clone()));
+            let agents = std::iter::once(agent).chain(draft.also().iter().map(agent_label));
+            return (!draft.sent()).then(|| (agents.collect(), draft.place().clone()));
         }
         // At rest and unbriefed only: an agent at work on a turn whose rows have not come yet,
         // or one a project briefed, is not asking the person anything.
@@ -2220,7 +2253,7 @@ impl ThreadView {
         let row = hub.threads().rows().rows.get(&self.thread);
         let repo = row.and_then(|r| r.repo.as_deref());
         let folder = folder_name(&state.meta.cwd, repo);
-        Some((agent, Place { folder, machine: hub.worker().to_owned(), worktree: false }))
+        Some((vec![agent], Place { folder, machine: hub.worker().to_owned(), worktree: false }))
     }
 
     /// The question over an empty thread's composer, at the reading column's width.
@@ -2426,7 +2459,7 @@ impl Render for ThreadView {
             .children(header)
             .children(trail)
             .map(|el| match hero {
-                Some((agent, place)) => el.child(
+                Some((agents, place)) => el.child(
                     div()
                         .w_full()
                         .flex_1()
@@ -2434,7 +2467,7 @@ impl Render for ThreadView {
                         .flex()
                         .flex_col()
                         .justify_center()
-                        .child(self.hero_question(hero_words(&agent, &place)))
+                        .child(self.hero_question(hero_words(&agents, &place)))
                         .child(self.foot(bar, composer)),
                 ),
                 None => el.child(rows).child(self.foot(bar, composer)).children(dock),
@@ -2555,11 +2588,19 @@ struct Bubble {
 pub(crate) const READING: &str = "Reading the thread\u{2026}";
 
 /// The question over an empty thread: "What should Claude Code do in slopty?", the place left
-/// out while it is not known.
-fn hero_words(agent: &str, place: &Place) -> String {
+/// out while it is not known. A message started on several `agents` asks what each should do,
+/// each in a new worktree of its own: "What should Claude Code and Codex each do in a new
+/// worktree of slopty?".
+fn hero_words(agents: &[String], place: &Place) -> String {
+    let who = match agents {
+        [] => "the agent".to_owned(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let each = if agents.len() > 1 { " each" } else { "" };
     match place.within() {
-        Some(within) => format!("What should {agent} do {within}?"),
-        None => format!("What should {agent} do?"),
+        Some(within) => format!("What should {who}{each} do {within}?"),
+        None => format!("What should {who}{each} do?"),
     }
 }
 
@@ -2757,15 +2798,20 @@ mod tests {
             machine: "studio".to_owned(),
             worktree,
         };
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(
-            hero_words("Claude Code", &place(Some("slopty"), false)),
+            hero_words(&names(&["Claude Code"]), &place(Some("slopty"), false)),
             "What should Claude Code do in slopty?"
         );
         assert_eq!(
-            hero_words("Codex", &place(Some("slopty"), true)),
+            hero_words(&names(&["Codex"]), &place(Some("slopty"), true)),
             "What should Codex do in a new worktree of slopty?"
         );
-        assert_eq!(hero_words("pi", &place(None, false)), "What should pi do?");
+        assert_eq!(hero_words(&names(&["pi"]), &place(None, false)), "What should pi do?");
+        assert_eq!(
+            hero_words(&names(&["Claude Code", "Codex", "pi"]), &place(Some("app"), true)),
+            "What should Claude Code, Codex and pi each do in a new worktree of app?"
+        );
         assert_eq!(place(Some("slopty"), false).said(), "in slopty on studio");
     }
 

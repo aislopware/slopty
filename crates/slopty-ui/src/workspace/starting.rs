@@ -290,7 +290,10 @@ impl WorkspaceView {
         let place = self.start_place(worker, &cwd, worktree);
         let recall = self.starting.sent.clone();
         let offers = self.offers(worker, &agent);
-        let draft = cx.new(|_| Draft::new(agent.clone(), cwd.clone(), offers, place, recall));
+        let others = self.startable_on(worker);
+        let draft = cx.new(|_| {
+            Draft::new(agent.clone(), cwd.clone(), offers, place, recall).with_others(others)
+        });
         let theme = self.theme.clone();
         let view = cx.new(|cx| ThreadView::drafting(hub, draft.clone(), theme, window, cx));
         let sending = cx.subscribe(&draft, move |this, _draft, sent: &DraftSent, cx| {
@@ -372,8 +375,9 @@ impl WorkspaceView {
             self.show_notice(text, cx);
             return;
         }
-        let DraftSent { text, attachments, model, mode, effort } = sent;
-        starting.chosen = Chosen { model, mode, effort, attachments };
+        let DraftSent { text, attachments, model, mode, effort, also } = sent;
+        let (cwd, worktree) = (starting.cwd.clone(), starting.worktree);
+        starting.chosen = Chosen { model, mode, effort, attachments: attachments.clone() };
         let prompt = (!text.is_empty()).then_some(text);
         if let Some(words) = &prompt {
             let kept = &mut self.starting.sent;
@@ -381,7 +385,22 @@ impl WorkspaceView {
             kept.insert(0, words.clone());
             kept.truncate(RECALLED);
         }
-        self.send_start(item, prompt, cx);
+        self.send_start(item, prompt.clone(), cx);
+        // The same message on each other agent chosen, each in a new worktree of its own and a
+        // column of its own, opened right of the one before, at its agent's defaults: the runs
+        // to compare. The keyboard stays with the run the person wrote.
+        let runs: Vec<AgentId> = also.into_iter().filter(|_| worktree).collect();
+        if runs.is_empty() {
+            return;
+        }
+        for agent in runs {
+            let run = ItemId::new();
+            let mut starting = Starting::new(worker, agent, cwd.clone(), None).in_worktree(true);
+            starting.chosen.attachments.clone_from(&attachments);
+            self.open_starting(run, starting, cx);
+            self.send_start(run, prompt.clone(), cx);
+        }
+        self.focus_tile(TileRef { worker, item }, cx);
     }
 
     /// What start `item`'s composer asks of the workspace: files attached go up to its
@@ -405,12 +424,16 @@ impl WorkspaceView {
             ThreadViewEvent::PickFiles => {
                 self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
             }
+            ThreadViewEvent::PickPhotos => {
+                self.ask_files(&super::folders::FilesAsk::Photos(tile), cx);
+            }
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(worker, slopty_proto::ClientMsg::FindFiles { root, query });
             }
             // A draft has no thread to review, watch or show the terminal of yet.
             ThreadViewEvent::ShowTerminal
             | ThreadViewEvent::Review { .. }
+            | ThreadViewEvent::ReviewRuns { .. }
             | ThreadViewEvent::Watch { .. }
             | ThreadViewEvent::RemoveWorktree(_) => {}
         }

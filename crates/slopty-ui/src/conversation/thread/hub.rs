@@ -675,6 +675,7 @@ fn turned_down(outcome: &Outcome) -> Option<String> {
     match outcome {
         Outcome::Refused { reason } => Some(reason.trim().trim_end_matches('.').to_owned()),
         Outcome::Unsupported { .. } => Some("the agent can't do that through Slopty".to_owned()),
+        Outcome::SetupFailed { .. } => Some("the worktree's setup failed".to_owned()),
         Outcome::Done | Outcome::Accepted | Outcome::Started { .. } => None,
     }
 }

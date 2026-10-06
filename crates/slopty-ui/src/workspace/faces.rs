@@ -135,11 +135,11 @@ pub(super) struct ThreadFaces {
     cache: Option<PathBuf>,
     /// The review tile of each thread whose review was asked for, kept while it is open.
     reviews: HashMap<ThreadId, Entity<ReviewView>>,
-    /// A thread view asked for its thread's review: made in the next sync, for the strip to
-    /// open ([`WorkspaceView::take_review`]).
-    review_asked: Option<(WorkerKey, ThreadId)>,
-    /// A review tile made and not yet opened, and the worker whose agent runs its thread.
-    review_made: Option<(WorkerKey, ThreadId)>,
+    /// The reviews thread views asked for, in order: made in the next sync, for the strip to
+    /// open ([`WorkspaceView::take_review`]). Several at once are a message's runs.
+    review_asked: Vec<(WorkerKey, ThreadId)>,
+    /// The review tiles made and not yet opened, and the worker whose agent runs each thread.
+    review_made: Vec<(WorkerKey, ThreadId)>,
     /// The thread view of each thread tile, kept while its tile is there.
     items: HashMap<ItemId, Entity<ThreadView>>,
     item_asks: HashMap<ItemId, gpui::Subscription>,
@@ -309,7 +309,8 @@ impl WorkspaceView {
     /// The review tile a thread view asked for since this was last asked, with the worker
     /// whose agent runs its thread, for the strip to open as a tile there (`Handed::Review`).
     pub fn take_review(&mut self) -> Option<(WorkerKey, ThreadId, Entity<ReviewView>)> {
-        let (key, thread) = self.faces.threads.review_made.take()?;
+        let made = &mut self.faces.threads.review_made;
+        let (key, thread) = (!made.is_empty()).then(|| made.remove(0))?;
         self.faces.threads.reviews.get(&thread).map(|view| (key, thread, view.clone()))
     }
 
@@ -330,6 +331,21 @@ impl WorkspaceView {
         let view = cx.new(|cx| ReviewView::new(hub, thread, theme, window, cx));
         self.faces.threads.reviews.insert(thread, view.clone());
         view
+    }
+
+    /// Ask for `thread`'s review on `key`, after those asked already: made in the next sync.
+    pub(super) fn ask_review(&mut self, key: WorkerKey, thread: ThreadId) {
+        self.faces.threads.review_asked.push((key, thread));
+    }
+
+    /// The thread view of each agent tile turned to its thread, by its session.
+    pub(super) fn thread_faces(&self) -> impl Iterator<Item = (&SessionId, &Entity<ThreadView>)> {
+        self.faces.threads.views.iter()
+    }
+
+    /// The thread view of each thread tile, by its item.
+    pub(super) fn thread_items(&self) -> impl Iterator<Item = (&ItemId, &Entity<ThreadView>)> {
+        self.faces.threads.items.iter()
     }
 
     /// Every review tile open.
@@ -799,7 +815,11 @@ impl WorkspaceView {
             match &done.outcome {
                 Outcome::Started { thread } => self.start_landed(key, item, *thread, &agent, cx),
                 Outcome::Refused { reason } => self.start_failed(key, item, reason.clone(), cx),
-                Outcome::Unsupported { .. } | Outcome::Done | Outcome::Accepted => {
+                // A setup that failed is said as a refusal until the start tile shows it.
+                Outcome::Unsupported { .. }
+                | Outcome::SetupFailed { .. }
+                | Outcome::Done
+                | Outcome::Accepted => {
                     let text = format!(
                         "{} can\u{2019}t start {}",
                         self.worker_name(key),
@@ -1154,6 +1174,7 @@ impl WorkspaceView {
             App::notify(cx, self.chrome.titlebar.entity_id());
         }
         self.settle_thread_tiles(cx);
+        self.count_runs(cx);
         // The overview's agents say their newest words as the table brings them.
         self.retake_agent_digests(cx);
         cx.notify();
@@ -1213,9 +1234,9 @@ impl WorkspaceView {
             self.faces.threads.asks.insert(session, asks);
             self.faces.threads.views.insert(session, view);
         }
-        if let Some((key, thread)) = self.faces.threads.review_asked.take() {
+        for (key, thread) in std::mem::take(&mut self.faces.threads.review_asked) {
             let _view = self.open_review(key, thread, window, cx);
-            self.faces.threads.review_made = Some((key, thread));
+            self.faces.threads.review_made.push((key, thread));
             cx.notify();
         }
         // A view that goes while it holds the keyboard hands it back to its tile, which then
@@ -1322,9 +1343,10 @@ impl WorkspaceView {
                 None => self.show_notice("The agent's terminal has ended".to_owned(), cx),
             },
             ThreadViewEvent::Review { thread } => {
-                self.faces.threads.review_asked = Some((key, thread));
+                self.faces.threads.review_asked.push((key, thread));
                 cx.notify();
             }
+            ThreadViewEvent::ReviewRuns { thread } => self.review_runs(key, thread, cx),
             ThreadViewEvent::Attach { id, what } => {
                 let tile = self.tile_of(item);
                 self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
@@ -1338,6 +1360,11 @@ impl WorkspaceView {
             ThreadViewEvent::PickFiles => {
                 if let Some(tile) = self.tile_of(item) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
+            ThreadViewEvent::PickPhotos => {
+                if let Some(tile) = self.tile_of(item) {
+                    self.ask_files(&super::folders::FilesAsk::Photos(tile), cx);
                 }
             }
             ThreadViewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, &root, cx),
@@ -1386,8 +1413,13 @@ impl WorkspaceView {
             ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
             ThreadViewEvent::Review { thread } => {
                 if let Some(key) = self.worker_of_session(session) {
-                    self.faces.threads.review_asked = Some((key, thread));
+                    self.faces.threads.review_asked.push((key, thread));
                     cx.notify();
+                }
+            }
+            ThreadViewEvent::ReviewRuns { thread } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.review_runs(key, thread, cx);
                 }
             }
             ThreadViewEvent::Attach { id, what } => {
@@ -1405,6 +1437,11 @@ impl WorkspaceView {
             ThreadViewEvent::PickFiles => {
                 if let Some(tile) = self.tile_of_session(session) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
+            ThreadViewEvent::PickPhotos => {
+                if let Some(tile) = self.tile_of_session(session) {
+                    self.ask_files(&super::folders::FilesAsk::Photos(tile), cx);
                 }
             }
             ThreadViewEvent::RemoveWorktree(root) => {
@@ -1527,6 +1564,7 @@ impl WorkspaceView {
             .collect();
         self.sync_thread_faces(&wanted, window, cx);
         self.sync_thread_items(window, cx);
+        self.count_runs(cx);
         self.sync_changes(window, cx);
         // Picks of sessions that are gone go with them, and views handed to a tile that went.
         let terminals = &self.terminals;
