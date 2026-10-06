@@ -2109,3 +2109,39 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::palette::{the_palette_splits_into_everything_commands_and_files,
     the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone}`, and the keymap's
     `a_chords_words_come_with_the_keymap` and `the_files_chord_wins_over_a_deeper_default`.
+- ✅ **A navigator row says its state in words, at the second line's end** (2026-10-07, item 11
+  of the MonoCode audit, `MonoCode`'s session card).
+  - **Where.** The title has the first line to itself, so a long one is never cut for the
+    state. The second line ends in the pull request, the changes, then the state: its glyph and
+    its word in the word tone (`Status::word`): "Needs approval" or "Has a question", "Working",
+    "Failed", "Away", and "Done" in the finish's green check for one not yet looked at. A running
+    command's clock stands before its glyph and says it in place of a word. With no state the
+    age is there.
+  - **Why the second line.** The 2026-10-02 showcase ruling took the word off the title's line,
+    where "Needs approval" took half a 240 pt row. `MonoCode` puts its status on a line of its
+    own, away from the title, and so does this. The muted words before it give way first.
+  - **The close.** Under the pointer the title's line ends in the row's close, over nothing,
+    so neither line moves.
+  - **Not taken: the model on the second line.** It is in the composer's foot and the agent's
+    meters, and a 248 pt row has no room left for it beside the state's word.
+  - Tests: `workspace::tests::nav_rows::{a_tile_row_reads_its_age_or_its_state_then_its_place,
+    a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer}` and
+    `agent_tile::an_agents_tile_leads_with_its_mark_and_ends_with_its_state`.
+- ✅ **A project's head shows its changes, and pins and mutes it** (2026-10-07, item 17 of the
+  MonoCode audit, `MonoCode`'s project card).
+  - **Changes.** The head ends in what its working trees have added and removed (`+12 −3`,
+    the kit's figures). Each checkout counts once, keyed by machine and repository, however many
+    of its shells are listed. They give way under the pointer to the fold and "+", as the rest
+    of the end does.
+  - **Pin.** "Pin to top" in the head's menu puts the project above the rest, the pinned in the
+    order they were pinned, then the others by name. "Unpin" puts it back. A quiet pin glyph
+    after the name says it.
+  - **Mute.** "Mute notifications" stops the project's moments from posting a system
+    notification here, its waits, its finished turns and its server notices alike. The bell,
+    *Needs you* and the navigator still say them. A quiet bell-off glyph after the name says it.
+  - **Saved.** Both are kept per device with the navigator in `layout.json`
+    (`Navigator::pinned`, `Navigator::muted`), by the project's group key.
+  - Two Tabler glyphs come in for them: `pin` and `bell-off`, redrawn at 1.75.
+  - Tests: `workspace::tests::nav_projects::a_projects_head_shows_its_changes_and_pins_and_mutes_it`,
+    `workspace::attention::tests::a_muted_projects_moments_post_nothing`, and
+    `layout::tests::the_tiling_and_the_navigator_are_saved_and_restored`.

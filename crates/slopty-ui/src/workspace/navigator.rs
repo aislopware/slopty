@@ -25,13 +25,14 @@
 //!
 //! A group's tiles come in order of attention: what needs the human, then what finished unseen,
 //! then what is working, then the rest, each class in reading order. Each tile is two lines: its
-//! kind and its title, ended by its state as its glyph, else the unseen dot, else its age past a
-//! minute (an agent at rest counts from its last turn); then, muted, what its agent says or its
+//! kind and its title, which has the line to itself; then, muted, what its agent says or its
 //! last command, its machine where its project spans several, its directory below the
-//! project's root and its branch, or a note's progress; a shell reopened after its shell was
-//! lost says "Restored" there, and one whose program reports progress (`OSC 9;4`) ends that
-//! line in its figure and draws a hairline bar along the row's foot. A row flies the camera to
-//! what it names.
+//! project's root and its branch, or a note's progress, ended (`MonoCode`'s session card) by
+//! its pull request, its changes, and its state as its glyph and its word ("Needs approval",
+//! "Working", "Done" for a finish not looked at), else its age past a minute (an agent at rest
+//! counts from its last turn). A shell reopened after its shell was lost says "Restored" there,
+//! and one whose program reports progress (`OSC 9;4`) ends that line in its figure and bar. A
+//! row goes to what it names.
 //!
 //! The filter takes words and facets: `machine:devbox`, `project:slopty`, `agent:codex`,
 //! `is:waiting` (or `working`, `failed`, `unseen`, `running`), or any fact a tile has
@@ -673,6 +674,23 @@ struct NavTile {
 }
 
 impl NavTile {
+    /// Whether its second line ends in something of its own: a state, a finish not yet looked
+    /// at, a running command's clock or an age.
+    const fn stated(&self) -> bool {
+        matches!(
+            self.mark,
+            Some(
+                Status::NeedsYou
+                    | Status::Working
+                    | Status::Running
+                    | Status::Failed
+                    | Status::Away
+            )
+        ) || self.unseen
+            || self.running.is_some()
+            || self.age.is_some()
+    }
+
     /// Whether it has a second line.
     const fn two_lines(&self) -> bool {
         let figure = match self.progress {
@@ -680,6 +698,7 @@ impl NavTile {
             None => false,
         };
         !self.meta.is_empty()
+            || self.stated()
             || self.changes.is_some()
             || self.restored
             || figure
@@ -787,6 +806,12 @@ struct NavGroup {
     folded: bool,
     /// It follows another block's rows, and stands a step off them.
     gap: bool,
+    /// The lines its working trees have added and removed, each checkout counted once.
+    changes: Option<(u32, u32)>,
+    /// It is pinned above the rest.
+    pinned: bool,
+    /// Its moments post no notification.
+    muted: bool,
 }
 
 /// A declared project's board, leading its group: how its tasks stand, and ↩ to the board.
@@ -1159,6 +1184,24 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Pin `key` above the rest, at the end of the pinned, or take its pin out.
+    pub(super) fn toggle_pinned(&mut self, key: &GroupKey, cx: &mut Context<Self>) {
+        let mut nav = self.navigator().clone();
+        toggle_in(&mut nav.pinned, key);
+        self.set_navigator(nav);
+        self.layout_touched(cx);
+        cx.notify();
+    }
+
+    /// Mute `key`'s notifications here, or let them post again.
+    pub(super) fn toggle_muted(&mut self, key: &GroupKey, cx: &mut Context<Self>) {
+        let mut nav = self.navigator().clone();
+        toggle_in(&mut nav.muted, key);
+        self.set_navigator(nav);
+        self.layout_touched(cx);
+        cx.notify();
+    }
+
     /// Whether the navigator lists the workers' own blocks and nothing else.
     fn grouped_by_machine(&self) -> bool {
         self.navigator().group_by.first().map(String::as_str) == Some(fact::MACHINE)
@@ -1501,6 +1544,10 @@ impl WorkspaceView {
         let mut by_group: Vec<Vec<(u8, NavTile)>> =
             grouping.grouped.groups.iter().map(|_| Vec::new()).collect();
         let mut loose: BTreeMap<WorkerKey, Vec<(u8, NavTile)>> = BTreeMap::new();
+        // Each group's checkouts and what each has changed, a checkout counted once however
+        // many of its shells are listed.
+        let mut checkouts: Vec<BTreeMap<(WorkerKey, String), (u32, u32)>> =
+            grouping.grouped.groups.iter().map(|_| BTreeMap::new()).collect();
         for (i, &tile) in grouping.tiles.iter().enumerate() {
             let Some(item) = self.item(tile) else { continue };
             let project = projects.group_of(tile);
@@ -1545,6 +1592,12 @@ impl WorkspaceView {
                 _ => None,
             };
             let changes = summary.and_then(|s| s.changes).and_then(line_changes);
+            if let (Some(g), Some(repo), Some(lines)) =
+                (at, summary.and_then(|s| s.repo.clone()), changes)
+                && let Some(seen) = checkouts.get_mut(g)
+            {
+                seen.insert((tile.worker, repo), lines);
+            }
             let progress = summary.and_then(|s| s.progress);
             let restored = summary.is_some_and(|s| s.restored.is_some());
             let running = match (mark, &item.kind) {
@@ -1589,7 +1642,9 @@ impl WorkspaceView {
         let (mut threads, mut thread_groups, mut loose_threads) =
             if boarded { self.nav_threads(&query, scope, projects) } else { Default::default() };
         let mut blocks: Vec<(String, NavBlock)> = Vec::new();
-        for ((group, tiles), machines) in grouping.grouped.groups.iter().zip(by_group).zip(&spans) {
+        for (((group, tiles), machines), seen) in
+            grouping.grouped.groups.iter().zip(by_group).zip(&spans).zip(&checkouts)
+        {
             let board = boards.remove(&group.key);
             let threads = threads.remove(&group.key).unwrap_or_default();
             let empty = tiles.is_empty() && board.is_none() && threads.is_empty();
@@ -1616,6 +1671,9 @@ impl WorkspaceView {
                 rollup,
                 folded,
                 gap: false,
+                changes: summed(seen.values()),
+                pinned: self.navigator().pinned.contains(&group.key),
+                muted: self.navigator().muted.contains(&group.key),
             };
             let block =
                 NavBlock { head: NavRow::Group(head), folded, board, threads, vacant: None, tiles };
@@ -1631,6 +1689,8 @@ impl WorkspaceView {
             let folded = query.is_empty() && self.nav.folded.contains(&key);
             let name = self.mirror_title(&board.project);
             let head = NavGroup {
+                pinned: self.navigator().pinned.contains(&key),
+                muted: self.navigator().muted.contains(&key),
                 key,
                 glyph: group_glyph(fact::PROJECT),
                 name: name.clone(),
@@ -1640,6 +1700,7 @@ impl WorkspaceView {
                 rollup,
                 folded,
                 gap: false,
+                changes: None,
             };
             let block = NavBlock {
                 head: NavRow::Group(head),
@@ -1661,6 +1722,8 @@ impl WorkspaceView {
             let folded = query.is_empty() && self.nav.folded.contains(&key);
             let name = self.group_name(&group);
             let head = NavGroup {
+                pinned: self.navigator().pinned.contains(&key),
+                muted: self.navigator().muted.contains(&key),
                 key,
                 glyph: group_glyph(&group.fact),
                 name: name.clone(),
@@ -1670,6 +1733,7 @@ impl WorkspaceView {
                 rollup,
                 folded,
                 gap: false,
+                changes: None,
             };
             let block = NavBlock {
                 head: NavRow::Group(head),
@@ -1681,12 +1745,21 @@ impl WorkspaceView {
             };
             blocks.push((name, block));
         }
+        // The pinned first, in the order they were pinned; then the rest by name.
+        let pinned = &self.navigator().pinned;
         blocks.sort_by(|(a, x), (b, y)| {
             let key = |row: &NavRow| match row {
                 NavRow::Group(g) => g.key.clone(),
                 _ => GroupKey::new("", ""),
             };
-            a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| key(&x.head).cmp(&key(&y.head)))
+            let pin = |row: &NavRow| {
+                let key = key(row);
+                pinned.iter().position(|p| *p == key).unwrap_or(usize::MAX)
+            };
+            pin(&x.head)
+                .cmp(&pin(&y.head))
+                .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+                .then_with(|| key(&x.head).cmp(&key(&y.head)))
         });
         // Two groups of one name say where each is, in another directory or under another
         // owner; where that is the same for all of them, they are on other machines, which the
@@ -3176,10 +3249,12 @@ impl WorkspaceView {
         let key = group.key.clone();
         let folded = group.folded;
         let label = SharedString::from(format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}{}",
             group.name,
             group.parent.as_ref().map(|p| format!(", in {p}")).unwrap_or_default(),
             group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
+            if group.pinned { ", pinned" } else { "" },
+            if group.muted { ", muted" } else { "" },
             if folded { ", folded" } else { "" }
         ));
         // The name at the medium weight, its glyph beside it.
@@ -3197,6 +3272,19 @@ impl WorkspaceView {
             .font_weight(gpui::FontWeight(named))
             .text_color(hsla(s.text))
             .child(SharedString::from(group.name.clone()));
+        // Pinned and muted are said by a quiet glyph each, after the name: `MonoCode`'s
+        // project card.
+        let marks = [(group.pinned, Symbol::Pin, "pin"), (group.muted, Symbol::BellSlash, "muted")]
+            .into_iter()
+            .filter(|(on, ..)| *on)
+            .map(|(_, glyph, what)| {
+                let mark_key = key.clone();
+                div()
+                    .debug_selector(move || format!("nav-group-{what}-{mark_key}"))
+                    .flex_none()
+                    .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)))
+            })
+            .collect::<Vec<_>>();
         let hover_group = SharedString::from(format!("nav-group-hover-{key}"));
         let rollup = folded.then_some(group.rollup).filter(|r| r.shown().is_some());
         let rollup_key = key.clone();
@@ -3218,6 +3306,11 @@ impl WorkspaceView {
             .children(
                 rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{rollup_key}"), r, false)),
             )
+            .children(group.changes.and_then(|(added, removed)| {
+                let changes_key = key.clone();
+                kit::changes(theme, added, removed)
+                    .map(|el| el.debug_selector(move || format!("nav-group-changes-{changes_key}")))
+            }))
             .children((!place.is_empty()).then(|| {
                 meta(div(), theme)
                     .debug_selector(move || format!("nav-group-machines-{machines_key}"))
@@ -3316,6 +3409,7 @@ impl WorkspaceView {
             .children(wash)
             .child(lead)
             .child(name)
+            .children(marks)
             .child(trailing)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.navigated();
@@ -3502,44 +3596,12 @@ impl WorkspaceView {
         // own mark, so the eye finds the same agent in the same column.
         let lead = crate::palette::lead_slot(theme, t.kind, faded(ink))
             .debug_selector(move || format!("nav-kind-{id}"));
-        // One mark at the line's end, by precedence: needs you, failed, at work (a running
-        // command's clock beside it), away; else the unseen dot, else the age. The state is a
-        // mark and never a word on the title's line, where "Needs approval" took half a row's
-        // width from the title; the second line says what is asked.
-        let state = t.mark.filter(|m| !matches!(m, Status::Idle | Status::Done));
-        let clock = t.running.clone().map(|ran| {
-            readout(theme, ran)
-                .debug_selector(move || format!("nav-running-{id}"))
-                .text_color(hsla(s.text_secondary))
-        });
-        let end = match state {
-            Some(state) => Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xxs))
-                    .children(clock.filter(|_| matches!(state, Status::Working | Status::Running)))
-                    .child(
-                        status_mark(theme, Some(state))
-                            .debug_selector(move || format!("nav-state-{id}")),
-                    )
-                    .into_any_element(),
-            ),
-            // Something ended there while the person was elsewhere: the finish's green check, in
-            // the slot a state stands in, so a title keeps its length with or without it.
-            None if t.unseen => Some(
-                status_mark(theme, Some(Status::Done))
-                    .debug_selector(move || format!("nav-unseen-{id}"))
-                    .into_any_element(),
-            ),
-            None => clock.map(gpui::IntoElement::into_any_element).or_else(|| {
-                t.age.clone().map(|age| {
-                    readout(theme, age)
-                        .debug_selector(move || format!("nav-age-{id}"))
-                        .into_any_element()
-                })
-            }),
-        };
+        // The state trails the second line as its glyph and its word, `MonoCode`'s session
+        // card: "Needs approval", "Working", "Failed", "Done" for a finish not yet looked at; a
+        // running command's clock beside its glyph; else the age. The title has the first line
+        // to itself, so a long one is never cut for the state ("Needs approval" on the title's
+        // line took half a 240 pt row).
+        let end = nav_state(theme, t);
         // Under the pointer the line's end gives way to the row's action, in the same place, so
         // nothing on the line moves.
         let tile = t.tile;
@@ -3554,7 +3616,9 @@ impl WorkspaceView {
             cx.stop_propagation();
             this.close_tile(tile, window, cx);
         }));
-        let end = div()
+        // Under the pointer the title's line ends in the row's close, over nothing, so no word
+        // on either line moves.
+        let close = div()
             .relative()
             .flex_none()
             .min_w(px(theme.typography.icon_large()))
@@ -3562,25 +3626,9 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_end()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .group_hover(row_group.clone(), gpui::Styled::invisible)
-                    .children(end),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right_0()
-                    .flex()
-                    .items_center()
-                    .invisible()
-                    .group_hover(row_group.clone(), gpui::Styled::visible)
-                    .child(close),
-            );
+            .invisible()
+            .group_hover(row_group.clone(), gpui::Styled::visible)
+            .child(close);
         let line1 = div()
             .h(px(first))
             .line_height(px(first))
@@ -3594,7 +3642,7 @@ impl WorkspaceView {
                         el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     }),
             )
-            .child(end);
+            .child(close);
         // The working tree's changes end the line whole; the words before them give way.
         let changes = t
             .changes
@@ -3658,6 +3706,7 @@ impl WorkspaceView {
                 .children(changes)
                 .children(figure)
                 .children(bar)
+                .children(end)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
         let row = row(theme, lines, format!("nav-tile-{id}"), label.into(), selected)
@@ -3712,6 +3761,84 @@ impl WorkspaceView {
             })
             .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
             .into_any_element()
+    }
+}
+
+/// `key` taken out of `keys` where it is there, else added at the end.
+fn toggle_in(keys: &mut Vec<GroupKey>, key: &GroupKey) {
+    if let Some(at) = keys.iter().position(|k| k == key) {
+        keys.remove(at);
+    } else {
+        keys.push(key.clone());
+    }
+}
+
+/// The lines `checkouts` have added and removed between them; `None` when none changed.
+fn summed<'a>(checkouts: impl Iterator<Item = &'a (u32, u32)>) -> Option<(u32, u32)> {
+    let (added, removed) = checkouts
+        .fold((0_u32, 0_u32), |(a, r), (x, y)| (a.saturating_add(*x), r.saturating_add(*y)));
+    (added > 0 || removed > 0).then_some((added, removed))
+}
+
+/// What ends `t`'s second line, by precedence: a state that wants a look (needs you, failed, at
+/// work with a running command's clock, away) as its glyph and its word; a finish not looked at
+/// as the green check and "Done"; a running command's clock; else the age.
+fn nav_state(theme: &Theme, t: &NavTile) -> Option<gpui::AnyElement> {
+    let s = &theme.surfaces;
+    let item = t.tile.item;
+    let state = t.mark.filter(|m| !matches!(m, Status::Idle | Status::Done));
+    let clock = t.running.clone().map(|ran| {
+        readout(theme, ran)
+            .debug_selector(move || format!("nav-running-{}", item.as_uuid()))
+            .text_color(hsla(s.text_secondary))
+    });
+    let said = |status: Status, word: String, selector: String| {
+        // A running command's clock says it in place of a word.
+        let word = (status != Status::Running).then(|| {
+            div()
+                .debug_selector(move || format!("nav-word-{}", item.as_uuid()))
+                .flex_none()
+                .text_color(hsla(status.word(theme)))
+                .child(word)
+        });
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs))
+            .child(status_mark(theme, Some(status)).debug_selector(move || selector))
+            .children(word)
+            .into_any_element()
+    };
+    match state {
+        Some(state) => {
+            let word = t.word.clone().unwrap_or_else(|| state.label().to_owned());
+            let mark = said(state, word, format!("nav-state-{}", item.as_uuid()));
+            let clock = clock.filter(|_| matches!(state, Status::Working | Status::Running));
+            Some(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xs))
+                    .children(clock)
+                    .child(mark)
+                    .into_any_element(),
+            )
+        }
+        // Something ended there while the person was elsewhere.
+        None if t.unseen => Some(said(
+            Status::Done,
+            Status::Done.label().to_owned(),
+            format!("nav-unseen-{}", item.as_uuid()),
+        )),
+        None => clock.map(gpui::IntoElement::into_any_element).or_else(|| {
+            t.age.clone().map(|age| {
+                readout(theme, age)
+                    .debug_selector(move || format!("nav-age-{}", item.as_uuid()))
+                    .into_any_element()
+            })
+        }),
     }
 }
 

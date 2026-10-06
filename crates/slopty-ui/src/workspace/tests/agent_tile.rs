@@ -376,8 +376,11 @@ fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppCo
         assert!(lead.right() < row.center().x, "{what}: the mark leads: {lead:?} {row:?}");
         assert_eq!(read(cx, tile).0, spark, "{what}: the mark never changes");
         state.map(|state| {
-            assert!(state.left() > row.center().x, "{what}: the state ends it: {state:?}");
-            assert!(state.right() <= row.right(), "{what}: {state:?} {row:?}");
+            let word = cx.debug_bounds(selector("nav-word", tile.item)).expect("its word");
+            assert!(word.left() > row.center().x, "{what}: the state ends it: {word:?}");
+            assert!(state.right() <= word.left(), "{what}: the glyph, then its word: {state:?}");
+            assert!(word.right() <= row.right(), "{what}: {word:?} {row:?}");
+            assert!(state.top() > lead.bottom() - px(0.5), "{what}: on the second line: {state:?}");
         })
     };
     let works = AgentEvent { status: AgentStatus::Working, ..blocked(session) };

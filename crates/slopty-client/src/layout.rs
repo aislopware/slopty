@@ -221,6 +221,11 @@ pub struct Navigator {
     /// ([`crate::groups::group`]): [`DEFAULT_CHAIN`] by project, `["machine"]` by machine, or
     /// any fact a tile reports.
     pub group_by: Vec<String>,
+    /// The groups pinned above the rest, by key, in the order they were pinned (`MonoCode`'s
+    /// pinned projects).
+    pub pinned: Vec<GroupKey>,
+    /// The groups whose moments post no notification here, by key.
+    pub muted: Vec<GroupKey>,
 }
 
 impl Navigator {
@@ -252,7 +257,13 @@ impl Navigator {
 
 impl Default for Navigator {
     fn default() -> Self {
-        Self { shown: true, width: Self::DEFAULT_WIDTH, group_by: Self::by_project() }
+        Self {
+            shown: true,
+            width: Self::DEFAULT_WIDTH,
+            group_by: Self::by_project(),
+            pinned: Vec::new(),
+            muted: Vec::new(),
+        }
     }
 }
 

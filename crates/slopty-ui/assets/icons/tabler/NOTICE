@@ -20,6 +20,7 @@ ArrowUpToLine                        arrow-bar-to-up.svg
 ArrowUturnBackward                   arrow-back-up.svg
 Bell                                 bell.svg
 BellBadge                            bell-ringing.svg
+BellSlash                            bell-off.svg
 CharacterCursorIbeam                 cursor-text.svg
 Checklist                            list-check.svg
 Checkmark                            check.svg
@@ -70,6 +71,7 @@ Paperclip                            paperclip.svg
 PauseCircle                          player-pause.svg
 Pencil                               pencil.svg
 Photo                                photo.svg
+Pin                                  pin.svg
 Plus                                 plus.svg
 PlusForwardslashMinus                plus-minus.svg
 Power                                power.svg

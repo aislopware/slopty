@@ -314,3 +314,57 @@ fn a_project_row_with_no_tile_here_opens_a_composer_there(cx: &mut TestAppContex
     });
     assert_eq!(project, Some(docs), "in a tab of that project");
 }
+
+/// A project's head says what its working trees have changed, each checkout once however many
+/// of its shells are listed (`MonoCode`'s project card). Its menu pins it above the rest, in the
+/// order pinned, and mutes its notifications; a glyph after its name says each, and both are
+/// saved with the navigator.
+#[gpui::test]
+fn a_projects_head_shows_its_changes_and_pins_and_mutes_it(cx: &mut TestAppContext) {
+    use slopty_proto::terminal::RepoChanges;
+
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let (one, atlas) = shell_in(&view, cx, &fake, 1, "/w/atlas", true);
+    let (two, _) = shell_in(&view, cx, &fake, 2, "/w/atlas", true);
+    let (_, bolt) = shell_in(&view, cx, &fake, 3, "/w/bolt", true);
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        for session in [one, two] {
+            let summary = SessionSummary {
+                repo: Some("/w/atlas".to_owned()),
+                changes: Some(RepoChanges { files: 2, added: 12, removed: 3 }),
+                ..summary(session, Some("/w/atlas"))
+            };
+            v.session_opened(key, summary, cx);
+        }
+    });
+    cx.run_until_parked();
+    let group = |cx: &mut VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, _| v.project_groups().group_of(tile).map(|g| g.key.clone()))
+            .expect("a project")
+    };
+    let (a, b) = (group(cx, atlas), group(cx, bolt));
+    let head = |k: &GroupKey| leak(format!("nav-group-{k}"));
+    assert!(cx.debug_bounds(leak(format!("nav-group-changes-{a}"))).is_some(), "its changes");
+    assert!(cx.debug_bounds(leak(format!("nav-group-changes-{b}"))).is_none(), "none changed");
+    assert!(top(cx, head(&a)) < top(cx, head(&b)), "by name first");
+
+    let pick = |cx: &mut VisualTestContext, k: &GroupKey, row: &str| {
+        let at = cx.debug_bounds(head(k)).expect("the head").center();
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        click(cx, leak(format!("menu-{row}")));
+    };
+    pick(cx, &b, "Pin to top");
+    assert!(top(cx, head(&b)) < top(cx, head(&a)), "the pinned above the rest");
+    assert!(cx.debug_bounds(leak(format!("nav-group-pin-{b}"))).is_some(), "its pin");
+    pick(cx, &a, "Mute notifications");
+    assert!(cx.debug_bounds(leak(format!("nav-group-muted-{a}"))).is_some(), "its mute");
+    let look = view.read_with(cx, |v, _| v.attention_look());
+    assert!(look.muted.contains(a.as_str()), "its moments post nothing: {:?}", look.muted);
+    let saved = view.read_with(cx, |v, _| v.navigator().clone());
+    assert_eq!((saved.pinned, saved.muted), (vec![b.clone()], vec![a.clone()]), "saved");
+    pick(cx, &b, "Unpin");
+    assert!(top(cx, head(&a)) < top(cx, head(&b)), "back in its place by name");
+}

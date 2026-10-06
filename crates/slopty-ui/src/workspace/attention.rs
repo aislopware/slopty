@@ -203,6 +203,8 @@ pub struct Look {
     /// The project each terminal and thread is in, by its group's key: the thread its notes
     /// stack in, so one project's notes sit together.
     pub projects: HashMap<About, String>,
+    /// The projects muted in the navigator, by their group's key: their moments post nothing.
+    pub muted: HashSet<String>,
 }
 
 /// A notice the server picked this client for, as its note says it.
@@ -267,6 +269,8 @@ pub struct Attention {
     badge: Option<usize>,
     /// The project each terminal and thread was in at the last look.
     projects: HashMap<About, String>,
+    /// The projects muted at the last look, by their group's key.
+    muted: HashSet<String>,
     /// The projects' notes up, by identifier.
     project_notes: HashSet<String>,
     /// A note went out while notifications were off, since the app last came back.
@@ -304,6 +308,7 @@ impl Attention {
             answers: HashMap::new(),
             badge: None,
             projects: HashMap::new(),
+            muted: HashSet::new(),
             project_notes: HashSet::new(),
             unsaid: false,
             said_off: false,
@@ -378,6 +383,13 @@ impl Attention {
             return;
         }
         if let Some(stack) = &heard.stack {
+            let key = slopty_client::groups::GroupKey::new(
+                slopty_client::groups::fact::PROJECT,
+                &stack.project,
+            );
+            if self.muted.contains(key.as_str()) {
+                return;
+            }
             tracing::debug!(id = stack.id, "project note");
             self.project_notes.insert(stack.id.clone());
             self.send(Note {
@@ -429,6 +441,7 @@ impl Attention {
     /// away, one that stopped takes its note back, and the badge follows the bell.
     pub fn look(&mut self, look: &Look) {
         self.projects.clone_from(&look.projects);
+        self.muted.clone_from(&look.muted);
         let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
         if self.away() {
             for asking in &look.asking {
@@ -533,8 +546,12 @@ impl Attention {
     }
 
     fn post(&mut self, about: About, why: Why, mut note: Note) {
-        tracing::debug!(?about, ?why, "attention note");
         note.thread = self.projects.get(&about).cloned();
+        // A muted project's moments post nothing; the bell and the navigator still say them.
+        if note.thread.as_ref().is_some_and(|project| self.muted.contains(project)) {
+            return;
+        }
+        tracing::debug!(?about, ?why, "attention note");
         // Only an agent that needs the person breaks through a Focus.
         note.urgent = why == Why::Asks;
         if why != Why::Asks {
@@ -602,7 +619,8 @@ impl WorkspaceView {
                 Some(Turn { route, title, body })
             })
             .collect();
-        Look { asking, turns, unread: self.bell_count(), projects: self.note_projects() }
+        let muted = self.navigator().muted.iter().map(|k| k.as_str().to_owned()).collect();
+        Look { asking, turns, unread: self.bell_count(), projects: self.note_projects(), muted }
     }
 
     /// The project each terminal and thread is in, by its group's key: a tile's group (its

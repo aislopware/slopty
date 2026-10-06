@@ -49,6 +49,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     assert!(memory.posted().is_empty(), "in front, the navigator says it");
 
@@ -58,6 +59,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     assert!(
         memory.posted().is_empty(),
@@ -69,6 +71,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         turns: Vec::new(),
         unread: 2,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let posted = memory.posted();
     assert_eq!(posted.len(), 1, "only the agent that started to wait: {posted:?}");
@@ -98,6 +101,7 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     assert_eq!(memory.posted().len(), 1, "away from every device: the phone says it");
 
@@ -109,6 +113,7 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
         turns: Vec::new(),
         unread: 2,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let done =
         Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
@@ -119,7 +124,13 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
     let c = route(4);
     let mut three = both;
     three.push(asking(c, "Asks: ship it?"));
-    attention.look(&Look { asking: three, turns: Vec::new(), unread: 3, projects: HashMap::new() });
+    attention.look(&Look {
+        asking: three,
+        turns: Vec::new(),
+        unread: 3,
+        projects: HashMap::new(),
+        muted: HashSet::new(),
+    });
     let posted = memory.posted();
     assert_eq!(posted.len(), 2, "gone from the Mac, a new wait notifies: {posted:?}");
     assert_eq!(posted[1].id, c.about.note_id());
@@ -140,6 +151,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
         turns: vec![turn],
         unread: 2,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     assert!(memory.posted().is_empty(), "the look decides nothing: {:?}", memory.posted());
 
@@ -161,6 +173,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
         turns: Vec::new(),
         unread: 2,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let posted = memory.posted();
     assert_eq!(posted.len(), 2, "the note again, now with the buttons");
@@ -191,6 +204,7 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     attention.look(&Look::default());
     assert_eq!(memory.withdrawn(), vec![id.clone()], "answered elsewhere, its note goes");
@@ -200,6 +214,7 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
     attention.command_finished(a, "api".into(), &done, Duration::from_secs(5));
@@ -255,6 +270,7 @@ fn only_needs_you_breaks_through_a_focus() {
         turns: vec![Turn { route: b, title: "api".into(), body: "Done".into() }],
         unread: 2,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let held = Asking { approval: Some("7".into()), ..asking(a, "Run cargo test") };
     own.look(&Look { asking: vec![held], ..Look::default() });
@@ -323,6 +339,7 @@ fn the_badge_is_the_bells_count() {
         turns: Vec::new(),
         unread: 3,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     assert_eq!(memory.badge(), Some(3), "the bell's count");
     attention.set_active(false);
@@ -594,6 +611,7 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let held = Asking { approval: Some("3".into()), ..asking(a, "Run make") };
     attention.look(&Look {
@@ -601,18 +619,21 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     attention.look(&Look {
         asking: vec![held],
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     attention.look(&Look {
         asking: vec![asking(a, "Run make")],
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let said: Vec<(bool, bool, Option<String>)> = memory
         .posted()
@@ -635,6 +656,7 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     };
     attention.look(&asks());
     memory.clear();
@@ -643,12 +665,14 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     });
     let answered = Look {
         asking: vec![Asking { answered: Some("4".into()), ..asking(b, "Run make") }],
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
+        muted: HashSet::new(),
     };
     attention.look(&answered);
     attention.look(&answered);
@@ -995,8 +1019,13 @@ fn a_finished_turn_notifies_once_while_the_app_is_away() {
     let (mut attention, memory) = attention();
     let a = route(1);
     let turn = Turn { route: a, title: "api".into(), body: "Fixed the test · Done · 2m".into() };
-    let look =
-        Look { asking: Vec::new(), turns: vec![turn.clone()], unread: 1, projects: HashMap::new() };
+    let look = Look {
+        asking: Vec::new(),
+        turns: vec![turn.clone()],
+        unread: 1,
+        projects: HashMap::new(),
+        muted: HashSet::new(),
+    };
     attention.look(&look);
     assert!(memory.posted().is_empty(), "in front, the navigator says it");
 
@@ -1149,4 +1178,26 @@ fn notes_of_one_project_share_a_thread(cx: &mut TestAppContext) {
     assert_eq!(thread_of(sessions[0]), Some(atlas.clone()), "atlas's thread");
     assert_eq!(thread_of(sessions[1]), Some(atlas), "the same one");
     assert_eq!(thread_of(sessions[2]), Some(site), "site's own");
+}
+
+/// A muted project's moments post nothing, its waits nor its finished turns; another
+/// project's still do.
+#[test]
+fn a_muted_projects_moments_post_nothing() {
+    let (mut attention, memory) = attention();
+    let (a, b) = (route(1), route(2));
+    attention.set_active(false);
+    let projects: HashMap<About, String> =
+        [(a.about, "repo:/w/atlas".to_owned()), (b.about, "repo:/w/bolt".to_owned())].into();
+    let muted: HashSet<String> = ["repo:/w/atlas".to_owned()].into();
+    attention.look(&Look {
+        asking: vec![asking(a, "Run cargo test"), asking(b, "Run make")],
+        turns: Vec::new(),
+        unread: 2,
+        projects,
+        muted,
+    });
+    let posted = memory.posted();
+    assert_eq!(posted.len(), 1, "only the other project's: {posted:?}");
+    assert_eq!(posted[0].id, b.about.note_id());
 }

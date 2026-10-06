@@ -54,6 +54,12 @@ pub(super) const CLOSE_OTHER_TABS: &str = "Close other tabs";
 pub(super) const CLOSE_TABS_RIGHT: &str = "Close tabs to the right";
 pub(super) const CLOSE_TABS_LEFT: &str = "Close tabs to the left";
 
+/// A project's menu's rows that pin it above the rest, and mute its notifications.
+pub(super) const PIN_TO_TOP: &str = "Pin to top";
+pub(super) const UNPIN: &str = "Unpin";
+pub(super) const MUTE_NOTES: &str = "Mute notifications";
+pub(super) const UNMUTE_NOTES: &str = "Unmute notifications";
+
 /// Copies where a tile is.
 pub(super) const COPY_PATH: &str = "Copy path";
 
@@ -335,7 +341,8 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// A project's rows: a new shell in its clone, where it has one, and folding it.
+    /// A project's rows: a new shell in its clone, where it has one, folding it, pinning it
+    /// above the rest and muting its notifications.
     fn project_entries(
         &self,
         key: &GroupKey,
@@ -359,6 +366,16 @@ impl WorkspaceView {
             cx.notify();
         });
         let label = if folded { "Unfold" } else { "Fold" };
+        entries.push(Self::entry(MenuGroup::Navigation, label, String::new(), run, cx));
+        let pinned = self.navigator().pinned.contains(key);
+        let pin = key.clone();
+        let run: Run = Rc::new(move |this, _w, cx| this.toggle_pinned(&pin, cx));
+        let label = if pinned { UNPIN } else { PIN_TO_TOP };
+        entries.push(Self::entry(MenuGroup::Navigation, label, String::new(), run, cx));
+        let muted = self.navigator().muted.contains(key);
+        let mute = key.clone();
+        let run: Run = Rc::new(move |this, _w, cx| this.toggle_muted(&mute, cx));
+        let label = if muted { UNMUTE_NOTES } else { MUTE_NOTES };
         entries.push(Self::entry(MenuGroup::Navigation, label, String::new(), run, cx));
         entries
     }

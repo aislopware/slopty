@@ -33,8 +33,8 @@ fn a_worker_key_prints_and_serialises_as_32_hex_digits() {
     assert_eq!(back, r);
 }
 
-/// The navigator's grouping and the projects' tiling are kept together in `layout.json`, and
-/// come back as they were.
+/// The navigator's grouping, its pinned and muted projects and the projects' tiling are kept
+/// together in `layout.json`, and come back as they were.
 #[test]
 fn the_tiling_and_the_navigator_are_saved_and_restored() {
     let mut tiling = Tiling::new(TilingConfig::default());
@@ -42,14 +42,22 @@ fn the_tiling_and_the_navigator_are_saved_and_restored() {
     tiling.new_tab(tile(1, 1), &GroupKey::new("project", "atlas"));
     tiling.split_focused(tile(1, 2), Side::Right, &GroupKey::new("project", "atlas"));
     let by_agent = vec!["agent".to_owned(), "machine".to_owned()];
+    let (pinned, muted) =
+        (vec![GroupKey::new("project", "atlas")], vec![GroupKey::new("project", "bolt")]);
     let saved = Saved {
         tiling: tiling.save(),
-        navigator: Navigator { group_by: by_agent.clone(), ..Navigator::default() },
+        navigator: Navigator {
+            group_by: by_agent.clone(),
+            pinned: pinned.clone(),
+            muted: muted.clone(),
+            ..Navigator::default()
+        },
         ..Saved::default()
     };
     let json = serde_json::to_string(&saved).unwrap();
     let back: Saved = serde_json::from_str(&json).unwrap();
     assert_eq!(back.navigator.group_by, by_agent);
+    assert_eq!((back.navigator.pinned, back.navigator.muted), (pinned, muted));
     let restored = Tiling::restore(back.tiling, TilingConfig::default());
     assert_eq!(restored.save(), tiling.save());
     assert_eq!(Navigator::default().group_by, ["project", "repo", "folder", "machine"]);

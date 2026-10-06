@@ -298,7 +298,8 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         cx.debug_bounds(leak(format!("nav-age-{id}"))).expect("the age"),
     );
     assert!(meta.top() > row.top() + (row.size.height / 3.0), "under the title: {meta:?} {row:?}");
-    assert!(age.bottom() <= meta.top(), "the age ends the first line: {age:?} {meta:?}");
+    assert!(age.top() >= meta.top() - px(0.5), "the age ends the second line: {age:?} {meta:?}");
+    assert!(age.left() >= meta.right(), "after its words: {age:?} {meta:?}");
     assert!(age.right() <= row.right() && age.left() > row.center().x, "{age:?} {row:?}");
 
     // Focus the other shell, so the waiting one's row is not the selected one.
@@ -322,13 +323,16 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         )),
         "what it asks, not its state again: {lines:#?}"
     );
-    // The state is a mark at the line's end, not a word that takes the title's room: it takes
-    // the age's place, the agent's mark still leads, and the row's name still says the state.
+    // The state ends the second line as its glyph and its word, `MonoCode`'s, in the age's
+    // place: the title keeps the first line whole, the agent's mark still leads, and the row's
+    // name still says the state.
     let state = cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the state's mark");
+    let word = cx.debug_bounds(leak(format!("nav-word-{id}"))).expect("the state's word");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(state.bottom() <= meta.top() + px(0.5), "on the first line: {state:?} {meta:?}");
+    assert!(state.top() >= meta.top() - px(0.5), "on the second line: {state:?} {meta:?}");
+    assert!(meta.right() <= state.left() && state.right() <= word.left(), "{meta:?} {word:?}");
     assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the age gives way");
-    assert!(cx.debug_bounds(leak(format!("nav-status-{id}"))).is_none(), "no state word");
+    assert!(word.size.width > px(40.0), "a word, \"Needs approval\": {word:?}");
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Image", Some("Needs you"))), "the glyph: {nodes:#?}");
     assert!(
@@ -1087,8 +1091,9 @@ fn an_agents_subagents_at_work_fold_into_its_row_as_a_count(cx: &mut TestAppCont
 }
 
 /// A row leads with its status glyph (an agent at work turns the working mark in the kind's
-/// place), its working tree's changes sit right-aligned under the first line's end, and under
-/// the pointer that end gives way to a close button, which takes the tile off.
+/// place). Its second line ends in its working tree's changes, then its state as a glyph and a
+/// word ("Working"), right-aligned. Under the pointer the title's line ends in a close button,
+/// which takes the tile off.
 #[gpui::test]
 fn a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1119,7 +1124,14 @@ fn a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer(cx: &mut Te
         cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the changes"),
     );
     assert!((kind.left() - lines.left()).abs() < px(0.5), "the glyph leads: {kind:?}");
-    assert!((lines.right() - changes.right()).abs() < px(0.5), "right-aligned: {changes:?}");
+    let (state, word) = (
+        cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the state's glyph"),
+        cx.debug_bounds(leak(format!("nav-word-{id}"))).expect("the state's word"),
+    );
+    assert!(changes.right() <= state.left(), "the changes, then the state: {changes:?}");
+    assert!(state.right() <= word.left(), "the glyph, then its word: {state:?} {word:?}");
+    assert!((lines.right() - word.right()).abs() < px(0.5), "right-aligned: {word:?}");
+    assert!(changes.top() >= state.top() - px(0.5), "on one line: {changes:?} {state:?}");
 
     let close = leak(format!("nav-close-{}", keep.item.as_uuid()));
     assert!(!shown(cx, close), "the close waits for the pointer");
