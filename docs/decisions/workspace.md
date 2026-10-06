@@ -2007,3 +2007,18 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     a_tile_row_goes_to_its_tab_and_pane, a_tile_row_dragged_to_a_panes_edge_splits_it,
     a_project_row_with_no_tile_here_opens_a_composer_there}`. The fold tests in `nav_rows.rs`
     fold by the chevron.
+- ✅ **The tab's terminal** (2026-10-07, step 7 of the study's §4.2). ⌘⌥T, "Show or hide the
+  tab's terminal" in the palette, and Layout ▸ Tab Terminal in the menu bar control it.
+  - The first press asks for a shell on the focused tile's machine, in its folder. That shell
+    becomes the tab's terminal: a pane below the whole tab, a third of its height, focused.
+  - Later presses put it away, with the focus back on the work, and bring the same shell back.
+    Its shell runs on while it is hidden.
+  - A shell is the worker's to make, so the ask waits in its worker's queue as `Opening::Terminal`.
+    Presses before the shell arrives ask for nothing more.
+  - The tab it joins is the one on show when the shell arrives. If no tab is on show by then, it
+    becomes a tab of its own.
+  - Zoom already replaced Focus mode in step 3. Fullscreen tile went with the strip's keys in
+    step 4.
+  - Tests: `workspace::tests::tab_commands::{cmd_alt_t_shows_hides_and_shows_the_same_shell,
+    a_zoom_fills_the_tab_and_both_come_back}` (the zoom puts the docked navigator away and both
+    come back), and `layout::tiling::tests` for the terminal's toggle.

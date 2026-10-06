@@ -2022,6 +2022,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::start_agent))
             .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::tab_terminal))
             .on_action(cx.listener(|this, a: &ShowTab, _w, cx| this.show_tab(a.id, cx)))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))

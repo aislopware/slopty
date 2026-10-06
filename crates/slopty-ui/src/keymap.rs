@@ -287,6 +287,7 @@ pub fn defaults() -> Vec<Command> {
         // An editor's ⌘D, the next occurrence, is deeper and wins in its text.
         c(Workspace, "split_right", ws::SplitRight, &["cmd-d"], W),
         c(Workspace, "split_down", ws::SplitDown, &["cmd-shift-d"], W),
+        c(Workspace, "tab_terminal", ws::TabTerminal, &["cmd-alt-t"], W),
         c(Workspace, "new_note", ws::NewNote, &["cmd-shift-n"], W),
         c(Workspace, "add_window", ws::AddWindow, &["cmd-o"], W),
         c(Workspace, "open_file", ws::OpenFile, &["cmd-p"], W),

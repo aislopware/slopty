@@ -23,6 +23,9 @@ actions!(
         SplitRight,
         /// ⌘⇧D: a new shell in a pane of its own below the focused one.
         SplitDown,
+        /// ⌘⌥T: the tab's terminal, a pane below the whole tab: a shell there the first time,
+        /// then put away and brought back, its shell going on.
+        TabTerminal,
         /// "Close other tabs": every tab of the project on show but the one on show, and what
         /// is in them.
         CloseOtherTabs,
@@ -426,6 +429,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("New agent\u{2026}", Box::new(NewAgent)),
         w("Split right with a terminal", Box::new(SplitRight)),
         w("Split down with a terminal", Box::new(SplitDown)),
+        w("Show or hide the tab's terminal", Box::new(TabTerminal)),
         w(super::agent_start::NEW_PROJECT, Box::new(NewProject)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),

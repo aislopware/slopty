@@ -1,6 +1,6 @@
 //! The tabs' commands: new work in a tab of its own or in a pane split off the focused one
-//! (⌘T, ⌘⇧T, ⌘D, ⌘⇧D), the steps that list the project's tabs and the other projects, and
-//! closing the other tabs.
+//! (⌘T, ⌘⇧T, ⌘D, ⌘⇧D), the tab's terminal (⌘⌥T), the steps that list the project's tabs and the
+//! other projects, and closing the other tabs.
 //!
 //! A shell is the worker's to make, so where it goes is decided when its item comes, not when
 //! it is asked for: each ask is queued with where it goes ([`Opening`]), and the shells this
@@ -19,7 +19,7 @@ use slopty_proto::items::ItemKind;
 use super::WorkspaceView;
 use super::actions::{
     CloseOtherTabs, MOVE_TO_PROJECT, MoveToProject, MoveToProjectOf, OTHER_TABS, OtherTabs,
-    ShowTab, SplitDown, SplitRight, StartAgent, StartThread,
+    ShowTab, SplitDown, SplitRight, StartAgent, StartThread, TabTerminal,
 };
 use super::title_tabs::TitleTabsHost as _;
 use crate::palette::PaletteItem;
@@ -33,6 +33,8 @@ pub(super) enum Opening {
     Tab,
     /// In a pane of its own on this side of the focused one (⌘D, ⌘⇧D).
     Split(Side),
+    /// The terminal of the tab on show, below the whole tab (⌘⌥T's first press).
+    Terminal,
 }
 
 /// The shells asked of one worker and not come yet, the first asked first.
@@ -74,6 +76,24 @@ impl WorkspaceView {
         self.new_terminal_as(Opening::Split(Side::Bottom), cx);
     }
 
+    /// ⌘⌥T: the tab's terminal put away or brought back, its shell going on; the first time, a
+    /// shell asked for it on the focused tile's worker, in its folder. Pressed again before that
+    /// shell comes, nothing more is asked.
+    pub(super) fn tab_terminal(
+        &mut self,
+        _: &TabTerminal,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut shown = None;
+        self.layout_action(cx, |l| shown = l.toggle_terminal());
+        let asked =
+            self.workers.values().any(|w| w.openings.iter().any(|(_, o)| *o == Opening::Terminal));
+        if shown.is_none() && !asked && self.layout.shown_tab().is_some() {
+            self.new_terminal_as(Opening::Terminal, cx);
+        }
+    }
+
     /// A shell on the focused tile's worker (or the one "+" chose), in the focused shell's
     /// directory when it is on that worker, going where `opening` says.
     pub(super) fn new_terminal_as(&mut self, opening: Opening, cx: &mut Context<Self>) {
@@ -108,6 +128,11 @@ impl WorkspaceView {
                 self.layout.new_tab(tile, &home);
             }
             Opening::Split(side) => self.layout.split_focused(tile, side, &home),
+            Opening::Terminal => {
+                if !self.layout.set_terminal(tile) {
+                    self.layout.new_tab(tile, &home);
+                }
+            }
         }
     }
 

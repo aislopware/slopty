@@ -34,8 +34,8 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
         FocusUp, FontLarger, FontReset, FontSmaller, GoBack, GoForward, MoveDown, MoveLeft,
         MoveRight, MoveToProject, MoveUp, NewAgent, NewNote, NewTerminal, NextAttention,
         NextProject, NextTab, OpenFile, OpenFolder, OpenPalette, OpenUrl, PreviousProject,
-        PreviousTab, SaveCopy, SplitDown, SplitRight, StartAgent, ToggleMute, ToggleStats,
-        UndoClose, ZoomPane,
+        PreviousTab, SaveCopy, SplitDown, SplitRight, StartAgent, TabTerminal, ToggleMute,
+        ToggleStats, UndoClose, ZoomPane,
     };
 
     use crate::{Minimize, OpenHelp, ShowWindow, Zoom};
@@ -112,6 +112,7 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
             MenuItem::action("Move to Project…", MoveToProject),
             MenuItem::separator(),
             MenuItem::action("Zoom Pane", ZoomPane),
+            MenuItem::action("Tab Terminal", TabTerminal),
             MenuItem::action("Equalize Panes", EqualizePanes),
             MenuItem::separator(),
             MenuItem::action("Previous Tab", PreviousTab),

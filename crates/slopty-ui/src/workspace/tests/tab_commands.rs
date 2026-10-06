@@ -156,3 +156,80 @@ fn move_to_project_takes_the_tile_to_a_tab_of_the_project_picked(cx: &mut TestAp
     assert_ne!(moved.tab, a.tab, "a tab of its own");
     assert_eq!(focused(&view, cx), Some(bolt), "and focused");
 }
+
+/// The panes drawn in the tab on show.
+fn panes(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> usize {
+    view.read_with(cx, |v, _| v.layout().frame().panes.len())
+}
+
+/// The shells asked of `fake` since last drained.
+fn asked(fake: &mut Fake) -> usize {
+    fake.drain().iter().filter(|m| matches!(m, ClientMsg::OpenSession { .. })).count()
+}
+
+/// ⌘⌥T asks for one shell, however often it is pressed before the shell comes, and that shell
+/// is the tab's terminal: a pane below the whole tab, a third of its height, focused. Pressed
+/// again it is put away, the focus back on the work; again, the same shell comes back.
+#[gpui::test]
+fn cmd_alt_t_shows_hides_and_shows_the_same_shell(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let work = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    fake.drain();
+
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+    assert_eq!(asked(&mut fake), 1, "one shell asked for");
+    let session = SessionId::new();
+    let terminal = opens(&view, cx, &fake, session, fake.me, 2);
+    assert_eq!(pos_of(&view, cx, terminal).tab, pos_of(&view, cx, work).tab, "in the tab");
+    assert_eq!(panes(&view, cx), 2);
+    assert_eq!(focused(&view, cx), Some(terminal));
+    let (above, below) = (
+        drawn_at(&view, cx, work).expect("the work drawn"),
+        drawn_at(&view, cx, terminal).expect("the terminal drawn"),
+    );
+    assert!(below.top() >= above.bottom() - px(0.5), "below: {above:?} {below:?}");
+    let third = f32::from(below.size.height) / f32::from(below.bottom() - above.top());
+    assert!((third - 1.0 / 3.0).abs() < 0.05, "a third of the height: {third}");
+
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+    assert_eq!(panes(&view, cx), 1, "put away");
+    assert_eq!(focused(&view, cx), Some(work), "the focus back on the work");
+    assert!(drawn_at(&view, cx, terminal).is_none(), "not drawn");
+
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+    assert_eq!(panes(&view, cx), 2, "back");
+    assert_eq!(focused(&view, cx), Some(terminal), "the same shell, focused");
+    assert!(terminal_focused(&view, cx, session), "with the keyboard");
+    assert_eq!(asked(&mut fake), 0, "nothing more asked");
+}
+
+/// ⇧⌘↩ zooms the focused pane over the whole tab and puts the docked navigator away; pressed
+/// again, both come back.
+#[gpui::test]
+fn a_zoom_fills_the_tab_and_both_come_back(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _left = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_keystrokes("cmd-d");
+    let right = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    assert!(navigator_docked(&view, cx), "docked to begin with");
+    let area = |cx: &mut VisualTestContext| cx.debug_bounds("area").expect("the area");
+
+    cx.simulate_keystrokes("cmd-shift-enter");
+    cx.run_until_parked();
+    assert_eq!(panes(&view, cx), 1, "one pane over the tab");
+    assert!(!navigator_docked(&view, cx), "the navigator put away");
+    let (zoomed, room) = (drawn_at(&view, cx, right).expect("drawn"), area(cx));
+    assert!((zoomed.size.width - room.size.width).abs() < px(2.0), "{zoomed:?} {room:?}");
+
+    cx.simulate_keystrokes("cmd-shift-enter");
+    cx.run_until_parked();
+    assert_eq!(panes(&view, cx), 2, "both panes back");
+    assert!(navigator_docked(&view, cx), "and the navigator");
+    assert_eq!(focused(&view, cx), Some(right));
+}
