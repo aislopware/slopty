@@ -53,8 +53,8 @@ use std::process::{ExitStatus, Stdio};
 
 pub use platform::{Arch, Os, Platform, Unsupported};
 pub use secrecy::{ExposeSecret, SecretString};
-pub use slopty_platform::service::Ptyd;
 use slopty_platform::service::{NOBODY_LOGGED_IN, Report, WORKER_BINARIES};
+pub use slopty_platform::service::{Ptyd, Removed};
 use slopty_proto::ctl::Health;
 pub use ssh::{Echo, Job, Local, OnEvent, PERSIST, Pending, Ran, Runner, Signed, Ssh};
 pub use target::{REMEMBERED, Remembered, Server, Target};
@@ -105,6 +105,8 @@ pub enum Step {
     Install,
     /// The new worker's `doctor`.
     Check,
+    /// The uploaded `slopty worker uninstall --purge` running there ([`remove`]).
+    Remove,
 }
 
 /// What a deploy says as it goes.
@@ -322,6 +324,14 @@ pub enum DeployError {
         /// The server as the plan named it.
         server: String,
     },
+    /// What the uninstall there said it removed was not a removal.
+    #[error("the uninstall said {said:?}: {error}")]
+    NotRemoved {
+        /// What it printed.
+        said: String,
+        /// Why that is not a removal.
+        error: serde_json::Error,
+    },
     /// The doctor there answered with something other than a health report.
     #[error("the worker's doctor said {said:?}: {error}")]
     Doctor {
@@ -502,6 +512,9 @@ impl DeployError {
             }
             Self::Doctor { said, .. } => {
                 plain("The new worker did not report back".to_owned(), last_lines(said))
+            }
+            Self::NotRemoved { said, .. } => {
+                plain("The uninstall did not say what it removed".to_owned(), last_lines(said))
             }
         }
     }
@@ -689,6 +702,45 @@ pub async fn deploy(
     };
     let console = reached.console;
     Ok(Deployed { platform: reached.platform, health, server, ptyd, stops_at_logout, console, key })
+}
+
+/// What a removal takes to the machine: the CLI, whose purge runs there.
+pub const REMOVER: [&str; 1] = ["slopty"];
+
+/// Take the worker off `runner`'s machine, and everything else of its there; what it removed,
+/// as it said.
+///
+/// That is `slopty worker uninstall --purge`: its services, its own files, its logs, the
+/// deploy's stage and Slopty's hook entries. This build's CLI goes up to [`STAGE`] first, from the
+/// first of `sources` built for the machine, so the purge is this build's and not that of whatever
+/// worker is there; on this machine it runs where it is.
+///
+/// The person's repositories, worktrees and the agents' own sessions there are not touched:
+/// the purge names what it takes ([`slopty_platform::service::WORKER_STATE`]).
+///
+/// # Errors
+///
+/// When the sign-in with `password` fails, the machine or the CLI do not fit, the purge there
+/// fails, or what it said is not a removal.
+pub async fn remove(
+    runner: &dyn Runner,
+    sources: &[PathBuf],
+    password: Option<&SecretString>,
+    on: &mut OnEvent<'_>,
+) -> Result<Removed, DeployError> {
+    let signed = match password {
+        Some(password) => {
+            named(runner)?;
+            runner.sign_in(password).await?
+        }
+        None => None,
+    };
+    let runner = signed.as_deref().unwrap_or(runner);
+    let reached = reach(runner, on).await?;
+    let bin = send(runner, sources, &REMOVER, reached.platform, on).await?;
+    on(Event::Step(Step::Remove));
+    let said = output(runner, &format!("{bin}/slopty --json worker uninstall --purge"), on).await?;
+    serde_json::from_str(&said).map_err(|error| DeployError::NotRemoved { said, error })
 }
 
 /// The person's public key, as `ssh-copy-id` picks it: the first the agent lists

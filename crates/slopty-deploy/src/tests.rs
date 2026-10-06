@@ -1300,3 +1300,111 @@ fn the_key_is_the_agent_s_first_else_the_newest_id_pub() {
     aged("work.pub", 3_000);
     assert_eq!(choose_key("", dir.path()).as_deref(), Some("ssh-ed25519 AAAAnew new"));
 }
+
+/// What the purge there says it removed.
+const REMOVED: &str = r#"{"services":["slopty-worker","slopty-ptyd"],"paths":["/Users/me/Library/Application Support/Slopty/worker-id"],"hooks":true}"#;
+
+/// A machine whose purge goes as it should.
+fn purges(script: &str) -> (i32, &'static str, &'static str) {
+    if script.contains("worker uninstall --purge") { (0, REMOVED, "") } else { mini(script) }
+}
+
+/// Runs `remove`, keeping what it said.
+async fn removing(
+    runner: &dyn Runner,
+    source: &tempfile::TempDir,
+    password: Option<&SecretString>,
+) -> (Result<Removed, DeployError>, Vec<Event>) {
+    let mut events = Vec::new();
+    let sources = [source.path().to_path_buf()];
+    let done = remove(runner, &sources, password, &mut |e| events.push(e)).await;
+    (done, events)
+}
+
+/// A removal over `ssh` runs exactly three things there: `uname`, the upload of this build's CLI
+/// alone, and that CLI's purge, whose word on what it removed comes back. Nothing else is run:
+/// no `rm` of its own, nothing outside the stage.
+#[tokio::test]
+async fn a_removal_uploads_the_cli_and_runs_its_purge() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted::new(purges);
+    let (done, events) = removing(&runner, &source, None).await;
+    let removed = done.unwrap();
+    assert_eq!(removed.services, ["slopty-worker", "slopty-ptyd"]);
+    assert!(removed.hooks);
+    let part = format!("{STAGE}/slopty.part");
+    assert_eq!(
+        runner.ran(),
+        [
+            REACH.to_owned(),
+            format!(
+                "mkdir -p {STAGE} && cat > {part} && chmod 755 {part} && mv -f {part} \
+                 {STAGE}/slopty"
+            ),
+            format!("{STAGE}/slopty --json worker uninstall --purge"),
+        ]
+    );
+    let steps: Vec<&Step> =
+        events.iter().filter_map(|e| if let Event::Step(s) = e { Some(s) } else { None }).collect();
+    assert_eq!(steps, [&Step::Reach, &Step::Upload { name: "slopty" }, &Step::Remove]);
+}
+
+/// On this Mac the CLI runs where it is, with no upload; behind a password every step rides
+/// the one sign-in.
+#[tokio::test]
+async fn a_local_removal_runs_in_place_and_a_password_signs_in_once() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted { local: true, ..Scripted::new(purges) };
+    let (done, events) = removing(&runner, &source, None).await;
+    done.unwrap();
+    let bin = format!("\"{}\"", source.path().display());
+    assert_eq!(
+        runner.ran(),
+        [REACH.to_owned(), format!("{bin}/slopty --json worker uninstall --purge")]
+    );
+    assert!(!events.iter().any(|e| matches!(e, Event::Step(Step::Upload { .. }))), "{events:?}");
+
+    let runner = Scripted::new(purges);
+    let password = SecretString::from("hunter2");
+    let (done, _) = removing(&runner, &source, Some(&password)).await;
+    done.unwrap();
+    let ran = runner.ran();
+    assert_eq!(ran.first().map(String::as_str), Some("sign in (7 characters)"));
+    assert!(ran.iter().skip(1).all(|s| s.starts_with("signed: ")), "{ran:#?}");
+}
+
+/// A machine no worker runs on is refused at `uname`, before anything goes up; a purge that
+/// fails says so with its error output; one that says something other than a removal fails
+/// with what it said.
+#[tokio::test]
+async fn a_removal_that_cannot_go_says_why() {
+    fn bsd(script: &str) -> (i32, &'static str, &'static str) {
+        if script == REACH { (0, "FreeBSD amd64\n", "") } else { purges(script) }
+    }
+    fn refused(script: &str) -> (i32, &'static str, &'static str) {
+        if script.contains("--purge") {
+            (1, "", "remove ~/.claude/settings.json: denied")
+        } else {
+            mini(script)
+        }
+    }
+    fn garbled(script: &str) -> (i32, &'static str, &'static str) {
+        if script.contains("--purge") { (0, "removed slopty-worker", "") } else { mini(script) }
+    }
+    let source = binaries(mac_arm64);
+
+    let runner = Scripted::new(bsd);
+    let (done, _) = removing(&runner, &source, None).await;
+    assert!(matches!(done, Err(DeployError::Machine { .. })), "{done:?}");
+    assert_eq!(runner.ran(), [REACH], "nothing went up, nothing ran");
+
+    let (done, _) = removing(&Scripted::new(refused), &source, None).await;
+    let failed = done.unwrap_err();
+    assert!(matches!(failed, DeployError::Failed { .. }), "{failed:?}");
+    assert!(failed.to_string().ends_with("remove ~/.claude/settings.json: denied"), "{failed}");
+
+    let (done, _) = removing(&Scripted::new(garbled), &source, None).await;
+    let failed = done.unwrap_err();
+    assert!(matches!(failed, DeployError::NotRemoved { .. }), "{failed:?}");
+    assert_eq!(failed.failure().title, "The uninstall did not say what it removed");
+}

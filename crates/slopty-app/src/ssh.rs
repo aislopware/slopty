@@ -331,7 +331,7 @@ impl Progress {
             Event::Machine(platform) => self.machine = Some(platform.to_string()),
             Event::Step(Step::Upload { .. }) => self.stage = Stage::Copy,
             Event::Sent { sent, total } => self.sent = Some((sent, total)),
-            Event::Step(Step::Install) => self.stage = Stage::Install,
+            Event::Step(Step::Install | Step::Remove) => self.stage = Stage::Install,
             Event::Line(line) => {
                 let line = line.trim();
                 if !line.is_empty() {
