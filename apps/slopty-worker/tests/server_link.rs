@@ -1224,9 +1224,16 @@ mod tests {
             tokio::time::timeout(STEP, looking).await.expect("the terminal says where it is")
         };
 
-        let opened = peer.ask(opening(Some(&clone))).await;
-        assert!(matches!(opened, Outcome::Opened(_)), "{opened:?}");
         let tree = std::fs::canonicalize(&clone).unwrap().join(".claude/worktrees/slopty-demo-1");
+        let made_in = |outcome: Outcome| {
+            let Outcome::OpenedIn { worktree, .. } = outcome else {
+                panic!("opened in its worktree: {outcome:?}")
+            };
+            assert_eq!(worktree.name, "slopty-demo-1");
+            assert_eq!(Path::new(&worktree.path), tree, "the worktree it says it opened in");
+            assert_eq!(worktree.branch.as_deref(), Some("worktree-slopty-demo-1"));
+        };
+        made_in(peer.ask(opening(Some(&clone))).await);
         assert_eq!(opened_in().await, tree.to_string_lossy());
         assert_eq!(git(&tree, &["rev-parse", "HEAD"]), main, "from main");
         assert_eq!(git(&tree, &["branch", "--show-current"]), "worktree-slopty-demo-1");
@@ -1235,8 +1242,7 @@ mod tests {
         git(&tree, &["commit", "-q", "--allow-empty", "-m", "the task's work"]);
         let work = git(&tree, &["rev-parse", "HEAD"]);
         std::fs::remove_file(&record).unwrap();
-        let again = peer.ask(opening(Some(&clone))).await;
-        assert!(matches!(again, Outcome::Opened(_)), "{again:?}");
+        made_in(peer.ask(opening(Some(&clone))).await);
         assert_eq!(opened_in().await, tree.to_string_lossy());
         assert_eq!(git(&tree, &["rev-parse", "HEAD"]), work, "reopened as is");
 
