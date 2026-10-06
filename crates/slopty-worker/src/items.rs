@@ -305,8 +305,11 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         ItemKind::File { path } if !good_path(path) => {
             Err(WorkerError::Items("bad file path".to_owned()))
         }
-        ItemKind::Folder { path } | ItemKind::Changes { path } if !good_path(path) => {
+        ItemKind::Folder { path } | ItemKind::Changes { path, .. } if !good_path(path) => {
             Err(WorkerError::Items("bad folder path".to_owned()))
+        }
+        ItemKind::Changes { against: Some(branch), .. } if !good_branch(branch) => {
+            Err(WorkerError::Items("bad branch".to_owned()))
         }
         ItemKind::Browser { url } if !web_address(url) => {
             Err(WorkerError::Items("bad url".to_owned()))
@@ -321,6 +324,11 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         | ItemKind::Thread { .. }
         | ItemKind::Changes { .. } => Ok(()),
     }
+}
+
+/// A branch a changes item may compare with: something, no longer than a path, and no option.
+fn good_branch(branch: &str) -> bool {
+    good_path(branch) && !branch.starts_with('-')
 }
 
 /// A path a file or folder item may name: something, [`PATH_MAX`] bytes at most.

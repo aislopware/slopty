@@ -1271,6 +1271,11 @@ async fn stream(
 }
 
 impl Threads {
+    /// The threads held.
+    pub(crate) const fn host(&self) -> &Host {
+        &self.host
+    }
+
     /// The whole of `content`, clipped in `thread`, from the adapter that made it.
     async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
         let meta = self.host.state(thread).map(|(state, _)| state.meta);

@@ -14,7 +14,7 @@ use std::time::Duration;
 use slopty_proto::project::{Fact, Facts};
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
 use slopty_proto::server::{Form, InstalledAgent, Os, WorkerCaps};
-use slopty_proto::thread::AgentId;
+use slopty_proto::thread::{AgentId, Offers};
 use tokio::sync::watch;
 
 /// How often permissions and displays are looked at: TCC and display changes come with no
@@ -78,11 +78,14 @@ pub fn agents_in(agents: &Facts, acp: &Facts) -> Vec<InstalledAgent> {
     };
     let adapted = ADAPTED.iter().filter_map(|(program, name)| {
         let version = text(agents.get(*program)?);
-        Some(InstalledAgent { agent: AgentId::named(name), version })
+        let agent = AgentId::named(name);
+        Some(InstalledAgent { offers: crate::thread::offers::seed(&agent), agent, version })
     });
-    let reached = acp
-        .iter()
-        .map(|(name, fact)| InstalledAgent { agent: AgentId::acp(name), version: text(fact) });
+    let reached = acp.iter().map(|(name, fact)| InstalledAgent {
+        agent: AgentId::acp(name),
+        version: text(fact),
+        offers: Offers::default(),
+    });
     adapted.chain(reached).collect()
 }
 
@@ -270,6 +273,9 @@ fn memory() -> u64 {
 /// Keep `caps` and `load` current until every receiver of both is gone, with the agents
 /// installed as `agents` last says: a change of them is probed at once.
 ///
+/// What each agent can be started with is what the threads `host` holds published
+/// ([`crate::thread::offers`]).
+///
 /// Permissions and displays every 5 s (the displays from CoreGraphics, since a ScreenCaptureKit
 /// enumeration that often raises the private-window consent prompt again and again), the load
 /// every 30 s when it moved by more than 0.5.
@@ -277,6 +283,7 @@ pub async fn watch(
     caps: watch::Sender<WorkerCaps>,
     load: watch::Sender<f32>,
     mut agents: watch::Receiver<Vec<InstalledAgent>>,
+    host: Option<crate::thread::Host>,
 ) {
     let mut tick = tokio::time::interval(CHECK_PERIOD);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -311,7 +318,14 @@ pub async fn watch(
             seldom = now;
             seldom_at = Some(tokio::time::Instant::now());
         }
-        let installed = agents.borrow_and_update().clone();
+        let mut installed = agents.borrow_and_update().clone();
+        if let Some(host) = &host {
+            let seen = crate::thread::offers::seen(host);
+            for agent in &mut installed {
+                let seed = std::mem::take(&mut agent.offers);
+                agent.offers = crate::thread::offers::merged(seed, seen.get(&agent.agent));
+            }
+        }
         let next = probe(&installed, &seldom);
         caps.send_if_modified(|current| {
             let changed = *current != next;

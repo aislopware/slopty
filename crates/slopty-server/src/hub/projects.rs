@@ -586,12 +586,11 @@ struct Place {
 
 /// The git worktree a writing agent works in.
 enum Worktree {
-    /// Claude Code's, by the name it is given (`--worktree <name>`), reopened by that name.
-    Named(String),
     /// Codex's, which it makes and names itself (`--worktree`).
     Codex,
-    /// One the worker makes for any other agent ([`slopty_proto::thread::wire::NewWorktree`]),
-    /// from the project's target, so the task's work starts where it is to land.
+    /// One the worker makes ([`slopty_proto::thread::wire::NewWorktree`]) from the project's
+    /// target, so the task's work starts where it is to land: Claude Code's own
+    /// `--worktree <name>` opens it, and any other agent's thread starts in it.
     Worker {
         /// Its name, reopened by it.
         name: String,
@@ -646,7 +645,7 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
                  your work there, and name its branch when you report done.",
                 plain(path)
             ),
-            Some(Worktree::Named(name) | Worktree::Worker { name, .. }) => format!(
+            Some(Worktree::Worker { name, .. }) => format!(
                 "- You work in a git worktree of your own, {name}, made from the clone at {} \
                  (branch worktree-{name}). Commit your work there, and name that branch when \
                  you report done.",
@@ -1200,7 +1199,8 @@ impl Hub {
         if let Some(answer) = self.start_keyed(key.as_ref(), sent).await {
             return answer;
         }
-        let Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size, .. } = verb else {
+        let Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size, worktree, .. } = verb
+        else {
             return error(ErrorCode::Invalid, "not an agent's start");
         };
         let admitted = Self::admit_agent(&mut self.inner.state.lock(), caller, from, worker, &args);
@@ -1233,6 +1233,7 @@ impl Hub {
             size,
             session,
             permission_flags,
+            worktree,
         };
         if let Some(key) = &key {
             keep_start(&mut self.inner.state.lock(), key.clone(), sent, &start);
@@ -1596,16 +1597,13 @@ impl Hub {
                 let at = clone.flatten().map(|path| {
                     let worktree = match &launch.run {
                         _ if card.read_only => None,
-                        Runner::Claude { args, .. } if !names(args, &WORKTREE_FLAGS) => {
-                            Some(Worktree::Named(format!("slopty-{project}-{task}")))
-                        }
                         Runner::Codex { .. } => Some(Worktree::Codex),
-                        // The worker makes it, where Claude Code makes its own.
-                        Runner::Agent { .. } => Some(Worktree::Worker {
+                        Runner::Claude { args, .. } if names(args, &WORKTREE_FLAGS) => None,
+                        Runner::Claude { .. } | Runner::Agent { .. } => Some(Worktree::Worker {
                             name: format!("slopty-{project}-{task}"),
                             base: record.target.clone(),
                         }),
-                        Runner::Claude { .. } | Runner::Command { .. } => None,
+                        Runner::Command { .. } => None,
                     };
                     Place { path, worktree }
                 });
@@ -1632,9 +1630,13 @@ impl Hub {
         let session = Some(term.session);
         let (start, conversation) = match run {
             Runner::Claude { prompt, mut args } => {
-                if let Some(Worktree::Named(name)) = worktree {
-                    args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name]);
-                }
+                let worktree = match worktree {
+                    Some(Worktree::Worker { name, base }) => {
+                        args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
+                        Some(NewWorktree { name, base: Some(base) })
+                    }
+                    Some(Worktree::Codex) | None => None,
+                };
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
                 let agent = AgentKind::ClaudeCode;
                 let spawn = Verb::SpawnAgent {
@@ -1647,6 +1649,7 @@ impl Hub {
                     size,
                     session,
                     permission_flags,
+                    worktree,
                 };
                 (spawn, conversation)
             }
@@ -1682,9 +1685,20 @@ impl Hub {
                     Some(Worktree::Worker { name, base }) => {
                         Some(NewWorktree { name, base: Some(base) })
                     }
-                    Some(Worktree::Named(_) | Worktree::Codex) | None => None,
+                    Some(Worktree::Codex) | None => None,
                 };
-                let start = Start { agent, cwd, drive: None, prompt, model, args, worktree };
+                let start = Start {
+                    agent,
+                    cwd,
+                    drive: None,
+                    prompt,
+                    model,
+                    mode: None,
+                    effort: None,
+                    attachments: Vec::new(),
+                    args,
+                    worktree,
+                };
                 let start = Verb::StartThread {
                     worker,
                     start: Box::new(start),

@@ -316,6 +316,11 @@ pub enum Verb {
         /// permissions. Without it the worker locks bypass mode off in the agent's settings.
         /// The server sets it from the person's policy on every start it forwards.
         permission_flags: bool,
+        /// A worktree made first by the worker when it is not there, from the clone `cwd` is in
+        /// at its base fetched current ([`crate::thread::wire::NewWorktree`]), for the agent's
+        /// own `--worktree <name>` in `args` to open. Without it Claude Code makes that one
+        /// itself, from `origin`'s default branch.
+        worktree: Option<crate::thread::wire::NewWorktree>,
     },
     /// Type into a terminal.
     SendInput {

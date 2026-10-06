@@ -194,6 +194,9 @@ mod codex {
             drive: None,
             prompt: Some(prompt.to_owned()),
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: None,
         }

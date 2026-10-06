@@ -841,7 +841,10 @@ mod golden {
                 by: ClientId::from_uuid(Uuid::from_u128(0x42)),
                 op: ItemOp::Add(Item {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7f)),
-                    kind: ItemKind::Changes { path: "/w/slopty".to_owned() },
+                    kind: ItemKind::Changes {
+                        path: "/w/slopty".to_owned(),
+                        against: Some("develop".to_owned()),
+                    },
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -1995,6 +1998,7 @@ mod orchestration {
                 size,
                 session: Some(term().session),
                 permission_flags: false,
+                worktree: None,
             }),
         );
         let resize = Verb::ResizeTerminal { term: term(), size: Size { cols: 100, rows: 30 } };

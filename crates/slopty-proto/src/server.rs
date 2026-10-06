@@ -118,6 +118,8 @@ pub struct InstalledAgent {
     pub agent: crate::thread::AgentId,
     /// Its version string, as it reports it.
     pub version: String,
+    /// What a new thread of it can be started with here.
+    pub offers: crate::thread::Offers,
 }
 
 /// What a worker can do, sent at registration and whenever it changes.

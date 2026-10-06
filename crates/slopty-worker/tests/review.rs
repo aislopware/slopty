@@ -297,8 +297,9 @@ mod review {
 
     /// A folder's working tree, reviewed with no thread through the person's git op: against
     /// `HEAD` it is what is not committed, a new file too, and the person's index stays as it
-    /// was; against the base it is the branch's commits as well; a branch with no base says
-    /// so; and a thread's review over the same span reads the same.
+    /// was; against the base it is the branch's commits as well, and so against the target
+    /// named, by any name; a branch with no base, or a target that is not there, says so; and a
+    /// thread's review over the same span reads the same.
     #[tokio::test]
     async fn a_folders_working_tree_is_reviewed_with_no_thread() {
         use slopty_proto::git::{GitDone, GitOp, GitOutcome};
@@ -337,6 +338,12 @@ mod review {
         assert_eq!(std::fs::read(repo.join(".git/index")).unwrap(), index, "the index untouched");
         let base = changes(Against::Base).await;
         assert_eq!(paths(&base), ["a.txt", "feature.txt", "new.txt"], "the branch's work too");
+        let main = changes(Against::Branch("main".to_owned())).await;
+        assert_eq!(paths(&main), paths(&base), "the target named, as the base");
+        let own = changes(Against::Branch("feature".to_owned())).await;
+        assert_eq!(paths(&own), paths(&head), "against its own branch, what is not committed");
+        let nowhere = changes(Against::Branch("nope".to_owned())).await;
+        assert_eq!(nowhere.absent.as_deref(), Some(NO_BASE), "a branch that is not there");
 
         let rig = Rig::new(dir.path(), &repo);
         let threads =
@@ -368,6 +375,12 @@ mod review {
                 other => panic!("{other:?}"),
             };
         assert_eq!(none.absent.as_deref(), Some(NO_BASE), "no main, no master, no origin");
+        let against = Against::Branch("trunk".to_owned());
+        let trunk = match apply(&programs, &folder, GitOp::Changes { against }, &[]).await {
+            GitOutcome::Done(GitDone::Changes(review)) => *review,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(paths(&trunk), ["draft.txt"], "a target by any name");
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         let folder = outside.to_string_lossy().into_owned();

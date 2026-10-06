@@ -245,6 +245,15 @@ pub struct Start {
     pub prompt: Option<String>,
     /// The model, by the agent's own id.
     pub model: Option<String>,
+    /// The mode it starts in, by the agent's own name
+    /// ([`Offers::modes`](super::Offers::modes)); the agent's own default when `None`. An
+    /// agent that names no modes refuses one.
+    pub mode: Option<String>,
+    /// How hard it starts thinking, by the agent's own name
+    /// ([`Offers::efforts`](super::Offers::efforts)); the agent's own default when `None`.
+    pub effort: Option<String>,
+    /// Files sent with the first message, as [`Intent::Send`]'s `attachments`.
+    pub attachments: Vec<String>,
     /// More arguments for the agent, checked by its adapter.
     pub args: Vec<String>,
     /// A git worktree of its own to work in: the worker makes it from the clone `cwd` is in
@@ -538,7 +547,7 @@ pub enum ThreadFrame {
 ///
 /// "Now" is one taken for the review. A thread's spans are between its snapshots
 /// ([`Action::Snapshot`]); [`Self::WorkingTree`] is any folder's, a thread's or none.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ReviewScope {
     /// One turn: from its start to its end, or to now while it runs.
     Turn(TurnId),
@@ -552,13 +561,17 @@ pub enum ReviewScope {
 }
 
 /// What a working tree's review compares it with ([`ReviewScope::WorkingTree`]).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Against {
     /// `HEAD`: what is not committed.
     Head,
     /// Where the branch left its base branch: the merge base of `HEAD` and `origin`'s default
     /// branch, else of the local `main` or `master`. All the branch's work, committed or not.
     Base,
+    /// Where the branch left the branch named, a project's target: the merge base of `HEAD` and
+    /// `origin`'s copy of it when that holds every commit of the local one, else the local one.
+    /// What merging the branch into it would bring, committed or not.
+    Branch(String),
 }
 
 /// A review: each file that differs between two trees.

@@ -174,6 +174,7 @@ pub async fn spawn_agent<D: Dispatch>(
         size,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     opened(res.dispatch(), key, verb).await
 }

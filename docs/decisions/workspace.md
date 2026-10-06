@@ -1853,5 +1853,13 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     once with the include file), so the syntax is git's own. Nothing is overwritten and a copy
     that fails is passed over: the worktree is made either way (`carry_ignored`). Orca and
     Claude Code do the same.
-  - A Claude Code task still runs `claude --worktree`, which makes its own from its own base.
-  - Test: `repo::worktrees::tests::a_new_worktree_starts_current_and_carries_the_ignored_files_it_names`.
+  - *A Claude Code task* too: the server sends `Verb::SpawnAgent::worktree` beside the
+    `--worktree <name>` it puts in the arguments, and the worker makes the worktree first, so
+    Claude Code's own flag opens it rather than making one. Claude Code reopens an existing
+    `.claude/worktrees/<name>` (its worktrees page, "Reuse a worktree name"), and it makes its
+    own from `origin`'s default branch fetched at most daily, never from a project's target.
+    One it did not make should keep its tip, as one whose state it cannot verify; were it
+    reset to the default branch instead, the task would start where it did before this. A
+    Codex task still runs `codex --worktree`.
+  - Tests: `repo::worktrees::tests::a_new_worktree_starts_current_and_carries_the_ignored_files_it_names`,
+    and the project task spawn test in `hub::project_tests` for the Claude Code task's worktree.

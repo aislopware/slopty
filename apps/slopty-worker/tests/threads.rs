@@ -1233,6 +1233,9 @@ mod threads {
             drive: None,
             prompt: Some("Say hello.".to_owned()),
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: None,
         };
@@ -1295,6 +1298,9 @@ mod threads {
             drive: None,
             prompt: None,
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: Some(NewWorktree::named("claude-c0ffee")),
         };
@@ -1344,6 +1350,9 @@ mod threads {
             drive: None,
             prompt: None,
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: None,
         };

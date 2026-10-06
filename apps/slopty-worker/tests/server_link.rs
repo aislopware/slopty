@@ -564,6 +564,7 @@ mod tests {
             size: None,
             session: None,
             permission_flags: true,
+            worktree: None,
         };
         let Outcome::Opened(term) = peer.ask(spawn).await else { panic!("the agent starts") };
         let recorded = async {
@@ -679,6 +680,7 @@ mod tests {
             size: None,
             session: Some(chosen),
             permission_flags: false,
+            worktree: None,
         };
         let term = TermRef { worker: reg.worker, session: chosen };
         assert_eq!(peer.ask(spawn.clone()).await, Outcome::Opened(term));
@@ -842,6 +844,7 @@ mod tests {
             size: None,
             session: Some(session),
             permission_flags: false,
+            worktree: None,
         };
         let term = TermRef { worker: reg.worker, session };
         assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));
@@ -920,6 +923,7 @@ mod tests {
             size: None,
             session: Some(session),
             permission_flags: false,
+            worktree: None,
         };
         let term = TermRef { worker: reg.worker, session };
         assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));

@@ -84,6 +84,9 @@ mod codex_rest {
                     drive: None,
                     prompt: None,
                     model: None,
+                    mode: None,
+                    effort: None,
+                    attachments: Vec::new(),
                     args: Vec::new(),
                     worktree: None,
                 };

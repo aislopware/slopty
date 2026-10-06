@@ -48,7 +48,7 @@ use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
     Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
-    Mode, Notice, PartKey, Patch, Phase, Plan, Request, RequestState, Retry, Status, Step,
+    Mode, Notice, Offers, PartKey, Patch, Phase, Plan, Request, RequestState, Retry, Status, Step,
     ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
     UserMessage, Wait, kind,
 };
@@ -198,19 +198,64 @@ pub fn seated(env: &[(String, String)], relay: Option<&str>) -> BTreeMap<String,
     config
 }
 
+/// The approval policies, as modes ([`MODES`]).
+fn modes() -> Vec<Mode> {
+    MODES
+        .iter()
+        .map(|(id, label, description)| Mode {
+            id: (*id).to_owned(),
+            label: (*label).to_owned(),
+            description: Some((*description).to_owned()),
+        })
+        .collect()
+}
+
+/// What a new Codex thread can be started with before any ran here: its approval policies.
+/// Its models and their efforts come from a thread that asked Codex (`model/list`).
+#[must_use]
+pub fn offers() -> Offers {
+    Offers { modes: modes(), ..Offers::default() }
+}
+
+/// The configuration key a thread's reasoning effort is set with at its start.
+const EFFORT_KEY: &str = "model_reasoning_effort";
+
 /// What asks the app-server for a new thread in `cwd` (`thread/start`).
 ///
-/// It names `model` when one is given and [`unclaimed`], and nothing else: the approval policy,
-/// the sandbox and the rest are the person's own Codex configuration's, so a thread Slopty starts
-/// is loosened in nothing.
-#[must_use]
-pub fn start(cwd: &str, model: Option<&str>) -> p::ThreadStartParams {
-    p::ThreadStartParams {
-        cwd: Some(cwd.to_owned()),
-        model: model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
-        config: Some(unclaimed()),
-        ..p::ThreadStartParams::default()
+/// It names what the person chose (`model`, the approval policy `mode`, the reasoning
+/// `effort`) and [`unclaimed`], and nothing else: the sandbox and the rest are the person's own
+/// Codex configuration's, so a thread Slopty starts is loosened in nothing the person did not
+/// pick. An effort the model does not support is Codex's to refuse.
+///
+/// # Errors
+///
+/// When `mode` is none of [`MODES`], in words.
+pub fn start(
+    cwd: &str,
+    model: Option<&str>,
+    mode: Option<&str>,
+    effort: Option<&str>,
+) -> Result<p::ThreadStartParams, String> {
+    let chosen = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    let approval_policy = match chosen(mode) {
+        Some(mode) if MODES.iter().any(|(id, ..)| *id == mode) => Some(
+            serde_json::from_value(Value::String(mode.clone()))
+                .map_err(|e| format!("Codex has no approval policy {mode}: {e}"))?,
+        ),
+        Some(mode) => return Err(format!("Codex has no approval policy {mode}")),
+        None => None,
+    };
+    let mut config = unclaimed();
+    if let Some(effort) = chosen(effort) {
+        config.insert(EFFORT_KEY.to_owned(), Value::String(effort));
     }
+    Ok(p::ThreadStartParams {
+        cwd: Some(cwd.to_owned()),
+        model: chosen(model),
+        approval_policy,
+        config: Some(config),
+        ..p::ThreadStartParams::default()
+    })
 }
 
 /// An approval or question open on the thread.
@@ -341,16 +386,8 @@ impl Shared {
         } else {
             ThreadMeta::PERSON
         };
-        let modes = MODES
-            .iter()
-            .map(|(id, label, description)| Mode {
-                id: (*id).to_owned(),
-                label: (*label).to_owned(),
-                description: Some((*description).to_owned()),
-            })
-            .collect();
         let meta = ThreadMeta {
-            modes,
+            modes: modes(),
             efforts: Vec::new(),
             id,
             agent: AgentId::named(AgentId::CODEX),

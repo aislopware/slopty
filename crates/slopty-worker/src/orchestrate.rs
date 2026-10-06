@@ -451,12 +451,19 @@ impl Orchestrator {
                 size,
                 session,
                 permission_flags,
+                worktree,
             } => {
                 self.mine(worker)?;
                 let spawn = Spawn { cwd, args, env, size: term_size(size)?, permission_flags };
                 let _choosing = self.choosing(session).await;
                 if let Some(running) = self.running(session) {
                     return Ok(Outcome::Opened(TermRef { worker, session: running }));
+                }
+                // Made, or reopened as it is, for the agent's own `--worktree <name>` to open.
+                if let Some(asked) = worktree {
+                    crate::repo::worktrees::open(&spawn.cwd, asked)
+                        .await
+                        .map_err(|failed| worktree_failed(&failed))?;
                 }
                 self.spawn_agent(agent, spawn, prompt, session).await
             }
@@ -526,15 +533,9 @@ impl Orchestrator {
                     Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
                 })?;
                 let mut start = *start;
-                let made = crate::repo::worktrees::enter(&mut start).await.map_err(|failed| {
-                    use crate::repo::worktrees::Failed;
-                    let code = match &failed {
-                        Failed::NotOne(_) => ErrorCode::Invalid,
-                        Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
-                        Failed::Other(_) => ErrorCode::Failed,
-                    };
-                    Failure::new(code, failed.to_string())
-                })?;
+                let made = crate::repo::worktrees::enter(&mut start)
+                    .await
+                    .map_err(|failed| worktree_failed(&failed))?;
                 let thread = threads.start(TaskThread { start, seat, env, role }).await?;
                 Ok(Outcome::ThreadStarted { thread, worktree: made.map(Box::new) })
             }
@@ -1071,6 +1072,17 @@ struct Spawn {
     size: TermSize,
     /// It may be given flags and modes that loosen its permissions.
     permission_flags: bool,
+}
+
+/// A worktree that could not be made or reopened, as the verb's failure.
+fn worktree_failed(failed: &crate::repo::worktrees::Failed) -> Failure {
+    use crate::repo::worktrees::Failed;
+    let code = match failed {
+        Failed::NotOne(_) => ErrorCode::Invalid,
+        Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
+        Failed::Other(_) => ErrorCode::Failed,
+    };
+    Failure::new(code, failed.to_string())
 }
 
 /// The session size a verb asks for, [`ORCHESTRATED_SIZE`] when it names none.

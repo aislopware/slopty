@@ -180,6 +180,9 @@ mod pi {
                 drive: None,
                 prompt: Some(prompt.to_owned()),
                 model: None,
+                mode: None,
+                effort: None,
+                attachments: Vec::new(),
                 args: vec!["--offline".to_owned()],
                 worktree: None,
             })

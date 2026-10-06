@@ -51,7 +51,7 @@ struct Ask {
 #[derive(Debug)]
 enum What {
     /// A thread as the start says, at a server task's seat when it has one.
-    Start(Start, Option<Box<Seated>>),
+    Start(Box<Start>, Option<Box<Seated>>),
     /// A thread branched off this one through this turn, or all of it.
     Fork { from: ThreadId, after: Option<TurnId> },
 }
@@ -75,7 +75,7 @@ impl Starter {
     /// Start the thread of intent `id` as `start` says, once.
     pub async fn start(&self, id: IntentId, start: Start) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask { id, what: What::Start(start, None), reply }).is_err() {
+        if self.0.send(Ask { id, what: What::Start(Box::new(start), None), reply }).is_err() {
             return refused("Claude Code threads are not started here");
         }
         outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
@@ -93,7 +93,10 @@ impl Starter {
     /// thread's session taken up again (`--resume`) runs where it was started.
     pub async fn start_at(&self, id: IntentId, start: Start, seated: Seated) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask { id, what: What::Start(start, Some(Box::new(seated))), reply }).is_err()
+        if self
+            .0
+            .send(Ask { id, what: What::Start(Box::new(start), Some(Box::new(seated))), reply })
+            .is_err()
         {
             return refused("Claude Code threads are not started here");
         }
@@ -171,12 +174,21 @@ async fn begin(
     if start.drive.as_ref().is_some_and(|d| !d.is(Drive::OBSERVED)) {
         return refused("Claude Code runs in its own terminal, observed");
     }
-    let (model, prompt) = (start.model.as_deref(), start.prompt.as_deref());
-    let asked = match StartArgs::of(&start.args) {
-        Ok(asked) => asked,
+    let resume = match resumed_of(&start.args) {
+        Ok(resume) => resume,
         Err(why) => return refused(&why),
     };
-    let (mut args, native) = match asked.resume {
+    if let Err(why) = crate::thread::attach::check(&start.attachments) {
+        return refused(&why);
+    }
+    // Claude Code's TUI takes a file by its path, a picture's too, as it would one pasted.
+    let prompt = slopty_agent::attach::with_paths(
+        start.prompt.as_deref().unwrap_or_default(),
+        start.attachments.iter().map(String::as_str),
+    );
+    let prompt = Some(prompt).filter(|p| !p.trim().is_empty());
+    let (model, prompt) = (start.model.as_deref(), prompt.as_deref());
+    let (mut args, native) = match resume {
         None => slopty_agent::resume::started(model, prompt),
         Some(session) => {
             let Some(args) = slopty_agent::resume::resumed(session, model, prompt) else {
@@ -191,8 +203,17 @@ async fn begin(
             (args, session.to_owned())
         }
     };
-    if let Some(mode) = asked.mode {
+    if let Some(mode) = start.mode.as_deref() {
+        if !slopty_agent::resume::startable_mode(mode) {
+            return refused(&format!("Claude Code starts in no mode {mode}"));
+        }
         args.splice(0..0, [slopty_agent::resume::PERMISSION_MODE.to_owned(), mode.to_owned()]);
+    }
+    if let Some(effort) = start.effort.as_deref() {
+        if !slopty_agent::resume::startable_effort(effort) {
+            return refused(&format!("Claude Code takes no effort {effort}"));
+        }
+        args.splice(0..0, [slopty_agent::resume::EFFORT_FLAG.to_owned(), effort.to_owned()]);
     }
     if !Path::new(&start.cwd).is_dir() {
         return refused(&format!("There is no folder {} here", start.cwd));
@@ -208,44 +229,20 @@ async fn begin(
     if let Some(seated) = seated {
         host.seated(thread, seated);
     }
-    if let Some(prompt) = start.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+    if let Some(prompt) = prompt {
         host.typed(thread, id, prompt);
     }
     Outcome::Started { thread }
 }
 
-/// What a client's start may ask of Claude Code in [`Start::args`]: a session to take up again
-/// (`--resume <id>`) and a permission mode to start in (`--permission-mode <mode>`), each once.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct StartArgs<'a> {
-    resume: Option<&'a str>,
-    mode: Option<&'a str>,
-}
-
-impl<'a> StartArgs<'a> {
-    /// `args` read; why not, in words, for anything else.
-    fn of(args: &'a [String]) -> Result<Self, String> {
-        let mut asked = Self::default();
-        let mut words = args.iter().map(String::as_str);
-        while let Some(flag) = words.next() {
-            let value = words.next();
-            match (flag, value) {
-                (slopty_agent::resume::RESUME_FLAG, Some(session)) if asked.resume.is_none() => {
-                    asked.resume = Some(session);
-                }
-                (slopty_agent::resume::PERMISSION_MODE, Some(mode))
-                    if asked.mode.is_none() && slopty_agent::resume::startable_mode(mode) =>
-                {
-                    asked.mode = Some(mode);
-                }
-                _ => {
-                    return Err("Claude Code takes no arguments from a start but --resume <id> \
-                         and --permission-mode <mode>"
-                        .to_owned());
-                }
-            }
-        }
-        Ok(asked)
+/// The session a client's start asks Claude Code to take up again in [`Start::args`]
+/// (`--resume <id>`), when it asks; why not, in words, for any other argument. The mode, the
+/// effort and the model are [`Start`]'s own.
+fn resumed_of(args: &[String]) -> Result<Option<&str>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, session] if flag == slopty_agent::resume::RESUME_FLAG => Ok(Some(session)),
+        _ => Err("Claude Code takes no arguments from a start but --resume <id>".to_owned()),
     }
 }
 

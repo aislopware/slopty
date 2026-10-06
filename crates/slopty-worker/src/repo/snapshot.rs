@@ -121,13 +121,13 @@ impl Repo {
 
     /// The tree `against` names: `HEAD`'s, the empty tree on an unborn branch; or that of where
     /// the branch left its base, the first of `origin`'s default branch, `origin/main`,
-    /// `origin/master`, `main` and `master` that shares history with it. `None` when no base
-    /// does.
+    /// `origin/master`, `main` and `master` that shares history with it; or where it left the
+    /// branch [`Against::Branch`] names. `None` when no base does.
     ///
     /// # Errors
     ///
     /// When git fails.
-    pub async fn against(&self, against: Against) -> Result<Option<TreeRef>, Failed> {
+    pub async fn against(&self, against: &Against) -> Result<Option<TreeRef>, Failed> {
         let verify = async |rev: &str| {
             let spec = format!("{rev}^{{commit}}");
             self.line(&["rev-parse", "-q", "--verify", "--end-of-options", &spec], None).await.ok()
@@ -147,6 +147,25 @@ impl Repo {
                     }
                 }
                 let Some(fork) = found else { return Ok(None) };
+                Some(fork)
+            }
+            Against::Branch(branch) => {
+                if verify("HEAD").await.is_none() {
+                    return Ok(None);
+                }
+                let (remote, local) =
+                    (verify(&format!("origin/{branch}")).await, verify(branch).await);
+                let base = match (remote, local) {
+                    (Some(remote), Some(local)) => {
+                        let holds = ["merge-base", "--is-ancestor", &local, &remote];
+                        if self.run(&holds, None, None).await.is_ok() { remote } else { local }
+                    }
+                    (Some(one), None) | (None, Some(one)) => one,
+                    (None, None) => return Ok(None),
+                };
+                let Ok(fork) = self.line(&["merge-base", "HEAD", &base], None).await else {
+                    return Ok(None);
+                };
                 Some(fork)
             }
         };
@@ -616,8 +635,8 @@ pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<R
     if tokio::fs::copy(&own, &index).await.is_err() {
         let _partial = tokio::fs::remove_file(&index).await;
     }
-    let scope = ReviewScope::WorkingTree(against);
-    let Some(from) = repo.against(against).await? else {
+    let scope = ReviewScope::WorkingTree(against.clone());
+    let Some(from) = repo.against(&against).await? else {
         return Ok(Review {
             scope,
             from: None,

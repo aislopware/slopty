@@ -252,10 +252,25 @@ async fn carry_ignored(git: &Path, clone: &Path, tree: &Path) {
 /// [`Failed::NotOne`] for a `cwd` in no repository or a name that is no plain name, and
 /// [`Failed::Other`] for a machine with no git or a git that failed.
 pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
-    let Some(NewWorktree { name, base }) = start.worktree.take() else { return Ok(None) };
+    let Some(asked) = start.worktree.take() else { return Ok(None) };
+    let (at, made) = open(&start.cwd, asked).await?;
+    start.cwd = at;
+    Ok(Some(made))
+}
+
+/// Make or reopen the worktree `asked` names ([`make`]) from the clone `cwd` is in.
+///
+/// It is trusted for the agent, and the answer says where `cwd` stands in it (its root when
+/// that folder is not in it) and what it is. [`enter`] starts a thread there; a spawned
+/// agent's own `--worktree <name>` opens it.
+///
+/// # Errors
+/// As [`enter`].
+pub async fn open(cwd: &str, asked: NewWorktree) -> Result<(String, Worktree), Failed> {
+    let NewWorktree { name, base } = asked;
     let git =
         crate::changes::git().ok_or_else(|| Failed::Other("this machine has no git".to_owned()))?;
-    let cwd = crate::file::expand_home(Path::new(&start.cwd));
+    let cwd = crate::file::expand_home(Path::new(cwd));
     let (clone, within) = {
         let cwd = cwd.clone();
         tokio::task::spawn_blocking(move || clone_of(&cwd))
@@ -272,14 +287,14 @@ pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
     .await
     .map_err(|e| Failed::Other(e.to_string()))?;
     let text = |p: &Path| p.to_string_lossy().into_owned();
-    start.cwd = text(&at);
-    Ok(Some(Worktree {
+    let worktree = Worktree {
         name,
         path: text(&made.path),
         branch: Some(made.branch),
         original_cwd: text(&made.clone),
         original_branch: made.clone_branch,
-    }))
+    };
+    Ok((text(&at), worktree))
 }
 
 /// The main checkout of the repository `cwd` is in, and where `cwd` stands in its own
@@ -635,6 +650,9 @@ mod tests {
             drive: None,
             prompt: None,
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: worktree.map(NewWorktree::named),
         };

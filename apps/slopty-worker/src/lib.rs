@@ -535,12 +535,13 @@ async fn follow_settings(
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
 /// answers, the person's own ACP agents as `own_acp` last says among them) and tell every
-/// client each change.
+/// client each change. What each agent can be started with follows the threads `host` holds.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
     load: tokio::sync::watch::Sender<f32>,
     events: broadcast::Sender<slopty_proto::WorkerMsg>,
     mut own_acp: tokio::sync::watch::Receiver<std::collections::BTreeMap<String, Vec<String>>>,
+    host: Option<slopty_worker::thread::Host>,
 ) {
     let mut changed = caps.subscribe();
     let mut moved = load.subscribe();
@@ -549,7 +550,7 @@ fn watch_caps(
         let own = own_acp.borrow_and_update().clone();
         let (installed, agents) =
             tokio::sync::watch::channel(slopty_worker::caps::installed_agents(&own).await);
-        tokio::spawn(slopty_worker::caps::watch(caps, load, agents));
+        tokio::spawn(slopty_worker::caps::watch(caps, load, agents, host));
         while own_acp.changed().await.is_ok() {
             let own = own_acp.borrow_and_update().clone();
             installed.send_replace(slopty_worker::caps::installed_agents(&own).await);
@@ -714,7 +715,6 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     ));
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
     let (own_acp, acp) = tokio::sync::watch::channel(own.acp.clone());
-    watch_caps(caps_tx, load_tx, events.clone(), acp);
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     let mod_path = modsock::beside(&ctl_path);
     let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
@@ -750,6 +750,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         Arc::clone(&agents),
     )
     .unzip();
+    watch_caps(caps_tx, load_tx, events.clone(), acp, threads.as_ref().map(|t| t.host().clone()));
     let daemon = Daemon {
         worker,
         listener,

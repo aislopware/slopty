@@ -427,18 +427,23 @@ impl Served {
             return outcome;
         }
         let role = seated.as_ref().and_then(|s| s.role.clone()).filter(|r| !r.trim().is_empty());
-        let first: Vec<ThreadAsk> = start
-            .prompt
-            .clone()
-            .filter(|p| !p.trim().is_empty())
-            .map(|text| ThreadAsk::Send {
-                text,
-                attachments: Vec::new(),
-                intent: id,
-                delivery: Delivery::Steer,
-            })
-            .into_iter()
-            .collect();
+        if start.mode.is_some() {
+            return self.host.record_start(id, refused("pi starts in no mode"));
+        }
+        if let Err(why) = super::attach::check(&start.attachments) {
+            return self.host.record_start(id, refused(&why));
+        }
+        // The level goes ahead of the first message, so its first turn thinks as chosen.
+        let effort = start.effort.clone().map(|effort| ThreadAsk::SetEffort { effort });
+        let prompt = start.prompt.clone().filter(|p| !p.trim().is_empty());
+        let prompt = prompt.or_else(|| (!start.attachments.is_empty()).then(String::new));
+        let send = prompt.map(|text| ThreadAsk::Send {
+            text,
+            attachments: start.attachments.clone(),
+            intent: id,
+            delivery: Delivery::Steer,
+        });
+        let first: Vec<ThreadAsk> = effort.into_iter().chain(send).collect();
         let resumed = sessions::resumed(&start.args);
         let (session, own) = match resumed {
             Some((session, rest)) => (session.to_owned(), rest),

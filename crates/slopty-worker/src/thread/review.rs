@@ -174,22 +174,23 @@ impl Snapshots {
     /// What changed in `thread`'s tree over `scope`.
     pub async fn review(&self, thread: ThreadId, scope: ReviewScope) -> Review {
         let absent = |why: &str| Review {
-            scope,
+            scope: scope.clone(),
             from: None,
             to: None,
             files: Vec::new(),
             absent: Some(why.to_owned()),
         };
         let Some(repo) = self.repo(thread) else { return absent(NOT_IN_GIT) };
-        if let ReviewScope::WorkingTree(against) = scope {
+        if let ReviewScope::WorkingTree(against) = &scope {
+            let against = against.clone();
             return match crate::repo::snapshot::working_tree(&repo.git, &repo.root, against).await {
                 Ok(review) => review,
                 Err(e) => absent(&e.to_string()),
             };
         }
-        let sides = self.host.update(thread, |state| (vec![], sides(state, scope)));
+        let sides = self.host.update(thread, |state| (vec![], sides(state, &scope)));
         let Some((from, to)) = sides else { return absent("The thread is gone") };
-        let from = match (scope, from) {
+        let from = match (&scope, from) {
             (ReviewScope::Kept, base) => match repo.kept(thread).await {
                 Ok(Some(kept)) => Some(kept),
                 _ => base,
@@ -340,14 +341,14 @@ impl Snapshots {
 }
 
 /// The two snapshots `scope` compares in `state`; `None` on the new side for now.
-fn sides(state: &ThreadState, scope: ReviewScope) -> (Option<TreeRef>, Option<TreeRef>) {
+fn sides(state: &ThreadState, scope: &ReviewScope) -> (Option<TreeRef>, Option<TreeRef>) {
     let turn = |id: TurnId| state.turns.iter().find(|t| t.id == id);
     match scope {
-        ReviewScope::Turn(id) => match turn(id) {
+        ReviewScope::Turn(id) => match turn(*id) {
             Some(t) => (t.before.clone(), t.after.clone()),
             None => (None, None),
         },
-        ReviewScope::Since(id) => (turn(id).and_then(|t| t.before.clone()), None),
+        ReviewScope::Since(id) => (turn(*id).and_then(|t| t.before.clone()), None),
         ReviewScope::Kept => (base(state), None),
         // Not between snapshots: [`Snapshots::review`] reads it from the repository.
         ReviewScope::WorkingTree(_) => (None, None),

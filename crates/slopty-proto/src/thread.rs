@@ -413,6 +413,24 @@ pub struct Effort {
     pub description: Option<String>,
 }
 
+/// What a new thread of an agent can be started with on a worker, known before any thread of
+/// it runs there ([`InstalledAgent::offers`](crate::server::InstalledAgent::offers)).
+///
+/// Each list is what the agent's adapter knows at start without asking the agent (Claude
+/// Code's permission modes and efforts), else what the worker's newest thread of the agent
+/// published; empty where neither says, and then a start leaves that choice to the agent.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Offers {
+    /// The models it can start on ([`wire::Start::model`]).
+    pub models: Vec<Model>,
+    /// The modes it can start in ([`wire::Start::mode`]).
+    pub modes: Vec<Mode>,
+    /// How hard it can start thinking ([`wire::Start::effort`]).
+    pub efforts: Vec<Effort>,
+    /// The commands its composer takes.
+    pub commands: Vec<Command>,
+}
+
 /// Where a subagent's thread hangs: the thread and the call that started it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Link {

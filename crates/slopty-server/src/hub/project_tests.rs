@@ -49,6 +49,7 @@ pub(super) fn worker_again(
     registration.caps.agents = vec![slopty_proto::server::InstalledAgent {
         agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
         version: "2.1.0".to_owned(),
+        offers: slopty_proto::thread::Offers::default(),
     }];
     let lease = hub.register(registration, ip, tx).unwrap();
     (worker, lease, rx)
@@ -393,6 +394,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
         size: None,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     let asked = spawn(&hub, plain());
     let start = request(&mut rx).await;
@@ -434,6 +436,7 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
         size: None,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     refused(&hub.dispatch(plain).await, ErrorCode::Limit);
     let terminal = Verb::OpenTerminal {
@@ -1078,6 +1081,7 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
         size: None,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     for (key, first, other) in
         [("open-1", terminal("~/a"), terminal("~/b")), ("spawn-1", agent("go"), agent("stop"))]
@@ -1161,6 +1165,7 @@ async fn an_agent_names_no_environment_that_steers_what_it_starts() {
         size: None,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     for (verb, name) in [
         (terminal(with("PATH")), "PATH"),
@@ -1371,6 +1376,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
         size: None,
         session: None,
         permission_flags: false,
+        worktree: None,
     };
     for who in [Speaker::Proven(theirs), Speaker::Agent] {
         let said = hub.dispatch_as(who, None, loose.clone()).await;
@@ -1558,10 +1564,17 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let verb = Verb::TaskSpawn { project: project(), task: writes, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
     let start = request(&mut linux_rx).await;
-    let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    let Verb::SpawnAgent { cwd, args, worktree, .. } = start.1.clone() else {
+        panic!("{:?}", start.1)
+    };
     assert_eq!(cwd, "/home/c/slopty", "the clone on the Linux worker, found by its first commit");
     let name = format!("slopty-slopty-{writes}");
     assert!(args.windows(2).any(|w| w == ["--worktree", name.as_str()]), "{args:?}");
+    assert_eq!(
+        worktree.map(|w| (w.name, w.base)),
+        Some((name.clone(), Some("main".to_owned()))),
+        "the worker makes it from the target first, for Claude Code to open"
+    );
     let role = args.iter().find(|a| a.starts_with("--append-system-prompt=")).unwrap();
     assert!(role.contains(&format!("a git worktree of your own, {name}")), "{role}");
     opened(&linux_lease, &start);

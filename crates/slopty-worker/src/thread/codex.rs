@@ -503,9 +503,17 @@ fn checked(start: &Start) -> Result<Begin, String> {
         return Err("A Codex thread is shared with Codex's own TUI".to_owned());
     }
     if let Some(native) = slopty_agent::codex::shared::resumed(&start.args) {
-        if start.prompt.as_ref().is_some_and(|p| !p.trim().is_empty()) {
+        if start.prompt.as_ref().is_some_and(|p| !p.trim().is_empty())
+            || !start.attachments.is_empty()
+        {
             return Err(
                 "A Codex thread taken up again takes its next message from the composer".to_owned()
+            );
+        }
+        if start.mode.is_some() || start.effort.is_some() {
+            return Err(
+                "A Codex thread taken up again keeps its settings; switch them in its composer"
+                    .to_owned(),
             );
         }
         return Ok(Begin::Resume(native.to_owned()));
@@ -516,7 +524,14 @@ fn checked(start: &Start) -> Result<Begin, String> {
     if !Path::new(&start.cwd).is_dir() {
         return Err(format!("There is no folder {} here", start.cwd));
     }
-    Ok(Begin::New(Box::new(slopty_agent::codex::shared::start(&start.cwd, start.model.as_deref()))))
+    super::attach::check(&start.attachments)?;
+    let params = slopty_agent::codex::shared::start(
+        &start.cwd,
+        start.model.as_deref(),
+        start.mode.as_deref(),
+        start.effort.as_deref(),
+    )?;
+    Ok(Begin::New(Box::new(params)))
 }
 
 /// Whether Codex refused a resume because the thread is archived: "session `<id>` is archived",
@@ -736,6 +751,7 @@ enum Waiting {
     Start {
         id: IntentId,
         prompt: Option<String>,
+        attachments: Vec<String>,
         seated: Option<Box<Seated>>,
     },
     /// A thread branched off `from` through `turn` for intent `id`.
@@ -1152,7 +1168,7 @@ impl Session {
             (Waiting::Turn { thread }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");
             }
-            (Waiting::Start { id, prompt, seated }, Ok(result)) => {
+            (Waiting::Start { id, prompt, attachments, seated }, Ok(result)) => {
                 let outcome = match rpc::response::<p::ThreadStartParams>(result) {
                     Ok(started) => {
                         if !self.threads.contains_key(&started.thread.id) {
@@ -1178,11 +1194,12 @@ impl Session {
                     Err(e) => refused(format!("Codex's answer did not read: {e}")),
                 };
                 self.answer_start(id, outcome.clone());
-                if let (Outcome::Started { thread }, Some(prompt)) = (outcome, prompt) {
+                let first = prompt.or_else(|| (!attachments.is_empty()).then(String::new));
+                if let (Outcome::Started { thread }, Some(text)) = (outcome, first) {
                     let ask = Ask::Send {
                         thread,
-                        text: prompt,
-                        attachments: Vec::new(),
+                        text,
+                        attachments,
                         delivery: Delivery::Queue,
                         intent: id,
                     };
@@ -1586,7 +1603,9 @@ impl Session {
                             params.developer_instructions.clone_from(&seated.role);
                         }
                         let prompt = start.prompt.filter(|p| !p.trim().is_empty());
-                        self.request(params.as_ref(), Waiting::Start { id, prompt, seated }).await
+                        let attachments = start.attachments;
+                        let waiting = Waiting::Start { id, prompt, attachments, seated };
+                        self.request(params.as_ref(), waiting).await
                     }
                     Ok(Begin::Resume(native)) => {
                         if let Some(thread) = self.threads.get(&native).map(|f| f.id) {

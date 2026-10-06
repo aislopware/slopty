@@ -1160,7 +1160,7 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 ItemKind::Display { display } => view.display = Some(display.0),
                 ItemKind::File { path }
                 | ItemKind::Folder { path }
-                | ItemKind::Changes { path } => view.path = Some(path),
+                | ItemKind::Changes { path, .. } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => {
                     view.thread = Some(thread.to_string());
@@ -1187,7 +1187,7 @@ pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
                 ItemKind::Display { display } => display.to_string(),
                 ItemKind::File { path }
                 | ItemKind::Folder { path }
-                | ItemKind::Changes { path } => path.clone(),
+                | ItemKind::Changes { path, .. } => path.clone(),
                 ItemKind::Browser { url } => url.clone(),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => thread.to_string(),
             };

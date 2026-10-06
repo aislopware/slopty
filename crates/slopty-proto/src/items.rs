@@ -67,6 +67,10 @@ pub enum ItemKind {
     Changes {
         /// A folder in the repository: absolute, or `~/…`.
         path: String,
+        /// The branch its whole branch is compared with
+        /// ([`crate::thread::wire::Against::Branch`]), a project's target; `None` for its
+        /// base branch, or what is not committed.
+        against: Option<String>,
     },
 }
 

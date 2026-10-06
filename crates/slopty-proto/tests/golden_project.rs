@@ -482,6 +482,9 @@ mod golden_project {
             drive: None,
             prompt: Some("Read your brief.".to_owned()),
             model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
             args: Vec::new(),
             worktree: Some(NewWorktree {
                 name: "slopty-slopty-6".to_owned(),

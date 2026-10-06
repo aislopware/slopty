@@ -785,8 +785,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `pi-args` fact and re-checked against the safe list each time pi starts again on the session,
     so a resumed or taken-back pi keeps its tool list. The model is left to the session, which
     keeps its own.
-  - **Not carried yet:** a picture in a message. (Queueing came on 2026-10-06: see "One queue
-    on the worker for ACP, Codex and pi".)
+  - A picture or file in a message goes to pi as every agent's attachments do
+    (`Intent::Send::attachments`, `slopty-worker/src/thread/pi.rs`). Queueing came on
+    2026-10-06: see "One queue on the worker for ACP, Codex and pi".
 
 - ✅ **pi's TUI takes a resting session on the person's word, and gives it back the same way;
   one writer holds it throughout** (2026-10-02; `Intent::Handoff`, `Intent::TakeBack`,
@@ -895,8 +896,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     The `agents` fact had listed some of these by their program (`cursor-agent`, `amp`), which
     named neither the agent nor, for Amp, the program that speaks ACP; it now holds only the
     agents with adapters of their own (and `aider`).
-  - **Not carried yet:** the client's offer itself (queued for the UI), pictures and files in a
-    prompt, and the unstable methods (forking, subagents, session notices).
+  - Pictures and files in a prompt go as every agent's attachments do
+    (`Intent::Send::attachments`, `slopty-worker/src/thread/acp.rs`).
+  - **Not carried yet:** the client's offer itself (queued for the UI) and the unstable methods
+    (forking, subagents, session notices).
 
 - ✅ **A client starts Claude Code and Codex threads too, each through the agent's own door**
   (2026-10-02, `crates/slopty-worker/src/thread/claude/start.rs` and `thread/codex.rs`,
@@ -1217,7 +1220,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `the_mode_chip_switches_the_agent_s_mode`.
 
 - ✅ **A start opens its tile at once, and its first message goes as the start's prompt**
-  (2026-10-04, readiness N11). A start drew nothing until the machine answered, and a start
+  (2026-10-04, readiness N11; amended 2026-10-06 by `ui.md`, "The first message is written in
+  the thread's composer": the field is the thread's own composer, and a refusal gives the
+  draft back rather than taking the tile away). A start drew nothing until the machine answered, and a start
   from the palette carried no prompt, so the agent booted idle and the task was typed after.
   - The last step of "New agent…" opens the thread's tile at once, focused, with a field
     asking "What should Codex do?" and where it will run. Nothing goes to the machine until ↵.
@@ -2196,3 +2201,26 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     it. The notice says the pull request's line ("#42: lint failed"). A project task's agent
     sends none: its pull request is the project's to tell of (`tell_project`), once.
   - Tests: `thread::pulls::tests` (two), `hub::ladder::tests::a_resting_thread_s_pull_request_lifts_it`.
+
+- ✅ **A start carries its mode, effort and files, and a worker says what each agent offers**
+  (2026-10-06, `.research/readiness-2026-10-07.md` rank 2). A new thread's first message is
+  written in the same composer a running thread has, so its model, mode and effort menus and
+  its attachments have to work before the thread exists. Only the model went in a `Start`; plan
+  mode reached Claude Code alone, as a `--permission-mode plan` the client spelled into `args`,
+  and no client knew any agent's menus until one of its threads had run.
+  - *On the wire*: `Start` gains `mode`, `effort` and `attachments`, each the agent's own name
+    or a path on the worker, as their intents take them. Each adapter applies them at launch:
+    Claude Code with `--permission-mode` and `--effort` and the files' paths after the prompt,
+    as a pasted path; Codex with `thread/start`'s approval policy and the
+    `model_reasoning_effort` setting, the files with the first turn; pi with its thinking level
+    ahead of the first prompt, which carries the pictures; an ACP agent with `session/set_mode`
+    and its thought option ahead of the prompt and its resources. Claude Code takes nothing in
+    `args` now but `--resume`. An agent refuses what it has no door for: pi a mode, a Codex
+    thread taken up again a mode, an effort or files.
+  - *The offers* (`InstalledAgent::offers`, `thread::offers`): each list is the newest thread's
+    of that agent on the worker that published one, list by list, over what the adapter knows
+    beforehand: Claude Code's five startable modes and five `--effort` levels (`claude --help`,
+    2.1.291) and its model aliases, Codex's three approval policies. The caps watcher folds
+    them in every 5 s, so a worker's caps change when a newer catalogue is heard, and only then.
+  - Tests: `thread::offers::tests`, `claude_start::a_start_in_plan_mode_opens_claude_planning`
+    and its refusals, the `client_start` and `machine_hello_ack` goldens.

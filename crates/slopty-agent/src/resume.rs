@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use slopty_proto::thread::{Effort, Mode, Model, Offers};
 
 use crate::HookEvent;
 
@@ -150,6 +151,63 @@ const PERMISSION_MODES: [&str; 6] =
 #[must_use]
 pub fn startable_mode(mode: &str) -> bool {
     mode != "bypassPermissions" && PERMISSION_MODES.contains(&mode)
+}
+
+/// The flag the effort is given with.
+pub const EFFORT_FLAG: &str = "--effort";
+/// The levels `--effort` takes (`claude --help`, 2.1.291), each with its name for people.
+const EFFORTS: [(&str, &str); 5] = [
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+    ("max", "Max"),
+];
+
+/// Whether a start may ask for effort `effort`: a level `--effort` takes.
+#[must_use]
+pub fn startable_effort(effort: &str) -> bool {
+    EFFORTS.iter().any(|(id, _)| *id == effort)
+}
+
+/// What a new Claude Code thread can be started with before any ran here.
+///
+/// The models `/model` takes by alias ([`crate::observed::MODELS`]), the modes a start may ask
+/// for ([`startable_mode`]) and the levels `--effort` takes. Its commands come from a thread
+/// that ran.
+#[must_use]
+pub fn offers() -> Offers {
+    let mode = |id: &str| {
+        let (label, description) = match id {
+            "acceptEdits" => ("Accept edits", Some("Edits files without asking")),
+            "auto" => ("Auto", Some("Asks only about what looks risky")),
+            "dontAsk" => ("Don't ask", Some("Denies what is not allowed beforehand")),
+            "plan" => ("Plan", Some("Plans first and changes nothing")),
+            "manual" => ("Manual", None),
+            other => (other, None),
+        };
+        Mode {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            description: description.map(str::to_owned),
+        }
+    };
+    Offers {
+        models: crate::observed::MODELS
+            .iter()
+            .map(|(id, label)| Model { id: (*id).to_owned(), label: (*label).to_owned() })
+            .collect(),
+        modes: PERMISSION_MODES.iter().filter(|m| startable_mode(m)).map(|m| mode(m)).collect(),
+        efforts: EFFORTS
+            .iter()
+            .map(|(id, label)| Effort {
+                id: (*id).to_owned(),
+                label: (*label).to_owned(),
+                description: None,
+            })
+            .collect(),
+        commands: Vec::new(),
+    }
 }
 
 /// What of `args` (Claude Code's own arguments, [`crate::detect::agent_args`]) a resume keeps.

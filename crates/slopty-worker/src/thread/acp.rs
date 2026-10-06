@@ -443,6 +443,7 @@ impl Served {
             if !Path::new(&start.cwd).is_dir() {
                 return Err(format!("There is no folder {} here", start.cwd));
             }
+            super::attach::check(&start.attachments)?;
             let launch = found.clone()?;
             let agent = slopty_agent::acp::agent_id(&name);
             let (mut session, mut actions) =
@@ -468,14 +469,22 @@ impl Served {
         if let Some(seated) = seated {
             self.host.seated(thread, &seated);
         }
-        let first =
-            prompt.map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id });
+        // The mode and the level go ahead of the first message, so its first turn runs in them.
+        let mode = start.mode.clone().map(|mode| ThreadAsk::SetMode { mode });
+        let effort = start.effort.clone().map(|effort| ThreadAsk::SetEffort { effort });
+        let prompt = prompt.or_else(|| (!start.attachments.is_empty()).then(String::new));
+        let send = prompt.map(|text| ThreadAsk::Send {
+            text,
+            attachments: start.attachments.clone(),
+            intent: id,
+        });
+        let first = mode.into_iter().chain(effort).chain(send);
         let opening = if resumed.is_some() {
             Opening::Load
         } else {
             Opening::New { model: start.model.clone() }
         };
-        self.run(&launch, thread, session, opening, first.into_iter().collect());
+        self.run(&launch, thread, session, opening, first.collect());
         outcome
     }
 

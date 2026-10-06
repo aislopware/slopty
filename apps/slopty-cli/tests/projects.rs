@@ -644,6 +644,7 @@ mod tests {
                 size: None,
                 session: None,
                 permission_flags: false,
+                worktree: None,
             })
             .await;
         assert!(matches!(spawned, Outcome::Opened(_)), "{spawned:?}");
