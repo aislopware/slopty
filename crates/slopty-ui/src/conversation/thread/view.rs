@@ -1587,7 +1587,7 @@ impl ThreadView {
             .max_w(relative(BUBBLE))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.lg))
+            .rounded(self.z(theme.radii.md))
             .map(|el| kit::inset(el, theme))
             .text_size(self.z(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))

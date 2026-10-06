@@ -907,9 +907,6 @@ pub struct Surfaces {
     /// The one ground: the window, every pane, the bars and the terminal's grid, `MonoCode`'s
     /// `background-base`. It is the content ([`Theme::content`]) the rest is derived from.
     pub ground: Rgb,
-    /// The chrome, under its old name, while the call sites move to [`Self::chrome`]: deleted
-    /// with them.
-    pub sidebar: Rgb,
     /// The chrome's plane: the title bar, the tab rows, the navigator and the status bar, the
     /// ground a step toward the ink ([`alpha::CARD`]: #1e1e1e in dark, #f0f0f0 in light), so
     /// the work stays the deepest plane, as Zed's and Warp's do.
@@ -1392,7 +1389,6 @@ impl Surfaces {
             .collect();
         Self {
             ground: content,
-            sidebar: chrome,
             chrome,
             elevated,
             card,
@@ -2655,7 +2651,7 @@ mod tests {
     const NEUTRAL_CHROMA: f32 = 0.002;
 
     /// Every grey of the chrome in both modes is a true neutral, `MonoCode`'s `hsl(240 0% L)`:
-    /// the ground, the sidebar, what floats, the washes, the lines, the text and the
+    /// the ground, the chrome, what floats, the washes, the lines, the text and the
     /// terminal's selection.
     #[test]
     fn every_grey_is_a_true_neutral() {

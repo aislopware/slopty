@@ -645,9 +645,8 @@ mod tests {
         assert_eq!(label.as_deref(), Some(crate::settings_form::SEARCH_PLACEHOLDER));
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("System"));
         assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("13 pt"));
-        // The sections lie on the canvas; the one shown rises off it toward the plate the
-        // navigator's chosen row wears, here at the hover's step as the keyboard is in the
-        // search.
+        // The section shown wears the selected wash, as the navigator's chosen row does
+        // where the keyboard is not: here it is in the search.
         let theme = Theme::default();
         // Past the wash's ease in.
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
@@ -666,7 +665,7 @@ mod tests {
                 .map(|q| q.background)
                 .collect()
         });
-        let plate = hsla(theme.surfaces.hover);
+        let plate = hsla(theme.surfaces.selected);
         assert!(fills.contains(&gpui::Background::from(plate)), "{plate:?} in {fills:?}");
     }
 

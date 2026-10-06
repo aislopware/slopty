@@ -8642,10 +8642,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - Under the pointer or in a drag the line steps to the focus green at 2 pt, since only the
       green clears 3:1 on the ground; a brightened neutral stays near 1.3:1.
   - The AA floors stand everywhere.
-  - **Still to land** after the tiling's wiring: the kit's and the call sites' move onto
-    `chrome`, `sash`, `keyed`, the new radii and the heights, the square tabs that open into
-    their content, the palette with no scrim, the terminal's blocks, the composer and the
-    icons.
+  - **Landed after the tiling's wiring (2026-10-07):**
+    - **Every pane's header is a tab row,** as Zed's is. The row is on the chrome step with a
+      sash line along its foot. The shown tab stands on the pane's ground, square, a sash line
+      on each side (none at the pane's own edge), over the foot line, so it opens into what it
+      shows. A tile alone in its pane has a row of one tab: its lead and its title, the facts
+      and the controls after it on the chrome. The starting and the out-of-reach tiles' headers
+      are the same row. The look is one, `workspace::tab_look`, shared with the title bar's
+      tabs.
+    - **Focus** is the title's tone and weight, and, while the tab on show holds two panes or
+      more, a `stroke::MARK` (1.5 pt) focus-green edge along the top of the focused pane's shown
+      tab. With one pane there is nothing to tell it from, and no edge.
+    - **A keyboard's selection is keyed.** `kit::selected` where the keyboard is: the keyed
+      wash (14 % dark, 12 % light) with the focus green's 1 pt line inside it. Elsewhere: the
+      selected wash alone, no longer the hover's. The list plate follows (`Plate::keyed`). The
+      navigator's row for the focused tile is not where keys go, so it wears the selected
+      wash. A row chosen from its filter is, and wears the keyed one.
+    - **Lines and radii.** The sash is `Surfaces::sash`, at the panes' sashes and along the
+      docked navigator's edge, laid over its last point so it takes no room. The navigator is
+      on the chrome step, and the transient `Surfaces::sidebar` is deleted. Cards, settings
+      groups and the thread's own messages are at `radii.md`, the search field at `radii.sm`.
+      A tab's close is `kit::close_box`, 16 pt at `radii.xs`. The dead `kit::panel` is deleted.
+  - **Still to land:** the palette with no scrim (lane A), the terminal's blocks, the composer
+    and the icons.
   - Tests:
     - `slopty_theme::tests`: `the_work_lies_deepest_under_the_chrome`,
       `the_line_weighs_the_same_at_every_scale`, `the_ladder_is_monotonic`,
@@ -8658,4 +8677,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `a_pill_is_a_twenty_point_chip_at_its_zoom`;
     - `kit::pane::tests`; `a11y::tests::the_keyboard_rings_a_stop_and_the_pointer_does_not`;
     - `workspace::tests::frame::the_window_is_one_opaque_ground`,
-      `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`.
+      `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`,
+      `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`,
+      `workspace::tests::tiles::a_tile_fills_its_pane_and_its_header_lies_on_it`,
+      `workspace::tab_look::tests`.

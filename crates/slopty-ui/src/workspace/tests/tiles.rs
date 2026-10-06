@@ -164,9 +164,10 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 }
 
 /// Every tile fills its pane: square, with no ring and no shadow of its own, the focused one
-/// included, the sashes between panes the only lines. Every header lies at its tile's top with
-/// no band and no rule of its own, a remote window's too: focus is the title's tone and weight
-/// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`).
+/// included, the sashes between panes the only lines round it. Every header is its pane's tab
+/// row at the tile's top, a remote window's too: the chrome step with a sash line along its foot,
+/// its one tab on the pane's ground over that line, so it opens into the pane
+/// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight` for the focus).
 #[gpui::test]
 fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -193,7 +194,24 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         }
         let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
         assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the tile's top");
-        assert!(quads_at(cx, header).is_empty(), "{tile:?}: no band and no rule of its own");
+        let theme = Theme::default();
+        let fill = |q: &gpui::Quad| q.background.as_solid();
+        let chrome = crate::colors::hsla(theme.surfaces.chrome);
+        let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
+        assert_eq!(row, [chrome], "{tile:?}: the row is the chrome step");
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let sash = crate::colors::hsla(theme.surfaces.sash);
+        let foot = quads.iter().any(|q| {
+            fill(q) == Some(sash)
+                && (q.bounds.bottom().0 / scale - f32::from(header.bottom())).abs() < 0.5
+                && (q.bounds.size.width.0 / scale - f32::from(header.size.width)).abs() < 0.5
+        });
+        assert!(foot, "{tile:?}: a sash line along its foot");
+        let tab = cx.debug_bounds(selector("lone-tab", tile.item)).expect("its tab");
+        assert_eq!(tab.bottom(), header.bottom(), "{tile:?}: the tab reaches the foot");
+        let ground = crate::colors::hsla(theme.content());
+        let opens = quads_at(cx, tab).iter().any(|q| fill(q) == Some(ground));
+        assert!(opens, "{tile:?}: the tab is on the pane's ground");
     }
 }
 
@@ -352,7 +370,8 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(edges.all(|q| q.border_color == ring), "no outline but the panel's ring");
 }
 
-/// A header holds no fill at rest: its state is a glyph at its end, not a chip. The leading
+/// A header holds no fill at rest past its row and its tab: its state is a glyph at its end, not
+/// a chip. The leading
 /// slot keeps the agent's glyph rather than a warn mark that would say the state again, and an
 /// agent the worker guessed at offers nothing to install.
 #[gpui::test]
@@ -395,9 +414,10 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
     };
     let surface = |q: &gpui::Quad| {
         let theme = Theme::default();
-        [theme.content(), theme.surfaces.ground]
-            .iter()
-            .any(|c| q.background.as_solid() == Some(crate::colors::hsla(*c)))
+        let s = theme.surfaces;
+        let fill = q.background.as_solid();
+        [theme.content(), s.ground, s.chrome].iter().any(|c| fill == Some(crate::colors::hsla(*c)))
+            || fill == Some(crate::colors::hsla(s.sash))
     };
     let fills: Vec<&gpui::Quad> = quads
         .iter()
@@ -973,7 +993,7 @@ fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
     for tab in tabs.iter().take(3) {
         let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
         let name = cx.debug_bounds(selector("name", tab.item)).expect("its name is drawn");
-        let pad = theme.spacing.xxs + 0.5;
+        let pad = theme.spacing.xs + 0.5;
         assert!(name.right() >= at.right() - px(pad), "the name runs to the end: {name:?} {at:?}");
         let letters = f32::from(name.size.width);
         assert!(letters >= theme.typography.ui_size * 2.0, "room for its letters: {letters}");

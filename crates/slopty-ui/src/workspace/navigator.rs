@@ -3,10 +3,6 @@
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
-//! On a phone that row names the active workspace, one level up from the bar beside it, which
-//! names the focused tile. There, where the title bar has no tabs, *Workspaces* heads the
-//! list: a row per workspace with its tile count, the active one in the text's tone at the
-//! medium weight (the focused tile's row below is the one selection), then "New workspace".
 //! *Needs you* appears only while an agent or a thread waits on the human, and *To review* only
 //! while an agent's turn ended unseen (its row says what it did, else how long it ran). They are
 //! what the bell counts, and the bell (⌘⇧U) shows the navigator at them. Each lists every one,
@@ -170,25 +166,26 @@ pub(super) enum Mode {
     /// Beside the frame, which narrows to make room.
     Docked,
     /// Over the frame, which keeps its width: an iPad, or a window too narrow to give the
-    /// room without turning the strip into a phone's.
+    /// room without leaving the panes a phone's width.
     Overlay,
     /// Over the frame and a scrim, from the left edge: a phone.
     Drawer,
 }
 
-/// The strip a touch screen keeps beside a docked navigator: an iPad's regular width, room
-/// for a terminal and a column beside it. Narrower, the navigator lays over the strip instead.
-pub(super) const TOUCH_DOCK_STRIP: f32 = 900.0;
+/// The width a touch screen keeps for the panes beside a docked navigator: an iPad's regular
+/// width, room for a terminal and a pane beside it. Narrower, the navigator lays over the panes
+/// instead.
+pub(super) const TOUCH_DOCK_PANES: f32 = 900.0;
 
 /// How the navigator sits in a window `window_w` wide, `width` its own width. A window that
-/// is a phone's gets the drawer; a window that would leave the strip a phone's width, or a
-/// touch screen (an iPad) that would leave it less than [`TOUCH_DOCK_STRIP`], gets the overlay;
+/// is a phone's gets the drawer; a window that would leave the panes a phone's width, or a
+/// touch screen (an iPad) that would leave them less than [`TOUCH_DOCK_PANES`], gets the overlay;
 /// anything else docks it.
 pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> Mode {
-    let strip = window_w - width;
+    let panes = window_w - width;
     if window_w < phone_below {
         Mode::Drawer
-    } else if strip < phone_below || (touch && strip < TOUCH_DOCK_STRIP) {
+    } else if panes < phone_below || (touch && panes < TOUCH_DOCK_PANES) {
         Mode::Overlay
     } else {
         Mode::Docked
@@ -199,7 +196,7 @@ pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> 
 /// layout's, and saved with it.
 #[derive(Default)]
 pub(super) struct NavState {
-    /// Open over the strip, where it does not dock.
+    /// Open over the panes, where it does not dock.
     pub open: bool,
     /// The pointer is over the navigator, which then draws its nesting guides. Shared with
     /// the hover listener, which draws the rows again only when it changes.
@@ -968,7 +965,7 @@ enum Anchor<'a> {
 
 impl WorkspaceView {
     /// ⌘B: dock or undock the navigator where it docks (kept with the layout), else open or
-    /// close it over the strip.
+    /// close it over the panes.
     pub fn toggle_navigator(
         &mut self,
         _: &ToggleNavigator,
@@ -1236,7 +1233,7 @@ impl WorkspaceView {
         self.navigator().width
     }
 
-    /// The panel's width in `mode`: a phone's drawer leaves a margin of the strip showing.
+    /// The panel's width in `mode`: a phone's drawer leaves a margin of the panes showing.
     pub(super) fn navigator_panel_width(&self, mode: Mode, window: &Window) -> f32 {
         match mode {
             Mode::Drawer => {
@@ -1316,9 +1313,8 @@ impl WorkspaceView {
     /// What a tile's second line says, and its age: a shell's agent words or its command,
     /// then where it is (its directory and branch); a page's address; a file's directory; a
     /// note's progress or next line. Empty when nothing is worth a line: the worker's name is
-    /// its header's, a home directory alone says nothing, and a kind is its icon's. The
-    /// overview's miniatures say it whole; a navigator row drops a file's place
-    /// ([`Self::nav_tile_meta`]).
+    /// its header's, a home directory alone says nothing, and a kind is its icon's. A navigator
+    /// row drops a file's place ([`Self::nav_tile_meta`]).
     ///
     /// An agent waiting on the human gives what it asks and not its state: the row's first line
     /// ends in "Needs approval" already, and "Needs approval: …" under it said the state twice.
@@ -2335,12 +2331,11 @@ impl WorkspaceView {
         div().flex_none().flex().flex_col().children(lights).children(filter)
     }
 
-    /// Every row the list holds this frame: on a phone *Workspaces* while there are two, then
-    /// *Needs you* while an agent or a thread waits, *To review* while a turn ended unseen,
-    /// then the projects, each header with its tiles unless it is folded, then the workers,
-    /// each with what belongs to no project. A section's heading shows only under another
-    /// section. While the filter holds something, a fold hides nothing; under a scope, only its
-    /// project's rows are left.
+    /// Every row the list holds this frame: *Needs you* while an agent or a thread waits, *To
+    /// review* while a turn ended unseen, then the projects, each header with its tiles unless
+    /// it is folded, then the workers, each with what belongs to no project. A section's
+    /// heading shows only under another section. While the filter holds something, a fold hides
+    /// nothing; under a scope, only its project's rows are left.
     ///
     /// The two attention sections list every one, its tile's row in view or not: they are what
     /// the bell counts and opens, and a waiting row is where its yes or no is answered.
@@ -2577,8 +2572,8 @@ impl WorkspaceView {
             })
             .flex()
             .flex_col()
-            // The sidebar: solid, as every surface is, parted from the panes by the stroke.
-            .bg(hsla(theme.surfaces.sidebar))
+            // On the chrome step, as every bar is, parted from the panes by the sash.
+            .bg(hsla(theme.surfaces.chrome))
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. Over a wider frame it
             // meets the window's top, left and bottom edges, so only its trailing edge carries
@@ -2619,6 +2614,9 @@ impl WorkspaceView {
         self.nav.list.set_rows(rows);
         let chosen = self.nav.filter.chosen.filter(|_| !self.nav.filter.query.is_empty());
         self.nav.list.selected.set(chosen.or_else(|| self.focused()));
+        // A row chosen from the filter is where the keys go; the focused tile's row says only
+        // which tile is in hand, the keyboard being in it.
+        self.nav.list.plate.keyed(chosen.is_some());
         self.nav.list.reveal_selected(window);
         self.schedule_navigator_tick(cx);
         let theme = &self.theme;
@@ -2747,14 +2745,14 @@ impl WorkspaceView {
             .overflow_y_scroll()
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
-            // The sidebar, as the docked navigator's.
-            .bg(hsla(theme.surfaces.sidebar))
+            // On the chrome step, as the docked navigator is.
+            .bg(hsla(theme.surfaces.chrome))
             .children(buttons)
             .into_any_element()
     }
 
     /// The handle on the navigator's edge, `x` its centre in the frame: a 12 pt strip around
-    /// the 1 pt edge, drawn over the strip so its outer half takes the pointer too. Pressed, it
+    /// the 1 pt edge, drawn over the panes so its outer half takes the pointer too. Pressed, it
     /// drags the width; double-clicked, it puts the width back. The listeners that follow the
     /// pointer are there in every frame the handle is, so the first move after the press is
     /// followed without waiting for a frame.

@@ -150,3 +150,54 @@ fn the_title_bar_shows_the_projects_tabs_and_their_agents(cx: &mut TestAppContex
     assert_eq!(tabs(cx).len(), 1);
     assert_eq!(focused(&view, cx), Some(first));
 }
+
+/// The title bar lies on the chrome step, and the tab on show opens into the layout under it:
+/// it reaches the bar's foot, on the content's ground, square. A tab not on show draws no
+/// fill at rest.
+#[gpui::test]
+fn the_shown_title_tab_opens_into_the_layout(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let _other = opens(&view, cx, &studio, SessionId::new(), ClientId::new(), 2);
+    let ids: Vec<u64> = view.read_with(cx, |v, _| {
+        v.layout()
+            .shown_project()
+            .map(|p| p.tabs().iter().map(|t| t.id().get()).collect())
+            .unwrap_or_default()
+    });
+    let shown = view.read_with(cx, |v, _| v.layout().shown_tab().map(|t| t.id().get()));
+    let (on, off) = match ids.as_slice() {
+        [a, b] if Some(*a) == shown => (*a, *b),
+        [a, b] => (*b, *a),
+        _ => panic!("two tabs: {ids:?}"),
+    };
+    let bounds = |cx: &mut VisualTestContext, what: String| {
+        let selector: &'static str = Box::leak(what.into_boxed_str());
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let bar = bounds(cx, "titlebar".to_owned());
+    let tab = bounds(cx, format!("title-tab-{on}"));
+    assert_eq!(tab.bottom(), bar.bottom(), "the shown tab reaches the bar's foot: {tab:?} {bar:?}");
+    let theme = Theme::default();
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let at = |b: Bounds<Pixels>, q: &gpui::Quad| {
+        let near = |a: f32, p: Pixels| f32::from(p).mul_add(-scale, a).abs() < 1.0;
+        near(q.bounds.origin.x.0, b.origin.x) && near(q.bounds.size.width.0, b.size.width)
+    };
+    let ground = crate::colors::hsla(theme.content());
+    let fill = |q: &gpui::Quad| {
+        (!q.background.is_transparent()).then(|| q.background.as_solid()).flatten()
+    };
+    assert!(
+        quads.iter().any(|q| at(tab, q) && fill(q) == Some(ground)),
+        "the shown tab on the content's ground"
+    );
+    let rest = bounds(cx, format!("title-tab-{off}"));
+    assert!(!quads.iter().any(|q| at(rest, q) && fill(q).is_some()), "a tab not shown is bare");
+    let chrome = crate::colors::hsla(theme.surfaces.chrome);
+    assert!(
+        quads.iter().any(|q| at(bar, q) && fill(q) == Some(chrome)),
+        "the bar on the chrome step"
+    );
+}

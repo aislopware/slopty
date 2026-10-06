@@ -53,6 +53,8 @@ pub(super) struct Placed {
     pub focused: bool,
     /// Its pane holds other tiles too, so its header is a row of tabs.
     pub tabs: bool,
+    /// Its tab holds other panes too, so the focused one's shown tab wears the focus edge.
+    pub shared: bool,
 }
 
 /// What the area drew, kept by its view ([`super::AreaHost`]) and read by the workspace's
@@ -207,8 +209,9 @@ impl WorkspaceView {
     pub(super) fn placed_tiles(&self) -> Vec<Placed> {
         let Some(tab) = self.layout.shown_tab() else { return Vec::new() };
         let focus = tab.focus();
-        self.layout
-            .frame()
+        let frame = self.layout.frame();
+        let shared = frame.panes.len() > 1;
+        frame
             .panes
             .iter()
             .filter_map(|laid| {
@@ -219,6 +222,7 @@ impl WorkspaceView {
                     pane: laid.pane,
                     focused: laid.pane == focus,
                     tabs: pane.tiles().len() > 1,
+                    shared,
                 })
             })
             .collect()

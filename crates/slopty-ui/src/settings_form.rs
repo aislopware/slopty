@@ -2095,17 +2095,17 @@ fn row_height(theme: &Theme) -> f32 {
 }
 
 /// The page's children with each run of rows set in one card, as System Settings groups them:
-/// the line that bounds a region (`border`) round the group at `radii.lg`, filled with the
-/// card's wash (`MonoCode`'s settings cards), the rows the content itself, each parted from the one
-/// before by the quieter hairline inside a region (`stroke`), inset to start where the titles do.
-/// On near-black the quieter one alone left the group's edge all but gone. Each
+/// the line that bounds a region (`border`) round the group at `radii.md`, a card's, filled with
+/// the card's wash (`MonoCode`'s settings cards), the rows the content itself, each parted from the
+/// one before by the quieter hairline inside a region (`stroke`), inset to start where the titles
+/// do. On near-black the quieter one alone left the group's edge all but gone. Each
 /// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
 /// its row with no rule.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
     let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
-    let (r, inset) = (px(theme.radii.lg), px(theme.spacing.inset()));
+    let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
     let wash = hsla(theme.surfaces.card);
     parts
         .into_iter()

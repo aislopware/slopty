@@ -28,7 +28,7 @@
 //! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
 //! The navigator and the title bar are views of their own (`ChromeView`),
-//! drawn cached: a terminal's echo draws the terminal and the strip around it, never the
+//! drawn cached: a terminal's echo draws the terminal and the panes around it, never the
 //! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
 mod about;
@@ -69,6 +69,7 @@ mod reviews;
 mod rollup;
 mod secure;
 mod starting;
+mod tab_look;
 mod tile;
 mod title_tabs;
 mod titlebar;
@@ -564,15 +565,13 @@ pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 pub enum MenuGroup {
     /// A phone's "…": the focused tile's own rows, which its header holds on a wider screen.
     Tile,
-    /// The breadcrumb's: the workspaces, or a repository's checkouts.
+    /// The breadcrumb's: the projects, or a repository's checkouts.
     Places,
     /// "+": the worker a new tile goes to, where there are several.
     Target,
     /// "+": what a new tile can be.
     Tiles,
-    /// "+": a new workspace.
-    Workspaces,
-    /// Where to go and what to see: the palette, the overview, the stream stats.
+    /// Where to go and what to see: the palette, the stream stats.
     Navigation,
     /// The settings.
     Settings,
@@ -778,7 +777,7 @@ pub struct WorkspaceView {
     /// How many times the workspace was built: the proof that the keyboard moving is not.
     #[cfg(test)]
     renders: usize,
-    /// What the strip and the chrome show of the shells, streams and faces ([`facts`]).
+    /// What the panes and the chrome show of the shells, streams and faces ([`facts`]).
     facts: facts::Facts,
     /// How often and how lately each project was gone to on this device, for the palette's
     /// ranking; saved with the layout.
@@ -1683,8 +1682,8 @@ impl WorkspaceView {
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.follow_secure_input(cx);
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
-        let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.area_host.entity_id());
-        // A command that starts or ends is the overview's moment to read the shell's rows again.
+        let (navigator, area) = (self.chrome.nav_rows.entity_id(), self.area_host.entity_id());
+        // A command that starts or ends renames its shell and its twins.
         if was.running != now.running {
             self.number_twins();
             App::notify(cx, navigator);
@@ -1714,7 +1713,7 @@ impl WorkspaceView {
         if (was.exit, was.failure_in_view) != (now.exit, now.failure_in_view) {
             cx.notify();
         } else if was.driving != now.driving {
-            App::notify(cx, strip);
+            App::notify(cx, area);
         }
     }
 
@@ -2108,13 +2107,13 @@ impl gpui::Render for WorkspaceView {
 impl WorkspaceView {
     /// How wide the workspace is: the window's width less what the app kept of it last frame.
     /// A difference, not last frame's width: the window's width is this frame's, so a resize
-    /// is seen at once and never lays the strip out for the old size.
+    /// is seen at once and never lays the panes out for the old size.
     pub(super) fn width(&self, window: &Window) -> f32 {
         f32::from(window.viewport_size().width) - self.width_inset
     }
 
     /// Takes how much of the window's width the workspace was laid out in; a change draws one
-    /// more frame at the new width, as the strip's own measure does. Read while the window
+    /// more frame at the new width, as the area's own measure does. Read while the window
     /// draws, and written only once it is done, and only when it changed: a write while it
     /// draws would build every view that read the workspace again.
     fn measure_width(cx: &Context<Self>) -> gpui::AnyElement {
@@ -2166,8 +2165,24 @@ impl WorkspaceView {
             Some(navigator::Mode::Docked) => {
                 let width = px(self.navigator_width());
                 let handle = Self::render_handle(width, cx);
-                // Not cached, as in `navigator_over`.
-                let column = gpui::div().flex_none().h_full().w(width).flex().child(navigator);
+                // Not cached, as in `navigator_over`. Its trailing edge is a sash line, as
+                // every edge between the chrome and the panes is, laid over its last point so
+                // it takes no room; the handle lies over it.
+                let edge = gpui::div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(crate::kit::HAIR)
+                    .bg(crate::colors::hsla(self.theme.surfaces.sash));
+                let column = gpui::div()
+                    .relative()
+                    .flex_none()
+                    .h_full()
+                    .w(width)
+                    .flex()
+                    .child(navigator)
+                    .child(edge);
                 (Some(column.into_any_element()), None, None, Some(handle))
             }
             Some(mode) => {

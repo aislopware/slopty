@@ -738,29 +738,41 @@ impl WorkspaceView {
         let shapes = k < SHAPES_BELOW;
         let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);
-        let header = div()
-            .id("title")
-            .debug_selector(move || format!("title-{}", id.as_uuid()))
-            .role(Role::Heading)
-            .aria_label(title.clone())
-            .h(px(theme.density.header * k))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .px(px(theme.spacing.inset() * k))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_size(px(theme.typography.ui_size * k))
-            .text_color(ink)
-            .font_family(theme.typography.ui_family.clone())
-            .when(!shapes, |el| {
-                let lead = crate::icons::Mark::agent(&starting.agent.0);
-                el.child(crate::palette::lead_slot(theme, lead, ink, k))
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(title.clone()))
-                    .children(status.map(|st| crate::icons::status_mark(theme, Some(st), k)))
-            });
+        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`).
+        let header =
+            super::tab_look::row(theme, div().id("title"))
+                .debug_selector(move || format!("title-{}", id.as_uuid()))
+                .role(Role::Heading)
+                .aria_label(title.clone())
+                .h(px(theme.density.header * k))
+                .w_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .pr(px(theme.spacing.inset() * k))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.ui_size * k))
+                .text_color(ink)
+                .font_family(theme.typography.ui_family.clone())
+                .when(!shapes, |el| {
+                    let lead = crate::icons::Mark::agent(&starting.agent.0);
+                    let look = super::tab_look::Look {
+                        shown: true,
+                        first: true,
+                        marked: placed.focused && placed.shared,
+                    };
+                    let tab = super::tab_look::tab(theme, div().id("lone-tab"), look)
+                        .min_w_0()
+                        .gap(px(theme.spacing.sm * k))
+                        .pl(px(theme.spacing.inset() * k))
+                        .pr(px(theme.spacing.md * k))
+                        .child(crate::palette::lead_slot(theme, lead, ink, k))
+                        .child(div().min_w_0().overflow_hidden().child(title.clone()));
+                    el.child(tab).children(status.map(|st| {
+                        div().ml_auto().child(crate::icons::status_mark(theme, Some(st), k))
+                    }))
+                });
         // The new worktree's setup, while it runs in place of the rest, and once it failed over
         // the draft given back.
         let setup = starting.setup.as_ref().filter(|_| !shapes).map(|seen| {

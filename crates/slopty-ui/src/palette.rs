@@ -210,6 +210,13 @@ impl std::fmt::Debug for Plate {
 }
 
 impl Plate {
+    /// Whether the keyboard is in the list (as it is unless said otherwise): the plate is then
+    /// the keyed wash with the focus line, the keyboard's cursor, and else the selected wash
+    /// ([`crate::kit::selected`]).
+    pub(crate) fn keyed(&self, keyed: bool) {
+        self.0.borrow_mut().away = !keyed;
+    }
+
     /// `row`, the selected one, `key` naming it among the list's rows: it tells the plate where
     /// it was laid out this frame.
     pub(crate) fn mark<E: ParentElement + Styled>(&self, row: E, key: impl Hash) -> E {
@@ -251,8 +258,9 @@ impl Plate {
                     }
                 },
                 move |bounds, (), window, _cx| {
-                    if glide.borrow().seated == Some(key) {
-                        crate::kit::paint_chosen(&theme, bounds, radius, window);
+                    let glide = glide.borrow();
+                    if glide.seated == Some(key) {
+                        crate::kit::paint_chosen(&theme, bounds, radius, !glide.away, window);
                     }
                 },
             )
@@ -282,8 +290,10 @@ impl Plate {
     ) -> impl IntoElement + use<> {
         let theme = theme.clone();
         let radius = px(theme.radii.sm);
+        // Read now: the glide is held while the plate paints.
+        let keyed = !self.0.borrow().away;
         self.under_painted(moves, now, move |plate, window| {
-            crate::kit::paint_chosen(&theme, plate, radius, window);
+            crate::kit::paint_chosen(&theme, plate, radius, keyed, window);
         })
     }
 
@@ -366,6 +376,8 @@ struct Glide {
     /// When the selection last moved.
     moved: Option<Instant>,
     flight: Option<Flight>,
+    /// The keyboard is not in the list: the plate is the selected wash, not the keyed one.
+    away: bool,
 }
 
 /// A move in flight: how far off the row the plate started, when, and how long it takes.

@@ -2,10 +2,10 @@
 //! ([`slopty_client::layout::tiling`]).
 //!
 //! A tab says the title of its focused work, then a mark for each agent in it that works or
-//! has finished (`MonoCode`'s `TabHarnesses`), then its close. The one on show rests on the hover
-//! fill; the rest are quiet words that take it under the pointer. Tabs that do not fit scroll,
-//! and chevrons at the strip's ends step it a tab's width at a time while there is more past
-//! them.
+//! has finished (`MonoCode`'s `TabHarnesses`), then its close. They are drawn as every tab is
+//! ([`super::tab_look`]): the one on show opens into the layout under the bar, the rest are
+//! bare words that take the hover wash. Tabs that do not fit scroll, and chevrons at the row's
+//! ends step it a tab's width at a time while there is more past them.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -17,6 +17,7 @@ use gpui::{
 use slopty_client::layout::tiling::TabId;
 use slopty_theme::{Theme, Typography};
 
+use super::tab_look::{self, Look};
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{Status, Symbol};
@@ -32,7 +33,7 @@ const TAB_GROUP: &str = "title-tab";
 /// What the close button says.
 pub(super) const CLOSE_TAB: &str = "Close tab";
 
-/// One title tab, as the strip draws it.
+/// One title tab, as the row draws it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TitleTab {
     /// Which.
@@ -45,7 +46,7 @@ pub(super) struct TitleTab {
     pub shown: bool,
 }
 
-/// What the strip asks of its host.
+/// What the row asks of its host.
 pub(super) trait TitleTabsHost: Sized + 'static {
     /// Show tab `id`.
     fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>);
@@ -54,7 +55,7 @@ pub(super) trait TitleTabsHost: Sized + 'static {
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>);
 }
 
-/// The strip of `tabs`, scrolled by `scroll`.
+/// The row of `tabs`, scrolled by `scroll`.
 pub(super) fn render<V: TitleTabsHost>(
     theme: &Theme,
     tabs: &[TitleTab],
@@ -62,7 +63,6 @@ pub(super) fn render<V: TitleTabsHost>(
     cx: &Draw<'_, V>,
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
-    let row = theme.density.row;
     let items: Vec<gpui::AnyElement> = tabs
         .iter()
         .map(|tab| {
@@ -78,18 +78,13 @@ pub(super) fn render<V: TitleTabsHost>(
                     .child(crate::icons::status_mark(theme, Some(*st), 1.0))
                     .into_any_element()
             });
-            let close =
-                kit::icon_button(theme, format!("title-tab-close-{n}"), Symbol::Xmark, CLOSE_TAB)
-                    .on_click(cx.listener(move |this: &mut V, _ev, window, cx| {
-                        this.close_title_tab(id, window, cx);
-                    }));
-            let close = if tab.shown {
-                close.into_any_element()
-            } else {
-                close.invisible().group_hover(TAB_GROUP, gpui::Styled::visible).into_any_element()
-            };
-            div()
-                .id(("title-tab", n))
+            let id_close = format!("title-tab-close-{n}");
+            let close = tab_look::close(theme, id_close, CLOSE_TAB, tab.shown, TAB_GROUP, 1.0)
+                .on_click(cx.listener(move |this: &mut V, _ev, window, cx| {
+                    this.close_title_tab(id, window, cx);
+                }));
+            let look = Look { shown: tab.shown, ..Look::default() };
+            tab_look::tab(theme, div().id(("title-tab", n)), look)
                 .debug_selector(move || format!("title-tab-{n}"))
                 .group(TAB_GROUP)
                 .role(Role::Tab)
@@ -98,18 +93,11 @@ pub(super) fn render<V: TitleTabsHost>(
                 .flex_initial()
                 .min_w(px(TAB_MIN))
                 .max_w(px(TAB_MAX))
-                .h(px(row))
-                .flex()
-                .items_center()
                 .gap(px(theme.spacing.xs))
                 .pl(px(theme.spacing.sm))
-                .pr(px(theme.spacing.xxs))
-                .rounded(px(theme.radii.sm))
+                .pr(px(theme.spacing.xs))
                 .text_color(hsla(ink))
-                .when(tab.shown, |el| {
-                    el.bg(hsla(s.hover)).font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                })
-                .when(!tab.shown, |el| el.hover(move |el| el.bg(hsla(s.hover))))
+                .when(tab.shown, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this: &mut V, _ev: &MouseDownEvent, _window, cx| {
@@ -153,8 +141,6 @@ pub(super) fn render<V: TitleTabsHost>(
         .min_w_0()
         .h_full()
         .flex()
-        .items_center()
-        .gap(px(theme.spacing.xxs))
         .overflow_x_scroll()
         .track_scroll(scroll)
         .children(items);

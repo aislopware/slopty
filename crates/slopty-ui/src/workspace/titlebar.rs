@@ -1,15 +1,14 @@
 //! The bar across the top, from the navigator's right edge to the window's (from past the
 //! traffic lights when the navigator is hidden): the navigator's toggle, the breadcrumb of
-//! where the focused work is (`workspace ▾ / checkout ▾ / branch`, `breadcrumb.rs`, whose
-//! workspace menu is how the bar goes between workspaces) and "+" after it (a menu of what to
-//! open: a terminal, an agent, a window, a note, or a workspace); the bell and "…" on the
-//! right. The bell counts what needs the person and the agents' turns left to review, and opens
-//! the navigator at them. Where the view is along the strip is the strip's own thumb (`marks`), not
-//! the bar's. Between them, only while there is something to say: the notices that are about no
-//! one tile's work (`toast`), and before the bell the readouts (`readouts`): the server while
-//! it does not answer, a plan far used, the ports forwarded, the transfers, a newer Slopty, the
-//! frame time with the stats. Every other action is a key, the palette, or a tile's own
-//! header. There is no bar along the bottom.
+//! where the focused work is (`project ▾ / checkout ▾ / branch`, `breadcrumb.rs`, whose
+//! project menu is how the bar goes between projects), the project's tabs (`title_tabs.rs`)
+//! and "+" after them (a menu of what to open: a terminal, an agent, a window or a note); the
+//! bell and "…" on the right. The bell counts what needs the person and the agents' turns left
+//! to review, and opens the navigator at them. Between them, only while there is something to say:
+//! the notices that are about no one tile's work (`toast`), and before the bell the readouts
+//! (`readouts`): the server while it does not answer, a plan far used, the ports forwarded, the
+//! transfers, a newer Slopty, the frame time with the stats. Every other action is a key, the
+//! palette, or a tile's own header. There is no bar along the bottom.
 //!
 //! It takes the content's tone ([`slopty_theme::Theme::content`]) with no rule under it, so the
 //! content runs up to the window's top edge and the navigator is the one panel beside it, as
@@ -466,7 +465,7 @@ impl WorkspaceView {
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, _cx| this.title_press = false),
             )
-            .relative()
+            .map(|el| super::tab_look::row(theme, el))
             .size_full()
             .pt(safe.top)
             .flex()

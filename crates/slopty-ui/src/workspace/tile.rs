@@ -29,6 +29,7 @@ use super::attention::About;
 use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
+use super::tab_look::{self, Look};
 use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
@@ -1046,15 +1047,14 @@ impl WorkspaceView {
         };
         let ink = title_ink(theme, focused);
         let heading = SharedString::from(spoken_heading(&kind, &title));
-        // Every header lies inside its panel's top, on the panel's own surface with nothing
-        // between it and the body, focused or not, so a tile reads as one piece and the strip
-        // as panels, not as rows of bands. A page or a remote picture meets the header on
-        // its own edge, with no rule between them: a rule there was the canvas's last divider.
-        // At the overview's small zoom the miniature's label names the tile; a band on top of it in
-        // another step, and a hairline under only some of them, read as tiles half drawn.
+        // A pane's header is its tab row, as Zed's is: a cap on the chrome step over the pane,
+        // its foot a sash line, and the shown tab on the pane's own ground with the foot broken
+        // under it, so the tab opens into what it shows. A lone tile's header is a row of one
+        // tab. The foot is drawn first, under the tabs, so the shown tab's ground covers it.
         let shapes = k < SHAPES_BELOW;
         let fills = !self.phone;
-        let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx)
+        let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx);
+        let header = tab_look::row(theme, header)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
             .role(Role::Heading)
@@ -1655,16 +1655,11 @@ impl WorkspaceView {
                 let title = self.tile_title(item);
                 let label = SharedString::from(title.clone());
                 let name = self.header_name(tab, id, title, chrome);
-                let close = kit::icon_button_at(
-                    theme,
-                    format!("tab-close-{}", id.as_uuid()),
-                    Symbol::Xmark,
-                    CLOSE_TILE,
-                    k,
-                )
-                .on_click(
-                    cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)),
-                );
+                let close_id = format!("tab-close-{}", id.as_uuid());
+                let close = tab_look::close(theme, close_id, CLOSE_TILE, true, TAB_GROUP, k)
+                    .on_click(
+                        cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)),
+                    );
                 // The shown tab keeps its close in the row. Any other's takes no room at rest, so
                 // a narrow tab keeps its four letters: it shows over the tab's end while the
                 // pointer is on the tab, on the tab's hover fill made solid, so the name it covers
@@ -1672,21 +1667,24 @@ impl WorkspaceView {
                 let close = if shown {
                     close.into_any_element()
                 } else {
-                    let under = hsla(s.hover.over(theme.content()));
+                    let under = hsla(s.hover.over(s.chrome));
                     div()
                         .absolute()
                         .top_0()
-                        .bottom_0()
+                        .bottom(kit::HAIR)
                         .right_0()
-                        .pr(px(theme.spacing.xxs * k))
+                        .pl(px(theme.spacing.xxs * k))
+                        .pr(px(theme.spacing.xs * k))
                         .flex()
                         .items_center()
-                        .rounded(px(theme.radii.sm * k))
                         .group_hover(TAB_GROUP, move |el| el.bg(under))
                         .child(close.invisible().group_hover(TAB_GROUP, gpui::Styled::visible))
                         .into_any_element()
                 };
                 let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
+                let first = column.first() == Some(&tab);
+                let el =
+                    tab_look::tab(theme, el, Look { shown, first, marked: on && placed.shared });
                 Some(
                     Self::tile_menu_press(el, tab, Pressed::Tab, cx)
                         .debug_selector(move || format!("tab-{}", id.as_uuid()))
@@ -1700,23 +1698,12 @@ impl WorkspaceView {
                         .flex_initial()
                         .min_w(px(floor * k))
                         .max_w(px(TAB_MAX * k))
-                        .h(px(theme.density.row * k))
-                        .flex()
-                        .items_center()
                         .gap(px(theme.spacing.xs * k))
-                        .pl(px(theme.spacing.xs * k))
-                        .pr(px(theme.spacing.xxs * k))
-                        .rounded(px(theme.radii.sm * k))
+                        .pl(px(if first { theme.spacing.inset() } else { theme.spacing.md } * k))
+                        .pr(px(theme.spacing.xs * k))
                         .text_color(hsla(ink))
                         .when(shown && placed.focused, |el| {
                             el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        })
-                        .map(|el| {
-                            if shown {
-                                el.bg(hsla(s.hover))
-                            } else {
-                                el.hover(move |el| el.bg(hsla(s.hover)))
-                            }
                         })
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1772,8 +1759,6 @@ impl WorkspaceView {
             .h_full()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xxs * k))
-            .pl(px((theme.spacing.inset() - theme.spacing.xs) * k))
             .overflow_x_scroll()
             .track_scroll(&handle);
         // An edge past which tabs lie hidden fades out per pixel, as deep as they run past it,
@@ -2393,8 +2378,9 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs * k))
             .pl(px(theme.spacing.xs * k))
-            // Not a ground: the backing that hides the title's end under the controls.
-            .bg(hsla(theme.content()))
+            // Not a ground: the backing that hides the facts under the controls, on the chrome
+            // they stand on.
+            .bg(hsla(theme.surfaces.chrome))
             .invisible()
             .group_hover(HEADER_GROUP, gpui::Styled::visible)
             .children(actions)
@@ -2495,11 +2481,20 @@ impl WorkspaceView {
             .children(place);
         let inset = theme.spacing.inset() * k;
         let floor = (inset.mul_add(-2.0, placed.rect.w * k) / 3.0).max(0.0);
+        // The lone tab: the lead and the title, from the pane's edge to past the title.
+        let look = Look { shown: true, first: true, marked: focused && placed.shared };
+        let tab = tab_look::tab(theme, div().id("lone-tab"), look)
+            .debug_selector(move || format!("lone-tab-{}", id.as_uuid()))
+            .min_w_0()
+            .gap(px(theme.spacing.sm * k))
+            .pl(px(inset))
+            .pr(px(theme.spacing.md * k))
+            .child(lead)
+            .child(titled);
         let mut row = kit::priority_row(SharedString::from(format!("header-row-{}", id.as_uuid())))
             .h_full()
             .gap(px(theme.spacing.sm * k))
-            .item("lead", kit::Priority::ESSENTIAL, lead)
-            .title(titled, px(floor))
+            .tall_title(tab, px(floor))
             .title_fills(renaming)
             .end();
         if let Some(worker) = worker {
@@ -2537,7 +2532,7 @@ impl WorkspaceView {
         } else {
             row.overlay(self.hover_controls(tile, actions, face, k, cx).h_full())
         };
-        header.items_center().px(px(inset)).child(row)
+        header.items_center().pr(px(inset)).child(row)
     }
 
     /// A tabbed header's right end: one fixed strip where the tile's readouts (a finished

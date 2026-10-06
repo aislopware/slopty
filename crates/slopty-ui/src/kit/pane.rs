@@ -33,9 +33,9 @@ pub fn pane_surface(theme: &Theme) -> Div {
 ///
 /// What comes back is the hit area, laid absolute and centred on the line,
 /// [`slopty_theme::Density::sash`] across; the caller adds the mouse handlers. At rest it paints
-/// the structural line ([`slopty_theme::Surfaces::stroke`]); under the pointer and while
-/// `dragging` the line steps to the focus green at [`stroke::FOCUS`], which the theme holds to
-/// 3:1 on every ground, where a brightened neutral would stay under it.
+/// the sash's line ([`slopty_theme::Surfaces::sash`], firmer than a divider inside a pane); under
+/// the pointer and while `dragging` the line steps to the focus green at [`stroke::FOCUS`], which
+/// the theme holds to 3:1 on every ground, where a brightened neutral would stay under it.
 #[must_use]
 pub fn sash(
     id: impl Into<ElementId>,
@@ -45,7 +45,7 @@ pub fn sash(
     dragging: bool,
 ) -> Stateful<Div> {
     let s = theme.surfaces;
-    let (rest, lit) = (hsla(s.stroke), hsla(s.focus));
+    let (rest, lit) = (hsla(s.sash), hsla(s.focus));
     let (thin, wide) = (px(stroke::LINE), px(stroke::FOCUS));
     let across = px(theme.density.sash);
     let centre = line.center();
@@ -140,13 +140,13 @@ mod tests {
         cx.update(|w, _| (w.scale_factor(), w.painted_quads()))
     }
 
-    /// The sash paints the 1 pt structural line on its own line's place at rest, and the 2 pt
+    /// The sash paints its 1 pt line on its own line's place at rest, and the 2 pt
     /// focus green centred on it while dragged, in both variants and along both axes.
     #[gpui::test]
     fn a_sash_is_the_line_and_lights_green_while_dragged(cx: &mut TestAppContext) {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
-            let (stroke, focus) = (hsla(theme.surfaces.stroke), hsla(theme.surfaces.focus));
+            let (stroke, focus) = (hsla(theme.surfaces.sash), hsla(theme.surfaces.focus));
             for axis in [Axis::Vertical, Axis::Horizontal] {
                 let (scale, at_rest) = drawn(cx, variant, axis, false);
                 let line = at_rest

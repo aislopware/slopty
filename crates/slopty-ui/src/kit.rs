@@ -31,7 +31,6 @@ mod identity;
 pub mod menu;
 pub mod message;
 mod pane;
-mod panel;
 mod press;
 mod priority;
 pub mod progress;
@@ -47,7 +46,6 @@ pub use go::{go, go_ink, go_pressable};
 pub use identity::{identity_ink, machine_ink, wears_identity};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use pane::{pane_surface, sash};
-pub use panel::{Stand, panel};
 pub use press::menu_press;
 pub use priority::{Dropped, Measured, Priority, PriorityRow, TitleFit, fit_row, priority_row};
 pub use room::{Room, room_query};
@@ -594,25 +592,28 @@ pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
     sunk(el, theme, stroke::LINE)
 }
 
-/// A search field in chrome: a field a row tall in the plane's own wash, at `radii.md`.
+/// A search field in chrome: a field a row tall in the hover's wash, at `radii.sm`, a field's
+/// radius.
 ///
 /// The magnifier leads at the icon size in the muted ink, then whatever the caller puts in it (a
 /// scope's token, the input, a way to clear it).
 ///
 /// It is chrome, not a document's field: no ring and no sunk shade, which made the navigator's
 /// filter the hardest-edged thing beside the traffic lights. While it holds the keyboard
-/// (`focused`) it takes the selected fill and the line inside its edge ([`selected`]), as
-/// `MonoCode`'s and Zed's are.
+/// (`focused`) the focus green's 1 pt line runs just inside its edge, as Zed's focused field's
+/// border does.
 #[must_use]
 pub fn search_field(theme: &Theme, focused: bool) -> Div {
     let (s, spacing) = (theme.surfaces, theme.spacing);
-    selected(div(), theme, focused)
+    div()
+        .bg(hsla(s.hover))
+        .when(focused, |el| el.shadow(vec![ring_inside(s.focus)]))
         .h(px(theme.density.row))
         .px(px(spacing.sm))
         .flex()
         .items_center()
         .gap(px(spacing.xs + spacing.xxs))
-        .rounded(px(theme.radii.md))
+        .rounded(px(theme.radii.sm))
         .child(crate::icons::icon(
             theme,
             crate::icons::Symbol::Magnifyingglass,
@@ -621,7 +622,8 @@ pub fn search_field(theme: &Theme, focused: bool) -> Div {
         ))
 }
 
-/// A card: [`raised`] at `radii.lg`, the caller adding the identity and the padding.
+/// A card: [`raised`] at `radii.md`, Zed's resting card's 6, the caller adding the identity and
+/// the padding.
 ///
 /// It is what rests on a plane and holds a thing of its own: a board's task, a settings group,
 /// an expanded tool group, a question's option.
@@ -637,7 +639,7 @@ pub fn card(theme: &Theme) -> Div {
 /// and the top edge, `last` the bottom ones. In order the parts read as one card.
 #[must_use]
 pub fn card_part(theme: &Theme, first: bool, last: bool) -> Div {
-    let r = px(theme.radii.lg);
+    let r = px(theme.radii.md);
     raised_part(div(), theme, first, last)
         .when(first, |el| el.rounded_t(r))
         .when(last, |el| el.rounded_b(r))
@@ -885,37 +887,49 @@ pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> 
 
 /// `el` drawn as the selected row of a list, live while that list has the keyboard.
 ///
-/// `focused`: the selected wash with a line just inside its edge. A list without the keyboard
-/// keeps its selection at the hover's wash, with no ring, so only one list in the window shows a
-/// live selection (Apple's key and non-key selection, in Slopty's neutrals).
-///
-/// The ring lets a selection read on a surface whose tone sits near the fill (a menu, a
-/// selected row on the bars) and hold its shape on any background. A hover is the wash alone.
+/// `focused`: where the keyboard is, as Zed's is, the keyed wash
+/// ([`slopty_theme::Surfaces::keyed`], ink 14 % dark, 12 % light) with the focus green's 1 pt line
+/// just inside its edge, the keyboard's cursor. A list without the keyboard keeps its selection at
+/// the selected wash with no line, so only one list in the window shows where keys go (Apple's key
+/// and non-key selection, in Slopty's neutrals). A hover is the hover wash alone.
 pub fn selected<E: Styled>(el: E, theme: &Theme, focused: bool) -> E {
+    let s = theme.surfaces;
     if focused {
-        el.bg(hsla(theme.surfaces.selected)).shadow(vec![ring_inside(theme)])
+        el.bg(hsla(s.keyed)).shadow(vec![ring_inside(s.focus)])
     } else {
-        el.bg(hsla(theme.surfaces.hover))
+        el.bg(hsla(s.selected))
     }
 }
 
-/// Paint the live selection into `bounds` at `radius`, as [`selected`] fills it: for a
-/// selection that moves on its own (a list's plate).
+/// Paint a selection into `bounds` at `radius`, as [`selected`] draws it, `keyed` where the
+/// keyboard is: for a selection that moves on its own (a list's plate).
 pub fn paint_chosen(
     theme: &Theme,
     bounds: gpui::Bounds<gpui::Pixels>,
     radius: gpui::Pixels,
+    keyed: bool,
     window: &mut Window,
 ) {
+    let s = theme.surfaces;
     let corners = gpui::Corners::all(radius);
-    window.paint_quad(gpui::fill(bounds, hsla(theme.surfaces.selected)).corner_radii(corners));
+    if keyed {
+        window.paint_quad(gpui::quad(
+            bounds,
+            corners,
+            hsla(s.keyed),
+            HAIR,
+            hsla(s.focus),
+            gpui::BorderStyle::Solid,
+        ));
+    } else {
+        window.paint_quad(gpui::fill(bounds, hsla(s.selected)).corner_radii(corners));
+    }
 }
 
-/// A hairline ring just inside an element's edge, in the border's tone: it holds a shape on a
-/// surface whose tone sits near its fill, and takes no room.
-fn ring_inside(theme: &Theme) -> BoxShadow {
+/// A 1 pt ring just inside an element's edge in `color`, taking no room.
+fn ring_inside(color: Rgb) -> BoxShadow {
     BoxShadow {
-        color: hsla(theme.surfaces.border),
+        color: hsla(color),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
         spread_radius: HAIR,
@@ -1160,6 +1174,47 @@ pub fn icon_button_at(
     eased(square_icon(theme, id.into(), icon, label, k, s.text_secondary))
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
+
+/// A tab's close: Zed's small square, 16 pt at [`slopty_theme::Radii::xs`], its cross at the
+/// inline size, so it sits inside a 32 pt tab with room round it. A finger's is its hit square.
+#[must_use]
+pub fn close_box(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: &'static str,
+    k: f32,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let side =
+        if theme.density == slopty_theme::Density::TOUCH { theme.density.hit } else { CLOSE_BOX }
+            * k;
+    let icon = crate::icons::IconSize::Inline;
+    let el = div()
+        .id(gpui::ElementId::Name(id))
+        .debug_selector(move || selector)
+        .role(gpui::accesskit::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .size(px(side))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.radii.xs * k))
+        .cursor_pointer()
+        .text_color(hsla(s.text_secondary))
+        .active(move |el| el.bg(hsla(s.pressed)))
+        .child(
+            crate::icons::Drawn::new(theme, crate::icons::Symbol::Xmark, icon)
+                .slot(px(icon.slot(theme) * k), hsla(s.text_secondary)),
+        );
+    eased(crate::a11y::tab_stop(el, s.focus))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+}
+
+/// The side of [`close_box`] at a pointer's density.
+pub const CLOSE_BOX: f32 = 16.0;
 
 /// [`icon_button`] with its icon in `ink`, not its words' tier: the bell while something needs
 /// the person, in the warn fill.
@@ -1646,16 +1701,17 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.link_active = hsla(s.accent);
     c.popover = hsla(s.elevated);
     c.popover_foreground = hsla(s.text);
-    // The surface order: bars on `canvas`, side panels on `panel`, content above both.
-    c.title_bar = hsla(s.ground);
-    c.title_bar_border = hsla(s.border);
-    c.status_bar = hsla(s.ground);
-    c.status_bar_border = hsla(s.border);
+    // The bars, the side panel and the tab rows on the chrome step, edged by the sash; the
+    // shown tab on the content's ground, as `workspace::tab_look` draws them.
+    c.title_bar = hsla(s.chrome);
+    c.title_bar_border = hsla(s.sash);
+    c.status_bar = hsla(s.chrome);
+    c.status_bar_border = hsla(s.sash);
     c.sidebar = hsla(s.chrome);
     c.sidebar_foreground = hsla(s.text);
-    c.sidebar_border = hsla(s.border);
-    c.tab_bar = hsla(s.ground);
-    c.tab = hsla(s.ground);
+    c.sidebar_border = hsla(s.sash);
+    c.tab_bar = hsla(s.chrome);
+    c.tab = hsla(s.chrome);
     c.tab_foreground = hsla(s.text_muted);
     c.tab_active = hsla(theme.content());
     c.tab_active_foreground = hsla(s.text);
@@ -1798,8 +1854,10 @@ mod tests {
                 assert_eq!(kit.colors.caret, hsla(theme.surfaces.text), "a neutral caret");
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
-                assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.ground));
-                assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.chrome));
+                for bar in [kit.colors.title_bar, kit.colors.sidebar, kit.colors.tab_bar] {
+                    assert_eq!(bar, hsla(theme.surfaces.chrome), "bars on the chrome step");
+                }
+                assert_eq!(kit.colors.title_bar_border, hsla(theme.surfaces.sash));
                 assert_eq!(kit.colors.tab_active, hsla(theme.content()));
                 assert_eq!(kit.colors.table_row_border, hsla(theme.surfaces.stroke));
                 assert_eq!(kit.colors.popover, hsla(theme.surfaces.elevated), "popovers float");
@@ -2135,7 +2193,8 @@ mod tests {
 
     /// The primary is the neutral solid, the destructive the error's wash, the secondary clear
     /// inside the border line and the rest bare, all one control's height, in both variants: no
-    /// button wears the accent. A selection is the selected wash with a line inside it.
+    /// button wears the accent. A selection where the keyboard is is the keyed wash with the
+    /// focus green's line inside it, and elsewhere the selected wash alone.
     #[test]
     fn a_button_is_neutral_and_one_height() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2165,11 +2224,14 @@ mod tests {
                 assert!(b.style().box_shadow.is_none(), "{variant:?} {kind:?}: flat");
             }
             let mut picked = selected(div(), &theme, true);
-            assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.selected))));
+            assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.keyed))));
             let ring = picked.style().box_shadow.clone().unwrap_or_default();
-            assert!(ring.iter().all(|l| l.inset && l.spread_radius == HAIR), "{ring:?}");
+            let green =
+                |l: &BoxShadow| l.inset && l.spread_radius == HAIR && l.color == hsla(s.focus);
+            assert!(!ring.is_empty() && ring.iter().all(green), "{ring:?}");
             let mut away = selected(div(), &theme, false);
-            assert_eq!(away.style().background, Some(gpui::Fill::from(hsla(s.hover))), "not key");
+            let wash = Some(gpui::Fill::from(hsla(s.selected)));
+            assert_eq!(away.style().background, wash, "not key");
             assert!(away.style().box_shadow.is_none(), "no ring off the keyboard");
         }
     }

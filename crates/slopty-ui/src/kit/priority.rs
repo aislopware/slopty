@@ -100,6 +100,8 @@ pub struct PriorityRow {
     title_priority: Priority,
     /// The title takes all the room the rest leave, not only its own width.
     title_fills: bool,
+    /// The title stands the row's whole height rather than centred at its own.
+    title_tall: bool,
     /// Sized by its content, as its parent allows, rather than by its style.
     fit_content: bool,
     /// Where the next item goes.
@@ -122,6 +124,7 @@ pub fn priority_row(id: impl Into<ElementId>) -> PriorityRow {
         title: None,
         title_priority: Priority::MEDIUM,
         title_fills: false,
+        title_tall: false,
         fit_content: false,
         side: Side::Leading,
         menu: None,
@@ -161,9 +164,21 @@ impl PriorityRow {
         });
         // In a block of its own, which takes the width it is laid out at: a flex row laid out
         // as a root keeps its content's width whatever room it is offered.
-        let title = gpui::ParentElement::child(gpui::div(), element).into_any_element();
+        let block = gpui::div();
+        // A tall one is a flex row the size it is laid out at, so its element stands the row's
+        // height and gives way to the width it is given.
+        let block = if self.title_tall { block.size_full().flex() } else { block };
+        let title = gpui::ParentElement::child(block, element).into_any_element();
         self.title = Some((title, floor));
         self
+    }
+
+    /// [`Self::title`] standing the row's whole height, top to foot, rather than centred at its
+    /// own: a pane's lone tab, whose ground meets the row's foot.
+    #[must_use]
+    pub fn tall_title(mut self, element: impl IntoElement, floor: Pixels) -> Self {
+        self.title_tall = true;
+        self.title(element, floor)
     }
 
     /// Items under `priority` leave before the title narrows at all ([`Priority::MEDIUM`] by
@@ -434,11 +449,13 @@ impl Element for PriorityRow {
                 let room = (bounds.size.width - rest).max(px(0.0));
                 let width = if self.title_fills { room } else { size.width.min(room) };
                 let width = width.max(least.min(room));
+                let height = if self.title_tall {
+                    AvailableSpace::Definite(high)
+                } else {
+                    AvailableSpace::MaxContent
+                };
                 let laid = element.layout_as_root(
-                    Size {
-                        width: AvailableSpace::Definite(width),
-                        height: AvailableSpace::MaxContent,
-                    },
+                    Size { width: AvailableSpace::Definite(width), height },
                     window,
                     cx,
                 );
