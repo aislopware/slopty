@@ -19,7 +19,7 @@ use gpui::{
     ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div,
 };
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::questionnaire::{
     Questionnaire, QuestionnaireActions, QuestionnaireAnswer, QuestionnaireChoice,
     QuestionnaireChoiceDefinition, QuestionnaireChoices, QuestionnaireError, QuestionnaireInput,
@@ -97,7 +97,9 @@ impl Questions {
                 let written = question.options.is_empty();
                 let (placeholder, label) =
                     if written { (WRITTEN, "Answer") } else { (OTHER, OTHER) };
-                let field = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                let field = cx.new(|cx| {
+                    TextareaState::new(window, cx).auto_grow(1, 6).placeholder(placeholder)
+                });
                 QuestionnaireItemDefinition::new(ix.to_string(), question.text.clone())
                     .with_required(true)
                     .with_multiple(question.multi_select)
