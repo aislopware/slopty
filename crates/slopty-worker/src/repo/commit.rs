@@ -79,6 +79,9 @@ pub async fn apply(
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::Branches => {
+            super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
+        }
         GitOp::RemoveWorktree => {
             use super::worktrees::{Failed, Removed, free};
             match free(git, gh, &root, terminals).await {

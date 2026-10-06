@@ -10,6 +10,7 @@
 //! ([`Identities`]): the origin is the config file read, the first commit one `git rev-list` in
 //! the background.
 
+pub mod branches;
 pub mod bundle;
 pub mod checks;
 pub mod cloning;

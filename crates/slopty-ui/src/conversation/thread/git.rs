@@ -12,7 +12,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use slopty_proto::git::{GitDone, GitOp, GitOutcome, GitStatus, PullStanding, PullStatus};
+use slopty_proto::git::{
+    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullStanding, PullStatus,
+};
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
@@ -110,6 +112,8 @@ pub struct Repo {
     /// Its working tree's changes against each commit it was compared with, as last read, or
     /// why they could not be ([`Review::absent`]).
     pub changes: HashMap<Against, Arc<Review>>,
+    /// The branches a new worktree of it could start from, as last read.
+    pub branches: Option<Arc<Branches>>,
 }
 
 /// An op on its way.
@@ -283,6 +287,7 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
                 repo.changes.insert(against, Arc::from(review));
             }
         }
+        GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {

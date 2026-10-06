@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod golden_git {
     use slopty_proto::git::{
-        GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus,
+        Branch, Branches, GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
@@ -106,6 +106,7 @@ mod golden_git {
             op: GitOp::RemoveWorktree,
         };
         snap("client_git_remove_worktree", &free);
+        snap("client_git_branches", &ask(10, GitOp::Branches));
     }
 
     #[test]
@@ -140,6 +141,32 @@ mod golden_git {
             branch_removed: false,
         };
         snap("worker_git_worktree_removed", &done(9, GitOutcome::Done(removed)));
+        let branches = GitDone::Branches(Box::new(Branches {
+            current: Some("feature".to_owned()),
+            default: Some("main".to_owned()),
+            list: vec![
+                Branch {
+                    name: "feature".to_owned(),
+                    local: true,
+                    remote: false,
+                    committed: 1_700_000_300,
+                },
+                Branch {
+                    name: "main".to_owned(),
+                    local: true,
+                    remote: true,
+                    committed: 1_700_000_200,
+                },
+                Branch {
+                    name: "theirs".to_owned(),
+                    local: false,
+                    remote: true,
+                    committed: 1_700_000_100,
+                },
+            ],
+            more: 3,
+        }));
+        snap("worker_git_branches", &done(10, GitOutcome::Done(branches)));
         let refused = GitOutcome::Refused { why: "choose the files to commit".to_owned() };
         snap("worker_git_refused", &done(4, refused));
         let unavailable = GitOutcome::Unavailable {

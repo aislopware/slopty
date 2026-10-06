@@ -2227,3 +2227,17 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     them in every 5 s, so a worker's caps change when a newer catalogue is heard, and only then.
   - Tests: `thread::offers::tests`, `claude_start::a_start_in_plan_mode_opens_claude_planning`
     and its refusals, the `client_start` and `machine_hello_ack` goldens.
+
+- ✅ **A start picks its worktree's base branch** (2026-10-07, `.research/readiness-2026-10-08.md`
+  rank 9). A new worktree started from the branch its clone had checked out, and nothing a client
+  could show said which others there were, so `NewWorktree::base` was never set.
+  - *On the wire*: `GitOp::Branches`, answered with `GitDone::Branches`. It lists the branches
+    the clone already knows, its own and `origin`'s, one entry a name with whether each side has
+    it, the newest commit first, at most `git::BRANCHES_MAX` (500), the rest counted. It also
+    gives the branch checked out and `origin`'s default (`origin/HEAD`). Nothing is fetched, so the
+    list comes at once; the worktree's own start still fetches its base for a moment, as before.
+  - The worker reads it with `git for-each-ref` over `refs/heads` and `refs/remotes/origin`
+    (`repo::branches`). Other remotes' branches are not offered: a base is fetched from `origin`.
+  - Tests: `repo::branches::tests::{a_branch_both_have_is_listed_once,
+    a_clone_lists_its_branches_and_origins}`, the `client_git_branches` and
+    `worker_git_branches` goldens.

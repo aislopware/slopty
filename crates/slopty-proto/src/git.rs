@@ -22,6 +22,9 @@ pub const SAID_MAX: usize = 4000;
 /// The most checks a pull request's status names; the rest are counted
 /// ([`PullStatus::more_checks`]).
 pub const CHECKS_MAX: usize = 200;
+/// The most branches a listing names, the newest first; the rest are counted
+/// ([`Branches::more`]).
+pub const BRANCHES_MAX: usize = 500;
 
 /// What to do in the repository.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -77,6 +80,10 @@ pub enum GitOp {
     /// it has landed in the clone's default branch, or its pull request merged at its tip; a
     /// branch with work not landed stays, so nothing committed is lost.
     RemoveWorktree,
+    /// The branches a new worktree of the repository could start from: its own and `origin`'s,
+    /// the newest commit first ([`GitDone::Branches`]). Nothing is fetched; it lists what the
+    /// clone knows.
+    Branches,
 }
 
 /// What a [`GitOp`] did.
@@ -129,6 +136,38 @@ pub enum GitDone {
         /// Whether that branch went too: it stays while it holds work not landed.
         branch_removed: bool,
     },
+    /// The branches a new worktree could start from.
+    Branches(Box<Branches>),
+}
+
+/// The branches of a repository, as a start offers them for a new worktree's base.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Branches {
+    /// The branch the clone has checked out; none on a detached `HEAD`. A new worktree starts
+    /// from it when no base is asked for.
+    pub current: Option<String>,
+    /// `origin`'s default branch (`origin/HEAD`), as a branch name; none when the clone does not
+    /// know it.
+    pub default: Option<String>,
+    /// Each branch by its name, once whether it is the clone's, `origin`'s or both, the newest
+    /// commit first, at most [`BRANCHES_MAX`].
+    pub list: Vec<Branch>,
+    /// How many more branches there are.
+    pub more: u32,
+}
+
+/// One branch a new worktree could start from.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Branch {
+    /// Its name, as a base names it (`main`, `feature/x`), with no remote's prefix.
+    pub name: String,
+    /// The clone has it as a branch of its own.
+    pub local: bool,
+    /// `origin` has it, as the clone last fetched.
+    pub remote: bool,
+    /// When its newest commit was made, the later of the two where both have it: seconds since
+    /// the Unix epoch, as git keeps them.
+    pub committed: i64,
 }
 
 /// A pull request as its forge reports it through gh. The forge's words are kept as it spells
