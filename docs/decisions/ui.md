@@ -7711,3 +7711,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::face::{the_default_mode_goes_unsaid_and_the_plus_menu_switches_it,
     the_meter_says_its_share_from_half_full, a_requests_card_carries_the_turns_edits_once,
     a_created_file_alone_still_opens_the_review}`.
+- ✅ **How surfaces adapt to their room** (2026-10-06, the person asked whether the UI was
+  responsive after a thread beside a board was cut at the window's edge;
+  `.research/responsive-2026-10-06.md`). Every surface lays out for the room its container
+  gives it, never for the window's size or a golden's. Each view had kept its own thresholds
+  (280, 560, 700, 720, 900, 960), and only three views were ever told their width.
+  - **Room.** `kit::Room` is `Narrow` under 420 pt, `Regular` to 720 pt and `Wide` from
+    there. Text decides the edges, so they are written at the default 13 pt chrome and scale
+    with the chrome size setting. The workspace hands each tile its room from its placed
+    width. A surface that is not a tile (a popover, an overlay, a sheet) asks its own
+    container through `kit::room_query`, GPUI's `container_query`.
+  - **Priority rows.** A row of a title, facts and controls is a `kit::priority_row`. Each
+    item is laid out at its own width. While the row overflows, the item of the lowest
+    `kit::Priority` leaves, the trailing one first among equals, as `NSToolbar`'s
+    `visibilityPriority` has it. `ESSENTIAL` never leaves. The title has a floor. Items under
+    the title's priority (`MEDIUM` by default) leave before it narrows at all, and the rest
+    stay while it narrows to its floor. What left is named in `kit::Dropped` for the row's
+    menu, whose button shows only while something has left. Controls hidden at rest are an
+    overlay at the trailing end and keep no room. Measured at about 0.7 µs per item against
+    a flex row (`docs/MEASUREMENTS.md`, "what a priority row costs").
+  - **Overflow discipline.** Words that do not fit end in an ellipsis (a name at its end, a
+    path at its start) or fade, and are never clipped mid-glyph. An ellipsis is the text's
+    own: a `ChromeText` lays out its own words, so a `truncate` around it does nothing. A
+    chip of words that never shrinks has a bound or stands in a priority row.
+  - Tests: `kit::priority::tests::{a_priority_row_drops_from_the_trailing_low_end_and_keeps_the_title_floor,
+    a_row_lays_out_what_stays_and_names_what_left}`, `kit::room::tests::{a_room_is_read_from_its_width_at_the_chromes_size,
+    a_sheet_reads_its_room_from_its_container}`, and the kit lints
+    `no_words_are_cut_mid_glyph`, `no_ellipsis_is_asked_around_chrome_text` and
+    `a_chip_of_words_has_a_bound`, each with its self-test. The files that do not obey yet
+    are listed in each lint as awaiting their owner's next change.

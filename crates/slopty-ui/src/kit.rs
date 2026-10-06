@@ -28,7 +28,9 @@ mod fit;
 pub mod menu;
 pub mod message;
 mod press;
+mod priority;
 pub mod progress;
+mod room;
 mod shimmer;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
@@ -37,6 +39,8 @@ pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use press::menu_press;
+pub use priority::{Dropped, Priority, PriorityRow, TitleFit, fit_row, priority_row};
+pub use room::{Room, room_query};
 pub use shimmer::{Shimmer, shimmer};
 pub use spark::Spark;
 
@@ -1693,6 +1697,8 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
+
+    mod overflow;
 
     /// A size reads the one way everywhere (a file tile, a download, a picture): whole
     /// kilobytes, a tenth of a megabyte.

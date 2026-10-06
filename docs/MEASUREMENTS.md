@@ -15305,3 +15305,30 @@ cargo test -p slopty-worker --lib search_cost -- --ignored --nocapture
   a key, which the worker's cost allows, and the answer still lands well inside a glance.
   The find bar and the palette share it, with `find::ASK_FROM` (two characters) as the
   shortest query asked.
+
+## 2026-10-06 — what a priority row costs against a plain flex row
+
+A tile header becomes a `kit::priority_row`: it lays out each item on its own to learn its
+width, decides what stays, then lays out the title again at the width it is given. The
+question was what that costs per frame against the flex row it replaces, since a header is
+drawn with its tile.
+
+`priority_row_cost` draws 24 header-shaped rows of eight text items (a lead, the title, a pull
+request, a worktree, the worker, the state, close and the menu) at 360 pt, one notify and its
+draw a sample, 400 samples after 40 to warm. It runs in release on the test platform, on an
+M1 Max.
+
+```sh
+cargo test -p slopty-ui --release --lib priority_row_cost -- --ignored --nocapture
+```
+
+| 24 headers | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| flex rows | 76 µs | 79 µs | 86 µs |
+| priority rows | 206 µs | 218 µs | 270 µs |
+
+- A priority row costs about 5.4 µs more than a flex row, about 0.7 µs per item, almost all of
+  it the separate layout of each item. A strip of ten tiles pays about 55 µs a frame, under
+  1 % of a 120 Hz frame. That is cheap enough to stand on the frame path without a cache.
+- The test platform shapes text with its own stand-in, so a header's real text costs more in
+  both rows alike; the difference is the layouts, which do not depend on the shaper.
