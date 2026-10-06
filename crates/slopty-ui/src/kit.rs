@@ -3019,7 +3019,8 @@ mod tests {
             ui.into_iter().chain(app).any(|(f, _, l)| f.ends_with(file) && l.contains(call))
         };
         for list in ["slopty-ui/src/palette.rs", "slopty-ui/src/picker.rs"] {
-            assert!(calls(list, "kit::anchor("), "{list} lays out on the anchor");
+            let anchored = calls(list, "kit::anchor(") || calls(list, "palette::list_anchor(");
+            assert!(anchored, "{list} lays out on the anchor");
             assert!(!calls(list, "kit::backdrop("), "{list} dims nothing");
         }
         for modal in ["slopty-ui/src/settings_editor.rs", "slopty-app/src/lib.rs"] {

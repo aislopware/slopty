@@ -10,7 +10,7 @@ use crate::conversation::thread::find::ASK_AFTER;
 use crate::palette::{PaletteRun, Section};
 
 fn open_palette(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
 }

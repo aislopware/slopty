@@ -1,5 +1,6 @@
 //! The bar across the top, from the navigator's right edge to the window's (from past the
-//! traffic lights when the navigator is hidden): the navigator's toggle, the breadcrumb of
+//! traffic lights when the navigator is hidden): the navigator's toggle, back and forward
+//! through the tabs visited (`MonoCode`'s `TabVisitNav`), the breadcrumb of
 //! where the focused work is (`project ▾ / checkout ▾ / branch`, `breadcrumb.rs`, whose
 //! project menu is how the bar goes between projects), the project's tabs (`title_tabs.rs`)
 //! and "+" after them (a menu of what to open: a terminal, an agent, a window or a note); the
@@ -41,8 +42,8 @@ use slopty_client::layout::{GroupKey, Tab, TabId, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
-    AddWindow, FilterNavigator, NewAgent, NewNote, NewTerminal, OpenPalette, ToggleNavigator,
-    ToggleStats,
+    AddWindow, FilterNavigator, GoBack, GoForward, NewAgent, NewNote, NewTerminal, OpenCommands,
+    OpenPalette, ToggleNavigator, ToggleStats,
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
@@ -77,6 +78,10 @@ pub(super) const SEARCH: &str = "Search";
 
 /// What the pencil after it is called: it starts "New agent…".
 pub(super) const NEW_AGENT: &str = "New agent";
+
+/// What the bar's arrows through the tabs visited are called.
+pub(super) const BACK: &str = "Back";
+pub(super) const FORWARD: &str = "Forward";
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
@@ -304,6 +309,31 @@ impl WorkspaceView {
         })
     }
 
+    /// Back and forward through the tabs visited (⌘[ ⌘]), a pair that always stands so the
+    /// tabs after it never move; a way with nowhere to go is drawn faint and takes no press.
+    fn visit_arrows(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let ways: [(bool, &'static str, Symbol, &'static str, &'static dyn gpui::Action); 2] = [
+            (false, "go-back", Symbol::ChevronLeft, BACK, &GoBack),
+            (true, "go-forward", Symbol::ChevronRight, FORWARD, &GoForward),
+        ];
+        let buttons = ways.map(|(forward, id, icon, label, action)| {
+            if self.layout.can_go_back(forward) {
+                self.leading_button(id, icon, label, action)
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.layout_action(cx, |l| {
+                            l.go_back(forward);
+                        });
+                    }))
+                    .into_any_element()
+            } else {
+                kit::icon_button_inked(theme, id, icon, label, theme.surfaces.text_muted)
+                    .into_any_element()
+            }
+        });
+        div().flex_none().flex().items_center().children(buttons).into_any_element()
+    }
+
     /// "Search", beside the navigator's toggle: in the navigator's top row it shows the
     /// navigator's filter and gives it the keyboard; in the bar, with the navigator hidden, it
     /// opens the palette, the one search left on screen.
@@ -382,7 +412,9 @@ impl WorkspaceView {
                 }))
         });
 
-        // Where the focused work is, then the project's tabs, "+" after the last.
+        // Back and forward through the tabs visited, then where the focused work is, then
+        // the project's tabs, "+" after the last.
+        let visits = (has_workers && !phone).then(|| self.visit_arrows(cx));
         let where_ = (has_workers && !phone).then(|| self.render_breadcrumb(cx));
         let tabs =
             (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
@@ -492,6 +524,7 @@ impl WorkspaceView {
                     .children(search)
                     .children(new_agent)
                     .children(phone_title)
+                    .children(visits)
                     .children(where_)
                     .children(tabs)
                     .children(new),
@@ -748,8 +781,8 @@ impl WorkspaceView {
                     Vec::new()
                 };
                 entries.extend([
-                    action("Command palette", &OpenPalette, |this, w, cx| {
-                        this.open_palette(&OpenPalette, w, cx);
+                    action("Command palette", &OpenCommands, |this, w, cx| {
+                        this.open_commands(&OpenCommands, w, cx);
                     }),
                     action("Stream stats", &ToggleStats, |this, w, cx| {
                         this.toggle_stats(&ToggleStats, w, cx);
@@ -955,5 +988,15 @@ impl super::title_tabs::TitleTabsHost for WorkspaceView {
         for tile in tiles {
             self.close_tile(tile, window, cx);
         }
+    }
+
+    fn title_tab_menu(
+        &mut self,
+        id: TabId,
+        at: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_title_tab_menu(id, at, window, cx);
     }
 }

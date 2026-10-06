@@ -486,7 +486,10 @@ fn back_and_forward_retrace_the_tabs_visited() {
     assert!(tiling.go_back(true));
     assert!(tiling.go_back(true));
     assert_eq!(tiling.focused(), Some(t(4)));
+    assert!(!tiling.can_go_back(true), "the forward arrow says nothing further");
     assert!(!tiling.go_back(true), "nothing further");
+    assert!(tiling.can_go_back(false), "the back arrow says there is");
+    assert_eq!(tiling.focused(), Some(t(4)), "asking moves nothing");
 }
 
 /// A worker's snapshot that no longer has some of its tiles takes them out: a pane emptied

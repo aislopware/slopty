@@ -128,11 +128,31 @@ pub(crate) fn quiet_line(
         .child(text)
 }
 
-/// The height of a line in a list that floats (the palette's, a picker's): a step taller than
-/// the navigator's rows, since a list typed at is read one line at a time, and its foot takes
-/// the same height.
-pub(crate) fn line_height(theme: &Theme) -> f32 {
-    theme.density.row + theme.spacing.xs
+/// The height of a line in a list that floats (the palette's, a picker's): a row, 28 on the
+/// Mac as Warp's palette rows are (`palette_styles.rs`), and its foot takes the same height.
+pub(crate) const fn line_height(theme: &Theme) -> f32 {
+    theme.density.row
+}
+
+/// How wide a list typed at grows on a desktop (the palette, a picker): Warp's palette is 640,
+/// Zed's 608.
+pub(crate) const LIST_WIDTH: f32 = 640.0;
+
+/// How far down the window a list typed at opens on a desktop: near the top, as Warp's (117 pt)
+/// and Zed's (80 pt) do, so the eye drops a short way to it and the rows have room under it.
+pub(crate) const LIST_ANCHOR: f32 = 0.12;
+
+/// The layer a list typed at is laid out on: [`crate::kit::anchor`]'s, the list
+/// [`LIST_ANCHOR`] down the window rather than a dialog's way down.
+pub(crate) fn list_anchor(theme: &Theme, window: &Window) -> gpui::Div {
+    let height = f32::from(window.viewport_size().height);
+    let safe_top = window.insets().effective().top;
+    crate::kit::anchor(theme, window).pt(px(height * LIST_ANCHOR) + safe_top)
+}
+
+/// The height of a floating list's query row: 36 on the Mac, Zed's picker head (`h_9`).
+pub(crate) const fn query_height(theme: &Theme) -> f32 {
+    theme.density.row + theme.spacing.sm
 }
 
 /// The pad round a floating list's rows: their fills sit this far in from the sheet's edges, so
@@ -164,9 +184,9 @@ pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::Styl
     gpui::StyledText::new(text).with_highlights(dots)
 }
 
-/// A floating list's field row: the query bare at the title size, the text on the rows' edge.
-/// The field wears no frame, no fill and no rule under it: the sheet is its frame, and the
-/// list's first heading parts it from the rows by space alone, as `MonoCode`'s and Raycast's do.
+/// A floating list's field row: the query bare at the title size, the text on the rows' edge,
+/// in a [`query_height`] row over a hairline that parts it from the rows, as Zed's picker head
+/// and Warp's palette draw it. The field wears no frame and no fill: the sheet is its frame.
 pub(crate) fn field_row(
     theme: &Theme,
     input: &Entity<InputState>,
@@ -174,7 +194,9 @@ pub(crate) fn field_row(
 ) -> gpui::Div {
     crate::kit::inset_x(div(), theme)
         .flex_none()
-        .h(px(theme.density.row + theme.spacing.lg))
+        .h(px(query_height(theme)))
+        .border_b(crate::kit::HAIR)
+        .border_color(hsla(theme.surfaces.border))
         .flex()
         .items_center()
         .child(
@@ -551,12 +573,12 @@ pub enum PaletteRun {
     Group(slopty_client::layout::GroupKey),
     /// Open again the tile closed as this closing (the workspace's count of them).
     Reopen(u64),
-    /// Open this thread at the turn where its words were found.
+    /// Open this thread: at the turn where its words were found, or where it stands.
     Thread {
         /// The thread.
         thread: slopty_proto::thread::ThreadId,
-        /// The turn the words were said in.
-        turn: slopty_proto::thread::TurnId,
+        /// The turn the words were said in; none for a thread gone to as it stands.
+        turn: Option<slopty_proto::thread::TurnId>,
     },
 }
 
@@ -655,6 +677,8 @@ pub enum Section {
     Files,
     /// A thread where the field's words were said, found by its worker.
     Threads,
+    /// A thread worked in lately, listed while the field is empty.
+    Recent,
 }
 
 impl Section {
@@ -668,6 +692,7 @@ impl Section {
             Self::Commands => "Commands",
             Self::Files => "Files",
             Self::Threads => "Threads",
+            Self::Recent => "Recent threads",
         }
     }
 
@@ -679,6 +704,7 @@ impl Section {
             Self::Commands => "commands",
             Self::Files => "files",
             Self::Threads => "threads",
+            Self::Recent => "recent-threads",
         }
     }
 }
@@ -838,9 +864,23 @@ impl PaletteItem {
         turn: slopty_proto::thread::TurnId,
     ) -> Self {
         let icon = agent.map_or_else(|| icons::AGENT.into(), Mark::agent);
-        let run = PaletteRun::Thread { thread, turn };
+        let run = PaletteRun::Thread { thread, turn: Some(turn) };
         Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Threads)
             .placed(Some(said.to_owned()))
+    }
+
+    /// A thread worked in lately, which an empty field lists: its title, its agent's mark, and
+    /// where it works or what its agent last said; ↩ opens it where it stands.
+    #[must_use]
+    pub fn recent_thread(
+        title: &str,
+        agent: Option<&str>,
+        place: Option<String>,
+        thread: slopty_proto::thread::ThreadId,
+    ) -> Self {
+        let icon = agent.map_or_else(|| icons::AGENT.into(), Mark::agent);
+        let run = PaletteRun::Thread { thread, turn: None };
+        Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Recent).placed(place)
     }
 
     /// The same line, with what its tile's header places its title by.
@@ -1055,10 +1095,11 @@ pub(crate) fn in_sections<T: Listed>(items: Vec<T>, path_first: bool) -> Vec<T> 
         Section::Files if path_first => 0,
         Section::Projects => 1,
         Section::Tiles => 2,
-        Section::Workers => 3,
-        Section::Commands => 4,
-        Section::Files => 5,
-        Section::Threads => 6,
+        Section::Recent => 3,
+        Section::Workers => 4,
+        Section::Commands => 5,
+        Section::Files => 6,
+        Section::Threads => 7,
     };
     let mut items = items;
     items.sort_by_key(|item| rank(item.item().section));
@@ -1092,6 +1133,7 @@ pub(crate) enum At {
     Item(usize),
     Found(usize),
     Thread(usize),
+    Recent(usize),
 }
 
 /// One line of the list: a group's heading, or the match at that place in the matches.
@@ -1384,6 +1426,11 @@ pub struct CommandPalette {
     found: Vec<PaletteItem>,
     /// The threads the workers found the field's words in, listed last; dropped on a change.
     threads: Vec<PaletteItem>,
+    /// The threads worked in lately, newest first, which a brief palette lists while its field
+    /// is empty ([`Self::set_recent`]).
+    recent: Vec<PaletteItem>,
+    /// What the field was opened with ([`Self::seed`]): Esc on it untouched closes.
+    seeded: SharedString,
     input: Entity<InputState>,
     /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
     scope: FocusHandle,
@@ -1462,6 +1509,18 @@ impl CommandPalette {
         Self::with_field(items, "Type a command", theme, window, cx)
     }
 
+    /// The palette over `items`, its empty field saying what it searches (`placeholder`): the
+    /// workspace's search of everything, or of the files.
+    pub fn search(
+        items: Vec<PaletteItem>,
+        placeholder: &'static str,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_field(items, placeholder, theme, window, cx)
+    }
+
     /// The palette as one step of a choice (an agent, a machine, a folder): only `items`, its
     /// field saying what is chosen.
     pub fn pick_step(
@@ -1495,6 +1554,8 @@ impl CommandPalette {
             typed: None,
             found: Vec::new(),
             threads: Vec::new(),
+            recent: Vec::new(),
+            seeded: SharedString::default(),
             input,
             scope: cx.focus_handle(),
             matched: Vec::new(),
@@ -1539,6 +1600,13 @@ impl CommandPalette {
     pub fn set_empty(&mut self, words: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.empty = words.into();
         cx.notify();
+    }
+
+    /// The threads worked in lately, newest first: a brief palette lists them under their own
+    /// heading while its field is empty, so going back to one is a key away (R17).
+    pub fn set_recent(&mut self, lines: Vec<PaletteItem>, cx: &App) {
+        self.recent = lines;
+        self.refresh(cx);
     }
 
     /// List only the tiles, the workers and a few commands while the field is empty.
@@ -1592,6 +1660,12 @@ impl CommandPalette {
         self.fades_in
     }
 
+    /// What its field holds.
+    #[cfg(test)]
+    pub(crate) fn input_value(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
     /// Show as a sheet from the bottom in a window narrower than `width`.
     pub const fn set_sheet_below(&mut self, width: f32) {
         self.sheet_below = width;
@@ -1605,6 +1679,7 @@ impl CommandPalette {
 
     /// Start the field at `text` (a path to finish), its path lines listed at once.
     pub fn seed(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.seeded = text.into();
         self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
         self.path_items = self.typed_lines(text);
         self.refresh(cx);
@@ -1680,6 +1755,7 @@ impl CommandPalette {
             At::Item(ix) => self.items.get(ix),
             At::Found(ix) => self.found.get(ix),
             At::Thread(ix) => self.threads.get(ix),
+            At::Recent(ix) => self.recent.get(ix),
         }
     }
 
@@ -1713,10 +1789,13 @@ impl CommandPalette {
         // Last of all, so a thread found while the person moves through the list never moves
         // the line they are on.
         let threads = self.threads.iter().enumerate().map(|(ix, item)| (At::Thread(ix), item));
+        // A field that asks for commands alone (`>`) lists every one of them.
+        let brief_now = self.brief && only_commands.is_none();
         let out = if empty {
             let kept = kept.into_iter().map(|(at, item, _)| (at, item));
-            if self.brief {
+            if brief_now {
                 out.extend(brief(kept.collect(), &recent));
+                out.extend(self.recent.iter().enumerate().map(|(ix, item)| (At::Recent(ix), item)));
             } else {
                 out.extend(kept);
             }
@@ -1741,7 +1820,7 @@ impl CommandPalette {
             out.extend(threads);
             out
         };
-        let recent = if self.brief && empty { recent } else { Vec::new() };
+        let recent = if brief_now && empty { recent } else { Vec::new() };
         let group = |item: &PaletteItem| group(item, &recent);
         // A heading only where there are two groups to tell apart: a list of workers, of
         // ports or of hits is one kind already, and the dialog's title names it.
@@ -1767,10 +1846,12 @@ impl CommandPalette {
         self.lines = lines;
     }
 
-    /// Esc empties a field that holds text, and closes the palette once it is empty: a query
-    /// typed wrong is taken back without starting over.
+    /// Esc empties a field that holds text, and closes the palette once it is empty or still
+    /// holds only what it was opened with ([`Self::seed`]): a query typed wrong is taken back
+    /// without starting over, and a palette opened at `>` or a folder closes at once.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.input.read(cx).value().is_empty() {
+        let value = self.input.read(cx).value();
+        if value.is_empty() || *value == *self.seeded {
             cx.emit(PaletteEvent::Dismiss);
             return;
         }
@@ -2065,7 +2146,7 @@ impl Render for CommandPalette {
         let safe_top = window.insets().effective().top;
         // A list typed at floats over the work (`kit::anchor`); only a touch screen's palette,
         // the phone's sheet or the iPad's with no keyboard, dims what it came over.
-        let backdrop = crate::kit::anchor(&theme, window);
+        let backdrop = list_anchor(&theme, window);
         let backdrop = if sheet {
             // A sheet from the bottom, as iOS search in a toolbar is: its field just above the
             // keyboard, in a thumb's reach, and what it finds above the field.
@@ -2089,7 +2170,7 @@ impl Render for CommandPalette {
                 .shadow_none()
         } else {
             let ceiling = crate::kit::Overlay::List.bounds().1;
-            dialog.max_h(px(ceiling.min(height * SHARE)))
+            dialog.max_w(px(LIST_WIDTH)).max_h(px(ceiling.min(height * SHARE)))
         };
         // Glass has no Esc: the field ends in Cancel, as iOS search does.
         let cancel = (!self.chords).then(|| {

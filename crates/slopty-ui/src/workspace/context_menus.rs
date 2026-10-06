@@ -1,6 +1,7 @@
 //! A thing's own menu, opened by a right click or a long press on it (`kit::menu_press`) and hung
 //! where the press landed: a tile's, from its navigator row or its header; a project's, from its
-//! navigator header; a machine's, from its navigator row (its "…" menu, at the press).
+//! navigator header; a machine's, from its navigator row (its "…" menu, at the press); a title
+//! tab's, from the tab (`MonoCode`'s `TitleBar` menu).
 //!
 //! The bar's menu machinery draws it ([`MenuKind::Context`]), so it closes, takes the keyboard
 //! and gives it back as every bar menu does. Its rows are worked out at the press, from what the
@@ -11,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{App, Context, Pixels, Point, SharedString, Window};
 use slopty_client::groups::GroupKey;
-use slopty_client::layout::{Drop, Side, TileRef, WorkerKey};
+use slopty_client::layout::{Drop, Side, Tab, TabId, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{CloseItem, ReloadPage, RenameItem, ZoomPane};
@@ -43,6 +44,15 @@ pub(super) const TILE_MENU: &str = "Tile";
 
 /// A project's menu, as a screen reader names it.
 pub(super) const PROJECT_MENU: &str = "Project";
+
+/// A title tab's menu, as a screen reader names it.
+pub(super) const TAB_MENU: &str = "Tab";
+
+/// A title tab's menu's rows.
+pub(super) const CLOSE_TAB: &str = super::title_tabs::CLOSE_TAB;
+pub(super) const CLOSE_OTHER_TABS: &str = "Close other tabs";
+pub(super) const CLOSE_TABS_RIGHT: &str = "Close tabs to the right";
+pub(super) const CLOSE_TABS_LEFT: &str = "Close tabs to the left";
 
 /// Copies where a tile is.
 pub(super) const COPY_PATH: &str = "Copy path";
@@ -136,6 +146,60 @@ impl WorkspaceView {
                 this.open_menu_at(MenuKind::Machine(key), at, window, cx);
             });
         })
+    }
+
+    /// Open title tab `id`'s menu at `at`, where it was pressed.
+    pub(super) fn open_title_tab_menu(
+        &mut self,
+        id: TabId,
+        at: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = self.title_tab_entries(id, cx);
+        if !entries.is_empty() {
+            self.open_context_menu(ContextMenu { name: TAB_MENU, entries }, at, window, cx);
+        }
+    }
+
+    /// Title tab `id`'s rows: close it, then the project's other tabs, those to its right and
+    /// those to its left, each only while there are some. Each closes what the tabs hold as ⌘W
+    /// would, a running shell asking first, and leaves tab `id` on show.
+    fn title_tab_entries(&self, id: TabId, cx: &Context<Self>) -> Vec<MenuEntry> {
+        let Some((p, t)) = self.layout.tab_place(id) else { return Vec::new() };
+        let ids: Vec<TabId> = self
+            .layout
+            .projects()
+            .get(p)
+            .map(|project| project.tabs().iter().map(Tab::id).collect())
+            .unwrap_or_default();
+        let left: Vec<TabId> = ids.iter().take(t).copied().collect();
+        let right: Vec<TabId> = ids.iter().skip(t.saturating_add(1)).copied().collect();
+        let others: Vec<TabId> = left.iter().chain(&right).copied().collect();
+        let close = |tabs: Vec<TabId>| -> Run {
+            Rc::new(move |this, window, cx| {
+                use super::title_tabs::TitleTabsHost as _;
+                for tab in &tabs {
+                    this.close_title_tab(*tab, window, cx);
+                }
+                this.layout_action(cx, |l| l.show_tab(id));
+            })
+        };
+        let only = Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            use super::title_tabs::TitleTabsHost as _;
+            this.close_title_tab(id, window, cx);
+        });
+        let mut rows: Vec<(&'static str, Run)> = vec![(CLOSE_TAB, only)];
+        for (label, tabs) in
+            [(CLOSE_OTHER_TABS, others), (CLOSE_TABS_RIGHT, right), (CLOSE_TABS_LEFT, left)]
+        {
+            if !tabs.is_empty() {
+                rows.push((label, close(tabs)));
+            }
+        }
+        rows.into_iter()
+            .map(|(label, run)| Self::entry(MenuGroup::Removal, label, String::new(), run, cx))
+            .collect()
     }
 
     /// `tile`'s rows: Open (from the navigator), from its header an agent's other faces to show

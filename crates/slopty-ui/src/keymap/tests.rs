@@ -178,7 +178,10 @@ fn the_files_chord_wins_over_a_deeper_default() {
     assert!(chords_of(&keymap, Scope::Terminal, "clear_screen").is_empty(), "no ⌘K under it");
     assert_eq!(
         keymap.diagnostics(),
-        ["⌘K runs `workspace.new_terminal` now, no longer `terminal.clear_screen`"]
+        [
+            "⌘K runs `workspace.new_terminal` now, no longer `workspace.open_palette`",
+            "⌘K runs `workspace.new_terminal` now, no longer `terminal.clear_screen`",
+        ]
     );
 
     let app = || vec![app_command("open_settings", ws::OpenPalette, &["cmd-,"])];
@@ -202,6 +205,8 @@ fn a_chords_words_come_with_the_keymap() {
     assert_eq!(keymap.label_of(&ws::NewTerminal), "⇧⌘T");
     assert_eq!(keymap.label_of(&ws::StartAgent), "⌘T");
     assert_eq!(keymap.label_of(&ws::OpenFile), "⌘P", "quick open");
+    assert_eq!(keymap.label_of(&ws::OpenPalette), "⌘K", "search everything");
+    assert_eq!(keymap.label_of(&ws::OpenCommands), "⇧⌘P", "the commands");
     assert_eq!(keymap.label_of(&ws::OpenFolder), "", "no chord");
     let keymap = Keymap::new(
         &keys("[keys.workspace]\nnew_terminal = \"cmd-alt-y\"\nnew_agent = \"\"\n"),

@@ -1214,7 +1214,7 @@ fn a_closed_tile_waits_in_the_palette_to_be_reopened(cx: &mut TestAppContext) {
     let lines = view.read_with(cx, |v, _| v.closed_lines().len());
     assert_eq!(lines, 1, "the tile is still on the list");
 
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     cx.simulate_keystrokes("r e o p e n enter");
     cx.run_until_parked();
@@ -1266,7 +1266,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     cx.update(|window, _cx| window.set_a11y_active(true));
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
@@ -1285,7 +1285,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.palette_open()), "then Esc closes it");
 
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     cx.simulate_keystrokes("n e w space n o t e");
     cx.run_until_parked();
@@ -1301,7 +1301,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     let session = SessionId::new();
     let tile = opens(&view, cx, &fake, session, ClientId::new(), 1);
     assert_ne!(focused(&view, cx), Some(tile));
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     cx.simulate_keystrokes("t e r m i n a l enter");
     cx.run_until_parked();

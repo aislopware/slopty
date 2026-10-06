@@ -2038,6 +2038,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::show_needs_you))
             .on_action(cx.listener(Self::filter_navigator))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::open_commands))
             .on_action(cx.listener(Self::edit_address))
             .on_action(cx.listener(Self::search_in_files))
             .on_action(cx.listener(Self::start_thread_action))

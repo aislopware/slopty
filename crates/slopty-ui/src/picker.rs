@@ -585,6 +585,7 @@ impl Render for WindowPicker {
         let title = "Jump to a session, or add a window from the worker";
 
         let panel = crate::kit::dialog(&theme, crate::kit::Overlay::List)
+            .max_w(px(crate::palette::LIST_WIDTH))
             .id("picker")
             .debug_selector(|| "picker".to_owned())
             .role(gpui::accesskit::Role::Dialog)
@@ -635,13 +636,13 @@ impl Render for WindowPicker {
         let layer = crate::palette::Layer::Dialog.priority();
         if self.leaving {
             let panel = panel.debug_selector(|| "picker-leaving".to_owned());
-            let root = crate::kit::anchor(&theme, window).id("picker-backdrop");
+            let root = crate::palette::list_anchor(&theme, window).id("picker-backdrop");
             let root = crate::kit::presence(root.children(scrim).child(panel), "picker", false);
             return gpui::deferred(root).with_priority(layer);
         }
         let home = self.focus_handle(cx);
         crate::a11y::hold(&self.focus, &home, cx);
-        let root = crate::kit::anchor(&theme, window).id("picker-backdrop");
+        let root = crate::palette::list_anchor(&theme, window).id("picker-backdrop");
         let root = crate::a11y::trap(root, &self.focus)
             .on_key_down(cx.listener(Self::key_down))
             // While an input method composes in the field, the arrows and Esc are its own.

@@ -101,3 +101,64 @@ fn a_tabs_menu_splits_its_tile_out_to_the_right(cx: &mut TestAppContext) {
     let at = |tile: TileRef| view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
     assert!(at(first).left() >= at(second).right() - px(1.0), "to the right");
 }
+
+/// A title tab's menu closes it, the project's other tabs, or those to its right or left, each
+/// offered only while there are some; what is left shows the tab pressed. The bar's arrows go
+/// back and forward through the tabs visited, the way with nowhere to go drawn but inert.
+#[gpui::test]
+fn a_title_tabs_menu_closes_the_tabs_beside_it(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let third = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    for tile in [second, third] {
+        on_new_tab(&view, cx, tile);
+    }
+    let tab = |cx: &mut VisualTestContext, tile: TileRef| {
+        leak(format!("title-tab-{}", pos_of(&view, cx, tile).tab.get()))
+    };
+    let tabs = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.layout().shown_project().map(|p| p.tabs().len()))
+    };
+    assert_eq!(tabs(cx), Some(3));
+
+    let first_tab = tab(cx, first);
+    right_click(cx, first_tab);
+    assert!(tree(cx).iter().any(|n| n.is("Menu", Some("Tab"))), "the tab's own menu");
+    assert_eq!(rows(cx), ["Close tab", "Close other tabs", "Close tabs to the right"]);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    // The middle one's menu has both sides; closing those to its right leaves it on show.
+    let middle = tab(cx, second);
+    right_click(cx, middle);
+    assert_eq!(
+        rows(cx),
+        ["Close tab", "Close other tabs", "Close tabs to the right", "Close tabs to the left"]
+    );
+    pick(cx, "Close tabs to the right");
+    // The closed shell's session is the worker's to end: it goes when its item does.
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let op = ItemOp::Remove(third.item);
+        v.apply_sync(key, ItemSync::Delta { version: 4, by: studio.me, op }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(tabs(cx), Some(2), "the one to its right closed");
+    assert_eq!(focused(&view, cx), Some(second), "the tab pressed is on show");
+
+    // Back goes to the tab visited before; forward then returns, and stops at the end.
+    assert!(cx.debug_bounds("go-back").is_some() && cx.debug_bounds("go-forward").is_some());
+    let go = |cx: &mut VisualTestContext, selector: &'static str| {
+        let at = bounds(cx, selector).center();
+        cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+    };
+    go(cx, "go-forward");
+    assert_eq!(focused(&view, cx), Some(second), "nothing forward: the arrow is inert");
+    go(cx, "go-back");
+    assert_eq!(focused(&view, cx), Some(first), "back to the tab visited before");
+    go(cx, "go-forward");
+    assert_eq!(focused(&view, cx), Some(second), "and forward again");
+}

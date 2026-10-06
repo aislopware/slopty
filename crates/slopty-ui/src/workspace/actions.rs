@@ -95,8 +95,12 @@ actions!(
         FocusNext,
         /// Move the keyboard focus to the previous control.
         FocusPrev,
-        /// Open the command palette: every action by name, run by ↩.
+        /// Search everything (⌘K): the tiles, the threads worked in lately and the words said in
+        /// any, the projects, the machines, the files and the commands.
         OpenPalette,
+        /// The command palette (⌘⇧P): the search with `>` typed, so it lists every action by
+        /// name, run by ↩; ⌫ widens it to everything.
+        OpenCommands,
         /// The palette as a list of the ports forwarded from the workers; ↩ opens one in a
         /// tile or in the browser.
         ListPorts,

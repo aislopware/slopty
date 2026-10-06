@@ -68,6 +68,15 @@ impl TitleTabsHost for Harness {
         self.tiling.drop_tab(id);
         cx.notify();
     }
+
+    fn title_tab_menu(
+        &mut self,
+        _id: TabId,
+        _at: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
 }
 
 /// The title tabs of the project on show.

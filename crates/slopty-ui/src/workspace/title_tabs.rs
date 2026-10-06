@@ -7,6 +7,9 @@
 //! bare words that take the hover wash. Tabs that do not fit scroll, and chevrons at the row's
 //! ends step it a tab's width at a time while there is more past them.
 //!
+//! A right click or a long press on a tab opens its menu: close it, the others, those to its
+//! right or to its left.
+//!
 //! A tab pressed and moved is carried ([`super::area`]): along the row it moves, onto a
 //! project's row in the navigator it goes to that project. While something carried is over
 //! the row, a mark stands where it would land ([`render`]'s `drop_at`).
@@ -17,8 +20,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, FontWeight, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
-    ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    ParentElement as _, Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 use slopty_client::layout::tiling::TabId;
 use slopty_theme::{Theme, Typography, stroke};
@@ -63,6 +66,15 @@ pub(super) trait TitleTabsHost: Sized + 'static {
 
     /// Close tab `id`, and what is in it.
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>);
+
+    /// Tab `id` was pressed for its menu (a right click, a long press) at `at`.
+    fn title_tab_menu(
+        &mut self,
+        id: TabId,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    );
 }
 
 /// What [`render`] draws besides the tabs: where the row takes a drop, and where a drop
@@ -119,7 +131,11 @@ pub(super) fn render<V: TitleTabsHost>(
                         this.close_title_tab(id, window, cx);
                     }));
                 let look = Look { shown: tab.shown, ..Look::default() };
-                tab_look::tab(theme, div().id(("title-tab", n)), look)
+                let host = cx.weak_entity();
+                let el = kit::menu_press(div().id(("title-tab", n)), move |at, window, cx| {
+                    let _gone = host.update(cx, |this, cx| this.title_tab_menu(id, at, window, cx));
+                });
+                tab_look::tab(theme, el, look)
                     .debug_selector(move || format!("title-tab-{n}"))
                     .group(TAB_GROUP)
                     .role(Role::Tab)
@@ -162,7 +178,7 @@ pub(super) fn render<V: TitleTabsHost>(
     let back = offset < px(0.0);
     let on = most > px(0.0) && offset > -most;
     let step = px(TAB_MIN);
-    let chevron = |name: &'static str, symbol: Symbol, label: &'static str, by: gpui::Pixels| {
+    let chevron = |name: &'static str, symbol: Symbol, label: &'static str, by: Pixels| {
         let scroll = scroll.clone();
         kit::icon_button(theme, name, symbol, label).on_click(move |_ev, window, _cx| {
             let at = scroll.offset();

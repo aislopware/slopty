@@ -2065,3 +2065,47 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     "New note", since an empty field lists the tiles first (`palette::brief`).
   - Tests: `smooth::a_sash_drag_beside_five_flooding_shells_on_the_mac` (numbers in
     `MEASUREMENTS.md`, 2026-10-07), with the app suite's tests above.
+- ✅ **The title bar goes back and forward, and a title tab has its own menu** (2026-10-07,
+  items 15 and 23 of `.research/ui-audit-monocode-2026-10-06.md`).
+  - **Back and forward.** Two arrows after the navigator's toggle step through the tabs visited
+    (⌘[ ⌘]), as `MonoCode`'s `TabVisitNav` does. The pair always stands, so the tabs after it
+    never move. A way with nowhere to go is drawn in the muted ink and takes no press. The
+    tiling answers whether a way leads anywhere (`Tiling::can_go_back`) by the same walk
+    `go_back` takes, past the tab on show and the tabs since closed.
+  - **A title tab's menu.** A right click or a long press on a title tab opens Close tab, Close
+    other tabs, Close tabs to the right and Close tabs to the left, each only while there are
+    tabs that way. Each closes what the tabs hold as ⌘W does, so a running shell still asks
+    first, and the tab pressed is left on show.
+  - **Not taken: Archive.** `MonoCode`'s tab menu archives its sessions. Slopty has no archive:
+    an agent's own session is the source of truth, and closing its tile leaves it there to come
+    back to (*Recent threads* below, "Resume a past session…").
+  - Tests: `workspace::tests::context_menus::a_title_tabs_menu_closes_the_tabs_beside_it` (the
+    menu, then the arrows), and `layout::tiling::tests::back_and_forward_retrace_the_tabs_visited`.
+- ✅ **The palette splits three ways, and opens on the threads worked in lately** (2026-10-07,
+  item 10 of the MonoCode audit with readiness R17, drawn to the Zed and Warp amendment's
+  palette, `.research/zed-warp-system-2026-10-06.md` row 8 and ranked item 9).
+  - **Three keys.** ⌘K searches everything: the tiles, the threads worked in lately and the
+    words said in any thread, the projects, the machines, the files and the commands. ⌘⇧P is the
+    same search opened at `>`, so it lists every command and nothing else; ⌫ widens it to
+    everything. ⌘P searches the files alone: the ones open in tiles at once, then what is typed,
+    asked of the files under the focused tile's directory on its machine. "Open folder…" keeps
+    the palette seeded with that directory. The View menu has Search… and Commands….
+  - **⌘K inside a terminal still clears it.** Terminal.app, iTerm2 and Ghostty all clear on ⌘K,
+    and the terminal stays the best there is, so its deeper binding wins there. From a terminal
+    the search is ⌘⇧P then ⌫, the title bar's Search, or the View menu.
+  - **Esc on what it was opened with closes.** Esc empties a typed query first, as before. A
+    field that still holds only what the palette was opened with (`>`, a folder) closes at once.
+  - **Recent threads (R17).** With nothing typed, the search lists up to five threads, newest
+    first, under *Recent threads*: the linked machines' top-level threads that no tile shows.
+    ↩ opens one where it stands (`PaletteRun::Thread` with no turn).
+  - **The frame, from Zed and Warp.** 640 pt wide (Warp 640, Zed 608) where the audit said 560;
+    the later amendment wins. It sits 12 % down the window (Warp 117 pt, Zed 80 pt), not a fifth.
+    Its query row is 36 pt over a hairline, and its rows are 28 pt. The pickers share the width,
+    the anchor, the query row and the rows. It still has no scrim on a desktop. The opaque float,
+    its ring and its shadow are the kit's.
+  - **Not done here: motion.** The audit's ranked item 7 opens menus, popovers and the palette
+    on the first frame. A pointer's palette still fades in until that lands for every float at
+    once.
+  - Tests: `workspace::tests::palette::{the_palette_splits_into_everything_commands_and_files,
+    the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone}`, and the keymap's
+    `a_chords_words_come_with_the_keymap` and `the_files_chord_wins_over_a_deeper_default`.

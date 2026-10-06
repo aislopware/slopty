@@ -3,15 +3,16 @@
 
 use std::collections::HashSet;
 
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
+use slopty_proto::thread::wire::ThreadRow;
 
 use super::WorkspaceView;
-use super::actions::{OpenFile, OpenFolder, OpenPalette, StartThread};
+use super::actions::{OpenCommands, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_mark_of, agent_status_text, needs_human};
 use crate::kit::find::Query;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
@@ -20,6 +21,18 @@ use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 /// How much of an agent's first prompt, and of its last answer, the palette searches: enough
 /// for what a task is about, bounded for a transcript that pasted a log.
 const ABOUT_CHARS: usize = 2_000;
+
+/// How many threads worked in lately an empty search lists.
+const RECENT_THREADS: usize = 5;
+
+/// What the empty field of the search of everything says (⌘K, ⌘⇧P).
+pub(super) const SEARCH_EVERYTHING: &str = "Search tiles, threads, files and commands";
+
+/// What the empty field of the search of files says (⌘P).
+pub(super) const SEARCH_FILES: &str = "Search files";
+
+/// What the search of files says when nothing is found.
+const NO_FILE_MATCHES: &str = "No file matches";
 
 impl WorkspaceView {
     /// Every tile in reading order: project by project, tab by tab, pane by pane.
@@ -202,21 +215,76 @@ impl WorkspaceView {
         self.begin_start(start.clone(), window, cx);
     }
 
-    /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is
-    /// gone and the focus is back.
+    /// ⌘K: search everything over whatever has the keyboard, the threads worked in lately
+    /// listed before anything is typed; the choice runs once it is gone and the focus is back.
     pub fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search("", window, cx);
+    }
+
+    /// ⌘⇧P: the same search with `>` typed, so it lists the commands alone.
+    pub fn open_commands(&mut self, _: &OpenCommands, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(">", window, cx);
+    }
+
+    /// The workspace's own palette, its field starting at `typed`.
+    fn open_search(&mut self, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             return;
         }
         let items = self.offered_lines(window, cx);
+        let recent = self.recent_thread_lines(cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| {
-            let mut p = CommandPalette::new(items, theme, window, cx);
+            let mut p = CommandPalette::search(items, SEARCH_EVERYTHING, theme, window, cx);
             p.set_brief(true, cx);
+            p.set_recent(recent, cx);
             p.set_live(true);
+            if !typed.is_empty() {
+                p.seed(typed, window, cx);
+            }
             p
         });
         self.show_palette(palette, window, cx);
+    }
+
+    /// The threads worked in lately across the linked machines, newest first, that no tile
+    /// shows: an empty search lists them so going back to one is a key away. A subagent's
+    /// thread is its parent's, so it is left out.
+    pub(super) fn recent_thread_lines(&self, cx: &App) -> Vec<PaletteItem> {
+        let shown: HashSet<_> = self
+            .layout
+            .tiles()
+            .filter_map(|tile| match self.item(tile).map(|i| &i.kind) {
+                Some(ItemKind::Thread { thread }) => Some(*thread),
+                Some(ItemKind::Terminal { session }) => self.session_thread(*session),
+                _ => None,
+            })
+            .collect();
+        let named = self.workers.values().filter(|w| w.link.is_some()).count() > 1;
+        let mut rows: Vec<(WorkerKey, &ThreadRow)> = self
+            .workers
+            .keys()
+            .filter_map(|key| Some((*key, self.held_hub(*key)?)))
+            .flat_map(|(key, hub)| {
+                hub.read(cx).threads().rows().rows.values().map(move |row| (key, row))
+            })
+            .filter(|(_, row)| row.parent.is_none() && !shown.contains(&row.id))
+            .collect();
+        rows.sort_by_key(|(_, row)| std::cmp::Reverse(row.updated_ms));
+        rows.into_iter()
+            .take(RECENT_THREADS)
+            .map(|(key, row)| {
+                let title = self.thread_title(row.id);
+                let place =
+                    row.cwd.as_deref().map(|cwd| super::tile::cwd_tail(cwd, self.home_of(key)));
+                let mut line =
+                    PaletteItem::recent_thread(&title, Some(row.agent.0.as_str()), place, row.id);
+                if named {
+                    line.worker = self.workers.get(&key).map(|w| w.name.clone());
+                }
+                line
+            })
+            .collect()
     }
 
     /// Focus `worker`'s first tile in reading order; one with no tile gets a shell, and one
@@ -235,8 +303,46 @@ impl WorkspaceView {
         self.open_session_on(worker, None, Vec::new(), None, cx);
     }
 
-    /// "Open file…": the palette, its field ready for a path on the focused tile's worker.
+    /// ⌘P, "Open file…": the palette over the files alone. What is typed is looked up among the
+    /// files under the focused tile's directory on its machine (or its home), best first; a
+    /// path typed from `/`, `~` or `.` is opened as it is spelled. With nothing typed it lists
+    /// the files open in tiles, the latest used first.
     pub fn open_file_palette(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let mut open: Vec<(usize, PaletteItem)> = self
+            .layout
+            .tiles()
+            .filter_map(|tile| {
+                let item = self.item(tile)?;
+                let ItemKind::File { .. } = item.kind else { return None };
+                let line =
+                    PaletteItem::item(&self.tile_title(item), self.kind_glyph(item), item.id)
+                        .placed(self.tile_place(item))
+                        .on_worker(self.worker_label(tile.worker));
+                Some((self.recency_rank(tile), line))
+            })
+            .collect();
+        open.sort_by_key(|(rank, _)| *rank);
+        let items = open.into_iter().map(|(_, line)| line).collect();
+        let theme = self.theme.clone();
+        let palette = cx.new(|cx| {
+            let mut p = CommandPalette::search(items, SEARCH_FILES, theme, window, cx);
+            p.set_empty(NO_FILE_MATCHES, cx);
+            p
+        });
+        self.show_palette(palette, window, cx);
+    }
+
+    /// "Open folder…": the palette, its field holding the focused shell's directory (or the
+    /// worker's home), so ↩ opens it and a few keys go elsewhere.
+    pub fn open_folder_palette(
+        &mut self,
+        _: &OpenFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.palette.is_some() {
             return;
         }
@@ -253,19 +359,8 @@ impl WorkspaceView {
         self.show_palette(palette, window, cx);
     }
 
-    /// "Open folder…": the palette, its field holding the focused shell's directory (or the
-    /// worker's home), so ↩ opens it and a few keys go elsewhere.
-    pub fn open_folder_palette(
-        &mut self,
-        _: &OpenFolder,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_file_palette(&OpenFile, window, cx);
-    }
-
     /// The focused tile's own find-bar query, to start a search from.
-    pub(super) fn active_query(&self, cx: &gpui::App) -> Query {
+    pub(super) fn active_query(&self, cx: &App) -> Query {
         let Some(tile) = self.focused() else { return Query::default() };
         let Some(active) = self.item(tile) else { return Query::default() };
         let query = match &active.kind {
@@ -428,7 +523,7 @@ impl WorkspaceView {
                 }
                 PaletteEvent::Run(PaletteRun::Thread { thread, turn }) => {
                     this.palette_return = None;
-                    let opens = crate::authorship::Opens { thread: *thread, turn: Some(*turn) };
+                    let opens = crate::authorship::Opens { thread: *thread, turn: *turn };
                     this.open_thread_at(opens, cx);
                 }
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}

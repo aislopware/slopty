@@ -23,7 +23,7 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 }
 
 fn open_palette(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
 }
@@ -410,13 +410,14 @@ fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("picker").is_none());
 }
 
-/// On a desktop the palette hangs a fifth of the way down the window (the one modal anchor)
-/// and takes at most three fifths of its height under its ceiling, shorter still when it lists
-/// less. On a phone it is a sheet from the bottom, the window's width, from under the status
-/// bar down to the keyboard, its field at its foot above the keyboard and its foot in view. On both
-/// a fade covers the list's end while more runs on below it.
+/// On a desktop the palette hangs near the top ([`crate::palette::LIST_ANCHOR`] down), at most
+/// [`crate::palette::LIST_WIDTH`] wide, and takes at most three fifths of the window's height
+/// under its ceiling, shorter still when it lists less. On a phone it is a sheet from the bottom,
+/// the window's width, from under the status bar down to the keyboard, its field at its foot above
+/// the keyboard and its foot in view. On both a fade covers the list's end while more runs on below
+/// it.
 #[gpui::test]
-fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
+fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     // One shell, so the brief list (its tile, its machine, a few commands) stays short of the
@@ -427,8 +428,10 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     open_palette(cx);
     let (w, h) = VIEWPORT;
     let brief = cx.debug_bounds("palette").expect("drawn");
-    let fifth = h * crate::kit::MODAL_ANCHOR;
-    assert!((f32::from(brief.top()) - fifth).abs() < 0.5, "a fifth down: {brief:?}");
+    let near = h * crate::palette::LIST_ANCHOR;
+    assert!((f32::from(brief.top()) - near).abs() < 0.5, "near the top: {brief:?}");
+    let wide = crate::palette::LIST_WIDTH;
+    assert!((f32::from(brief.size.width) - wide).abs() < 0.5, "Warp's width: {brief:?}");
     cx.simulate_input("e");
     cx.run_until_parked();
     let full = cx.debug_bounds("palette").expect("drawn");
@@ -627,7 +630,7 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
         assert!(!has(&shell, label), "{label} is not a shell's: {shell:?}");
     }
 
-    cx.simulate_keystrokes("cmd-shift-p");
+    cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     view.update_in(cx, |v, _w, cx| {
         let by = ClientId::new();
@@ -746,4 +749,90 @@ fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestA
     let listed = view.read_with(cx, |v, _| v.navigator_tiles());
     assert!(listed.contains(&site), "every row is back: {listed:?}");
     assert!(cx.debug_bounds(row(site_agent)).is_some(), "and site's agent with them");
+}
+
+/// The palette splits three ways, `MonoCode`'s. ⌘K searches everything and, before anything is
+/// typed, lists the threads worked in lately that no tile shows, newest first (R17). ⌘⇧P opens
+/// the same search at `>`: every command and nothing else, and Esc on the untouched `>` closes
+/// it. ⌘P searches the files alone: the ones open in tiles at once, and what is typed asked of
+/// the machine's files.
+#[gpui::test]
+fn the_palette_splits_into_everything_commands_and_files(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{TableFrame, ThreadRow};
+    use slopty_proto::thread::{Cursor, ThreadId};
+
+    use crate::palette::Section;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let _notes = arrives(&view, cx, &studio, ItemKind::File { path: "/w/notes.txt".into() }, 2);
+    let row = |title: &str, at: u64| -> ThreadRow {
+        let mut state = crate::conversation::thread::fixtures::empty();
+        state.meta.title = title.to_owned();
+        state.meta.cwd = "/w/atlas".to_owned();
+        state.row(WallMs::from_millis(at))
+    };
+    let rows = vec![row("older work", 1_000), row("newer work", 2_000)];
+    let ids: Vec<ThreadId> = rows.iter().map(|r| r.id).collect();
+    let key = studio.key;
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    cx.run_until_parked();
+    let shown = |cx: &mut VisualTestContext| -> Vec<(Section, String)> {
+        view.read_with(cx, |v, cx| {
+            let palette = v.palette.clone().expect("open");
+            palette.read(cx).matches().into_iter().map(|l| (l.section, l.label.clone())).collect()
+        })
+    };
+
+    open_palette(cx);
+    let recent: Vec<String> = shown(cx)
+        .into_iter()
+        .filter(|(section, _)| *section == Section::Recent)
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(recent, ["newer work", "older work"], "newest first");
+    assert!(cx.debug_bounds("palette-heading-recent-threads").is_some(), "under their heading");
+    let first_recent = view.read_with(cx, |v, cx| {
+        let palette = v.palette.clone().expect("open");
+        palette.read(cx).matches().into_iter().find_map(|l| match l.run {
+            PaletteRun::Thread { thread, turn: None } => Some(thread),
+            _ => None,
+        })
+    });
+    assert_eq!(first_recent, Some(ids[1]), "↩ opens it where it stands");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    cx.dispatch_action(OpenCommands);
+    cx.run_until_parked();
+    let field = view.read_with(cx, |v, cx| {
+        v.palette.clone().map(|p| p.read(cx).input_value(cx)).unwrap_or_default()
+    });
+    assert_eq!(field, ">", "opened at the commands");
+    let lines = shown(cx);
+    assert!(lines.iter().all(|(section, _)| *section == Section::Commands), "{lines:?}");
+    assert!(lines.len() > crate::palette::RECENT_COMMANDS, "every command: {}", lines.len());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.palette.is_none()), "Esc on the untouched `>` closes");
+
+    studio.drain();
+    cx.dispatch_action(OpenFile);
+    cx.run_until_parked();
+    let lines = shown(cx);
+    assert_eq!(lines.len(), 1, "the file open in a tile, nothing else: {lines:?}");
+    assert!(lines[0].1.contains("notes.txt"), "{lines:?}");
+    cx.simulate_input("ma");
+    cx.run_until_parked();
+    let asked = studio
+        .drain()
+        .into_iter()
+        .any(|m| matches!(m, ClientMsg::FindFiles { query, .. } if query == "ma"));
+    assert!(asked, "what is typed is asked of the machine's files");
+    assert!(shown(cx).iter().all(|(s, _)| *s != Section::Commands), "no command among them");
 }

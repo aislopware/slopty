@@ -314,7 +314,9 @@ pub fn defaults() -> Vec<Command> {
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
         c(Workspace, "focus_next", ws::FocusNext, &["ctrl-tab"], &[RING]),
         c(Workspace, "focus_previous", ws::FocusPrev, &["ctrl-shift-tab"], &[RING]),
-        c(Workspace, "open_palette", ws::OpenPalette, &["cmd-shift-p"], W),
+        // A terminal's ⌘K, clearing its screen, is deeper and wins there.
+        c(Workspace, "open_palette", ws::OpenPalette, &["cmd-k"], W),
+        c(Workspace, "open_commands", ws::OpenCommands, &["cmd-shift-p"], W),
         // A remote VS Code's ⌘⇧P is its own; ⌃⌘⇧P is nobody's there.
         c(
             Workspace,

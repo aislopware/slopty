@@ -661,24 +661,36 @@ impl Tiling {
 
     /// Back or forward through the tabs visited (⌘[ ⌘]), past those since closed.
     pub fn go_back(&mut self, forward: bool) -> bool {
+        let Some((at, p, t)) = self.next_visit(forward) else { return false };
+        self.at = at;
+        if let Some(project) = self.projects.get_mut(p) {
+            project.shown = t;
+        }
+        // Not a visit of its own: the trail stays as it was.
+        self.shown = Some(p);
+        true
+    }
+
+    /// There is a tab to go back (else forward) to, as the title bar's arrows say.
+    #[must_use]
+    pub fn can_go_back(&self, forward: bool) -> bool {
+        self.next_visit(forward).is_some()
+    }
+
+    /// Where back (else forward) goes: the visit's index, and its tab's project and index.
+    fn next_visit(&self, forward: bool) -> Option<(usize, usize, usize)> {
+        let shown = self.shown_tab().map(Tab::id);
         let mut at = self.at;
         loop {
             let next = if forward { at.checked_add(1) } else { at.checked_sub(1) };
-            let Some(next) = next.filter(|n| *n < self.visits.len()) else { return false };
-            at = next;
-            let Some(id) = self.visits.get(at).copied() else { return false };
+            at = next.filter(|n| *n < self.visits.len())?;
+            let id = self.visits.get(at).copied()?;
             // A visit to the tab on show, or to one since closed, is passed over.
-            if Some(id) == self.shown_tab().map(Tab::id) {
+            if Some(id) == shown {
                 continue;
             }
             if let Some((p, t)) = self.tab_place(id) {
-                self.at = at;
-                if let Some(project) = self.projects.get_mut(p) {
-                    project.shown = t;
-                }
-                // Not a visit of its own: the trail stays as it was.
-                self.shown = Some(p);
-                return true;
+                return Some((at, p, t));
             }
         }
     }
