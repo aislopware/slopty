@@ -1267,8 +1267,8 @@ impl ThreadView {
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small() * z))
-            .bg(hsla(theme.surfaces.card.over(theme.surfaces.ground)))
-            .rounded(px(theme.radii.md * z))
+            .bg(hsla(theme.surfaces.card))
+            .rounded(px(theme.radii.sm * z))
             .px(px(theme.spacing.md * z))
             .py(px(theme.spacing.sm * z));
         style

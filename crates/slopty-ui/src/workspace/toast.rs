@@ -521,7 +521,7 @@ impl WorkspaceView {
                 .into_any_element();
         }
         let rise = theme.spacing.xxs;
-        crate::kit::slide_fade(notice, ("toast-in", shown.seq), rise, crate::kit::Pace::Fade, cx)
+        crate::kit::slide_fade(notice, ("toast-in", shown.seq), rise, crate::kit::Pace::Toast, cx)
     }
 
     /// Take down the held-back pages `which` picks.

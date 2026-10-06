@@ -147,6 +147,9 @@ pub enum Pace {
     /// An overlay, a menu or a popover leaving: [`Motion::exit`], eased out, shorter than its
     /// way in, since what is dismissed is no longer looked at.
     Exit,
+    /// A toast or a notice arriving: [`Motion::toast`], eased out. Menus, popovers and the
+    /// palette have no pace: they open on their first frame.
+    Toast,
 }
 
 impl Pace {
@@ -159,6 +162,7 @@ impl Pace {
             Self::Settle => m.settle,
             Self::Sheet => m.sheet,
             Self::Exit => m.exit,
+            Self::Toast => m.toast,
         }
     }
 
@@ -167,7 +171,7 @@ impl Pace {
     pub const fn curve(self) -> slopty_theme::Curve {
         let m = Motion::DEFAULT;
         match self {
-            Self::Fade | Self::Settle | Self::Exit => m.ease_out,
+            Self::Fade | Self::Settle | Self::Exit | Self::Toast => m.ease_out,
             Self::Sheet => m.drawer,
         }
     }
@@ -393,11 +397,12 @@ pub const PILL_HEIGHT: f32 = 20.0;
 
 /// A pill's shape without its fill, at the chrome's zoom `k`.
 ///
-/// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end, a
-/// capsule: a pill says a state, and every reference draws a state as a capsule, where a 4 pt
-/// box at this height read as a 2018 tag or a button. A header's words that act (Take, Mute)
-/// wear it bare, so they stand as tall as the state's [`pill`] beside them and their hover
-/// takes the same capsule. Key caps keep their 4 pt corners: they are keys.
+/// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end, a chip
+/// at `radii.sm` (6 pt, at the zoom) as `MonoCode`'s state chips are: its glyph and its word.
+/// Capsules are kept for the switch, count badges, dots and the scrollbar's thumb. A header's
+/// words that act (Take, Mute) wear it bare, so they stand as tall as the state's [`pill`]
+/// beside them and their hover takes the same chip. Key caps keep their 4 pt corners: they
+/// are keys.
 #[must_use]
 pub fn pill_frame(theme: &Theme, k: f32) -> Div {
     div()
@@ -406,7 +411,7 @@ pub fn pill_frame(theme: &Theme, k: f32) -> Div {
         .h(px(PILL_HEIGHT * k))
         .gap(px(theme.spacing.xs * k))
         .px(px(theme.spacing.sm * k))
-        .rounded(px(theme.radii.full))
+        .rounded(px(theme.radii.sm * k))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(px(theme.typography.small() * k))
@@ -511,8 +516,8 @@ impl Overlay {
     }
 }
 
-/// A float's shadow, as GPUI draws it: two soft layers ([`slopty_theme::Elevation::float`]),
-/// Tailwind's shadow-xl, as `MonoCode`'s menus and popovers wear it.
+/// A float's shadow, as GPUI draws it: Zed's two crisp layers
+/// ([`slopty_theme::Elevation::float`]), as its menus, popovers and palette wear them.
 #[must_use]
 pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
     theme
@@ -524,12 +529,17 @@ pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
         .collect()
 }
 
-/// A dialog's shadow: one deep, soft layer ([`slopty_theme::Elevation::dialog`]), Tailwind's
-/// shadow-2xl, so the one thing holding the window stands above every float.
+/// A dialog's shadow: Zed's modal surface's four layers ([`slopty_theme::Elevation::dialog`]),
+/// so the one thing holding the window stands above every float.
 #[must_use]
 pub fn dialog_elevation(theme: &Theme) -> Vec<BoxShadow> {
-    let layer = theme.elevation.dialog;
-    if layer.shows() { vec![drop_shadow(theme, layer)] } else { Vec::new() }
+    theme
+        .elevation
+        .dialog
+        .iter()
+        .filter(|l| l.shows())
+        .map(|&layer| drop_shadow(theme, layer))
+        .collect()
 }
 
 /// One layer of the shade falling under a surface.
@@ -748,14 +758,14 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
 }
 
 /// `el` as a modal's sheet: [`elevate`]d with the dialog's own shadow ([`dialog_elevation`]),
-/// at `radii.xl`. [`dialog`] wears it, and so does a modal that lays itself out (adding a
-/// worker).
+/// at `radii.lg`, every float's radius. [`dialog`] wears it, and so does a modal that lays itself
+/// out (adding a worker).
 #[must_use]
 pub fn modal<E: Styled>(el: E, theme: &Theme) -> E {
-    elevate(el, theme).shadow(dialog_elevation(theme)).rounded(px(theme.radii.xl))
+    elevate(el, theme).shadow(dialog_elevation(theme)).rounded(px(theme.radii.lg))
 }
 
-/// The shell every overlay wears: [`elevate`]d with the dialog's own shadow, at `radii.xl`, the
+/// The shell every overlay wears: [`elevate`]d with the dialog's own shadow, at `radii.lg`, the
 /// UI font.
 ///
 /// `min_w_0` so an unwrapped title cannot hold the box wider than a phone, and `min_h_0` so it
@@ -1641,7 +1651,7 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.title_bar_border = hsla(s.border);
     c.status_bar = hsla(s.ground);
     c.status_bar_border = hsla(s.border);
-    c.sidebar = hsla(s.sidebar);
+    c.sidebar = hsla(s.chrome);
     c.sidebar_foreground = hsla(s.text);
     c.sidebar_border = hsla(s.border);
     c.tab_bar = hsla(s.ground);
@@ -1790,7 +1800,7 @@ mod tests {
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
                 assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.ground));
-                assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.sidebar));
+                assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.chrome));
                 assert_eq!(kit.colors.tab_active, hsla(theme.content()));
                 assert_eq!(kit.colors.table_row_border, hsla(theme.surfaces.stroke));
                 assert_eq!(kit.colors.popover, hsla(theme.surfaces.elevated), "popovers float");
@@ -2054,10 +2064,10 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// A pill is its fixed height at any zoom and a capsule, and the state's pill is the frame
+    /// A pill is its fixed height at any zoom and a 6 pt chip, and the state's pill is the frame
     /// filled at the faint step, a notch fainter on white.
     #[test]
-    fn a_pill_is_a_twenty_point_capsule_at_its_zoom() {
+    fn a_pill_is_a_twenty_point_chip_at_its_zoom() {
         for (variant, step) in
             [(Variant::Dark, alpha::FAINT), (Variant::Light, alpha::FAINT_ON_PAPER)]
         {
@@ -2067,7 +2077,7 @@ mod tests {
                 let height = frame.style().size.height;
                 assert_eq!(height, Some(px(PILL_HEIGHT * k).into()), "zoom {k}");
                 let corner = frame.style().corner_radii.top_left;
-                assert_eq!(corner, Some(px(theme.radii.full).into()), "a capsule");
+                assert_eq!(corner, Some(px(theme.radii.sm * k).into()), "a 6 pt chip");
                 let mut filled = pill(&theme, theme.surfaces.warn, k);
                 assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT * k).into()));
                 let fill = filled.style().background.clone();
@@ -2915,7 +2925,7 @@ mod tests {
     }
 
     /// What floats as a sheet (a menu, a popover, a toast) is rounded at `radii.lg`, and a modal
-    /// (a dialog, the add-worker panel, through [`modal`]) at `radii.xl`. A hint and a chip keep
+    /// (a dialog, the add-worker panel, through [`modal`]) too. A hint and a chip keep
     /// their control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
@@ -2939,8 +2949,7 @@ mod tests {
                 .take(30)
                 .find(|(f, _, l)| f.ends_with(sheet) && l.contains(".rounded("))
                 .unwrap_or_else(|| panic!("{sheet}: {marker} is not rounded"));
-            let radius = if marker.contains("modal") { "radii.xl" } else { "radii.lg" };
-            assert!(rounded.2.contains(radius), "{}:{}: {}", rounded.0, rounded.1, rounded.2);
+            assert!(rounded.2.contains("radii.lg"), "{}:{}: {}", rounded.0, rounded.1, rounded.2);
         }
     }
 
@@ -3098,24 +3107,26 @@ mod tests {
         assert!(theme.typography.icon() < icon_button_side(&theme), "the icon stays its size");
     }
 
-    /// The elevation reaches GPUI as the theme says: a float's two layers of the shade falling
-    /// down, the softer one wider and tucked under, and a dialog's one deeper layer. The scrim is
-    /// the same shade.
+    /// The elevation reaches GPUI as the theme says: a float's two crisp layers of the shade
+    /// falling down, tightest first and unspread, and a dialog's four reaching further. The scrim
+    /// is the same shade.
     #[test]
     fn the_elevation_is_layers_of_the_shade() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let layers = elevation(&theme);
-            assert_eq!(layers.len(), 2, "{variant:?}: shadow-xl's two layers");
+            assert_eq!(layers.len(), 2, "{variant:?}: Zed's two layers");
             let ink = hsla(theme.elevation.shade);
             let tinted = |c: Hsla| (c.h, c.s, c.l) == (ink.h, ink.s, ink.l);
             assert!(layers.iter().all(|l| !l.inset && tinted(l.color)), "{variant:?}");
             assert!(tinted(scrim(&theme)), "{variant:?}: the scrim is the shade");
             assert!(layers.iter().all(|l| l.offset.y > px(0.0)));
             assert!(layers.first().map(|l| l.blur_radius) < layers.last().map(|l| l.blur_radius));
-            assert!(layers.iter().all(|l| l.spread_radius < px(0.0)), "{variant:?}: tucked under");
-            let [deep] = dialog_elevation(&theme).try_into().expect("one dialog layer");
-            assert!(deep.blur_radius > layers[1].blur_radius, "{variant:?}: a dialog stands above");
+            assert!(layers.iter().all(|l| l.spread_radius == px(0.0)), "{variant:?}: unspread");
+            let dialog = dialog_elevation(&theme);
+            assert_eq!(dialog.len(), 4, "{variant:?}: Zed's modal layers");
+            let deepest = dialog.iter().map(|l| l.blur_radius).fold(px(0.0), gpui::Pixels::max);
+            assert!(deepest > layers[1].blur_radius, "{variant:?}: a dialog stands above");
             assert!((scrim(&theme).a - theme.elevation.scrim).abs() < f32::EPSILON);
             assert!(aside_scrim(&theme).a < scrim(&theme).a, "{variant:?}: a sidebar dims less");
         }
@@ -3701,6 +3712,7 @@ mod tests {
         assert_eq!(Pace::Settle.curve(), m.ease_out);
         assert_eq!(Pace::Sheet.curve(), m.drawer);
         assert_eq!(Pace::Exit.duration(), m.exit);
+        assert_eq!((Pace::Toast.duration(), Pace::Toast.curve()), (m.toast, m.ease_out));
         assert_eq!(Pace::Exit.curve(), m.ease_out);
         assert!(Pace::Exit.duration() < Pace::Fade.duration(), "out quicker than in");
         assert!(Pace::Fade.duration() < Pace::Settle.duration());

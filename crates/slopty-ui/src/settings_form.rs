@@ -1014,7 +1014,7 @@ impl SettingsForm {
             .p(px(spacing.sm))
             // The canvas, a tone step from the page and not a rule: the sidebar of the window's
             // own frame, the sections on it as the navigator's rows lie on it.
-            .bg(hsla(s.sidebar))
+            .bg(hsla(s.chrome))
             .child(self.search_field(cx))
             .child(
                 div()
@@ -2094,18 +2094,19 @@ fn row_height(theme: &Theme) -> f32 {
     if touch { theme.density.row } else { theme.density.row + theme.spacing.sm }
 }
 
-/// The page's children with each run of rows set in one ring, as System Settings groups them:
-/// the hairline that bounds a region (`border`) round the group at `radii.md` with no fill, the
-/// rows the content itself, each parted from the one before by the quieter hairline inside a
-/// region (`stroke`), inset to start where the titles do. On near-black the quieter one
-/// alone left the group's edge all but gone. Each
+/// The page's children with each run of rows set in one card, as System Settings groups them:
+/// the line that bounds a region (`border`) round the group at `radii.lg`, filled with the
+/// card's wash (`MonoCode`'s settings cards), the rows the content itself, each parted from the one
+/// before by the quieter hairline inside a region (`stroke`), inset to start where the titles do.
+/// On near-black the quieter one alone left the group's edge all but gone. Each
 /// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
 /// its row with no rule.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
     let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
-    let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
+    let (r, inset) = (px(theme.radii.lg), px(theme.spacing.inset()));
+    let wash = hsla(theme.surfaces.card);
     parts
         .into_iter()
         .enumerate()
@@ -2118,6 +2119,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
                 .relative()
                 .w_full()
                 .px(inset)
+                .bg(wash)
                 .border_color(ring)
                 .border_l(crate::kit::HAIR)
                 .border_r(crate::kit::HAIR)
@@ -2316,7 +2318,7 @@ mod tests {
 
     /// A group's rows are one ring under its label, as System Settings draws a group: the
     /// label stands apart, the rows' parts meet edge to edge on one column, the first rounded at
-    /// the top, with no fill under them and the page on the content plane; each row after the
+    /// the top, on the card's wash and the page on the content plane; each row after the
     /// first is parted by a hairline inset to where the titles start, and the group's footer
     /// stands under the ring.
     #[gpui::test]
@@ -2351,10 +2353,9 @@ mod tests {
         let filled = quads.iter().any(|q| {
             (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
                 && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
-                && !q.background.is_transparent()
-                && q.background != gpui::Background::from(hsla(theme.content()))
+                && q.background == gpui::Background::from(hsla(theme.surfaces.card))
         });
-        assert!(!filled, "no fill under the ring");
+        assert!(filled, "the card's wash under the ring");
         // The ring bounds a region; the rules part rows inside it, a step quieter.
         let at_origin = |b: gpui::Bounds<gpui::Pixels>| {
             move |q: &&gpui::Quad| {

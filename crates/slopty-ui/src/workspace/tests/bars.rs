@@ -316,13 +316,13 @@ fn the_keyboard_reaches_a_machines_menu(cx: &mut TestAppContext) {
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Button", Some("Machine actions, laptop"))), "{nodes:#?}");
     let button = cx.debug_bounds(leak(format!("nav-machine-menu-{laptop_key}"))).expect("laid out");
-    let ring =
-        crate::colors::hsla_alpha(Theme::default().surfaces.focus, slopty_theme::alpha::STRONG);
+    let ring = crate::colors::hsla(Theme::default().surfaces.focus);
     let ringed = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
-        // A stop's ring stands two of its widths clear all round, as `a11y::tab_stop` draws it.
-        let around = 4.0_f32.mul_add(crate::a11y::RING, f32::from(button.size.width));
+        // A stop's ring stands its gap and its width clear all round, as `a11y::tab_stop` draws it.
+        let reach = crate::a11y::RING + slopty_theme::stroke::FOCUS;
+        let around = 2.0_f32.mul_add(reach, f32::from(button.size.width));
         quads.iter().any(|q| {
             let at = point(px(q.bounds.center().x.0 / scale), px(q.bounds.center().y.0 / scale));
             let wide = q.bounds.size.width.0 / scale;

@@ -3882,7 +3882,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     monospace face, since it is read character by character to judge it: the mono face's
     third use (`kit::tests::the_mono_face_is_for_ports_and_the_settings_file`). "Open" and
     "Dismiss" are its actions, and it stays 20 s (a word stays 6 s), since it waits on a
-    choice. The palette's "Open last offered page" opens it after the notice went.
+    choice. Once the notice goes the page goes with it; the palette line that opened it later
+    was deleted on 2026-10-06.
   - **A file.** It opens in a file tile right of the shell that asked, focused, at its line.
     One asked again after a reconnect is the same tile, brought forward. While a program waits
     on it, a line under the header says so, in the accent's wash under the shell glyph, with
@@ -5076,17 +5077,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The dispatch tree says what applies.** The workspace listens for an action bound to the
     focus only while it applies (`workspace::actions::Applies`, read once a frame): a tile's
     actions while a tile has the focus, a page's while a page does, a remote picture's, a
-    file's, an agent's, a project's, "Undo close" while a closing can be taken back, "Open last
-    offered page" while one was held back. What the workspace does whatever has the focus (new
-    tiles, the palettes, the inbox, the workspaces, the text size) it always listens for. The
-    tiles' own actions (a terminal's, a file's, a board's) are their views' and live where the
-    keyboard is. So GPUI's own question, whether anything on the way from the focused element
-    up answers an action (`Window::is_action_available_in`), is the whole test: the palette
-    keeps a command line only when it is answered from where the keyboard was, and the menu
-    bar greys an item the same way, as macOS greys what nothing answers. A hand list of which
-    command suits which tile would drift from the handlers; the tree cannot. A chord whose
-    action is not answered falls through to the focused element, as an unbound chord does: a
-    terminal passes ⌘ chords up, and a remote window takes them.
+    file's, an agent's, a project's, and "Undo close" while a closing can be taken back. What
+    the workspace does whatever has the focus (new tiles, the palettes, the inbox, the
+    workspaces, the text size) it always listens for. The tiles' own actions (a terminal's, a
+    file's, a board's) are their views' and live where the keyboard is. So GPUI's own question,
+    whether anything on the way from the focused element up answers an action
+    (`Window::is_action_available_in`), is the whole test: the palette keeps a command line only
+    when it is answered from where the keyboard was, and the menu bar greys an item the same
+    way, as macOS greys what nothing answers. A hand list of which command suits which tile
+    would drift from the handlers; the tree cannot. A chord whose action is not answered falls
+    through to the focused element, as an unbound chord does: a terminal passes ⌘ chords up, and
+    a remote window takes them.
   - **Never silently.** A pick runs from the element that had the keyboard, or from the
     workspace when that is gone or nothing had it. If nothing there answers it by then (its
     tile went while the palette was open), a notice says "<command> does not apply here". The
@@ -5564,7 +5565,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Pills are capsules** (#6), amending "Design tokens": `radii.full` at 20 pt, the tone at
     `FAINT` in dark and the new `alpha::FAINT_ON_PAPER` (0.10) in light, since a 4 pt box at
     20 pt reads as a tag or a button and these are states. Key caps keep `radii.xs`: they are
-    keys. Test: `a_pill_is_a_twenty_point_capsule_at_its_zoom`.
+    keys. Test: `a_pill_is_a_twenty_point_chip_at_its_zoom` (a 6 pt chip since "The design system starts
+    from MonoCode's").
   - **A quieter focus line and overview ring** (#7, #16), amending §4b's numbers: the line is
     `stroke::MARK` 1.5 pt in `text` at the new `alpha::FOCUS` (0.45, 3.95:1 over the content,
     above the 3:1 asked of what is seen), inset `radii.sm` at both ends with round caps, whole
@@ -8549,9 +8551,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The design system starts from MonoCode's** (2026-10-06, from
   `.research/monocode-system-2026-10-06.md`, the person's rulings on it, and the tiling ruling
-  in `docs/decisions/workspace.md`). Where an earlier choice of ours was taste, MonoCode's wins.
-  Panes now meet edge to edge on one ground, so the panels, the canvas under them, the finish
-  and the lit rim had nothing left to stand on. This supersedes, by name:
+  in `docs/decisions/workspace.md`; amended the same day from Zed and Warp,
+  `.research/zed-warp-system-2026-10-06.md` §2, since the person likes the square style). Where
+  an earlier choice of ours was taste, MonoCode's wins. Where Zed and Warp are squarer and
+  crisper, theirs win. Panes now meet edge to edge, so the panels, the canvas under them, the
+  finish and the lit rim had nothing left to stand on. This supersedes, by name:
   - "Premium foundations: tiles stand on the canvas as panels";
   - "Premium pass from the mockups: a deeper light canvas and one green way on" (its canvas
     and its finished destructive solid);
@@ -8563,63 +8567,95 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - "The navigator stands on the system's glass".
 
   What it rules:
-  - **Solid surfaces only.** The person dislikes MonoCode's frosted glass, the one part of it
-    not taken. Every surface is solid and opaque, as in Warp and Zed: no vibrancy, no blur, no
-    translucent sheet. The navigator's system material is deleted (`slopty_platform::material`,
-    `alpha::GLASS`, `Surfaces::on_glass`), and the window is always opaque. Floats are their
-    solid ground with a border and a shadow. Only the washes (hover, selection, the card's 3 %)
-    are translucent, and only over that ground.
-  - **One neutral ground.** #171717 in dark and #f7f7f7 in light, with no warm hue:
-    `every_grey_is_a_true_neutral` holds every grey under 0.002 OKLCH chroma. `canvas`,
-    `panel` and `band` are gone. The sidebar is the ground in light and a hair under it in
-    dark (−0.009 L, MonoCode's sidebar value, solid). A selection is the selected wash on every
-    plane (`kit::Plane` is gone). Ink keeps our ladder, made neutral.
-  - **One line.**
-    - `stroke` is the structural line: 1 pt at 7 % of the ink, snapped to device pixels.
-      `border` is ink at 10 % in both variants.
-    - "The structural line at 1x and 2x" in `docs/MEASUREMENTS.md` has the numbers: 1 pt
-      weighs the same at both scales, where half a point doubles at 1x.
+  - **Solid surfaces only.**
+    - The person dislikes MonoCode's frosted glass, the one part of it not taken. Every surface
+      is solid and opaque, as in Warp and Zed: no vibrancy, no blur, no translucent sheet.
+    - The navigator's system material is deleted (`slopty_platform::material`, `alpha::GLASS`,
+      `Surfaces::on_glass`), and the window is always opaque.
+    - Floats are their solid ground with a border and a shadow. Only the washes (hover,
+      selection, the card's 3 %) are translucent, and only over a solid plane.
+  - **Two opaque planes, all neutral** (Zed and Warp amend MonoCode's one ground).
+    - The work lies deepest: panes and the terminal are on the ground, #171717 in dark and
+      #f7f7f7 in light.
+    - `chrome` is a step toward the ink, #1e1e1e and #f0f0f0. It holds the title bar, the tab
+      rows, the navigator and the status bar.
+    - `canvas`, `panel`, `band` and the sidebar's darker hair are gone. Every text tone is
+      lifted on the chrome too.
+    - `every_grey_is_a_true_neutral` holds every grey under 0.002 OKLCH chroma. Ink keeps our
+      ladder, made neutral.
+  - **Two lines, both 1 pt and snapped to device pixels.**
+    - `sash` is 12 % of the ink in dark and 14 % in light. It runs between panes and along a
+      bar's edge against a pane.
+    - `stroke` is 7 %, for dividers inside a pane. `border` is 10 %, for a control's or a
+      card's ring.
+    - "The structural line at 1x and 2x" in `docs/MEASUREMENTS.md` has the numbers.
+      - Every 1 pt line weighs the same at both scales; half a point doubles at 1x.
+      - The sash weighs 1.6 to 2.1 dividers on both planes, and the two sashes land close
+        across the modes.
+  - **States.**
+    - Hover is 5 % and a selection 8.5 % in dark, 8 % in light.
+    - A list that has the keyboard shows its selected row at 14 % in dark and 12 % in light
+      (`keyed`), with a square 1 pt focus line as the cursor.
+    - A press is 18 % and 16 %.
+    - Text is lifted to AA on the keyboard's row over the three planes a list lies on. That
+      moved the light green word to L 0.465. It also moved the light crimson to
+      `oklch(0.37 0.15 25)`, to stay apart from it for every dichromacy.
   - **Elevation.**
     - Gone: `Finish`, `Rim`, `Elevation.rest` and `Sunk.lip`.
     - What rests (`kit::raised`, `kit::card`) is ink at 3 % inside `border`, with no shadow.
-    - A secondary button is clear inside `border`. Primaries are flat, and a press shows the
-      pressed wash with no scale.
-    - Floats wear Tailwind's shadow-xl and their border. A modal (`kit::modal`: dialogs, adding
-      a worker) wears shadow-2xl at `radii.xl`.
+      A secondary button is clear inside `border`.
+    - Primaries are flat, and a press shows the pressed wash with no scale.
+    - Floats are an opaque step: ink 5 % in dark, white in light, ringed in `border`. They
+      wear Zed's two crisp layers, `0 1 0` and `0 2 3`.
+    - A modal (`kit::modal`: dialogs, adding a worker) wears Zed's four modal layers, none
+      blurred past 12 pt.
   - **Destructive is tinted.** The error's wash at 0.20 (0.30 under the pointer) carries the
     error's word, held to AA over the ground and over a float. `error_solid` is gone.
-  - **Radii by size.**
-    - 0: panes, bars, pane lists, tree and diff rows.
-    - 4: tiny boxes.
-    - 6: buttons, tabs, segments, sidebar rows, chips, code and diff shells.
-    - 8: inputs, the composer, menu items, question cards.
-    - 12: menus, popovers, toasts, cards.
-    - 16 (`radii.xl`): dialogs.
-    - Capsules only for the switch, count badges, dots, the scrollbar thumb and one-line user
-      bubbles.
-  - **Focus** is a 2 pt outline in the accent green, held to 3:1 on every ground.
+  - **Radii** (Zed's and Warp's compact ladder, which replaces MonoCode's 4 to 16).
+    - 0: panes, bars, tabs, pane lists, tree and diff rows.
+    - 2: tiny boxes such as a tab's close box.
+    - 4: buttons, chips (a state's pill is now a chip, glyph and word), fields, icon buttons,
+      navigator and menu rows, code and diff shells.
+    - 6: resting cards, a question's card, the composer boxed in its column.
+    - 8: every float (menus, popovers, the palette, dialogs, toasts).
+    - Capsules only for the switch, count badges, dots, the scrollbar thumb, a progress bar's
+      round ends and one-line user bubbles.
+  - **Focus.**
+    - The keyboard's outline is 2 pt of the accent green, whole, 2 pt clear of its control,
+      and held to 3:1 on every ground.
+    - The focused pane is told by its labels' tone. A tab of two or more panes adds a 1.5 pt
+      green top edge to its active tab.
   - **Motion.**
     - Feedback (hover and press) takes 120 ms, eased out (`Motion::feedback`).
-    - A popover opens in 170 ms, fading, scaling from 0.94 and travelling 8 pt from its
-      anchor.
-    - A toast takes 180 ms and a pane's entry 260 ms.
-  - **Type and heights.** Prose is 14/24 and the composer 14/22. `density.bar` is 36 and
-    `density.status` 28; the header stays 40, and rows and controls 28.
-  - **Tiling's pieces** for the panes (`kit::pane`):
+    - Menus, popovers and the palette open on their first frame, as Zed's do: latency comes
+      first.
+    - Only toasts move, 150 ms and 8 pt (`Pace::Toast`).
+  - **Type and heights.**
+    - Prose is 14/24 and the composer 14/22.
+    - The title bar is 36 (`density.title`), a pane's tab row and its toolbar 32
+      (`density.header`, `density.bar`), and the status bar 28 on the chrome. Rows and controls
+      stay 28.
+  - **Tiling's pieces** for the panes (`kit::pane`).
     - `pane_surface` is square on the ground, with nothing of its own.
-    - `sash` is the 1 pt `stroke` line, found across `density.sash` (12 pt), under the resize
-      cursor along its axis.
+    - `sash` is a 1 pt line, found across `density.sash` (12 pt), under the resize cursor
+      along its axis.
     - Under the pointer or in a drag the line steps to the focus green at 2 pt, since only the
       green clears 3:1 on the ground; a brightened neutral stays near 1.3:1.
   - The AA floors stand everywhere.
+  - **Still to land** after the tiling's wiring: the kit's and the call sites' move onto
+    `chrome`, `sash`, `keyed`, the new radii and the heights, the square tabs that open into
+    their content, the palette with no scrim, the terminal's blocks, the composer and the
+    icons.
   - Tests:
-    - `slopty_theme::tests`: `the_window_is_one_ground`, `the_line_weighs_the_same_at_every_scale`,
-      `the_lines_are_monocode_s_shares_in_both_modes`, `the_washes_are_monocode_s_shares`,
-      `a_float_rises_and_its_rows_still_answer_the_pointer`,
-      `the_focus_outline_is_the_green_and_seen_everywhere`, `elevation_and_density`;
+    - `slopty_theme::tests`: `the_work_lies_deepest_under_the_chrome`,
+      `the_line_weighs_the_same_at_every_scale`, `the_ladder_is_monotonic`,
+      `the_washes_stand_off_the_chrome`, `a_float_rises_and_its_rows_still_answer_the_pointer`,
+      `the_focus_outline_is_the_green_and_seen_everywhere`, `elevation_and_density`,
+      `chrome_text_clears_wcag_aa`;
     - `kit::tests`: `the_elevation_is_layers_of_the_shade`, `a_card_rests_on_its_edge`,
       `a_button_is_neutral_and_one_height`, `the_destructive_button_reads_in_every_state`,
-      `a_floating_surface_is_rounded_lg`, `a_painted_line_is_one_point_in_whole_device_pixels`;
-    - `kit::pane::tests`;
+      `a_floating_surface_is_rounded_lg`, `a_painted_line_is_one_point_in_whole_device_pixels`,
+      `a_pill_is_a_twenty_point_chip_at_its_zoom`;
+    - `kit::pane::tests`; `a11y::tests::the_keyboard_rings_a_stop_and_the_pointer_does_not`;
     - `workspace::tests::frame::the_window_is_one_opaque_ground`,
       `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`.

@@ -198,7 +198,7 @@ impl ThreadView {
                     .when(new > 0, |el| {
                         el.pl(self.z(theme.spacing.sm)).pr(self.z(theme.spacing.xs))
                     })
-                    .rounded_full()
+                    .rounded(self.z(theme.radii.sm))
                     .border(kit::HAIR)
                     .border_color(hsla(s.border))
                     .bg(hsla(s.elevated))

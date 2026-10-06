@@ -100,7 +100,7 @@ fn remove_button(
 }
 
 /// A pasted picture's chip: the picture itself in a small square on the hairline, its ✕ on a
-/// lifted disc in the top corner, and while it uploads a progress line along its foot.
+/// small raised box in the top corner, and while it uploads a progress line along its foot.
 fn picture_chip(
     theme: &Theme,
     zoom: f32,
@@ -114,7 +114,7 @@ fn picture_chip(
         .absolute()
         .top(z(theme.spacing.xxs))
         .right(z(theme.spacing.xxs))
-        .rounded_full()
+        .rounded(z(theme.radii.xs))
         .overflow_hidden()
         .hover(move |el| el.bg(hsla(s.hover)))
         .child(remove_button(theme, chip, z(theme.typography.icon_large()), zoom, remove));

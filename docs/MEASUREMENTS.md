@@ -15538,23 +15538,38 @@ CARGO_TARGET_DIR=target/scratch-panels/target cargo test -p slopty-ui --release 
 
 ## 2026-10-06 — the structural line at 1x and 2x
 
-The design system starts from `MonoCode`'s (`docs/decisions/ui.md`, "The design system starts
-from MonoCode's"). Its one structural line is 1 pt at 7 % of the ink. The kit had drawn half a
-point at twice the share. GPUI draws a stroke in whole device pixels, never under one, so half
-a point is one device pixel at both scales: a full point wide at 1x.
+The design system starts from `MonoCode`'s, with Zed's and Warp's squarer amendments
+(`docs/decisions/ui.md`, "The design system starts from MonoCode's"). It has two lines, both
+1 pt:
+- the divider inside a pane, at 7 % of the ink;
+- the sash between panes and a bar's edge against a pane, at 12 % in dark and 14 % in light.
 
-The eye takes a thin line's weight as its width times how far it sits off its ground. The
-test weighs each line as its drawn width in points times its distance from the ground in
-CIE L*, on the default dark (#171717) and light (#f7f7f7) grounds.
+The kit had drawn half a point at twice the share. GPUI draws a stroke in whole device pixels,
+never under one, so half a point is one device pixel at both scales: a full point wide at 1x.
 
-| line | dark 1x | dark 2x | light 1x | light 2x |
+The eye takes a thin line's weight as its width times how far it sits off its ground. The test
+weighs each line as its drawn width in points times its distance from its plane in CIE L*. The
+planes are the default grounds (#171717 dark, #f7f7f7 light) and the chrome step over them
+(#1e1e1e, #f0f0f0).
+
+| line | dark ground 1x / 2x | dark chrome 1x / 2x | light ground 1x / 2x | light chrome 1x / 2x |
 |---|---|---|---|---|
-| 1 pt at 0.07 (taken) | 7.42 | 7.42 | 5.24 | 5.24 |
-| 0.5 pt at 0.14 | 14.42 | 7.21 | 10.89 | 5.45 |
+| 1 pt at 0.07 (the divider) | 7.42 / 7.42 | 7.21 / 7.21 | 5.24 / 5.24 | 5.27 / 5.27 |
+| 1 pt at 0.12 (the dark sash) | 12.59 / 12.59 | 11.81 / 11.81 | 9.47 / 9.47 | 9.17 / 9.17 |
+| 1 pt at 0.14 (the light sash) | 14.42 / 14.42 | 13.61 / 13.61 | 10.89 / 10.89 | 10.60 / 10.60 |
+| 0.5 pt at 0.14 | 14.42 / 7.21 | 13.61 / 6.80 | 10.89 / 5.45 | 10.60 / 5.30 |
+| 0.5 pt at 0.24 | 23.72 / 11.86 | 22.34 / 11.17 | 18.44 / 9.22 | 18.19 / 9.09 |
+| 0.5 pt at 0.28 | 27.14 / 13.57 | 25.72 / 12.86 | 21.72 / 10.86 | 21.12 / 10.56 |
 
-- The 1 pt line weighs the same at both scales. Half a point matches it at 2x but doubles at
-  1x, so an external 1x display ruled the chrome twice as hard as a Retina one. The ruling of
-  1 pt at 0.07 stands on these numbers, and the test holds them.
+- **Every 1 pt line weighs the same at both scales.** Half a point matches it at 2x but doubles
+  at 1x, so an external 1x display ruled the chrome twice as hard as a Retina one. The ruling of
+  1 pt lines stands on these numbers.
+- **The sash.**
+  - The dark sash at 0.12 weighs 1.7 dividers on the ground and 1.6 on the chrome.
+  - The light sash at 0.14 weighs 2.1 dividers on the ground and 2.0 on the chrome.
+  - Across the variants the two sashes land close together, 12.6 against 10.9 on the ground:
+    one weight of line in both modes, where 0.12 in light would weigh 9.5.
+  - The test holds the sash between 1.5 and 2.2 dividers on both planes.
 
 ```sh
 cargo test -p slopty-theme --lib the_line_weighs_the_same_at_every_scale -- --nocapture

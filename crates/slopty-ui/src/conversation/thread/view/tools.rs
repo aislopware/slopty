@@ -430,14 +430,14 @@ impl ThreadView {
         Some(self.well(list.p(self.z(theme.spacing.xs))).into_any_element())
     }
 
-    /// An opened call's well: set into the thread's plane ([`kit::inset`]) at the radius of
-    /// what is framed inside content, no edge, clipped to its corners.
+    /// An opened call's well: set into the thread's plane ([`kit::inset`]) at a code shell's
+    /// `radii.sm`, no edge, clipped to its corners.
     fn well(&self, content: impl gpui::IntoElement) -> Div {
         let theme = &self.theme;
         kit::inset(div(), theme)
             .w_full()
             .overflow_hidden()
-            .rounded(self.z(theme.radii.md))
+            .rounded(self.z(theme.radii.sm))
             .child(content)
     }
 }

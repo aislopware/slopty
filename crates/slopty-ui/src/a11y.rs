@@ -3,8 +3,9 @@
 //! Every button-like element goes through [`tab_stop`]: it becomes focusable in reading
 //! order (render order, all at tab index 0), Tab and ⇧Tab move along the ring, Enter and
 //! Space click it (GPUI's keyboard click), and while it holds the keyboard focus that came
-//! from the keyboard it wears the focus ring: a 2 pt gap, then a 2 pt ring of the accent at
-//! [`alpha::STRONG`], its corners the element's grown by the gap and the ring. Pointer focus
+//! from the keyboard it wears the focus ring: a 2 pt gap, then a ring of the accent green
+//! [`stroke::FOCUS`] wide, whole, which the theme holds to 3:1 on every ground; its corners the
+//! element's grown by the gap and the ring. Pointer focus
 //! shows nothing, and a mouse press does not move the focus to it: the terminal keeps the
 //! keyboard, as macOS buttons behave.
 //!
@@ -17,20 +18,20 @@ use gpui::{
     FocusHandle, InteractiveElement, KeyDownEvent, Outline, StatefulInteractiveElement, Styled,
     WeakFocusHandle, Window, px,
 };
-use slopty_theme::{Rgb, alpha};
+use slopty_theme::{Rgb, stroke};
 
-use crate::colors::hsla_alpha;
+use crate::colors::hsla;
 
-/// The focus ring's gap from its element and its own width, in points.
+/// The focus ring's gap from its element, in points.
 ///
 /// Geist's `0 0 0 2px background, 0 0 0 4px blue`. The gap is left clear, so the ring stands
 /// off any element on any surface, and a ring drawn outside it moves no layout.
 pub const RING: f32 = 2.0;
 
-/// The ring round a stop that holds the keyboard focus.
+/// The ring round a stop that holds the keyboard focus: `color` whole, [`stroke::FOCUS`] wide.
 #[must_use]
 pub fn ring(color: Rgb) -> Outline {
-    Outline { color: hsla_alpha(color, alpha::STRONG), width: px(RING), offset: px(RING) }
+    Outline { color: hsla(color), width: px(stroke::FOCUS), offset: px(RING) }
 }
 
 /// Make `el` one stop of the keyboard ring (see the module docs).
@@ -242,9 +243,9 @@ mod tests {
     use gpui::{
         Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, div, px,
     };
-    use slopty_theme::{Theme, alpha};
+    use slopty_theme::{Theme, stroke};
 
-    use crate::colors::hsla_alpha;
+    use crate::colors::hsla;
     use crate::kit::{ButtonKind, button};
 
     struct Buttons(Theme);
@@ -265,12 +266,12 @@ mod tests {
         }
     }
 
-    /// Tab puts the ring round a stop: 2 pt clear of it, 2 pt wide, the focus tone (the chrome's
-    /// text) at `alpha::STRONG`, drawn outside so nothing moves. A click shows no ring.
+    /// Tab puts the ring round a stop: 2 pt clear of it, 2 pt wide, the focus green whole, drawn
+    /// outside so nothing moves. A click shows no ring.
     #[gpui::test]
     fn the_keyboard_rings_a_stop_and_the_pointer_does_not(cx: &mut TestAppContext) {
         let theme = Theme::default();
-        let color = hsla_alpha(theme.surfaces.focus, alpha::STRONG);
+        let color = hsla(theme.surfaces.focus);
         let (_view, cx) = cx.add_window_view(|_window, _cx| Buttons(theme.clone()));
         let rings = |cx: &mut gpui::VisualTestContext| {
             cx.run_until_parked();
@@ -295,8 +296,8 @@ mod tests {
         cx.update(gpui::Window::focus_next);
         assert!(rings(cx).is_empty(), "focus alone, from no keystroke, shows no ring");
         cx.simulate_keystrokes("tab");
-        let ring = super::RING;
-        let expected = 4.0_f32.mul_add(ring, f32::from(save.size.width));
+        let ring = stroke::FOCUS;
+        let expected = 2.0_f32.mul_add(super::RING + ring, f32::from(save.size.width));
         assert!(
             matches!(rings(cx).as_slice(), [(w, b)] if (w - expected).abs() < 0.01 && (b - ring).abs() < 0.01),
             "{:?}",

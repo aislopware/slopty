@@ -212,7 +212,7 @@ pub fn code_block(
     div()
         .flex()
         .flex_col()
-        .rounded(px(theme.radii.xs))
+        .rounded(px(theme.radii.sm))
         .map(|el| crate::kit::inset(el, theme))
         .px(px(spacing.sm * scale))
         .py(px(spacing.xs * scale))
@@ -366,8 +366,8 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let code_block = gpui::StyleRefinement::default()
         .font_family(mono.to_owned())
         .text_size(px(small))
-        .bg(hsla(theme.surfaces.card.over(theme.surfaces.ground)))
-        .rounded(px(theme.radii.xs))
+        .bg(hsla(theme.surfaces.card))
+        .rounded(px(theme.radii.sm))
         .px(px(theme.spacing.sm * scale))
         .py(px(theme.spacing.xs * scale));
     let inline_code = gpui::HighlightStyle {
