@@ -645,6 +645,29 @@ mod tests {
         assert_eq!(label.as_deref(), Some(crate::settings_form::SEARCH_PLACEHOLDER));
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("System"));
         assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("13 pt"));
+        // The sections lie on the canvas; the one shown rises off it toward the plate the
+        // navigator's chosen row wears, here at the hover's step as the keyboard is in the
+        // search.
+        let theme = Theme::default();
+        // Past the wash's ease in.
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let shown = cx.debug_bounds("settings-section-0").expect("the first section");
+        let fills: Vec<gpui::Background> = cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let centre = shown.center().scale(scale);
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|q| {
+                    q.bounds.contains(&centre) && q.bounds.size.height.0 < 3.0 * 28.0 * scale
+                })
+                .map(|q| q.background)
+                .collect()
+        });
+        let plate = crate::kit::hover_on(&theme, crate::kit::Plane::Canvas);
+        assert!(fills.contains(&gpui::Background::from(plate)), "{plate:?} in {fills:?}");
     }
 
     /// Where the window has room the dialog is about 800 pt wide, its sidebar beside a page of

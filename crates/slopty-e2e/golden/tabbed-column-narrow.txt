@@ -95,4 +95,4 @@ Button │ Close tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell
-Status │ Ship the project board: #5 Check the wire goldens: its verifier failed
+Status │ #5 Check the wire goldens: its verifier failed

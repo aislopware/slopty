@@ -176,6 +176,9 @@ fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
     let content = gpui::Background::from(crate::colors::hsla(theme.content()));
     let ring = crate::colors::hsla(theme.surfaces.border_subtle);
     for tile in [first, window, second] {
+        // Each in view in its turn: the strip clips what lies past its edge.
+        view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+        cx.run_until_parked();
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         let quads = quads_at(cx, bounds);
         let ground = quads.iter().find(|q| q.background == content).expect("its surface");

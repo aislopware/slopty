@@ -1635,7 +1635,11 @@ impl FileView {
                 .text_color(hsla(s.text))
                 .hover(move |st| st.bg(hsla(s.hover)))
                 .active(move |st| st.bg(hsla(s.pressed))),
-            ButtonKind::Primary | ButtonKind::Ghost | ButtonKind::Link => button
+            ButtonKind::Primary
+            | ButtonKind::Go
+            | ButtonKind::Destructive
+            | ButtonKind::Ghost
+            | ButtonKind::Link => button
                 .border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
                 .hover(move |st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))

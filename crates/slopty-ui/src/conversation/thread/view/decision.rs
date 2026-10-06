@@ -41,7 +41,7 @@ pub(crate) const STANDING: &str = "Grants that last";
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Arranged<'a> {
     /// The row, in order: the answers to a question and any other plain allow, quiet; then the
-    /// plain deny; then the plain allow, the one solid, last.
+    /// plain deny; then the plain allow, the one green control ([`ButtonKind::Go`]), last.
     pub front: Vec<(&'a Choice, ButtonKind)>,
     /// Behind the deny's chevron: every other deny (one that reaches further, one that also
     /// stops the turn).
@@ -50,7 +50,7 @@ pub(super) struct Arranged<'a> {
     pub standing: Vec<&'a Choice>,
 }
 
-/// Where each of `options` goes. The plain allow leads as the one solid; a grant that reaches
+/// Where each of `options` goes. The plain allow leads in the green; a grant that reaches
 /// past this once never does, nor ever sits in the row, so the card never leads the person to
 /// a standing grant.
 pub(super) fn arrange(options: &[Choice]) -> Arranged<'_> {
@@ -70,7 +70,7 @@ pub(super) fn arrange(options: &[Choice]) -> Arranged<'_> {
     }
     let plain = options.iter().find(|c| Some(c.id.as_str()) == plain);
     front.extend(plain.map(|c| (c, ButtonKind::Secondary)));
-    front.extend(lead.and_then(|ix| options.get(ix)).map(|c| (c, ButtonKind::Primary)));
+    front.extend(lead.and_then(|ix| options.get(ix)).map(|c| (c, ButtonKind::Go)));
     Arranged { front, denials, standing }
 }
 
@@ -128,7 +128,7 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 // Where the answers do not fit beside the rest they take a line of their own,
-                // and wrap among themselves, ending at the trailing edge with the one solid
+                // and wrap among themselves, ending at the trailing edge with the green way on
                 // last: a long answer never pushes the primary out of the card.
                 .flex_wrap()
                 .items_center()
@@ -380,13 +380,13 @@ mod tests {
         let a = arrange(&offered);
         assert_eq!(
             a.front.iter().map(|(c, k)| (c.id.as_str(), *k)).collect::<Vec<_>>(),
-            [("deny", ButtonKind::Secondary), ("allow", ButtonKind::Primary)]
+            [("deny", ButtonKind::Secondary), ("allow", ButtonKind::Go)]
         );
         assert_eq!(ids(a.denials), ["stop"]);
         assert_eq!(ids(a.standing), ["always"]);
     }
 
-    /// An ACP agent may offer "always" first: the plain allow still leads as the one solid, a
+    /// An ACP agent may offer "always" first: the plain allow still leads in the green, a
     /// standing deny is one of the other denials, and the row never holds a standing grant.
     #[test]
     fn a_standing_grant_never_leads_or_sits_in_the_row() {
@@ -398,7 +398,7 @@ mod tests {
         ];
         let a = arrange(&offered);
         assert_eq!(ids(a.front.iter().map(|(c, _)| *c)), ["deny", "allow"]);
-        assert_eq!(a.front.last().map(|(_, k)| *k), Some(ButtonKind::Primary));
+        assert_eq!(a.front.last().map(|(_, k)| *k), Some(ButtonKind::Go));
         assert_eq!(ids(a.denials), ["deny-always"]);
         assert_eq!(ids(a.standing), ["allow-always"]);
     }

@@ -56,6 +56,10 @@ fn view_in<'a>(
     theme: Theme,
 ) -> (Entity<ThreadView>, &'a mut VisualTestContext) {
     let hub = hub.clone();
+    // Motion runs on wall time, which a test does not hold: a move under way when a test reads
+    // a place or clicks one (the composer docking at the foot as a turn starts) lands it where
+    // a busy machine has got to. A test of a move turns motion back on itself.
+    cx.update(|cx| cx.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|window, cx| {
         let view = ThreadView::new(hub, thread, theme, window, cx);
         view.focus(window, cx);

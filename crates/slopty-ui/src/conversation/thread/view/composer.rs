@@ -10,7 +10,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled, div, px,
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
@@ -380,8 +380,9 @@ impl ThreadView {
             model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
         // The model by its name alone: the agent's mark leads the tile's header, and beside
         // "Opus 5.5" it only said again whose model it is.
-        let chip = self
-            .chip("thread-model", format!("Model, {name}"))
+        // The model is the foot's one outlined pill, beside the outlined "+": the two things
+        // the person sets before writing, drawn as controls; the rest are quiet words.
+        let chip = outlined(self.chip("thread-model", format!("Model, {name}")), theme)
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(
@@ -620,9 +621,10 @@ impl ThreadView {
         })
     }
 
-    /// The one solid: stop the turn while one runs and nothing is typed; otherwise what ↵ will
-    /// do with the draft, in its glyph and its name: Update a waiting message being changed,
-    /// Steer into the turn under way, Queue after it (an agent that takes no steer), or Send.
+    /// The disc at the foot's end: stop the turn while one runs and nothing is typed, in the
+    /// neutral solid; otherwise what ↵ will do with the draft, in its glyph and its name and
+    /// in the green that sends work on: Update a waiting message being changed, Steer into the
+    /// turn under way, Queue after it (an agent that takes no steer), or Send.
     fn send_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -647,7 +649,7 @@ impl ThreadView {
         } else {
             label.into()
         };
-        let el = kit::message::send_control(theme, self.zoom, id, icon, label)
+        let el = kit::message::send_control(theme, self.zoom, id, icon, label, !stop)
             .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
                 cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
@@ -675,7 +677,7 @@ impl ThreadView {
     /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, all
     /// its corners round, or with the tray as its head only the foot's. `focused`: the field
     /// has the keyboard, and the hairline says so.
-    pub(super) fn shell<E: gpui::Styled>(&self, el: E, capped: bool, focused: bool) -> E {
+    pub(super) fn shell<E: Styled>(&self, el: E, capped: bool, focused: bool) -> E {
         kit::message::shell(el, &self.theme, self.zoom, capped, focused)
     }
 
@@ -707,7 +709,7 @@ impl ThreadView {
             .map(|el| self.shell(el, capped, focused))
             // Under the tray the shell has no top edge: the tray's band over the field's raised
             // tone parts them, with no line between.
-            .when(capped, gpui::Styled::border_t_0)
+            .when(capped, Styled::border_t_0)
             .child(
                 div()
                     .w_full()
@@ -788,6 +790,12 @@ impl ThreadView {
     }
 }
 
+/// `el` outlined as a pill or a disc: the ordinary hairline round it at the full radius, as the
+/// "+" and the model chip stand at the composer's foot.
+fn outlined<E: Styled>(el: E, theme: &Theme) -> E {
+    el.rounded(px(theme.radii.full)).border(kit::HAIR).border_color(hsla(theme.surfaces.border))
+}
+
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
 /// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
@@ -825,16 +833,17 @@ impl ThreadView {
         div()
             .relative()
             .flex_none()
-            .child(self.icon_button(ADD_BUTTON, Symbol::Plus, ADD_LABEL).on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.add_open = !this.add_open;
-                    // Closed by its button as by Esc: the keyboard goes back to the field.
-                    if !this.add_open {
-                        this.focus(window, cx);
-                    }
-                    cx.notify();
-                },
-            )))
+            .child(
+                outlined(self.icon_button(ADD_BUTTON, Symbol::Plus, ADD_LABEL), &self.theme)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.add_open = !this.add_open;
+                        // Closed by its button as by Esc: the keyboard goes back to the field.
+                        if !this.add_open {
+                            this.focus(window, cx);
+                        }
+                        cx.notify();
+                    })),
+            )
             .children(menu)
             .into_any_element()
     }

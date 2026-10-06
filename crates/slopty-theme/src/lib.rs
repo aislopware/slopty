@@ -800,10 +800,6 @@ pub mod stroke {
     pub const MARK: f32 = 1.5;
 }
 
-/// How much of the focus tone a focused field's edge starts from ([`Surfaces::field_focus`]):
-/// a mid tone, so the field says it has the keyboard without the weight of the text colour.
-pub const FIELD_FOCUS: f32 = 0.45;
-
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
 /// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
@@ -1003,6 +999,11 @@ pub struct Surfaces {
     pub solid: Rgb,
     /// Text and glyphs on [`Self::solid`]: the darkest chrome step in dark, white in light.
     pub solid_ink: Rgb,
+    /// The destructive solid: the one press that removes or ends something for good (Remove a
+    /// machine), in the error's red under the solid's ink: the error mark three tenths of the
+    /// way to the error's word, lighter in dark and deeper in light, so the ink reads AA on it
+    /// over every content (on the mark's own red white read 3.6:1 in light).
+    pub error_solid: Rgb,
     /// Slopty's green, the mark's lit dots: the same in both variants, as a brand colour is
     /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
     pub brand: Rgb,
@@ -1081,6 +1082,8 @@ struct Tones {
     fill_fg: Rgb,
     /// The solid's ink: the far end of the ladder from the text.
     solid_ink: Step,
+    /// The destructive solid, which the solid's ink reads AA on.
+    error_solid: Rgb,
 }
 
 /// Slopty's green in OKLCH (`docs/decisions/brand.md`): [`BRAND`] is its sRGB.
@@ -1190,14 +1193,21 @@ const DARK_TONES: Tones = Tones {
     identity: identity(0.72, 0.06),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
+    // The error mark three tenths of the way to the error's word, as in light: the ink reads
+    // 6.4:1 on it over the default dark and 4.7:1 over the lightest dark content, where on the
+    // mark's own red it read 4.1:1 there.
+    error_solid: Rgb::hex(0xf4676f),
 };
 
 /// Light: every step below the content darkens toward the text; what floats goes to white.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const LIGHT_TONES: Tones = Tones {
-    // Near-white chrome and a zinc-200 hairline: at 0.08 and 0.21 the bars were a grey slab
-    // under a darker rule than any reference draws.
-    canvas: ink(0.04),
+    // The frame the panels stand on: OKLCH L 0.953 under content at 0.992, near the step the
+    // reference mockups draw (canvas 0.94 to 0.95 under panels at 0.99 to 1.0). At 0.04 the
+    // panels stood 0.027 L over it and barely parted from it, which read as one page; past
+    // 0.06 secondary text on glass moves more than a tenth of L. At 0.08, before the panels,
+    // the bars were a grey slab under a darker rule than any reference draws.
+    canvas: ink(0.06),
     panel: ink(0.025),
     // White, a step over the content: what floats and what is raised rises by tone as well as
     // by its ring and shadow. At 0.6 over a white content it was white on white.
@@ -1247,6 +1257,9 @@ const LIGHT_TONES: Tones = Tones {
     identity: identity(0.60, 0.07),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::White, share: 1.0 },
+    // The error mark three tenths of the way to the error's word (`oklch(0.58 0.19 24)`):
+    // white on it reads 4.9:1, where on the mark's own red it read 3.6:1.
+    error_solid: Rgb::hex(0xd2353f),
 };
 
 /// The least contrast `fg` has on any of `surfaces`.
@@ -1329,23 +1342,6 @@ fn thicken_until(line: Tint, reads: impl Fn(Tint) -> bool) -> Tint {
 }
 
 impl Surfaces {
-    /// The edge of a text field that has the keyboard (a composer, a message being written):
-    /// the focus tone set back toward the field's [`Self::elevated`] ground, so focus is said
-    /// quietly. A near-black ring round a whole card was the loudest thing on the screen. It
-    /// keeps the least of [`FIELD_FOCUS`] of the focus tone that still clears 3:1 against the
-    /// ground (WCAG 1.4.11, non-text contrast).
-    #[must_use]
-    pub fn field_focus(&self) -> Rgb {
-        let mut share = FIELD_FOCUS;
-        loop {
-            let edge = self.elevated.mix(self.focus, share);
-            if edge.contrast(self.elevated) >= NON_TEXT || share >= 1.0 {
-                return edge;
-            }
-            share = (share + 0.05).min(1.0);
-        }
-    }
-
     /// The chrome for `content`, the terminal's background: dark tones on a dark one, light on
     /// a light one.
     ///
@@ -1448,6 +1444,7 @@ impl Surfaces {
             accent_ink: t.accent_ink.rgb(),
             solid: text,
             solid_ink: at(t.solid_ink),
+            error_solid: t.error_solid,
             brand: BRAND,
             stage: STAGE,
         }
@@ -1584,6 +1581,10 @@ pub struct Finish {
     pub contact: Option<Shadow>,
     /// The black shade inside the top edge while held; the point is off then.
     pub pressed: f32,
+    /// What a coloured solid (the destructive red) wears inside its top at rest in both
+    /// variants, at [`alpha::DIM`]: white, as coss's buttons do, where the neutral solid's
+    /// dark point would muddy the colour.
+    pub lit: Rgb,
 }
 
 /// The two elevations, resting and floating, and what dims the window under a modal.
@@ -1638,7 +1639,14 @@ impl Elevation {
             rest: Some(alpha::RIM),
             float: Some(alpha::EDGE),
         },
-        finish: Finish { top: false, ink: Rgb::hex(0), alpha: 0.10, contact: None, pressed: 0.08 },
+        finish: Finish {
+            top: false,
+            ink: Rgb::hex(0),
+            alpha: 0.10,
+            contact: None,
+            pressed: 0.08,
+            lit: Rgb::hex(0x00ff_ffff),
+        },
         sunk: Sunk { shade: 0.18, lip: Some(alpha::RIM) },
     };
     /// Light: shadows in the warm ink (`oklch(0.24 0.012 85)`), three layers under what floats
@@ -1670,6 +1678,7 @@ impl Elevation {
             alpha: 0.14,
             contact: Some(Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.08 }),
             pressed: 0.08,
+            lit: Rgb::hex(0x00ff_ffff),
         },
         sunk: Sunk { shade: 0.05, lip: None },
     };
@@ -2056,12 +2065,6 @@ impl Theme {
         self.terminal.bg
     }
 
-    /// The edge of a text field that has the keyboard ([`Surfaces::field_focus`]).
-    #[must_use]
-    pub fn field_focus(&self) -> Rgb {
-        self.surfaces.field_focus()
-    }
-
     /// Which variant the colours are: light when the terminal's background reads as light,
     /// whatever the settings made it.
     #[must_use]
@@ -2259,6 +2262,11 @@ mod tests {
         }
     }
 
+    /// The panel step sits a notch under the content in both variants, and each step shows.
+    /// The canvas the panels stand on sits a notch under the content in dark, where a panel
+    /// also stands on its lit rim, and two in light, where white panels stand on it by tone,
+    /// as the references draw them (`docs/decisions/ui.md`, "The light canvas is the
+    /// panels' frame").
     #[test]
     fn the_chrome_sits_one_notch_from_the_content() {
         let steps = |variant| {
@@ -2269,17 +2277,21 @@ mod tests {
             [(content - panel).abs(), (panel - canvas).abs(), (content - canvas).abs()]
         };
         let (dark, light) = (steps(Variant::Dark), steps(Variant::Light));
+        assert!(
+            (dark[0] - light[0]).abs() <= 0.5,
+            "panel: dark {:.2}, light {:.2}",
+            dark[0],
+            light[0]
+        );
         for (name, d, l) in [
             ("content to panel", dark[0], light[0]),
             ("panel to bars", dark[1], light[1]),
             ("content to bars", dark[2], light[2]),
         ] {
-            assert!((d - l).abs() <= 0.5, "{name}: dark {d:.2}, light {l:.2}");
             assert!(d.min(l) >= 1.0, "{name} shows: dark {d:.2}, light {l:.2}");
         }
-        for (variant, notch) in [("dark", dark[2]), ("light", light[2])] {
-            assert!((2.5..=4.0).contains(&notch), "{variant}: bars {notch:.2} L* under content");
-        }
+        assert!((2.5..=4.0).contains(&dark[2]), "dark: bars {:.2} L* under content", dark[2]);
+        assert!((4.0..=6.0).contains(&light[2]), "light: bars {:.2} L* under content", light[2]);
     }
 
     /// A terminal block's head band is seen on its own: as far off the content as the bars
@@ -2617,8 +2629,10 @@ mod tests {
                 worst(s.text_secondary, &grounds),
                 worst(s.text, &grounds),
             );
+            // At the light end, under the deeper canvas, black itself is not a quarter past
+            // muted text on the darkest glass ground: secondary goes as far as black goes.
             assert!(
-                secondary >= muted * LEVEL,
+                secondary >= muted * LEVEL || s.text_secondary == pole,
                 "{name}: secondary {secondary:.2}, muted {muted:.2}"
             );
             // At the light end of the range black itself is not a quarter past secondary text
@@ -2716,24 +2730,6 @@ mod tests {
             assert_eq!(Surfaces::derive(content).stage, STAGE, "{content:?}");
         }
         assert!(STAGE.contrast(Rgb::hex(0)) < 1.1, "near-black");
-    }
-
-    /// A focused field's edge clears 3:1 on its card, quieter than the keyboard's ring and
-    /// louder than its hairline at rest.
-    #[test]
-    fn a_focused_field_says_so_quietly_and_still_clears_three_to_one() {
-        for (name, bg) in BACKGROUNDS {
-            let content = Rgb::hex(bg);
-            let plain = Surfaces::derive(content);
-            let edge = plain.field_focus();
-            let (said, full) =
-                (edge.contrast(plain.elevated), plain.focus.contrast(plain.elevated));
-            assert!(said >= NON_TEXT, "{name}: the edge reads {said:.2} on its card");
-            assert!(said < full || full < NON_TEXT, "{name}: quieter than the ring ({said:.2})");
-            let rest = plain.border.over(plain.elevated);
-            assert!(said > rest.contrast(plain.elevated), "{name}: stronger than at rest");
-            println!("MEASURE field focus {name}: {said:.2}:1, the ring {full:.2}:1");
-        }
     }
 
     /// An unticked box's outline reads 3:1 on every surface it can sit on, for every supported
@@ -3205,6 +3201,7 @@ mod tests {
                 ("accent_fill", s.accent_fill, s.accent_ink),
                 ("warn_fill", s.warn_fill, s.fill_fg),
                 ("error_fill", s.error_fill, s.fill_fg),
+                ("error_solid", s.error_solid, s.solid_ink),
             ]
             .map(|(n, f, o)| (n, o.contrast(f)))
             {

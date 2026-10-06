@@ -269,8 +269,28 @@ fn the_reading_size_grows_what_is_read_and_not_the_chrome(cx: &mut TestAppContex
     assert_eq!(tall(cx, "thread-model"), chip, "the chrome does not");
 }
 
-/// The composer's one solid stops the turn while it runs and nothing is typed, and sends what
-/// is typed.
+/// The fill a disc at `at` was painted with, and its corner radius over its side: a round disc
+/// has a half.
+fn disc(
+    cx: &mut VisualTestContext,
+    at: gpui::Bounds<gpui::Pixels>,
+) -> Option<(gpui::Background, f32)> {
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        window.painted_quads().into_iter().find_map(|q| {
+            let near = |a: f32, b: gpui::Pixels| (a / scale - f32::from(b)).abs() < 0.5;
+            let here = near(q.bounds.origin.x.0, at.origin.x)
+                && near(q.bounds.origin.y.0, at.origin.y)
+                && near(q.bounds.size.width.0, at.size.width);
+            let round = q.corner_radii.top_left.0 / q.bounds.size.width.0;
+            (here && q.background != gpui::Background::from(gpui::transparent_black()))
+                .then_some((q.background, round))
+        })
+    })
+}
+
+/// The composer's disc stops the turn while it runs and nothing is typed, in the neutral solid,
+/// and sends what is typed, in the green that sets work going. It is round either way.
 #[gpui::test]
 fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -284,10 +304,19 @@ fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds("thread-stop").is_some(), "at work, nothing typed: stop");
+    let theme = slopty_theme::Theme::default();
+    let fill = |c| gpui::Background::from(crate::colors::hsla(c));
+    let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
+    let (painted, round) = disc(cx, stop).expect("the stop's disc");
+    assert_eq!(painted, fill(theme.surfaces.solid), "stopping is the solid");
+    assert!(round >= 0.49, "a disc: {round}");
     cx.simulate_input("And the docs");
-    let send = cx.debug_bounds("thread-send").expect("typed: send").center();
+    let send = cx.debug_bounds("thread-send").expect("typed: send");
+    let (painted, round) = disc(cx, send).expect("the send's disc");
+    assert_eq!(painted, fill(theme.surfaces.accent_fill), "sending is the green");
+    assert!(round >= 0.49, "a disc: {round}");
+    let send = send.center();
     cx.simulate_click(send, Modifiers::none());
     assert!(
         matches!(intents(&sent).as_slice(), [Intent::Send { text, .. }] if text == "And the docs"),
@@ -593,6 +622,7 @@ fn the_latest_answer_s_new_words_lift_in(cx: &mut TestAppContext) {
     state.items = vec![answer("t1", 1, "Earlier"), answer("t2", 2, "Reading")];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|_, cx| cx.set_reduce_motion(false));
     let mut seq = 1_u64;
     let mut show = |state: &ThreadState, cx: &mut VisualTestContext| {
         seq = seq.saturating_add(1);

@@ -949,14 +949,14 @@ impl ThreadView {
     }
 
     /// The answer ⌘↵ (`allow`) or ⌘⌫ gives the request on show: its plain allow, the
-    /// decision's one solid, or its plain deny; `None` for a request with no such answer.
+    /// decision's green way on, or its plain deny; `None` for a request with no such answer.
     fn key_answer(&self, allow: bool, cx: &App) -> Option<(AskId, String)> {
         self.on_show(cx, |request| {
             let choice = if allow {
                 decision::arrange(&request.options)
                     .front
                     .into_iter()
-                    .find(|(_, kind)| *kind == ButtonKind::Primary)
+                    .find(|(_, kind)| *kind == ButtonKind::Go)
                     .map(|(choice, _)| choice.id.clone())
             } else {
                 denying::plain_deny(&request.options).map(|c| c.id.clone())
@@ -1197,6 +1197,10 @@ impl ThreadView {
         // row of them keeps one height.
         let el = match kind {
             ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
+            ButtonKind::Go => kit::go_pressable(el.border_color(hsla(s.accent_fill)), theme),
+            ButtonKind::Destructive => {
+                kit::destructive_pressable(el.border_color(hsla(s.error_solid)), theme)
+            }
             ButtonKind::Secondary => {
                 kit::secondary(el.border_color(gpui::transparent_black()), theme)
             }

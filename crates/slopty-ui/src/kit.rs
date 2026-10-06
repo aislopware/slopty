@@ -26,6 +26,7 @@ mod disclosure;
 mod facts;
 pub mod find;
 mod fit;
+mod go;
 mod identity;
 pub mod menu;
 pub mod message;
@@ -41,6 +42,7 @@ pub use disclosure::Disclosure;
 pub use facts::{FactAt, FactsRow, MeasuredFacts, facts_row, wrap_facts};
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
+pub use go::{go, go_ink, go_pressable};
 pub use identity::{identity_ink, machine_ink, wears_identity};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use panel::{Stand, panel};
@@ -865,9 +867,15 @@ pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonKind {
     /// The one action the surface is for: the neutral [`solid`], white on dark and near-black
-    /// on light, as `MonoCode`'s stop and Commit buttons are. Never the accent: green says
-    /// "live" or "done", not "press here".
+    /// on light, as `MonoCode`'s stop and Commit buttons are.
     Primary,
+    /// The answer that sets an agent's work going (the plain allow of its ask): the brand's
+    /// green ([`go()`]), as the composer's send is. The one green control a surface holds.
+    Go,
+    /// The press that removes or ends something for good (Remove a machine): the
+    /// [`destructive`] red under the solid's ink, behind a confirm. Never a surface's only way
+    /// on, and never beside a [`Self::Primary`].
+    Destructive,
     /// Another way on: a neutral fill, the hover step, with no hairline. A row of bordered
     /// boxes beside the primary read as a form.
     Secondary,
@@ -926,6 +934,49 @@ fn solid_finish(theme: &Theme) -> (Vec<BoxShadow>, Vec<BoxShadow>) {
 fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
     let (solid, content) = (theme.surfaces.solid, theme.content());
     (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
+}
+
+/// `el` filled with the destructive solid, its words in the solid's ink: the one press that
+/// removes or ends something for good.
+pub fn destructive<E: Styled>(el: E, theme: &Theme) -> E {
+    let s = theme.surfaces;
+    el.bg(hsla(s.error_solid)).text_color(hsla(s.solid_ink))
+}
+
+/// [`destructive`] that answers the pointer, eased as the solid is.
+///
+/// It wears coss's finish in both variants: a 1 px highlight inside its top at rest (on the
+/// red, where the solid's dark point would muddy it), the light variant's contact under it, and
+/// pressed the shade inside its top.
+pub fn destructive_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
+    let (hovered, pressed) = destructive_states(theme);
+    let f = theme.elevation.finish;
+    let (_, held) = solid_finish(theme);
+    let rest: Vec<BoxShadow> = f
+        .contact
+        .map(|layer| drop_shadow(theme, layer))
+        .into_iter()
+        .chain([BoxShadow {
+            color: hsla_alpha(f.lit, alpha::DIM),
+            offset: point(px(0.0), px(RIM_DEPTH)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+            inset: true,
+        }])
+        .collect();
+    eased(destructive(el, theme))
+        .shadow(rest)
+        .hover(move |el| el.bg(hsla(hovered)))
+        .active(move |el| el.bg(hsla(pressed)).shadow(held))
+}
+
+/// The destructive solid under the pointer and pressed: given [`alpha::FAINT`] and
+/// [`alpha::DIM`] away from its ink (toward the error's word in light, deeper; toward the text
+/// in dark, lighter), so the ink keeps its contrast in every state.
+fn destructive_states(theme: &Theme) -> (Rgb, Rgb) {
+    let s = theme.surfaces;
+    let away = if theme.variant() == Variant::Light { s.error } else { s.text };
+    (s.error_solid.mix(away, alpha::FAINT), s.error_solid.mix(away, alpha::DIM))
 }
 
 /// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): raised at rest ([`raised`]),
@@ -1070,6 +1121,8 @@ pub fn button(
         .child(label);
     let el = match kind {
         ButtonKind::Primary => solid_pressable(el, theme),
+        ButtonKind::Go => go_pressable(el, theme),
+        ButtonKind::Destructive => destructive_pressable(el, theme),
         ButtonKind::Secondary => secondary(el, theme),
         ButtonKind::Ghost => eased(el)
             .text_color(hsla(s.text_secondary))
@@ -2024,7 +2077,9 @@ mod tests {
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line_no, line) in chrome_lines(dir) {
-                let waived = file.ends_with("slopty-ui/src/kit.rs");
+                // The kit's own files draw the elevations and finishes the rest call.
+                let waived = file.ends_with("slopty-ui/src/kit.rs")
+                    || file.ends_with("slopty-ui/src/kit/go.rs");
                 if let Some(why) = own_elevation(&line).filter(|_| !waived) {
                     wrong.push(format!("{file}:{line_no}: {why}"));
                 }
@@ -2252,11 +2307,18 @@ mod tests {
             let s = theme.surfaces;
             let fill = |kind| button(&theme, "b", "Go", kind).style().background.clone();
             assert_eq!(fill(ButtonKind::Primary), Some(gpui::Fill::from(hsla(s.solid))));
+            let red = Some(gpui::Fill::from(hsla(s.error_solid)));
+            assert_eq!(fill(ButtonKind::Destructive), red);
             let raised = if variant == Variant::Light { hsla(s.elevated) } else { hsla(s.hover) };
             assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(raised)));
             assert_eq!(fill(ButtonKind::Ghost), None);
             assert_eq!(fill(ButtonKind::Link), None);
-            for kind in [ButtonKind::Primary, ButtonKind::Secondary, ButtonKind::Ghost] {
+            for kind in [
+                ButtonKind::Primary,
+                ButtonKind::Destructive,
+                ButtonKind::Secondary,
+                ButtonKind::Ghost,
+            ] {
                 let height = button(&theme, "b", "Go", kind).style().size.height;
                 assert_eq!(height, Some(px(theme.density.control).into()), "{kind:?}");
             }
@@ -2268,6 +2330,45 @@ mod tests {
             assert_eq!(away.style().background, Some(gpui::Fill::from(hsla(s.hover))), "not key");
             assert!(away.style().box_shadow.is_none(), "no ring off the keyboard");
         }
+    }
+
+    /// The destructive button's words read AA on its red at rest, under the pointer and
+    /// pressed, in both variants: its states move away from its ink. At rest it wears the white
+    /// highlight inside its top, one point deep, and in light the solid's contact under it.
+    #[test]
+    fn the_destructive_button_reads_in_every_state() {
+        for variant in [Variant::Light, Variant::Dark] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let (hovered, pressed) = destructive_states(&theme);
+            for (state, fill) in [("rest", s.error_solid), ("hover", hovered), ("pressed", pressed)]
+            {
+                let ratio = s.solid_ink.contrast(fill);
+                assert!(ratio >= 4.5, "{variant:?} {state}: the ink reads {ratio:.2}");
+            }
+            let el = div().id("d");
+            let rest = destructive_pressable(el, &theme).style().box_shadow.clone();
+            let rest = rest.unwrap_or_default();
+            let lit = hsla_alpha(theme.elevation.finish.lit, alpha::DIM);
+            let top = rest.iter().filter(|l| l.inset && l.color == lit && l.offset.y == px(1.0));
+            assert_eq!(top.count(), 1, "{variant:?}: one highlight inside the top: {rest:?}");
+            let contact = rest.iter().filter(|l| !l.inset).count();
+            assert_eq!(contact, usize::from(variant == Variant::Light), "{variant:?}: contact");
+        }
+    }
+
+    /// The destructive red is a control's fill only through [`ButtonKind::Destructive`]: drawn
+    /// here, and edged in it where the thread's answer row draws the kinds itself.
+    #[test]
+    fn the_destructive_red_is_the_kits() {
+        const RULED: [&str; 1] = ["slopty-ui/src/conversation/thread/view.rs"];
+        let red = |line: &str| {
+            let code = !line.trim_start().starts_with("//");
+            (code && line.contains("error_solid"))
+                .then_some("the destructive red outside `ButtonKind::Destructive`")
+        };
+        let wrong = flagged(&RULED, red);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// The first run and About lead with one mark at one size.
@@ -2415,7 +2516,8 @@ mod tests {
     /// what finished).
     #[test]
     fn the_accent_is_never_a_control() {
-        const RULED: [&str; 1] = ["slopty-ui/src/workspace/titlebar.rs"];
+        // `kit::go` draws the one green control, the way on (the send, an ask's plain allow).
+        const RULED: [&str; 2] = ["slopty-ui/src/workspace/titlebar.rs", "slopty-ui/src/kit/go.rs"];
         // Call sites whose owners move them onto `kit::solid` in their next change.
         const AWAITING: [&str; 0] = [];
         let waived: Vec<&str> = RULED.iter().chain(&AWAITING).copied().collect();

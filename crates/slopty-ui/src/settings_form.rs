@@ -965,6 +965,7 @@ impl SettingsForm {
         let keyed = self.tabs.iter().any(|tab| tab.is_focused(window));
         let tabs = Section::ALL.iter().zip(&self.tabs).map(|(&section, handle)| {
             let selected = !searching && section == self.section;
+            let hover = crate::kit::hover_on(theme, crate::kit::Plane::Canvas);
             let el = div()
                 .id(("settings-section", section.index()))
                 .debug_selector(move || format!("settings-section-{}", section.index()))
@@ -983,13 +984,15 @@ impl SettingsForm {
                 .cursor_pointer()
                 .map(|el| {
                     if selected {
-                        crate::kit::selected(el, theme, keyed)
+                        // The sections lie on the canvas, so the one shown rises off it as a
+                        // white plate in light, as the navigator's chosen row does.
+                        crate::kit::selected_on(el, theme, crate::kit::Plane::Canvas, keyed)
                             .text_color(hsla(s.text))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     } else {
                         el.text_color(hsla(s.text_secondary))
                             .map(crate::kit::eased)
-                            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                            .hover(move |el| el.bg(hover).text_color(hsla(s.text)))
                     }
                 })
                 .on_click(
@@ -1009,8 +1012,9 @@ impl SettingsForm {
             .flex_col()
             .gap(px(spacing.xxs))
             .p(px(spacing.sm))
-            // A tone step from the page, not a rule: the sidebar of the window's own frame.
-            .bg(hsla(s.panel))
+            // The canvas, a tone step from the page and not a rule: the sidebar of the window's
+            // own frame, the sections on it as the navigator's rows lie on it.
+            .bg(hsla(s.canvas))
             .child(self.search_field(cx))
             .child(
                 div()

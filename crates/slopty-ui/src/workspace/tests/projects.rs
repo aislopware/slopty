@@ -388,7 +388,8 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
 }
 
 /// The board is one grouped list, as Linear's issues are: each lane a head over its rows, down
-/// one column as wide as the body, in their order. The orchestrator waiting on the person leads
+/// one column as wide as the body, in their order. A lane's rows stand in one raised group under
+/// its head, which ends in its count. The orchestrator waiting on the person leads
 /// *Needs you*, its question on the line under it, so it is said once. A row with nothing under
 /// it is one line, 32 pt, inside the tile. *Merged* folds to its head until it is opened.
 #[gpui::test]
@@ -428,6 +429,13 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     assert!(lanes[0].contains(&asks.center()), "it leads Needs you: {asks:?}");
     let task = at(cx, "project-card-2").expect("drawn");
     assert!(asks.bottom() <= task.top(), "before the task waiting on you");
+    let group = at(cx, "project-lane-needs-you-group").expect("its rows' group");
+    assert!(group.contains(&asks.center()) && group.contains(&task.center()), "one group");
+    let head = at(cx, "project-lane-needs-you-head").expect("drawn");
+    let count = at(cx, "project-lane-needs-you-head-count").expect("its count");
+    let pad = px(Theme::default().spacing.xs);
+    assert!((head.right() - pad - count.right()).abs() < px(0.5), "at the head's end: {count:?}");
+    assert!(head.bottom() <= group.top(), "the head over its group");
     assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
     let one = at(cx, "project-card-3").expect("drawn");
     assert!((one.size.height - px(32.0)).abs() < px(0.5), "a row is 32 pt: {one:?}");

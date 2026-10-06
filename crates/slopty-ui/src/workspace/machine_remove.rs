@@ -127,8 +127,9 @@ impl Render for RemoveSheet {
         let (s, sp) = (theme.surfaces, theme.spacing);
         let cancel = kit::button(theme, "remove-machine-cancel", "Cancel", ButtonKind::Ghost)
             .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(RemoveEvent::Cancel)));
-        let remove = kit::button(theme, "remove-machine-confirm", "Remove", ButtonKind::Primary)
-            .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(RemoveEvent::Remove)));
+        let remove =
+            kit::button(theme, "remove-machine-confirm", "Remove", ButtonKind::Destructive)
+                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(RemoveEvent::Remove)));
         let line = |ix: usize, text: &str| {
             let text = SharedString::from(text.to_owned());
             div()

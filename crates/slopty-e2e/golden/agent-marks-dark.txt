@@ -83,7 +83,6 @@ Group │ Thread
 Heading │ What should pi do in atlas?
 MultilineTextInput │ Message
 Button │ Add to the message
-Label │ in atlas on studio
 Label │ Model, Canned
 Label │ Effort, Medium
 Button │ Continue in the terminal

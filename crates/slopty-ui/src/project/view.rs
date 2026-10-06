@@ -1242,8 +1242,10 @@ impl ProjectView {
         CardFacts { check, stages, meta }
     }
 
-    /// One lane: its head, then its rows, `lead` first (the orchestrator waiting on the
-    /// person). A folding lane's head is the button that opens it.
+    /// One lane: its head (its state's glyph, its name, and its count at the trailing edge),
+    /// then its rows in one raised group, `lead` first (the orchestrator waiting on the
+    /// person), a quiet hairline between two rows, as the references' boards and Apple's
+    /// grouped lists set them. A folding lane's head is the button that opens it.
     fn lane(
         &self,
         board: &Board,
@@ -1283,12 +1285,6 @@ impl ProjectView {
                         crate::kit::label(theme, lane.title())
                             .text_size(self.z(roles.metadata.size)),
                     )
-                    .child(
-                        crate::kit::tabular(div())
-                            .text_size(self.z(roles.metadata.size))
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(count.to_string())),
-                    )
                     .when(folds, |el| {
                         el.child(crate::kit::Disclosure::new(
                             format!("{head_id}-fold"),
@@ -1298,6 +1294,17 @@ impl ProjectView {
                             hsla(s.text_muted),
                         ))
                     }),
+            )
+            .child(
+                crate::kit::tabular(div())
+                    .debug_selector({
+                        let id = format!("{head_id}-count");
+                        move || id
+                    })
+                    .ml_auto()
+                    .text_size(self.z(roles.metadata.size))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(count.to_string())),
             );
         let head = if folds {
             let what = if folded { "Show" } else { "Hide" };
@@ -1322,11 +1329,36 @@ impl ProjectView {
         } else {
             head.role(Role::Heading).aria_label(lane.title()).into_any_element()
         };
-        let rows = (!folded).then(|| {
-            tasks.into_iter().filter_map(|task| {
+        let rows: Vec<AnyElement> = if folded {
+            Vec::new()
+        } else {
+            let tasks = tasks.into_iter().filter_map(|task| {
                 let card = board.tasks.get(&task)?;
                 Some(self.row(board, card, cx))
-            })
+            });
+            lead.into_iter().chain(tasks).collect()
+        };
+        let group = (!rows.is_empty()).then(|| {
+            let group = div()
+                .debug_selector({
+                    let id = format!("project-lane-{}-group", lane.selector());
+                    move || id
+                })
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .p(self.z(sp.xxs))
+                .rounded(self.z(theme.radii.md));
+            crate::kit::raised(group, theme).children(rows.into_iter().enumerate().map(
+                |(ix, row)| {
+                    div()
+                        .min_w_0()
+                        .when(ix > 0, |el| {
+                            el.border_t(crate::kit::HAIR).border_color(hsla(s.border_subtle))
+                        })
+                        .child(row)
+                },
+            ))
         });
         let selector = format!("project-lane-{}", lane.selector());
         div()
@@ -1337,9 +1369,9 @@ impl ProjectView {
             .min_w_0()
             .flex()
             .flex_col()
+            .gap(self.z(sp.xxs))
             .child(head)
-            .children(lead)
-            .children(rows.into_iter().flatten())
+            .children(group)
             .into_any_element()
     }
 
@@ -1848,6 +1880,7 @@ impl ProjectView {
             "project-send",
             Symbol::ArrowUp,
             SEND,
+            true,
         )
         .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()

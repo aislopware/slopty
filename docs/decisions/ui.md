@@ -8418,6 +8418,58 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     base.
   - Test: `workspace::tests::thread_start::a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out`.
 
+- ✅ **Premium pass from the mockups: a deeper light canvas and one green way on** (2026-10-06,
+  from reference mockups an image model drew for the person's "still provincial" verdict,
+  `.research/mockups-2026-10-06/`). Each proposal was held against the pixels and the earlier
+  rulings before it was taken.
+  - **The light canvas is the panels' frame.** Sampled, the mockups' canvas is OKLCH L 0.941
+    to 0.946 (`#ecebea`, `#ededed`) and the settings sidebar L 0.967 (`#f3f4f5`), all at chroma
+    0.0017, under panels at L 0.991 to 0.997. Ours was the same chroma at hue 68 (`#f4f3f2`,
+    L 0.965) under panels at L 0.992: the warm tint was not the difference, the step was, 0.027
+    L against about 0.05. The light canvas share goes from 0.04 to 0.06 of the ink (`#f0efee`,
+    L 0.953), so the panels stand 0.039 L over it. The one neutral stays. Past 0.06, secondary
+    text on glass had to darken more than a tenth of L. Dark is unchanged: its panels stand on
+    their lit rim. `the_chrome_sits_one_notch_from_the_content` now holds light's canvas at 4 to
+    6 L* under the content and dark's at 2.5 to 4. At the extreme light end (a `#cccccc`
+    terminal background) secondary text on glass goes as far as black.
+  - **One green way on.** The composer's send and the plain allow of an agent's ask take the
+    brand's green with its near-black ink (`kit::go`, `ButtonKind::Go`), as the mockups and the
+    Codex Astra direction draw them. Overrules "The primary is the neutral solid" for these two
+    alone: they are the presses that set work going. Every other primary (Commit, Create, Done,
+    Merge) keeps the solid, and so does the send disc while it stops a turn. Under the pointer
+    and pressed the green lightens, away from its ink, which reads AA in every state in both
+    variants. The lint `the_accent_is_never_a_control` still holds every other file; `kit/go.rs`
+    is where the one is drawn.
+  - **The composer's foot.** The send is a disc (`radii.full`). The "+" is an outlined disc
+    and the model an outlined pill, the ordinary hairline at the full radius, as the two
+    things set before writing. The other chips stay quiet words.
+  - **The composer card** wears the quiet hairline at rest and the ordinary one with the
+    keyboard, over its contact. The 3:1 focus edge (`field_focus`) is deleted: the caret says
+    where the keyboard is, and the dark ring round the card was the loudest thing on screen.
+  - **The board.** A lane's rows sit in one raised group (`kit::raised`, `radii.md`), a quiet
+    hairline between two rows. The head reads glyph, name and count, the count at the trailing
+    edge, as the reference boards set theirs. The state glyphs themselves wait for their own
+    pass, with the chrome's icons. Kept: the working mark stays the braille cell ("The working
+    mark is a braille cell", ruled today; a turning arc steps 30° at a time at the spin clock's
+    rate), and working keeps its blue, one hue per meaning, though the mockup drew it green.
+  - **Settings.** The sections lie on the canvas, and the one shown rises off it as the white
+    plate the navigator's chosen row wears (`kit::Plane::Canvas`). The pages were already
+    grouped inset sections.
+  - **The destructive button** (`ButtonKind::Destructive`, `kit::destructive`) is the one
+    press that removes or ends something for good, behind a confirm (Remove a machine). It fills
+    with `error_solid`, the error mark three tenths of the way to the error's word: deeper in
+    light, where white on the mark's own red read 3.6:1, and lighter in dark, where the dark
+    ink read 4.1:1 over the lightest dark content. It takes the solid's ink. Under the pointer
+    and pressed it eases as the solid does, away from its ink, so the ink reads AA in every
+    state. At rest it wears coss's finish in both variants, a white 1 px highlight inside its
+    top at `alpha::DIM` (`Finish::lit`), with light's contact under it. Pressed, the solid's
+    shade goes inside its top. The red is the kit's alone (`the_destructive_red_is_the_kits`).
+  - Tests: `kit::go::tests::the_go_control_reads_in_every_state`,
+    `kit::tests::the_destructive_button_reads_in_every_state`,
+    `conversation::thread::view::decision` (the plain allow is `Go`), the theme's notch and
+    glass floors and `controls_and_the_words_on_fills_read`,
+    `kit::tests::the_accent_is_never_a_control`.
+
 - ✅ **A machine is removed from its row or the palette, after a confirm** (2026-10-06,
   readiness rank 20; what goes and what stays is ruled in `docs/decisions/workers.md`, "A
   machine is removed whole").
@@ -8435,7 +8487,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`Verb::ForgetWorker`, which refuses one that is online). The wait follows the directory's
     own word; a worker still listed online 10 s after its removal is said to still answer. A
     removal that fails there says why and forgets nothing.
-  - Remove stands in the primary style until kit has a destructive one.
+  - Remove wears kit's destructive style.
   - Tests: `workspace::tests::bars::removing_a_machine_asks_first_and_says_what_stays`;
     `slopty-app` `ssh::tests::a_removal_takes_the_worker_off_then_the_server_forgets_it`.
 

@@ -398,6 +398,7 @@ fn the_working_line_shimmers_on_the_marks_twelve_frames(cx: &mut TestAppContext)
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
+    cx.update(|_w, cx| cx.set_reduce_motion(false));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working(state), 0), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-working-shimmer").is_some(), "shimmering");
