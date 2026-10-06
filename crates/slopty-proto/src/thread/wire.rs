@@ -380,11 +380,6 @@ pub enum Intent {
     },
     /// Compact the context.
     Compact,
-    /// Stop one background task.
-    StopTask {
-        /// The task.
-        task: String,
-    },
     /// Take a change into what the person has kept ([`ReviewScope::Kept`]): the whole file,
     /// or the hunks named. Refused when the file or what was kept no longer is what the
     /// review showed.
@@ -491,7 +486,6 @@ impl Intent {
             Self::SetEffort { .. } => Cap::SET_EFFORT,
             Self::Compact => Cap::COMPACT,
             Self::Handoff | Self::TakeBack => Cap::HANDOFF,
-            Self::StopTask { .. } => Cap::STOP_TASK,
             Self::Fork { .. } | Self::Aside | Self::Discard | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Review { .. } => Cap::REVIEW,

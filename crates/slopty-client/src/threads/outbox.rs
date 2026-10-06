@@ -76,7 +76,6 @@ impl Sent {
             | Intent::Compact
             | Intent::Handoff
             | Intent::TakeBack
-            | Intent::StopTask { .. }
             | Intent::Keep(_)
             | Intent::Revert(_)
             | Intent::Fork { .. }

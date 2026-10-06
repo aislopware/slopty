@@ -102,8 +102,6 @@ pub struct Activity<'a> {
     pub background: Vec<Background<'a>>,
     /// The work the agent lists as run in the background, what still runs first.
     pub tasks: Vec<&'a BackgroundTask>,
-    /// Whether a task can be stopped from here.
-    pub can_stop: bool,
     /// Whether a waiting message can be withdrawn from here.
     pub can_withdraw: bool,
     /// Whether a waiting message can be sent now from here: into the turn under way where the
@@ -200,7 +198,6 @@ impl<'a> Activity<'a> {
                 tasks.sort_by_key(|t| !t.is_running());
                 tasks
             },
-            can_stop: state.meta.can(Cap::STOP_TASK),
             can_withdraw: state.meta.can(Cap::QUEUE) || state.meta.can(Cap::SCHEDULE),
             can_promote: state.meta.can(Cap::QUEUE),
         }

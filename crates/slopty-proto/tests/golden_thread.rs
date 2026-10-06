@@ -458,7 +458,6 @@ mod golden_thread {
         snap("intent_compact", &send(Intent::Compact));
         snap("intent_handoff", &send(Intent::Handoff));
         snap("intent_take_back", &send(Intent::TakeBack));
-        snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
         snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));

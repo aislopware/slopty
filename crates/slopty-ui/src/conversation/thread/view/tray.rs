@@ -297,7 +297,7 @@ impl ThreadView {
         }
         if self.tasks_open && !bar.tasks.is_empty() {
             let mut tasks = vec![self.tasks_head(cx)];
-            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task, bar.can_stop, cx)));
+            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task)));
             groups.push(tasks);
         }
         if self.meter_open {
@@ -1153,15 +1153,11 @@ impl ThreadView {
     }
 
     /// One piece of background work in the panel: its kind, what it is, the end of what it
-    /// printed, how it stands and for how long, and the way to stop it while it runs.
-    fn task_line(&self, task: &BackgroundTask, can_stop: bool, cx: &Context<Self>) -> AnyElement {
+    /// printed, and how it stands and for how long.
+    fn task_line(&self, task: &BackgroundTask) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let id = task.id.clone();
         let running = task.is_running();
-        let stopping = self.hub.read(cx).threads().unshown(self.thread).any(|sent| {
-            matches!(&sent.intent, Intent::StopTask { task: t } if *t == id) && !sent.failed()
-        });
         let mark = if running {
             self.spinner(true)
         } else {
@@ -1181,9 +1177,9 @@ impl ThreadView {
             let end = task.ended_ms.unwrap_or_else(slopty_core::WallMs::now);
             kit::duration(Duration::from_secs(end.millis_since(task.started_ms) / 1_000))
         });
-        let state = if stopping { "Stopping".to_owned() } else { sentence(&task.state) };
+        let state = sentence(&task.state);
         let standing = took.map_or_else(|| state.clone(), |t| format!("{state} \u{b7} {t}"));
-        let tag = id.clone();
+        let tag = task.id.clone();
         let label = SharedString::from(format!("{}: {state}", task.title));
         let head = div()
             .w_full()
@@ -1205,16 +1201,7 @@ impl ThreadView {
                     .flex_none()
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(standing)),
-            )
-            .when(running && can_stop && !stopping, |el| {
-                el.child(
-                    self.button(format!("stop-task-{id}"), "Stop", ButtonKind::Ghost).on_click(
-                        cx.listener(move |this, _ev, _w, cx| {
-                            let _id = this.intent(Intent::StopTask { task: id.clone() }, cx);
-                        }),
-                    ),
-                )
-            });
+            );
         self.two_lines(head, last.filter(|_| running))
             .id(ElementId::Name(format!("task-{tag}").into()))
             .debug_selector(move || format!("task-{tag}"))

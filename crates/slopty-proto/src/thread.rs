@@ -276,8 +276,6 @@ impl Cap {
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
     pub const STEER: &'static str = "steer";
-    /// [`wire::Intent::StopTask`].
-    pub const STOP_TASK: &'static str = "stop-task";
 
     /// The capability named `name`.
     #[must_use]

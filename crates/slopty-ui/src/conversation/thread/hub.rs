@@ -701,7 +701,6 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::SetModel { model } => format!("Couldn't switch to {model}"),
         Intent::SetMode { mode } => format!("Couldn't switch to {mode}"),
         Intent::Compact => "Couldn't compact".to_owned(),
-        Intent::StopTask { .. } => "Couldn't stop the task".to_owned(),
         Intent::Keep(pick) => format!("Couldn't keep {}", file_name(&pick.path)),
         Intent::Revert(pick) => format!("Couldn't revert {}", file_name(&pick.path)),
         Intent::Handoff => "Couldn't hand over to the terminal".to_owned(),
