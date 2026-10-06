@@ -28,7 +28,7 @@ pub const MOD_PROTOCOL: u32 = 1;
 /// only with a new recording, because the plugin API is early access and changes between
 /// releases; until then a release of the same `major.minor` line is heard provisionally
 /// ([`crate::live::Trust::Provisional`]).
-pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.290"];
+pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.291"];
 
 /// Where the mod posts its events: the worker's mod socket.
 pub const SOCKET_ENV: &str = "SLOPTY_MOD_SOCKET";

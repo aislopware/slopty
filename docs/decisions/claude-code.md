@@ -1222,15 +1222,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.290"]`, recorded 2026-10-06 with the mod unchanged; 2.1.289 and
-      2.1.286 before it).
+      recorded (today `["2.1.291"]`, recorded 2026-10-06 with the mod unchanged; 2.1.290,
+      2.1.289 and 2.1.286 before it).
     - A newer release is heard provisionally (2026-10-05, ruled; see "A managed `claude`"
       below). A fleet moves to a new release before anyone records it, and refusing it left the
       face without its live stream on the very machines that most need it. So the gate has
       three answers (`live::Trust`):
       - **Verified**: a recorded version.
-      - **Provisional**: an unrecorded release of a recorded `major.minor` line (2.1.291 while
-        2.1.290 is recorded), in strict `x.y.z` digits. Its events are decoded strictly: an
+      - **Provisional**: an unrecorded release of a recorded `major.minor` line (2.1.292 while
+        2.1.291 is recorded), in strict `x.y.z` digits. Its events are decoded strictly: an
         event of a known kind that does not decode (`ModEvent::Malformed`) drops the mod for
         the session (`Trust::Dropped`, logged once), its blocks in flight go, and no later
         `hello` revives it. The transcript, the hooks and the status line carry on alone. An
