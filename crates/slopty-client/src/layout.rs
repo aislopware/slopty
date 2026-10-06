@@ -24,6 +24,8 @@
 
 mod spring;
 mod swipe;
+pub mod tiling;
+pub mod tree;
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
