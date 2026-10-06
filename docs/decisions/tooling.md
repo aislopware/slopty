@@ -1226,6 +1226,30 @@ more full-window layer.
   delete a forgotten worker's page store as in use. The records hold `AnyWeakView` now, and a
   gap that cannot upgrade builds the view around it. Upstream has nothing open on it.
 
+- ✅ **gpui-fast takes longbridge `598306fc` (zed `a1b71072`); gpui-kit takes upstream `af78e935`**
+  (2026-10-06, fork `3420fbe5`, kit `7344fad5`).
+  - **What upstream changed.** Longbridge's #38 imports zed's #65170 (startup time), #65176
+    (a smaller dependency footprint), #64958 (a journal of frame requests), #65043
+    (test-support safe in every build), #64990 (the dispatcher and Metal renderer shared with
+    iOS) and #64969 (headless windows). gpui-kit's #3373 lets a mouse selection take in a
+    block plugin whole.
+  - **The merge.** Longbridge kept its global-id cache on top of zed#64209. The fork had
+    deleted that cache when it took #64209 itself, measured as saving no instructions, so
+    `fast/global_id.rs` stays deleted and `GlobalElementId` keeps upstream's private fields.
+    Longbridge's window composition in `gpui_apple` and `gpui_linux` stays deleted too; the
+    fork composes in `gpui_macos`. The dependencies upstream moved to the top of the fork's
+    `Cargo.toml` are listed once. `gpui_ios` asks for uuid's `v5` itself, since the workspace
+    no longer turns it on. gpui tests 730, gpui_macos 42 and gpui_apple 25 pass, and
+    `script/check-upstream` passes.
+  - **gpui-kit:** the kit's block selection asked `GlobalState` for the text view. The fork
+    keeps the views being drawn on `TextViewStateStack`, so the block reads the innermost one
+    there, as inline text does.
+  - **Sync:** a local fork branch that is only behind its fork (pull requests merged on GitHub
+    since the last sync) is now fast-forwarded, where it was refused as diverged.
+  - **Open:** gpui-kit's own `ordered_markdown_list_start_reaches_layout_marker` fails on the
+    fork both before and after this sync. It shapes a lone `.` before `1.`. Not from this
+    change; still to find.
+
 - ✅ **Linux clippy compiles the build scripts' C with zig** (2026-10-06). The server's push
   client is rustls on ring (`docs/decisions/platform.md`). ring compiles C for its target, and
   it has no path without a C compiler. Plain `cargo clippy` for `x86_64-unknown-linux-musl` on

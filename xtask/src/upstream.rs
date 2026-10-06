@@ -867,8 +867,8 @@ fn ensure_idle(sh: &Shell, dir: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// Make the local branch the one to build on: created at the fork head when missing, kept when it
-/// is the fork head or ahead of it, refused when it has diverged.
+/// Make the local branch the one to build on: created at the fork head when missing, moved up to
+/// it when behind, kept when it is the fork head or ahead of it, refused when it has diverged.
 fn reconcile_local(
     sh: &Shell,
     dir: &Utf8Path,
@@ -884,6 +884,16 @@ fn reconcile_local(
     };
     if local == fork_head.sha {
         return Ok(());
+    }
+    // Behind the fork (its pull requests merged on GitHub since this checkout last synced): move
+    // the branch up to it, in place when it is the one checked out.
+    if cmd!(sh, "git merge-base --is-ancestor {local} {fork_sha}").quiet().run().is_ok() {
+        let current = cmd!(sh, "git branch --show-current").read()?;
+        return if current.trim() == branch.as_str() {
+            step("fast-forward", &cmd!(sh, "git merge --ff-only {fork_sha}"))
+        } else {
+            step("fast-forward", &cmd!(sh, "git branch -f {branch} {fork_sha}"))
+        };
     }
     // The fork head is usually an ancestor. Under a rebase it is not when the previous `sync`
     // rebased this branch and then stopped (a build-check failed and the fix landed here), so fall

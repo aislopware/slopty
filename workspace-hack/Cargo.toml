@@ -38,7 +38,6 @@ ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 curve25519-dalek = { version = "5", default-features = false, features = ["digest", "precomputed-tables", "zeroize"] }
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
-fastrand = { version = "2", features = ["js"] }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
@@ -60,7 +59,7 @@ image = { version = "0.25", default-features = false, features = ["dds", "exr", 
 indexmap = { version = "2", features = ["serde"] }
 insta = { version = "1", features = ["json", "redactions", "yaml"] }
 litemap = { version = "0.8", default-features = false, features = ["alloc"] }
-log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
+log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFByteOrder", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFError", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFTimeZone", "CFURL", "std"] }
@@ -68,7 +67,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = ["
 once_cell = { version = "1" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
-rand = { version = "0.9" }
+rand = { version = "0.9", default-features = false, features = ["small_rng", "thread_rng"] }
 rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
@@ -91,7 +90,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tracing-core = { version = "0.1" }
-uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v5", "v7"] }
+uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v7"] }
 winnow = { version = "1" }
 writeable = { version = "0.6", default-features = false, features = ["alloc"] }
 yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
@@ -108,7 +107,7 @@ bstr = { version = "1" }
 crossbeam-utils = { version = "0.8" }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 indexmap = { version = "2", features = ["serde"] }
-log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
+log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
@@ -128,8 +127,10 @@ toml_parser = { version = "1" }
 winnow = { version = "1" }
 
 [target.aarch64-apple-darwin.dependencies]
+async-channel = { version = "2" }
 block2 = { version = "0.6" }
 concurrent-queue = { version = "2" }
+dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
@@ -151,7 +152,7 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
 objc2-foundation = { version = "0.3" }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
-objc2-user-notifications = { version = "0.3" }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
@@ -163,7 +164,6 @@ crypto-common = { version = "0.2", default-features = false, features = ["rand_c
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
-fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
@@ -175,7 +175,9 @@ subtle = { version = "2", default-features = false, features = ["const-generics"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [target.aarch64-apple-ios.dependencies]
+async-channel = { version = "2" }
 concurrent-queue = { version = "2" }
+dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
@@ -195,6 +197,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAcces
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 sha2 = { version = "0.11" }
+uuid = { version = "1", default-features = false, features = ["v5"] }
 
 [target.aarch64-apple-ios.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
@@ -202,7 +205,6 @@ crypto-common = { version = "0.2", default-features = false, features = ["rand_c
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
-fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
@@ -213,7 +215,9 @@ subtle = { version = "2", default-features = false, features = ["const-generics"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [target.aarch64-apple-ios-sim.dependencies]
+async-channel = { version = "2" }
 concurrent-queue = { version = "2" }
+dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
@@ -233,6 +237,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAcces
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
 sha2 = { version = "0.11" }
+uuid = { version = "1", default-features = false, features = ["v5"] }
 
 [target.aarch64-apple-ios-sim.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
@@ -240,7 +245,6 @@ crypto-common = { version = "0.2", default-features = false, features = ["rand_c
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 errno = { version = "0.3" }
-fastrand = { version = "2", features = ["js"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
