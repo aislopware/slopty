@@ -242,9 +242,9 @@ impl ThreadView {
                             theme,
                             Symbol::Pencil,
                             IconSize::Inline,
-                            hsla(s.text_muted),
+                            hsla(s.text_secondary),
                         )
-                        .size(self.z(theme.typography.small())),
+                        .size(self.z(theme.typography.icon())),
                     )
                     .child(
                         div()
@@ -294,6 +294,8 @@ impl ThreadView {
         let pull = hub.git().repo(&repo)?.pull.status()?;
         let words = crate::conversation::thread::git::standing_words(pull);
         let tone = crate::conversation::thread::commit::standing_tone(theme, pull.standing());
+        let glyph = crate::icons::GitGlyph::of_pull(pull.standing());
+        let glyph_ink = glyph.state_ink(theme).unwrap_or(tone);
         Some(
             crate::a11y::tab_stop(
                 div()
@@ -313,13 +315,8 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
-                        crate::icons::icon(
-                            theme,
-                            Symbol::ArrowTrianglePull,
-                            IconSize::Inline,
-                            hsla(tone),
-                        )
-                        .size(self.z(theme.typography.small())),
+                        crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
+                            .size(self.z(theme.typography.icon())),
                     )
                     .child(
                         kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))),
@@ -370,13 +367,8 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
-                        crate::icons::icon(
-                            theme,
-                            Symbol::ChevronDown,
-                            IconSize::Inline,
-                            hsla(s.text_muted),
-                        )
-                        .size(self.z(theme.typography.small())),
+                        crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                            .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
                 s.focus,
@@ -425,13 +417,8 @@ impl ThreadView {
                         .cursor_pointer()
                         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                         .child(
-                            crate::icons::icon(
-                                theme,
-                                Symbol::ChevronDown,
-                                IconSize::Inline,
-                                hsla(s.text_muted),
-                            )
-                            .size(self.z(theme.typography.small())),
+                            crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                                .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
                     s.focus,
@@ -484,13 +471,8 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
-                        crate::icons::icon(
-                            theme,
-                            Symbol::ChevronDown,
-                            IconSize::Inline,
-                            hsla(s.text_muted),
-                        )
-                        .size(self.z(theme.typography.small())),
+                        crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                            .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_efforts(cx))),
                 s.focus,
@@ -691,7 +673,6 @@ impl ThreadView {
             return strip;
         }
         let theme = &self.theme;
-        let s = theme.surfaces;
         let editing = self.composing.editing();
         let view = cx.weak_entity();
         div()
@@ -702,9 +683,9 @@ impl ThreadView {
             .flex()
             .flex_col()
             .map(|el| self.shell(el, capped, focused))
-            // Under the tray, the one line in the shell: the quieter hairline, where the
-            // tray's head meets the field.
-            .when(capped, |el| el.border_t_0().child(kit::rule(s.border_subtle)))
+            // Under the tray the shell has no top edge: the tray's band over the field's raised
+            // tone parts them, with no line between.
+            .when(capped, gpui::Styled::border_t_0)
             .child(
                 div()
                     .w_full()

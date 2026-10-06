@@ -172,13 +172,12 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.xs))
-            .border_b(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
-            .child(self.icon(Symbol::QuestionmarkBubble, s.text_muted))
+            .child(self.icon(Symbol::QuestionmarkBubble, s.text_secondary))
             .child(
                 div()
                     .flex_1()
                     .text_size(self.z(theme.typography.small()))
+                    .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text_secondary))
                     .child("Aside"),
             )

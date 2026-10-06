@@ -1326,8 +1326,6 @@ impl ReviewView {
             .w_full()
             .h(self.z(theme.density.header))
             .px(self.z(theme.spacing.md))
-            .border_b(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
             .child(row.menu(self.scopes_more(cx)))
             .into_any_element()
@@ -1689,10 +1687,9 @@ impl ReviewView {
             .items_start()
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.sm))
-            .py(self.z(theme.spacing.xs))
-            .border_t(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
-            .child(self.icon(Symbol::TextBubble, s.text_muted))
+            .pt(self.z(theme.spacing.sm))
+            .pb(self.z(theme.spacing.xs))
+            .child(self.icon(Symbol::TextBubble, s.text_secondary))
             .child(
                 div()
                     .min_w_0()
@@ -1808,8 +1805,7 @@ impl ReviewView {
             .w(self.z(LIST_WIDTH))
             .h_full()
             .overflow_y_scroll()
-            .border_r(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
+            .bg(hsla(s.panel))
             .py(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.small()))
             .children(self.model.listed().iter().filter_map(|listed| {
@@ -1859,12 +1855,11 @@ impl ReviewView {
             Row::Comment(c) => self.comment_row(c, cx),
             Row::Draft => self.draft_row(),
         };
-        // Each file is a card: its head row draws the top edge, its rows the sides, its last
-        // row the foot.
+        // One plane: a file is its head on the band and its lines on the content, with no frame
+        // round them; its last line keeps a base unit under it.
         let last =
             !matches!(self.rows.get(ix.saturating_add(1)), Some(r) if !matches!(r, Row::File(_)));
         let theme = &self.theme;
-        let radius = self.z(theme.radii.sm);
         div()
             .w_full()
             .px(self.z(theme.spacing.md))
@@ -1872,15 +1867,7 @@ impl ReviewView {
                 div()
                     .w_full()
                     .overflow_hidden()
-                    .border_l(kit::HAIR)
-                    .border_r(kit::HAIR)
-                    .border_color(hsla(theme.surfaces.border_subtle))
-                    .when(last, |el| {
-                        el.border_b(kit::HAIR)
-                            .rounded_bl(radius)
-                            .rounded_br(radius)
-                            .pb(self.z(theme.spacing.xs))
-                    })
+                    .when(last, |el| el.pb(self.z(theme.spacing.xs)))
                     .child(inner),
             )
             .into_any_element()
@@ -1962,7 +1949,9 @@ impl ReviewView {
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.sm))
-            .px(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.sm))
+            .rounded(radius)
+            .map(|el| kit::inset(el, theme))
             .min_h(self.z(kit::Row::One.height(theme)))
             .text_size(self.z(theme.typography.small()))
             .child(
@@ -1994,18 +1983,8 @@ impl ReviewView {
             .w_full()
             .px(self.z(theme.spacing.md))
             .pt(self.z(theme.spacing.lg))
+            .pb(self.z(theme.spacing.xs))
             .child(Self::file_menu_press(head, at, cx))
-            .child(
-                div()
-                    .w_full()
-                    .h(self.z(theme.spacing.xs))
-                    .rounded_tl(radius)
-                    .rounded_tr(radius)
-                    .border_t(kit::HAIR)
-                    .border_l(kit::HAIR)
-                    .border_r(kit::HAIR)
-                    .border_color(hsla(s.border_subtle)),
-            )
             .into_any_element()
     }
 
@@ -2200,9 +2179,11 @@ impl ReviewView {
 
     fn draft_row(&self) -> AnyElement {
         let s = self.theme.surfaces;
-        self.note()
+        // A field to type in: raised off the diff, where the comments stand on the panel.
+        kit::raised(self.note(), &self.theme)
+            .rounded(self.z(self.theme.radii.sm))
             .debug_selector(|| "review-draft".to_owned())
-            .child(self.icon(Symbol::TextBubble, s.text_muted))
+            .child(self.icon(Symbol::TextBubble, s.text_secondary))
             .child(div().min_w_0().flex_1().child(Input::new(&self.draft).aria_label("Comment")))
             .into_any_element()
     }
@@ -2219,9 +2200,6 @@ impl ReviewView {
             .items_start()
             .gap(self.z(theme.spacing.xs))
             .bg(hsla(s.panel))
-            .border_t(kit::HAIR)
-            .border_b(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
     }
 
@@ -2235,7 +2213,6 @@ impl ReviewView {
     /// go behind "More" when there is no room for them.
     fn foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
-        let s = theme.surfaces;
         let n = self.model.waiting();
         let away = self.comments_away();
         let send_words = match n {
@@ -2288,8 +2265,6 @@ impl ReviewView {
             .w_full()
             .h(self.z(kit::Row::Two.height(theme)))
             .px(self.z(theme.spacing.md))
-            .border_t(kit::HAIR)
-            .border_color(hsla(s.border_subtle))
             .text_size(self.z(theme.typography.small()))
             .child(row.menu(self.foot_more(cx)))
             .into_any_element()
@@ -2387,12 +2362,18 @@ impl ReviewView {
             .flex()
             .when(self.room().is_wide(), |el| el.child(self.file_list(cx)))
             .child(
+                // No rule under the scope bar or over the foot: the diff fades where it slides
+                // under either, and only while some of it lies past that edge.
                 div().flex_1().min_w_0().h_full().child(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
+                    gpui::edge_fade(
+                        list(
+                            self.list.clone(),
+                            cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
+                        )
+                        .size_full(),
+                        gpui::EdgeFade::y(self.z(theme.spacing.lg)),
                     )
-                    .size_full(),
+                    .hidden_by_list(&self.list),
                 ),
             )
             .into_any_element()

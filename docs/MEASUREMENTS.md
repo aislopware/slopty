@@ -15332,3 +15332,111 @@ cargo test -p slopty-ui --release --lib priority_row_cost -- --ignored --nocaptu
   1 % of a 120 Hz frame. That is cheap enough to stand on the frame path without a cache.
 - The test platform shapes text with its own stand-in, so a header's real text costs more in
   both rows alike; the difference is the layouts, which do not depend on the shaper.
+
+## 2026-10-06 — SF Symbols' smaller design
+
+SF Symbols draws a symbol under about 12.25 pt in a smaller design: a fifth narrower, with
+nearly the same stroke. The chrome drew 90 of its icons at 12 pt beside 13 pt words, so each
+lost about a fifth of its ink to that step alone. Measured with the raster call the chrome makes
+(`NSImageSymbolConfiguration`, regular, medium scale), at 2x. Width is the ink's, in device
+pixels, and ink is the sum of coverage:
+
+| symbol | 12 pt | 12.25 pt | 12.5 pt | 13 pt |
+| --- | --- | --- | --- | --- |
+| terminal | 26 px, 175 | 31 px, 210 | 31 px, 218 | 32 px, 236 |
+| folder | 25 px, 180 | 30 px, 217 | 30 px, 226 | 31 px, 243 |
+| server.rack | 26 px, 251 | 31 px, 300 | 31 px, 313 | 32 px, 338 |
+| doc.text | 18 px, 176 | 23 px, 223 | 23 px, 232 | 24 px, 250 |
+
+- From 12 to 12.5 pt, a symbol gains 19 to 32 % more ink and 5 px of width at 2x. So no symbol
+  is drawn under 12.5 pt (`icons::SYMBOL_FLOOR`), Apple's disclosure chevrons aside.
+- Beside a row's facts (12 pt words) an icon draws at the floor. A lead draws at the chrome's
+  13 pt.
+
+```sh
+cargo test -p slopty-ui --lib sf_draws_a_smaller_design_under_the_floor -- --nocapture
+```
+
+## 2026-10-06 — git glyphs at 1x
+
+The chrome's git glyphs are GitHub's Octicons at 16 px. They are filled from their outlines by
+Core Graphics into the masks SF Symbols use, at a lead beside 13 pt words, with their grid
+spanning 16/14 of the point size (GitHub sets them beside 14 px text). Crisp is Σα²/Σα and
+solid is the share of inked pixels at α ≥ 0.9, both at 1x:
+
+| glyph | ink | crisp | solid |
+| --- | --- | --- | --- |
+| git-branch | 11×13 | 0.790 | 0.33 |
+| git-pull-request | 12×13 | 0.766 | 0.22 |
+| git-pull-request-draft | 13×13 | 0.787 | 0.26 |
+| git-pull-request-closed | 13×13 | 0.773 | 0.26 |
+| git-merge | 12×13 | 0.788 | 0.28 |
+| git-commit | 15×7 | 0.801 | 0.33 |
+| repo | 11×15 | 0.843 | 0.47 |
+| *SF terminal, 13 pt* | | *0.782* | *0.28* |
+| *SF folder, 13 pt* | | *0.704* | *0.19* |
+
+- Every glyph stands 13 px at 1x, the height of SF's terminal and folder beside the same words.
+- Every glyph is within 0.02 of SF's crispest symbol or crisper, and most have more whole
+  pixels.
+- Drawn at the 14 pt ink box the study first proposed, the branch fell a pixel short of SF and
+  was softer.
+- Each glyph is drawn once per size and kept, the way the agents' marks are.
+
+```sh
+cargo test -p slopty-ui --lib the_git_glyphs_are_crisp_at_1x -- --nocapture
+```
+
+## 2026-10-06 — the overview without its ring
+
+The overview's active block lost its outer ring, and the summaries lost their band fill and
+the rules over their quotes (`docs/decisions/workspace.md`, "The overview holds work, not
+boxes"). Two arms ran from one dev-profile e2e build: **A** put the ring, fills and rules back
+under a temporary `SLOPTY_MEASURE_OLD_OVERVIEW` switch, deleted after these runs, and **B** is
+as built. The scenario is the smooth probe's (m): twenty mixed tiles, five of them flooding
+shells, with the overview springing open and closed six times each way, then held. Draw is
+the frame probe's `begin` → `end` in ms (p50 / p95 / p99 / max). The runs went B A B on
+mac-studio at 60 Hz, 1280 × 800, under other lanes' load.
+
+| arm | (m) opening | (m) closing | (m) held open |
+| --- | --- | --- | --- |
+| B | 0.1 / 2.0 / 8.8 / 8.8 (195 frames) | 0.9 / 2.1 / 2.4 / 2.4 | no frame |
+| A | 0.1 / 2.0 / 8.9 / 8.9 (192) | 0.9 / 2.0 / 2.2 / 2.2 | no frame |
+| B | 0.1 / 2.0 / 8.6 / 8.6 (191) | 1.0 / 2.0 / 2.2 / 2.2 | no frame |
+
+- The two arms are the same within noise. The worst frame is still the landing's, where every
+  card's text is shaped (8.6–8.9 ms here, against 7.1–7.5 ms on the day "the overview as a
+  map of work" was measured, under different load). No frame went over 16.7 ms.
+- A resting overview still draws no frame.
+
+```sh
+cargo xtask e2e smooth --filter 'test(twenty_mixed)'
+# the A arm was the same with SLOPTY_MEASURE_OLD_OVERVIEW=1 before the switch was deleted
+```
+
+## 2026-10-06 — the thread's soft top edge
+
+The rule under a thread's header became a soft edge: the turns fade under the header while some
+lie above it (`gpui::edge_fade` hidden by the list; `docs/decisions/ui.md`, "Space, headings and
+tone part the review and the thread"). The review's diff list takes the same fade at both ends.
+The bench `soft_edge_cost` (`conversation::thread::tests`, ignored, release) lays out a list of
+400 rows of a turn's words scrolled to its end, as a thread opens, and times a notify and its
+draw, 400 of each after 40 to warm up, in a fresh 800 × 600 window per arm: plain, faded,
+plain, faded. Time per draw in µs (p50 / p95 / p99), three runs on mac-studio under other
+lanes' load:
+
+| run | plain | faded | plain | faded |
+| --- | --- | --- | --- | --- |
+| 1 | 32.4 / 33.5 / 33.9 | 25.0 / 29.0 / 29.2 | 21.5 / 22.1 / 34.5 | 19.5 / 20.1 / 20.6 |
+| 2 | 28.4 / 33.6 / 34.0 | 24.7 / 25.7 / 26.0 | 21.3 / 22.1 / 22.4 | 18.2 / 20.2 / 20.5 |
+| 3 | 13.9 / 14.3 / 14.6 | 13.8 / 14.8 / 15.5 | 13.3 / 13.5 / 13.7 | 13.5 / 13.9 / 14.8 |
+
+- The fade costs nothing measurable on the CPU: the arms fall with warm-up in run order in the
+  loaded runs, and in the quiet third run plain and faded are within 0.5 µs. The fade adds one
+  mask over the list's layer on the GPU, the same the transcript and the palette already draw.
+- `timing_of_the_thread_s_frames` panics in release at its "in that frame" check (the sending
+  row has no bounds there) and passes in debug, before this change as after; it was not used.
+
+```sh
+cargo test -p slopty-ui --release --lib soft_edge_cost -- --ignored --nocapture
+```

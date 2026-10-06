@@ -74,8 +74,13 @@ impl ThreadView {
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
             .active(move |el| el.bg(hsla(s.pressed)))
             .child(
-                crate::icons::icon(theme, mark(&screen.kind), IconSize::Inline, hsla(s.text_muted))
-                    .size(self.z(theme.typography.small())),
+                crate::icons::icon(
+                    theme,
+                    mark(&screen.kind),
+                    IconSize::Inline,
+                    hsla(s.text_secondary),
+                )
+                .size(self.z(theme.typography.icon())),
             )
             .on_click(cx.listener(|this, _ev, _w, cx| this.watch_screen(cx)));
         let chip = if self.room().is_narrow() {

@@ -1978,8 +1978,6 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.sm))
                 .px(self.z(theme.spacing.lg))
                 .min_h(self.z(kit::Row::Two.height(theme)))
-                .border_b(kit::HAIR)
-                .border_color(hsla(s.border_subtle))
                 .child(
                     div()
                         .min_w_0()
@@ -2110,14 +2108,24 @@ impl ThreadView {
         if self.rows.is_empty() {
             return region.children(self.empty_notice(cx)).into_any_element();
         }
+        // No rule under the header or the trail over it: the turns fade where they slide under
+        // the top edge, and only while some lie above it, as macOS 26's soft scroll edge does.
+        let fade = gpui::EdgeFade::new(gpui::Edges {
+            top: self.z(self.theme.spacing.lg),
+            ..gpui::Edges::default()
+        });
         region
             .debug_selector(|| "thread-rows".to_owned())
             .child(
-                list(
-                    self.list.clone(),
-                    cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
+                gpui::edge_fade(
+                    list(
+                        self.list.clone(),
+                        cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
+                    )
+                    .size_full(),
+                    fade,
                 )
-                .size_full(),
+                .hidden_by_list(&self.list),
             )
             .children(self.marks.get().down.then(|| self.down_button(cx)))
             .children(self.find_bar(cx))

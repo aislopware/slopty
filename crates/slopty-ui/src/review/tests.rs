@@ -186,6 +186,33 @@ fn under_960_points_the_lines_run_in_a_column(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-pair-1-0-0").is_none());
 }
 
+/// A review is one plane, as the status-colour study ruled (`docs/decisions/ui.md`, "Space,
+/// headings and tone part the review and the thread"): no hairline frames a file, rules the
+/// scope bar or the foot, or parts the file list from the diff. A border that runs most of the
+/// way across the tile, or down the file list's edge, fails here; a button's own edge is too
+/// short to.
+#[gpui::test]
+fn no_rule_or_frame_parts_the_review(cx: &mut TestAppContext) {
+    for width in [1200.0, 800.0] {
+        let (_view, _hub, _sent, cx) = tile(cx, width);
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let ruled: Vec<String> = quads
+            .iter()
+            .filter(|q| {
+                let w = q.border_widths;
+                let (across, down) =
+                    (q.bounds.size.width.0 / scale, q.bounds.size.height.0 / scale);
+                let horizontal = (w.top.0 > 0.0 || w.bottom.0 > 0.0) && across > width * 0.4;
+                let vertical = (w.left.0 > 0.0 || w.right.0 > 0.0) && down > HEIGHT * 0.4;
+                horizontal || vertical
+            })
+            .map(|q| format!("{:?} {:?}", q.bounds, q.border_widths))
+            .collect();
+        assert!(ruled.is_empty(), "at {width} pt: {}", ruled.join("\n"));
+        assert!(cx.debug_bounds("review-head-row-1").is_some(), "a file's head is drawn");
+    }
+}
+
 /// A change of appearance draws the same lines in the new theme.
 #[gpui::test]
 fn the_lines_stay_when_the_appearance_changes(cx: &mut TestAppContext) {

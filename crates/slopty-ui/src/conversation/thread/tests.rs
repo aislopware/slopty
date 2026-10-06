@@ -332,6 +332,36 @@ fn a_cached_thread_draws_in_its_first_frame(cx: &mut TestAppContext) {
     assert_eq!(follow, Some(Some(cursor)), "caught up from the cursor it was kept at");
 }
 
+/// The thread's head is parted from its turns by a soft edge, not a rule: no hairline under
+/// the header, and the turns fade at the top only while some lie above it, as macOS 26's
+/// scroll edge does. A long thread opens on its newest turn, so its top fades.
+#[gpui::test]
+fn the_turns_fade_under_the_header_with_no_rule(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::long(6, 12);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    // The fade reads the list's extent as it lays out, so it lands a frame later.
+    cx.update(gpui::Window::simulate_next_frame);
+    cx.run_until_parked();
+    let header = cx.debug_bounds("thread-header").expect("the header");
+    let rows = cx.debug_bounds("thread-rows").expect("the turns");
+    let ruled = cx.update(|window, _| {
+        window.painted_quads().into_iter().any(|q| {
+            q.border_widths.bottom.0 > 0.0
+                && (q.bounds.bottom().0 / window.scale_factor() - f32::from(header.bottom())).abs()
+                    < 1.0
+        })
+    });
+    assert!(!ruled, "no hairline under the header");
+    let faded = cx.update(|window, _| crate::retained::faded_edges(window, rows));
+    assert!(faded.top, "the turns above the newest fade under the header");
+    assert!(!faded.bottom, "nothing lies below the newest");
+}
+
 /// A word streamed into the answer builds the rows again but measures only the row it grew.
 #[gpui::test]
 fn a_streamed_word_moves_only_its_own_row(cx: &mut TestAppContext) {
@@ -518,3 +548,82 @@ mod face;
 mod find;
 mod questions;
 mod steps;
+
+/// What the soft top edge costs a thread's frame: a list of 400 rows of a turn's words, scrolled
+/// to its end as a thread opens, drawn after a notify with and without the edge fade over it
+/// (`gpui::edge_fade` hidden by the list). Run by hand, in release:
+/// `cargo test -p slopty-ui --release --lib soft_edge_cost -- --ignored --nocapture`.
+#[gpui::test]
+#[ignore = "measurement, run by hand"]
+fn soft_edge_cost(cx: &mut TestAppContext) {
+    use gpui::{
+        Context, IntoElement, ListAlignment, ListState, ParentElement as _, Render, Styled as _,
+        Window, div, list, px,
+    };
+
+    struct Turns {
+        list: ListState,
+        fade: bool,
+    }
+    impl Render for Turns {
+        fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rows = list(self.list.clone(), |ix, _w, _cx| {
+                div()
+                    .px(px(16.0))
+                    .py(px(4.0))
+                    .child(format!(
+                        "Row {ix}: the agent read the parser, split the lexer and ran the tests \
+                         again, and they passed."
+                    ))
+                    .into_any_element()
+            })
+            .size_full();
+            let body = if self.fade {
+                let edges = gpui::Edges { top: px(16.0), ..gpui::Edges::default() };
+                gpui::edge_fade(rows, gpui::EdgeFade::new(edges))
+                    .hidden_by_list(&self.list)
+                    .into_any_element()
+            } else {
+                rows.into_any_element()
+            };
+            div().size_full().child(body)
+        }
+    }
+
+    const FRAMES: usize = 400;
+    const WARM: usize = 40;
+    let mut line = Vec::new();
+    for fade in [false, true, false, true] {
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let list = ListState::new(400, ListAlignment::Bottom, px(200.0));
+            Turns { list, fade }
+        });
+        cx.simulate_resize(size(px(800.0), px(600.0)));
+        cx.run_until_parked();
+        let mut samples = Vec::new();
+        for n in 0..WARM + FRAMES {
+            let started = std::time::Instant::now();
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            if n >= WARM {
+                samples.push(started.elapsed());
+            }
+        }
+        samples.sort_unstable();
+        let at = |q: usize| {
+            let ix = samples.len().saturating_sub(1).saturating_mul(q) / 100;
+            samples.get(ix).copied().unwrap_or_default()
+        };
+        line.push(format!(
+            "{}: {:?} / {:?} / {:?}",
+            if fade { "faded" } else { "plain" },
+            at(50),
+            at(95),
+            at(99)
+        ));
+    }
+    println!(
+        "MEASURE 400 rows at their end, a notify and its draw (p50 / p95 / p99): {}",
+        line.join(" · ")
+    );
+}

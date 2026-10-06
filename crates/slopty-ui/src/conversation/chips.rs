@@ -94,7 +94,7 @@ fn remove_button(
         .on_click(remove)
         .child(
             crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
-                .size(px(theme.typography.small() * zoom)),
+                .size(px(theme.typography.icon() * zoom)),
         );
     crate::a11y::tab_stop(button, s.focus).into_any_element()
 }

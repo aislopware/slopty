@@ -550,8 +550,6 @@ impl ThreadView {
                 .flex()
                 .flex_col()
                 .pb(self.z(theme.spacing.xs))
-                .border_b(crate::kit::HAIR)
-                .border_color(hsla(theme.surfaces.border_subtle))
                 .text_color(hsla(theme.surfaces.text))
                 .children(body)
                 .into_any_element(),

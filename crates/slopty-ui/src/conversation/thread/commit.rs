@@ -1021,17 +1021,15 @@ impl CommitSheet {
 impl Render for CommitSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let s = theme.surfaces;
         let body = match self.page {
             Page::Commit => div()
                 .w_full()
                 .min_h_0()
                 .flex()
                 .flex_col()
+                .gap(px(theme.spacing.md))
                 .children(self.pull_part(cx))
-                .child(kit::rule(s.border_subtle))
                 .child(self.files_part(cx))
-                .child(kit::rule(s.border_subtle))
                 .child(self.commit_foot(cx)),
             Page::Open => self.open_page(cx),
         };
@@ -1063,8 +1061,7 @@ impl Render for CommitSheet {
                     }))
                     .overflow_y_scroll()
                     .child(self.head(cx))
-                    .child(kit::rule(s.border_subtle))
-                    .child(body),
+                    .child(div().pt(px(theme.spacing.md)).child(body)),
             )
     }
 }

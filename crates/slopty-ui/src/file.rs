@@ -1590,8 +1590,6 @@ impl FileView {
             .gap(px(theme.spacing.sm * k))
             .px(px(theme.spacing.inset() * k))
             .py(px(theme.spacing.xs * k))
-            .border_b(crate::kit::HAIR)
-            .border_color(hsla(s.border))
             .bg(wash)
             .text_size(px(theme.typography.small() * k))
             .font_family(theme.typography.ui_family.clone())

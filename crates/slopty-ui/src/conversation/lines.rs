@@ -190,12 +190,12 @@ impl Ink<'_> {
         div()
             .w_full()
             .flex()
+            .gap(self.z(spacing.xxs))
             .child(side(old, |l| l.old))
-            .child(crate::kit::rule_v(self.theme.surfaces.border_subtle))
             .child(side(new, |l| l.new))
     }
 
-    /// The divider before a hunk, between hairlines, with no band: the line git names it by
+    /// The divider before a hunk, on the band with no rule round it: the line git names it by
     /// (the function it is in), else where it starts in the new file.
     #[must_use]
     pub fn hunk_head(&self, block: &Block) -> Div {
@@ -204,8 +204,7 @@ impl Ink<'_> {
             .w_full()
             .px(self.z(self.theme.spacing.sm))
             .py(self.z(self.theme.spacing.xxs))
-            .border_y(crate::kit::HAIR)
-            .border_color(hsla(s.border_subtle))
+            .map(|el| crate::kit::inset(el, self.theme))
             .text_color(hsla(s.text_muted))
             .text_size(self.z(self.theme.typography.small()))
             .overflow_hidden()

@@ -6963,7 +6963,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
   `.research/icons-2026-10-05.md` §4.3–4.4 and §5, steps 3 to 5 of its plan). Supersedes "One
   icon set at one weight" above. (Amended 2026-10-06 by "State is a glyph": the empty and
-  dashed rings are painted by `icons::Ring`, since SF's `circle.dashed` lost its gaps at 1x.) At 1x, the person's view, only 14 % of the Hugeicons ink
+  dashed rings are painted by `icons::Ring`, since SF's `circle.dashed` lost its gaps at 1x.
+  Amended 2026-10-06 by "An icon takes its words' size, weight and tier": git is Octicons, and
+  no symbol is drawn under 12.5 pt.) At 1x, the person's view, only 14 % of the Hugeicons ink
   pixels were solid; SF Symbols at the text's size have 77 % more, and sharpen and grey with
   the system font beside them.
   - **The platform draws them** (`slopty_platform::symbols`). A `Symbol` is one of a closed
@@ -7004,6 +7006,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the point size that fits, in quarter points (`icons::fitted`), so it keeps its weight and
     shrinks only as much as it must.
   - **Drawn by us, three things only:** the app's mark; the working mark, now twelve spokes
+    (amended 2026-10-06 by "The working mark is a braille cell": a cell of six dots)
     whose brightness steps round on the existing spin clock (a ring turned in 30° jumps read as
     dropped frames), upright and breathing under Reduce Motion; and the dot of a finish not yet
     seen.
@@ -7584,7 +7587,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **One family of circles.** Needs you is `exclamationmark.circle.fill` in `warn_fill`,
     failed `xmark.circle.fill` in `error_fill`, a finish not yet seen
     `checkmark.circle.fill` in `success_fill` (it fades in over `Pace::Settle`, at once under
-    Reduce Motion), working the stepped spokes in `working_fill`. Waiting is a dashed ring
+    Reduce Motion), working the stepped spokes in `working_fill` (a braille cell since
+    2026-10-06, "The working mark is a braille cell"). Waiting is a dashed ring
     and idle, where a mark is needed, an empty ring, both muted. Away keeps `wifi.slash`.
     Rows still show nothing at rest.
   - **The rings are ours** (`icons::Ring`: `Empty`, `Dashed`, `Pie(share)`). SF's
@@ -7867,3 +7871,125 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `file::tests::reading::the_preview_keeps_to_the_reading_measure`. Goldens: `thread*`,
     `palette*`, `workspace-navigator*`, `agent-needs-you-navigator`, `project-*`,
     `empty-workspace` and the wide-reading golden.
+
+- ✅ **An icon takes its words' size, weight and tier, and git is drawn in Octicons**
+  (2026-10-06, `.research/elegance-icons-2026-10-06.md` §3.1–3.4, build step 2). SF Symbols
+  was never the weak part; how it was configured was. Ninety of the chrome's icons were drawn
+  at 12 pt beside 13 pt words, in `text_muted` beside titles in `text`, always at the regular
+  weight, and the wide ones shrunk to fit a 14 pt slot. Together that cost an icon about a
+  third of the visual weight of the words beside it at 1x.
+  - **The floor.** Under about 12.25 pt SF draws a smaller design, a fifth narrower for the
+    same stroke (`docs/MEASUREMENTS.md`, "SF Symbols' smaller design"). No symbol is drawn
+    under `icons::SYMBOL_FLOOR` (12.5 pt) except Apple's own disclosure chevrons.
+    `IconSize::Inline` beside a row's facts draws at max(small, 12.5) in its 14 pt slot.
+    `IconSize::Lead` (formerly `Large`) draws at the chrome's size in a 16 pt slot.
+  - **Size and weight follow the words.** `icons::beside(theme, mark, role, ink)` and
+    `Drawn::beside` take a `TypeRole` and give its point size (floored) in a slot that grows
+    with it, so a finger's 17 pt rows get a 17 pt glyph. The weight is regular beside 400,
+    medium beside 500 and semibold beside 600 (`icons::weight_beside`), as the HIG matches
+    them. Every row lead in the palette, the pickers, the navigator and the tile headers is
+    the lead size. A group's machine or project glyph is drawn at the medium weight beside
+    its medium name, and a tile header's at the medium weight while its title is.
+    `kit::square_icon` is the lead size at the medium weight.
+  - **One tier under, never two.** A lead is `text_secondary` at rest and the title's `text`
+    when chosen. Muted is for away and disabled. The tile header's lead wears its title's
+    tier, the focused title's `text` and any other's muted, so it never outshines the title
+    it leads. A folder's rows follow suit: no file is a tier under the folder beside it.
+  - **Wide symbols keep their size.** `fitted` judges a symbol on its ink, not on the OS's
+    padded image (about 2 px each side), and lets it reach an eighth past its slot
+    (`FIT_ROOM`, 18 of 16) before drawing it smaller. The server rack, the folder and the
+    window keep their words' size in a lead.
+  - **Git is GitHub's Octicons** (MIT, `crates/slopty-ui/assets/git/` with
+    `LICENSE-octicons` and `NOTICE`): branch, pull request (open, draft, closed), merge,
+    commit and repository, as `icons::GitGlyph` (`Mark::Git`). SF has no git vocabulary, and
+    its `arrow.triangle.pull` read as a lone bent arrow. They are drawn the way the agents'
+    marks are, filled from their outlines by Core Graphics into the same masks at device
+    pixels. Their 16-unit grid spans 16/14 of the words' point size, since GitHub sets them
+    beside 14 px text. That stands them at SF's height beside the same words, with strokes
+    between SF's regular and medium. At 1x each is within 0.02 of SF's crispest symbol or
+    crisper, and most have more whole pixels (`docs/MEASUREMENTS.md`, "git glyphs at 1x"). A pull request's glyph wears its
+    state in its fill step (`GitGlyph::state_ink`): open green, merged violet, closed red, a
+    draft grey. Its words keep their review's tone. A branch, a commit and a repository take
+    their words' tier. Octicons stays to git only: as the whole set, it would read as GitHub
+    Desktop and lose the system's weight matching.
+  - **A machine wears its form** (`icons::machine(Option<Form>)`): `laptopcomputer` for a
+    laptop, `display` for a desktop, `server.rack` for a server or one that has not said. The
+    worker says its form (`WorkerCaps::form`). It shows in the navigator's machine heads and
+    rail, the tile header's worker, the breadcrumb, the away tile and the palette's workers.
+    A repository group is the Octicons repo, not the diff glyph. A project group is a folder,
+    since a project is a folder first. A workspace row on the phone has no glyph, and its
+    empty slot keeps the names' edge.
+  - **Lints as tests:** `kit::tests::a_symbol_is_never_drawn_under_12_5` (no icon slot sized
+    to `small()` or `caption()`, a check inside its filled box excepted) and
+    `kit::tests::a_lead_is_never_muted_at_rest`, beside
+    `icons::tests::{no_icon_size_draws_a_symbol_under_12_5,
+    an_icon_takes_its_words_size_and_weight, a_leads_wide_symbol_keeps_its_size}` and
+    `icons::git::tests::{every_git_glyph_reads, a_git_glyph_is_drawn_at_its_words_size,
+    the_git_glyphs_are_crisp_at_1x}`.
+
+- ✅ **The working mark is a braille cell** (2026-10-06). Overrules the twelve spokes of "The
+  chrome's icons are SF Symbols" and "State is a glyph". The person found the spokes ugly and
+  dated: Apple's activity indicator from the Aqua years, and pale, because eleven of its twelve
+  spokes were faded copies of the hue. The bar is MonoCode and T3 Code.
+  - **What they do** (read in their sources).
+    - MonoCode's sidebar marks a working agent with braille frames (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) every 80 ms
+      in its accent. A running tool is a dashed ring turning slowly.
+    - T3 Code's sidebar shows a still dashed circle with the word "Working". Its generic
+      spinner is an open arc that turns only where motion is allowed.
+  - **The cell.** Six dots in two columns of three, drawn by us (`icons::Spinner`). Three dots
+    lit go round the ring, and a fourth lights on the step between as the head moves on: twelve
+    frames a turn, one a step of the existing spin clock (`SPIN_STEP`, a twelfth of a second).
+    So nothing draws more often than the spokes did, and the frame and wakeup budgets hold
+    unchanged ("a working mark that steps").
+    - Each dot is a whole number of device pixels on a whole-pixel pitch: 2 px dots, 4 px apart
+      at a row's 14 pt slot at 1x, and 5 and 8 at 2x, so every dot is sharp and alike.
+    - The dots at rest keep 22 % of the ink, a faint track, so a column of working rows holds
+      one shape while the lit dots move.
+    - The first frame is ⠋, MonoCode's first, never a column of three, which would read as a
+      menu's "⋮". It is the frame Reduce Motion stands on, and the one a pinned clock draws.
+    - The lit dots are the working hue's mark step (`working_fill`) at full ink. No dot is a
+      faded copy, so the mark reads as meant in both themes, not as a pastel.
+    - Under Reduce Motion it stands on its first frame and breathes, as before.
+  - **Rejected.**
+    - An open arc over a hairline track looked the most modern still. It only looks right
+      turning smoothly, though, which needs a frame at the display's rate for every working
+      row. Stepped at 12 a second, it jumps 30° at a time, the very thing that retired the
+      ring before the spokes. A braille cell is made to step.
+    - The still dashed ring stays waiting's (`Status::Running`), as in both references. Using
+      it for working too would leave working and waiting alike.
+    - MonoCode's bare cell (unlit dots absent) changed its outline from frame to frame at 1x,
+      and its column frames read as "⋮". The track and the first frame fix that.
+  - Specimens: `.research/icon-specimen/app` (`cargo run --release -- spin <dir>`) renders the
+    spokes, five cells, the arc and the dashed ring beside a "#42" pull request and an agent's
+    mark, in light and dark at 1x and 2x.
+  - Tests: `icons::tests::{the_working_cell_goes_round_in_twelve_frames,
+    the_working_cell_sits_on_whole_pixels}`, beside the spin clock's own.
+- ✅ **Space, headings and tone part the review and the thread** (2026-10-06,
+  `.research/status-color-2026-10-06.md` §7.2, the divider inventory; amends "Fades are per
+  pixel, with the surface outside them"). The person found the chrome ruled into boxes. The
+  references part a surface by space, a heading's weight and a step of tone, and keep a rule
+  for a real seam. So the hairlines inside a thread and a review go.
+  - **The thread.** The rule under the header is gone. The turns fade under the header while
+    some lie above it (`gpui::edge_fade`, top `lg`, hidden by the list), as macOS 26's scroll
+    edge does. The trail's, the aside's and the composer menu's rules are gone, and so is the
+    composer's rule when it is capped. The aside's head words take the medium weight and its
+    icon the secondary tier. A commit's three rules become `md` of space under its head. A
+    tucked tray's activity sits on the band (`kit::inset`), and an open one is raised.
+  - **Diffs.** The side-by-side view parts its two columns by `xxs` of space, not a vertical
+    rule, and a hunk's head sits on the band instead of between two rules. A file's notice
+    band loses its rule.
+  - **The review.** The scope bar's and the foot's rules give way to the diff list's fade at
+    both ends (`lg`). The file list stands on the panel's tone, not behind a vertical rule. A
+    file is no longer framed: its head row sits on the band, rounded, with `xs` under it. A
+    comment's rule becomes space, a comment has no border, and a draft is raised.
+  - **What stays**, as §7.2 rules: the thought's left rule (the stream's one aside mark), a
+    call's sunk inset, a diff card's rim outside the review, a picture's or a chip's ring, a
+    button's ring, and the hairline between two tiles.
+  - **Cost.** The fade costs nothing measurable on the CPU against the plain list
+    (`docs/MEASUREMENTS.md`, "the thread's soft top edge").
+  - Tests: `review::tests::no_rule_or_frame_parts_the_review` (at 1200 and 800 pt, no border
+    runs most of the way across the tile or down the file list), and
+    `conversation::thread::tests::the_turns_fade_under_the_header_with_no_rule` (no hairline at
+    the header's foot; the top fades on a long thread and the foot does not); the bench
+    `soft_edge_cost`. Goldens: the thread, review, file and agent renders retaken in the same
+    batch.

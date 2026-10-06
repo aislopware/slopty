@@ -386,7 +386,9 @@ impl ThreadView {
                         .mb(self.z(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
-                .bg(hsla(s.elevated))
+                // Tucked over the composer it is the card's head, on the band; the field under
+                // it stays raised, so the tone step parts them with no rule.
+                .map(|el| if tucked { kit::inset(el, theme) } else { el.bg(hsla(s.elevated)) })
                 .map(|el| kit::rests(el, theme, true, !tucked))
                 .overflow_hidden()
                 .child(rest)
