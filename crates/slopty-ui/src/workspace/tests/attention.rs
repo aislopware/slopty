@@ -505,6 +505,62 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     assert_eq!(Route::of_tap(&tap), Some(heard.route), "the tap leads back to it");
 }
 
+/// A note pushed while the app is suspended is the note it would have posted for the same
+/// notice: the same identifier, words, urgency and route back. It knows no tile, which a tap
+/// finds by the session or the thread. Once the app has said it stops listening, it posts
+/// none of the server's notices itself, so a moment is not said twice.
+#[gpui::test]
+fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::TermRef;
+    use slopty_proto::push::PushBody;
+    use slopty_proto::thread::ThreadId;
+    use slopty_proto::thread::attention::{Subject, ThreadAt, Via};
+
+    let (view, cx) = workspace(cx);
+    let session = SessionId::new();
+    let id = slopty_core::WorkerId::new();
+    let key = crate::workspace::projects::worker_key(id);
+    let (_tiles, _link) = worker(&view, cx, key, "mini", &[session]);
+    let thread = ThreadId::new();
+    let notice = |kind, tile: Option<TermRef>, via: Option<Via>| Notice {
+        kind,
+        about: Subject::Thread(ThreadAt { worker: id, thread }),
+        tile,
+        title: "Fix the build".into(),
+        text: "Run cargo test".into(),
+        worked_ms: Some(600_000),
+        via,
+    };
+    let tile = Some(TermRef { worker: id, session });
+    let explore = Some(Via { thread: ThreadId::new(), title: "Explore the tests".into() });
+    for notice in [
+        notice(NoticeKind::NeedsYou, tile, explore),
+        notice(NoticeKind::Finished, tile, None),
+        notice(NoticeKind::Failed, None, None),
+    ] {
+        let heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a note");
+        let (mut attention, memory) = attention();
+        attention.set_active(false);
+        attention.notice(&heard);
+        let posted = memory.posted();
+        let [posted] = posted.as_slice() else { panic!("one note: {posted:?}") };
+        let pushed = notify::pushed::note_of(&PushBody { notice: notice.clone(), ask: None });
+        let mut info = posted.info.clone();
+        info.remove(ITEM);
+        let what = |n: &Note| (n.id.clone(), n.title.clone(), n.body.clone(), n.urgent, n.category);
+        assert_eq!(what(&pushed), what(posted), "{notice:?}");
+        assert_eq!(pushed.info, info, "all but the tile, {notice:?}");
+        let tap =
+            |n: &Note| Route::of_tap(&Tap { id: n.id.clone(), info: n.info.clone(), action: None });
+        let routed = tap(&pushed).expect("a pushed note routes");
+        assert_eq!((routed.worker, routed.about), (heard.route.worker, heard.route.about));
+
+        attention.set_listening(false);
+        attention.notice(&heard);
+        assert_eq!(memory.posted().len(), 1, "not listening, the push says it");
+    }
+}
+
 #[gpui::test]
 fn a_tapped_note_focuses_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

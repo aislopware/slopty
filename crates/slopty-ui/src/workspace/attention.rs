@@ -51,6 +51,7 @@ use std::time::Duration;
 use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
+use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
 use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, Tap};
 use slopty_proto::items::ItemKind;
 use slopty_proto::project::ProjectId;
@@ -61,17 +62,6 @@ use super::agents::{agent_ask_text, agent_status_word};
 use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
 use crate::terminal::TerminalView;
-
-/// The `userInfo` key of the worker a note is about.
-const WORKER: &str = "worker";
-/// The `userInfo` key of the tile's item.
-const ITEM: &str = "item";
-/// The `userInfo` key of the session.
-const SESSION: &str = "session";
-/// The `userInfo` key of the thread, for a note about one with no terminal.
-const THREAD: &str = "thread";
-/// The `userInfo` key of the thread's request an approval note answers.
-const ASK: &str = "ask";
 
 /// What a note's answer says when its request was no longer open: answered elsewhere, or the
 /// terminal asks by now.
@@ -283,6 +273,9 @@ pub struct Attention {
     unsaid: bool,
     /// The app has said this run that notifications are off.
     said_off: bool,
+    /// The app still hears the server's notices on its link: it has not told the server it is
+    /// about to be suspended, after which the server pushes instead.
+    listening: bool,
 }
 
 impl std::fmt::Debug for Attention {
@@ -314,6 +307,7 @@ impl Attention {
             project_notes: HashSet::new(),
             unsaid: false,
             said_off: false,
+            listening: true,
         }
     }
 
@@ -363,6 +357,13 @@ impl Attention {
         self.server_led = led;
     }
 
+    /// The app told the server it is about to be suspended (`listening`: false), or came back.
+    /// Until it comes back, the server pushes what it hears and the app posts none of its
+    /// notices, so a moment is never said twice.
+    pub const fn set_listening(&mut self, listening: bool) {
+        self.listening = listening;
+    }
+
     /// Whether the server's notices decide which agent moments post and sound.
     #[must_use]
     pub const fn server_led(&self) -> bool {
@@ -373,7 +374,7 @@ impl Attention {
     /// where the navigator already says it. A wait's note gets its approval buttons from the next
     /// [`Self::look`].
     pub fn notice(&mut self, heard: &Heard) {
-        if self.active {
+        if self.active || !self.listening {
             return;
         }
         if let Some(stack) = &heard.stack {
@@ -651,11 +652,7 @@ impl WorkspaceView {
         let title = Some(notice.title.trim())
             .filter(|t| !t.is_empty())
             .map_or_else(|| self.route_title(route), str::to_owned);
-        let body = match &notice.via {
-            Some(via) if !notice.text.is_empty() => format!("{}: {}", via.title, notice.text),
-            Some(via) => via.title.clone(),
-            None => notice.text.clone(),
-        };
+        let body = notify::pushed::notice_body(notice);
         Some(Heard { route, kind: notice.kind, title, body, stack: None })
     }
 
