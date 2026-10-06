@@ -38,14 +38,8 @@ pub fn beside(ctl: &Path) -> PathBuf {
     ctl.with_extension("mod.sock")
 }
 
-/// Serve the mod socket at `path` for the daemon's life.
-pub async fn serve(daemon: Daemon, path: PathBuf) {
-    if let Err(e) = serve_inner(daemon, &path).await {
-        tracing::error!(error = %e, "mod socket");
-    }
-}
-
-async fn serve_inner(daemon: Daemon, path: &Path) -> Result<()> {
+/// Bind the mod socket at `path`, taking over a stale one; before any agent can start.
+pub async fn bind(path: &Path) -> Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -55,8 +49,19 @@ async fn serve_inner(daemon: Daemon, path: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
     tracing::info!(path = %path.display(), "mod socket ready");
+    Ok(listener)
+}
+
+/// Serve a socket from [`bind`] for the daemon's life.
+pub async fn serve(daemon: Daemon, listener: UnixListener) {
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _addr)) => stream,
+            Err(e) => {
+                tracing::error!(error = %e, "mod socket");
+                return;
+            }
+        };
         let daemon = daemon.clone();
         tokio::spawn(async move {
             let service = service_fn(move |request| {

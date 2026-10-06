@@ -856,7 +856,12 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
 
     let server = server_address(args.server.as_deref(), &data_dir);
     if daemon.claude_mod.is_some() {
-        tokio::spawn(modsock::serve(daemon.clone(), mod_path));
+        match modsock::bind(&mod_path).await {
+            Ok(listener) => {
+                tokio::spawn(modsock::serve(daemon.clone(), listener));
+            }
+            Err(e) => tracing::error!(error = %e, "mod socket"),
+        }
     }
     let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
     daemon.worker.set_session_env(env);
@@ -869,7 +874,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             let _sent = daemon.events.send(slopty_proto::WorkerMsg::Items(delta));
         }
     }
-    tokio::spawn(ctl::serve(daemon.clone(), ctl_path.clone()));
+    let ctl_listener = ctl::bind(&ctl_path).await.context("control socket")?;
+    tokio::spawn(ctl::serve(daemon.clone(), ctl_listener));
 
     let joined = server.and_then(|addr| join_server(&daemon, addr, &data_dir));
     tokio::spawn(follow_settings(

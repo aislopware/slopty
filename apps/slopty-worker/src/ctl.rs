@@ -17,13 +17,9 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::Daemon;
 
-pub async fn serve(daemon: Daemon, path: PathBuf) {
-    if let Err(e) = serve_inner(daemon, &path).await {
-        tracing::error!(error = %e, "control socket");
-    }
-}
-
-async fn serve_inner(daemon: Daemon, path: &Path) -> Result<()> {
+/// Bind the control socket at `path`, taking over a stale one. Bound before the worker says it
+/// is up, so whoever waits on that can ask at once.
+pub async fn bind(path: &Path) -> Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -33,8 +29,19 @@ async fn serve_inner(daemon: Daemon, path: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
     tracing::info!(path = %path.display(), "control socket ready");
+    Ok(listener)
+}
+
+/// Answer requests on a socket from [`bind`].
+pub async fn serve(daemon: Daemon, listener: UnixListener) {
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _addr)) => stream,
+            Err(e) => {
+                tracing::error!(error = %e, "control socket");
+                return;
+            }
+        };
         let daemon = daemon.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(daemon, stream).await {
