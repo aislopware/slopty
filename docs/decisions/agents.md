@@ -1149,13 +1149,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     loads sessions: the next message, which the composer says. An agent that cannot load its
     session says it cannot.
   - **Compact and modes.** `/compact` is listed where the thread has `Cap::COMPACT` and the
-    agent lists no such command, and sends `Intent::Compact`. No wire field lists an agent's
-    modes, so a thread with its own TUI but no `SET_MODE` says the mode is changed there.
-    Proposed wire change: `ThreadMeta.modes`.
+    agent lists no such command, and sends `Intent::Compact`. The agent's modes come in
+    `ThreadMeta.modes`; a thread with its own TUI but no `SET_MODE` says the mode is changed
+    there.
   - **"Machine", not "worker",** in what these surfaces say (rulings §8).
-  - **Left:** "Edit…" on an edit approval (rulings §5a) needs `Verdict::AllowEdited { input }` in
-    `slopty-proto`. Driving Claude Code for API-key users (§5c) is not built. Uploads to threads
-    with no terminal are still to come.
+  - **Left:** driving Claude Code for API-key users (§5c) is not built. Edited allows (§5a)
+    were deleted ("Sleep, waits on another thread, queue reordering and edited allows are
+    gone"), and threads with no terminal take uploads (the composer's attachments).
   - Tests: `conversation::thread::tests::doors::*` and the attachment, queue and `/compact` tests
     in `tests::composing`; `review::tests::a_refused_keep_says_why_on_its_hunk`;
     `codex::form::tests::*`; `a_queued_message_waits_for_the_turn_and_goes_as_the_next` and
@@ -1389,7 +1389,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_stopped_turn_fails_by_what_stopped_it`.
 
 - ✅ **A queued message can be moved in the list or sent now** (2026-10-04, from the T3 Code
-  study's queue controls). Two intents on the thread wire, for the UI to offer later:
+  study's queue controls). *`Reorder` was deleted the same day ("Sleep, waits on another
+  thread, queue reordering and edited allows are gone"); `Promote` stays, and now reads
+  `Cap::QUEUE`, as the tray's "Send now" does; the tests named below predate the deletion.*
+  Two intents on the thread wire, as built:
   - `Reorder { pending, before }` moves a message that has not gone to just before another,
     or to the end (`Cap::QUEUE`). Queued messages go in the list's order. One rule serves every
     adapter (`Pending::reorder`): a message or mark no longer in the list is refused and moves

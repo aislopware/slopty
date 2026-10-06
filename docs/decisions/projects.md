@@ -1778,24 +1778,9 @@ follow-up)
   subagents already, under their own ids.
 - Test: `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).
 
-**A task's thread put to sleep holds no place, but stays its task's.** ✅ 2026-10-04
-- An agent put to sleep has ended, with its session kept so the next message wakes it. Its
-  task's thread therefore no longer counts against the live limits (`Board::live_seats`
-  skips it), and a subagent put to sleep has stopped as a native.
-- It is not gone. Its row stays in the table, so its assignment holds and the task keeps
-  its agent. Waking takes the place back.
-- Tests: `an_asleep_thread_counts_as_no_live_agent_and_stays_on_its_task` and
-  `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).
-
-**A thread put to sleep is no news, and stands below idle.** ✅ 2026-10-04
-- The person puts an agent to sleep at rest. Its turn finished before that, and the Finished
-  notice went then, so the ladder sends no notice when a thread goes to `Rung::Sleeping`.
-  That holds even for a thread that slept straight from work (`moved` rules the arm
-  explicitly). Sleep still ends the stretch the thread was busy for.
-- A root's rung starts from its own rung and rises with its family's. A default once stood in
-  for an empty family and lifted a sleeping root to idle, so a thread put to sleep from work
-  read as finished. That default is gone.
-- Test: `a_thread_put_to_sleep_is_no_news` (`hub::ladder`).
+**A task's thread put to sleep holds no place, and a thread put to sleep is no news.** ❌
+2026-10-04. *Deleted the same day with sleep itself: see "Sleep, waits on another thread, queue
+reordering and edited allows are gone" in `agents.md`.*
 
 **The person commits, pushes and opens a pull request from any thread.** ✅ 2026-10-04
 - Before: only a project's task had a way to its branch's end (`TaskPush`, the merge queue).

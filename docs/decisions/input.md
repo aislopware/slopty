@@ -133,10 +133,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   GPUI names no side, so the left key stands for both) carrying the new state as `mods`; an
   unchanged state sends nothing. The fn key stays local: forwarding it would fire the host's
   own fn setting (emoji picker, dictation) every time a client pressed it for a function key.
-  Not done: releasing modifiers when the view loses focus while one is down (⌘-tab away with
-  ⌘ held) — the release does arrive from GPUI when the key goes up in this window, and a
-  focus-loss sweep belongs with a sweep of `held` too. Test: headless
-  `modifier_keys_go_to_the_worker_as_they_move`.
+  Focus leaving the view, or the window going inactive (⌘-tab away with ⌘ held), releases
+  every key and button held on the worker (`let_go`). Tests: headless
+  `modifier_keys_go_to_the_worker_as_they_move` and
+  `losing_focus_releases_what_is_held_on_the_worker`.
 
 - ✅ **A window card's grip resizes the host window** (2026-09-13). Dragging a card's grip only
   changed the card, and the next `Geometry` event snapped it back to the window's aspect;
