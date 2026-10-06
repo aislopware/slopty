@@ -255,6 +255,13 @@ async fn read_requests(
                     tracing::debug!("ignored where the person is, from no person's client");
                 }
             }
+            Ok(ToServer::PushDevice { client, device }) => {
+                if let Some(link) = seat {
+                    hub.push_device(link, client, device);
+                } else {
+                    tracing::debug!("ignored a phone, from no person's client");
+                }
+            }
             Ok(_other) => tracing::debug!("ignored a message a client does not send"),
             Err(e) => return e,
         }

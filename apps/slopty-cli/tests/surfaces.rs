@@ -150,6 +150,7 @@ mod tests {
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().to_path_buf(),
             admission: Admission::default(),
+            push: slopty_server::PushConfig::Off,
         })
         .await
         .unwrap();

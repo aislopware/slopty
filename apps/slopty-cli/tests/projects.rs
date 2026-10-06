@@ -184,6 +184,7 @@ mod tests {
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: root.join("server"),
             admission: slopty_net::admission::Admission::default(),
+            push: slopty_server::PushConfig::Off,
         })
         .await
         .unwrap();

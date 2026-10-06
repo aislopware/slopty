@@ -13,6 +13,11 @@
 //! no client when the thread's tile is on screen where the person is, to the desks they are at when
 //! they are at one, to the handhelds they hold when not, and to every client when they are at none.
 //!
+//! When a notice finds the person at none of their clients, it is pushed as well to every phone
+//! that gave the server a device and is not listening on a live link ([`Phones`],
+//! `slopty_proto::push`): sealed to the phone, through the relay or straight to APNs
+//! ([`crate::push`]).
+//!
 //! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
 //! request's checks failing, its verifier or a step for it failing (a rebase that conflicts
 //! among them), or the push after its merge not going. It is one notice per timeline entry,
@@ -22,24 +27,26 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use slopty_agent::status::{AgentStatus, BlockReason};
-use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{TermAgent, TermRef};
 use slopty_proto::project::{
     AgentReport, ChecksState, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep,
     TimelineEntry,
 };
+use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::server::FromServer;
 use slopty_proto::thread::attention::{
     Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, Subject,
     ThreadAt, Via,
 };
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
-use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId, Wait};
-use tokio::sync::{Notify, broadcast, mpsc};
+use slopty_proto::thread::{AgentId, AskId, Liveness, Phase, Request, ThreadId, Wait};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 use super::awake::{Awake, Hold, Policy as KeepAwake};
 use super::{Hub, State, WeakHub};
 use crate::project::{Kept, Projects};
+use crate::push::Outgoing;
 
 /// The rows every worker published, the ladder made of them, and the clients the person may
 /// be at.
@@ -70,6 +77,53 @@ pub(super) struct Board {
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
     /// The hold on the server's machine that the seats and the tables imply.
     awake: Awake,
+    /// The phones notices are pushed to when the person is at no client.
+    phones: Phones,
+}
+
+/// The phones the server may push to, and where their pushes go.
+#[derive(Debug, Default)]
+struct Phones {
+    /// Each phone, by its client.
+    devices: Devices,
+    /// Where pushes go to be sealed and sent: none while pushing is off.
+    out: Option<mpsc::Sender<Outgoing>>,
+    /// Where the devices go to be kept ([`crate::store::PushStore`]).
+    kept: Option<watch::Sender<Devices>>,
+}
+
+/// The phones the server may push to, by their clients.
+pub type Devices = BTreeMap<ClientId, PushDevice>;
+
+impl Phones {
+    /// Hand every device to the keeper.
+    fn keep(&self) {
+        if let Some(kept) = &self.kept {
+            kept.send_replace(self.devices.clone());
+        }
+    }
+
+    /// Push `notice` to every phone not listening on a live link among `seats`, with `ask`,
+    /// the request its note's buttons answer; a finished turn shorter than a phone's quiet
+    /// time is not pushed to it, as that phone would not post it.
+    fn push(&self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
+        let Some(out) = &self.out else { return };
+        for (client, device) in &self.devices {
+            let listening = seats.values().any(|s| {
+                s.client == Some(*client) && s.presence.as_ref().is_none_or(|p| p.listening)
+            });
+            let short = notice.kind == NoticeKind::Finished
+                && notice.worked_ms.is_some_and(|ms| ms < device.quiet_ms);
+            if listening || short {
+                continue;
+            }
+            let body = PushBody { notice: notice.clone(), ask: ask.cloned() };
+            let push = Outgoing { client: *client, device: device.clone(), body };
+            if out.try_send(push).is_err() {
+                tracing::debug!(%client, "a push found its queue full or gone");
+            }
+        }
+    }
 }
 
 /// A person's client link.
@@ -80,6 +134,8 @@ struct Sitting {
     tx: mpsc::Sender<FromServer>,
     /// Where the person is on it, once it said.
     presence: Option<Presence>,
+    /// The client, once it said it is a phone the server may push to.
+    client: Option<ClientId>,
 }
 
 impl Board {
@@ -415,7 +471,7 @@ impl Hub {
     #[must_use]
     pub fn seat(&self, link: u64, name: String, tx: mpsc::Sender<FromServer>) -> Seated {
         let mut state = self.inner.state.lock();
-        state.board.seats.insert(link, Sitting { name, tx, presence: None });
+        state.board.seats.insert(link, Sitting { name, tx, presence: None, client: None });
         state.board.settle_awake();
         drop(state);
         Seated { hub: self.downgrade(), link }
@@ -431,6 +487,70 @@ impl Hub {
         seat.presence = Some(presence);
         self.announce(FromServer::Present(state.board.present()));
         drop(state);
+    }
+
+    /// The phone the client `client` is, as it said on `link`: one the server may push to,
+    /// or, with no `device`, no longer. A device token another client gave before is that
+    /// client's no more: the phone was set up again.
+    pub fn push_device(&self, link: u64, client: ClientId, device: Option<PushDevice>) {
+        let mut state = self.inner.state.lock();
+        let board = &mut state.board;
+        if let Some(seat) = board.seats.get_mut(&link) {
+            seat.client = Some(client);
+        }
+        let phones = &mut board.phones;
+        let before = phones.devices.clone();
+        match device {
+            Some(device) if slopty_push::apns::is_token(&device.token) => {
+                phones.devices.retain(|c, d| *c == client || d.token != device.token);
+                phones.devices.insert(client, device);
+            }
+            Some(_) => {
+                tracing::debug!(%client, "ignored a phone whose token is no device token");
+            }
+            None => {
+                phones.devices.remove(&client);
+            }
+        }
+        if phones.devices != before {
+            phones.keep();
+        }
+        drop(state);
+    }
+
+    /// Forget the phone of `client` while its token is still `token`: APNs said it is gone.
+    pub fn forget_device(&self, client: ClientId, token: &str) {
+        let mut state = self.inner.state.lock();
+        let phones = &mut state.board.phones;
+        if phones.devices.get(&client).is_some_and(|d| d.token == token) {
+            phones.devices.remove(&client);
+            phones.keep();
+        }
+        drop(state);
+    }
+
+    /// Take `devices`, the phones a store kept by their clients, and say every change to them
+    /// on the returned receiver from now on, for the store to keep.
+    pub fn keep_devices(&self, devices: Devices) -> watch::Receiver<Devices> {
+        let mut state = self.inner.state.lock();
+        let phones = &mut state.board.phones;
+        phones.devices = devices;
+        let (kept, changes) = watch::channel(phones.devices.clone());
+        phones.kept = Some(kept);
+        drop(state);
+        changes
+    }
+
+    /// The phones the server may push to, by their clients.
+    #[must_use]
+    pub fn devices(&self) -> Devices {
+        self.inner.state.lock().board.phones.devices.clone()
+    }
+
+    /// Push notices to phones through `out` from now on; with none, push none. The queue
+    /// before it closes, so what sent from it ends.
+    pub fn push_to(&self, out: Option<mpsc::Sender<Outgoing>>) {
+        self.inner.state.lock().board.phones.out = out;
     }
 
     /// The ladder as last published.
@@ -489,8 +609,8 @@ impl Hub {
         let notices = moved(&mut state.board, &ladder, &state.projects);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
-        for notice in notices {
-            send(&state.board.seats, &notice);
+        for (notice, ask) in notices {
+            tell(&state.board, &notice, ask.as_ref());
         }
         drop(guard);
     }
@@ -499,17 +619,23 @@ impl Hub {
 /// A project's change that holds its work up goes to the person as a notice, where they are.
 pub(super) fn tell_project(state: &State, kept: &Kept) {
     if let Some(notice) = project_notice(&state.projects, kept) {
-        send(&state.board.seats, &notice);
+        tell(&state.board, &notice, None);
     }
 }
 
-/// Send `notice` to the links [`route`] picks among `seats`.
-fn send(seats: &BTreeMap<u64, Sitting>, notice: &Notice) {
-    for link in route(seats, notice) {
-        let Some(seat) = seats.get(&link) else { continue };
+/// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
+/// phones when it finds the person at none of them, with `ask`, the request its note's buttons
+/// answer.
+fn tell(board: &Board, notice: &Notice, ask: Option<&AskId>) {
+    let reach = route(&board.seats, notice);
+    for link in &reach.links {
+        let Some(seat) = board.seats.get(link) else { continue };
         if seat.tx.try_send(FromServer::Notice(Box::new(notice.clone()))).is_err() {
             tracing::debug!(link, "a notice found its link full or gone");
         }
+    }
+    if reach.away {
+        board.phones.push(&board.seats, notice, ask);
     }
 }
 
@@ -735,9 +861,13 @@ fn ladder(
 }
 
 /// The notices `ladder` makes against the one `board` published, keeping how long each
-/// thread has been busy. A project task's agent that finished says nothing: what it made
-/// reaches the person as work ready to merge, and its orchestrator hears of the rest.
-fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Notice> {
+/// thread has been busy, each with the request its note's buttons answer: a thread's own
+/// first, when it needs the person for a plain yes or no ([`RequestCard::answerable`]). A
+/// project task's agent that finished says nothing: what it made reaches the person as work
+/// ready to merge, and its orchestrator hears of the rest.
+///
+/// [`RequestCard::answerable`]: slopty_proto::thread::wire::RequestCard::answerable
+fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice, Option<AskId>)> {
     let before: HashMap<ThreadAt, Rung> =
         board.published.threads.iter().map(|r| (r.at, r.rung)).collect();
     let busy = |rung: Rung| matches!(rung, Rung::Working | Rung::Waiting);
@@ -775,7 +905,12 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Notice>
             table.values().filter(|r| r.id != row.id && root_of(table, r) == row.id).collect();
         let (_, from) = source(row, &family);
         let via = (from.id != row.id).then(|| Via { thread: from.id, title: from.title.clone() });
-        notices.push(Notice {
+        let ask = row
+            .requests
+            .first()
+            .filter(|r| kind == NoticeKind::NeedsYou && via.is_none() && r.answerable());
+        let ask = ask.map(|r| r.id.clone());
+        let notice = Notice {
             kind,
             about: Subject::Thread(now.at),
             tile: row.terminal.map(|session| TermRef { worker: now.at.worker, session }),
@@ -783,7 +918,8 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Notice>
             text: text(kind, from),
             worked_ms: (kind == NoticeKind::Finished).then_some(worked_ms).flatten(),
             via,
-        });
+        };
+        notices.push((notice, ask));
     }
     let standing: Vec<ThreadAt> = ladder.threads.iter().map(|r| r.at).collect();
     board.busy.retain(|at, _| standing.binary_search(at).is_ok());
@@ -803,8 +939,18 @@ fn text(kind: NoticeKind, row: &ThreadRow) -> String {
     }
 }
 
-/// The links `notice` goes to among `seats`.
-fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Vec<u64> {
+/// Where a notice goes.
+#[derive(Debug, PartialEq, Eq)]
+struct Reach {
+    /// The links it is sent on.
+    links: Vec<u64>,
+    /// Whether it finds the person at none of them: its tile shown nowhere and no client in
+    /// use, so it goes to every link and the phones are pushed.
+    away: bool,
+}
+
+/// Where `notice` goes among `seats`.
+fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Reach {
     let tile = notice.tile;
     let at = |seat: Option<Seat>| {
         seats
@@ -820,17 +966,17 @@ fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Vec<u64> {
         .filter_map(|s| s.presence.as_ref())
         .any(|p| p.active && tile.is_some_and(|t| p.showing.contains(&t) || p.focus == Some(t)));
     if shown {
-        return Vec::new();
+        return Reach { links: Vec::new(), away: false };
     }
     let desks = at(Some(Seat::Desk));
     if !desks.is_empty() {
-        return desks;
+        return Reach { links: desks, away: false };
     }
     let held = at(Some(Seat::Handheld));
     if !held.is_empty() {
-        return held;
+        return Reach { links: held, away: false };
     }
-    seats.keys().copied().collect()
+    Reach { links: seats.keys().copied().collect(), away: true }
 }
 
 #[cfg(test)]

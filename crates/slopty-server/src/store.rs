@@ -1,6 +1,8 @@
-//! The server's state files: the last-known info of every worker, so a restarted server
-//! lists them (as gone) before they re-register, and every project whole
-//! ([`ProjectStore`]).
+//! The server's state files.
+//!
+//! They hold the last-known info of every worker, so a restarted server lists them (as gone)
+//! before they re-register, every project whole ([`ProjectStore`]), and the phones it pushes
+//! to with this install's key for the relay ([`PushStore`]).
 //!
 //! Each file is replaced whole ([`slopty_platform::fs::replace`]), so a crash leaves the old
 //! one or the new one. One that does not parse is set aside under a name of its own and read
@@ -14,8 +16,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slopty_proto::server::WorkerInfo;
+use slopty_push::relay::InstallKey;
 use tokio::sync::{mpsc, watch};
 
+use crate::hub::Devices;
 use crate::project::{Keep, ProjectsFile};
 
 /// The file's name in the server's data directory.
@@ -24,6 +28,10 @@ pub const FILE: &str = "workers.json";
 pub const PROJECTS_FILE: &str = "projects.json";
 /// The log of project changes past the snapshot, beside it.
 pub const PROJECTS_LOG: &str = "projects.log";
+/// The phones the server pushes to, beside [`FILE`].
+pub const PUSH_FILE: &str = "push.json";
+/// This install's key for the relay, beside [`FILE`], readable by its owner only.
+pub const PUSH_KEY: &str = "push.key";
 /// How long the projects keeper waits after a change for more before it writes: an agent's
 /// burst of hooks costs one write.
 pub const PROJECTS_SETTLE: Duration = Duration::from_millis(250);
@@ -228,6 +236,93 @@ impl ProjectStore {
     }
 }
 
+/// The phones the server pushes to ([`PUSH_FILE`]) and this install's key for the relay
+/// ([`PUSH_KEY`]), made on first use and never written again.
+#[derive(Clone, Debug)]
+pub struct PushStore {
+    path: PathBuf,
+    key: PathBuf,
+}
+
+impl PushStore {
+    /// The store in `dir` (created on the first save).
+    #[must_use]
+    pub fn in_dir(dir: &Path) -> Self {
+        Self { path: dir.join(PUSH_FILE), key: dir.join(PUSH_KEY) }
+    }
+
+    /// Its devices' path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The phones it holds: none when there is no file. One that does not parse is set aside
+    /// as `push.json.bad-<ms>` and read as none.
+    ///
+    /// # Errors
+    /// The file is there and cannot be read, or cannot be set aside.
+    pub async fn load(&self) -> io::Result<Devices> {
+        load(&self.path).await
+    }
+
+    /// Replace the file with `devices`.
+    ///
+    /// # Errors
+    /// The file cannot be written.
+    pub async fn save(&self, devices: &Devices) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(devices).map_err(io::Error::other)?;
+        write(&self.path, json).await
+    }
+
+    /// Save every change `changes` says until its sender goes away; changes that arrive during
+    /// a write collapse into the latest.
+    pub async fn keep(self, mut changes: watch::Receiver<Devices>) {
+        while changes.changed().await.is_ok() {
+            let devices = changes.borrow_and_update().clone();
+            if let Err(e) = self.save(&devices).await {
+                tracing::warn!(path = %self.path.display(), error = %e, "phones not saved");
+            }
+        }
+    }
+
+    /// This install's key: the one kept, else a new one, kept from now on where only this
+    /// user reads it. One that is not a key is set aside as `push.key.bad-<ms>` and replaced,
+    /// which costs the relay's binding of each phone to it a slot.
+    ///
+    /// # Errors
+    /// The file cannot be read, set aside or written, or the system's random source fails.
+    pub async fn install_key(&self) -> io::Result<InstallKey> {
+        match tokio::fs::read(&self.key).await {
+            Ok(bytes) => {
+                if let Ok(bytes) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    return Ok(InstallKey::from_bytes(&bytes));
+                }
+                let aside = aside(&self.key).await;
+                tracing::warn!(aside = %aside.display(), "the relay key is not one; set aside");
+                tokio::fs::rename(&self.key, &aside).await?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let key = InstallKey::generate().map_err(io::Error::other)?;
+        let (path, bytes) = (self.key.clone(), key.to_bytes());
+        let made = tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut file =
+                std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()
+        });
+        made.await.map_err(io::Error::other)??;
+        Ok(key)
+    }
+}
+
 /// Append `bytes` to the file at `path` and flush them to the disk, on a blocking thread.
 async fn append(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
     use std::io::Write as _;
@@ -336,6 +431,54 @@ mod tests {
         assert_eq!(left, [FILE], "the temporary is renamed");
     }
 
+    /// The phones a server pushes to outlive it, and its key for the relay is made once,
+    /// readable by its owner only, and the same on every start; one that is not a key is set
+    /// aside for a new one.
+    #[tokio::test]
+    async fn the_phones_and_the_relay_key_outlive_the_server() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use slopty_core::ClientId;
+        use slopty_proto::push::PushDevice;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = PushStore::in_dir(&dir.path().join("server"));
+        assert!(store.load().await.unwrap().is_empty(), "no file yet");
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let keeper = tokio::spawn(store.clone().keep(hub.keep_devices(Devices::new())));
+        let (tx, _rx) = mpsc::channel(8);
+        let link = hub.number_link();
+        let seated = hub.seat(link, "phone".to_owned(), tx);
+        let client = ClientId::new();
+        let device = PushDevice {
+            token: "ab".repeat(32),
+            key: [3; 32],
+            sandbox: false,
+            topic: "dev.aislopware.slopty".to_owned(),
+            quiet_ms: 30_000,
+        };
+        hub.push_device(link, client, Some(device.clone()));
+        drop(seated);
+        drop(hub);
+        keeper.await.unwrap();
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.get(&client), Some(&device), "the phone is kept");
+
+        let key = store.install_key().await.unwrap();
+        let path = dir.path().join("server").join(PUSH_KEY);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "only its owner reads it");
+        assert_eq!(store.install_key().await.unwrap().public(), key.public(), "the same key");
+        std::fs::write(&path, b"short").unwrap();
+        let new = store.install_key().await.unwrap();
+        assert_ne!(new.public(), key.public(), "one that is no key is replaced");
+        let aside = std::fs::read_dir(dir.path().join("server"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".bad-"))
+            .count();
+        assert_eq!(aside, 1, "and set aside");
+    }
+
     /// Projects outlive the server: its keeper writes them after each change, and a server
     /// started again on the same directory has every project whole, timeline and all.
     #[tokio::test]
@@ -350,6 +493,7 @@ mod tests {
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().join("server"),
             admission: slopty_net::admission::Admission::default(),
+            push: crate::PushConfig::Off,
         };
         let id = ProjectId::new("slopty").unwrap();
         let status = |hub: Hub| {
@@ -455,6 +599,7 @@ mod tests {
             mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: data_dir.clone(),
             admission: slopty_net::admission::Admission::default(),
+            push: crate::PushConfig::Off,
         };
         let started = crate::Server::start(config).await;
         let Err(crate::ServerError::State { path, .. }) = started else {

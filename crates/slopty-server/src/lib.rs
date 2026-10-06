@@ -7,7 +7,8 @@
 //!
 //! * [`hub`] — the registry, the leases and the one verb dispatch.
 //! * [`project`] — projects: their records, path claims, placement, and how agents move tasks.
-//! * [`store`] — the state files: known workers and every project, across restarts.
+//! * [`store`] — the state files: known workers, every project and the phones, across restarts.
+//! * [`push`] — notices pushed to pocketed phones, through the relay or straight to APNs.
 //! * [`link`] — the QUIC front end.
 //! * [`mcp`] — the MCP front end (Streamable HTTP).
 
@@ -24,6 +25,7 @@ pub mod link;
 pub mod mcp;
 mod placement;
 pub mod project;
+pub mod push;
 pub mod store;
 
 use std::net::SocketAddr;
@@ -33,9 +35,10 @@ pub use hub::{
     Acting, GONE_AFTER, Hold, Hub, KeepAwake, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS,
 };
 pub use mcp::Mcp;
+pub use push::PushConfig;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
-pub use store::{ProjectStore, Store};
+pub use store::{ProjectStore, PushStore, Store};
 use tokio::task::JoinHandle;
 
 /// Log whether this machine serves as a Tailscale peer relay: the server's machine is always
@@ -49,6 +52,53 @@ async fn say_relay(api: slopty_tailnet::LocalApi) {
         ),
         Err(e) => tracing::debug!(error = %e, "tailscale prefs"),
     }
+}
+
+/// Push notices to phones as `config` says from now on.
+///
+/// It goes through the relay, with this install's key from the store in `data_dir`, or
+/// straight to APNs, or nowhere when it is off. What was pushing before stops once its last
+/// push is sent.
+///
+/// # Errors
+/// [`ServerError::Push`] when the system's certificates cannot be used, [`ServerError::State`]
+/// when the install's key cannot be read or made.
+pub async fn push_as(
+    hub: &Hub,
+    config: PushConfig,
+    data_dir: &std::path::Path,
+) -> Result<(), ServerError> {
+    let Some(pusher) = pusher(config, &PushStore::in_dir(data_dir)).await? else {
+        hub.push_to(None);
+        return Ok(());
+    };
+    let (out, queue) = tokio::sync::mpsc::channel(push::QUEUE);
+    hub.push_to(Some(out));
+    // It ends when the hub drops its end: pushing set up again, or the server gone.
+    tokio::spawn(push::deliver(hub.downgrade(), queue, pusher));
+    Ok(())
+}
+
+/// What sends pushes as `config` says, with this install's key from `phones` for a relay; none
+/// when pushing is off.
+async fn pusher(
+    config: PushConfig,
+    phones: &PushStore,
+) -> Result<Option<std::sync::Arc<dyn push::Pusher>>, ServerError> {
+    Ok(Some(match config {
+        PushConfig::Off => return Ok(None),
+        PushConfig::Relay { url } => {
+            let key = phones.install_key().await.map_err(|source| ServerError::State {
+                path: phones.path().with_file_name(store::PUSH_KEY),
+                source,
+            })?;
+            std::sync::Arc::new(push::RelayPusher::new(&url, key, push::Https::new()?))
+        }
+        PushConfig::Direct(key) => {
+            std::sync::Arc::new(push::DirectPusher::new(key, push::Https::new()?))
+        }
+        PushConfig::Through(pusher) => pusher,
+    }))
 }
 
 /// Server errors.
@@ -65,6 +115,9 @@ pub enum ServerError {
         /// Why.
         source: std::io::Error,
     },
+    /// Pushing to phones could not be set up.
+    #[error("push: {0}")]
+    Push(#[from] push::SetupError),
     /// A state file could not be read: the server does not start rather than write over it.
     #[error("state file {path}: {source}")]
     State {
@@ -88,6 +141,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Who may connect, on both listeners.
     pub admission: Admission,
+    /// How notices reach a pocketed phone.
+    pub push: PushConfig,
 }
 
 /// A running server: both listeners, the registry and its state file.
@@ -116,6 +171,10 @@ impl Server {
         let kept = projects.load().await.map_err(unreadable(projects.path()))?;
         hub.adopt_projects(kept.clone());
         let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));
+        let phones = PushStore::in_dir(&config.data_dir);
+        let devices = phones.load().await.map_err(unreadable(phones.path()))?;
+        let devices = hub.keep_devices(devices);
+        push_as(&hub, config.push, &config.data_dir).await?;
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
         let mcp_listener = mcp::bind(config.mcp)
@@ -127,6 +186,7 @@ impl Server {
             tokio::spawn(say_relay(api));
         }
         let tasks = vec![
+            tokio::spawn(phones.keep(devices)),
             tokio::spawn(store.clone().keep(hub.persisted())),
             tokio::spawn(Hub::deliver_reports(hub.downgrade())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
@@ -135,6 +195,7 @@ impl Server {
             tokio::spawn(Hub::watch_checks(hub.downgrade())),
             tokio::spawn(Hub::settle_finished(hub.downgrade())),
         ];
+
         tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
         Ok(Self { hub, listener, quic, mcp, store, tasks, keeper })
     }

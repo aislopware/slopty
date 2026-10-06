@@ -13,11 +13,18 @@ workspace = true
 [dependencies]
 # Digests of keyed verbs (`hub`).
 blake3.workspace = true
+# The HTTP/2 client pushes go out on (`push`).
+bytes.workspace = true
+http-body-util.workspace = true
 # Placement rules over the workers' facts (`placement`).
-hyper.workspace = true
-hyper-util.workspace = true
+hyper = { workspace = true, features = [ "client", "http2" ] }
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = [ "client-legacy", "http2" ] }
 parking_lot.workspace = true
 rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }
+# TLS for pushes: ring builds for the musl server with no C toolchain; the system's checks.
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
 # The projects file's records (`project`).
 serde.workspace = true
 serde_json.workspace = true
@@ -29,6 +36,8 @@ slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-tailnet.workspace = true
 slopty-proto.workspace = true
+# Sealing a notice to a phone, and the relay's and APNs' requests (`push`).
+slopty-push.workspace = true
 slopty-tools.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
@@ -36,8 +45,11 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The stand-in relay and APNs of `tests/push.rs`: HTTP/2 over TLS on loopback.
+rcgen.workspace = true
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 # The `*_cost` measurements (`cargo xtask bench`).
 slopty-testkit.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }
+tokio-rustls.workspace = true

@@ -38,6 +38,7 @@ slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
 slopty-agent = { path = "crates/slopty-agent" }
 slopty-settings = { path = "crates/slopty-settings" }
+slopty-push = { path = "crates/slopty-push" }
 slopty-server = { path = "crates/slopty-server" }
 slopty-tools = { path = "crates/slopty-tools" }
 slopty-deploy = { path = "crates/slopty-deploy" }
@@ -94,6 +95,17 @@ hyper = { version = "1.11.1", features = [ "server", "http1" ] }
 hyper-util = { version = "0.1.20", features = [ "tokio" ] }
 # A response's whole body, for the LocalAPI client (`slopty_tailnet`).
 http-body-util = "0.1.5"
+# The server's HTTPS client for push (rustls on ring, the system's roots), and its tests'
+# stand-ins (a relay and APNs over TLS on loopback).
+rustls = { version = "0.23.45", default-features = false, features = [ "ring", "std", "tls12" ] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = [
+    "ring",
+    "http2",
+    "tls12",
+] }
+rustls-platform-verifier = "0.7.1"
+tokio-rustls = { version = "0.26.6", default-features = false, features = [ "ring", "tls12" ] }
+rcgen = { version = "0.14.10", default-features = false, features = [ "crypto", "pem", "ring" ] }
 camino = { version = "1.2.6", features = [ "serde1" ] }
 # A password the person types for an SSH host, held until `ssh`'s askpass takes it and wiped
 # when dropped; its `Debug` never shows it (`slopty_deploy`).

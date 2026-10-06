@@ -450,3 +450,152 @@ async fn held_up_work_is_said_by_what_held_it() {
         Some("merged into main, but the push to origin failed: rejected (non-fast-forward)")
     );
 }
+
+/// A pusher that answers every push with what it was given, and counts them.
+#[derive(Debug)]
+struct Answering(slopty_push::apns::Outcome, std::sync::atomic::AtomicUsize);
+
+impl crate::push::Pusher for Answering {
+    fn push<'a>(
+        &'a self,
+        _push: &'a slopty_push::apns::Push,
+        _topic: &'a str,
+    ) -> crate::push::PushFuture<'a> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::ready(self.0.clone()))
+    }
+}
+
+/// A notice that finds the person at no client is pushed to a phone whose link is gone, once
+/// per moment: a thread needing them for a plain yes or no carries its ask, urgent. Nothing is
+/// pushed while they are at a desk, nor to a phone still listening on its link, but one that
+/// said it stops listening is pushed to. A finished turn shorter than the phone's quiet time
+/// is not pushed. A phone that withdraws, or that APNs says is gone, is forgotten.
+#[tokio::test]
+async fn needs_you_pushes_once_per_ask() {
+    use slopty_proto::push::PushDevice;
+    use slopty_proto::thread::{Choice, Effect};
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let kept = hub.keep_devices(Devices::new());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let (shell, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub
+        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let rank = |rows: Vec<ThreadRow>| {
+        lease.handle(delta(rows));
+        hub.rank_ladder();
+    };
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push);
+        }
+        out
+    };
+
+    let mac = Client::sit(&hub, "mac");
+    mac.at(&hub, Seat::Desk, false, Vec::new());
+    let (phone, client) = (Client::sit(&hub, "phone"), ClientId::new());
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 60_000,
+    };
+    hub.push_device(phone.seated.link(), client, Some(device.clone()));
+    assert_eq!(kept.borrow().get(&client), Some(&device), "kept for the next start");
+    let odd = PushDevice { token: "not hex".to_owned(), ..device.clone() };
+    hub.push_device(Client::sit(&hub, "odd").seated.link(), ClientId::new(), Some(odd));
+    assert_eq!(hub.devices().len(), 1, "a token that is no token is no phone");
+
+    let thread = row(Phase::Working, 1_000, Some(shell));
+    lease.handle(snapshot(vec![thread.clone()]));
+    hub.rank_ladder();
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let mut needs = asking(moved(&thread, Phase::NeedsYou, 2_000), "Run cargo test?");
+    needs.requests[0].kind = Request::APPROVAL.to_owned();
+    needs.requests[0].options = vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)];
+    phone.at(&hub, Seat::Handheld, false, Vec::new());
+    rank(vec![needs.clone()]);
+    assert!(pushes().is_empty(), "a phone listening on its link hears it there");
+
+    rank(vec![moved(&thread, Phase::Working, 3_000)]);
+    let gone = Presence {
+        seat: Seat::Handheld,
+        active: false,
+        workspace: None,
+        showing: Vec::new(),
+        focus: None,
+        listening: false,
+    };
+    hub.presence(phone.seated.link(), gone);
+    rank(vec![needs.clone()]);
+    let first = pushes();
+    assert_eq!(first.len(), 1, "a phone that stopped listening is pushed to");
+    let push = &first[0];
+    assert_eq!((push.client, &push.device), (client, &device));
+    assert_eq!(push.body.notice.kind, NoticeKind::NeedsYou);
+    assert_eq!(push.body.notice.text, "Run cargo test?");
+    assert_eq!(push.body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
+    assert!(crate::push::sealed(push).unwrap().urgent);
+    hub.rank_ladder();
+    rank(vec![needs.clone()]);
+    assert!(pushes().is_empty(), "nothing moved, nothing pushed");
+
+    rank(vec![moved(&thread, Phase::Working, 4_000)]);
+    mac.at(&hub, Seat::Desk, true, Vec::new());
+    rank(vec![needs.clone()]);
+    assert!(pushes().is_empty(), "the person at a desk hears it there");
+    mac.at(&hub, Seat::Desk, false, Vec::new());
+
+    rank(vec![moved(&thread, Phase::Working, 5_000)]);
+    rank(vec![moved(&thread, Phase::Done, 30_000)]);
+    assert!(pushes().is_empty(), "a turn under the phone's quiet time");
+    rank(vec![moved(&thread, Phase::Working, 31_000)]);
+    rank(vec![moved(&thread, Phase::Done, 200_000)]);
+    let finished = pushes();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].body.notice.kind, NoticeKind::Finished);
+    assert_eq!(finished[0].body.ask, None);
+    assert!(!crate::push::sealed(&finished[0]).unwrap().urgent);
+
+    drop(phone);
+    rank(vec![needs.clone()]);
+    let queued = pushes();
+    assert_eq!(queued.len(), 1, "a phone whose link is gone");
+    let (queue_out, queue) = mpsc::channel(8);
+    let answering = Arc::new(Answering(
+        slopty_push::apns::Outcome::Gone,
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let pusher: Arc<dyn crate::push::Pusher> = Arc::<Answering>::clone(&answering);
+    let delivering = tokio::spawn(crate::push::deliver(hub.downgrade(), queue, pusher));
+    queue_out.send(queued[0].clone()).await.unwrap();
+    drop(queue_out);
+    delivering.await.unwrap();
+    for _ in 0..100 {
+        if hub.devices().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(answering.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(hub.devices().is_empty(), "APNs said it is gone");
+    assert!(kept.borrow().is_empty(), "and the store forgets it");
+
+    let again = Client::sit(&hub, "phone");
+    hub.push_device(again.seated.link(), client, Some(device));
+    hub.push_device(Client::sit(&hub, "other link").seated.link(), client, None);
+    assert!(hub.devices().is_empty(), "a phone withdraws on any link");
+}

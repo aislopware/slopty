@@ -70,7 +70,7 @@ mod settle;
 mod steps;
 
 pub use awake::{Hold, Policy as KeepAwake};
-pub use ladder::Seated;
+pub use ladder::{Devices, Seated};
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
 /// grace; `docs/decisions/topology.md`).
@@ -1442,7 +1442,7 @@ impl Lease {
             ToServer::Hello { .. }
             | ToServer::Request { .. }
             | ToServer::Presence(_)
-            | ToServer::PushDevice(_) => {
+            | ToServer::PushDevice { .. } => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
             }
         }
