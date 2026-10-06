@@ -10,9 +10,9 @@
 //! in it, is kept and said, and its branch goes only when every commit on it landed.
 //!
 //! A new worktree starts current: from its base branch as `origin` has it, fetched for a moment
-//! first, unless the clone holds commits `origin` lacks ([`base_of`]). The files the clone's
+//! first, unless the clone holds commits `origin` lacks (`base_of`). The files the clone's
 //! `.worktreeinclude` names that git ignores (`.env`, local certificates) are copied in, as
-//! Claude Code's own worktrees do, since a fresh checkout has none of them ([`carry_ignored`]).
+//! Claude Code's own worktrees do, since a fresh checkout has none of them (`carry_ignored`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -91,8 +91,8 @@ const WORKTREE_INCLUDE: &str = ".worktreeinclude";
 /// Make the worktree `name` of the clone rooted at `clone`, as Claude Code's `--worktree <name>`
 /// does.
 ///
-/// It is `.claude/worktrees/<name>` on branch `worktree-<name>`, from `base` ([`base_of`]),
-/// with the ignored files `.worktreeinclude` names copied in ([`carry_ignored`]). One there
+/// It is `.claude/worktrees/<name>` on branch `worktree-<name>`, from `base` (`base_of`),
+/// with the ignored files `.worktreeinclude` names copied in (`carry_ignored`). One there
 /// already is reopened as it is. Unlike Claude Code's, a branch of that name there already is
 /// checked out where it is, never reset to the base, so the work of a task tried again is kept.
 ///

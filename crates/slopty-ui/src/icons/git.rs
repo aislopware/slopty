@@ -41,7 +41,7 @@ pub enum GitGlyph {
 }
 
 impl GitGlyph {
-    /// Every glyph, in the order [`OUTLINES`] holds them.
+    /// Every glyph, in the order `OUTLINES` holds them.
     pub const ALL: [Self; 7] = [
         Self::Branch,
         Self::PullRequest,
