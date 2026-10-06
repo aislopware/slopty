@@ -727,6 +727,31 @@ impl Tiling {
         }
     }
 
+    /// Put `tile` back where it stood before it closed, `at` (its close taken back): a tab of
+    /// its pane when that is still there, else a new pane right of its tab's focused one; the
+    /// focus goes with it. Nothing when its tab has gone or holds it already.
+    pub fn put_back(&mut self, tile: TileRef, at: Pos) -> bool {
+        let Some((p, t)) = self.tab_place(at.tab) else { return false };
+        let holds = self.projects.get(p).and_then(|pr| pr.tabs.get(t)).map(|tab| tab.pane_of(tile));
+        if holds.flatten().is_some() {
+            return false;
+        }
+        self.remove(tile);
+        let id = self.pane_id();
+        let Some(project) = self.projects.get_mut(p) else { return false };
+        let Some(tab) = project.tab_mut(at.tab) else { return false };
+        let placed = if tab.pane(at.pane).is_some() {
+            tab.join(at.pane, tile)
+        } else {
+            let focus = tab.focus();
+            tab.split(focus, Side::Right, id, tile)
+        };
+        if placed {
+            self.focus(tile);
+        }
+        placed
+    }
+
     /// Put `tile` in a new tab of `home`'s project, after its shown one, on purpose ("Move to
     /// project…", a drop on a project's row, or on the title strip); the focus goes with it.
     pub fn move_to_project(&mut self, tile: TileRef, home: &GroupKey) {

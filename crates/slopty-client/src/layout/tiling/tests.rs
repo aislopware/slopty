@@ -544,3 +544,36 @@ fn a_tile_moves_to_another_project_on_purpose() {
     let atlas = &tiling.projects()[tiling.project_of(&home("atlas")).unwrap()];
     assert_eq!(atlas.tabs()[0].panes().count(), 1);
 }
+
+/// A close taken back puts the tile where it stood: a tab of its pane while that pane holds
+/// others, else a pane of its own in its tab; a tab since gone takes nothing.
+#[test]
+fn a_close_taken_back_goes_where_it_stood() {
+    let mut tiling = mac();
+    tiling.new_tab(t(1), &home("atlas"));
+    tiling.split_focused(t(2), Side::Right, &home("atlas"));
+    tiling.focus(t(1));
+    tiling.open_beside(t(3), &home("atlas"));
+    let at = tiling.position(t(3)).unwrap();
+    assert_eq!(at.pane, tiling.position(t(2)).unwrap().pane, "a tab of the pane beside");
+    // Its pane holds another: it comes back a tab there, from a tab of its own.
+    tiling.remove(t(3));
+    tiling.new_tab(t(3), &home("atlas"));
+    assert!(tiling.put_back(t(3), at));
+    assert_eq!(tiling.position(t(3)), Some(at));
+    assert_eq!(tiling.focused(), Some(t(3)));
+    assert_eq!(tiling.shown_project().unwrap().tabs().len(), 1, "the tab it came in went");
+    // Its pane went with it: a pane of its own, right of the focused one.
+    let lone = tiling.position(t(1)).unwrap();
+    tiling.remove(t(1));
+    tiling.new_tab(t(1), &home("atlas"));
+    assert!(tiling.put_back(t(1), lone));
+    let back = tiling.position(t(1)).unwrap();
+    assert_eq!(back.tab, lone.tab);
+    assert_eq!(tiling.shown_tab().unwrap().panes().count(), 2);
+    // Its tab went: nothing moves.
+    let gone = tiling.position(t(1)).unwrap();
+    let mut other = mac();
+    other.new_tab(t(1), &home("web"));
+    assert!(!other.put_back(t(1), gone), "no such tab here");
+}
