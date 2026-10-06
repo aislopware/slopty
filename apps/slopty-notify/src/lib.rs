@@ -7,10 +7,10 @@
 //! (`slopty_platform::notify::pushed`). On any failure it hands back what it was given, whose
 //! fixed words ("An agent needs you") the relay wrote.
 //!
-//! The bundle's `NSExtensionPrincipalClass` names [`Service`], which Foundation looks up by name
-//! as the extension starts. A class `define_class!` makes is registered on its first use, so an
-//! image initializer registers it as the binary loads, before anything looks; `main` does too,
-//! for a link that enters there.
+//! The bundle's `NSExtensionPrincipalClass` names `Service` (iOS only), which Foundation looks
+//! up by name as the extension starts. A class `define_class!` makes is registered on its first
+//! use, so an image initializer registers it as the binary loads, before anything looks; `main`
+//! does too, for a link that enters there.
 
 #![cfg(target_os = "ios")]
 

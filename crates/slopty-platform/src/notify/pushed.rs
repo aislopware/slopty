@@ -9,7 +9,7 @@
 //!
 //! The phone's side of the registration lives here too: the device token APNs gives the app
 //! ([`token_arrived`], [`tokens`]), and, on iOS, the key and the token kept in the Keychain
-//! where the extension reads them ([`device_key`], [`stored`]).
+//! where the extension reads them (`device_key`, `stored`, iOS only).
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -127,7 +127,7 @@ pub fn opened(enc: &str, sealed: &str, token: &str, key: &DeviceKey) -> Result<N
 static TOKEN: LazyLock<watch::Sender<Option<String>>> = LazyLock::new(|| watch::Sender::new(None));
 
 /// APNs gave the app `token` (the app delegate's `didRegisterForRemoteNotifications`): kept
-/// for the extension ([`remember_token`]) and handed to whoever follows [`tokens`].
+/// for the extension (`remember_token`, iOS only) and handed to whoever follows [`tokens`].
 pub fn token_arrived(token: &[u8]) {
     let hex = token.iter().fold(String::new(), |mut hex, b| {
         use std::fmt::Write as _;
