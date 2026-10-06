@@ -164,9 +164,10 @@ fn agent_with_chips(
     (tile, session)
 }
 
-/// A shell, an agent's shell with its chips, the agent's thread, a board, a file, a folder and
-/// a column of three tabs: at every width a column takes, nothing any of them draws lies past
-/// the tile's edges. A clipped send button or a chip run under the next column fails here.
+/// A shell, an agent's shell with its chips, the agent's thread, a board, a file, a folder, a
+/// folder's changes in review, a page, a remote window waiting and one that did not open, and a
+/// column of three tabs: at every width a column takes, nothing any of them draws lies past the
+/// tile's edges. A clipped send button or a chip run under the next column fails here.
 #[gpui::test]
 fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     let (view, cx) = still_workspace(app);
@@ -253,6 +254,42 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
 
     let (view, cx) = still_workspace(app);
     let studio = connect(&view, cx, 1, "studio");
+    let review = changes_in_review(&view, cx, studio);
+    contained(&view, cx, &review.0, review.1, "a folder's changes in review");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    cx.update(|window, _| window.activate_window());
+    let url = "http://127.0.0.1:5173/a/path/long/enough/to/run/past/any/narrow/column".to_owned();
+    let page = arrives(&view, cx, &studio, ItemKind::Browser { url }, 1);
+    view.update_in(cx, |v, window, cx| {
+        v.focus_tile(page, cx);
+        let view = v.browser(page.item).cloned().expect("a page view");
+        view.update(cx, |page, cx| page.open_stand_in(window, cx));
+    });
+    settle(cx);
+    contained(&view, cx, &studio, page, "a page");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let remote = arrives(&view, cx, &studio, ItemKind::Window { window }, 1);
+    cx.executor().advance_clock(crate::screen::LOADING_GRACE);
+    settle(cx);
+    assert!(cx.debug_bounds(selector("waiting", remote.item)).is_some(), "it says it is opening");
+    contained(&view, cx, &studio, remote, "a remote window opening");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        use slopty_proto::screen::{CaptureTarget, OpenAsk, ScreenEvent, ScreenFailure};
+        let asked = OpenAsk::Target(CaptureTarget::Window(window));
+        v.screen_event(key, ScreenEvent::OpenFailed { asked, why: ScreenFailure::Gone }, cx);
+    });
+    cx.executor().advance_clock(crate::screen::LOADING_GRACE);
+    settle(cx);
+    contained(&view, cx, &studio, remote, "a remote window that did not open");
+
+    let (view, cx) = still_workspace(app);
+    let studio = connect(&view, cx, 1, "studio");
     let tabs: Vec<TileRef> = (1..=3)
         .map(|version| opens(&view, cx, &studio, SessionId::new(), studio.me, version))
         .collect();
@@ -267,4 +304,60 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     settle(cx);
     let last = *tabs.last().expect("three tabs");
     contained(&view, cx, &studio, last, "a column of three tabs");
+}
+
+/// A folder's changes opened as a tile of their own, the worker's answer in: a file whose path
+/// runs on past a narrow column, with the scope bar and the file's head. The worker, then the
+/// tile.
+fn changes_in_review(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    mut studio: Fake,
+) -> (Fake, TileRef) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+    use slopty_proto::thread::Patch;
+    use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope};
+
+    use super::super::actions::ReviewChanges;
+
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let folder = arrives(view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
+    cx.run_until_parked();
+    studio.drain();
+    cx.dispatch_action(ReviewChanges);
+    settle(cx);
+    let sent = studio.drain();
+    let tile = sent.iter().find_map(|m| match m {
+        ClientMsg::Items(ItemOp::Add(item)) => Some(item.id),
+        _ => None,
+    });
+    let request = sent.iter().find_map(|m| match m {
+        ClientMsg::Git { request, op: GitOp::Changes { .. }, .. } => Some(*request),
+        _ => None,
+    });
+    let (Some(item), Some(request)) = (tile, request) else { panic!("a review asked: {sent:?}") };
+    let file = FileDiff {
+        path: "crates/a-crate-whose-name-runs-on/src/a-file-whose-name-runs-on-past-any-column.rs"
+            .to_owned(),
+        from: Some("old".to_owned()),
+        to: Some("new".to_owned()),
+        binary: false,
+        patch: Patch { hunks: Vec::new(), added: 12, removed: 3, clipped_lines: 0, full: None },
+    };
+    let review = Review {
+        scope: ReviewScope::WorkingTree(Against::Head),
+        from: None,
+        to: None,
+        files: vec![file],
+        absent: None,
+    };
+    let done = GitOutcome::Done(GitDone::Changes(Box::new(review)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, request, done, cx));
+    settle(cx);
+    assert!(cx.debug_bounds("review-head-0").is_some(), "the file shows");
+    let tile = TileRef { worker: key, item };
+    assert!(view.read_with(cx, |v, _| v.tile_bounds(tile)).is_some(), "a tile of its own");
+    (studio, tile)
 }
