@@ -335,28 +335,25 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "list_ports", ws::ListPorts, &[], W),
         c(Workspace, "rename_tile", ws::RenameItem, &["cmd-e"], W),
         c(Workspace, "search_in_files", ws::SearchInFiles, &["cmd-shift-f"], &[CTX, INPUT]),
-        c(Workspace, "focus_column_left", ws::FocusColumnLeft, &["cmd-alt-left"], W),
-        c(Workspace, "focus_column_right", ws::FocusColumnRight, &["cmd-alt-right"], W),
+        c(Workspace, "focus_left", ws::FocusLeft, &["cmd-alt-left"], W),
+        c(Workspace, "focus_right", ws::FocusRight, &["cmd-alt-right"], W),
         c(Workspace, "focus_up", ws::FocusUp, &["cmd-alt-up"], &[CTX, FILE_INPUT]),
         c(Workspace, "focus_down", ws::FocusDown, &["cmd-alt-down"], &[CTX, FILE_INPUT]),
-        c(Workspace, "move_column_left", ws::MoveColumnLeft, &["cmd-alt-shift-left"], W),
-        c(Workspace, "move_column_right", ws::MoveColumnRight, &["cmd-alt-shift-right"], W),
+        c(Workspace, "move_left", ws::MoveLeft, &["cmd-alt-shift-left"], W),
+        c(Workspace, "move_right", ws::MoveRight, &["cmd-alt-shift-right"], W),
         c(Workspace, "move_up", ws::MoveUp, &["cmd-alt-shift-up"], W),
         c(Workspace, "move_down", ws::MoveDown, &["cmd-alt-shift-down"], W),
-        // niri's Mod+Ctrl+Home/End; ⇧ stands for niri's Ctrl, as on the arrows.
-        c(Workspace, "move_column_to_first", ws::MoveColumnToFirst, &["cmd-alt-shift-home"], W),
-        c(Workspace, "move_column_to_last", ws::MoveColumnToLast, &["cmd-alt-shift-end"], W),
-        // The page keys are the workspace level (niri's Mod on Page Up/Down).
-        c(Workspace, "focus_workspace_up", ws::FocusWorkspaceUp, &["cmd-alt-pageup"], W),
-        c(Workspace, "focus_workspace_down", ws::FocusWorkspaceDown, &["cmd-alt-pagedown"], W),
-        c(Workspace, "consume_or_expel_left", ws::ConsumeOrExpelLeft, &["cmd-["], W),
-        c(Workspace, "consume_or_expel_right", ws::ConsumeOrExpelRight, &["cmd-]"], W),
-        c(Workspace, "cycle_width", ws::CycleWidth, &["cmd-r"], W),
-        c(Workspace, "focus_mode", ws::FocusMode, &["cmd-shift-enter"], W),
-        c(Workspace, "fullscreen_tile", ws::FullscreenTile, &["ctrl-cmd-f"], W),
-        c(Workspace, "center_column", ws::CenterColumn, &["cmd-alt-c"], W),
-        c(Workspace, "toggle_tabbed", ws::ToggleTabbed, &["cmd-alt-t"], W),
-        c(Workspace, "toggle_overview", ws::ToggleOverview, &["cmd-alt-o"], W),
+        c(Workspace, "zoom_pane", ws::ZoomPane, &["cmd-shift-enter"], W),
+        c(Workspace, "equalize_panes", ws::EqualizePanes, &[], W),
+        c(Workspace, "previous_project", ws::PreviousProject, &["cmd-alt-pageup"], W),
+        c(Workspace, "next_project", ws::NextProject, &["cmd-alt-pagedown"], W),
+        c(Workspace, "previous_tab", ws::PreviousTab, &["cmd-shift-["], W),
+        c(Workspace, "next_tab", ws::NextTab, &["cmd-shift-]"], W),
+        c(Workspace, "last_tab", ws::LastTab, &["cmd-9"], W),
+        c(Workspace, "go_back", ws::GoBack, &["cmd-["], W),
+        c(Workspace, "go_forward", ws::GoForward, &["cmd-]"], W),
+        c(Workspace, "previous_pane_tab", ws::PreviousPaneTab, &["cmd-alt-["], W),
+        c(Workspace, "next_pane_tab", ws::NextPaneTab, &["cmd-alt-]"], W),
         c(Workspace, "font_larger", ws::FontLarger, &["cmd-=", "cmd-shift-="], W),
         c(Workspace, "font_smaller", ws::FontSmaller, &["cmd--"], W),
         c(Workspace, "font_reset", ws::FontReset, &["cmd-0"], W),
@@ -365,27 +362,18 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "toggle_trackpad", crate::screen::ToggleTrackpad, &[], W),
         c(Workspace, "toggle_remote_gestures", crate::screen::ToggleRemoteGestures, &[], W),
     ];
-    for (index, key) in ('1'..='9').enumerate() {
+    for (index, key) in ('1'..='8').enumerate() {
         out.push(Command::new(
             Workspace,
-            format!("focus_column_{key}"),
-            ws::FocusColumn { index },
+            format!("select_tab_{key}"),
+            ws::SelectTab { index },
             &[format!("cmd-{key}").as_str()],
             W,
         ));
     }
-    // niri's Mod+N: ⌘N is the column here.
-    for (index, key) in ('1'..='9').enumerate() {
-        out.push(Command::new(
-            Workspace,
-            format!("focus_workspace_{key}"),
-            ws::FocusWorkspace { index },
-            &[format!("cmd-alt-{key}").as_str()],
-            W,
-        ));
-    }
     out.extend([
-        // A browser's ⌘[ and ⌘] (and ⌘R) are the layout's here; ⌘← and ⌘→ are Chrome's others.
+        // A browser's ⌘[ and ⌘] are back and forward through the tabs here; ⌘← and ⌘→ are
+        // Chrome's others.
         c(Page, "back", ws::PageBack, &["cmd-left"], &[PAGE]),
         c(Page, "forward", ws::PageForward, &["cmd-right"], &[PAGE]),
         c(Page, "reload", ws::ReloadPage, &[], &[PAGE]),
@@ -515,7 +503,7 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "copy_last_output", t::CopyLastOutput, &["cmd-shift-c"], &[TERMINAL]),
         // WezTerm's copy mode chord (⌃⇧X), with ⌘ for ⌃ as every app chord here.
         c(Terminal, "copy_mode", t::CopyMode, &["cmd-shift-x"], &[TERMINAL]),
-        // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
+        // ⌘⇧↩ is the workspace's zoom-pane; "Rerun last command" is in the palette.
         c(Terminal, "rerun_last", t::RerunLast, &[], &[TERMINAL]),
         c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),
         c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),

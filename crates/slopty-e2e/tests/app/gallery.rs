@@ -1,6 +1,6 @@
 //! Every state of the app worth looking at, rendered by the app's own renderer and held as a
-//! golden: the first run, the panels that add a worker, a workspace of columns in both themes,
-//! the overview, the palette, the settings, the "…" menu, the empty workspace, an agent that
+//! golden: the first run, the panels that add a worker, a workspace of panes in both themes,
+//! the palette, the settings, the "…" menu, the empty workspace, an agent that
 //! needs the human (on its tile and in the navigator), a remote tile, an upload and a forwarded
 //! port, a failed command block, and a tile kept nowhere whose worker is away after a relaunch;
 //! the first run, the navigator, the failed block and the away tile dark as well.
@@ -125,9 +125,9 @@ async fn the_first_run_offers_one_way_in() {
         "{:#?}",
         dump.a11y
     );
-    // The way in and the other way in; no menu, no tile, no column marks to wonder about.
+    // The way in and the other way in; no menu and no tile to wonder about.
     let buttons = labels(&dump, "Button");
-    for absent in ["Open", "More", "Columns"] {
+    for absent in ["Open", "More"] {
         assert!(!buttons.iter().any(|b| b == absent), "{absent} on the first run: {buttons:?}");
     }
     assert!(buttons.iter().any(|b| b == "Connect"), "{buttons:?}");
@@ -379,11 +379,11 @@ fn pdf(pages: &[&str]) -> Vec<u8> {
     out
 }
 
-/// Three columns with the shell focused, the overview, the palette and the settings, then
+/// Two panes, the shell focused among its pane's tabs, the palette and the settings, then
 /// the same workspace dark.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_workspace_of_columns_in_both_themes() {
+async fn a_workspace_of_panes_in_both_themes() {
     let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let home = std::path::PathBuf::from(stack.home().unwrap());
@@ -402,19 +402,26 @@ async fn a_workspace_of_columns_in_both_themes() {
     .await
     .unwrap();
     drv.open(&["cat"], 1).await.unwrap();
-    drv.wait_for("a third column", STEP, |d| d.items.len() == 3).await.unwrap();
+    drv.wait_for("a third tile", STEP, |d| d.items.len() == 3).await.unwrap();
+    // No room at this size for a pane beside the shell, so all three are its pane's tabs:
+    // ⌥⇧⌘→ moves `cat` out to a pane of its own on the right, ⌥⌘← goes back to the left pane,
+    // which shows the checklist, and ⌥⌘[ its tab before, the shell.
+    drv.keys("cmd-alt-shift-right").await.unwrap();
+    drv.wait_for("two panes", STEP, |d| d.items.iter().any(|i| i.pos[2] == 1)).await.unwrap();
     drv.keys("cmd-alt-left").await.unwrap();
-    drv.keys("cmd-alt-left").await.unwrap();
+    drv.keys("cmd-alt-[").await.unwrap();
     let dump = drv
         .wait_for("the first shell focused", STEP, |d| {
-            d.items.iter().any(|i| i.active && i.pos[1] == 0)
+            d.items
+                .iter()
+                .any(|i| i.active && i.kind == "terminal" && i.pos[2] == 0 && i.bounds[2] > 0.0)
         })
         .await
         .unwrap();
-    assert_eq!(dump.workspace, "e2e-worker", "a shell at home leaves the worker's name");
+    assert_eq!(dump.project, "e2e-worker", "a shell at home leaves the worker's name");
     golden(drv, &dir, "workspace").await;
 
-    // A desktop-sized window leaves the strip its room, so the navigator docks beside it.
+    // A desktop-sized window leaves the panes their room, so the navigator docks beside them.
     drv.ok(&Command::Resize { width: 1280.0, height: 800.0 }).await.unwrap();
     drv.wait_for("the navigator docked", STEP, |d| {
         d.a11y_node("Navigation", Some("Navigator")).is_some()
@@ -428,12 +435,6 @@ async fn a_workspace_of_columns_in_both_themes() {
     })
     .await
     .unwrap();
-
-    drv.keys("cmd-alt-o").await.unwrap();
-    drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
-    golden(drv, &dir, "overview").await;
-    drv.keys("cmd-alt-o").await.unwrap();
-    drv.wait_for("the overview closed", STEP, |d| !d.overview).await.unwrap();
 
     drv.keys("cmd-shift-p").await.unwrap();
     drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
@@ -494,11 +495,6 @@ async fn a_workspace_of_columns_in_both_themes() {
     drv.wait_for("the palette closed", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_none())
         .await
         .unwrap();
-    drv.keys("cmd-alt-o").await.unwrap();
-    drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
-    golden(drv, &dir, "overview-dark").await;
-    drv.keys("cmd-alt-o").await.unwrap();
-    drv.wait_for("the overview closed", STEP, |d| !d.overview).await.unwrap();
     drv.keys("cmd-,").await.unwrap();
     drv.wait_for("the settings", STEP, |d| d.a11y_node("Dialog", Some("Settings")).is_some())
         .await
@@ -559,7 +555,7 @@ async fn a_tile_kept_nowhere_says_its_worker_is_away() {
     stack.shutdown().await;
 }
 
-/// A worker with nothing open: the strip says how to begin, once.
+/// A worker with nothing open: the workspace says how to begin, once.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_empty_workspace_says_how_to_begin() {
@@ -605,7 +601,17 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     let titled = format!("printf '\\033]0;{TITLED_AGENT}\\007'; exec cat");
     stack.driver.open(&["sh", "-c", &titled], 1).await.unwrap();
     let dump =
-        stack.driver.wait_for("a second column", STEP, |d| d.terminals.len() == 2).await.unwrap();
+        stack.driver.wait_for("a second shell", STEP, |d| d.terminals.len() == 2).await.unwrap();
+    // It came in as a tab of the first's pane, there being no room beside it at this size:
+    // ⌥⇧⌘→ moves it out to a pane of its own, so both agents are drawn.
+    stack.driver.keys("cmd-alt-shift-right").await.unwrap();
+    stack
+        .driver
+        .wait_for("two panes", STEP, |d| {
+            d.items.len() == 2 && d.items.iter().all(|i| i.bounds[2] > 0.0)
+        })
+        .await
+        .unwrap();
     let second = dump
         .terminals
         .iter()
@@ -747,7 +753,8 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
     })
     .await
     .unwrap();
-    drv.keys("cmd-alt-left").await.unwrap();
+    // ⌘T put the second on a tab of its own: back to the first's.
+    drv.keys("cmd-[").await.unwrap();
     let dump = drv
         .wait_for("the shell focused", STEP, |d| {
             d.items.iter().any(|i| i.id == shell.id && i.active)
@@ -866,38 +873,35 @@ async fn a_failed_command_block_says_so_under_the_pointer() {
     stack.shutdown().await;
 }
 
-/// Two shells in one tabbed column: the header is a tab row, a tab per shell with its slot and
-/// its title, the shown one on its body's surface.
+/// Two shells in one pane, there being no room for a pane each at this size: the header is a
+/// tab row, a tab per shell with its slot and its title, the shown one on its body's surface.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_tabbed_column_draws_its_tab_row() {
+async fn a_pane_of_two_draws_its_tab_row() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
     drv.open(&["cat"], 1).await.unwrap();
-    drv.wait_for("a second column", STEP, |d| d.items.len() == 2).await.unwrap();
-    drv.keys("cmd-[").await.unwrap();
-    drv.keys("cmd-alt-t").await.unwrap();
     let dump = drv
-        .wait_for("one tabbed column", STEP, |d| {
+        .wait_for("one pane of two tabs", STEP, |d| {
             d.items.len() == 2
-                && d.items.iter().all(|i| i.pos[1] == 0)
-                && labels(d, "Tab").len() == 2
+                && d.items.iter().all(|i| i.pos == d.items[0].pos)
+                && d.items.iter().find(|i| i.active).is_some_and(|i| d.pane_tabs(i).len() == 2)
         })
         .await
         .unwrap();
     assert!(dump.a11y.iter().all(|n| n.label.as_deref() != Some("2/2")), "{:#?}", dump.a11y);
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    golden(drv, &dir, "tabbed-column").await;
+    golden(drv, &dir, "pane-tabs").await;
     stack.shutdown().await;
 }
 
-/// A window as macOS 26 tiles it to half a screen, 756 × 900, holds two columns, the second
-/// stepped twice through the width presets (⌘R), with the navigator opened over them, since
-/// docked it would leave the strip a phone's width. Then the window at the least size it takes,
-/// 375 × 480, its one column a phone's. Nothing in either may run past its edges
+/// A window as macOS 26 tiles it to half a screen, 756 × 900, holds two panes, one above the
+/// other, with the navigator opened over them, since docked it would leave them a phone's
+/// width. Then the window at the least size it takes, 375 × 480, its one pane a phone's.
+/// Nothing in either may run past its edges
 /// (`docs/decisions/ui.md`, "How surfaces adapt to their room").
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -908,12 +912,10 @@ async fn a_half_screen_and_the_least_window_keep_their_chrome_whole() {
     drv.ok(&Command::Resize { width: 756.0, height: 900.0 }).await.unwrap();
     first_shell(drv).await;
     drv.open(&["cat"], 1).await.unwrap();
-    drv.wait_for("a second column", STEP, |d| d.items.len() == 2).await.unwrap();
-    drv.keys("cmd-r").await.unwrap();
-    drv.keys("cmd-r").await.unwrap();
+    drv.wait_for("a second pane", STEP, |d| d.items.iter().any(|i| i.pos[2] == 1)).await.unwrap();
     at_rest(drv).await;
     drv.keys("cmd-b").await.unwrap();
-    drv.wait_for("the navigator over the strip", STEP, |d| {
+    drv.wait_for("the navigator over the panes", STEP, |d| {
         d.a11y_node("Navigation", Some("Navigator")).is_some()
     })
     .await

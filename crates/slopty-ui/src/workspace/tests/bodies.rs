@@ -1,6 +1,6 @@
 //! Tile bodies and their neighbours in the headless workspace: what a body says while it waits
 //! on its worker, where a file's "Edited" sits, the header slot beside a failure the grid
-//! shows, and the column divider's double-click.
+//! shows, and the sash's double-click.
 
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseUpEvent};
 use slopty_core::WallMs;
@@ -202,25 +202,26 @@ fn a_failure_the_grid_shows_leaves_the_header_slot_alone(cx: &mut TestAppContext
     assert_eq!(status(cx, away_tile), Some(Status::Failed), "its rows are off screen");
 }
 
-/// A double-click on the divider right of a column puts that column back at the width a new
-/// column opens at, after a drag had made it wider.
+/// A double-click on the sash between two panes makes their shares equal again, after a drag
+/// had made the one above taller.
 #[gpui::test]
-fn a_double_click_on_a_divider_resets_its_column(cx: &mut TestAppContext) {
+fn a_double_click_on_a_sash_makes_its_panes_equal(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), ..] = three_shells(&view, cx, &fake);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
-    cx.run_until_parked();
-    let opened = f32::from(bounds(cx, selector("item", first.item)).size.width);
-    let grab = bounds(cx, "divider-0").center();
+    let height = |cx: &mut VisualTestContext| {
+        f32::from(bounds(cx, selector("item", first.item)).size.height)
+    };
+    let opened = height(cx);
+    let grab = bounds(cx, "sash--0").center();
     cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
-    let to = point(grab.x + px(80.0), grab.y);
+    let to = point(grab.x, grab.y + px(80.0));
     cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
     cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
-    near(f32::from(bounds(cx, selector("item", first.item)).size.width), opened + 80.0);
+    near(height(cx), opened + 80.0);
 
-    let at = bounds(cx, "divider-0").center();
+    let at = bounds(cx, "sash--0").center();
     for click_count in [1, 2] {
         let (button, modifiers) = (MouseButton::Left, Modifiers::default());
         let first_mouse = false;
@@ -234,11 +235,11 @@ fn a_double_click_on_a_divider_resets_its_column(cx: &mut TestAppContext) {
         cx.simulate_event(MouseUpEvent { button, position: at, modifiers, click_count });
     }
     cx.run_until_parked();
-    near(f32::from(bounds(cx, selector("item", first.item)).size.width), opened);
+    near(height(cx), opened);
 }
 
 /// Under the touch density a tile's header is a finger's 44 pt, its body starts under it, and
-/// the strip's hit test puts the header's edge in the same place.
+/// the area's hit test puts the header's edge in the same place.
 #[gpui::test]
 fn the_header_and_its_hit_test_follow_the_density(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

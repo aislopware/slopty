@@ -89,10 +89,10 @@ fn a_page_is_its_tile_s_body_where_the_strip_draws_it(cx: &mut TestAppContext) {
     );
 }
 
-/// Scaled in the overview the page would lay itself out small, so the tile shows the page's
-/// picture there, and the page again once the overview closes. A failed page shows why.
+/// A page's picture decoded leaves the page itself on show, and a failed page is gone with
+/// its picture, its tile saying why.
 #[gpui::test]
-fn the_overview_shows_the_page_s_picture_and_a_failed_page_says_why(cx: &mut TestAppContext) {
+fn a_page_stays_live_over_its_picture_and_a_failed_page_says_why(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let fake = connect(&view, cx, 1, "studio");
@@ -104,21 +104,6 @@ fn the_overview_shows_the_page_s_picture_and_a_failed_page_says_why(cx: &mut Tes
     cx.run_until_parked();
     assert!(page.read_with(cx, |p, _| p.has_snapshot()), "the picture is decoded");
     assert!(cx.debug_bounds(selector("page-picture", tile.item)).is_none(), "the page shows");
-
-    view.update(cx, |v, cx| {
-        v.layout.set_overview(true);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("page", tile.item)).is_none(), "no page, scaled");
-    assert!(cx.debug_bounds(selector("page-picture", tile.item)).is_some(), "its picture");
-
-    view.update(cx, |v, cx| {
-        v.layout.set_overview(false);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("page", tile.item)).is_some(), "the page again");
 
     cx.update(|window, cx| {
         page.update(cx, |p, cx| p.native_event(WebEvent::Failed("refused".into()), window, cx));
@@ -140,6 +125,7 @@ fn the_page_taking_the_keyboard_focuses_its_tile_and_giving_it_back_the_workspac
     let fake = connect(&view, cx, 1, "studio");
     let tile = open_page(&view, cx, &fake);
     let other = arrives(&view, cx, &fake, ItemKind::Browser { url: "http://a.test/".into() }, 2);
+    beside(&view, cx, other, tile, slopty_client::layout::Side::Right);
     view.update(cx, |v, cx| v.focus_tile(other, cx));
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(other));
@@ -170,6 +156,7 @@ fn a_click_in_the_page_focuses_it_and_its_tile(cx: &mut TestAppContext) {
     let fake = connect(&view, cx, 1, "studio");
     let tile = open_page(&view, cx, &fake);
     let other = arrives(&view, cx, &fake, ItemKind::Browser { url: "http://a.test/".into() }, 2);
+    beside(&view, cx, other, tile, slopty_client::layout::Side::Right);
     view.update(cx, |v, cx| v.focus_tile(other, cx));
     cx.run_until_parked();
     // The first page is left of the second, still in view.

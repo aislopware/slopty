@@ -799,6 +799,17 @@ fn apply(
             view.update(cx, |view, cx| view.reveal_session(session, cx));
             Reply::Ok
         }
+        Command::FocusItem { item } => {
+            let Ok(item) = item.parse::<ItemId>() else {
+                return Reply::Error { message: format!("not an item id: {item}") };
+            };
+            let view = workspace.read(cx).view.clone();
+            let Some(tile) = view.read(cx).tile_of(item) else {
+                return Reply::Error { message: format!("no tile of {item}") };
+            };
+            view.update(cx, |view, cx| view.focus_tile(tile, cx));
+            Reply::Ok
+        }
         Command::ForgetWorker { id } => {
             let Ok(id) = id.trim().parse::<WorkerId>() else {
                 return Reply::Error { message: format!("not a worker id: {id}") };
@@ -1153,8 +1164,7 @@ impl Workspace {
             adding: self.adding.is_some(),
             status,
             notice: view.toast_text(),
-            workspace: view.workspace_name(),
-            overview: view.layout().overview_open(),
+            project: view.project_name(),
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
             frames: frame_info(slopty_ui::frames::stats(cx)),
             ..Dump::default()
@@ -1177,12 +1187,21 @@ impl Workspace {
         });
         let names: std::collections::HashMap<_, _> =
             view.workers().map(|(key, name, _)| (key, name.to_owned())).collect();
-        let mut tiles: Vec<_> = view
-            .layout()
+        let layout = view.layout();
+        // A tile's place as indices: its project, its tab in the project, and its pane in the
+        // tab in reading order.
+        let place = |pos: slopty_client::layout::Pos| {
+            let project = layout.projects().get(pos.project)?;
+            let tab_at = project.tabs().iter().position(|t| t.id() == pos.tab)?;
+            let tab = project.tabs().get(tab_at)?;
+            let pane = tab.panes().position(|p| p.id() == pos.pane)?;
+            Some([pos.project, tab_at, pane])
+        };
+        let mut tiles: Vec<_> = layout
             .tiles()
-            .filter_map(|tile| view.layout().position(tile).map(|pos| (pos, tile)))
+            .filter_map(|tile| layout.position(tile).and_then(place).map(|pos| (pos, tile)))
             .collect();
-        tiles.sort_by_key(|(pos, _)| (pos.workspace, pos.column, pos.tile));
+        tiles.sort_by_key(|(pos, _)| *pos);
         for (pos, tile) in tiles {
             let Some(item) = view.item(tile) else { continue };
             let (kind, session) = match &item.kind {
@@ -1258,7 +1277,7 @@ impl Workspace {
                 kind: kind.to_owned(),
                 worker: names.get(&tile.worker).cloned().unwrap_or_default(),
                 session,
-                pos: [pos.workspace, pos.column, pos.tile],
+                pos,
                 bounds,
                 active: view.focused() == Some(tile),
                 file,

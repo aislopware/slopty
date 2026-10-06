@@ -242,8 +242,8 @@ pub enum Command {
         /// Vertical lines (positive scrolls the content down, GPUI convention).
         dy: f32,
     },
-    /// Open `count` sessions running `command` (the login shell when empty) in the active
-    /// workspace, as ⌘N does. Load for the frame-time scenarios without
+    /// Open `count` sessions running `command` (the login shell when empty) in the project on
+    /// show, as ⌘N does. Load for the frame-time scenarios without
     /// typing anything into a shell.
     Open {
         /// Program and arguments.
@@ -287,11 +287,17 @@ pub enum Command {
         /// The session id (`terminal:<id>` without the prefix), as the dump reports it.
         session: String,
     },
-    /// Add the worker's first display to the active workspace, as picking it would (the worker
+    /// Show the tile of `item` and give it the keyboard, as a click on its tab does, whatever
+    /// kind it is.
+    FocusItem {
+        /// The item's id, as the dump reports it.
+        item: String,
+    },
+    /// Add the worker's first display to the project on show, as picking it would (the worker
     /// needs Screen Recording permission; the stream opens when the item lands).
     AddDisplay,
-    /// Put a window of the worker in the strip, as picking it in the ⌘O picker does. The id
-    /// need not name a live window: one that never sends a frame is how a remote tile's
+    /// Put a window of the worker on the project on show, as picking it in the ⌘O picker does. The
+    /// id need not name a live window: one that never sends a frame is how a remote tile's
     /// placeholder is reached on a machine that has granted no screen capture.
     PickWindow {
         /// The worker's window id.
@@ -301,7 +307,7 @@ pub enum Command {
     },
     /// Drive the app's system-notification response path with `tag` (a session UUID),
     /// exactly as `cx.on_system_notification_response` would when the user activates an
-    /// agent banner: reveal the session in whichever workspace holds its tile. System
+    /// agent banner: reveal the session in whichever project holds its tile. System
     /// notifications are disabled outside a bundle, so this is the only way to test the path.
     NotificationResponse {
         /// The banner's tag, which is the session UUID.
@@ -616,15 +622,12 @@ pub struct Dump {
     /// editor), `browser:<item>` (the page itself), `project:<name>` (a board), `other`, or
     /// `none`.
     pub focused: String,
-    /// The active workspace's name.
+    /// The name of the project on show.
     #[serde(default)]
-    pub workspace: String,
-    /// The overview is open.
-    #[serde(default)]
-    pub overview: bool,
+    pub project: String,
     /// The theme is the dark variant (`[theme] appearance`, or the system's under `system`).
     pub dark: bool,
-    /// Every tile, workspace by workspace, column by column, top to bottom.
+    /// Every tile, project by project, tab by tab, pane by pane in reading order.
     pub items: Vec<ItemInfo>,
     /// Terminals with a view.
     pub terminals: Vec<TerminalInfo>,
@@ -813,7 +816,8 @@ pub struct ItemInfo {
     pub worker: String,
     /// Session id for terminals.
     pub session: Option<String>,
-    /// Its place: workspace, column, tile in the column.
+    /// Its place: its project, its tab in the project and its pane in the tab, in reading
+    /// order. Its bounds say where the pane lies.
     #[serde(default)]
     pub pos: [usize; 3],
     /// Window rect: x, y, w, h in points (where to click); zero when it is not drawn.
@@ -844,8 +848,7 @@ pub struct BrowserItemInfo {
     pub failed: Option<String>,
     /// The web view is on screen, as the platform shows it.
     pub shown: bool,
-    /// A picture of the page is ready for where the tile is drawn without it (the overview,
-    /// a render).
+    /// A picture of the page is ready for where the tile is drawn without it (a render).
     pub snapshot: bool,
 }
 
@@ -1222,6 +1225,21 @@ impl Dump {
         self.a11y
             .iter()
             .find(|n| n.role == role && label.is_none_or(|l| n.label.as_deref() == Some(l)))
+    }
+
+    /// The tabs of the pane `item` is drawn in, left to right: the `Tab` nodes on its header.
+    /// Empty when the pane holds one tile, or `item` is not drawn.
+    #[must_use]
+    pub fn pane_tabs(&self, item: &ItemInfo) -> Vec<&A11yNode> {
+        let [x, y, w, h] = item.bounds;
+        let inside = |n: &&A11yNode| {
+            let [nx, ny, nw, nh] = n.bounds;
+            nx >= x - 0.5 && ny >= y - 0.5 && nx + nw <= x + w + 0.5 && ny + nh <= y + h + 0.5
+        };
+        let mut tabs: Vec<&A11yNode> =
+            self.a11y.iter().filter(|n| n.role == "Tab").filter(inside).collect();
+        tabs.sort_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]));
+        tabs
     }
 }
 

@@ -165,11 +165,21 @@ fn the_page_keys_are_bound_only_on_a_page(cx: &mut TestAppContext) {
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let page = page(&view, cx, &fake, None);
+    // Matched against the focused element's path in the frame drawn, as a key is dispatched:
+    // `Window::bindings_for_action` reads the context stack the dispatch tree was last built
+    // with, which a frame drawn partly from last frame's can leave behind.
     let bound = |cx: &mut VisualTestContext| {
-        cx.update(|window, _cx| {
-            let back = window.bindings_for_action(&PageBack);
-            let forward = window.bindings_for_action(&PageForward);
-            (back.len(), forward.len())
+        cx.update(|window, cx| {
+            let path = window.context_stack();
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let on = |action: &dyn gpui::Action| {
+                keymap
+                    .bindings_for_action(action)
+                    .filter(|b| b.predicate().is_none_or(|p| p.eval(&path)))
+                    .count()
+            };
+            (on(&PageBack), on(&PageForward))
         })
     };
     assert_eq!(focused(&view, cx), Some(page));

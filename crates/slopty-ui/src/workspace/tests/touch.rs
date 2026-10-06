@@ -1,5 +1,5 @@
-//! A pinch over the strip in the headless workspace: over a remote picture it zooms the picture
-//! and leaves the overview alone; over a terminal it still opens the overview.
+//! A pinch over the panes in the headless workspace: over a remote picture it zooms the
+//! picture; over a terminal it leaves the picture and the layout alone.
 
 use gpui::{Bounds, PinchEvent};
 use slopty_proto::screen::VideoCodec;
@@ -37,15 +37,21 @@ fn zoom_of(view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef) 
     view.read_with(cx, |v, cx| v.screen(tile.item).map(|s| s.read(cx).zoom())).expect("streaming")
 }
 
-fn overview(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> bool {
-    view.read_with(cx, |v, _| v.layout().overview_open())
+/// What the layout shows: the tile focused and every pane's place.
+fn shown(
+    view: &Entity<WorkspaceView>,
+    cx: &VisualTestContext,
+) -> (Option<TileRef>, Vec<slopty_client::layout::Rect>) {
+    view.read_with(cx, |v, _| {
+        (v.focused(), v.layout.frame().panes.iter().map(|l| l.rect).collect())
+    })
 }
 
 /// The focused remote window takes a pinch that begins on its picture: spreading the fingers
-/// zooms it, pinching them together goes no smaller than fit, and neither opens the overview.
-/// The same pinch over a shell's body opens the overview, and pinching out closes it.
+/// zooms it, and pinching them together goes no smaller than fit. The same pinch over a
+/// shell's body is no gesture of the workspace's: the picture and the layout stay as they were.
 #[gpui::test]
-fn a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview(cx: &mut TestAppContext) {
+fn a_pinch_over_a_stream_zooms_it_and_over_a_shell_leaves_all_alone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -75,7 +81,6 @@ fn a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview(cx: &mut T
     pinch(cx, on_picture, 0.3);
     let zoomed = zoom_of(&view, cx, tile);
     assert!((zoomed.scale() - 1.69).abs() < 1e-3, "two steps of 1.3: {zoomed:?}");
-    assert!(!overview(&view, cx), "the picture took the pinch");
     let readout =
         view.read_with(cx, |v, cx| v.screen(tile.item).and_then(|s| s.read(cx).readout()));
     assert!(
@@ -85,16 +90,16 @@ fn a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview(cx: &mut T
 
     pinch(cx, on_picture, -0.4);
     assert_eq!(zoom_of(&view, cx, tile), Zoom::FIT, "no smaller than fit");
-    assert!(!overview(&view, cx), "pinching in over the picture is not the overview's");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
     let on_shell = on_body(cx, shell);
-    pinch(cx, on_shell, -0.1);
-    assert!(overview(&view, cx), "over a shell the pinch opens the overview");
-    assert_eq!(zoom_of(&view, cx, tile), Zoom::FIT, "and the picture is left alone");
-    pinch(cx, on_shell, 0.1);
-    assert!(!overview(&view, cx), "pinching out closes it");
+    let before = shown(&view, cx);
+    for step in [-0.1, 0.1] {
+        pinch(cx, on_shell, step);
+        assert_eq!(shown(&view, cx), before, "{step}: the layout is as it was");
+        assert_eq!(zoom_of(&view, cx, tile), Zoom::FIT, "{step}: and the picture");
+    }
 }
 
 /// The palette's "Trackpad mode" reaches the active picture even with the keyboard on the

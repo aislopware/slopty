@@ -192,16 +192,15 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
-    // Each shell comes home to its project's workspace, so the last one is moved into a column
-    // of its own just before the window's, in the window's workspace, and drawn beside it.
+    // Each comes home to its own project, so the shell is moved into a pane of its own left of
+    // the window's, on the window's tab, and drawn beside it.
     let shell_tile = view.read_with(cx, |v, _| v.tile_of_session(shell)).expect("the shell's tile");
     view.update_in(cx, |v, _w, cx| {
-        let at = v.layout.position(tile).expect("the window is placed");
-        let target = slopty_client::layout::DropTarget::NewColumn {
-            workspace: at.workspace,
-            index: at.column,
-        };
-        v.layout.move_tile(shell_tile, target);
+        // A drop lands on the tab on show: the window's, once it has the focus.
+        v.layout.focus(tile);
+        let pane = v.layout.position(tile).expect("the window is placed").pane;
+        let left = Some(slopty_client::layout::tree::Side::Left);
+        assert!(v.layout.place(shell_tile, slopty_client::layout::Drop { pane, edge: left }));
         v.focus_tile(tile, cx);
         cx.notify();
     });

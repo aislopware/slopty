@@ -95,7 +95,7 @@ fn trim_dir(path: &str) -> &str {
 }
 
 /// A group's identity: `<fact>:<value>`, opaque to the layout, which places an arriving tile
-/// by it ([`crate::layout::Placement::Remote`]).
+/// by it ([`crate::layout::Tiling::arrive`]).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GroupKey(String);

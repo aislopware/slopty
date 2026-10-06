@@ -2,19 +2,19 @@
 //! the body (a terminal, a remote window or display, a file tile), with the pill that
 //! says when the body cannot show what it should.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, App, AppContext as _, Context, Div, ElementId, Entity, ExternalPaths,
-    FontWeight, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
-    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Window, div, px,
+    App, AppContext as _, Context, Div, ElementId, Entity, ExternalPaths, FontWeight,
+    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Window, div, px,
 };
 use gpui_kit::component::input::Input;
-use slopty_client::layout::{Placed, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::Worktree;
@@ -24,11 +24,11 @@ use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Theme, Typography};
 
 use super::actions::{AddWindow, CloseItem};
+use super::area::{Handed, Placed};
 use super::attention::About;
 use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
-use super::strip::Handed;
 use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
@@ -732,6 +732,32 @@ impl WorkspaceView {
             }
         }
         drop(seen);
+        let placed: HashSet<TileRef> = self.layout.tiles().collect();
+        let mut kinds: HashMap<(bool, &str), u32> = HashMap::new();
+        let listed: Vec<(ItemId, bool, &str)> = self
+            .items()
+            .filter(|(worker, item)| placed.contains(&TileRef { worker: *worker, item: item.id }))
+            .filter_map(|(_, item)| {
+                let file = match item.kind {
+                    ItemKind::File { .. } => true,
+                    ItemKind::Folder { .. } => false,
+                    _ => return None,
+                };
+                derived.get(&item.id).map(|title| (item.id, file, title.as_str()))
+            })
+            .collect();
+        for (_, file, title) in &listed {
+            let count = kinds.entry((*file, title)).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+        let alike = listed
+            .iter()
+            .filter(|(_, file, title)| kinds.get(&(*file, *title)).is_some_and(|n| *n > 1))
+            .map(|(id, ..)| *id)
+            .collect();
+        drop(kinds);
+        drop(listed);
+        self.alike = alike;
         self.twins = twins;
         self.derived = derived;
         self.places = places;
@@ -843,7 +869,6 @@ impl WorkspaceView {
                 .render_starting(placed, chrome, cx)
                 .or_else(|| self.render_missing(placed, chrome, cx));
         };
-        let theme = &self.theme;
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
 
@@ -866,10 +891,6 @@ impl WorkspaceView {
                 _ => false,
             };
 
-        // The open animation grows the tile about its centre.
-        let rect = placed.rect;
-        let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
-        let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
         Some(
             div()
                 .id(ElementId::Uuid(*id.as_uuid()))
@@ -878,12 +899,7 @@ impl WorkspaceView {
                 .role(Role::Group)
                 .aria_label(label)
                 .when_some(shows, gpui::StatefulInteractiveElement::aria_description)
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(width))
-                .h(px(height))
-                .opacity(placed.alpha)
+                .size_full()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
@@ -913,7 +929,7 @@ impl WorkspaceView {
                         (takes_files && self.files_over == Some(tile) && cx.has_active_drag())
                             .then(|| self.drop_overlay(tile, item, chrome)),
                     );
-                    kit::panel(el, theme, self.stand(chrome.k), inside)
+                    el.child(inside.relative().size_full().overflow_hidden())
                 })
                 .into_any_element(),
         )
@@ -1009,64 +1025,6 @@ impl WorkspaceView {
         view.clone().into_any_element()
     }
 
-    /// A tile fading out where it stood, over a fade: its panel and its header's glyph and
-    /// title as they were, the content already gone. A panel at any zoom, as every tile is,
-    /// and never scaled: text does not shrink on its way out. Nothing where chrome does not
-    /// move.
-    pub(super) fn render_closing(
-        &self,
-        closing: &slopty_client::layout::Closing,
-        chrome: Chrome,
-        cx: &App,
-    ) -> Option<gpui::AnyElement> {
-        if !self.chrome_moves(cx) {
-            return None;
-        }
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let k = chrome.k;
-        let rect = self.panel_rect(closing.rect, k);
-        let id = closing.tile.item;
-        let was = self.closed.iter().rev().find(|c| c.tile == closing.tile).map(|c| &c.item);
-        let header = was.filter(|_| k >= SHAPES_BELOW).map(|item| {
-            let lead = hsla(s.text_secondary);
-            div()
-                .h(px(theme.density.header * k))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.sm * k))
-                .px(px(theme.spacing.inset() * k))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_size(px(theme.typography.ui_size * k))
-                .text_color(hsla(s.text_secondary))
-                .font_family(theme.typography.ui_family.clone())
-                .child(crate::palette::lead_slot(theme, self.kind_glyph(item), lead, k))
-                .child(SharedString::from(self.tile_title(item)))
-        });
-        let ghost = div()
-            .debug_selector(move || format!("closing-{}", id.as_uuid()))
-            .absolute()
-            .left(px(rect.x))
-            .top(px(rect.y))
-            .w(px(rect.w))
-            .h(px(rect.h));
-        let ghost =
-            kit::panel(ghost, theme, self.stand(k), div().flex().flex_col().children(header));
-        let fade = kit::Pace::Fade.animation();
-        Some(
-            ghost
-                .with_animation(
-                    SharedString::from(format!("closing-{}", id.as_uuid())),
-                    fade,
-                    |el, t| el.opacity(1.0 - t),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn render_header(
         &self,
         placed: &Placed,
@@ -1095,7 +1053,7 @@ impl WorkspaceView {
         // At the overview's small zoom the miniature's label names the tile; a band on top of it in
         // another step, and a hairline under only some of them, read as tiles half drawn.
         let shapes = k < SHAPES_BELOW;
-        let fills = self.offers_fullscreen(placed);
+        let fills = !self.phone;
         let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .group(HEADER_GROUP)
@@ -1112,14 +1070,14 @@ impl WorkspaceView {
             .cursor_grab()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                    // The second click of a double-click on the header's empty part fills the
-                    // screen, as a Mac's title bar zooms its window (the name's names the
-                    // tile); the first began a move that its mouse-up ended.
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    // The second click of a double-click on the header's empty part zooms the
+                    // pane, as a Mac's title bar zooms its window (the name's names the tile);
+                    // the first began a move that its mouse-up ended.
                     if ev.click_count == 2 {
                         if fills {
                             this.focus_tile(tile, cx);
-                            this.width_action(cx, slopty_client::layout::Layout::toggle_fullscreen);
+                            this.toggle_zoom(window, cx);
                         }
                     } else {
                         this.begin_move(tile, ev, cx);
@@ -1348,12 +1306,10 @@ impl WorkspaceView {
                 .into_any_element()
         });
         let place = address.or(text_place);
-        // The worker's name, where more than one could be meant (the tile's workspace holds
+        // The worker's name, where more than one could be meant (the tile's project holds
         // tiles of several): quiet text after a server glyph, a fact about the tile rather than
-        // a control. A workspace on one machine never pays for it.
-        let spans =
-            self.layout.position(tile).and_then(|p| self.layout.workspaces().get(p.workspace));
-        let several = spans.is_some_and(|ws| ws.workers().len() > 1);
+        // a control. A project on one machine never pays for it.
+        let several = self.project_machines(tile) > 1;
         let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
             let name = w.name.clone();
             let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
@@ -1397,7 +1353,7 @@ impl WorkspaceView {
                         .zooming(chrome.zooming),
                 )
         });
-        let tabbed = placed.tabs.is_some();
+        let tabbed = placed.tabs;
         let header = if tabbed {
             let readouts = readouts.into_iter().map(|(_, _, el)| el).collect();
             let buttons = f32::from(1_u8.saturating_add(u8::from(face.is_some())));
@@ -1656,17 +1612,10 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = chrome.k;
-        let pos = placed.pos;
-        let column = self
-            .layout
-            .workspaces()
-            .get(pos.workspace)
-            .and_then(|w| w.columns().get(pos.column))
-            .map(|c| c.tiles().iter().map(slopty_client::layout::Tile::tile).collect::<Vec<_>>())
-            .unwrap_or_default();
-        // In a narrow column a tab gives way to its mark and four letters' room before the
+        let column = self.pane_tiles(placed.tile);
+        // In a narrow pane a tab gives way to its mark and four letters' room before the
         // row scrolls.
-        let narrow = kit::Room::of(placed.target.w, theme).is_narrow();
+        let narrow = kit::Room::of(placed.rect.w, theme).is_narrow();
         let tab_min = if narrow {
             theme
                 .spacing
@@ -1796,11 +1745,12 @@ impl WorkspaceView {
         // the person scrolled it.
         let first = column.first().map_or(placed.tile.item, |t| t.item);
         let shown_ix = column.iter().position(|t| *t == placed.tile).unwrap_or_default();
-        let width = placed.target.w;
+        let width = placed.rect.w;
         let handle = {
             let mut rows = self.drawn.tab_rows.borrow_mut();
-            let (handle, last, wide) =
-                rows.entry(first).or_insert_with(|| (gpui::ScrollHandle::new(), first, f32::NAN));
+            let (handle, last, wide) = rows
+                .entry(placed.pane)
+                .or_insert_with(|| (gpui::ScrollHandle::new(), first, f32::NAN));
             if *last != placed.tile.item || (*wide - width).abs() >= 0.5 || wide.is_nan() {
                 *last = placed.tile.item;
                 *wide = width;
@@ -2412,11 +2362,17 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// Whether filling the screen adds something to `placed`: not on a phone, where a column is
-    /// the screen's width already.
-    pub(super) fn offers_fullscreen(&self, placed: &Placed) -> bool {
-        let view_w = f32::from(self.drawn.viewport.get().size.width);
-        view_w >= self.layout.config().phone_below || placed.target.w + 1.0 < view_w
+    /// How many machines the tiles of `tile`'s project are on.
+    pub(super) fn project_machines(&self, tile: TileRef) -> usize {
+        let Some(pos) = self.layout.position(tile) else { return 0 };
+        let Some(project) = self.layout.projects().get(pos.project) else { return 0 };
+        let mut machines: Vec<WorkerKey> = Vec::new();
+        for t in project.tabs().iter().flat_map(slopty_client::layout::Tab::tiles) {
+            if !machines.contains(&t.worker) {
+                machines.push(t.worker);
+            }
+        }
+        machines.len()
     }
 
     /// The controls a header shows under the pointer, on its own ground over what ends it at
@@ -2446,9 +2402,9 @@ impl WorkspaceView {
             .child(self.tile_close(tile, k, cx))
     }
 
-    /// A tile's close button. Fullscreen has no button: a double-click on the header's empty
-    /// part fills the screen (as a Mac's title bar zooms its window), as do the palette's and
-    /// the header's menu's "Fullscreen".
+    /// A tile's close button. Zoom has no button: a double-click on the header's empty part
+    /// zooms the pane (as a Mac's title bar zooms its window), as do the palette's and the
+    /// header's menu's "Zoom pane".
     fn tile_close(&self, tile: TileRef, k: f32, cx: &Draw<'_, Self>) -> Stateful<Div> {
         let id = tile.item.as_uuid();
         kit::icon_button_at(&self.theme, format!("close-{id}"), Symbol::Xmark, CLOSE_TILE, k)
@@ -2515,7 +2471,7 @@ impl WorkspaceView {
                     )
                 } else {
                     // A double-click on the name names the tile; on the rest of the header it
-                    // fills the screen. The first click began a move, as on the header.
+                    // zooms the pane. The first click began a move, as on the header.
                     el.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -2538,7 +2494,7 @@ impl WorkspaceView {
             .child(named)
             .children(place);
         let inset = theme.spacing.inset() * k;
-        let floor = (inset.mul_add(-2.0, placed.target.w * k) / 3.0).max(0.0);
+        let floor = (inset.mul_add(-2.0, placed.rect.w * k) / 3.0).max(0.0);
         let mut row = kit::priority_row(SharedString::from(format!("header-row-{}", id.as_uuid())))
             .h_full()
             .gap(px(theme.spacing.sm * k))
@@ -3006,20 +2962,9 @@ impl WorkspaceView {
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        let bare = chrome.k < SHAPES_BELOW;
-        // Once the overview rests, a tile of words is wholly under its summary: its body is not
-        // drawn at all, so a flood in a shell nobody can read costs no frame. The focused one
-        // is, as it keeps the keyboard.
-        if bare && self.summed_up(placed, item) {
-            let hidden = div().flex_1().min_h_0().into_any_element();
-            return self.render_miniature(placed, item, hidden, cx);
-        }
-        let state = self.body_state(placed.tile, item).filter(|_| !bare);
+        let state = self.body_state(placed.tile, item);
         let empty = std::cell::Cell::new(false);
         let content = self.render_content(placed, item, chrome, &empty, window, cx);
-        if bare {
-            return self.render_miniature(placed, item, content, cx);
-        }
         let content = self.set_back_in_doubt(placed.tile, content);
         let Some(state) = state else { return content };
         // A body with nothing in it says what is so in its middle, not at its foot.
@@ -3224,8 +3169,8 @@ impl WorkspaceView {
         let theme = &self.theme;
         let k = chrome.k;
         let worker_up = self.workers.get(&placed.tile.worker).is_some_and(|w| w.link.is_some());
-        let rest_w = (placed.target.w * k).max(1.0);
-        let rest_h = ((placed.target.h - self.header_h()) * k).max(1.0);
+        let rest_w = (placed.rect.w * k).max(1.0);
+        let rest_h = ((placed.rect.h - self.header_h()) * k).max(1.0);
         let fixed = |el: gpui::AnyElement| {
             div()
                 .flex_1()
@@ -3255,7 +3200,7 @@ impl WorkspaceView {
                     && self.face_shown(*session)
                     && self.body_state(placed.tile, item).is_none() =>
                 {
-                    let width = placed.target.w;
+                    let width = placed.rect.w;
                     let handed = Handed::Face { zoom: k, width };
                     // The tile's header already says the title, the agent and its state, so the
                     // thread view draws none. Its view is made in the frame after it is wanted.
@@ -3329,7 +3274,7 @@ impl WorkspaceView {
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
                     // Scaled, the page would lay itself out small: its picture shows instead.
-                    let live = k >= 1.0 && !self.layout.overview_open();
+                    let live = k >= 1.0;
                     self.hand_over(cx, view, Handed::Page { live }, move |v, cx| {
                         v.set_live(live, cx);
                     });
@@ -3377,7 +3322,7 @@ impl WorkspaceView {
             },
             ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
                 Some(view) => {
-                    let (width, height) = (placed.target.w, placed.target.h - self.header_h());
+                    let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
                     let handed = Handed::Review { zoom: k, width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
                         v.set_layout(k, width, height, cx);
@@ -3389,7 +3334,7 @@ impl WorkspaceView {
             },
             ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
                 Some(view) => {
-                    let (width, height) = (placed.target.w, placed.target.h - self.header_h());
+                    let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
                     let handed = Handed::Review { zoom: k, width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
                         v.set_layout(k, width, height, cx);
@@ -3402,7 +3347,7 @@ impl WorkspaceView {
             // The thread view, under the tile's header, which says its title already.
             ItemKind::Thread { .. } => match self.thread_item(item.id).cloned() {
                 Some(view) => {
-                    let width = placed.target.w;
+                    let width = placed.rect.w;
                     let handed = Handed::Face { zoom: k, width };
                     self.hand_over(cx, &view, handed, move |v, cx| {
                         v.set_layout(k, width, cx);

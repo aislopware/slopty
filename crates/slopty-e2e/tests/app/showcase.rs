@@ -150,12 +150,29 @@ fn sessions(d: &Dump) -> Vec<String> {
     d.terminals.iter().map(|t| t.session.clone()).collect()
 }
 
-/// Open the login shell in a new column of the active workspace and give it the keyboard.
+/// Show the tile after the focused one in reading order (project, tab, pane), with the keyboard.
+async fn next_tile(drv: &mut Driver) {
+    let d = look(drv).await;
+    let at = d.items.iter().position(|i| i.active).map_or(0, |i| i.saturating_add(1));
+    let next = d.items.get(at).or_else(|| d.items.first()).expect("a tile").id.clone();
+    drv.focus_item(&next).await.unwrap();
+    wait(drv, "the next tile focused", |d| d.items.iter().any(|i| i.id == next && i.active)).await;
+}
+
+/// Show the last tile in reading order, with the keyboard.
+async fn last_tile(drv: &mut Driver) {
+    let d = look(drv).await;
+    let last = d.items.last().expect("a tile").id.clone();
+    drv.focus_item(&last).await.unwrap();
+    wait(drv, "the last tile focused", |d| d.items.iter().any(|i| i.id == last && i.active)).await;
+}
+
+/// Open the login shell beside the focused tile and give it the keyboard.
 async fn new_shell(drv: &mut Driver) -> String {
     open_program(drv, &[]).await
 }
 
-/// Open `command` (the login shell when empty) in a new column; its session.
+/// Open `command` (the login shell when empty) beside the focused tile; its session.
 async fn open_program(drv: &mut Driver, command: &[&str]) -> String {
     let before = sessions(&look(drv).await);
     drv.open(command, 1).await.unwrap();
@@ -1380,7 +1397,7 @@ struct Studio {
     chart: String,
 }
 
-/// The studio's columns: the history, the build and its failed tests, an agent that needs the
+/// The studio's tiles: the history, the build and its failed tests, an agent that needs the
 /// person, and an agent at work; with a page's `port`, a file, a listing and a chart, a folder,
 /// the page and a note among them as well.
 async fn studio(stack: &mut Stack, home: &Path, port: Option<u16>) -> Studio {
@@ -1393,7 +1410,7 @@ async fn studio(stack: &mut Stack, home: &Path, port: Option<u16>) -> Studio {
 
     let build = new_shell(drv).await;
     run(drv, &build, "cd ~/code/atlas && cargo build", "Finished").await;
-    // It takes its time and ends while the person is in another column.
+    // It takes its time and ends while the person is on another tile.
     start(drv, &build, "cargo test").await;
     let tested = tokio::time::Instant::now();
 
@@ -1733,7 +1750,7 @@ impl Day {
 
 /// The studio's workspace, every kind of tile in it: the history, a build and its failed
 /// tests, an agent that needs the person, a file, a listing with a chart, a folder, a page, an
-/// agent at work and a note; the overview, and the toast a closed tile leaves.
+/// agent at work and a note, each in turn; and the toast a closed tile leaves.
 #[tokio::test]
 #[ignore = "showcase: cargo xtask e2e showcase"]
 async fn showcase_the_studio_workspace() {
@@ -1744,7 +1761,6 @@ async fn showcase_the_studio_workspace() {
 
     let drv = &mut stack.driver;
     drv.reveal(&studio.history).await.unwrap();
-    drv.keys("cmd-1").await.unwrap();
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     both(stack, "workspace-studio").await;
 
@@ -1759,32 +1775,23 @@ async fn showcase_the_studio_workspace() {
 
     let drv = &mut stack.driver;
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    drv.keys("cmd-alt-right").await.unwrap();
+    next_tile(drv).await;
     shot(drv, "workspace-agent-needs-you-light").await;
-    drv.keys("cmd-alt-right").await.unwrap();
+    next_tile(drv).await;
     shot(drv, "workspace-file-light").await;
     drv.reveal(&studio.chart).await.unwrap();
     both(stack, "workspace-chart").await;
     let drv = &mut stack.driver;
-    drv.keys("cmd-alt-right").await.unwrap();
+    next_tile(drv).await;
     shot(drv, "workspace-folder-light").await;
-    drv.keys("cmd-alt-right").await.unwrap();
+    next_tile(drv).await;
     both(stack, "workspace-browser").await;
     let drv = &mut stack.driver;
-    drv.keys("cmd-alt-right").await.unwrap();
+    next_tile(drv).await;
     shot(drv, "workspace-agent-at-work-light").await;
-    drv.keys("cmd-9").await.unwrap();
+    last_tile(drv).await;
     shot(drv, "workspace-note-light").await;
 
-    drv.reveal(&studio.history).await.unwrap();
-    drv.keys("cmd-alt-o").await.unwrap();
-    wait(drv, "the overview", |d| d.overview).await;
-    both(stack, "overview").await;
-    let drv = &mut stack.driver;
-    drv.keys("cmd-alt-o").await.unwrap();
-    wait(drv, "the overview closed", |d| !d.overview).await;
-
-    drv.keys("cmd-9").await.unwrap();
     wait(drv, "the note focused", |d| {
         d.items.iter().any(|i| i.file.as_ref().is_some_and(|f| f.previewing) && i.active)
     })

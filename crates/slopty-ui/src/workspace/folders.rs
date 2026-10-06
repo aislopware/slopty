@@ -383,10 +383,9 @@ impl WorkspaceView {
         }
     }
 
-    /// A file opened from folder tile `id`: its tile goes right of the folder's.
+    /// A file opened from folder tile `id`: its tile goes beside the folder's by the room rule.
     fn open_file_beside(&mut self, id: ItemId, path: &str, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_of(id) else { return };
-        self.tick();
         self.layout.focus(tile);
         self.open_file_on(Some(tile.worker), path, None, cx);
     }

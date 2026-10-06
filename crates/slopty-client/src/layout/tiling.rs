@@ -455,6 +455,7 @@ impl Tiling {
                 project.shown = project.shown.saturating_sub(1);
             }
             self.forget_visits(pos.tab);
+            self.emptied(pos.project);
         }
     }
 
@@ -477,7 +478,34 @@ impl Tiling {
             project.shown = project.shown.saturating_sub(1);
         }
         self.forget_visits(id);
+        self.emptied(p);
         tab.tiles().collect()
+    }
+
+    /// Project `p` may have lost its last tab. On show, it hands the window to the tab visited
+    /// before, else to the first project that has one, and goes unless it has a name; one not on
+    /// show and with no name just goes. With nothing left anywhere it stays on show, empty.
+    fn emptied(&mut self, p: usize) {
+        let Some(project) = self.projects.get(p).filter(|x| x.tabs.is_empty()) else { return };
+        let named = project.name.is_some();
+        if self.shown == Some(p) {
+            let back = self.visits.get(self.at).and_then(|id| self.tab_place(*id));
+            let first = || {
+                let (q, x) = self.projects.iter().enumerate().find(|(_, x)| !x.tabs.is_empty())?;
+                Some((q, x.shown))
+            };
+            if let Some((q, at)) = back.filter(|(q, _)| *q != p).or_else(first) {
+                if let Some(next) = self.projects.get_mut(q) {
+                    next.shown = at;
+                }
+                self.show_index(q);
+            }
+            return;
+        }
+        if !named {
+            self.projects.remove(p);
+            self.shown = self.shown.map(|s| if s > p { s.saturating_sub(1) } else { s });
+        }
     }
 
     // ----- going places ------------------------------------------------------------------
@@ -517,6 +545,22 @@ impl Tiling {
         let Some(at) = self.shown.filter(|_| n > 1) else { return };
         let p = super::tree::round_step(at, n, forward);
         self.show_index(p);
+    }
+
+    /// Give the project of `home` the home `to`, as its tiles now say: a project first made at
+    /// its machine's, before what its work is was known, takes the repository or the folder
+    /// its tiles turned out to share. Its tabs, its name and its place in the order stay. Not
+    /// where another project has `to` already: nothing moves between projects. Whether it
+    /// took it.
+    pub fn rehome(&mut self, home: &GroupKey, to: GroupKey) -> bool {
+        if self.project_of(&to).is_some() {
+            return false;
+        }
+        let Some(project) = self.project_of(home).and_then(|p| self.projects.get_mut(p)) else {
+            return false;
+        };
+        project.home = to;
+        true
     }
 
     /// Give the project of `home` the person's name for it, or none.

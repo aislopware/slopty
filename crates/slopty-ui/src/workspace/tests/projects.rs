@@ -34,6 +34,8 @@ struct Setup {
 }
 
 fn setup(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Setup {
+    // Wide enough for the orchestrator and its agent side by side, each the window's height.
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
     let worker = WorkerId::new();
     let fake = connect_as(view, cx, worker, "studio");
     let (orchestrator, agent, blocked_session) =
@@ -195,35 +197,34 @@ fn a_project_s_agents_are_named_by_their_part_in_it(cx: &mut TestAppContext) {
     drop(setup.fake);
 }
 
-/// An agent opened from a board that fills the view comes in beside it: the board's column
-/// gives up its full width, so neither is left cut off at the window's edge.
+/// An agent opened from a board zoomed over its tab comes in beside it: the zoom ends, so
+/// neither is left hidden under the other.
 #[gpui::test]
-fn an_agent_opened_from_a_full_width_board_shows_beside_it(cx: &mut TestAppContext) {
+fn an_agent_opened_from_a_zoomed_board_shows_beside_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (orchestrator_tile, orchestrator) = setup.orchestrator;
     let (agent_tile, _) = setup.agent;
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    let full = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+    let zoomed = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
         view.read_with(cx, |v, _| {
-            let pos = v.layout.position(orchestrator_tile).expect("placed");
-            v.layout.workspaces()[pos.workspace].columns()[pos.column].is_full_width()
+            v.layout.shown_tab().and_then(slopty_client::layout::Tab::zoomed).is_some()
         })
     };
-    assert!(full(&view, cx), "the board fills the view");
+    assert!(zoomed(&view, cx), "the board is zoomed over its tab");
     view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
     cx.run_until_parked();
     cx.simulate_keystrokes("down down enter");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(agent_tile), "↩ went to task 1's agent");
-    assert!(!full(&view, cx), "the board gave up its full width");
-    let (board, agent, strip) = view.read_with(cx, |v, _| {
+    assert!(!zoomed(&view, cx), "the zoom ended");
+    let (board, agent, area) = view.read_with(cx, |v, _| {
         (v.tile_bounds(orchestrator_tile), v.tile_bounds(agent_tile), v.drawn.viewport.get())
     });
     let (board, agent) = (board.expect("the board shows"), agent.expect("the agent shows"));
-    assert!(board.left() >= strip.left() - px(0.5), "the board is whole: {board:?} in {strip:?}");
-    assert!(agent.right() <= strip.right() + px(0.5), "{agent:?} in {strip:?}");
+    assert!(board.left() >= area.left() - px(0.5), "the board is whole: {board:?} in {area:?}");
+    assert!(agent.right() <= area.right() + px(0.5), "{agent:?} in {area:?}");
     drop(setup.fake);
 }
 
@@ -1326,6 +1327,9 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     });
     done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };
     let working = card(2, "Golden files", TaskState::Running);
+    // Zoomed over its tab, so the card has the room for every fact on its line.
+    cx.simulate_keystrokes("cmd-shift-enter");
+    cx.run_until_parked();
     view.update_in(cx, |v, _w, cx| {
         v.project_update(11, task_changed("board", done, None), cx);
         v.project_update(12, task_changed("board", working, None), cx);

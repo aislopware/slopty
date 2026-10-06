@@ -514,8 +514,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         (pct(50), pct(95))
     };
     // Its state, not its bounds: a release build keeps no debug selectors.
-    let shown =
-        |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.layout().navigator().shown);
+    let shown = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.navigator().shown);
     assert!(shown(cx));
     let docked = time(cx);
     // The action itself: a snapshot's tiles arrive unfocused, so no element holds the keyboard
@@ -734,62 +733,6 @@ fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
     assert_eq!(meta, "", "a lone word is the mark's to say: {lines:#?}");
     assert!(!meta.contains("Idle"), "{meta:?}");
     assert_eq!(age.as_deref(), Some("2m"), "from its rest: {lines:#?}");
-}
-
-/// A phone's title bar has no tabs, so its drawer heads the list with *Workspaces* once there
-/// are two: a row per workspace, above the workers. With one, the bar names where the person
-/// is and the section says nothing more. "New workspace" is the bar's "+" menu's, not a row.
-/// A desktop's navigator has no such section. The active workspace is said by its name's tone,
-/// not a fill: the focused tile's row is the list's one selection, so two rows never both read
-/// as selected.
-#[gpui::test]
-fn a_phone_drawer_lists_the_workspaces_once_there_are_two(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    assert!(!shown(cx, "nav-workspaces"), "the title bar's tabs say it on a desktop");
-    cx.simulate_resize(size(px(390.0), px(844.0)));
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    assert!(shown(cx, "navigator"), "the drawer is out");
-    assert!(!shown(cx, "nav-workspaces"), "one workspace: the bar names it");
-    assert!(!shown(cx, "nav-new-space"), "a new one is the bar's \"+\" menu's");
-
-    view.update_in(cx, |v, _w, cx| {
-        let last = v.layout.workspaces().len().saturating_sub(1);
-        v.go_to_workspace(last, cx);
-    });
-    cx.run_until_parked();
-    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let heading = cx.debug_bounds("nav-workspaces").expect("two: the section heads the drawer");
-    let (first, second) = (
-        cx.debug_bounds("nav-space-0").expect("the first workspace's row"),
-        cx.debug_bounds("nav-space-1").expect("the second's"),
-    );
-    let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the worker");
-    assert!(heading.bottom() <= first.top() && first.bottom() <= second.top(), "in order");
-    assert!(second.bottom() <= worker.top(), "above the workers");
-    assert!(!shown(cx, "nav-new-space"), "still no row for a new one");
-    let plate = view.read_with(cx, |v, _| v.navigator_plate()).expect("the selection's plate");
-    let focused = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the focused row");
-    assert!((plate.top() - focused.top()).abs() < px(0.5), "under the focused tile: {plate:?}");
-    let fills = [Theme::default().surfaces.selected, Theme::default().surfaces.hover]
-        .map(|fill| gpui::Background::from(crate::colors::hsla(fill)));
-    let filled = cx.update(|window, _| {
-        let scale = window.scale_factor();
-        let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
-        window.painted_quads().into_iter().any(|q| {
-            fills.contains(&q.background)
-                && near(q.bounds.origin.y.0, second.origin.y)
-                && near(q.bounds.size.height.0, second.size.height)
-        })
-    });
-    assert!(!filled, "the active workspace's row has no fill of its own");
-    click(cx, "nav-space-0");
-    assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 0, "its row goes there");
 }
 
 /// A phone's drawer floats as iOS 26's sidebar does: clear of the window's leading and bottom
@@ -1035,7 +978,7 @@ fn group_by_machine_brings_back_the_workers_blocks(cx: &mut TestAppContext) {
     assert!(headings.is_empty(), "a lone section has no heading: {headings:?}");
     let lines = view.read_with(cx, |v, _| v.group_lines());
     assert_eq!(lines.first().map(|l| l.label.as_str()), Some(navigator::BY_PROJECT));
-    let saved = view.read_with(cx, |v, _| v.layout.save().navigator.group_by);
+    let saved = view.read_with(cx, |v, _| v.to_save().navigator.group_by);
     assert_eq!(saved, ["machine"], "kept with the layout");
 }
 

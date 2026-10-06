@@ -670,8 +670,8 @@ impl WorkspaceView {
         let route = heard.route;
         let in_view = route.item.is_some_and(|item| {
             let tile = TileRef { worker: route.worker, item };
-            let active = self.layout.active_workspace();
-            self.layout.position(tile).is_some_and(|at| at.workspace == active)
+            let shown = self.layout.shown_index();
+            self.layout.position(tile).is_some_and(|at| Some(at.project) == shown)
         });
         let text = if in_view || heard.title.trim().is_empty() {
             heard.body.clone()

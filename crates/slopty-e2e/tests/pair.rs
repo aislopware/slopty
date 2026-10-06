@@ -26,8 +26,8 @@ mod tests {
 
     /// How long a worker round trip (open a shell, run a command) may take.
     const STEP: Duration = Duration::from_secs(20);
-    /// Window size: wide enough for two half-width columns side by side, so both clients can
-    /// click into the second shell without scrolling the strip.
+    /// Window size: wide enough for two panes side by side, so the opener's second shell is
+    /// drawn beside its first.
     const WINDOW: (f32, f32) = (1600.0, 720.0);
     /// (a) A terminal one client opens is on the other no later than this after it is on the
     /// opener, over loopback.
@@ -208,8 +208,8 @@ mod tests {
     }
 
     /// (a) A terminal opened on A appears on B with the same title, size and rows, within a
-    /// round trip; (e) where A puts it is A's alone: a column A widens or moves stays as it was
-    /// on B, while both keep the same items; (g) a note edited on A reads the same on B, and ⌘W on
+    /// round trip; (e) where A puts it is A's alone: a tile A moves stays where it was on B,
+    /// while both keep the same items; (g) a note edited on A reads the same on B, and ⌘W on
     /// A takes the item off B.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e pair"]
@@ -234,9 +234,9 @@ mod tests {
         assert!(ta.driving, "the opener drives: {ta:#?}");
         assert!(!db.terminal(&session).unwrap().driving, "the other client does not");
 
-        // (e) The layout is per client: A's new shell took A's focus in a column of its own,
-        // while on B it joined the end without taking B's. A moving it left changes nothing
-        // on B; the items stay the same set on both.
+        // (e) The layout is per client: A's new shell took A's focus in a pane of its own,
+        // while on B it came in as a background tab without taking B's. A moving it left, into
+        // the first's pane, changes nothing on B; the items stay the same set on both.
         let on_a = |d: &Dump| d.item_for_session(&session).map(|i| (i.pos, i.active));
         let (pos_a, active_a) = on_a(&da).unwrap();
         let (pos_b, active_b) = on_a(&db).unwrap();
@@ -244,8 +244,8 @@ mod tests {
         assert!(!active_b, "and not B's: {db:#?}");
         a.keys("cmd-alt-shift-left").await.unwrap();
         let da = a
-            .wait_for("the column moved on A", STEP, |d| {
-                d.item_for_session(&session).is_some_and(|i| i.pos[1] + 1 == pos_a[1])
+            .wait_for("the tile moved on A", STEP, |d| {
+                d.item_for_session(&session).is_some_and(|i| i.pos != pos_a)
             })
             .await
             .unwrap();
@@ -356,14 +356,14 @@ mod tests {
             .unwrap();
         assert_eq!(da.terminal(&session).unwrap().size, db.terminal(&session).unwrap().size);
 
-        // The pill moved the driver, not just its label: prove B now sizes the PTY. B widens
-        // its column (⌘R, the next preset) while A's column stays as it was; if the take-over
-        // were cosmetic (B's flag flips but A keeps driving), A's unchanged grid would keep the
-        // PTY's size and nobody would follow B's.
+        // The pill moved the driver, not just its label: prove B now sizes the PTY. B's window
+        // narrows while A's stays as it was; if the take-over were cosmetic (B's flag flips but
+        // A keeps driving), A's unchanged grid would keep the PTY's size and nobody would
+        // follow B's.
         let before = db.terminal(&session).unwrap().size;
         focus_session(b, &session).await;
-        b.keys("cmd-r").await.unwrap();
-        let resized = |d: &Dump| d.terminal(&session).is_some_and(|t| t.size[0] > before[0]);
+        b.ok(&Command::Resize { width: WINDOW.0 - 400.0, height: WINDOW.1 }).await.unwrap();
+        let resized = |d: &Dump| d.terminal(&session).is_some_and(|t| t.size[0] < before[0]);
         let db = b.wait_for("B's resize taking hold", STEP, resized).await.unwrap();
         let da = a.wait_for("A following B's size", STEP, resized).await.unwrap();
         let (sa, sb) = (da.terminal(&session).unwrap().size, db.terminal(&session).unwrap().size);
@@ -579,7 +579,7 @@ mod tests {
         .unwrap();
 
         // (a) opened on the Mac, on the phone; the phone reads the same rows and title. Where
-        // the tile sits is each device's own: on the phone it joins the end of the strip.
+        // the tile sits is each device's own: on the phone it comes in as a background tab.
         let (session, lag) = open_on_a(a, b).await;
         let same_rows = |da: &Dump, db: &Dump| match (da.terminal(&session), db.terminal(&session))
         {
@@ -602,7 +602,7 @@ mod tests {
         assert!(lag <= PROPAGATION_LIMIT, "the phone lagged by {lag:?}");
 
         // (b) typed on the phone into the first shell, read on the Mac. Reveal it first: the
-        // phone shows one full-width column at a time, and revealing focuses it so the soft
+        // phone shows one full-width pane at a time, and revealing focuses it so the soft
         // keyboard routes to it.
         b.reveal(&first).await.unwrap();
         b.wait_for("the phone's grid to take the keyboard", STEP, |d| {

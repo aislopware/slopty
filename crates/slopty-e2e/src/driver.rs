@@ -299,6 +299,15 @@ impl Driver {
         self.ok(&Command::Reveal { session: session.to_owned() }).await
     }
 
+    /// Show `item`'s tile, focused and holding the keyboard.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks, or the app holds no tile of `item`.
+    pub async fn focus_item(&mut self, item: &str) -> Result<()> {
+        self.ok(&Command::FocusItem { item: item.to_owned() }).await
+    }
+
     /// Activate an agent banner: reveal `tag`'s session, on whichever worker runs it, as the
     /// response handler does.
     ///

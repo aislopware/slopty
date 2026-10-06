@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use gpui::{Context, Focusable as _, Task, Window};
-use slopty_client::layout::{Frame, Rect, WorkerKey};
+use slopty_client::layout::{Rect, WorkerKey};
 use slopty_client::screen::display::{self, Follow};
 use slopty_core::{ItemId, StreamId};
 use slopty_proto::ClientMsg;
@@ -448,10 +448,9 @@ impl WorkspaceView {
         if !self.offers_displays(tile.worker) || self.display_key().is_none() {
             return;
         }
-        let frame = self.layout.frame();
-        let Some(placed) = frame.tiles.iter().find(|p| p.tile == tile) else { return };
+        let Some(placed) = self.placed_tiles().into_iter().find(|p| p.tile == tile) else { return };
         let scale = window.scale_factor();
-        let pixels = body_pixels(placed.target, self.header_h(), scale);
+        let pixels = body_pixels(placed.rect, self.header_h(), scale);
         let shape = display::shape(pixels, scale, crate::screen::main_refresh_hz());
         if let Some(w) = self.workers.get_mut(&tile.worker) {
             w.sized = Some(Sized::new(tile.item, shape));
@@ -498,12 +497,7 @@ impl WorkspaceView {
     /// Each display made for this device takes its tile's size once the tile has held it for
     /// [`display::SETTLE`]; the frame then is woken for it. The shape a tile rests at is kept
     /// for the next open.
-    pub(super) fn follow_sized_displays(
-        &mut self,
-        frame: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn follow_sized_displays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.desktop.refocus
             && let Some(view) = self.screens.get(&item)
         {
@@ -517,16 +511,17 @@ impl WorkspaceView {
         let scale = window.scale_factor();
         let header = self.header_h();
         let mut due: Option<Instant> = None;
+        let placed = self.placed_tiles();
         for w in self.workers.values_mut() {
             let Some(sized) = w.sized.as_mut() else { continue };
             // A tile in a window of its own keeps the display it had.
             if self.popouts.holds(sized.item) {
                 continue;
             }
-            let Some(placed) = frame.tiles.iter().find(|p| p.tile.item == sized.item) else {
+            let Some(placed) = placed.iter().find(|p| p.tile.item == sized.item) else {
                 continue;
             };
-            let pixels = body_pixels(placed.target, header, scale);
+            let pixels = body_pixels(placed.rect, header, scale);
             sized.shape = display::shape(pixels, scale, sized.shape.refresh_hz);
             let Some(stream) = sized.stream.filter(|_| !sized.opening) else { continue };
             sized.follow.tile(pixels, scale, now);

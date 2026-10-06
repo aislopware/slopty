@@ -23,15 +23,15 @@ use gpui::{
     MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, px,
 };
-use slopty_client::layout::{Placed, Placement, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::thread::wire::{Setup, Start};
 use slopty_proto::thread::{AgentId, IntentId, ThreadId};
 
 use super::WorkspaceView;
 use super::actions::StartThread;
+use super::area::{Handed, Placed};
 use super::projects::agent_label;
-use super::strip::Handed;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
 use crate::conversation::attach::Target;
@@ -426,17 +426,37 @@ impl WorkspaceView {
         }
     }
 
-    /// Open the tile of `starting`, focused.
+    /// Open the tile of `starting` in a tab of its own, focused: a start is a tab.
     pub(super) fn open_starting(
         &mut self,
         item: ItemId,
         starting: Starting,
         cx: &mut Context<Self>,
     ) {
+        self.place_starting(item, starting, false, cx);
+    }
+
+    /// Open the tile of `starting`, focused: in a tab of its own, or `beside` the focused tile
+    /// by the room rule (a run to compare beside the one before).
+    fn place_starting(
+        &mut self,
+        item: ItemId,
+        starting: Starting,
+        beside: bool,
+        cx: &mut Context<Self>,
+    ) {
         let worker = starting.worker;
         self.starting.tiles.insert(item, starting);
-        self.tick();
-        self.layout.open(TileRef { worker, item }, Placement::Local);
+        let tile = TileRef { worker, item };
+        if beside {
+            self.open_here(tile);
+        } else {
+            let home = match self.layout.shown_project() {
+                Some(project) => project.home().clone(),
+                None => self.home_for(tile),
+            };
+            self.layout.new_tab(tile, &home);
+        }
         self.after_focus_moved(cx);
         self.layout_touched(cx);
         cx.notify();
@@ -480,7 +500,7 @@ impl WorkspaceView {
         }
         self.send_start(item, prompt.clone(), cx);
         // The same message on each other agent chosen, each in a new worktree of its own and a
-        // column of its own, opened right of the one before, at its agent's defaults: the runs
+        // pane of its own, opened beside the one before, at its agent's defaults: the runs
         // to compare, each on its own checkout of the pull request where the start is one's. The
         // keyboard stays with the run the person wrote.
         let runs: Vec<AgentId> = also.into_iter().filter(|_| worktree).collect();
@@ -492,7 +512,7 @@ impl WorkspaceView {
             let mut starting = Starting::new(worker, agent, cwd.clone(), None).in_worktree(true);
             starting.pull = pull;
             starting.chosen.attachments.clone_from(&attachments);
-            self.open_starting(run, starting, cx);
+            self.place_starting(run, starting, true, cx);
             self.send_start(run, prompt.clone(), cx);
         }
         self.focus_tile(TileRef { worker, item }, cx);
@@ -680,7 +700,6 @@ impl WorkspaceView {
     }
 
     fn drop_starting_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        self.tick();
         self.layout.remove(tile);
         self.after_focus_moved(cx);
         self.layout_touched(cx);
@@ -768,7 +787,7 @@ impl WorkspaceView {
                     .into_any_element()
             } else if let Some(drafting) = &starting.draft {
                 let view = &drafting.view;
-                let width = placed.target.w;
+                let width = placed.rect.w;
                 let handed = Handed::Face { zoom: k, width };
                 let theme = self.theme.clone();
                 let stale = view.read(cx).theme() != &theme;
@@ -805,21 +824,13 @@ impl WorkspaceView {
                     .into_any_element()
             }
         });
-        let rect = placed.rect;
-        let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
-        let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
         Some(
             div()
                 .id(ElementId::Uuid(*id.as_uuid()))
                 .debug_selector(move || format!("item-{}", id.as_uuid()))
                 .role(Role::Group)
                 .aria_label(title)
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(width))
-                .h(px(height))
-                .opacity(placed.alpha)
+                .size_full()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
@@ -833,7 +844,7 @@ impl WorkspaceView {
                 .map(|el| {
                     let inside =
                         div().flex().flex_col().child(header).children(failed).children(body);
-                    kit::panel(el, theme, self.stand(k), inside)
+                    el.child(inside.relative().size_full().overflow_hidden())
                 })
                 .into_any_element(),
         )

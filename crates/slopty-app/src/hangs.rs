@@ -135,10 +135,10 @@ mod tests {
     fn a_hang_names_its_longest_work() {
         let start = Instant::now();
         let events =
-            [action("file::SaveFile", start, 40), action("workspace::ToggleOverview", start, 310)];
+            [action("file::SaveFile", start, 40), action("workspace::ZoomPane", start, 310)];
         let one = hang(HangTrigger::Threshold, Duration::from_millis(360), &events);
         assert_eq!(one.stall, Duration::from_millis(310));
-        assert_eq!(one.cause, "the action workspace::ToggleOverview");
+        assert_eq!(one.cause, "the action workspace::ZoomPane");
         assert!(!one.piled_up);
         assert_eq!(one.active, Duration::from_millis(360));
 

@@ -37,8 +37,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas,
     div, px,
 };
-use slopty_client::groups::Group;
-use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
+use slopty_client::layout::{GroupKey, Tab, TabId, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
@@ -47,21 +46,18 @@ use super::actions::{
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
-use super::strip::NEW_WORKSPACE;
+use super::title_tabs::TitleTab;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{Status, Symbol};
 use crate::kit;
 
-/// The bar's height under the safe area, with a pointer.
-pub const TITLEBAR_H: f32 = 38.0;
-
 /// The bar's height under `theme`'s density: a finger's target and a hairline's room round
 /// it at least, so its buttons fit it on touch.
 #[must_use]
 pub const fn titlebar_height(theme: &slopty_theme::Theme) -> f32 {
-    TITLEBAR_H.max(2.0_f32.mul_add(theme.spacing.xxs, theme.density.hit))
+    theme.density.title.max(2.0_f32.mul_add(theme.spacing.xxs, theme.density.hit))
 }
 
 /// Room for the traffic lights at the left of the bar, or of the navigator when it shows.
@@ -91,8 +87,8 @@ type MenuAction = fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView
 /// Which of the bar's menus is open.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) enum MenuKind {
-    /// The breadcrumb's workspace: every workspace, and a new one.
-    Workspaces,
+    /// The breadcrumb's project: every project.
+    Projects,
     /// The breadcrumb's checkout: the same repository's other checkouts.
     Checkouts,
     /// "+": what to open.
@@ -166,58 +162,37 @@ impl WorkspaceView {
         self.nav.drawn.is_some() && (slow(was) || slow(now))
     }
 
-    /// The active workspace's name: the one given, else its place.
+    /// The name of the project on show: the one given, else its group's.
     #[must_use]
-    pub fn workspace_name(&self) -> String {
-        self.workspace_name_at(self.layout.active_workspace())
+    pub fn project_name(&self) -> String {
+        self.layout.shown_index().map(|ix| self.project_name_at(ix)).unwrap_or_default()
     }
 
-    /// Workspace `ix`'s name: the one given, else the project most of its tiles are in (a tie
-    /// going to the one first in the strip, so the name holds as the focus moves), which is the
-    /// worker's name where that is all its tiles have in common. Never a number, nor a tile's
-    /// title, which follows every command run and every page loaded. One with nothing on it is
-    /// new.
-    pub(super) fn workspace_name_at(&self, ix: usize) -> String {
-        let Some(ws) = self.layout.workspaces().get(ix) else { return NEW_WORKSPACE.to_owned() };
-        if let Some(name) = ws.name() {
+    /// Project `ix`'s name: the one the person gave it, else its group's as the navigator says
+    /// it, which is its machine's for work that has no project.
+    pub(super) fn project_name_at(&self, ix: usize) -> String {
+        let Some(project) = self.layout.projects().get(ix) else { return String::new() };
+        if let Some(name) = project.name() {
             return name.to_owned();
         }
-        let projects = self.project_groups();
-        // The project of the most tiles; a project before a machine, which only says where.
-        let mut counts: Vec<(&Group, usize)> = Vec::new();
-        for tile in ws.columns().iter().flat_map(Column::tiles).map(Tile::tile) {
-            let Some(group) = projects.group_of(tile) else { continue };
-            match counts.iter_mut().find(|(g, _)| g.key == group.key) {
-                Some((_, n)) => *n = n.saturating_add(1),
-                None => counts.push((group, 1)),
-            }
+        self.home_name(project.home())
+    }
+
+    /// What the group `home` is called: its machine's name, else its group's.
+    pub(super) fn home_name(&self, home: &GroupKey) -> String {
+        if let Some(worker) = home.worker() {
+            return self.worker_name(worker);
         }
-        let best = counts.iter().enumerate().max_by_key(|(order, (g, n))| {
-            (g.key.worker().is_none(), *n, std::cmp::Reverse(*order))
-        });
-        best.map(|(_, (group, _))| *group)
-            .map_or_else(|| NEW_WORKSPACE.to_owned(), |group| self.group_name(group))
+        let projects = self.project_groups();
+        projects.group(home).map_or_else(|| home.value().to_owned(), |g| self.group_name(g))
     }
 
-    /// The workspaces the bar has a tab for: those holding something or named, and the
-    /// active one even when empty.
-    pub(super) fn tabbed_workspaces(&self) -> Vec<usize> {
-        let active = self.layout.active_workspace();
-        self.layout
-            .workspaces()
-            .iter()
-            .enumerate()
-            .filter(|(ix, ws)| *ix == active || !ws.columns().is_empty() || ws.name().is_some())
-            .map(|(ix, _)| ix)
-            .collect()
-    }
-
-    /// What workspace `ix`'s tiles add up to, and how many there are.
-    pub(super) fn workspace_rollup(&self, ix: usize) -> (Rollup, usize) {
+    /// What project `ix`'s tiles add up to, and how many there are.
+    pub(super) fn project_rollup(&self, ix: usize) -> (Rollup, usize) {
         let mut rollup = Rollup::default();
         let mut count = 0_usize;
-        let Some(ws) = self.layout.workspaces().get(ix) else { return (rollup, count) };
-        for tile in ws.columns().iter().flat_map(Column::tiles).map(Tile::tile) {
+        let Some(project) = self.layout.projects().get(ix) else { return (rollup, count) };
+        for tile in project.tabs().iter().flat_map(Tab::tiles) {
             count = count.saturating_add(1);
             if let Some(item) = self.item(tile) {
                 let (mark, unseen) = self.tile_marks(tile, item);
@@ -227,31 +202,41 @@ impl WorkspaceView {
         (rollup, count)
     }
 
-    /// What the overview says beside workspace `ix`'s name, in one meta line: the machines its
-    /// tiles are on, unless that is its name already, then the next thing in it that needs the
-    /// person ("Claude Code · Needs approval"), the first in reading order. Empty when there is
-    /// nothing to add.
-    pub(super) fn workspace_glance(&self, ix: usize) -> String {
-        let name = self.workspace_name_at(ix);
-        let Some(ws) = self.layout.workspaces().get(ix) else { return String::new() };
-        let tiles: Vec<TileRef> =
-            ws.columns().iter().flat_map(Column::tiles).map(Tile::tile).collect();
-        let mut machines: Vec<String> = Vec::new();
-        for tile in &tiles {
-            let machine = self.worker_name(tile.worker);
-            if !machines.contains(&machine) {
-                machines.push(machine);
-            }
-        }
-        let machines = machines.join(", ");
-        let machines = (machines != name).then_some(machines);
-        let need = tiles.iter().find_map(|&tile| {
-            let item = self.item(tile)?;
-            let (mark, _) = self.tile_marks(tile, item);
-            let word = self.tile_word(item, mark.filter(|m| *m == Status::NeedsYou))?;
-            Some(format!("{}{}{word}", self.tile_title(item), super::rollup::META_SEPARATOR))
-        });
-        super::rollup::meta_line([machines.as_deref(), need.as_deref()])
+    /// The tabs of the project on show, as the bar draws them: each named by its focused
+    /// work, with a mark for each agent in it that works or has finished.
+    pub(super) fn title_tabs(&self) -> Vec<TitleTab> {
+        let Some(project) = self.layout.shown_project() else { return Vec::new() };
+        let shown = project.shown().map(Tab::id);
+        project
+            .tabs()
+            .iter()
+            .map(|tab| {
+                let title = tab
+                    .focused()
+                    .and_then(|t| self.item(t))
+                    .map(|item| self.tile_title(item))
+                    .unwrap_or_default();
+                let marks = tab
+                    .tiles()
+                    .filter_map(|t| {
+                        let item = self.item(t)?;
+                        let (mark, _) = self.tile_marks(t, item);
+                        mark.filter(|m| {
+                            matches!(
+                                m,
+                                Status::Working | Status::NeedsYou | Status::Done | Status::Failed
+                            )
+                        })
+                    })
+                    .collect();
+                TitleTab {
+                    id: tab.id(),
+                    title: title.into(),
+                    marks,
+                    shown: shown == Some(tab.id()),
+                }
+            })
+            .collect()
     }
 
     pub(super) fn toggle_menu(
@@ -395,9 +380,10 @@ impl WorkspaceView {
                 }))
         });
 
-        // Where the focused work is, "+" after its last segment.
-        let where_ = (has_workers && !phone)
-            .then(|| self.render_breadcrumb(new.map(gpui::IntoElement::into_any_element), cx));
+        // Where the focused work is, then the project's tabs, "+" after the last.
+        let where_ = (has_workers && !phone).then(|| self.render_breadcrumb(cx));
+        let tabs =
+            (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
 
         // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
         // left to review; it opens the navigator at them.
@@ -501,7 +487,9 @@ impl WorkspaceView {
                     .children(search)
                     .children(new_agent)
                     .children(phone_title)
-                    .children(where_),
+                    .children(where_)
+                    .children(tabs)
+                    .children(new),
             )
             .children(lane)
             .children(readouts)
@@ -513,16 +501,16 @@ impl WorkspaceView {
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
     /// (or its agent's mark) before its name and how it is doing after, as an inline navigation
     /// title ([`phone_title_role`]). The tile has no header of its own on a phone, so its rows
-    /// are the bar's "…". With no tile focused it names the workspace.
+    /// are the bar's "…". With no tile focused it names the project.
     fn render_phone_title(&self) -> gpui::AnyElement {
-        let ix = self.layout.active_workspace();
         let theme = &self.theme;
         let s = &theme.surfaces;
         let focused = self.focused().and_then(|tile| self.item(tile).map(|item| (tile, item)));
         let Some((tile, item)) = focused else {
-            let (label, _rollup) = self.workspace_words(ix);
+            let ix = self.layout.shown_index().unwrap_or_default();
+            let (label, _rollup) = self.project_words(ix);
             return phone_heading(theme, label)
-                .child(SharedString::from(self.workspace_name_at(ix)))
+                .child(SharedString::from(self.project_name_at(ix)))
                 .into_any_element();
         };
         let id = item.id;
@@ -579,11 +567,11 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// What a workspace's name says to a screen reader: its name, how many tiles it holds, and
+    /// What a project's name says to a screen reader: its name, how many tiles it holds, and
     /// what they add up to.
-    fn workspace_words(&self, ix: usize) -> (SharedString, Rollup) {
-        let name = self.workspace_name_at(ix);
-        let (rollup, count) = self.workspace_rollup(ix);
+    pub(super) fn project_words(&self, ix: usize) -> (SharedString, Rollup) {
+        let name = self.project_name_at(ix);
+        let (rollup, count) = self.project_rollup(ix);
         let noun = if count == 1 { "tile" } else { "tiles" };
         let label = match rollup.words() {
             Some(words) => format!("{name}, {count} {noun}, {words}"),
@@ -642,11 +630,6 @@ impl WorkspaceView {
             entry(MenuGroup::Tiles, "New note", Some(&NewNote), |this, w, cx| {
                 this.new_note(&NewNote, w, cx);
             }),
-            entry(MenuGroup::Workspaces, NEW_WORKSPACE, None, |this, _w, cx| {
-                // The layout always keeps an empty workspace last.
-                let last = this.layout.workspaces().len().saturating_sub(1);
-                this.go_to_workspace(last, cx);
-            }),
         ]
     }
 
@@ -692,7 +675,7 @@ impl WorkspaceView {
         };
         let entries: Vec<MenuEntry> = match which {
             MenuKind::Machine(key) => self.machine_entries(key, &entity, cx),
-            MenuKind::Workspaces => self.workspace_entries(&entity),
+            MenuKind::Projects => self.project_entries_menu(&entity),
             MenuKind::Server => self.server_entries.clone(),
             MenuKind::Context => {
                 self.context_menu.as_ref().map(|m| m.entries.clone()).unwrap_or_default()
@@ -717,12 +700,6 @@ impl WorkspaceView {
                 entries.extend([
                     action("Command palette", &OpenPalette, |this, w, cx| {
                         this.open_palette(&OpenPalette, w, cx);
-                    }),
-                    action("Overview", &super::actions::ToggleOverview, |this, _w, cx| {
-                        this.tick();
-                        this.layout.toggle_overview();
-                        this.overview_flipped(cx);
-                        cx.notify();
                     }),
                     action("Stream stats", &ToggleStats, |this, w, cx| {
                         this.toggle_stats(&ToggleStats, w, cx);
@@ -786,7 +763,7 @@ impl WorkspaceView {
                             el.left(at.map_or_else(|| px(spacing.inset()), |b| b.origin.x))
                         };
                         match which {
-                            MenuKind::New | MenuKind::Workspaces | MenuKind::Checkouts => {
+                            MenuKind::New | MenuKind::Projects | MenuKind::Checkouts => {
                                 left(el.top(under_bar))
                             }
                             // The server's readout sits among the trailing ones: its menu ends
@@ -894,9 +871,29 @@ const fn menu_name(which: MenuKind) -> &'static str {
         MenuKind::New => NEW,
         MenuKind::More => "More",
         MenuKind::Machine(_) => "Machine",
-        MenuKind::Workspaces => "Workspaces",
+        MenuKind::Projects => "Projects",
         MenuKind::Checkouts => "Checkouts",
         MenuKind::Server => "Server",
         MenuKind::Context => "Menu",
+    }
+}
+
+impl super::title_tabs::TitleTabsHost for WorkspaceView {
+    fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        self.layout_action(cx, |l| l.show_tab(id));
+    }
+
+    fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((p, t)) = self.layout.tab_place(id) else { return };
+        let tiles: Vec<TileRef> = self
+            .layout
+            .projects()
+            .get(p)
+            .and_then(|project| project.tabs().get(t))
+            .map(|tab| tab.tiles().collect())
+            .unwrap_or_default();
+        for tile in tiles {
+            self.close_tile(tile, window, cx);
+        }
     }
 }

@@ -9,8 +9,8 @@
 //! * [`server`] — [`server::spawn`]: the one link to the server, redialled after every drop.
 //! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
 //!   optimistically.
-//! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
-//!   (workspaces of columns of tiles), with its springs and gestures; pure, clocked by the caller.
+//! * [`layout`] — [`layout::Tiling`]: this device's projects, their tabs and the panes that tile
+//!   every worker's items; pure, with no clock and no toolkit.
 //! * [`groups`] — [`groups::group`]: which tiles are one body of work (a project, a repository, a
 //!   folder, a machine, or any fact the caller names), and the frecency the palette ranks them by.
 //! * [`meters`] — [`meters::PlanMeters`]: each machine's plan windows as its agents publish them,

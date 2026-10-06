@@ -100,8 +100,8 @@ mod tests {
                     && d.focus.as_deref() == Some("terminal")
                     && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
                     // The shell starts in the stack's private home, which names nothing, so
-                    // the workspace takes its worker's name.
-                    && d.workspace == "e2e-worker"
+                    // its project takes its worker's name.
+                    && d.project == "e2e-worker"
             })
             .await
             .unwrap();
@@ -209,22 +209,12 @@ mod tests {
         .await
         .unwrap();
 
-        // A command left running in this shell while the human moves on: its tile counts how
-        // long it has run from the shell integration marks ptyd injected, and stops once it
-        // ends. (Its end earns a mark only past the slow command's 30 s, which the workspace's
-        // own tests hold; here the marks crossing the wire are the point.)
+        // A command left running in this shell: its tile counts how long it has run from the
+        // shell integration marks ptyd injected, and stops once it ends, whatever the person
+        // did meanwhile. (Its end earns a mark only past the slow command's 30 s, which the
+        // workspace's own tests hold; here the marks crossing the wire are the point.)
         drv.type_text("sleep 6").await.unwrap();
         drv.keys("enter").await.unwrap();
-
-        // ⌘N opens a second shell beside the first and takes the keyboard.
-        drv.keys("cmd-n").await.unwrap();
-        let dump = drv
-            .wait_for("a second shell", STEP, |d| {
-                d.items.len() == 2 && d.items.iter().any(|i| i.id != term.id && i.active)
-            })
-            .await
-            .unwrap();
-        assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
         // The count is the tile header's status: a duration, "4 s".
         let counting = |d: &slopty_e2e::Dump| {
             d.a11y.iter().any(|n| {
@@ -235,13 +225,22 @@ mod tests {
             })
         };
         drv.wait_for("the sleep counted on its tile", STEP, counting).await.unwrap();
-        drv.wait_for("the sleep ended", STEP + Duration::from_secs(8), |d| !counting(d))
+
+        // ⌘N opens a second shell beside the first and takes the keyboard. At this window's
+        // size there is no room for a pane of its own, so it is a tab of the first's pane,
+        // shown.
+        drv.keys("cmd-n").await.unwrap();
+        let dump = drv
+            .wait_for("a second shell", STEP, |d| {
+                d.items.len() == 2 && d.items.iter().any(|i| i.id != term.id && i.active)
+            })
             .await
             .unwrap();
+        assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
 
-        // The new shell opened in a column right of the first. ⌘⌥← goes back to the first
-        // column, whose terminal takes the keyboard; both half-width columns are in view.
-        drv.keys("cmd-alt-left").await.unwrap();
+        // ⌥⌘[ shows the first again, whose terminal takes the keyboard; the second waits
+        // undrawn behind it. The sleep ends on the first's header.
+        drv.keys("cmd-alt-[").await.unwrap();
         let session = term.session.clone().unwrap();
         let dump = drv
             .wait_for("the first shell focused again", STEP, |d| {
@@ -250,32 +249,38 @@ mod tests {
             })
             .await
             .unwrap();
+        drv.wait_for("the sleep ended", STEP + Duration::from_secs(8), |d| !counting(d))
+            .await
+            .unwrap();
         assert_eq!(dump.items.len(), 2);
-        assert!(
-            dump.items.iter().all(|i| {
-                let [x, y, w, h] = i.bounds;
-                w > 0.0
-                    && x >= 0.0
-                    && y >= 0.0
-                    && x + w <= dump.window.width
-                    && y + h <= dump.window.height
-            }),
-            "both columns in view: {dump:#?}"
-        );
+        let first = dump.items.iter().find(|i| i.id == term.id).unwrap().clone();
         let second = dump.items.iter().find(|i| i.id != term.id).unwrap().clone();
-        assert_eq!(second.pos[1], term.pos[1] + 1, "opened right of the first: {dump:#?}");
+        let [x, y, w, h] = first.bounds;
+        assert!(
+            w > 0.0
+                && x >= 0.0
+                && y >= 0.0
+                && x + w <= dump.window.width
+                && y + h <= dump.window.height,
+            "the first in view: {dump:#?}"
+        );
+        assert_eq!(second.pos, first.pos, "one pane: {dump:#?}");
+        assert!(second.bounds[2] <= 0.0, "the tab behind is not drawn: {dump:#?}");
 
-        // A click on the second tile focuses it; ⌘1 goes to the first column again.
-        let (x, y) = second.center();
-        drv.click(x, y).await.unwrap();
-        drv.wait_for("the click to focus the second shell", STEP, |d| {
-            d.items.iter().any(|i| i.id == second.id && i.active)
+        // A click on the second's tab on the pane's header shows it with the keyboard; ⌥⌘]
+        // goes round to the first again.
+        let tabs = dump.pane_tabs(&first);
+        assert_eq!(tabs.len(), 2, "a tab per shell: {:#?}", dump.a11y);
+        let [tx, ty, tw, th] = tabs[1].bounds;
+        drv.click(tx + tw / 2.0, ty + th / 2.0).await.unwrap();
+        drv.wait_for("the click to show the second shell", STEP, |d| {
+            d.items.iter().any(|i| i.id == second.id && i.active && i.bounds[2] > 0.0)
         })
         .await
         .unwrap();
-        drv.keys("cmd-1").await.unwrap();
+        drv.keys("cmd-alt-]").await.unwrap();
         let dump = drv
-            .wait_for("⌘1 on the first column", STEP, |d| {
+            .wait_for("⌥⌘] round to the first", STEP, |d| {
                 d.focused == format!("terminal:{session}")
             })
             .await
@@ -413,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e app"]
-    async fn notes_and_the_width_keys_change_the_workspace_as_dumped() {
+    async fn notes_and_the_pane_keys_change_the_workspace_as_dumped() {
         let mut stack = Stack::launch("e2e-worker").await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -448,37 +453,53 @@ mod tests {
             })
             .await
             .unwrap();
-        // The note, a Markdown file not on disk yet, opened in a column right of the shell and
-        // has the focus, in its source.
+        // The note, a Markdown file not on disk yet, opened beside the shell, which at this
+        // window's size is a tab of the shell's pane, and has the focus, in its source.
         let note = dump.item("file").unwrap().clone();
         let file = note.file.as_ref().unwrap();
         let md = std::path::Path::new(&file.path).extension().is_some_and(|e| e == "md");
         assert!(md && !file.previewing, "{file:?}");
         let shell = dump.item("terminal").unwrap().clone();
         assert!(note.active, "{dump:#?}");
-        assert_eq!(note.pos[1], shell.pos[1] + 1, "{dump:#?}");
-        let before = note.bounds;
+        assert_eq!(note.pos, shell.pos, "{dump:#?}");
+        let whole = note.bounds;
 
-        // ⌘R: the next preset width (two thirds); twice more, a third and back to half.
-        drv.keys("cmd-r").await.unwrap();
+        // ⌥⇧⌘→ moves the note out into a pane of its own on the right, the shell's pane on
+        // its left: the two side by side, each part of the width.
+        drv.keys("cmd-alt-shift-right").await.unwrap();
         let dump = drv
-            .wait_for("a wider note", STEP, |d| {
+            .wait_for("the note in a pane of its own", STEP, |d| {
+                let (Some(note), Some(shell)) = (d.item("file"), d.item("terminal")) else {
+                    return false;
+                };
+                note.active
+                    && note.pos[2] != shell.pos[2]
+                    && note.bounds[0] >= shell.bounds[0] + shell.bounds[2] - 1.0
+            })
+            .await
+            .unwrap();
+        let before = dump.item("file").unwrap().bounds;
+        assert!(before[2] < whole[2] - 50.0, "a part of the width: {whole:?} → {before:?}");
+
+        // ⇧⌘↩ zooms the note over the tab, and again lets it go back to its pane.
+        drv.keys("cmd-shift-enter").await.unwrap();
+        let dump = drv
+            .wait_for("the note zoomed", STEP, |d| {
                 d.item("file").is_some_and(|n| n.bounds[2] > before[2] + 50.0)
             })
             .await
             .unwrap();
         let after = dump.item("file").unwrap().bounds;
         assert!((after[3] - before[3]).abs() < 1.0, "only the width moved: {before:?} → {after:?}");
-        drv.keys("cmd-r").await.unwrap();
-        drv.keys("cmd-r").await.unwrap();
+        drv.keys("cmd-shift-enter").await.unwrap();
         let dump = drv
-            .wait_for("the note back at half", STEP, |d| {
+            .wait_for("the note back in its pane", STEP, |d| {
                 d.item("file").is_some_and(|n| (n.bounds[2] - before[2]).abs() < 1.0)
             })
             .await
             .unwrap();
 
-        // The shell, a column left of the note, takes a name: ⌘E puts a field in its header,
+        // The shell, a pane left of the note, takes a name: ⌘E puts a field in its header,
         // ↩ keeps the name, the heading says it, and the shell has the keyboard back (⌘W
         // below needs it focused).
         let shell = dump.item("terminal").unwrap().id.clone();

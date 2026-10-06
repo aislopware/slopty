@@ -1,7 +1,7 @@
 //! What a relaunch puts back beside the arrangement: the main window's frame, the face or TUI
 //! each agent's tile showed, and the tiles out in windows of their own.
 
-use slopty_client::layout::WindowFrame;
+use slopty_client::layout::{GroupKey, Saved, SavedPopout, Tiling, TilingConfig, WindowFrame};
 use slopty_core::WindowId;
 use slopty_proto::screen::VideoCodec;
 
@@ -135,15 +135,13 @@ fn a_relaunch_puts_a_popped_out_tile_back_in_its_window(cx: &mut TestAppContext)
         height: 400.0,
         fullscreen: false,
     };
-    let mut saved = Layout::new(LayoutConfig::default());
-    saved.open(
-        tile,
-        slopty_client::layout::Placement::Remote {
-            home: slopty_client::layout::GroupKey::machine(tile.worker),
-        },
-    );
-    let mut saved = saved.save();
-    saved.popouts.push(slopty_client::layout::SavedPopout { tile, frame });
+    let mut tiling = Tiling::new(TilingConfig::default());
+    tiling.arrive(tile, &GroupKey::machine(tile.worker));
+    let saved = Saved {
+        tiling: tiling.save(),
+        popouts: vec![SavedPopout { tile, frame }],
+        ..Saved::default()
+    };
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
 
     let (view, cx) = relaunched(cx, &path);
@@ -216,6 +214,7 @@ fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppC
         let shell = opens(&view, vcx, &studio, SessionId::new(), studio.me, 1);
         let page = ItemKind::Browser { url: "http://localhost:3000/".into() };
         let page = arrives(&view, vcx, &studio, page, 2);
+        beside(&view, vcx, page, shell, slopty_client::layout::Side::Right);
         vcx.executor().advance_clock(SAVE_AFTER);
         vcx.run_until_parked();
         (shell, page)

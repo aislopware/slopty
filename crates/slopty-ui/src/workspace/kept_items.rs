@@ -17,9 +17,10 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::items::{ItemCache, ItemDoc};
-use slopty_client::layout::{Placed, WorkerKey};
+use slopty_client::layout::WorkerKey;
 
 use super::WorkspaceView;
+use super::area::Placed;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
 use crate::draw::Draw;
@@ -118,21 +119,13 @@ impl WorkspaceView {
                     .child(name.clone())
             });
         let pill = (!shapes).then(|| self.render_state_pill(tile, &state, true, chrome, cx));
-        let rect = placed.rect;
-        let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
-        let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
         Some(
             div()
                 .id(ElementId::Uuid(*id.as_uuid()))
                 .debug_selector(move || format!("item-{}", id.as_uuid()))
                 .role(Role::Group)
                 .aria_label(name)
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(width))
-                .h(px(height))
-                .opacity(placed.alpha)
+                .size_full()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
@@ -147,7 +140,7 @@ impl WorkspaceView {
                             .relative()
                             .children(pill),
                     );
-                    crate::kit::panel(el, theme, self.stand(k), inside)
+                    el.child(inside.relative().size_full().overflow_hidden())
                 })
                 .into_any_element(),
         )

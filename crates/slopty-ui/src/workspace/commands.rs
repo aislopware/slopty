@@ -1,11 +1,11 @@
 //! What the actions do: opening things, closing and taking back, naming, moving the focus and
-//! the columns, the terminal text size.
+//! the tiles among the panes and the tabs, the terminal text size.
 
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_kit::component::input::{InputEvent, InputState};
-use slopty_client::layout::{Column, DropTarget, Navigator, TileRef, WorkerKey};
+use slopty_client::layout::{Navigator, Side, TileRef, Tiling, WorkerKey};
 use slopty_core::{ItemId, SessionId, WallMs};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
@@ -14,12 +14,11 @@ use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
-    AddWindow, Applies, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight,
-    CycleWidth, FocusColumn, FocusColumnLeft, FocusColumnRight, FocusDown, FocusMode, FocusUp,
-    FocusWorkspace, FocusWorkspaceDown, FocusWorkspaceUp, FontLarger, FontReset, FontSmaller,
-    FullscreenTile, MoveColumnLeft, MoveColumnRight, MoveColumnToFirst, MoveColumnToLast, MoveDown,
-    MoveUp, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
-    ToggleTabbed, UndoClose,
+    AddWindow, Applies, CloseItem, EqualizePanes, FocusDown, FocusLeft, FocusRight, FocusUp,
+    FontLarger, FontReset, FontSmaller, GoBack, GoForward, LastTab, MoveDown, MoveLeft, MoveRight,
+    MoveUp, NewNote, NewTerminal, NextPaneTab, NextProject, NextTab, PreviousPaneTab,
+    PreviousProject, PreviousTab, RenameItem, SelectTab, ToggleMute, ToggleStats, UndoClose,
+    ZoomPane,
 };
 use super::attention::About;
 use super::navigator::Mode;
@@ -43,7 +42,6 @@ impl WorkspaceView {
 
     /// Focus a tile: the layout moves to it, and its terminal (if it is one) takes the keyboard.
     pub fn focus_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        self.tick();
         self.layout.focus(tile);
         self.after_focus_moved(cx);
         self.layout_touched(cx);
@@ -154,24 +152,22 @@ impl WorkspaceView {
         }
     }
 
-    /// Run a layout action at the clock, then follow the focus and save.
-    pub(super) fn layout_action(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut slopty_client::layout::Layout),
-    ) {
-        self.tick();
+    /// Run a tiling action, then follow the focus, ask the remote windows whose panes changed
+    /// size to follow them, and save.
+    pub(super) fn layout_action(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Tiling)) {
         let before = self.focused();
+        let sizes = self.pane_sizes();
         f(&mut self.layout);
         if self.focused() != before {
             self.after_focus_moved(cx);
         }
+        self.resize_remote_windows(&sizes, cx);
         self.layout_touched(cx);
         cx.notify();
     }
 
-    /// The layout's actions: those about the focused column or tile only while a tile has the
-    /// focus ([`Applies`]), the workspaces' and the text size's always.
+    /// The tiling's actions: those about the focused pane and tile only while a tile has the
+    /// focus ([`Applies`]), the projects', the tabs' and the text size's always.
     pub(super) fn register_layout_actions(
         el: gpui::Stateful<gpui::Div>,
         applies: Applies,
@@ -179,26 +175,34 @@ impl WorkspaceView {
     ) -> gpui::Stateful<gpui::Div> {
         use gpui::InteractiveElement as _;
         use gpui::prelude::FluentBuilder as _;
-        use slopty_client::layout::Layout;
-        el.on_action(cx.listener(|this, _: &FocusUp, _w, cx| {
-            this.layout_action(cx, Layout::focus_window_or_workspace_up);
+        el.on_action(cx.listener(|this, _: &PreviousProject, _w, cx| {
+            this.layout_action(cx, |l| l.step_project(false));
         }))
-        .on_action(cx.listener(|this, _: &FocusDown, _w, cx| {
-            this.layout_action(cx, Layout::focus_window_or_workspace_down);
+        .on_action(cx.listener(|this, _: &NextProject, _w, cx| {
+            this.layout_action(cx, |l| l.step_project(true));
         }))
-        .on_action(cx.listener(|this, _: &FocusWorkspaceUp, _w, cx| {
-            this.layout_action(cx, Layout::focus_workspace_up);
+        .on_action(cx.listener(|this, _: &PreviousTab, _w, cx| {
+            this.layout_action(cx, |l| l.step_tab(false));
         }))
-        .on_action(cx.listener(|this, _: &FocusWorkspaceDown, _w, cx| {
-            this.layout_action(cx, Layout::focus_workspace_down);
+        .on_action(cx.listener(|this, _: &NextTab, _w, cx| {
+            this.layout_action(cx, |l| l.step_tab(true));
         }))
-        .on_action(cx.listener(|this, a: &FocusWorkspace, _w, cx| {
+        .on_action(cx.listener(|this, a: &SelectTab, _w, cx| {
             let index = a.index;
-            this.layout_action(cx, |l| l.focus_workspace(index));
+            this.layout_action(cx, |l| l.select_tab(index));
         }))
-        .on_action(cx.listener(|this, _: &ToggleOverview, _w, cx| {
-            this.layout_action(cx, Layout::toggle_overview);
-            this.overview_flipped(cx);
+        .on_action(cx.listener(|this, _: &LastTab, _w, cx| {
+            this.layout_action(cx, Tiling::last_tab);
+        }))
+        .on_action(cx.listener(|this, _: &GoBack, _w, cx| {
+            this.layout_action(cx, |l| {
+                l.go_back(false);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &GoForward, _w, cx| {
+            this.layout_action(cx, |l| {
+                l.go_back(true);
+            });
         }))
         // A focused page zooms; everywhere else the text size moves.
         .on_action(cx.listener(|this, _: &FontLarger, _w, cx| {
@@ -217,147 +221,111 @@ impl WorkspaceView {
                 this.apply_font(cx);
             }
         }))
-        .when(applies.tile, |el| Self::register_column_actions(el, cx))
+        .when(applies.tile, |el| Self::register_pane_actions(el, cx))
         .when(applies.page, |el| el.on_action(cx.listener(Self::inspect_page)))
         .when(applies.own_window, |el| el.on_action(cx.listener(Self::toggle_own_window)))
     }
 
-    /// The actions on the focused column and tile.
-    fn register_column_actions(
+    /// The actions on the focused pane and tile.
+    fn register_pane_actions(
         el: gpui::Stateful<gpui::Div>,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         use gpui::InteractiveElement as _;
-        use slopty_client::layout::Layout;
-        el.on_action(cx.listener(|this, _: &FocusColumnLeft, _w, cx| {
-            this.layout_action(cx, Layout::focus_column_left);
-        }))
-        .on_action(cx.listener(|this, _: &FocusColumnRight, _w, cx| {
-            this.layout_action(cx, Layout::focus_column_right);
-        }))
-        .on_action(cx.listener(|this, a: &FocusColumn, _w, cx| {
-            let index = a.index;
-            this.layout_action(cx, |l| l.focus_column(index));
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnLeft, _w, cx| {
-            this.layout_action(cx, Layout::move_column_left);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnRight, _w, cx| {
-            this.layout_action(cx, Layout::move_column_right);
-        }))
-        .on_action(cx.listener(|this, _: &MoveUp, _w, cx| {
-            this.layout_action(cx, Layout::move_window_up_or_to_workspace_up);
-        }))
-        .on_action(cx.listener(|this, _: &MoveDown, _w, cx| {
-            this.layout_action(cx, Layout::move_window_down_or_to_workspace_down);
-        }))
-        .on_action(cx.listener(|this, _: &ConsumeOrExpelLeft, _w, cx| {
-            this.layout_action(cx, Layout::consume_or_expel_window_left);
-        }))
-        .on_action(cx.listener(|this, _: &ConsumeOrExpelRight, _w, cx| {
-            this.layout_action(cx, Layout::consume_or_expel_window_right);
-        }))
-        .on_action(cx.listener(|this, _: &CycleWidth, _w, cx| {
-            this.width_action(cx, |l| l.switch_preset_width(true));
-        }))
-        .on_action(cx.listener(|this, _: &FocusMode, window, cx| {
-            this.toggle_focus_mode(window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &FullscreenTile, _w, cx| {
-            this.width_action(cx, Layout::toggle_fullscreen);
-        }))
-        .on_action(cx.listener(|this, _: &CenterColumn, _w, cx| {
-            this.layout_action(cx, Layout::center_column);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToFirst, _w, cx| {
-            this.layout_action(cx, Layout::move_column_to_first);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToLast, _w, cx| {
-            this.layout_action(cx, Layout::move_column_to_last);
-        }))
-        .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
-            this.layout_action(cx, Layout::toggle_tabbed);
-        }))
+        let focus = |side: Side| {
+            move |this: &mut Self, cx: &mut Context<Self>| {
+                this.layout_action(cx, |l| {
+                    l.focus_side(side);
+                });
+            }
+        };
+        let moves = |side: Side| {
+            move |this: &mut Self, cx: &mut Context<Self>| {
+                this.layout_action(cx, |l| {
+                    l.move_focused(side);
+                });
+            }
+        };
+        el.on_action(cx.listener(move |this, _: &FocusLeft, _w, cx| focus(Side::Left)(this, cx)))
+            .on_action(
+                cx.listener(move |this, _: &FocusRight, _w, cx| focus(Side::Right)(this, cx)),
+            )
+            .on_action(cx.listener(move |this, _: &FocusUp, _w, cx| focus(Side::Top)(this, cx)))
+            .on_action(
+                cx.listener(move |this, _: &FocusDown, _w, cx| focus(Side::Bottom)(this, cx)),
+            )
+            .on_action(cx.listener(move |this, _: &MoveLeft, _w, cx| moves(Side::Left)(this, cx)))
+            .on_action(cx.listener(move |this, _: &MoveRight, _w, cx| moves(Side::Right)(this, cx)))
+            .on_action(cx.listener(move |this, _: &MoveUp, _w, cx| moves(Side::Top)(this, cx)))
+            .on_action(cx.listener(move |this, _: &MoveDown, _w, cx| moves(Side::Bottom)(this, cx)))
+            .on_action(cx.listener(|this, _: &PreviousPaneTab, _w, cx| {
+                this.layout_action(cx, |l| l.step_pane_tab(false));
+            }))
+            .on_action(cx.listener(|this, _: &NextPaneTab, _w, cx| {
+                this.layout_action(cx, |l| l.step_pane_tab(true));
+            }))
+            .on_action(cx.listener(|this, _: &EqualizePanes, _w, cx| {
+                this.layout_action(cx, Tiling::equalize_all);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomPane, window, cx| {
+                this.toggle_zoom(window, cx);
+            }))
     }
 
-    /// Focus mode on or off for the focused tile. On: its column takes the working width and a
-    /// docked navigator steps aside, so the work has all the room the window has. Off: the column
-    /// takes back the width it had and the navigator comes back if it was there. The person's
-    /// own width for the column is its width rule, which full width overrides and keeps.
-    fn toggle_focus_mode(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(tile) = self.layout.focused() else { return };
-        let entering = !self.is_full_width(tile);
-        self.width_action(cx, slopty_client::layout::Layout::toggle_full_width);
-        if entering {
+    /// Zoom the focused pane over its tab, or let it go. Zoomed, a docked navigator steps aside,
+    /// so the work has all the room the window has; let go, it comes back if it was there.
+    pub(super) fn toggle_zoom(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.layout.focused().is_none() {
+            return;
+        }
+        let mut zoomed = false;
+        self.layout_action(cx, |l| zoomed = l.toggle_zoom());
+        if zoomed {
             let docked = self.navigator_mode(window) == Mode::Docked;
-            let navigator = match self.focus_mode.take() {
-                Some(held) => held.navigator,
-                None => docked && self.layout.navigator().shown,
+            let navigator = match self.zoom_hold.take() {
+                Some(held) => held,
+                None => docked && self.navigator().shown,
             };
-            if docked && self.layout.navigator().shown {
+            if docked && self.navigator().shown {
                 self.show_navigator(false, cx);
             }
-            self.focus_mode = Some(super::FocusHold { tile, navigator });
-        } else if self.focus_mode.is_some_and(|held| held.tile == tile) {
-            self.end_focus_mode(cx);
+            self.zoom_hold = Some(navigator);
+        } else {
+            self.end_zoom(cx);
         }
     }
 
-    /// Focus mode ends on its own when its tile's column stops taking the working width some
-    /// other way (a width preset, a drag, fullscreen's way back) or its tile closes: the
-    /// navigator comes back then too.
-    pub(super) fn keep_focus_mode(&mut self, cx: &Context<Self>) {
-        let Some(held) = self.focus_mode else { return };
-        if !self.is_full_width(held.tile) {
-            self.end_focus_mode(cx);
+    /// A zoom ends on its own when its tab's tree changes (a split, a close, a move) or the tab
+    /// goes from view: the navigator comes back then too.
+    pub(super) fn keep_zoom(&mut self, cx: &Context<Self>) {
+        if self.zoom_hold.is_none() {
+            return;
+        }
+        if self.layout.shown_tab().and_then(slopty_client::layout::Tab::zoomed).is_none() {
+            self.end_zoom(cx);
         }
     }
 
-    fn end_focus_mode(&mut self, cx: &Context<Self>) {
-        if self.focus_mode.take().is_some_and(|held| held.navigator) {
+    fn end_zoom(&mut self, cx: &Context<Self>) {
+        if self.zoom_hold.take().is_some_and(|navigator| navigator) {
             self.show_navigator(true, cx);
         }
     }
 
-    /// Whether `tile`'s column takes the working width.
-    fn is_full_width(&self, tile: TileRef) -> bool {
-        self.layout.position(tile).is_some_and(|pos| {
-            self.layout
-                .workspaces()
-                .get(pos.workspace)
-                .and_then(|ws| ws.columns().get(pos.column))
-                .is_some_and(Column::is_full_width)
-        })
-    }
-
     fn show_navigator(&mut self, shown: bool, cx: &Context<Self>) {
-        let nav = self.layout.navigator();
+        let nav = self.navigator().clone();
         if nav.shown != shown {
-            self.layout.set_navigator(Navigator { shown, ..nav.clone() });
+            self.set_navigator(Navigator { shown, ..nav });
             self.layout_touched(cx);
         }
     }
 
-    /// A width change: the layout's, then the remote windows of the column asked to take the
-    /// size their tile now has.
-    pub(super) fn width_action(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut slopty_client::layout::Layout),
-    ) {
-        let before = self.column_sizes();
-        self.layout_action(cx, f);
-        self.resize_remote_windows(&before, cx);
-    }
-
-    /// Every remote window tile's target size now, to compare after a width change.
-    pub(super) fn column_sizes(&self) -> Vec<(ItemId, (f32, f32))> {
-        let frame = self.layout.frame();
-        frame
-            .tiles
-            .iter()
+    /// Every remote window tile's pane size now, to compare after a change.
+    pub(super) fn pane_sizes(&self) -> Vec<(ItemId, (f32, f32))> {
+        self.placed_tiles()
+            .into_iter()
             .filter(|p| self.screens.contains_key(&p.tile.item))
-            .map(|p| (p.tile.item, (p.target.w, p.target.h)))
+            .map(|p| (p.tile.item, (p.rect.w, p.rect.h)))
             .collect()
     }
 
@@ -370,7 +338,7 @@ impl WorkspaceView {
         before: &[(ItemId, (f32, f32))],
         cx: &Context<Self>,
     ) {
-        let after = self.column_sizes();
+        let after = self.pane_sizes();
         for (id, (w0, h0)) in before {
             let Some((_, (w1, h1))) = after.iter().find(|(i, _)| i == id) else { continue };
             if (w1 - w0).abs() < 1.0 && (h1 - h0).abs() < 1.0 {
@@ -1113,12 +1081,7 @@ impl WorkspaceView {
             self.request_file(tile.item);
         }
         if let Some(at) = closed.at {
-            self.tick();
-            self.layout.move_tile(
-                tile,
-                DropTarget::NewColumn { workspace: at.workspace, index: at.column },
-            );
-            self.layout.focus(tile);
+            self.layout.put_back(tile, at);
             self.layout_touched(cx);
         }
         match closed.session {
@@ -1170,7 +1133,6 @@ impl WorkspaceView {
             InputEvent::Change | InputEvent::Focus => {}
         });
         let return_to = window.focused(cx);
-        self.tick();
         self.layout.focus(tile);
         self.rename = Some(Rename { tile, field, input, return_to, _subscription: subscription });
         self.pending_focus_rename = true;

@@ -217,14 +217,12 @@ impl WorkspaceView {
         self.facts.folders.get(&id).copied().unwrap_or_default()
     }
 
-    /// Copy item `id`'s file again. Its dot is its header's news, and only when it changed;
-    /// the overview, while it shows, copies what the file holds again then too.
+    /// Copy item `id`'s file again. Its dot is its header's news, and only when it changed.
     pub(super) fn file_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(view) = self.files.get(&id) else { return };
         let now = FileFacts::of(view.read(cx));
         if self.facts.files.insert(id, now) != Some(now) {
-            let _changed = self.retake_digest(id, cx);
-            App::notify(cx, self.strip_host.entity_id());
+            App::notify(cx, self.area_host.entity_id());
         }
     }
 
@@ -243,7 +241,7 @@ impl WorkspaceView {
             self.titles_dirty = true;
             cx.notify();
         } else if was != now {
-            App::notify(cx, self.strip_host.entity_id());
+            App::notify(cx, self.area_host.entity_id());
         }
     }
 
@@ -252,7 +250,7 @@ impl WorkspaceView {
         let Some(view) = self.folders.get(&id) else { return };
         let now = FolderFacts::of(view.read(cx));
         if self.facts.folders.insert(id, now) != Some(now) {
-            App::notify(cx, self.strip_host.entity_id());
+            App::notify(cx, self.area_host.entity_id());
         }
     }
 
@@ -297,7 +295,7 @@ impl WorkspaceView {
         let counting = |session: &SessionId| self.running_for(*session).is_some();
         if self.facts.shells.keys().any(counting) {
             App::notify(cx, self.chrome.nav_rows.entity_id());
-            App::notify(cx, self.strip_host.entity_id());
+            App::notify(cx, self.area_host.entity_id());
         }
     }
 
@@ -313,8 +311,6 @@ impl WorkspaceView {
 
     /// Forget the facts of bodies no longer kept.
     pub(super) fn prune_facts(&mut self) {
-        let items: std::collections::HashSet<ItemId> = self.items().map(|(_, i)| i.id).collect();
-        self.facts.digests.retain(|id, _| items.contains(id));
         let Self { facts, terminals, screens, files, browsers, folders, .. } = self;
         facts.shells.retain(|session, _| terminals.contains_key(session));
         facts.screens.retain(|id, _| screens.contains_key(id));
@@ -333,8 +329,6 @@ pub(super) struct Facts {
     files: std::collections::HashMap<ItemId, FileFacts>,
     pages: std::collections::HashMap<ItemId, PageFacts>,
     folders: std::collections::HashMap<ItemId, FolderFacts>,
-    /// What the overview shows of each tile of words ([`super::miniature::Digest`]).
-    digests: std::collections::HashMap<ItemId, super::miniature::Digest>,
     /// The readouts' last tick ([`WorkspaceView::keep_time`]): the monotonic clock, and the
     /// wall clock in Unix milliseconds for what a worker stamped.
     ticked: Option<(Instant, u64)>,
@@ -343,34 +337,15 @@ pub(super) struct Facts {
 }
 
 impl Facts {
-    /// What the overview shows of item `id`, as last copied.
-    pub(super) fn digest(&self, id: ItemId) -> Option<&super::miniature::Digest> {
-        self.digests.get(&id)
-    }
-
-    /// Every tile of words' digest, copied as the overview opens.
-    pub(super) fn set_digests(
-        &mut self,
-        digests: std::collections::HashMap<ItemId, super::miniature::Digest>,
-    ) {
-        self.digests = digests;
-    }
-
-    /// Item `id`'s digest, copied again.
-    pub(super) fn put_digest(&mut self, id: ItemId, digest: super::miniature::Digest) {
-        self.digests.insert(id, digest);
-    }
-
     /// How many facts are kept of each kind, for the footprint.
     #[cfg(test)]
-    pub(super) fn lens(&self) -> [(&'static str, usize); 6] {
+    pub(super) fn lens(&self) -> [(&'static str, usize); 5] {
         [
             ("facts.shells", self.shells.len()),
             ("facts.screens", self.screens.len()),
             ("facts.files", self.files.len()),
             ("facts.pages", self.pages.len()),
             ("facts.folders", self.folders.len()),
-            ("facts.digests", self.digests.len()),
         ]
     }
 }

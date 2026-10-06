@@ -1,6 +1,6 @@
 //! A tile's chrome in the headless workspace: what its header says (kind, place, worker,
 //! status), the surface it sits on, the controls it offers, the pill over a body that cannot
-//! show what it should, and the notices in the strip's corner.
+//! show what it should, and the notices in the title bar.
 
 use gpui::MouseButton;
 use slopty_core::WallMs;
@@ -80,6 +80,7 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
         opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/Users/w/src/slopty"));
     let main = "/Users/w/src/slopty/src/main.rs".to_owned();
     let file = arrives(&view, cx, &fake, ItemKind::File { path: main }, 2);
+    beside(&view, cx, file, shell, slopty_client::layout::Side::Right);
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal slopty"))), "{nodes:#?}");
     assert!(nodes.iter().any(|n| n.is("Label", Some("src"))), "the file's: {nodes:#?}");
@@ -114,11 +115,17 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
         }
     });
     cx.run_until_parked();
+    // Each alone in its pane and its tab, shown in its turn.
+    let tile = |id| TileRef { worker: key, item: id };
+    on_new_tab(&view, cx, tile(bare_id));
     let width = |cx: &mut VisualTestContext, what: &str, item: ItemId| {
         let b = cx.debug_bounds(selector(what, item)).unwrap_or_else(|| panic!("{what} drawn"));
         f32::from(b.size.width)
     };
-    let (title, alone) = (width(cx, "name", placed_id), width(cx, "name", bare_id));
+    let alone = width(cx, "name", bare_id);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile(placed_id), cx));
+    cx.run_until_parked();
+    let title = width(cx, "name", placed_id);
     assert!((title - alone).abs() < 1.0, "the title is whole beside its place: {title} vs {alone}");
     let place = width(cx, "place", placed_id);
     // The path is three times what the header leaves it.
@@ -156,13 +163,12 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
         .collect()
 }
 
-/// Every tile stands on a panel: the content's surface rounded at `radii.md`, its corners
-/// covered with the canvas it stands on and its ring in the quiet border, the focused one
-/// included. Every header lies inside its panel's top with no fill and no rule of its own, a
-/// remote window's too: focus is the title's tone and weight
+/// Every tile fills its pane: square, with no ring and no shadow of its own, the focused one
+/// included, the sashes between panes the only lines. Every header lies at its tile's top with
+/// no band and no rule of its own, a remote window's too: focus is the title's tone and weight
 /// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`).
 #[gpui::test]
-fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
+fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -171,50 +177,50 @@ fn a_tile_stands_on_a_panel_and_its_header_on_it(cx: &mut TestAppContext) {
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
     assert_eq!(focused(&view, cx), Some(second));
     cx.run_until_parked();
-    let theme = Theme::default();
-    let scale = cx.update(|window, _| window.scale_factor());
-    let content = gpui::Background::from(crate::colors::hsla(theme.content()));
-    let ring = crate::colors::hsla(theme.surfaces.stroke);
     for tile in [first, window, second] {
-        // Each in view in its turn: the strip clips what lies past its edge.
+        // Each shown in its turn: a pane shows one of its tabs.
         view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
         cx.run_until_parked();
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
-        let quads = quads_at(cx, bounds);
-        let ground = quads.iter().find(|q| q.background == content).expect("its surface");
-        let radius = ground.corner_radii.top_left.0 / scale;
-        assert!((radius - theme.radii.md).abs() < 0.01, "rounded at radii.md: {ground:?}");
-        assert!(quads.iter().any(|q| q.border_color == ring), "{tile:?}: its ring");
+        let pane = pos_of(&view, cx, tile).pane;
+        let around = cx
+            .debug_bounds(Box::leak(format!("pane-{}", pane.get()).into_boxed_str()))
+            .expect("its pane");
+        assert_eq!(bounds, around, "{tile:?}: it fills its pane");
+        for q in quads_at(cx, bounds) {
+            assert_eq!(q.corner_radii.top_left.0, 0.0, "{tile:?}: square: {q:?}");
+            assert_eq!(q.border_widths.top.0, 0.0, "{tile:?}: no ring: {q:?}");
+        }
         let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
-        assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the panel's top");
+        assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the tile's top");
         assert!(quads_at(cx, header).is_empty(), "{tile:?}: no band and no rule of its own");
     }
 }
 
-/// A gutter of the canvas parts every two neighbours, a column from the next and a tile from
-/// the one stacked under it, and runs round the outer ones: no hairline is drawn between them.
+/// Panes meet edge to edge, parted by their sash alone: the pane above ends where the one
+/// under it begins, the outer ones meet the area's edges, and no hairline of the canvas or a
+/// ring parts them.
 #[gpui::test]
-fn a_gutter_parts_every_neighbour(cx: &mut TestAppContext) {
+fn panes_meet_edge_to_edge_at_their_sash(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), (_, third)] = three_shells(&view, cx, &fake);
-    cx.simulate_keystrokes("cmd-[");
-    cx.run_until_parked();
-    assert_eq!(column_of(&view, cx, third), column_of(&view, cx, second), "stacked");
+    assert_eq!(pos_of(&view, cx, third).pane, pos_of(&view, cx, second).pane, "tabs of one");
     let at = |cx: &mut VisualTestContext, tile: TileRef| {
         cx.debug_bounds(selector("item", tile.item)).expect("drawn")
     };
-    let (first, second, third) = (at(cx, first), at(cx, second), at(cx, third));
-    let gutter = Theme::default().spacing.gutter();
-    let near = |a: Pixels, b: f32, what: &str| {
-        assert!((f32::from(a) - b).abs() < 0.5, "{what}: {a:?}, not {b}");
+    let (above, below) = (at(cx, first), at(cx, third));
+    let near = |a: Pixels, b: Pixels, what: &str| {
+        assert!(f32::from(a - b).abs() < 0.5, "{what}: {a:?}, not {b:?}");
     };
-    near(second.left() - first.right(), gutter, "between two columns");
-    near(third.top() - second.bottom(), gutter, "between two stacked tiles");
-    let window = cx.update(|window, _| window.viewport_size());
-    near(window.height - third.bottom(), gutter, "under the last row");
-    let strip = cx.debug_bounds("strip").expect("the strip");
-    near(first.left() - strip.left(), gutter / 2.0, "half from the strip, half its margin");
+    near(below.top(), above.bottom(), "the pane under begins where the one above ends");
+    let sash = cx.debug_bounds("sash--0").expect("the sash between them");
+    near(sash.center().y, above.bottom(), "the sash on their edge");
+    let area = cx.debug_bounds("area").expect("the area");
+    near(above.left(), area.left(), "on the area's leading edge");
+    near(above.right(), area.right(), "on its trailing edge");
+    near(above.top(), area.top(), "on its top");
+    near(below.bottom(), area.bottom(), "on its bottom");
     let border = crate::colors::hsla(Theme::default().surfaces.border);
     let lines = cx.update(|w, _| w.painted_quads());
     assert!(!lines.iter().any(|q| q.border_color == border), "no hairline parts them");
@@ -230,8 +236,8 @@ fn a_phone_tile_is_full_bleed(cx: &mut TestAppContext) {
     let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     cx.run_until_parked();
     let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
-    let strip = cx.debug_bounds("strip").expect("the strip");
-    assert_eq!(bounds.size.width, strip.size.width, "edge to edge: {bounds:?} in {strip:?}");
+    let area = cx.debug_bounds("area").expect("the area");
+    assert_eq!(bounds.size.width, area.size.width, "edge to edge: {bounds:?} in {area:?}");
     let window = cx.update(|window, _| window.viewport_size());
     assert!(f32::from(window.height - bounds.bottom()).abs() < 0.5, "to the bottom edge");
     let quads = quads_at(cx, bounds);
@@ -443,11 +449,11 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
-    // A waiting agent's news ends its header and its navigator row, each once; its slot keeps
-    // the agent's glyph.
+    // A waiting agent's news ends its header, its title tab and its navigator row, each once;
+    // its slot keeps the agent's glyph.
     assert!(cx.debug_bounds(selector("agent", agent_tile.item)).is_some(), "the agent waits");
     let waiting = drawn.iter().filter(|m| *m == "Needs you").count();
-    assert_eq!(waiting, 2, "the glyph in the header, the glyph in the row: {drawn:?}");
+    assert_eq!(waiting, 3, "the glyph in the header, its tab's and its row's: {drawn:?}");
     assert!(drawn.iter().any(|m| m == "Failed"), "the shell's last command failed: {drawn:?}");
 
     let key = fake.key;
@@ -725,10 +731,10 @@ fn notices_stack_two_in_the_title_bar_and_go(cx: &mut TestAppContext) {
         .iter()
         .find(|n| n.is("Status", Some(long.as_str())))
         .map_or_else(|| panic!("the long notice is drawn: {nodes:#?}"), |n| n.bounds);
-    let strip = cx.debug_bounds("workspace").expect("drawn");
+    let workspace = cx.debug_bounds("workspace").expect("drawn");
     let titlebar = cx.debug_bounds("titlebar").expect("drawn");
     assert!(w <= 400.0, "capped at 400 pt: {w}");
-    assert!(x > f32::from(strip.center().x), "on the right: {x}");
+    assert!(x > f32::from(workspace.center().x), "on the right: {x}");
     assert!(y < f32::from(titlebar.bottom()), "in the title bar: {y}");
 
     cx.executor().advance_clock(SAY_FOR);
@@ -744,7 +750,7 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     let [_, _, (_, third)] = three_shells(&view, cx, &fake);
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
-    assert!(!view.read_with(cx, |v, _| v.layout().contains(third)), "off the strip");
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(third)), "off the layout");
     fake.drain();
     click(cx, "toast-undo");
     let sent = fake.drain();
@@ -820,11 +826,11 @@ fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
     assert!(nodes.iter().any(|n| n.is("Button", Some("Show thread"))), "named for its face");
 }
 
-/// A tabbed column's header is a tab row: a tab per tile with its title, the shown one
+/// A pane of tabs' header is a tab row: a tab per tile with its title, the shown one
 /// selected, each tab's kind on the edge grid a single header's is on; a click on a tab shows
 /// and focuses it, and a tab's close closes its tile.
 #[gpui::test]
-fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
+fn a_pane_of_tabs_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -835,10 +841,10 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     );
     let inset = Theme::default().spacing.inset();
     assert!((single - inset).abs() < 0.5, "a single header's slot on the grid: {single}");
-    cx.simulate_keystrokes("cmd-[");
-    cx.simulate_keystrokes("cmd-alt-t");
+    one_pane(&view, cx, &[first, second]);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
     cx.run_until_parked();
-    assert_eq!(column_of(&view, cx, first), column_of(&view, cx, second), "one column");
+    assert_eq!(pos_of(&view, cx, first), pos_of(&view, cx, second), "one pane");
     assert_eq!(focused(&view, cx), Some(second));
     let tab = |cx: &mut VisualTestContext, tile: TileRef| {
         cx.debug_bounds(selector("tab", tile.item)).expect("a tab per tile")
@@ -846,11 +852,14 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let (a, b) = (tab(cx, first), tab(cx, second));
     assert_eq!(a.top(), b.top(), "side by side in one row");
     let slot = cx.debug_bounds(selector("tab-slot", first.item)).expect("the tab's slot");
-    let row = cx.debug_bounds(selector("title", second.item)).expect("the column's header");
+    let row = cx.debug_bounds(selector("title", second.item)).expect("the pane's header");
     let tabbed = f32::from(slot.left() - row.left());
     assert!((tabbed - single).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
-    assert!(a.right() <= b.left(), "in the column's order");
-    let tabs: Vec<_> = tree(cx).into_iter().filter(|n| n.role == "Tab").collect();
+    assert!(a.right() <= b.left(), "in the pane's order");
+    // The pane's tabs, below the title bar's own.
+    let bar = cx.debug_bounds("titlebar").expect("the title bar").bottom();
+    let tabs: Vec<_> =
+        tree(cx).into_iter().filter(|n| n.role == "Tab" && n.bounds[1] >= f32::from(bar)).collect();
     assert_eq!(tabs.len(), 2, "{tabs:#?}");
     assert!(
         tree(cx).iter().all(|n| n.label.as_deref() != Some("2/2")),
@@ -868,71 +877,46 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     assert_eq!(left, vec![first], "its close closed that tab's tile");
 }
 
-/// Four shells in one tabbed column, the last shown, beside a column of their own so the tabs
-/// are the column's header, in a window wide enough for both at any width. The tabs, in order.
+/// Four shells as the tabs of one pane, the last shown, beside a pane of their own right of
+/// it, in a window wide enough for both at any width. The tabs, in order.
 fn four_tabs(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<TileRef> {
     cx.simulate_resize(size(px(1600.0), px(800.0)));
     let fake = connect(view, cx, 1, "studio");
     let tabs: Vec<TileRef> =
         (1..=4).map(|version| opens(view, cx, &fake, SessionId::new(), fake.me, version)).collect();
-    view.update_in(cx, |v, _w, cx| {
-        for tab in tabs.iter().skip(1) {
-            v.focus_tile(*tab, cx);
-            v.layout.consume_or_expel_window_left();
-        }
-        v.layout.toggle_tabbed();
+    one_pane(view, cx, &tabs);
+    let beside = opens(view, cx, &fake, SessionId::new(), fake.me, 99);
+    let pane = pos_of(view, cx, tabs[0]).pane;
+    view.update(cx, |v, cx| {
+        let right = Some(slopty_client::layout::tree::Side::Right);
+        assert!(v.layout.place(beside, slopty_client::layout::Drop { pane, edge: right }));
         cx.notify();
     });
-    cx.run_until_parked();
-    opens(view, cx, &fake, SessionId::new(), fake.me, 99);
     let last = *tabs.last().expect("four tabs");
     view.update_in(cx, |v, _w, cx| v.focus_tile(last, cx));
     cx.run_until_parked();
     tabs
 }
 
-/// `tile`'s column dragged to `width`, as its divider is, and drawn twice so a scroll asked for
-/// lands.
-fn column_at(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef, width: f32) {
-    for _ in 0..4 {
-        let got =
-            view.read_with(cx, |v, _| v.tile_bounds(tile)).map_or(0.0, |b| f32::from(b.size.width));
-        if (got - width).abs() < 0.5 {
-            break;
-        }
-        let column = column_of(view, cx, tile);
-        view.update_in(cx, |v, _w, cx| {
-            v.layout.resize_begin(column);
-            v.layout.resize_update(width - got);
-            v.layout.resize_end();
-            v.focus_tile(tile, cx);
-            cx.notify();
-        });
-        cx.run_until_parked();
-    }
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-}
-
-/// Whether `tab`'s tab lies wholly inside `column`'s tile.
+/// Whether `tab`'s tab lies wholly inside its pane's tile.
 fn tab_in_view(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tab: TileRef) -> bool {
-    let tile = view.read_with(cx, |v, _| v.tile_bounds(tab)).expect("the column is drawn");
+    let tile = view.read_with(cx, |v, _| v.tile_bounds(tab)).expect("the pane is drawn");
     let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
     at.left() >= tile.left() - px(0.5) && at.right() <= tile.right() + px(0.5)
 }
 
-/// A narrow tabbed column scrolls its shown tab into view: the last of four at 312 pt, after
-/// the column narrowed from a width where every tab fitted, and again after another tab was
-/// shown and the last shown back. The strip never leaves the tab in hand past its edge.
+/// A narrow pane's tab row scrolls its shown tab into view: the last of four at 312 pt, after
+/// the pane narrowed from a width where every tab fitted, and again after another tab was
+/// shown and the last shown back.
 #[gpui::test]
 fn a_narrow_tab_row_keeps_its_shown_tab_in_view(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let tabs = four_tabs(&view, cx);
     let (first, last) = (tabs[0], tabs[3]);
-    column_at(&view, cx, last, 720.0);
+    pane_at(&view, cx, last, 720.0);
     assert!(tab_in_view(&view, cx, last), "every tab fits at 720 pt");
-    column_at(&view, cx, last, 312.0);
-    assert!(tab_in_view(&view, cx, last), "the shown tab stays in view as the column narrows");
+    pane_at(&view, cx, last, 312.0);
+    assert!(tab_in_view(&view, cx, last), "the shown tab stays in view as the pane narrows");
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
@@ -959,9 +943,9 @@ fn a_tab_row_fades_only_where_tabs_lie_hidden(cx: &mut TestAppContext) {
         let at = cx.debug_bounds(row).expect("the tab row");
         cx.update(|window, _| crate::retained::faded_edges(window, at))
     };
-    column_at(&view, cx, last, 720.0);
+    pane_at(&view, cx, last, 720.0);
     assert_eq!(faded(cx), gpui::Edges::default(), "every tab fits: no fade");
-    column_at(&view, cx, last, 312.0);
+    pane_at(&view, cx, last, 312.0);
     let edges = faded(cx);
     assert!(edges.left && !edges.right, "the first tabs hidden before it: {edges:?}");
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
@@ -970,7 +954,7 @@ fn a_tab_row_fades_only_where_tabs_lie_hidden(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let edges = faded(cx);
     assert!(!edges.left && edges.right, "the last tabs hidden past it: {edges:?}");
-    let panel = view.read_with(cx, |v, _| v.tile_bounds(first)).expect("the column");
+    let panel = view.read_with(cx, |v, _| v.tile_bounds(first)).expect("the pane");
     let under = cx.update(|window, _| crate::retained::faded_edges(window, panel));
     assert_eq!(under, gpui::Edges::default(), "the panel does not fade");
 }
@@ -984,7 +968,7 @@ fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let tabs = four_tabs(&view, cx);
     let last = tabs[3];
-    column_at(&view, cx, last, 312.0);
+    pane_at(&view, cx, last, 312.0);
     let theme = Theme::default();
     for tab in tabs.iter().take(3) {
         let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
@@ -1006,11 +990,11 @@ fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
     assert!(letters >= theme.typography.ui_size * 2.0, "and its letters' room: {letters}");
 }
 
-/// On a phone a column is the screen's width already and the tile has no header: its rows are
-/// the bar's "…", which offers to close it but not to fill the screen it fills. On a desktop,
-/// where a column is part of the strip, the header's menu offers fullscreen.
+/// On a phone a tile is the screen's width already and has no header: its rows are the bar's
+/// "…", which offers to close it but not to zoom over a screen it fills. On a desktop, where a
+/// pane is part of a tab, the header's menu offers the zoom.
 #[gpui::test]
-fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
+fn a_tile_that_fills_a_phone_offers_no_zoom(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -1020,7 +1004,7 @@ fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let rows: Vec<String> =
         tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
-    assert!(rows.iter().any(|r| r == "Fullscreen"), "on a desktop: {rows:?}");
+    assert!(rows.iter().any(|r| r == "Zoom pane"), "on a desktop: {rows:?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     cx.simulate_resize(size(px(390.0), px(844.0)));
@@ -1029,7 +1013,7 @@ fn a_tile_that_fills_a_phone_offers_no_fullscreen(cx: &mut TestAppContext) {
     let rows: Vec<String> =
         tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
     assert!(rows.iter().any(|r| r == "Close tile"), "close stays: {rows:?}");
-    assert!(!rows.iter().any(|r| r == "Fullscreen"), "a phone's column already does: {rows:?}");
+    assert!(!rows.iter().any(|r| r == "Zoom pane"), "a phone's tile fills it: {rows:?}");
 }
 
 /// Two shells of one worker that would read alike are told apart, in the order they were
@@ -1120,27 +1104,6 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("unseen", tile.item)).is_none(), "no dot on screen");
 }
 
-/// In the overview the words line up with the panes: a workspace's name and the "New
-/// workspace" glyph start on the edge of the glyphs the pane covers lead with.
-#[gpui::test]
-fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let shells = three_shells(&view, cx, &fake);
-    cx.simulate_keystrokes("cmd-alt-o");
-    cx.run_until_parked();
-    let edge = shells
-        .iter()
-        .filter_map(|(_, t)| cx.debug_bounds(selector("shapes-label", t.item)))
-        .map(|b| f32::from(b.left()))
-        .fold(f32::INFINITY, f32::min);
-    let name = cx.debug_bounds("overview-name-0").expect("the name");
-    assert!((f32::from(name.left()) - edge).abs() < 0.5, "{name:?} on {edge}");
-    let new = cx.debug_bounds("overview-new-workspace").expect("the place for the next");
-    let pad = Theme::default().spacing.sm;
-    assert!((f32::from(new.left()) + pad - edge).abs() < 0.5, "its glyph on {edge}: {new:?}");
-}
-
 /// On a phone the bar is the focused tile's, as a navigation bar names its screen: its kind and
 /// its title, as an inline navigation title, a step above the rows by weight as the drawer's is,
 /// and the tile draws no header of its own, so the screen keeps one bar.
@@ -1176,7 +1139,7 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
         tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect();
     assert_eq!(rows.first().map(String::as_str), Some("Rename"), "the tile's rows: {rows:?}");
     assert!(rows.iter().any(|r| r == "New terminal"), "{rows:?}");
-    assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
+    assert!(rows.iter().any(|r| r == "New note"), "{rows:?}");
 }
 
 /// A phone names its tile in the bar, which is the tile's header there: "Name this tile" turns
@@ -1206,8 +1169,8 @@ fn a_phone_names_its_tile_in_the_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("rename", shell.item)).is_none(), "and the field is gone");
 }
 
-/// Chrome moves where it may: a menu drops in, a notice rises in and fades when its time is
-/// up, and a closing tile fades where it stood. Under Reduce Motion each lands at once.
+/// Chrome moves where it may: a menu drops in, and a notice rises in and fades when its time
+/// is up. Under Reduce Motion each lands at once.
 #[gpui::test]
 fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1234,11 +1197,6 @@ fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
     assert!(cx.debug_bounds("said").is_none(), "then it goes");
-    let last = focused(&view, cx).expect("a focused shell");
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    let fading = Box::leak(format!("closing-{}", last.item.as_uuid()).into_boxed_str());
-    assert!(cx.debug_bounds(fading).is_some(), "the closed tile fades where it stood");
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     let (still_menu, still_notice) = (menu_top(cx), notice_top(cx, "two"));
     assert!(dropping < still_menu - px(1.0), "the menu dropped in: {dropping:?} {still_menu:?}");
@@ -1246,21 +1204,6 @@ fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
     assert!(cx.debug_bounds("said").is_none(), "gone at once");
-    let next = focused(&view, cx).expect("a shell left to close");
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    let gone = Box::leak(format!("closing-{}", next.item.as_uuid()).into_boxed_str());
-    assert!(cx.debug_bounds(gone).is_none(), "the tile goes at once");
-}
-
-/// The overview's words show only while it opens (fading in once the zoom has all but landed)
-/// and leave at once as it closes; where chrome does not move they are simply there.
-#[test]
-fn the_overview_words_wait_for_the_zoom() {
-    use crate::workspace::strip::overview_words;
-    assert!(overview_words(gpui::div(), "w", true, true).is_some(), "opening: fading in");
-    assert!(overview_words(gpui::div(), "w", true, false).is_some(), "still: at once");
-    assert!(overview_words(gpui::div(), "w", false, true).is_none(), "closing: gone");
 }
 
 /// The server's word says what it costs, to a screen reader and under the pointer, and is a

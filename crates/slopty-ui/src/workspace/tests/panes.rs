@@ -36,8 +36,12 @@ impl PaneHost for Harness {
         &mut self.panes
     }
 
-    fn drag_sash(&mut self, sash: &Sash, delta: f32, _cx: &mut Context<Self>) -> f32 {
-        self.tiling.drag_sash(sash, delta)
+    fn sash_pressed(&mut self, _cx: &mut Context<Self>) {}
+
+    fn drag_sash(&mut self, sash: &Sash, delta: f32, cx: &mut Context<Self>) -> f32 {
+        let went = self.tiling.drag_sash(sash, delta);
+        cx.notify();
+        went
     }
 
     fn sash_released(&mut self, _cx: &mut Context<Self>) {

@@ -283,98 +283,64 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
 
-    narrow_column_beside_the_board(&mut stack, &agent_session).await;
+    panes_on_the_agent_s_tab(&mut stack, &agent_session).await;
     stack.shutdown().await;
 }
 
-/// What a narrow column's file says: a heading, a paragraph longer than the column and a list.
+/// What the notes' file says: a heading, a paragraph longer than a line and a list.
 const NOTES: &str = "# Notes on the board\n\nEach lane is a group of rows, and a row says only \
 what moves its task on; the rest waits under it until it needs reading.\n\n- Draw the lanes\n\
 - Hold it to goldens\n- Write the decision\n";
 
-/// The column at the board's side, 312 pt of the window whose panel stands a gutter in from
-/// either side (296 pt), holding every kind of tile a person puts there:
-/// task 1's agent, a Markdown file and a terminal (`cat`, so no run's path shows) stacked,
-/// light and dark; then the same column with a fourth tile, tabbed, the last tab active.
-/// Nothing in it may run past its edges (`docs/decisions/ui.md`, "How surfaces adapt to their
-/// room").
-async fn narrow_column_beside_the_board(stack: &mut ProjectStack, agent: &str) {
-    let column =
-        |d: &Dump| d.items.iter().find(|i| i.session.as_deref() == Some(agent)).map(|i| i.pos[1]);
+/// Task 1's agent on its tab with what a person opens beside it: a Markdown file in a pane
+/// below it, the room rule finding no room for one at its side, and a terminal (`cat`, so no
+/// run's path shows) a tab of the file's pane, which has no room to split again; light and
+/// dark. Every tile lies inside the window.
+async fn panes_on_the_agent_s_tab(stack: &mut ProjectStack, agent: &str) {
+    let agent_at =
+        |d: &Dump| d.items.iter().find(|i| i.session.as_deref() == Some(agent)).map(|i| i.pos);
     let notes = stack.path("repo").join("NOTES.md");
     std::fs::write(&notes, NOTES).unwrap();
     let notes = notes.to_string_lossy().into_owned();
     stack.driver.open_file(&notes, None).await.unwrap();
     stack
         .driver
-        .wait_for("the notes in a tile", STEP, |d| {
-            d.item("file").is_some_and(|f| f.active && f.file.as_ref().is_some_and(|f| f.lines > 0))
-        })
-        .await
-        .unwrap();
-    stack.driver.keys("cmd-[").await.unwrap();
-    stack
-        .driver
-        .wait_for("the notes under the agent", STEP, |d| {
-            d.item("file").is_some_and(|f| Some(f.pos[1]) == column(d))
+        .wait_for("the notes in a pane below the agent", STEP, |d| {
+            let (Some(file), Some(at)) = (d.item("file"), agent_at(d)) else { return false };
+            file.active
+                && file.file.as_ref().is_some_and(|f| f.lines > 0)
+                && file.pos[..2] == at[..2]
+                && file.pos[2] != at[2]
         })
         .await
         .unwrap();
     let shells = |d: &Dump| d.items.iter().filter(|i| i.kind == "terminal").count();
     let before = shells(&stack.driver.dump().await.unwrap());
     stack.driver.open(&["cat"], 1).await.unwrap();
-    stack
-        .driver
-        .wait_for("a shell of its own", STEP, |d| {
-            shells(d) > before && d.items.iter().any(|i| i.active && i.kind == "terminal")
-        })
-        .await
-        .unwrap();
-    stack.driver.keys("cmd-[").await.unwrap();
     let d = stack
         .driver
-        .wait_for("three tiles in the narrow column", STEP, |d| {
-            column(d).is_some_and(|c| d.items.iter().filter(|i| i.pos[1] == c).count() == 3)
+        .wait_for("a shell on the notes' pane", STEP, |d| {
+            let Some(file) = d.item("file") else { return false };
+            shells(d) > before
+                && d.items.iter().any(|i| i.active && i.kind == "terminal" && i.pos == file.pos)
         })
         .await
         .unwrap();
-    let narrow = d.items.iter().find(|i| i.session.as_deref() == Some(agent)).unwrap();
-    assert!((narrow.bounds[2] - 296.0).abs() < 1.0, "the column beside a board: {narrow:?}");
+    let (w, h) = (d.window.width, d.window.height);
+    let inside = |b: &[f32; 4]| {
+        b[2] <= 0.0
+            || (b[0] >= 0.0 && b[1] >= 0.0 && b[0] + b[2] <= w + 1.0 && b[1] + b[3] <= h + 1.0)
+    };
+    assert!(d.items.iter().all(|i| inside(&i.bounds)), "inside the window: {:?}", d.items);
     stack.driver.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
     rested(&mut stack.driver).await;
-    golden(stack, "narrow-columns").await;
+    golden(stack, "agent-tab-panes").await;
     stack.set_appearance("dark").unwrap();
     stack.driver.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     rested(&mut stack.driver).await;
-    golden(stack, "narrow-columns-dark").await;
+    golden(stack, "agent-tab-panes-dark").await;
     stack.set_appearance("light").unwrap();
     stack.driver.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
-
-    let before = shells(&stack.driver.dump().await.unwrap());
-    stack.driver.open(&["cat"], 1).await.unwrap();
-    stack
-        .driver
-        .wait_for("a fourth tile", STEP, |d| {
-            shells(d) > before && d.items.iter().any(|i| i.active && i.kind == "terminal")
-        })
-        .await
-        .unwrap();
-    stack.driver.keys("cmd-[").await.unwrap();
-    stack.driver.keys("cmd-alt-t").await.unwrap();
-    let d = stack
-        .driver
-        .wait_for("four tabs in the narrow column", STEP, |d| {
-            let tabs = d.a11y.iter().filter(|n| n.role == "Tab").count();
-            column(d).is_some_and(|c| d.items.iter().filter(|i| i.pos[1] == c).count() == 4)
-                && tabs >= 4
-        })
-        .await
-        .unwrap();
-    let last = d.items.iter().filter(|i| Some(i.pos[1]) == column(&d)).max_by_key(|i| i.pos[2]);
-    assert!(last.is_some_and(|i| i.active), "the last tab is the active one: {:?}", d.items);
-    stack.driver.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
-    rested(&mut stack.driver).await;
-    golden(stack, "tabbed-column-narrow").await;
 }
 
 /// Wait until nothing moves: two dumps a frame apart place every tile alike.

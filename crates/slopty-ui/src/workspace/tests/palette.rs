@@ -244,7 +244,7 @@ fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
     for label in ["New agent", "New terminal", "Add a window or display", "studio"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
-    assert_eq!(strip::begin_keys(), ["⇧⌘T".to_owned(), "⌘T".to_owned(), "⌘O".to_owned()]);
+    assert_eq!(area::begin_keys(), ["⇧⌘T".to_owned(), "⌘T".to_owned(), "⌘O".to_owned()]);
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -302,9 +302,9 @@ fn the_empty_workspaces_agent_starts_in_the_machines_latest_place(cx: &mut TestA
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
         v.session_opened(key, summary(shell, Some("/Users/me/oss/slopty")), cx);
-        let last = v.layout.workspaces().len().saturating_sub(1);
-        v.go_to_workspace(last, cx);
     });
+    // Its tile closed, the workspace is empty and the shell's place is still known.
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     let started = |cx: &mut VisualTestContext, fake: &mut Fake| {
         click(cx, "empty-agent");
@@ -408,34 +408,6 @@ fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
     click(cx, "picker-cancel");
     assert!(view.read_with(cx, |v, _| v.picker.is_none()), "Cancel closes it");
     assert!(cx.debug_bounds("picker").is_none());
-}
-
-/// The overview's names are chrome: the same size however far the overview zooms out to fit
-/// the workspaces, and so are the words on the place for a new workspace.
-#[gpui::test]
-fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    three_shells(&view, cx, &fake);
-    let overview = |cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes("cmd-alt-o");
-        cx.run_until_parked();
-        let zoom = view.read_with(cx, |v, _| v.drawn.zoom.get());
-        let name = cx.debug_bounds("overview-name-0").expect("the first workspace's name");
-        let new = cx.debug_bounds("overview-new-workspace-words").expect("the new one's words");
-        cx.simulate_keystrokes("cmd-alt-o");
-        cx.run_until_parked();
-        (zoom, f32::from(name.size.height), f32::from(new.size.height))
-    };
-    let (zoom, name, new) = overview(cx);
-    // The focused tile goes down into a workspace of its own: three to fit, not two.
-    cx.simulate_keystrokes("cmd-alt-shift-down");
-    cx.run_until_parked();
-    let (fitted, name_after, new_after) = overview(cx);
-    assert!(fitted < zoom, "more workspaces, smaller: {zoom} then {fitted}");
-    assert!(name > 0.0 && new > 0.0);
-    assert!((name - name_after).abs() < 0.01, "{name} then {name_after}");
-    assert!((new - new_after).abs() < 0.01, "{new} then {new_after}");
 }
 
 /// On a desktop the palette hangs a fifth of the way down the window (the one modal anchor)
@@ -599,7 +571,7 @@ fn the_lens_is_an_option_named_for_what_it_does(cx: &mut TestAppContext) {
         cx.run_until_parked();
     };
     option(cx, navigator::BY_MACHINE);
-    let lens = view.read_with(cx, |v, _| v.layout.navigator().group_by.clone());
+    let lens = view.read_with(cx, |v, _| v.navigator().group_by.clone());
     assert_eq!(lens, ["machine"], "chosen, it turns");
     option(cx, navigator::BY_PROJECT);
 }
@@ -618,8 +590,8 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
         lines.into_iter().map(|l| l.label).collect()
     };
     let has = |labels: &[String], label: &str| labels.iter().any(|l| l == label);
-    let always = ["New terminal", "New note", "Overview", "Search in files"];
-    let of_a_tile = ["Close tile", "Name this tile", "Focus mode", "Move column left"];
+    let always = ["New terminal", "New note", "Previous project", "Search in files"];
+    let of_a_tile = ["Close tile", "Name this tile", "Zoom pane", "Move tile left"];
     let elsewhere = [
         "Page back",
         "Reload page",

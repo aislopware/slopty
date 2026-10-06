@@ -123,12 +123,11 @@ fn body_pixels(
 ) -> (u32, u32) {
     let scale = cx.update(|window, _| window.scale_factor());
     view.read_with(cx, |v, _| {
-        let frame = v.layout().frame();
-        let placed = frame.tiles.iter().find(|p| p.tile == tile).expect("placed");
+        let placed = v.placed_tiles().into_iter().find(|p| p.tile == tile).expect("placed");
         let header = v.theme.density.header;
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
         let px = |points: f32| (points * scale).round() as u32;
-        (px(placed.target.w), px(placed.target.h - header))
+        (px(placed.rect.w), px(placed.rect.h - header))
     })
 }
 
@@ -211,10 +210,11 @@ fn a_display_made_for_this_device_follows_its_tile(cx: &mut TestAppContext) {
     assert!(palette_has(&view, cx, BACK_TO_PHYSICAL));
     sent(&mut fake, cx);
 
-    cx.simulate_keystrokes("cmd-r");
+    // Zoomed, the docked navigator steps aside and the pane takes its room.
+    cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
     let wider = body_pixels(&view, cx, tile);
-    assert_ne!(wider, body, "the column changed width");
+    assert_ne!(wider, body, "the pane changed width");
     let resized = |msgs: &[ClientMsg]| {
         msgs.iter()
             .filter_map(|m| match m {

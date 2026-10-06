@@ -10,8 +10,6 @@
 //! What a pane holds is the host's: it draws each pane's body and its header ([`PaneHost`]).
 //! The drop wash shows the panel a dragged tile would become ([`wash`]).
 
-#![cfg_attr(not(test), expect(dead_code, reason = "drawn by the workspace once the strip goes"))]
-
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Bounds, Context, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
@@ -34,7 +32,11 @@ pub(super) trait PaneHost: Sized + 'static {
     /// Its panes' pointer state, to change.
     fn panes_mut(&mut self) -> &mut Panes;
 
-    /// Move `sash` by `delta` points (right or down); how far it went.
+    /// A sash was pressed, and a drag may follow.
+    fn sash_pressed(&mut self, cx: &mut Context<Self>);
+
+    /// Move `sash` by `delta` points (right or down), and draw again what that moved; how far
+    /// it went.
     fn drag_sash(&mut self, sash: &Sash, delta: f32, cx: &mut Context<Self>) -> f32;
 
     /// The sash let go: what follows a pane's new size (a remote window, a display) may
@@ -169,6 +171,7 @@ pub(super) fn render<V: PaneHost>(
                         let from = along(pressed.axis, ev.position);
                         this.panes_mut().grab =
                             Some(Grab { sash: pressed.clone(), from, moved: 0.0 });
+                        this.sash_pressed(cx);
                         cx.notify();
                     }),
                 )
@@ -217,7 +220,6 @@ pub(super) fn render<V: PaneHost>(
                 if let Some(grab) = this.panes_mut().grab.as_mut() {
                     grab.moved += went;
                 }
-                cx.notify();
             }))
             .on_mouse_up(
                 MouseButton::Left,

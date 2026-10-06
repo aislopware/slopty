@@ -123,8 +123,9 @@ fn every_link_starts_by_saying_which_handoffs_this_client_takes(cx: &mut TestApp
     assert_eq!(rx.try_recv().ok(), Some(caps), "said again on the new link");
 }
 
-/// `git commit` in a shell hands its message file over: it opens in a file tile right of that
-/// shell, focused, and the worker hears it was taken. "Done" (⌘↩) saves the edit and answers
+/// `git commit` in a shell hands its message file over: it opens in a file tile beside that
+/// shell, focused (a tab of the shell's pane here, where the tab has no room for a pane
+/// more), and the worker hears it was taken. "Done" (⌘↩) saves the edit and answers
 /// the program only once the worker has written it; the tile then stops waiting.
 #[gpui::test]
 fn an_edit_opens_beside_its_shell_and_done_answers_once_the_save_lands(cx: &mut TestAppContext) {
@@ -143,7 +144,9 @@ fn an_edit_opens_beside_its_shell_and_done_answers_once_the_save_lands(cx: &mut 
     );
     let (tile, waiting) = focused_file(&view, cx).expect("a focused file tile");
     assert_eq!(waiting, Some(7), "a program waits on it");
-    assert_eq!(column_of(&view, cx, tile), column_of(&view, cx, shell).saturating_add(1));
+    let (file_at, shell_at) = (pos_of(&view, cx, tile), pos_of(&view, cx, shell));
+    assert_eq!(file_at.tab, shell_at.tab, "on the shell's tab");
+    assert_eq!(file_at.pane, shell_at.pane, "no room for a pane more: a tab of the shell's");
     message_read(&view, cx, studio.key);
     assert!(cx.debug_bounds(selector("file-waiting", tile.item)).is_some(), "the bar says so");
 
@@ -476,7 +479,7 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
 fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let session = SessionId::new();
     let tile = opens(&view, cx, &studio, session, studio.me, 2);
     let mut state = crate::conversation::thread::fixtures::thread("edit");
@@ -487,29 +490,19 @@ fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppCon
     let width = |cx: &mut VisualTestContext| {
         f32::from(cx.debug_bounds(selector("title", tile.item)).expect("the header").size.width)
     };
-    let mut presets = 0_u32;
-    while width(cx) < 480.0 && presets < 6 {
-        view.update_in(cx, |v, _w, cx| {
-            v.layout.switch_preset_width(true);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        presets = presets.saturating_add(1);
-    }
     let wide = cx.debug_bounds(selector("title", tile.item)).expect("the header");
     assert!(f32::from(wide.size.width) >= 480.0, "starts roomy: {wide:?}");
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a roomy header says it");
 
-    for _ in 0..6 {
-        if width(cx) < 400.0 {
-            break;
-        }
-        view.update_in(cx, |v, _w, cx| {
-            v.layout.switch_preset_width(false);
-            cx.notify();
-        });
-        cx.run_until_parked();
-    }
+    // Beside the first shell, its pane dragged to a board's neighbour's width.
+    let pane = pos_of(&view, cx, tile).pane;
+    view.update(cx, |v, cx| {
+        let right = Some(slopty_client::layout::tree::Side::Right);
+        assert!(v.layout.place(first, slopty_client::layout::Drop { pane, edge: right }));
+        cx.notify();
+    });
+    pane_at(&view, cx, tile, 312.0);
+    assert!(width(cx) < 400.0, "narrowed");
     let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
     assert!(f32::from(header.size.width) < 400.0, "narrowed: {header:?}");
     // The title keeps a third of the header; the request stays only beside that, never over it.

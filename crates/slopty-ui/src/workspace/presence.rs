@@ -28,11 +28,7 @@ impl WorkspaceView {
             .filter_map(|tile| self.term_ref(tile))
             .collect();
         showing.sort_by_key(|t| (t.worker, t.session));
-        let workspace = self
-            .layout
-            .workspaces()
-            .get(self.layout.active_workspace())
-            .map(|_| self.workspace_name_at(self.layout.active_workspace()));
+        let workspace = self.layout.shown_index().map(|ix| self.project_name_at(ix));
         Presence {
             seat: self.seat(),
             active: self.app_active && window.is_window_active(),

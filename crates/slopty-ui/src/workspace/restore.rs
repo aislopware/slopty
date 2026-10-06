@@ -51,8 +51,12 @@ impl WorkspaceView {
     /// frame, the faces picked on the tiles there and the tiles out in their own windows. What
     /// the last run left that this one has not caught up with yet is kept as it was.
     pub(super) fn to_save(&self) -> Saved {
-        let mut saved = self.layout.save();
-        saved.window.clone_from(&self.restore.window);
+        let mut saved = Saved {
+            tiling: self.layout.save(),
+            navigator: self.navigator.clone(),
+            window: self.restore.window.clone(),
+            ..Saved::default()
+        };
         let tiles: Vec<_> = self.layout.tiles().collect();
         for tile in &tiles {
             let Some(ItemKind::Terminal { session }) = self.item(*tile).map(|i| &i.kind) else {

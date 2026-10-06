@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use slopty_client::groups::{self, Claim, Facts, Group, GroupKey, Grouped, Matcher, fact};
-use slopty_client::layout::{Placement, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::RepoId;
@@ -465,26 +465,60 @@ impl WorkspaceView {
         }
     }
 
-    /// Say each tile's project to the layout, which places a tile from elsewhere beside the
-    /// others of its project. Nothing moves.
-    pub(super) fn refresh_homes(&mut self) {
+    /// Put `tile`, opened here, by the room rule beside the focused one in the project on
+    /// show; with nothing on show, in a tab of its own project.
+    pub(super) fn open_here(&mut self, tile: TileRef) {
+        let home = match self.layout.shown_project() {
+            Some(project) => project.home().clone(),
+            None => self.home_for(tile),
+        };
+        self.layout.open_beside(tile, &home);
+    }
+
+    /// Each project takes the project its tiles turned out to share, once all of them share
+    /// one other than its home: one first made at its machine's or its folder's, before what
+    /// its work is was known, is named for its repository or its declared project then, and
+    /// what arrives of it joins it ([`slopty_client::layout::Tiling::rehome`]). A project
+    /// holding a machine's own work (a window, a note) beside a shell keeps its home. Whether
+    /// one moved.
+    pub(super) fn rehome_projects(&mut self) -> bool {
         let grouping = self.project_groups();
-        self.layout.set_homes(|tile| grouping.group_of(tile).map(|g| g.key.clone()));
+        let moves: Vec<(GroupKey, GroupKey)> = self
+            .layout
+            .projects()
+            .iter()
+            .filter_map(|p| {
+                let mut keys = p
+                    .tabs()
+                    .iter()
+                    .flat_map(slopty_client::layout::Tab::tiles)
+                    .map(|t| grouping.group_of(t).map(|g| &g.key));
+                let first = keys.next().flatten()?;
+                let shared = first != p.home() && keys.all(|k| k == Some(first));
+                shared.then(|| (p.home().clone(), first.clone()))
+            })
+            .collect();
+        let mut moved = false;
+        for (from, to) in moves {
+            moved |= self.layout.rehome(&from, to);
+        }
+        moved
     }
 
     /// Put `arriving` (tiles from elsewhere: another client, an orchestrator, the worker's own
-    /// list) in the layout, each beside the tiles of its project ([`Placement::Remote`]). The
-    /// projects are worked out once over the layout and the arrivals together, so a snapshot of
-    /// many lands in one pass, and the tiles already placed say their project first.
+    /// list) in the tiling, each a background tab in its project
+    /// ([`slopty_client::layout::Tiling::arrive`]). The projects are worked out once over the
+    /// tiling and the arrivals together, so a snapshot of many lands in one pass, and the tiles
+    /// already placed say their project first.
     pub(super) fn place_from_elsewhere(&mut self, arriving: &[TileRef]) {
         let mut tiles = self.reading_order();
         tiles.extend(arriving.iter().filter(|t| !self.layout.contains(**t)));
         let grouping = self.grouping(tiles, &groups::DEFAULT_CHAIN);
-        let home = |tile: TileRef| grouping.group_of(tile).map(|g| g.key.clone());
-        self.layout.set_homes(home);
         for &tile in arriving {
-            let home = home(tile).unwrap_or_else(|| GroupKey::machine(tile.worker));
-            self.layout.open(tile, Placement::Remote { home });
+            let home = grouping
+                .group_of(tile)
+                .map_or_else(|| GroupKey::machine(tile.worker), |g| g.key.clone());
+            self.layout.arrive(tile, &home);
         }
     }
 

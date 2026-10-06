@@ -308,44 +308,6 @@ fn the_palette_lists_tiles_by_recency_with_the_focused_last(cx: &mut TestAppCont
     assert_eq!(sessions(&view, cx), vec![b, a, c], "who waits on the human first");
 }
 
-/// An overview miniature sums up its work: its name row, then how it stands and its worker
-/// where there are several, then what it is doing or where it is, each under the last; a
-/// workspace's name carries its rollup and says what in it needs the person.
-#[gpui::test]
-fn overview_labels_say_state_place_and_worker(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let _laptop = connect(&view, cx, 2, "laptop");
-    let shells = three_shells(&view, cx, &fake);
-    let key = fake.key;
-    for (session, _) in &shells {
-        let moved = summary(*session, Some("/Users/me/oss/slopty"));
-        view.update_in(cx, |v, _w, cx| v.session_opened(key, moved, cx));
-    }
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(shells[0].0), cx));
-    run(&view, cx, shells[2].0, "cargo test");
-    cx.simulate_keystrokes("cmd-alt-o");
-    cx.run_until_parked();
-    // The name, then how it stands, then what it does, each under the last on one edge.
-    let first = shells[0].1.item;
-    let label = cx.debug_bounds(selector("shapes-label", first)).expect("named");
-    let standing = cx.debug_bounds(selector("shapes-standing", first)).expect("how it stands");
-    let meta = cx.debug_bounds(selector("shapes-meta", first)).expect("what it does");
-    assert!(standing.top() >= label.bottom() - px(0.5), "under the name: {standing:?}");
-    assert!(meta.top() >= standing.bottom() - px(0.5), "then the facts: {meta:?}");
-    assert!((meta.left() - label.left()).abs() < px(0.5), "on one edge");
-    let said = view.read_with(cx, |v, _| v.workspace_glance(v.layout.active_workspace()));
-    assert!(said.contains("studio"), "the machine, where it is not the name: {said}");
-    assert!(said.ends_with("Claude Code · Has a question"), "and what needs the person: {said}");
-    let lines = view.read_with(cx, |v, cx| {
-        let item = v.item(shells[1].1).cloned();
-        item.map(|item| v.tile_meta(&item, std::time::SystemTime::now(), cx).0)
-    });
-    assert_eq!(lines.as_deref(), Some("oss/slopty"));
-    let ix = view.read_with(cx, |v, _| v.layout.active_workspace());
-    assert!(cx.debug_bounds(leak(format!("overview-rollup-{ix}"))).is_some(), "its rollup");
-}
-
 /// A worker has one sound, so its tiles have one mute. Silenced from one window (⌘⇧M), every
 /// tile of the worker says so at once, its pill naming whose sound it is; resumed from the other
 /// window's pill, neither does.
@@ -358,6 +320,8 @@ fn a_workers_tiles_share_its_one_sound_and_say_its_mute_together(cx: &mut TestAp
         arrives(&view, cx, &fake, ItemKind::Window { window: windows[0] }, 1),
         arrives(&view, cx, &fake, ItemKind::Window { window: windows[1] }, 2),
     ];
+    // Both on show, as the pills are read off the frame.
+    beside(&view, cx, tiles[1], tiles[0], slopty_client::layout::Side::Right);
     let key = fake.key;
     for (stream, window) in (1..).zip(windows) {
         view.update_in(cx, |v, _w, cx| {

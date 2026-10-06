@@ -1,16 +1,16 @@
-//! The title bar's breadcrumb: where the focused work is, `workspace ▾ / checkout ▾ / branch`,
+//! The title bar's breadcrumb: where the focused work is, `project ▾ / checkout ▾ / branch`,
 //! as Zed's title bar names its project and branch.
 //!
 //! When the focused tile's project spans more than one worker, its worker follows the
-//! workspace (`slopty ▾ / devbox ▾ / main`), with the menu of the project's clones on every
+//! project (`slopty ▾ / devbox ▾ / main`), with the menu of the project's clones on every
 //! machine when there are several, so one project on three machines never reads as one.
 //!
-//! The workspace leads in the medium weight: its name, and a menu of every workspace with
-//! something on it and a new one, which is how the bar switches between them. What waits in
-//! another workspace shows as its rollup's mark on this segment, so it is not lost from view.
-//! The checkout is the focused shell's repository (else its directory), with a menu of the
-//! same repository's other checkouts in the layout, on any worker, when there are some; with
-//! no menu it is left out when the workspace already goes by its name. The
+//! The project on show leads in the medium weight: its name, and a menu of every project,
+//! which is how the bar switches between them. What waits in another project shows as its
+//! rollup's mark on this segment, so it is not lost from view. The checkout is the focused
+//! shell's repository (else its directory), with a menu of the same repository's other
+//! checkouts in the layout, on any worker, when there are some; with no menu it is left out
+//! when the project already goes by its name. The
 //! branch follows with what its working tree changed, as every diff's size is drawn. A segment
 //! has a chevron only when it opens something: no branch list reaches the client, so the branch
 //! is words.
@@ -21,13 +21,12 @@ use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
-use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::{RepoChanges, RepoId};
 use slopty_theme::Typography;
 
 use super::rollup::{Rollup, rollup_slot};
-use super::strip::NEW_WORKSPACE;
 use super::tile::place_name;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
@@ -38,9 +37,9 @@ use crate::draw::Draw;
 use crate::icons::{Drawn, GitGlyph, IconSize, Symbol, icon};
 use crate::kit;
 
-/// The most room a workspace's name takes in the bar, in ems: a long name ends in an ellipsis
-/// rather than push "+" and the bell off.
-const WORKSPACE_NAME_EM: f32 = 20.0;
+/// The most room a project's name takes in the bar, in ems: a long name ends in an ellipsis
+/// rather than push the tabs and the bell off.
+const PROJECT_NAME_EM: f32 = 20.0;
 
 /// A checkout: a repository's working tree on one worker (or a directory outside one).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -55,7 +54,7 @@ pub(super) struct Checkout {
     pub tile: TileRef,
 }
 
-/// What the breadcrumb says after the workspace, for the focused tile.
+/// What the breadcrumb says after the project, for the focused tile.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(super) struct Crumbs {
     /// The focused shell's checkout.
@@ -92,12 +91,7 @@ impl WorkspaceView {
         };
         let mut checkouts = vec![checkout.clone()];
         if let Some(repo) = repo {
-            let tiles = self
-                .layout
-                .workspaces()
-                .iter()
-                .flat_map(|ws| ws.columns().iter().flat_map(Column::tiles).map(Tile::tile))
-                .collect::<Vec<_>>();
+            let tiles = self.layout.tiles().collect::<Vec<_>>();
             for tile in tiles {
                 let Some((other, same)) = self.checkout_of(tile) else { continue };
                 let known =
@@ -118,12 +112,12 @@ impl WorkspaceView {
         (projects.machines(group).len() > 1).then(|| self.worker_name(focused.worker))
     }
 
-    /// What the workspaces other than the active one add up to: what waits out of view.
+    /// What the projects other than the one on show add up to: what waits out of view.
     fn elsewhere(&self) -> Rollup {
-        let active = self.layout.active_workspace();
+        let shown = self.layout.shown_index();
         let mut all = Rollup::default();
-        for ix in (0..self.layout.workspaces().len()).filter(|ix| *ix != active) {
-            let (rollup, _) = self.workspace_rollup(ix);
+        for ix in (0..self.layout.projects().len()).filter(|ix| Some(*ix) != shown) {
+            let (rollup, _) = self.project_rollup(ix);
             all.needs_you = all.needs_you.saturating_add(rollup.needs_you);
             all.working = all.working.saturating_add(rollup.working);
             all.unseen = all.unseen.saturating_add(rollup.unseen);
@@ -132,18 +126,13 @@ impl WorkspaceView {
         all
     }
 
-    /// The breadcrumb, laid in the bar after the navigator's toggle, with `new` ("+") after
-    /// its last segment.
+    /// The breadcrumb, laid in the bar after the navigator's toggle, before the project's tabs.
     ///
-    /// It is a [`kit::priority_row`] filling what the bar leaves: the workspace and "+" always
-    /// stand; the worker goes first and then the checkout where the bar is narrow, and the
-    /// branch, last, ends in an ellipsis down to six letters' room. A step ("/") belongs to the
-    /// segment after it, so none is ever left at an end.
-    pub(super) fn render_breadcrumb(
-        &self,
-        new: Option<AnyElement>,
-        cx: &Draw<'_, Self>,
-    ) -> AnyElement {
+    /// It is a [`kit::priority_row`]: the project always stands; the worker goes first and then
+    /// the checkout where the bar is narrow, and the branch, last, ends in an ellipsis down to
+    /// six letters' room. A step ("/") belongs to the segment after it, so none is ever left at
+    /// an end.
+    pub(super) fn render_breadcrumb(&self, cx: &Draw<'_, Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let spacing = theme.spacing;
@@ -155,8 +144,7 @@ impl WorkspaceView {
                 .child(SharedString::from("/"))
                 .into_any_element()
         };
-        let ix = self.layout.active_workspace();
-        let name = SharedString::from(self.workspace_name_at(ix));
+        let name = SharedString::from(self.project_name());
         let elsewhere = self.elsewhere();
         let label = match elsewhere.words() {
             Some(words) => format!("{name}, elsewhere {words}"),
@@ -165,13 +153,13 @@ impl WorkspaceView {
         let stepped = |segment: AnyElement| {
             div().flex().items_center().gap(px(spacing.xxs)).child(step()).child(segment)
         };
-        let workspace = self
-            .crumb(MenuKind::Workspaces, "crumb-workspace", label.into(), cx)
+        let project = self
+            .crumb(MenuKind::Projects, "crumb-project", label.into(), cx)
             .child(
                 div()
-                    .debug_selector(|| "crumb-workspace-name".to_owned())
+                    .debug_selector(|| "crumb-project-name".to_owned())
                     .min_w_0()
-                    .max_w(px(theme.typography.ui_size * WORKSPACE_NAME_EM))
+                    .max_w(px(theme.typography.ui_size * PROJECT_NAME_EM))
                     .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
                     .child(ChromeText::new(name.clone(), px(theme.typography.ui_size), 1.0).fill()),
@@ -181,13 +169,14 @@ impl WorkspaceView {
                 el.child(rollup_slot(theme, "crumb-elsewhere".to_owned(), elsewhere, true))
             });
         let mut row = kit::priority_row("breadcrumb")
-            .flex_1()
+            .fit_content()
+            .flex_initial()
             .min_w_0()
             .h(px(theme.density.row))
             .gap(px(spacing.xxs))
             .text_size(px(theme.typography.ui_size))
             .text_color(hsla(s.text_secondary))
-            .item("workspace", kit::Priority::ESSENTIAL, workspace);
+            .item("project", kit::Priority::ESSENTIAL, project);
         // A project on more than one worker names the focused tile's, so three machines'
         // clones of one repository do not read as one; the menu of its clones is then the
         // machine's, each clone named by its machine.
@@ -213,7 +202,7 @@ impl WorkspaceView {
             .when(more, |el| el.child(self.chevron()));
             row = row.item("worker", kit::Priority::LOW, stepped(segment.into_any_element()));
         }
-        // A workspace is named after its project until it is named otherwise, and that name
+        // A project is named after its checkout until it is named otherwise, and that name
         // said twice in a row is noise; a menu of checkouts keeps its segment.
         let menu = more && machine.is_none();
         let checkout = crumbs.checkout.as_ref().filter(|c| menu || c.name != *name);
@@ -258,15 +247,14 @@ impl WorkspaceView {
                 px(theme.typography.ui_size * 6.0),
             );
         }
-        if let Some(new) = new {
-            row = row.item("new", kit::Priority::ESSENTIAL, new);
-        }
         div()
             .id("where")
             .debug_selector(|| "breadcrumb".to_owned())
             .role(Role::Group)
             .aria_label("Where")
-            .flex_1()
+            // As wide as what it says and no wider: the title tabs and "+" follow it, and what
+            // is left of the bar is its empty span.
+            .flex_initial()
             .min_w_0()
             .h_full()
             .flex()
@@ -346,16 +334,14 @@ impl WorkspaceView {
             .slot(px(IconSize::Inline.slot(theme)), hsla(theme.surfaces.text_muted))
     }
 
-    /// The workspace segment's menu: every workspace with something on it (the active one
-    /// ticked, the others saying what waits in them), then a new one.
-    pub(super) fn workspace_entries(&self, entity: &gpui::WeakEntity<Self>) -> Vec<MenuEntry> {
-        let active = self.layout.active_workspace();
-        let mut entries: Vec<MenuEntry> = self
-            .tabbed_workspaces()
-            .into_iter()
+    /// The project segment's menu: every project, the one on show ticked, the others saying
+    /// what waits in them.
+    pub(super) fn project_entries_menu(&self, entity: &gpui::WeakEntity<Self>) -> Vec<MenuEntry> {
+        let shown = self.layout.shown_index();
+        (0..self.layout.projects().len())
             .map(|ix| {
-                let (rollup, count) = self.workspace_rollup(ix);
-                let detail = if ix == active {
+                let (rollup, count) = self.project_rollup(ix);
+                let detail = if Some(ix) == shown {
                     "\u{2713}".to_owned()
                 } else {
                     rollup.words().unwrap_or_else(|| {
@@ -365,28 +351,14 @@ impl WorkspaceView {
                 let entity = entity.clone();
                 MenuEntry {
                     group: MenuGroup::Places,
-                    label: self.workspace_name_at(ix).into(),
+                    label: self.project_name_at(ix).into(),
                     detail: detail.into(),
                     run: std::rc::Rc::new(move |_window: &mut Window, cx: &mut gpui::App| {
-                        let _gone = entity.update(cx, |this, cx| this.go_to_workspace(ix, cx));
+                        let _gone = entity.update(cx, |this, cx| this.go_to_project(ix, cx));
                     }),
                 }
             })
-            .collect();
-        let entity = entity.clone();
-        entries.push(MenuEntry {
-            group: MenuGroup::Workspaces,
-            label: NEW_WORKSPACE.into(),
-            detail: SharedString::default(),
-            run: std::rc::Rc::new(move |_window: &mut Window, cx: &mut gpui::App| {
-                let _gone = entity.update(cx, |this, cx| {
-                    // The layout always keeps an empty workspace last.
-                    let last = this.layout.workspaces().len().saturating_sub(1);
-                    this.go_to_workspace(last, cx);
-                });
-            }),
-        });
-        entries
+            .collect()
     }
 
     /// The checkout segment's menu: the same repository's checkouts in the layout, each named

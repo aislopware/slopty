@@ -62,9 +62,8 @@ pub const fn resize(stream: StreamId, pixels: (u32, u32), scale: Option<f32>) ->
 
 /// How long a tile holds one size before its display is asked to take it.
 ///
-/// A column resize or a width spring passes through a size a frame, and each mode change
-/// reconfigures the worker's displays, which takes it a few hundred milliseconds and blanks the
-/// picture.
+/// A sash drag passes through a size a frame, and each mode change reconfigures the worker's
+/// displays, which takes it a few hundred milliseconds and blanks the picture.
 pub const SETTLE: Duration = Duration::from_millis(300);
 
 /// A made display following its tile: the size and scale last asked for, and the one the tile

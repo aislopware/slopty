@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::ItemChange;
-use slopty_client::layout::{Placement, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
@@ -466,7 +466,6 @@ impl WorkspaceView {
         self.given_pending.remove(&key);
         self.nav.folded.remove(&slopty_client::layout::GroupKey::machine(key));
         self.items_dirty = true;
-        self.tick();
         self.layout.retain_worker(key, |_| false);
         self.layout_touched(cx);
         self.after_focus_moved(cx);
@@ -624,14 +623,13 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.items_dirty = true;
-        self.tick();
         match change {
             ItemChange::Reset => {
                 let Some(w) = self.workers.get(&key) else { return };
                 let present: std::collections::HashSet<ItemId> =
                     w.doc.items().map(|i| i.id).collect();
                 // A tile whose item the worker no longer has leaves; the rest stay where this
-                // device put them, and anything new joins at the end of its workspace.
+                // device put them, and anything new is a background tab in its project.
                 let starting = &self.starting;
                 self.layout.retain_worker(key, |id| present.contains(&id) || starting.has(id));
                 let new: Vec<ItemId> = w
@@ -663,7 +661,7 @@ impl WorkspaceView {
             ItemChange::Added { id, by_me } => {
                 let tile = TileRef { worker: key, item: id };
                 if by_me {
-                    self.layout.open(tile, Placement::Local);
+                    self.open_here(tile);
                 } else {
                     self.place_from_elsewhere(&[tile]);
                 }
@@ -905,7 +903,7 @@ impl WorkspaceView {
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => this.terminal_changed(sid, cx),
             // The header draws the report: the strip's tiles draw again.
-            TerminalViewEvent::Progress => App::notify(cx, this.strip_host.entity_id()),
+            TerminalViewEvent::Progress => App::notify(cx, this.area_host.entity_id()),
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();

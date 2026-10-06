@@ -1,11 +1,10 @@
-//! The frame around the strip in the headless workspace: the navigator, the title bar's
+//! The frame around the panes in the headless workspace: the navigator, the title bar's
 //! items and the bell.
 
 use gpui::{AppContext as _, Modifiers, MouseButton};
 use slopty_client::layout::Navigator;
 
 use super::*;
-use crate::workspace::marks;
 
 /// `debug_bounds` wants a static selector; tests may leak a handful.
 fn leak(selector: String) -> &'static str {
@@ -56,14 +55,14 @@ fn saved_navigator(cx: &VisualTestContext, path: &std::path::Path) -> Navigator 
     read_layout(path).ok().flatten().expect("written").navigator
 }
 
-/// How the navigator sits: docked where the strip keeps a desktop's width beside it, and on an
-/// iPad where it keeps a regular width; over the strip on an iPad narrower than that or a
-/// window that would leave the strip a phone's; a drawer on a phone.
+/// How the navigator sits: docked where the panes keep a desktop's width beside it, and on an
+/// iPad where they keep a regular width; over the panes on an iPad narrower than that or a
+/// window that would leave the panes a phone's; a drawer on a phone.
 #[test]
-fn the_navigator_docks_only_where_the_strip_keeps_its_room() {
+fn the_navigator_docks_only_where_the_panes_keep_their_room() {
     use navigator::{Mode, mode};
     assert_eq!(mode(1200.0, 248.0, 700.0, false), Mode::Docked);
-    assert_eq!(mode(900.0, 248.0, 700.0, false), Mode::Overlay, "the strip would be a phone's");
+    assert_eq!(mode(900.0, 248.0, 700.0, false), Mode::Overlay, "the panes would be a phone's");
     assert_eq!(mode(1376.0, 248.0, 700.0, true), Mode::Docked, "a 13-inch iPad in landscape");
     assert_eq!(mode(1210.0, 248.0, 700.0, true), Mode::Docked, "an 11-inch iPad in landscape");
     assert_eq!(mode(1032.0, 248.0, 700.0, true), Mode::Overlay, "a 13-inch iPad upright");
@@ -71,7 +70,7 @@ fn the_navigator_docks_only_where_the_strip_keeps_its_room() {
     assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Drawer, "a phone");
 }
 
-/// ⌘B hides the docked navigator and the strip takes its room but the rail's; ⌘B brings it
+/// ⌘B hides the docked navigator and the panes take its room but the rail's; ⌘B brings it
 /// back. Whether it shows is written with the layout, and a workspace made from that file
 /// starts the same way.
 #[gpui::test]
@@ -81,24 +80,24 @@ fn cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it(cx: &mut TestAppC
     view.update(cx, |v, _| v.set_layout_path(path.clone()));
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let strip_w = |cx: &mut VisualTestContext| {
-        f32::from(cx.debug_bounds("strip").expect("the strip is drawn").size.width)
+    let area_w = |cx: &mut VisualTestContext| {
+        f32::from(cx.debug_bounds("area").expect("the panes' area is drawn").size.width)
     };
     assert!(cx.debug_bounds("navigator").is_some(), "docked by default on a wide window");
-    let beside = strip_w(cx);
+    let beside = area_w(cx);
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     assert!(cx.debug_bounds("navigator").is_none(), "hidden");
     assert!(cx.debug_bounds("nav-rail").is_some(), "the rail in its place");
-    let alone = strip_w(cx);
+    let alone = area_w(cx);
     let freed = Navigator::DEFAULT_WIDTH - navigator::RAIL_W;
     assert!((alone - beside - freed).abs() < 1.0, "{beside} → {alone}");
     assert!(!saved_navigator(cx, &path).shown, "the layout keeps it hidden");
     let saved = read_layout(&path).ok().flatten().expect("written");
     let restored =
         cx.update(|_w, cx| cx.new(|cx| WorkspaceView::new(Theme::default(), Some(saved), cx)));
-    assert!(!restored.read_with(cx, |v, _| v.layout().navigator().shown), "and starts hidden");
+    assert!(!restored.read_with(cx, |v, _| v.navigator().shown), "and starts hidden");
 
     click(cx, "navigator-toggle");
     assert!(cx.debug_bounds("navigator").is_some(), "the title bar's toggle brings it back");
@@ -195,11 +194,11 @@ fn on_a_phone_the_navigator_is_a_drawer_that_closes_on_a_choice(cx: &mut TestApp
     click(cx, selector("nav-tile", first.item));
     assert_eq!(focused(&view, cx), Some(first));
     assert!(cx.debug_bounds("navigator").is_none(), "out of the way of what was chosen");
-    assert!(view.read_with(cx, |v, _| v.layout().navigator().shown), "the desktop's setting");
+    assert!(view.read_with(cx, |v, _| v.navigator().shown), "the desktop's setting");
 }
 
-/// A tile's row focuses its tile and hands it the keyboard; a workspace's row in the
-/// breadcrumb's menu goes there.
+/// A tile's row focuses its tile and hands it the keyboard, and shows its project first where
+/// another is on show.
 #[gpui::test]
 fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -209,18 +208,14 @@ fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     click(cx, selector("nav-tile", first.item));
     assert_eq!(focused(&view, cx), Some(first));
     assert!(terminal_focused(&view, cx, first_session), "the keyboard goes with it");
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.focus_workspace(1);
-        v.after_focus_moved(cx);
-        cx.notify();
-    });
+    let laptop = connect(&view, cx, 2, "laptop");
+    let theirs = opens(&view, cx, &laptop, SessionId::new(), ClientId::new(), 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(theirs, cx));
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 1);
-    click(cx, "crumb-workspace");
-    let first_name = view.read_with(cx, |v, _| v.workspace_name_at(0));
-    click(cx, leak(format!("menu-{first_name}")));
-    assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 0);
+    let shown = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.layout().shown_index());
+    let elsewhere = shown(cx);
+    click(cx, selector("nav-tile", first.item));
+    assert_ne!(shown(cx), elsewhere, "its project on show");
     assert_eq!(focused(&view, cx), Some(first));
 }
 
@@ -327,15 +322,16 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
     };
     view.update_in(cx, |v, _w, cx| {
-        let name = "The workspace with the longest name anybody ever gave one of them, and more";
-        v.layout.set_workspace_name(0, Some(name.to_owned()));
+        let name = "The project with the longest name anybody ever gave one of them, and more";
+        let home = v.layout.shown_project().map(|p| p.home().clone()).expect("a project");
+        v.layout.set_name(&home, Some(name.to_owned()));
         cx.notify();
     });
     cx.run_until_parked();
     let (navigator, toggle, crumbs, new, bell) = (
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
-        bounds(cx, "crumb-workspace"),
+        bounds(cx, "crumb-project"),
         bounds(cx, "new-menu"),
         bounds(cx, "bell"),
     );
@@ -343,87 +339,6 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
     assert!(navigator.right() <= crumbs.left(), "the bar starts at the navigator's edge");
     assert!(crumbs.right() <= new.left(), "{crumbs:?} {new:?}");
     assert!(new.right() <= bell.left(), "+ covers the bell: {new:?} {bell:?}");
-}
-
-/// Where the view is along the strip is a thumb on the strip's bottom edge, never in the title
-/// bar: it shows while the strip scrolls and there is somewhere to go, goes once the strip has
-/// been still a while, and comes back while the pointer is near that edge.
-#[gpui::test]
-fn the_strip_thumb_shows_only_while_the_strip_moves(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    view.update(cx, |v, _| v.set_animation(true));
-    let fake = connect(&view, cx, 1, "studio");
-    for n in 1..=4 {
-        let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, n);
-    }
-    assert!(
-        !view.read_with(cx, |v, _| marks::all_in_view(&v.drawn.strip.borrow())),
-        "past the view"
-    );
-    assert!(cx.debug_bounds("indicator").is_none(), "nothing in the title bar");
-    let strip = cx.debug_bounds("strip").expect("the strip");
-    let track = cx.debug_bounds("strip-marks").expect("the strip moved to the new column");
-    let thumb = cx.debug_bounds("strip-thumb").expect("the view's share");
-    assert!((f32::from(track.size.height) - 3.0).abs() < 0.01, "3 pt: {track:?}");
-    assert!(
-        (f32::from(strip.bottom() - track.bottom()) - 8.0).abs() < 0.5,
-        "a base unit over the strip's bottom edge: {track:?} in {strip:?}"
-    );
-    assert!(thumb.size.width < track.size.width, "the view is a share of the strip");
-
-    let gone = |cx: &mut VisualTestContext| {
-        cx.executor().advance_clock(marks::MARKS_HOLD);
-        cx.run_until_parked();
-        cx.executor().advance_clock(crate::kit::Pace::Fade.duration());
-        cx.run_until_parked();
-        cx.debug_bounds("strip-marks").is_none()
-    };
-    // The spring steps by the wall clock: land the strip, as the self-test draws it.
-    view.update(cx, |v, _| v.set_animation(false));
-    cx.run_until_parked();
-    assert!(gone(cx), "still a while, it goes");
-
-    let near = point(strip.center().x, strip.bottom() - px(10.0));
-    cx.simulate_mouse_move(near, None, Modifiers::default());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("strip-marks").is_some(), "the pointer near the edge brings it");
-    cx.executor().advance_clock(marks::MARKS_HOLD);
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("strip-marks").is_some(), "and keeps it while it stays");
-    cx.simulate_mouse_move(strip.center(), None, Modifiers::default());
-    assert!(gone(cx), "gone a while after the pointer left");
-}
-
-/// The strip's thumb fades out once the pointer has left the edge a while; under Reduce
-/// Motion it goes at once, so no frame of a fade is asked for.
-#[gpui::test]
-fn the_strip_thumb_goes_at_once_under_reduce_motion(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    for n in 1..=4 {
-        let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, n);
-    }
-    view.update(cx, |v, _| v.set_animation(true));
-    let strip = cx.debug_bounds("strip").expect("the strip");
-    let near = point(strip.center().x, strip.bottom() - px(10.0));
-    let left_a_while = |cx: &mut VisualTestContext| {
-        cx.simulate_mouse_move(near, None, Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("strip-marks").is_some(), "the pointer near the edge brings it");
-        cx.simulate_mouse_move(strip.center(), None, Modifiers::default());
-        cx.executor().advance_clock(marks::MARKS_HOLD);
-        cx.run_until_parked();
-    };
-    left_a_while(cx);
-    assert!(cx.debug_bounds("strip-marks").is_some(), "it fades where it was");
-    let fading = frames_in_a_second(&view, cx);
-    assert!(fading > 1, "a fade draws frames: {fading}");
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    left_a_while(cx);
-    assert!(cx.debug_bounds("strip-marks").is_none(), "gone at once");
-    let after = frames_in_a_second(&view, cx);
-    assert!(after <= 1, "the frame it goes in at most: {after}");
-    assert_eq!(frames_in_a_second(&view, cx), 0, "then nothing");
 }
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
@@ -787,26 +702,23 @@ fn theme() -> Theme {
 
 /// A window narrowed past where the navigator docks is laid out for its new width at once.
 /// Were the frame still sized by the window before, the navigator would dock for that frame,
-/// the strip would pass through a phone's width, and the view would keep a phone's strut.
+/// the panes would pass through a phone's width, and the view would keep a phone's strut.
 #[gpui::test]
-fn narrowing_the_window_never_lays_the_strip_out_as_a_phone(cx: &mut TestAppContext) {
+fn narrowing_the_window_never_lays_the_panes_out_as_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), ..] = three_shells(&view, cx, &fake);
     click(cx, selector("nav-tile", first.item));
     let before = cx.debug_bounds(selector("item", first.item)).expect("drawn");
-    // The first panel stands half a gutter in from where its column starts the strip.
-    let half = px(theme().spacing.gutter() / 2.0);
-    let strip_left = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, _| v.drawn.viewport.get().left()) + half
-    };
-    assert_eq!(before.left(), strip_left(cx), "the first column starts the strip");
+    let area_left =
+        |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.viewport.get().left());
+    assert_eq!(before.left(), area_left(cx), "the first pane starts the area");
 
     cx.simulate_resize(size(px(900.0), px(600.0)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("navigator").is_none(), "no room to dock: it waits closed");
     let after = cx.debug_bounds(selector("item", first.item)).expect("drawn");
-    assert_eq!(after.left(), strip_left(cx), "no strut before it: {after:?}");
+    assert_eq!(after.left(), area_left(cx), "no strut before it: {after:?}");
 }
 
 /// The window is solid: an opaque ground under the title bar, and the panels opaque on it.

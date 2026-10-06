@@ -3,10 +3,10 @@
 //! Every test is live (`#[ignore]`): `cargo xtask e2e smooth` runs the Mac's, and
 //! `cargo xtask e2e smooth-ios --sim ipad` the simulator's. The app's frame probe
 //! (`slopty_ui::frames`, read back through `dump.frames`) times every frame the window draws
-//! while the driver scrolls the strip, opens the overview and types over the test socket; each
-//! scenario runs for [`RUN`] and prints one `MEASURE` line with the percentiles
-//! (`docs/MEASUREMENTS.md` quotes them). Scrolling the strip across twenty streaming shells is
-//! the guarded scenario: its p95 draw must stay under [`PAN_P95_LIMIT`] on the Mac.
+//! while the driver steps a pane from tab to tab, opens the palette and types over the test
+//! socket; each scenario runs for [`RUN`] and prints one `MEASURE` line with the percentiles
+//! (`docs/MEASUREMENTS.md` quotes them). Stepping a pane through twenty streaming shells is the
+//! guarded scenario: its p95 draw must stay under [`PAN_P95_LIMIT`] on the Mac.
 //!
 //! Load is twenty sessions running [`LOAD`] straight from `OpenSession` (nothing is typed into
 //! a shell); the display scenario needs Screen Recording for the worker and runs only with
@@ -14,7 +14,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
     use std::time::{Duration, Instant};
 
     use slopty_e2e::harness::Simulator;
@@ -27,11 +26,10 @@ mod tests {
     const MOVING: (&str, &str) = ("SLOPTY_E2E_MOTION", "1");
     /// Each scenario's measured span.
     const RUN: Duration = Duration::from_secs(5);
-    /// Window size for the Mac scenarios: a laptop-sized viewport shows two of the twenty
-    /// half-width columns.
+    /// Window size for the Mac scenarios: a laptop-sized viewport, two panes side by side.
     const WINDOW: (f32, f32) = (1280.0, 800.0);
-    /// Shells in the workspace in the strip and overview scenarios (`SLOPTY_SMOOTH_SHELLS`
-    /// overrides it for a scaling run; the guard applies to the default).
+    /// Shells in the project in the pane scenario (`SLOPTY_SMOOTH_SHELLS` overrides it for a
+    /// scaling run; the guard applies to the default).
     const SHELLS: u32 = 20;
 
     fn shells() -> u32 {
@@ -39,7 +37,7 @@ mod tests {
     }
     /// Shells beside the display stream.
     const SHELLS_WITH_DISPLAY: u32 = 5;
-    /// Streaming shells all in view for the view-cache scenario.
+    /// Streaming shells beside the typed one in the view-cache scenario.
     const BUSY: u32 = 6;
     /// Typing rate for the keystroke scenario, characters per second.
     const TYPING_CPS: u64 = 15;
@@ -48,7 +46,7 @@ mod tests {
     /// Keys that must have echoed for the run to count (the last one or two may still be in
     /// flight when the loop ends).
     const TYPED_MIN: u64 = TYPED as u64 - 2;
-    /// The guard: scrolling the strip across twenty streaming shells keeps its p95 draw under this,
+    /// The guard: stepping a pane through twenty streaming shells keeps its p95 draw under this,
     /// one and a half 60 Hz periods (measured 3.9 ms on the Mac Studio with other sessions
     /// building; see MEASUREMENTS 2026-09-05, frame time under streaming load).
     const PAN_P95_LIMIT: Duration = Duration::from_millis(25);
@@ -95,7 +93,7 @@ mod tests {
         .unwrap()
     }
 
-    /// `total` terminals in the workspace, the load ones (all but the first, interactive shell)
+    /// `total` terminals in the project, the load ones (all but the first, interactive shell)
     /// showing screens full of output.
     async fn load(drv: &mut Driver, total: u32) -> Dump {
         let have = u32::try_from(drv.dump().await.unwrap().terminals.len()).unwrap();
@@ -141,21 +139,11 @@ mod tests {
         );
     }
 
-    /// The most frames a resting overview may draw in [`RUN`] while shells stream under their
-    /// summaries: their output is not drawn there at all (`docs/decisions/workspace.md`, "The
-    /// overview is a map of work"), so only a stray readout's frame may come.
-    const COVERED_FRAMES: u64 = 5;
-
-    /// A resting overview drew next to nothing for the output its summaries cover.
-    fn assert_covered_output_draws_nothing(frames: &FrameInfo) {
-        assert!(frames.frames <= COVERED_FRAMES, "covered output drew frames: {frames:?}");
-    }
-
-    /// How often the strip is stepped: faster than a column's ease settles, so the view is
-    /// always moving.
-    const STRIP_STEP: Duration = Duration::from_millis(150);
-    /// How often the overview is toggled: about as long as its zoom takes.
-    const OVERVIEW_STEP: Duration = Duration::from_millis(400);
+    /// How often a pane is stepped to its next tab: every few frames, so a fresh shell is
+    /// drawn the whole time.
+    const PANE_STEP: Duration = Duration::from_millis(150);
+    /// How often the palette is opened or closed.
+    const PALETTE_STEP: Duration = Duration::from_millis(400);
 
     fn clock(period: Duration) -> tokio::time::Interval {
         let mut clock = tokio::time::interval(period);
@@ -163,44 +151,29 @@ mod tests {
         clock
     }
 
-    /// Step the focus a column at a time (⌘⌥→, and ⌘⌥← back from the last column) every
-    /// [`STRIP_STEP`] for `run`, from the first column: the strip scrolls the whole time.
+    /// Show the next tab of the pane holding the most shells (⌥⌘]) every [`PANE_STEP`] for
+    /// `run`: each step draws another streaming shell in the pane's place.
     async fn pan(drv: &mut Driver, run: Duration) -> FrameInfo {
         let d = drv.dump().await.unwrap();
-        let columns = d.items.iter().map(|i| i.pos[1]).max().unwrap_or(0);
-        drv.frames_reset().await.unwrap();
-        let mut clock = clock(STRIP_STEP);
-        let start = Instant::now();
-        let (mut column, mut right) = (0_usize, true);
-        while start.elapsed() < run {
-            clock.tick().await;
-            if column == columns {
-                right = false;
-            } else if column == 0 {
-                right = true;
+        let mut panes: std::collections::BTreeMap<[usize; 3], Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for item in &d.items {
+            if let Some(session) = item.session.as_deref() {
+                panes.entry(item.pos).or_default().push(session);
             }
-            drv.keys(if right { "cmd-alt-right" } else { "cmd-alt-left" }).await.unwrap();
-            column = if right { column.saturating_add(1) } else { column.saturating_sub(1) };
         }
-        let after = drv.dump().await.unwrap();
-        assert_floods_advanced(&d, &after);
-        after.frames
-    }
-
-    /// Open and close the overview (⌘⌥O) every [`OVERVIEW_STEP`] for `run`.
-    async fn overview_cycle(drv: &mut Driver, run: Duration) -> FrameInfo {
-        let d = drv.dump().await.unwrap();
+        let fullest = panes.values().max_by_key(|s| s.len()).expect("a pane of shells");
+        assert!(fullest.len() > 1, "no pane holds two shells: {d:#?}");
+        let session = fullest.first().copied().unwrap_or_default().to_owned();
+        drv.reveal(&session).await.unwrap();
         drv.frames_reset().await.unwrap();
-        let mut clock = clock(OVERVIEW_STEP);
+        let mut clock = clock(PANE_STEP);
         let start = Instant::now();
         while start.elapsed() < run {
             clock.tick().await;
-            drv.keys("cmd-alt-o").await.unwrap();
+            drv.keys("cmd-alt-]").await.unwrap();
         }
         let after = drv.dump().await.unwrap();
-        if after.overview {
-            drv.keys("cmd-alt-o").await.unwrap();
-        }
         assert_floods_advanced(&d, &after);
         after.frames
     }
@@ -253,10 +226,10 @@ mod tests {
         dump.frames
     }
 
-    /// Focus the first column's shell (⌘1).
+    /// Show the first tab (⌘1), a shell on it holding the keyboard.
     async fn focus_first_shell(drv: &mut Driver) {
         drv.keys("cmd-1").await.unwrap();
-        drv.wait_for("the first column's shell focused", STEP, |d| {
+        drv.wait_for("a shell on the first tab focused", STEP, |d| {
             d.focused.starts_with("terminal:")
                 && d.items.iter().any(|i| i.active && i.pos[1] == 0 && i.kind == "terminal")
         })
@@ -264,37 +237,31 @@ mod tests {
         .unwrap();
     }
 
-    /// The scenarios on one stack: the strip and the overview over `shells` streaming shells
-    /// (returns the strip numbers for the guard).
-    async fn strip_and_overview(drv: &mut Driver, label: &str, shells: u32) -> FrameInfo {
+    /// The guarded scenario over `shells` streaming shells: a pane stepped from tab to tab.
+    async fn through_a_pane(drv: &mut Driver, label: &str, shells: u32) -> FrameInfo {
         ready(drv).await;
         load(drv, shells).await;
         focus_first_shell(drv).await;
         let panned = pan(drv, RUN).await;
-        measure(
-            &format!("(a) {label}: {shells} streaming shells, strip column to column"),
-            &panned,
-        );
-        let overview = overview_cycle(drv, RUN).await;
-        measure(&format!("(b) {label}: {shells} streaming shells, overview in and out"), &overview);
+        measure(&format!("(a) {label}: {shells} streaming shells, pane tab to tab"), &panned);
         panned
     }
 
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
-    async fn twenty_streaming_shells_scroll_the_strip_within_budget_on_the_mac() {
+    async fn twenty_streaming_shells_step_through_a_pane_within_budget_on_the_mac() {
         let mut stack = Stack::launch_with("e2e-smooth", &[MOVING]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         let shells = shells();
-        let panned = strip_and_overview(drv, "mac", shells).await;
+        let panned = through_a_pane(drv, "mac", shells).await;
         stack.shutdown().await;
 
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
         let p95 = Duration::from_micros(panned.draw_p95_us);
         assert!(
             shells != SHELLS || p95 <= PAN_P95_LIMIT,
-            "strip p95 draw {p95:?} over the {PAN_P95_LIMIT:?} limit ({})",
+            "pane p95 draw {p95:?} over the {PAN_P95_LIMIT:?} limit ({})",
             panned.row()
         );
     }
@@ -372,8 +339,8 @@ mod tests {
     }
 
     /// A file tile beside five streaming shells, [`FILE_LINES`] lines of source by default: the
-    /// editor draws the rows on screen, so paging through it, typing into it and scrolling the
-    /// strip past it should cost what those rows cost, not the file.
+    /// editor draws the rows on screen, so paging through it, typing into it and stepping a
+    /// pane of shells beside it should cost what those rows cost, not the file.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn a_large_file_tile_beside_five_shells_scrolls_and_types_on_the_mac() {
@@ -410,9 +377,7 @@ mod tests {
         measure(&format!("(j) mac: {label}, paging through the file"), &paged);
         focus_first_shell(drv).await;
         let panned = pan(drv, RUN).await;
-        measure(&format!("(e) mac: {label}, strip column to column"), &panned);
-        let overview = overview_cycle(drv, RUN).await;
-        measure(&format!("(f) mac: {label}, overview in and out"), &overview);
+        measure(&format!("(e) mac: {label}, pane tab to tab"), &panned);
         stack.shutdown().await;
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
     }
@@ -446,10 +411,10 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         port
     }
 
-    /// Open the palette and close it again, each every [`OVERVIEW_STEP`], for `run`.
+    /// Open the palette and close it again, each every [`PALETTE_STEP`], for `run`.
     async fn palette_cycle(drv: &mut Driver, run: Duration) -> FrameInfo {
         drv.frames_reset().await.unwrap();
-        let mut clock = clock(OVERVIEW_STEP);
+        let mut clock = clock(PALETTE_STEP);
         let start = Instant::now();
         let mut open = false;
         while start.elapsed() < run {
@@ -465,8 +430,8 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
     }
 
     /// A browser tile beside five streaming shells: the page is a native view the window
-    /// composes, so scrolling the strip past it, the palette over it and the overview around
-    /// it should cost what the shells cost.
+    /// composes, so the palette over it and a pane of shells stepped beside it should cost
+    /// what the shells cost.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn a_page_tile_beside_five_shells_pans_on_the_mac() {
@@ -490,9 +455,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         measure(&format!("(l) mac: {label}, palette in and out over the page"), &palette);
         focus_first_shell(drv).await;
         let panned = pan(drv, RUN).await;
-        measure(&format!("(e) mac: {label}, strip column to column"), &panned);
-        let overview = overview_cycle(drv, RUN).await;
-        measure(&format!("(f) mac: {label}, overview in and out"), &overview);
+        measure(&format!("(e) mac: {label}, pane tab to tab"), &panned);
         stack.shutdown().await;
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
     }
@@ -518,199 +481,28 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
             .unwrap();
             focus_first_shell(drv).await;
             let panned = pan(drv, RUN).await;
-            measure(
-                "(c) mac: 1 display stream + 5 streaming shells, strip column to column",
-                &panned,
-            );
+            measure("(c) mac: 1 display stream + 5 streaming shells, pane tab to tab", &panned);
             stack.shutdown().await;
             assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
         }
     }
 
-    /// A shell that fills its screen once and then sits still.
-    const STILL: &[&str] = &["/bin/sh", "-c", "seq 1 60; exec sleep 3600"];
-
-    /// Open the overview and, once its zoom has settled, time the frames drawn over [`RUN`]
-    /// while nothing moves. Returns the dumps either side.
-    async fn overview_still(drv: &mut Driver) -> (Dump, Dump) {
-        drv.keys("cmd-alt-o").await.unwrap();
-        drv.wait_for("the overview open", STEP, |d| d.overview).await.unwrap();
-        tokio::time::sleep(OVERVIEW_STEP).await;
-        let before = drv.dump().await.unwrap();
-        drv.frames_reset().await.unwrap();
-        tokio::time::sleep(RUN).await;
-        (before, drv.dump().await.unwrap())
-    }
-
-    /// Six shells streaming under the resting overview's summaries, then typing into a seventh
-    /// with the six streaming beside it; then one streaming shell beside five still ones under
-    /// the overview. Output a summary covers draws no frame at all; the typing numbers are the
-    /// view cache's, a frame redrawing the terminals whose output changed, not every tile.
+    /// Typing into a shell with [`BUSY`] streaming beside it: the view cache's numbers, a frame
+    /// redrawing the terminals whose output changed, not every tile.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
-    async fn six_streaming_shells_in_view_on_the_mac() {
+    async fn typing_beside_six_streaming_shells_on_the_mac() {
         let mut stack = Stack::launch_with("e2e-smooth-busy", &[MOVING]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
         load(drv, BUSY.saturating_add(1)).await;
         focus_first_shell(drv).await;
-        let (before, after) = overview_still(drv).await;
-        assert_floods_advanced(&before, &after);
-        measure(&format!("(g) mac: {BUSY} streaming shells in the overview, still"), &after.frames);
-        drv.keys("cmd-alt-o").await.unwrap();
-        drv.wait_for("the overview closed", STEP, |d| !d.overview).await.unwrap();
-        focus_first_shell(drv).await;
         let latency = typing(drv).await;
         println!("MEASURE (h) mac: typing beside {BUSY} streaming shells: {}", latency.row());
         println!("MEASURE (h) mac hops: {}", latency.hops());
         stack.shutdown().await;
-        assert_covered_output_draws_nothing(&after.frames);
         assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
-
-        let mut stack = Stack::launch_with("e2e-smooth-still", &[MOVING]).await.unwrap();
-        let drv = &mut stack.driver;
-        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        ready(drv).await;
-        // The streaming shell goes next to the first column, where the overview shows it.
-        load(drv, 2).await;
-        let still = BUSY.saturating_sub(1);
-        drv.open(STILL, still).await.unwrap();
-        let shells = usize::try_from(still).unwrap().saturating_add(2);
-        drv.wait_for("the still shells full", STEP, |d| {
-            d.terminals.len() == shells
-                && d.terminals.iter().filter(|t| t.rows.iter().any(|r| r == "60")).count()
-                    == usize::try_from(still).unwrap()
-        })
-        .await
-        .unwrap();
-        focus_first_shell(drv).await;
-        let (before, after) = overview_still(drv).await;
-        assert_floods_advanced(&before, &after);
-        measure(
-            &format!("(i) mac: 1 streaming shell beside {still} still ones in the overview"),
-            &after.frames,
-        );
-        stack.shutdown().await;
-        assert_covered_output_draws_nothing(&after.frames);
-    }
-
-    /// Springs of the overview timed each way in the mixed scenario.
-    const SPRINGS: usize = 6;
-    /// How long one spring is given to land before its frames are read: past its zoom and the
-    /// words' fade.
-    const SPRING: Duration = Duration::from_millis(500);
-    /// The mixed scenario's tiles besides its twelve shells: code files, then Markdown notes.
-    const MIXED_FILES: usize = 4;
-    const MIXED_NOTES: usize = 4;
-
-    /// One spring of the overview: ⌘⌥O, then the frames drawn while it lands.
-    async fn spring(drv: &mut Driver, open: bool) -> FrameInfo {
-        drv.frames_reset().await.unwrap();
-        drv.keys("cmd-alt-o").await.unwrap();
-        tokio::time::sleep(SPRING).await;
-        let d = drv.dump().await.unwrap();
-        assert_eq!(d.overview, open, "the overview did not follow ⌘⌥O");
-        d.frames
-    }
-
-    /// The springs as one row: the median of their medians, the worst of the rest, and every
-    /// frame counted.
-    fn springs_row(springs: &[FrameInfo]) -> FrameInfo {
-        let mut p50: Vec<u64> = springs.iter().map(|f| f.draw_p50_us).collect();
-        p50.sort_unstable();
-        let worst = |f: fn(&FrameInfo) -> u64| springs.iter().map(f).max().unwrap_or(0);
-        FrameInfo {
-            frames: springs.iter().map(|f| f.frames).sum(),
-            over_budget: springs.iter().map(|f| f.over_budget).sum(),
-            dropped: springs.iter().map(|f| f.dropped).sum(),
-            draw_p50_us: p50.get(p50.len() / 2).copied().unwrap_or(0),
-            draw_p95_us: worst(|f| f.draw_p95_us),
-            draw_p99_us: worst(|f| f.draw_p99_us),
-            draw_max_us: worst(|f| f.draw_max_us),
-            interval_p50_us: worst(|f| f.interval_p50_us),
-            interval_p95_us: worst(|f| f.interval_p95_us),
-            interval_p99_us: worst(|f| f.interval_p99_us),
-            nominal_us: worst(|f| f.nominal_us),
-        }
-    }
-
-    /// Twenty tiles of every text kind (twelve shells, five of them streaming, six still after
-    /// a screen of output; four file tiles; four notes): the overview's springs in and out,
-    /// [`SPRINGS`] each way, and the overview held open for [`RUN`]. What the overview's
-    /// miniatures cost (MEASUREMENTS 2026-09-28, "the overview's miniatures").
-    #[tokio::test]
-    #[ignore = "live: cargo xtask e2e smooth"]
-    async fn twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac() {
-        let mut stack = Stack::launch_with("e2e-smooth-mixed", &[MOVING]).await.unwrap();
-        let files: Vec<String> = (0..MIXED_FILES)
-            .map(|n| {
-                let path = stack.dir.path().join(format!("mixed_{n}.rs"));
-                let body = (0..400).fold(String::new(), |mut body, i| {
-                    writeln!(body, "fn line_{i}() -> u32 {{ {i} * {n} + 1 }}").unwrap();
-                    body
-                });
-                std::fs::write(&path, body).unwrap();
-                path.to_str().unwrap().to_owned()
-            })
-            .collect();
-        let notes: Vec<String> = (0..MIXED_NOTES)
-            .map(|n| {
-                let path = stack.dir.path().join(format!("release_{n}.md"));
-                let body =
-                    format!("# Release {n}\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag\n");
-                std::fs::write(&path, body).unwrap();
-                path.to_str().unwrap().to_owned()
-            })
-            .collect();
-        let drv = &mut stack.driver;
-        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        ready(drv).await;
-        load(drv, 6).await;
-        let still = 6;
-        drv.open(STILL, still).await.unwrap();
-        let shells = usize::try_from(still).unwrap().saturating_add(6);
-        drv.wait_for("the still shells full", STEP, |d| {
-            d.terminals.len() == shells
-                && d.terminals.iter().filter(|t| t.rows.iter().any(|r| r == "60")).count()
-                    == usize::try_from(still).unwrap()
-        })
-        .await
-        .unwrap();
-        for path in &files {
-            drv.open_file(path, None).await.unwrap();
-        }
-        drv.wait_for("the file tiles read", STEP, |d| {
-            d.items.iter().filter(|i| i.file.as_ref().is_some_and(|f| f.lines >= 400)).count()
-                == MIXED_FILES
-        })
-        .await
-        .unwrap();
-        for path in &notes {
-            drv.open_file(path, None).await.unwrap();
-        }
-        let tiles = shells.saturating_add(MIXED_FILES).saturating_add(MIXED_NOTES);
-        drv.wait_for("twenty tiles, the notes previewed", STEP, |d| {
-            d.items.len() == tiles
-                && d.items.iter().filter(|i| i.file.as_ref().is_some_and(|f| f.previewing)).count()
-                    == MIXED_NOTES
-        })
-        .await
-        .unwrap();
-        focus_first_shell(drv).await;
-        let (mut opening, mut closing) = (Vec::new(), Vec::new());
-        for _ in 0..SPRINGS {
-            opening.push(spring(drv, true).await);
-            closing.push(spring(drv, false).await);
-        }
-        let label = format!("{tiles} mixed tiles (5 streaming shells)");
-        measure(&format!("(m) mac: {label}, overview opening"), &springs_row(&opening));
-        measure(&format!("(m) mac: {label}, overview closing"), &springs_row(&closing));
-        let (before, after) = overview_still(drv).await;
-        assert_floods_advanced(&before, &after);
-        measure(&format!("(m) mac: {label}, overview held open"), &after.frames);
-        stack.shutdown().await;
-        assert_covered_output_draws_nothing(&after.frames);
     }
 
     #[tokio::test]
@@ -799,7 +591,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         .await
         .unwrap();
         let drv = &mut stack.driver;
-        let panned = strip_and_overview(drv, "simulator", shells()).await;
+        let panned = through_a_pane(drv, "simulator", shells()).await;
         stack.shutdown().await;
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
 

@@ -15611,3 +15611,48 @@ width. Crisp is Σα²/Σα (1 when every inked pixel is whole), solid the share
 ```sh
 cargo test -p slopty-platform --lib a_glyph_on_its_grid_is_crisper_than_one_halved -- --nocapture
 ```
+
+## 2026-10-07 — panes in place of the strip: a sash drag and the frames beside the chrome
+
+The release `slopty-ui` test binaries of `af3acb14` (before, a `git archive` in
+`target/scratch-tiling/tree`) and of the tree with the panes (after), alternated three times,
+p50 in ms. Each workspace holds 60 shells and 60 notes with the navigator docked, unless named.
+The strip's measurement of motion was a frame of the overview's spring, which went with the
+overview. The panes' motion is a sash drag: 400 steps of the pointer back and forth over the
+sash between the two panes of `three_shells`, each timed from the move to the frame drawn. 280
+of the steps moved the panes; the rest held them at a pane's least height.
+
+| measurement, p50 ms | before | after |
+| --- | --- | --- |
+| a frame of the overview's spring (before) / a step of a sash drag (after) | 0.952, 0.946, 0.942 | 0.175, 0.175, 0.177 |
+| the workspace's own frame (echo test) | 1.033, 0.975, 0.995 | 0.968, 0.976, 0.965 |
+| a pointer frame | 0.082, 0.079, 0.079 | 0.072, 0.075, 0.073 |
+| the keyboard moving between two shells | 1.080, 1.002, 0.999 | 1.002, 1.001, 1.001 |
+| a frame over a large registry (120 folders, 60 files, 12 shells) | 3.432, 3.343, 3.343 | 2.253, 2.305, 2.248 |
+| the shell's echo over that registry | 0.188, 0.190, 0.184 | 0.146, 0.157, 0.152 |
+| a stream frame beside 60 shells and 60 folders | 0.254, 0.244, 0.247 | 0.060, 0.060, 0.060 |
+| the workspace's own frame beside the stream | 1.883, 1.831, 1.829 | 1.063, 1.063, 1.058 |
+
+- A step of a sash drag costs a fifth of a frame of the spring it replaces. It draws the area
+  and no chrome (the chrome's renders stay 19 and 11 through all 400 steps), and builds each of
+  the two shells shown at most twice.
+- The first run had the large registry's frame at 23.6 ms. The navigator asked of each file and
+  folder row whether another placed one reads alike: every item against every item, each
+  looked up through the tiling's tree, so the cost grew with the cube of the registry. The
+  answer is now worked out with the twins, when the workspace changes, and read per row. Every
+  arrival is a tab of its own, so the 192 items are 192 tabs; the title bar's tabs cost 0.04 ms
+  to work out.
+- A project's group is checked against its tiles only when the workspace or a fact changed,
+  not in every frame (0.18 ms at 192 tiles).
+- The stream frame no longer draws beside the strip's other columns near the view: the window's
+  tab holds the window and the shell alone.
+
+```sh
+(cd target/scratch-tiling/tree && CARGO_TARGET_DIR=../../scratch-panels/target cargo test -p slopty-ui --release --lib --no-run)
+cargo test -p slopty-ui --release --lib --no-run
+<binary> --ignored --exact --nocapture --test-threads 1 workspace::tests::chrome::measure_a_sash_drag_beside_the_chrome
+# and, one at a time: chrome::measure_an_echo_frame_beside_the_chrome,
+# chrome::measure_a_pointer_frame_beside_the_chrome, chrome::measure_the_keyboard_moving_beside_the_chrome,
+# measure::measure_a_frame_over_a_large_registry, measure::measure_a_stream_frame_beside_the_chrome
+# (before: chrome::measure_a_frame_of_motion_beside_the_chrome in place of the sash drag)
+```

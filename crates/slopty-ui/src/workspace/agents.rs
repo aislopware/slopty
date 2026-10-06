@@ -228,10 +228,10 @@ impl WorkspaceView {
     }
 
     /// Sessions whose agent is waiting on the human: those with a tile in reading order
-    /// (workspace, column, tile) so ⌘⇧A walks the strip predictably, then those the server's
+    /// (project, tab, pane) so ⌘⇧A walks the tiles predictably, then those the server's
     /// ladder names on a worker with no tile for them here.
     pub(super) fn needs_you(&self) -> Vec<Waiting> {
-        let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
+        let mut shown: Vec<(Option<usize>, Waiting)> = self
             .items()
             .filter_map(|(worker, i)| match i.kind {
                 ItemKind::Terminal { session } => {
@@ -240,11 +240,9 @@ impl WorkspaceView {
                 _ => None,
             })
             .filter(|w| self.agent_state(w.session).is_some_and(needs_human))
-            .map(|w| (w.tile.and_then(|t| self.layout.position(t)), w))
+            .map(|w| (w.tile.and_then(|t| self.reading_rank(t)), w))
             .collect();
-        shown.sort_by_key(|(pos, w)| {
-            (pos.map(|p| (p.workspace, p.column, p.tile)), w.tile.map(|t| t.item))
-        });
+        shown.sort_by_key(|(rank, w)| (*rank, w.tile.map(|t| t.item)));
         let mut unshown: Vec<Waiting> = self
             .agent_sessions()
             .filter(|(session, stand)| {
@@ -342,11 +340,11 @@ impl WorkspaceView {
         &self,
         steps: impl IntoIterator<Item = Step>,
     ) -> Vec<Step> {
-        let mut steps: Vec<(Option<slopty_client::layout::Pos>, Step)> = steps
+        let mut steps: Vec<(Option<usize>, Step)> = steps
             .into_iter()
-            .map(|step| (step.tile().and_then(|t| self.layout.position(t)), step))
+            .map(|step| (step.tile().and_then(|t| self.reading_rank(t)), step))
             .collect();
-        steps.sort_by_key(|(pos, _)| (pos.is_none(), pos.map(|p| (p.workspace, p.column, p.tile))));
+        steps.sort_by_key(|(rank, _)| (rank.is_none(), *rank));
         steps.into_iter().map(|(_, step)| step).collect()
     }
 

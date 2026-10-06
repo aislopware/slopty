@@ -1,5 +1,5 @@
-//! Nothing a tile draws lies past its edges, whatever room its column gives it: each kind of
-//! tile is laid out at the narrow, regular and wide widths a column takes, and every node of
+//! Nothing a tile draws lies past its edges, whatever room its pane gives it: each kind of
+//! tile is laid out at the narrow, regular and wide widths a pane takes, and every node of
 //! its accessibility tree is checked against the tile's own bounds (`docs/decisions/ui.md`,
 //! "How surfaces adapt to their room").
 
@@ -14,8 +14,8 @@ use slopty_proto::thread::wire::TableFrame;
 
 use super::*;
 
-/// The widths a column is checked at: the least a column takes, beside a board, a phone's,
-/// the narrow edge, a half and the wide edge.
+/// The widths a pane is checked at: a phone's narrowest, beside a board, a phone's, the narrow
+/// edge, a half and the wide edge.
 const WIDTHS: [f32; 6] = [280.0, 312.0, 360.0, 420.0, 560.0, 720.0];
 
 /// A tile's height while it is checked.
@@ -27,16 +27,20 @@ fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// `tile` beside a shell of its own column, so its header is its own and not the title bar's,
-/// in a window wide enough for both at any of [`WIDTHS`].
+/// `tile` on a tab of its own beside a shell in a pane on its right, so its header is its own
+/// and not the title bar's and one sash sets its width, in a window wide enough for both at
+/// any of [`WIDTHS`].
 fn beside(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, tile: TileRef) {
     cx.simulate_resize(size(px(1600.0), px(HIGH)));
-    opens(view, cx, fake, SessionId::new(), fake.me, 99);
+    let shell = opens(view, cx, fake, SessionId::new(), fake.me, 99);
+    on_new_tab(view, cx, tile);
+    super::beside(view, cx, shell, tile, slopty_client::layout::Side::Right);
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     settle(cx);
 }
 
-/// `tile`'s column dragged to `width`, as its divider is.
+/// `tile`'s pane dragged to `width` by the sash on its right, the least room let down to the
+/// narrowest width checked.
 fn at_width(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef, width: f32) {
     for _ in 0..4 {
         let got =
@@ -44,11 +48,10 @@ fn at_width(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: Tile
         if (got - width).abs() < 0.5 {
             return;
         }
-        let column = column_of(view, cx, tile);
         view.update_in(cx, |v, _w, cx| {
-            v.layout.resize_begin(column);
-            v.layout.resize_update(width - got);
-            v.layout.resize_end();
+            v.layout.set_room(slopty_client::layout::Room { min_w: WIDTHS[0], min_h: 200.0 });
+            let sash = v.layout.frame().sashes.first().cloned().expect("a sash right of it");
+            v.layout.drag_sash(&sash, width - got);
             v.focus_tile(tile, cx);
             cx.notify();
         });
@@ -114,7 +117,7 @@ fn escaped(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileR
     })
 }
 
-/// `tile`, beside another column, at each of [`WIDTHS`]: nothing escapes it.
+/// `tile`, beside another pane, at each of [`WIDTHS`]: nothing escapes it.
 fn contained(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
@@ -166,8 +169,8 @@ fn agent_with_chips(
 
 /// A shell, an agent's shell with its chips, the agent's thread, a board, a file, a folder, a
 /// folder's changes in review, a page, a remote window waiting and one that did not open, and a
-/// column of three tabs: at every width a column takes, nothing any of them draws lies past the
-/// tile's edges. A clipped send button or a chip run under the next column fails here.
+/// pane of three tabs: at every width a pane takes, nothing any of them draws lies past the
+/// tile's edges. A clipped send button or a chip run under the next pane fails here.
 #[gpui::test]
 fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     let (view, cx) = still_workspace(app);
@@ -212,10 +215,10 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
 
     let (view, cx) = still_workspace(app);
     let studio = connect(&view, cx, 1, "studio");
-    let path = "/w/a-file-whose-name-runs-on-past-any-narrow-column.md";
+    let path = "/w/a-file-whose-name-runs-on-past-any-narrow-pane.md";
     let file = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
     let text = slopty_proto::file::FileRead::Text {
-        text: "# Notes\n\nA line long enough to wrap in a narrow column, and then some more.\n"
+        text: "# Notes\n\nA line long enough to wrap in a narrow pane, and then some more.\n"
             .to_owned(),
         size: 80,
         modified_ms: WallMs::from_millis(1_000),
@@ -243,7 +246,7 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
         dir: "/w/proj".to_owned(),
         entries: vec![
             entry("src", FileKind::Dir),
-            entry("a-file-whose-name-runs-on-past-any-narrow-column.rs", FileKind::File),
+            entry("a-file-whose-name-runs-on-past-any-narrow-pane.rs", FileKind::File),
         ],
         total: 2,
     };
@@ -260,7 +263,7 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     let (view, cx) = still_workspace(app);
     let studio = connect(&view, cx, 1, "studio");
     cx.update(|window, _| window.activate_window());
-    let url = "http://127.0.0.1:5173/a/path/long/enough/to/run/past/any/narrow/column".to_owned();
+    let url = "http://127.0.0.1:5173/a/path/long/enough/to/run/past/any/narrow/pane".to_owned();
     let page = arrives(&view, cx, &studio, ItemKind::Browser { url }, 1);
     view.update_in(cx, |v, window, cx| {
         v.focus_tile(page, cx);
@@ -294,20 +297,19 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
         .map(|version| opens(&view, cx, &studio, SessionId::new(), studio.me, version))
         .collect();
     view.update_in(cx, |v, _w, cx| {
+        let pane = v.layout.position(tabs[0]).expect("placed").pane;
         for tab in tabs.iter().skip(1) {
-            v.focus_tile(*tab, cx);
-            v.layout.consume_or_expel_window_left();
+            v.layout.place(*tab, slopty_client::layout::Drop { pane, edge: None });
         }
-        v.layout.toggle_tabbed();
         cx.notify();
     });
     settle(cx);
     let last = *tabs.last().expect("three tabs");
-    contained(&view, cx, &studio, last, "a column of three tabs");
+    contained(&view, cx, &studio, last, "a pane of three tabs");
 }
 
 /// A folder's changes opened as a tile of their own, the worker's answer in: a file whose path
-/// runs on past a narrow column, with the scope bar and the file's head. The worker, then the
+/// runs on past a narrow pane, with the scope bar and the file's head. The worker, then the
 /// tile.
 fn changes_in_review(
     view: &Entity<WorkspaceView>,
@@ -339,7 +341,7 @@ fn changes_in_review(
     });
     let (Some(item), Some(request)) = (tile, request) else { panic!("a review asked: {sent:?}") };
     let file = FileDiff {
-        path: "crates/a-crate-whose-name-runs-on/src/a-file-whose-name-runs-on-past-any-column.rs"
+        path: "crates/a-crate-whose-name-runs-on/src/a-file-whose-name-runs-on-past-any-pane.rs"
             .to_owned(),
         from: Some("old".to_owned()),
         to: Some("new".to_owned()),

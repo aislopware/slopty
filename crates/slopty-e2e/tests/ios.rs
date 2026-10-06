@@ -3,8 +3,8 @@
 //! Live (`#[ignore]`), run by `cargo xtask e2e ios [--sim iphone|ipad]`: the daemons
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
 //! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. Phone or tablet: a
-//! shell opens, its rows come back, typed text echoes, and its column is sized for the screen
-//! it is on (a phone's fills the screen but for the neighbours' peeks, an iPad's is half). The
+//! shell opens, its rows come back, typed text echoes, and its pane is sized for the screen it
+//! is on (a lone pane fills it, a phone's always does). The
 //! scenario renders the app's own frame (the fork's iOS `render_to_image`) and compares it
 //! with a golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
 
@@ -36,7 +36,7 @@ mod tests {
     }
 
     /// The first shell still shows its echo: its rows survive the resizes the soft keyboard
-    /// and the columns put it through (fewer rows trim blank rows at the bottom first).
+    /// and the panes put it through (fewer rows trim blank rows at the bottom first).
     fn echo_on_screen(d: &Dump) -> bool {
         !d.lines_containing("echo ios-").is_empty()
             && d.lines_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
@@ -135,14 +135,14 @@ mod tests {
         let [x, y, w, h] = term.bounds;
         let (vw, vh) = (dump.window.width, dump.window.height);
         assert!(vw > 300.0 && vh > 300.0, "window: {vw}x{vh}");
-        // The column is on screen and sized for it.
+        // The pane is on screen and sized for it.
         assert!(
             x >= 0.0 && y >= 0.0 && x + w <= vw + 1.0 && y + h <= vh + 1.0,
             "{term:?} in {vw}x{vh}"
         );
-        // A lone column fills the width on a phone and a tablet alike
+        // A lone pane fills the width on a phone and a tablet alike
         // (docs/decisions/workspace.md).
-        assert!(w > vw * 0.85, "a lone column fills the screen: {term:?} in {vw}");
+        assert!(w > vw * 0.85, "a lone pane fills the screen: {term:?} in {vw}");
 
         drv.type_text("echo ios-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();
@@ -272,7 +272,7 @@ mod tests {
         .await
         .unwrap();
 
-        // The shell and the note side by side, the note focused: columns and their marks,
+        // The shell and the note, the note focused: panes and their tabs,
         // once the take-back offer for the closed shell has gone (it lasts five seconds).
         let dump =
             drv.wait_for("the undo offer to lapse", STEP, |d| d.notice.is_none()).await.unwrap();
@@ -290,7 +290,7 @@ mod tests {
         .await
         .unwrap();
         // The navigator from the title bar's toggle: on a phone a drawer over a scrim that
-        // leaves an edge of the strip, on an iPad a panel over the strip. The shell's row
+        // leaves an edge of the panes, on an iPad a panel over them. The shell's row
         // closes it with the shell focused.
         tap(drv, "Button", "Navigator").await;
         let shown = drv
@@ -340,9 +340,9 @@ mod tests {
             // Split View, the app on half the screen.
             let (w, h) = (dump.window.width / 2.0 - 5.0, dump.window.height);
             drv.ok(&Command::Resize { width: w, height: h }).await.unwrap();
-            // Compact: the active column takes the whole width, edge to edge (a phone has no
-            // struts), and the other column waits off screen beside it.
-            drv.wait_for("one full-width column", STEP, |d| {
+            // Compact: the active pane takes the whole width, edge to edge, and the other tile
+            // is not drawn beside it.
+            drv.wait_for("one full-width pane", STEP, |d| {
                 let Some(active) = d.items.iter().find(|i| i.active) else { return false };
                 let (left, right) = (active.bounds[0], active.bounds[0] + active.bounds[2]);
                 active.bounds[2] >= w - 1.0

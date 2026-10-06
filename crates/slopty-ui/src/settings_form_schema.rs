@@ -396,16 +396,35 @@ pub const KEY_GROUPS: [&str; 9] = [
 ];
 
 /// The group a command is listed under: its scope's, the workspace's split into what arranges
-/// the strip and the rest.
+/// the panes and the tabs and the rest.
 fn key_group(command: &Command) -> &'static str {
     match command.scope() {
         Scope::App => "General",
         Scope::Workspace => {
             let name = command.name();
-            let layout = ["column", "workspace", "width", "tabbed", "overview", "fullscreen"]
-                .iter()
-                .any(|word| name.contains(word))
-                || matches!(name, "focus_up" | "focus_down" | "move_up" | "move_down");
+            let layout = name.starts_with("select_tab_")
+                || matches!(
+                    name,
+                    "focus_left"
+                        | "focus_right"
+                        | "focus_up"
+                        | "focus_down"
+                        | "move_left"
+                        | "move_right"
+                        | "move_up"
+                        | "move_down"
+                        | "zoom_pane"
+                        | "equalize_panes"
+                        | "previous_project"
+                        | "next_project"
+                        | "previous_tab"
+                        | "next_tab"
+                        | "last_tab"
+                        | "go_back"
+                        | "go_forward"
+                        | "previous_pane_tab"
+                        | "next_pane_tab"
+                );
             if layout { "Layout" } else { "General" }
         }
         Scope::Terminal => "Terminal",
@@ -661,8 +680,8 @@ mod tests {
         assert!(note.set, "the file's");
         let find = line("terminal.find");
         assert_eq!((find.label.as_str(), find.group), ("Find", "Terminal"), "several scopes");
-        assert_eq!(line("workspace.focus_column_3").label, "Focus column 3");
-        assert_eq!(line("workspace.focus_column_3").group, "Layout");
+        assert_eq!(line("workspace.select_tab_3").label, "Select tab 3");
+        assert_eq!(line("workspace.select_tab_3").group, "Layout");
         assert_eq!(line("terminal.scroll_page_up").label, "Scroll page up", "the name's words");
         assert_eq!(line("conversation.interrupt").label, "Stop the agent");
         assert_eq!(line("workspace.toggle_mute").label, "Mute sound", "its variant is no scope");

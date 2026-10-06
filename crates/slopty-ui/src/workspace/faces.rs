@@ -1094,14 +1094,7 @@ impl WorkspaceView {
             TileRef { worker: key, item: id }
         });
         if let Some(at) = at {
-            self.tick();
-            self.layout.move_tile(
-                tile,
-                slopty_client::layout::DropTarget::NewColumn {
-                    workspace: at.workspace,
-                    index: at.column,
-                },
-            );
+            self.layout.put_back(tile, at);
             self.layout_touched(cx);
         }
         self.focus_tile(tile, cx);
@@ -1240,7 +1233,6 @@ impl WorkspaceView {
         self.settle_thread_tiles(cx);
         self.count_runs(cx);
         // The overview's agents say their newest words as the table brings them.
-        self.retake_agent_digests(cx);
         cx.notify();
     }
 
@@ -1805,18 +1797,16 @@ impl WorkspaceView {
                 _ => None,
             })
             .collect();
-        let mut out: Vec<(Option<slopty_client::layout::Pos>, ThreadWait)> = self
+        let mut out: Vec<(Option<usize>, ThreadWait)> = self
             .thread_stands()
             .filter(|(_, stand)| stand.rung == rung)
             .map(|(thread, stand)| {
                 let tile = tiles.get(&thread).copied();
-                let pos = tile.and_then(|t| self.layout.position(t));
-                (pos, ThreadWait { worker: stand.worker, thread, tile })
+                let rank = tile.and_then(|t| self.reading_rank(t));
+                (rank, ThreadWait { worker: stand.worker, thread, tile })
             })
             .collect();
-        out.sort_by_key(|(pos, w)| {
-            (pos.is_none(), pos.map(|p| (p.workspace, p.column, p.tile)), w.worker, w.thread)
-        });
+        out.sort_by_key(|(rank, w)| (rank.is_none(), *rank, w.worker, w.thread));
         out.into_iter().map(|(_, w)| w).collect()
     }
 
@@ -1825,22 +1815,6 @@ impl WorkspaceView {
     /// plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
         self.thread_line(self.session_thread(session)?).map(crate::markdown::plain_line)
-    }
-
-    /// The last words `thread`'s agent wrote, as Markdown: its newest message where a hub
-    /// follows the thread, else the last line its worker's table carries. Read out of the hub,
-    /// so only where nothing draws: the overview copies it ([`super::miniature::Digest`]).
-    pub(super) fn last_words(&self, thread: ThreadId, cx: &App) -> Option<String> {
-        let followed = self.faces.threads.hubs.values().find_map(|hub| {
-            let state = hub.read(cx).threads().mirror(thread)?.state()?;
-            state.items.iter().rev().find_map(|item| match &item.body {
-                thread::ItemBody::Text(text) if !text.text.trim().is_empty() => {
-                    Some(text.text.clone())
-                }
-                _ => None,
-            })
-        });
-        followed.or_else(|| self.thread_line(thread).map(str::to_owned))
     }
 }
 

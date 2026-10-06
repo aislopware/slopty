@@ -22,9 +22,14 @@ use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 const ABOUT_CHARS: usize = 2_000;
 
 impl WorkspaceView {
-    /// Every tile in reading order: workspace by workspace, column by column, top to bottom.
+    /// Every tile in reading order: project by project, tab by tab, pane by pane.
     pub(super) fn reading_order(&self) -> Vec<TileRef> {
         self.layout.tiles().collect()
+    }
+
+    /// Where `tile` stands in reading order ([`Self::reading_order`]).
+    pub(super) fn reading_rank(&self, tile: TileRef) -> Option<usize> {
+        self.layout.tiles().position(|t| t == tile)
     }
 
     /// `worker`'s name for a line about one of its tiles, when more than one worker is known

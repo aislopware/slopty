@@ -1016,7 +1016,7 @@ mod tests {
             tree.iter().find(|n| n.is("ListItem", Some(label))).and_then(|n| n.value.clone())
         };
         assert_eq!(keys("New terminal").as_deref(), Some("⌘T, ⌘N"), "{tree:#?}");
-        assert_eq!(keys("Focus column 3").as_deref(), Some("⌘3"));
+        assert_eq!(keys("Select tab 3").as_deref(), Some("⌘3"));
         assert_eq!(keys("Open URL…").as_deref(), Some(""), "a command with no chord, listed");
         assert_eq!(keys("Copy last output").as_deref(), Some("⇧⌘C"));
         assert!(tree.iter().any(|n| n.is("Heading", Some("Layout"))), "{tree:#?}");

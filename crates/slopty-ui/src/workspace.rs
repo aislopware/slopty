@@ -1,9 +1,9 @@
 //! `WorkspaceView`: every worker's items, tiled.
 //!
 //! One view for every worker this client reaches: each worker's item registry is mirrored
-//! ([`slopty_client::ItemDoc`]) and each item is a tile in this device's layout
-//! ([`slopty_client::layout::Layout`]), a niri-style strip of columns per workspace, workspaces
-//! stacked vertically. The registry is the worker's; the arrangement is this device's alone.
+//! ([`slopty_client::ItemDoc`]) and each item is a tile in this device's tiling
+//! ([`slopty_client::layout::Tiling`]): projects, each with its tabs, each tab its panes tiled
+//! edge to edge. The registry is the worker's; the arrangement is this device's alone.
 //!
 //! * [`actions`] — the actions, the key table and the palette lines.
 //! * `workers` — connecting, losing and forgetting a worker; the sync that follows.
@@ -14,7 +14,9 @@
 //! * `overlays` — the command palette, find in every tile, the window picker.
 //! * `toast` — the one-line notices: undo close, what needs the person off screen.
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
-//! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
+//! * `area` — the tab on show: its panes and their tiles, a header's drag, the start page.
+//! * `panes` — a tab's panes at their rectangles and the sashes between them.
+//! * `title_tabs` — the title bar's tabs of the project on show.
 //! * `tile` — one tile's chrome and body.
 //! * `titlebar` — the bar across the top: where the focused work is, the notices, the bell.
 //! * `navigator` — the workers and their tiles, down the left, and the filter over them.
@@ -35,6 +37,7 @@ mod agent_screens;
 mod agent_start;
 mod agents;
 mod approvals;
+mod area;
 pub mod attention;
 mod authors;
 mod breadcrumb;
@@ -50,8 +53,6 @@ mod handoffs;
 mod kept_items;
 mod machine_remove;
 mod machines;
-mod marks;
-mod miniature;
 mod navigator;
 mod overlays;
 mod panes;
@@ -68,7 +69,6 @@ mod reviews;
 mod rollup;
 mod secure;
 mod starting;
-mod strip;
 mod tile;
 mod title_tabs;
 mod titlebar;
@@ -83,6 +83,8 @@ use std::time::{Duration, Instant};
 
 pub use actions::*;
 pub use agents::{banner_title, program_banner};
+#[cfg(test)]
+pub(crate) use area::{ADD_WORKER, NEW_AGENT, NO_WORKERS, NO_WORKERS_NEXT};
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
@@ -92,7 +94,7 @@ pub use navigator::NAVIGATOR_CTX;
 pub use projects::worker_key;
 pub(crate) use rollup::META_SEPARATOR;
 use slopty_client::ItemDoc;
-use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
+use slopty_client::layout::{Navigator, Saved, TileRef, Tiling, TilingConfig, WorkerKey};
 use slopty_client::relay::RelayWatch;
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
@@ -101,8 +103,6 @@ use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
-#[cfg(test)]
-pub(crate) use strip::{ADD_WORKER, NEW_AGENT, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING, SESSION_ENDED, TAKE,
@@ -115,7 +115,7 @@ pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
 /// badge's description and what "+" is called.
 #[cfg(test)]
 pub(crate) const CHROME_WORDS: [&str; 2] = [agents::SHOW_PROMPT, titlebar::NEW];
-pub use titlebar::{TITLEBAR_H, titlebar_height};
+pub use titlebar::titlebar_height;
 use tokio::sync::mpsc;
 
 use crate::file::FileView;
@@ -164,6 +164,9 @@ enum Region {
     /// not the panel with its filter field.
     NavigatorRows,
     Titlebar,
+    /// The title bar's tabs, inside it: a working mark's step builds this view alone, not
+    /// the bar with its breadcrumb and its readouts.
+    TitleTabs,
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
@@ -195,19 +198,19 @@ impl gpui::Render for ChromeView {
     }
 }
 
-/// The strip as a view of its own, built from the workspace, which it reads and never writes
-/// ([`crate::draw`]). What only moves the strip (a step of the layout's spring, a working mark's
-/// turn, a tile fading in, the pointer over a tile) builds this view alone: the workspace's own
-/// notify is news of a change for the chrome and the titles. What the strip drew is kept for it
-/// in [`strip::Drawn`].
-struct StripHost {
+/// The tab on show as a view of its own, built from the workspace, which it reads and never
+/// writes ([`crate::draw`]). What only changes the panes (a working mark's turn, the pointer
+/// over a tile, a body's own news) builds this view alone: the workspace's own notify is news
+/// of a change for the chrome and the titles. What the area drew is kept for it in
+/// [`area::Drawn`].
+struct AreaHost {
     workspace: WeakEntity<WorkspaceView>,
-    /// How many times it has built: the proof that a frame of motion builds it alone.
+    /// How many times it has built: the proof that a pane's own news builds it alone.
     #[cfg(test)]
     builds: usize,
 }
 
-impl gpui::Render for StripHost {
+impl gpui::Render for AreaHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         #[cfg(test)]
         {
@@ -219,7 +222,7 @@ impl gpui::Render for StripHost {
             projects.hold(false, cx);
         }
         crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
-            workspace.render_strip(host, window, cx)
+            workspace.render_area(host, window, cx)
         })
     }
 }
@@ -229,6 +232,7 @@ struct Chrome {
     navigator: Entity<ChromeView>,
     nav_rows: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
+    title_tabs: Entity<ChromeView>,
 }
 
 impl Chrome {
@@ -248,6 +252,7 @@ impl Chrome {
             navigator: view(Region::Navigator),
             nav_rows: view(Region::NavigatorRows),
             titlebar: view(Region::Titlebar),
+            title_tabs: view(Region::TitleTabs),
         }
     }
 
@@ -259,8 +264,8 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 3] {
-        [&self.navigator, &self.nav_rows, &self.titlebar].map(Entity::entity_id)
+    fn ids(&self) -> [gpui::EntityId; 4] {
+        [&self.navigator, &self.nav_rows, &self.titlebar, &self.title_tabs].map(Entity::entity_id)
     }
 }
 
@@ -607,15 +612,6 @@ enum Field {
     Project,
 }
 
-/// What focus mode holds while it is on.
-#[derive(Clone, Copy)]
-struct FocusHold {
-    /// The tile whose column took the working width.
-    tile: TileRef,
-    /// The docked navigator was shown when it began.
-    navigator: bool,
-}
-
 /// The field open in a tile's header: its name, or a page's address.
 struct Rename {
     tile: TileRef,
@@ -673,7 +669,20 @@ pub struct WorkspaceView {
     base_theme: Theme,
     /// Points ⌘=/⌘- moved the terminal text by.
     font_delta: f32,
-    layout: Layout,
+    /// The projects, their tabs and the panes they tile.
+    layout: Tiling,
+    /// The navigator's width, its grouping and whether it shows, kept with the tiling.
+    navigator: Navigator,
+    /// The sash being dragged.
+    panes: panes::Panes,
+    /// The remote windows' pane sizes when the sash was pressed, to ask them to follow once it
+    /// is let go.
+    sash_before: Vec<(ItemId, (f32, f32))>,
+    /// Where the title bar's tabs are scrolled.
+    title_scroll: gpui::ScrollHandle,
+    /// The title tabs as last drawn: a header's news draws them again only where it changed
+    /// what they say.
+    title_tabs_drawn: std::cell::RefCell<Vec<title_tabs::TitleTab>>,
     /// The layout's clock starts here.
     epoch: Instant,
     /// A tick runs while a worker is out of reach, so its tiles' "Reconnecting for …" keeps
@@ -746,18 +755,22 @@ pub struct WorkspaceView {
     twins: HashMap<ItemId, u32>,
     /// Every item's derived title, as the twins were last worked out from.
     derived: HashMap<ItemId, String>,
+    /// The placed files and folders whose title another placed one of their kind shares, on
+    /// any machine, worked out with the twins: only their place tells them apart in the
+    /// navigator ([`Self::nav_tile_meta`]).
+    alike: HashSet<ItemId>,
     /// Every item's place ([`Self::tile_place`]), worked out with the titles.
     places: HashMap<ItemId, Option<String>>,
     /// A title may have changed since the twins were worked out: the workspace changed (its
     /// own notify), a shell's command started or ended, a window was named. A frame another
     /// tile causes (an echo, a video frame) changes no title, and works nothing out.
     titles_dirty: bool,
-    /// What the strip drew, for the handlers to read ([`strip::Drawn`]).
-    drawn: Rc<strip::Drawn>,
+    /// What the area drew, for the handlers to read ([`area::Drawn`]).
+    drawn: Rc<area::Drawn>,
     /// The navigator and the title bar, each a view of its own.
     chrome: Chrome,
-    /// The strip, a view of its own so its motion is not news.
-    strip_host: Entity<StripHost>,
+    /// The area, a view of its own so a sash drag is not the chrome's news.
+    area_host: Entity<AreaHost>,
     /// How many changes the workspace took and how many times the titles were worked out: the
     /// proof that a frame of motion is neither.
     #[cfg(test)]
@@ -865,10 +878,8 @@ pub struct WorkspaceView {
     toast: Option<toast::Toast>,
     closed: Vec<ClosedTile>,
     closed_seq: u64,
-    /// The pointer or finger in progress over the strip.
-    drag: Option<strip::Drag>,
-    /// A trackpad or touch gesture in progress over the strip.
-    gesture: strip::Gesture,
+    /// A header or a tab pressed, and where it would land once it moves.
+    drag: Option<area::Drag>,
     /// How much narrower than the window the workspace was laid out in the last frame: none,
     /// unless the app gives it less (an iPad's Split View, as the self-test sets it).
     width_inset: f32,
@@ -876,12 +887,9 @@ pub struct WorkspaceView {
     park_pending: bool,
     /// A terminal to focus on the next frame.
     pending_focus: Option<SessionId>,
-    /// The tiles whose work reads wide (a board on show, a review), as the layout was last
-    /// told ([`Self::suit_wide_work`]).
-    wide: HashSet<TileRef>,
-    /// Focus mode, while it is on: the tile given the width, and whether the docked navigator
-    /// was shown before it, to put it back on the way out.
-    focus_mode: Option<FocusHold>,
+    /// A pane is zoomed: whether the docked navigator was shown before, to put it back on the
+    /// way out.
+    zoom_hold: Option<bool>,
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
     /// The server's projects and their boards.
@@ -931,7 +939,7 @@ pub struct WorkspaceView {
     app_active: bool,
     /// Remote tiles shown in windows of their own.
     popouts: popout::PopOuts,
-    /// The window's title as last set: the workspace on show ([`Self::retitle_window`]).
+    /// The window's title as last set: the project on show ([`Self::retitle_window`]).
     window_title: String,
     /// Workers told this client wants their clipboard.
     watching: HashSet<WorkerKey>,
@@ -996,11 +1004,12 @@ impl WorkspaceView {
     /// device), its tiles waiting for their workers.
     pub fn new(theme: Theme, saved: Option<Saved>, cx: &mut Context<Self>) -> Self {
         let layout = match saved.clone() {
-            Some(saved) => Layout::restore(saved, LayoutConfig::default()),
-            None => Layout::new(LayoutConfig::default()),
+            Some(saved) => Tiling::restore(saved.tiling, TilingConfig::default()),
+            None => Tiling::new(TilingConfig::default()),
         };
-        // A terminal's own change (an echo) is not the workspace's, and a frame of motion
-        // notifies the strip's view instead ([`StripHost`]): neither comes here.
+        let navigator = saved.as_ref().map(|s| s.navigator.clone()).unwrap_or_default();
+        // A terminal's own change (an echo) is not the workspace's, and a pane's own news
+        // notifies the area's view instead ([`AreaHost`]): neither comes here.
         cx.observe_self(Self::changed).detach();
         let this = cx.weak_entity();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
@@ -1019,6 +1028,11 @@ impl WorkspaceView {
             font_delta: 0.0,
             theme,
             layout,
+            navigator,
+            panes: panes::Panes::default(),
+            sash_before: Vec::new(),
+            title_scroll: gpui::ScrollHandle::new(),
+            title_tabs_drawn: std::cell::RefCell::default(),
             epoch: Instant::now(),
             away_ticking: false,
             #[cfg(test)]
@@ -1051,13 +1065,14 @@ impl WorkspaceView {
             faces_dirty: true,
             twins: HashMap::new(),
             derived: HashMap::new(),
+            alike: HashSet::new(),
             places: HashMap::new(),
             titles_dirty: true,
             drawn: Rc::default(),
             chrome: Chrome::new(cx),
-            strip_host: {
+            area_host: {
                 let workspace = cx.weak_entity();
-                gpui::AppContext::new(cx, |_| StripHost {
+                gpui::AppContext::new(cx, |_| AreaHost {
                     workspace,
                     #[cfg(test)]
                     builds: 0,
@@ -1121,12 +1136,10 @@ impl WorkspaceView {
             closed: Vec::new(),
             closed_seq: 0,
             drag: None,
-            gesture: strip::Gesture::default(),
             width_inset: 0.0,
             park_pending: false,
             pending_focus: None,
-            wide: HashSet::new(),
-            focus_mode: None,
+            zoom_hold: None,
             faces: faces::Faces::default(),
             projects: projects::ProjectsState {
                 looked: saved
@@ -1186,10 +1199,21 @@ impl WorkspaceView {
 
     // ----- reading ---------------------------------------------------------------------------
 
-    /// The layout (read only; tests and the self-test dump).
+    /// The tiling (read only; tests and the self-test dump).
     #[must_use]
-    pub const fn layout(&self) -> &Layout {
+    pub const fn layout(&self) -> &Tiling {
         &self.layout
+    }
+
+    /// The navigator's width, grouping and whether it shows.
+    #[must_use]
+    pub(super) const fn navigator(&self) -> &Navigator {
+        &self.navigator
+    }
+
+    /// Change the navigator's width, grouping or whether it shows; saved with the tiling.
+    pub(super) fn set_navigator(&mut self, navigator: Navigator) {
+        self.navigator = navigator;
     }
 
     /// The focused tile.
@@ -1331,15 +1355,13 @@ impl WorkspaceView {
 
     /// Whether moves animate. The self-test turns this off so a dump right after an action
     /// sees where things landed, not where they were passing through.
-    pub fn set_animation(&mut self, on: bool) {
+    pub const fn set_animation(&mut self, on: bool) {
         self.animate = on;
-        self.layout.set_animate(on && !self.reduced);
     }
 
     /// GPUI's Reduce Motion flag changed: the springs, and every view, follow it.
     pub fn motion_setting_changed(&mut self, cx: &mut Context<Self>) {
         self.reduced = cx.reduce_motion();
-        self.set_animation(self.animate);
         cx.notify();
     }
 
@@ -1416,11 +1438,6 @@ impl WorkspaceView {
                 req: slopty_proto::terminal::TermRequest::Close,
             });
         }
-    }
-
-    /// The layout's clock, advanced to now.
-    fn tick(&mut self) {
-        self.layout.set_clock(self.now());
     }
 
     /// The time on the layout's clock.
@@ -1558,10 +1575,16 @@ impl WorkspaceView {
             Region::Navigator => self.render_navigator_region(window, cx),
             Region::NavigatorRows => self.render_navigator_rows(window, cx),
             Region::Titlebar => self.render_titlebar(window, cx),
+            Region::TitleTabs => {
+                let tabs = self.title_tabs();
+                let drawn = title_tabs::render(&self.theme, &tabs, &self.title_scroll, cx);
+                *self.title_tabs_drawn.borrow_mut() = tabs;
+                drawn
+            }
         }
     }
 
-    /// The workspace changed (its own notify; never a frame of motion, see [`StripHost`]): the
+    /// The workspace changed (its own notify; never a frame of motion, see [`AreaHost`]): the
     /// chrome may show it and a title may follow it, and who needs the human and which
     /// worker's clipboard is wanted follow it at once, and so do the approvals asked of the
     /// workers. The faces follow in the next frame.
@@ -1660,11 +1683,8 @@ impl WorkspaceView {
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.follow_secure_input(cx);
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
-        let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.strip_host.entity_id());
+        let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.area_host.entity_id());
         // A command that starts or ends is the overview's moment to read the shell's rows again.
-        if self.retake_shell_digest(session, cx) {
-            App::notify(cx, strip);
-        }
         if was.running != now.running {
             self.number_twins();
             App::notify(cx, navigator);
@@ -1698,13 +1718,21 @@ impl WorkspaceView {
         }
     }
 
-    /// `session`'s header changed, news for the strip alone. On a phone the bar is the
-    /// focused tile's header, so a change to that tile's title, kind or state is the bar's
-    /// news too; any other tile's is not.
+    /// `session`'s header changed, news for the area. A title tab is named and marked by the
+    /// tiles of its tab, so a tile of the project on show is the title tabs' news too where it
+    /// changed what they say. On a
+    /// phone the bar is the focused tile's header, so a change to that tile's title, kind or
+    /// state is the bar's news as well; any other tile's is not.
     fn header_news(&self, session: SessionId, cx: &mut App) {
-        App::notify(cx, self.strip_host.entity_id());
-        let focused = self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
-        if self.phone && focused {
+        App::notify(cx, self.area_host.entity_id());
+        let tile = self.tile_of_session(session);
+        let shown = self.layout.shown_index();
+        if tile.and_then(|t| self.layout.position(t)).is_some_and(|p| Some(p.project) == shown)
+            && *self.title_tabs_drawn.borrow() != self.title_tabs()
+        {
+            App::notify(cx, self.chrome.title_tabs.entity_id());
+        }
+        if self.phone && tile.is_some_and(|t| self.focused() == Some(t)) {
             App::notify(cx, self.chrome.titlebar.entity_id());
         }
     }
@@ -1862,12 +1890,12 @@ impl WorkspaceView {
 }
 
 impl WorkspaceView {
-    /// The window is called by the workspace on show, as a document window is by its
+    /// The window is called by the project on show, as a document window is by its
     /// document: the Window menu, Mission Control, cycling the windows by key and the screen
     /// reader tell two windows apart by it, where every one was the app's name. Set only when it
     /// changes.
     fn retitle_window(&mut self, window: &mut Window) {
-        let title = self.workspace_name();
+        let title = self.project_name();
         if title != self.window_title {
             window.set_window_title(&title);
             self.window_title = title;
@@ -1900,13 +1928,14 @@ impl gpui::Render for WorkspaceView {
             self.renders = self.renders.saturating_add(1);
         }
         self.frame_projects.hold(true, cx);
+        // A project's group can change only with the workspace or a fact, which both leave
+        // the titles to work out.
+        if self.titles_dirty && self.rehome_projects() {
+            self.layout_touched(cx);
+        }
         self.retitle_window(window);
         self.phone = self.width(window) < self.layout.config().phone_below;
         self.reduced = cx.reduce_motion();
-        let animate = self.animate && !self.reduced;
-        if self.layout.config().animate != animate {
-            self.layout.set_animate(animate);
-        }
         if std::mem::take(&mut self.items_dirty) {
             self.reconcile_files(window, cx);
             self.reconcile_browsers(cx);
@@ -1921,17 +1950,10 @@ impl gpui::Render for WorkspaceView {
         self.settle_going(cx);
         self.settle_review_writers(cx);
         self.sync_projects(window, cx);
-        self.suit_wide_work();
-        self.keep_focus_mode(cx);
+        self.keep_zoom(cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);
-        // One clock for everything this frame draws: the bar's column marks and the strip,
-        // which the strip's own view builds from the layout as it stands now.
-        if self.advance(window) {
-            Self::motion_frame(cx.weak_entity(), &self.drawn, self.strip_host.entity_id(), window);
-        }
-        let frame = self.layout.frame();
-        self.follow_sized_displays(&frame, window, cx);
+        self.follow_sized_displays(window, cx);
         self.arm_system_keys(window, cx);
         if std::mem::take(&mut self.titles_dirty) {
             self.number_twins();
@@ -1940,14 +1962,14 @@ impl gpui::Render for WorkspaceView {
                 self.counts.1 = self.counts.1.saturating_add(1);
             }
         }
-        // First: a docked navigator narrows the title bar and the strip.
+        // First: a docked navigator narrows the title bar and the area.
         self.place_navigator(window);
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
             self.settle_navigator_filter(window, cx);
         }
         self.serve_browsers(cx);
-        let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
+        let area = gpui::IntoElement::into_any_element(self.area_host.clone());
         let menu = self.render_menu(window, cx);
         // What is leaving is drawn under the menu and what is live over it: a palette fading
         // out where a menu then opens must not take the menu's clicks.
@@ -2071,7 +2093,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_navigator))
             .on_action(cx.listener(Self::toggle_navigator_lens))
             .child(Self::measure_width(cx))
-            .child(self.render_frame(strip, window, cx))
+            .child(self.render_frame(area, window, cx))
             .when_some(picker_leaving, gpui::ParentElement::child)
             .when_some(palette_leaving, gpui::ParentElement::child)
             .children(menu)
@@ -2118,23 +2140,26 @@ impl WorkspaceView {
     }
 
     /// The frame: the navigator the window's full height on the left, docked beside the rest
-    /// or laid over it (or the rail in its place), and the title bar over the strip to its
-    /// right, the strip running to the window's bottom edge. The chrome's regions are their own
+    /// or laid over it (or the rail in its place), and the title bar over the area to its
+    /// right, the area running to the window's bottom edge. The chrome's regions are their own
     /// views, drawn cached at the sizes laid out here.
     fn render_frame(
         &self,
-        strip: gpui::AnyElement,
+        area: gpui::AnyElement,
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         use gpui::{IntoElement as _, ParentElement as _, Styled as _, px};
         let safe = window.insets().effective();
-        let titlebar = self.chrome.titlebar.clone().cached(
-            StyleRefinement::default()
-                .w_full()
-                .flex_none()
-                .h(px(titlebar_height(&self.theme)) + safe.top),
-        );
+        // Not cached, as the docked navigator is not: a retained view is drawn again from last
+        // frame around a nested view notified alone (the title tabs' marks stepping), where a
+        // cached one is built again whole.
+        let titlebar = gpui::div()
+            .w_full()
+            .flex_none()
+            .h(px(titlebar_height(&self.theme)) + safe.top)
+            .flex()
+            .child(self.chrome.titlebar.clone());
         let navigator = self.chrome.navigator.clone();
         let column = |width: Pixels| StyleRefinement::default().flex_none().h_full().w(width);
         let (docked, rail, over, handle) = match self.nav.drawn {
@@ -2153,11 +2178,7 @@ impl WorkspaceView {
             }
             None => (None, None, None, None),
         };
-        // The strip stands half a gutter in from the frame's sides and bottom, and each panel
-        // half a gutter in from its place, so the canvas between every two panels and round
-        // the outer ones is one gutter (`WorkspaceView::panel_rect`). The clip is the frame's,
-        // not the strip's, so a panel sliding off is cut at the window's edge.
-        let half = px(self.panel_inset(1.0));
+        // The panes meet the frame's edges and each other on the one ground.
         let middle =
             gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
                 gpui::div()
@@ -2168,10 +2189,7 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .pl(half)
-                    .pr(half)
-                    .pb(half)
-                    .child(strip),
+                    .child(area),
             );
         gpui::div()
             .relative()

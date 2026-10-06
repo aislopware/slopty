@@ -45,7 +45,7 @@ fn a_right_click_or_a_long_press_opens_a_things_own_menu(cx: &mut TestAppContext
     let row = leak(format!("nav-tile-{}", file.item.as_uuid()));
     let at = right_click(cx, row);
     assert!(tree(cx).iter().any(|n| n.is("Menu", Some("Tile"))), "the tile's menu");
-    assert_eq!(rows(cx), ["Open", "Rename", "Fullscreen", "Copy path", "Close tile"]);
+    assert_eq!(rows(cx), ["Open", "Rename", "Zoom pane", "Copy path", "Close tile"]);
     let menu = bounds(cx, "menu");
     assert!(menu.contains(&(at + point(px(1.0), px(1.0)))), "hung at the press: {menu:?} {at:?}");
     pick(cx, "Copy path");
@@ -77,25 +77,27 @@ fn a_right_click_or_a_long_press_opens_a_things_own_menu(cx: &mut TestAppContext
     assert!(tree(cx).iter().any(|n| n.is("Menu", Some("Tile"))), "a long press opens it too");
 }
 
-/// A tab's menu adds what a tabbed column offers: Move out of the column puts its tile in a
-/// column of its own, and Close other tabs is there beside Close tile.
+/// A tab's menu adds what a pane of tabs offers: Split out to the right puts its tile in a
+/// pane of its own right of the one it left, and Close other tabs is there beside Close tile.
 #[gpui::test]
-fn a_tabs_menu_moves_its_tile_out_of_the_column(cx: &mut TestAppContext) {
+fn a_tabs_menu_splits_its_tile_out_to_the_right(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
-    cx.simulate_keystrokes("cmd-[");
-    cx.simulate_keystrokes("cmd-alt-t");
-    cx.run_until_parked();
-    assert_eq!(column_of(&view, cx, first), column_of(&view, cx, second), "one column");
+    one_pane(&view, cx, &[first, second]);
+    assert_eq!(pos_of(&view, cx, first), pos_of(&view, cx, second), "one pane");
 
     right_click(cx, selector("tab", first.item));
     let shown = rows(cx);
-    for row in ["Rename", "Move out of the column", "Close tile", "Close other tabs"] {
+    for row in ["Rename", "Split out to the right", "Close tile", "Close other tabs"] {
         assert!(shown.iter().any(|r| r == row), "{row}: {shown:?}");
     }
     assert!(!shown.iter().any(|r| r == "Open"), "the tab is open: {shown:?}");
-    pick(cx, "Move out of the column");
-    assert_ne!(column_of(&view, cx, first), column_of(&view, cx, second), "a column of its own");
+    pick(cx, "Split out to the right");
+    let (out, left) = (pos_of(&view, cx, first), pos_of(&view, cx, second));
+    assert_eq!(out.tab, left.tab, "on the same tab");
+    assert_ne!(out.pane, left.pane, "a pane of its own");
+    let at = |tile: TileRef| view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
+    assert!(at(first).left() >= at(second).right() - px(1.0), "to the right");
 }

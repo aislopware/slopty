@@ -53,11 +53,10 @@ fn title_leads(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: T
     focused && tile::title_ink(&theme, focused) == theme.surfaces.text
 }
 
-/// With two tiles in view nothing is drawn over either header: both lie inside their panels'
-/// tops, on the one ground. The focused one's title leads in the primary
-/// tone at the medium weight and the other's steps back a tier to the secondary tone at the
-/// regular weight, and both go with the focus. No line, ring or frame says it: the two panels'
-/// edges are drawn alike.
+/// With two tiles in view nothing is drawn over either header: both lie at their panes' tops,
+/// on the one ground. The focused one's title leads in the primary tone at the medium weight
+/// and the other's steps back a tier to the secondary tone at the regular weight, and both go
+/// with the focus. No line, ring or frame says it: neither pane draws an edge of its own.
 #[gpui::test]
 fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -83,8 +82,8 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContex
         edges_at(cx, bounds)
     };
     let (focused_edges, other_edges) = (edges(cx, second), edges(cx, first));
-    assert!(!focused_edges.is_empty(), "a panel draws its edge");
-    assert_eq!(focused_edges, other_edges, "the focused panel's edge is the other's");
+    assert!(focused_edges.is_empty(), "no ring round the focused pane: {focused_edges:?}");
+    assert!(other_edges.is_empty(), "nor round the other: {other_edges:?}");
     assert_eq!(tile::title_ink(&theme, true), theme.surfaces.text);
     assert_eq!(tile::title_ink(&theme, false), theme.surfaces.text_secondary);
 

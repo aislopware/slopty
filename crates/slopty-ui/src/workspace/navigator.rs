@@ -894,15 +894,6 @@ struct NavAgent {
     answer: Option<Answer>,
 }
 
-/// A workspace as the phone's drawer lists it.
-#[derive(Clone)]
-struct NavSpace {
-    ix: usize,
-    name: String,
-    tiles: usize,
-    active: bool,
-}
-
 /// One row of the navigator's list.
 #[derive(Clone)]
 enum NavRow {
@@ -911,8 +902,6 @@ enum NavRow {
         text: SharedString,
     },
     Agent(NavAgent),
-    /// A workspace, on a phone, whose title bar has no tabs.
-    Space(NavSpace),
     Worker(NavHeader),
     Group(NavGroup),
     Board(NavBoard),
@@ -942,7 +931,6 @@ impl NavRow {
             | Self::Thread(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
-            | Self::Space(_)
             | Self::Vacant(_)
             | Self::Nothing => (false, false),
         };
@@ -960,7 +948,6 @@ impl NavRow {
             Self::Board(b) => Some(Anchor::Board(&b.project)),
             Self::Heading { .. }
             | Self::Agent(_)
-            | Self::Space(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
             | Self::Vacant(_)
@@ -991,8 +978,8 @@ impl WorkspaceView {
         let mode = self.navigator_mode(window);
         match mode {
             Mode::Docked => {
-                let nav = self.layout.navigator();
-                self.layout.set_navigator(Navigator { shown: !nav.shown, ..nav.clone() });
+                let nav = self.navigator().clone();
+                self.set_navigator(Navigator { shown: !nav.shown, ..nav });
                 self.nav.open = false;
                 self.layout_touched(cx);
             }
@@ -1015,9 +1002,9 @@ impl WorkspaceView {
     ) {
         match self.navigator_mode(window) {
             Mode::Docked => {
-                let nav = self.layout.navigator();
+                let nav = self.navigator().clone();
                 if !nav.shown {
-                    self.layout.set_navigator(Navigator { shown: true, ..nav.clone() });
+                    self.set_navigator(Navigator { shown: true, ..nav });
                     self.layout_touched(cx);
                 }
             }
@@ -1092,9 +1079,9 @@ impl WorkspaceView {
     pub(super) fn needs_you_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.navigator_mode(window) {
             Mode::Docked => {
-                let nav = self.layout.navigator();
+                let nav = self.navigator().clone();
                 if !nav.shown {
-                    self.layout.set_navigator(Navigator { shown: true, ..nav.clone() });
+                    self.set_navigator(Navigator { shown: true, ..nav });
                     self.layout_touched(cx);
                 }
             }
@@ -1169,15 +1156,15 @@ impl WorkspaceView {
     }
 
     fn group_navigator(&mut self, group_by: Vec<String>, cx: &mut Context<Self>) {
-        let nav = self.layout.navigator().clone();
-        self.layout.set_navigator(Navigator { group_by, ..nav });
+        let nav = self.navigator().clone();
+        self.set_navigator(Navigator { group_by, ..nav });
         self.layout_touched(cx);
         cx.notify();
     }
 
     /// Whether the navigator lists the workers' own blocks and nothing else.
     fn grouped_by_machine(&self) -> bool {
-        self.layout.navigator().group_by.first().map(String::as_str) == Some(fact::MACHINE)
+        self.navigator().group_by.first().map(String::as_str) == Some(fact::MACHINE)
     }
 
     /// The palette's lines that regroup the navigator: by machine (the keymap's line, which
@@ -1186,7 +1173,7 @@ impl WorkspaceView {
     /// labels.team"), each with the machine after it for the tiles that lack it.
     pub(super) fn group_lines(&self) -> Vec<PaletteItem> {
         let keys = super::actions::key_bindings();
-        let current = &self.layout.navigator().group_by;
+        let current = &self.navigator().group_by;
         let mut lines = vec![if self.grouped_by_machine() {
             PaletteItem::new(BY_PROJECT, Box::new(ToggleNavigatorLens), &keys)
         } else {
@@ -1217,7 +1204,7 @@ impl WorkspaceView {
     /// How the navigator sits in `window`.
     pub(super) fn navigator_mode(&self, window: &Window) -> Mode {
         let window_w = self.width(window);
-        let width = self.layout.navigator().width;
+        let width = self.navigator().width;
         mode(window_w, width, self.layout.config().phone_below, cfg!(target_os = "ios"))
     }
 
@@ -1225,7 +1212,7 @@ impl WorkspaceView {
     pub(super) fn navigator_visible(&self, mode: Mode) -> bool {
         !self.workers.is_empty()
             && match mode {
-                Mode::Docked => self.layout.navigator().shown,
+                Mode::Docked => self.navigator().shown,
                 Mode::Overlay | Mode::Drawer => self.nav.open,
             }
     }
@@ -1246,7 +1233,7 @@ impl WorkspaceView {
     /// The navigator's width, in points.
     #[must_use]
     pub const fn navigator_width(&self) -> f32 {
-        self.layout.navigator().width
+        self.navigator().width
     }
 
     /// The panel's width in `mode`: a phone's drawer leaves a margin of the strip showing.
@@ -1260,19 +1247,15 @@ impl WorkspaceView {
         }
     }
 
-    /// A row was chosen: a bar menu closes, and over the strip the navigator gets out of the
+    /// A row was chosen: a bar menu closes, and over the panes the navigator gets out of the
     /// way of what it chose.
-    fn navigated(&mut self) {
+    const fn navigated(&mut self) {
         self.menu = None;
         self.nav.open = false;
-        if self.layout.overview_open() {
-            self.close_overview();
-        }
     }
 
     /// Fly to `tile` and focus it.
     pub(super) fn go_to_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        self.tick();
         self.navigated();
         self.focus_tile(tile, cx);
     }
@@ -1280,28 +1263,24 @@ impl WorkspaceView {
     /// Go to an agent or a thread waiting on the human, or an agent at work: its tile, or,
     /// with none here, a new one on its worker (the same as ⌘⇧A does for one waiting).
     pub(super) fn go_to_step(&mut self, step: Step, cx: &mut Context<Self>) {
-        self.tick();
         self.navigated();
         self.reveal_step(step, cx);
     }
 
-    /// Switch to workspace `ix`.
-    pub(super) fn go_to_workspace(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.tick();
+    /// Show project `ix`, on the tab it was left on.
+    pub(super) fn go_to_project(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.navigated();
-        self.layout.focus_workspace(ix);
-        self.after_focus_moved(cx);
-        self.layout_touched(cx);
-        cx.notify();
+        let Some(home) = self.layout.projects().get(ix).map(|p| p.home().clone()) else { return };
+        self.layout_action(cx, |l| l.show_project(&home));
     }
 
     /// The handle moved to `x` (window points): the width follows, within its clamps.
     fn resize_navigator_to(&mut self, x: f32, cx: &mut Context<Self>) {
         let Some((grab, from)) = self.nav.resize else { return };
-        let nav = self.layout.navigator();
+        let nav = self.navigator().clone();
         let width = Navigator::clamp_width(from + x - grab);
         if (width - nav.width).abs() > f32::EPSILON {
-            self.layout.set_navigator(Navigator { width, ..nav.clone() });
+            self.set_navigator(Navigator { width, ..nav });
             cx.notify();
         }
     }
@@ -1315,9 +1294,9 @@ impl WorkspaceView {
 
     /// A double-click on the handle: the width it had before it was ever dragged.
     fn reset_navigator_width(&mut self, cx: &mut Context<Self>) {
-        let nav = self.layout.navigator();
+        let nav = self.navigator().clone();
         self.nav.resize = None;
-        self.layout.set_navigator(Navigator { width: Navigator::DEFAULT_WIDTH, ..nav.clone() });
+        self.set_navigator(Navigator { width: Navigator::DEFAULT_WIDTH, ..nav });
         self.layout_touched(cx);
         cx.notify();
     }
@@ -1397,17 +1376,10 @@ impl WorkspaceView {
     }
 
     /// Whether another file or folder in the layout reads as `item` does: the same kind and the
-    /// same name before any twin's number, so only its place tells them apart.
+    /// same name before any twin's number, so only its place tells them apart. Worked out with
+    /// the twins ([`Self::number_twins`]), not once a row: a frame lists every row.
     fn reads_alike(&self, item: &Item) -> bool {
-        let title = self.derived_title(item);
-        let file = matches!(item.kind, ItemKind::File { .. });
-        self.items().any(|(worker, other)| {
-            other.id != item.id
-                && matches!(other.kind, ItemKind::File { .. }) == file
-                && matches!(other.kind, ItemKind::File { .. } | ItemKind::Folder { .. })
-                && self.layout.contains(TileRef { worker, item: other.id })
-                && self.derived_title(other) == title
-        })
+        self.alike.contains(&item.id)
     }
 
     /// What a shell's second line says it is doing (its agent's words, else its command) and
@@ -1518,7 +1490,7 @@ impl WorkspaceView {
         let query = Query::parse(&self.nav.filter.query);
         let now = SystemTime::now();
         let clock = cx.background_executor().now();
-        let chain = self.layout.navigator().group_by.clone();
+        let chain = self.navigator().group_by.clone();
         let regrouped;
         let grouping = if chain == groups::DEFAULT_CHAIN {
             projects
@@ -2388,9 +2360,6 @@ impl WorkspaceView {
             })
         };
         let mut rows = Vec::new();
-        if parsed.is_empty() && scope.is_none() && self.nav.drawn == Some(Mode::Drawer) {
-            rows.extend(self.space_rows());
-        }
         let agents = |list: Vec<Step>, status: Status| -> Vec<NavAgent> {
             list.into_iter()
                 .filter(|at| in_scope(at))
@@ -2485,25 +2454,6 @@ impl WorkspaceView {
         }
     }
 
-    /// *Workspaces*, as a phone's drawer heads its list: each workspace the title bar would tab,
-    /// named, with its tile count. Only while there are two: one workspace is where the person
-    /// already is, and the bar names it. "New workspace" is the bar's "+" menu's.
-    fn space_rows(&self) -> Vec<NavRow> {
-        let active = self.layout.active_workspace();
-        let tabbed = self.tabbed_workspaces();
-        if tabbed.len() < 2 {
-            return Vec::new();
-        }
-        let spaces = tabbed.into_iter().map(|ix| {
-            let (_, tiles) = self.workspace_rollup(ix);
-            let name = self.workspace_name_at(ix);
-            NavRow::Space(NavSpace { ix, name, tiles, active: ix == active })
-        });
-        let heading =
-            NavRow::Heading { selector: "nav-workspaces".into(), text: "Workspaces".into() };
-        std::iter::once(heading).chain(spaces).collect()
-    }
-
     /// Draw the navigator again when the soonest age it shows changes: at its next minute (or
     /// hour).
     fn schedule_navigator_tick(&self, cx: &gpui::App) {
@@ -2556,7 +2506,6 @@ impl WorkspaceView {
                 heading(theme, selector.clone(), text.clone(), ix == 0).into_any_element()
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
-            Some(NavRow::Space(space)) => self.space_row(space, cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Group(group)) => self.group_header(group, cx),
             Some(NavRow::Board(board)) => self.board_row(board, cx),
@@ -2760,7 +2709,6 @@ impl WorkspaceView {
                 rollup,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| {
-                this.tick();
                 this.navigated();
                 this.go_to_group(&key, cx);
             }));
@@ -2779,7 +2727,6 @@ impl WorkspaceView {
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
             let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup).on_click(
                 cx.listener(move |this, _ev, _w, cx| {
-                    this.tick();
                     this.navigated();
                     this.go_to_worker(key, cx);
                 }),
@@ -2975,30 +2922,6 @@ impl WorkspaceView {
                     ))
             })
             .into_any_element()
-    }
-
-    /// A workspace in the phone's drawer: its glyph, its name and how many tiles it holds. The
-    /// active one is said by its name's tone and weight, not a fill: the focused tile's row is
-    /// the list's one selection. A press goes there and closes the drawer.
-    fn space_row(&self, space: &NavSpace, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let ix = space.ix;
-        let count = match space.tiles {
-            1 => "1 tile".to_owned(),
-            n => format!("{n} tiles"),
-        };
-        let label = SharedString::from(format!("{}, {count}", space.name));
-        let ink = if space.active { s.text } else { s.text_secondary };
-        let row = row(theme, kit::Row::One, format!("nav-space-{ix}"), label, false)
-            // No glyph: a workspace is its name, and the empty slot keeps the names' edge.
-            .child(lead_slot(theme, div()))
-            .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
-                el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            }))
-            .child(readout(theme, space.tiles.to_string()))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
-        row.into_any_element()
     }
 
     /// A worker's header: the server icon (crossed out, in the warn fill, while it is away),

@@ -249,6 +249,11 @@ fn zoom_fills_the_tab_and_a_split_undoes_it() {
     assert_eq!(tiling.frame().panes.len(), 5);
     assert!(tiling.toggle_zoom());
     assert!(!tiling.toggle_zoom(), "the second press lets it go");
+    // The focus going to another pane lets it go too, so the tile focused shows.
+    assert!(tiling.toggle_zoom());
+    tiling.focus(t(1));
+    assert_eq!(tiling.shown_tab().unwrap().zoomed(), None, "the focus went elsewhere");
+    assert!(tiling.on_show(t(1)));
 }
 
 /// What a relaunch begins from comes back the same: the projects, their tabs, each tree with
@@ -576,4 +581,48 @@ fn a_close_taken_back_goes_where_it_stood() {
     let mut other = mac();
     other.new_tab(t(1), &home("web"));
     assert!(!other.put_back(t(1), gone), "no such tab here");
+}
+
+/// A project re-homed keeps its tabs, its name and its place in the order, and its arrivals
+/// follow the new home; a home another project holds is not taken.
+#[test]
+fn a_project_rehomed_keeps_its_tabs_and_takes_no_others_home() {
+    let mut tiling = mac();
+    let machine = GroupKey::machine(WorkerKey::new(1));
+    tiling.new_tab(t(1), &machine);
+    tiling.set_name(&machine, Some("Mine".to_owned()));
+    tiling.new_tab(t(2), &home("web"));
+    assert!(tiling.rehome(&machine, home("atlas")));
+    let first = &tiling.projects()[0];
+    assert_eq!(first.home(), &home("atlas"));
+    assert_eq!((first.name(), first.tabs().len()), (Some("Mine"), 1), "its name and its tab");
+    tiling.arrive(t(3), &home("atlas"));
+    assert_eq!(tiling.position(t(3)).unwrap().project, 0, "its arrivals follow");
+    assert!(!tiling.rehome(&home("atlas"), home("web")), "web is another's");
+    assert!(!tiling.rehome(&machine, home("elsewhere")), "no project at the old home");
+}
+
+/// The last tab of the project on show closed hands the window to the tab visited before it,
+/// in its own project, and the emptied project goes; a project not on show emptied goes too,
+/// unless the person named it.
+#[test]
+fn a_project_emptied_hands_the_window_back_and_goes() {
+    let mut tiling = mac();
+    tiling.new_tab(t(1), &home("atlas"));
+    tiling.new_tab(t(2), &home("web"));
+    assert_eq!(tiling.shown_project().unwrap().home(), &home("web"));
+    tiling.remove(t(2));
+    assert_eq!(tiling.shown_project().unwrap().home(), &home("atlas"), "back where it was");
+    assert_eq!(tiling.focused(), Some(t(1)));
+    assert_eq!(tiling.projects().len(), 1, "the emptied project went");
+    tiling.arrive(t(3), &home("docs"));
+    tiling.set_name(&home("docs"), Some("Docs".to_owned()));
+    tiling.arrive(t(4), &home("notes"));
+    tiling.remove(t(4));
+    tiling.remove(t(3));
+    let homes: Vec<&GroupKey> = tiling.projects().iter().map(Project::home).collect();
+    assert_eq!(homes, [&home("atlas"), &home("docs")], "the named one stays");
+    assert_eq!(tiling.shown_project().unwrap().home(), &home("atlas"), "still on show");
+    let _gone = tiling.drop_tab(tiling.shown_tab().unwrap().id());
+    assert!(tiling.shown_tab().is_none(), "nothing left anywhere: empty");
 }

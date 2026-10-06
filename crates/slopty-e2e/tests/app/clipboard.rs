@@ -164,17 +164,19 @@ async fn the_focused_clients_copy_is_on_the_workers_pasteboard() {
     let drv = &mut stack.driver;
     watched(drv).await;
     drv.keys("cmd-shift-n").await.unwrap();
-    drv.wait_for("a note focused, the worker no longer watched", STEP, |d| {
-        d.items.iter().any(|i| i.kind == "file" && i.active)
-            && d.workers.iter().all(|w| !w.clipboard_watched)
-    })
-    .await
-    .unwrap();
+    let noted = drv
+        .wait_for("a note focused, the worker no longer watched", STEP, |d| {
+            d.items.iter().any(|i| i.kind == "file" && i.active)
+                && d.workers.iter().all(|w| !w.clipboard_watched)
+        })
+        .await
+        .unwrap();
+    let shell = noted.item("terminal").expect("the shell").id.clone();
     let (worker, app) = (MacPasteboard::named(&worker_name), MacPasteboard::named(&app_name));
     let text = format!("copied on this client {}", std::process::id());
     app.copy(&[(TEXT, text.as_bytes())]);
 
-    drv.keys("cmd-alt-left").await.unwrap();
+    drv.focus_item(&shell).await.unwrap();
     drv.wait_for("the shell focused and watched again", STEP, |d| {
         d.items.iter().any(|i| i.kind == "terminal" && i.active)
             && d.workers.iter().any(|w| w.clipboard_watched)

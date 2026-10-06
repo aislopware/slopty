@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{AppContext as _, Context, Entity, Window};
-use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_client::layout::WorkerKey;
 use slopty_client::server::ServerCaller;
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
@@ -214,32 +214,6 @@ impl WorkspaceView {
         self.projects.views.get(&board.project.id)
     }
 
-    /// Tell the layout which tiles hold wide work, as it changes: a board on show, a review, a
-    /// folder's changes. Their columns open out to two thirds of the strip, at least 720 pt
-    /// where it has them, and go back when the work leaves; a width the person chose stays
-    /// (`Layout::suit`).
-    pub(super) fn suit_wide_work(&mut self) {
-        let wide: HashSet<TileRef> = self
-            .layout
-            .tiles()
-            .filter(|t| match self.item(*t).map(|i| &i.kind) {
-                Some(ItemKind::Terminal { session }) => self.board_shown(*session),
-                Some(ItemKind::Review { .. } | ItemKind::Changes { .. }) => true,
-                _ => false,
-            })
-            .collect();
-        if wide == self.wide {
-            return;
-        }
-        for tile in wide.difference(&self.wide) {
-            self.layout.suit(*tile, true);
-        }
-        for tile in self.wide.difference(&wide) {
-            self.layout.suit(*tile, false);
-        }
-        self.wide = wide;
-    }
-
     /// Turn `session`'s tile to its project's board, or back to its terminal.
     pub fn show_board(&mut self, session: SessionId, board: bool, cx: &mut Context<Self>) {
         let Some(project) =
@@ -327,38 +301,9 @@ impl WorkspaceView {
             self.show_notice(why, cx);
             return;
         }
-        let board_tile =
-            board.project.orchestrator.and_then(|term| self.tile_of_session(term.session));
         // A task agent that is itself an orchestrator's session opens on its terminal.
         self.projects.shown.remove(&session);
-        if let (Some(from), Some(to)) = (board_tile, self.tile_of_session(session)) {
-            self.keep_beside(from, to);
-        }
         self.reveal_session(session, cx);
-    }
-
-    /// `to` is about to be focused from `from` and should show beside it: when `from`'s column
-    /// fills the view, it gives up its full width first, as a column does for a tile opened
-    /// beside it. Following the focus would otherwise leave the board cut off at the window's
-    /// edge, a sliver with no gutter.
-    fn keep_beside(&mut self, from: TileRef, to: TileRef) {
-        let (Some(a), Some(b)) = (self.layout.position(from), self.layout.position(to)) else {
-            return;
-        };
-        if a.workspace != b.workspace || a.column == b.column {
-            return;
-        }
-        let full = self
-            .layout
-            .workspaces()
-            .get(a.workspace)
-            .and_then(|ws| ws.columns().get(a.column))
-            .is_some_and(slopty_client::layout::Column::is_full_width);
-        if full {
-            self.tick();
-            self.layout.focus(from);
-            self.layout.toggle_full_width();
-        }
     }
 
     /// What an agent's terminal is to a project, as it is named: "Orchestrator" for the one the

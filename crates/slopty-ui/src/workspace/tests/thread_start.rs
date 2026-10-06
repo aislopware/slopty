@@ -947,13 +947,14 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     assert_ne!(names[0], names[1], "of its own");
     assert!(sent.iter().all(|s| s.prompt.as_deref() == Some("try the other layout")));
     assert!(sent.iter().all(|s| s.cwd == "/w/atlas"));
-    let (focused, columns) = view.read_with(cx, |v, _| {
-        let pos = |t| v.layout.position(t).map(|p| p.column);
-        (v.focused(), (pos(first), v.layout.tiles().filter_map(pos).max()))
+    let (focused, panes) = view.read_with(cx, |v, _| {
+        let tab = v.layout.shown_tab().expect("a tab on show");
+        let first_pane = tab.pane_of(first);
+        let others = tab.tiles().filter(|t| *t != first && tab.pane_of(*t) != first_pane).count();
+        (v.focused(), others)
     });
     assert_eq!(focused, Some(first), "the keyboard stays with the first");
-    let (Some(at), Some(last)) = columns else { panic!("placed: {columns:?}") };
-    assert_eq!(last, at.saturating_add(1), "the other run in the column right of it");
+    assert_eq!(panes, 1, "the other run in a pane of its own beside it");
 }
 
 /// A new worktree's setup on its start tile: while it runs, where it came from and its newest

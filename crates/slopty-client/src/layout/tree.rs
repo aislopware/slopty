@@ -652,6 +652,10 @@ impl Tab {
         if pane.hidden {
             pane.hidden = false;
         }
+        // Another pane taking the focus lets a zoom go, or the focused tile would not show.
+        if self.zoomed.is_some_and(|z| z != id) {
+            self.zoomed = None;
+        }
         self.focus = id;
         true
     }

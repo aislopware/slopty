@@ -1899,3 +1899,42 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Before it lands, a sash drag beside five flooding shells is measured against today's
     divider drag, with a budget of no frame over 8.3 ms. The ten-step migration is in the study,
     §4.2.
+
+- ✅ **The panes are drawn and the strip is gone** (2026-10-07, step 3 of the study's §4.2).
+  The workspace draws the tab on show as its panes, each at its rectangle in the tree's frame,
+  with the sashes over their edges. The title bar draws the shown project's tabs. The strip, its
+  column marks, the overview and its miniatures, the swipe tracker and the springs are deleted,
+  with their tests. The keys for columns and workspaces went with them (step 4's deletions). What
+  the drawing taught:
+  - **A project takes the group its tiles turn out to share.** A project made at a machine's
+    home, before its shells said which repository they are in, moves to that repository's group
+    once every tile in it shares one. What arrives of the repository then joins it. A project
+    holding a machine's own work beside a shell keeps its home
+    (`Tiling::rehome`, `WorkspaceView::rehome_projects`).
+  - **An emptied project gives the window back and goes.** When a project's last tab closes,
+    the window shows the tab visited before it, else the first project with tabs. An emptied
+    project with no name of its own is removed; a named one stays for its next tab.
+  - **A zoom ends when another pane takes the focus**, by click, key or navigator row, so the
+    focus never lands on a pane the zoom hides.
+  - **The title bar's tabs are a view of their own.** A working spinner on a tab redraws that
+    view alone. The title bar is no longer cached: a cached view is rebuilt whole when any view
+    inside it is, so a cached title bar rebuilt itself on every spinner step.
+  - **The focus is read after the panes are built.** Each body decides whether it can replay
+    from the focus it was last drawn with. Setting the new focus before the bodies were built
+    replayed the two tiles the focus had moved between, and their headers showed the old focus.
+  - **A sash drag builds each shell at most twice a step.** A changed row count is drawn in the
+    frame after the one that measured it (`TerminalView::fitted`), so a shell the drag resizes
+    is built once for the new width and once for its rows. The retained oracle checks the panes
+    drawn after each step of a drag against the same state drawn from scratch.
+  - **At the e2e window (900 × 600) there is no room beside a tile**, so what opens from it is a
+    tab of its pane. The live tests read a tile's place from the dump as its project, its tab
+    and its pane in reading order, and the overview's field is gone. The step-9 dump (a pane's
+    path in the tree and a tile's index in its pane) replaces this interim one.
+  - Tests: `layout::tiling::tests::a_project_rehomed_keeps_its_tabs_and_takes_no_others_home`,
+    `a_project_emptied_hands_the_window_back_and_goes`, the zoom test in the same file,
+    `workspace::tests::retained::a_sash_drag_is_drawn_as_from_scratch_and_builds_each_shell_once`,
+    `the_pane_keys_are_drawn_as_from_scratch`,
+    `chrome::a_sash_drag_is_no_news_for_the_chrome`,
+    `bodies::a_double_click_on_a_sash_makes_its_panes_equal`,
+    `tiles::a_pane_of_tabs_draws_a_tab_per_tile`, and `rooms::nothing_escapes_its_tile_at_any_room`
+    at every pane width. The cost of a sash drag is in `MEASUREMENTS.md` (2026-10-07).

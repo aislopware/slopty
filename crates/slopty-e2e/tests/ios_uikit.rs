@@ -6,7 +6,7 @@
 //! metal view runs the same code its `pressesBegan:` / `touchesBegan:` / pinch target /
 //! `insertText:` / `deleteBackward` run once they have read their UIKit objects, so a lost
 //! modifier, a wrongly mapped touch phase or a key the text system should have typed shows up
-//! here and nowhere else. Every assertion reads the dump (rows, focus, overview, bounds, a11y);
+//! here and nowhere else. Every assertion reads the dump (rows, focus, bounds, a11y);
 //! no golden is involved.
 
 #[cfg(test)]
@@ -31,16 +31,9 @@ mod tests {
         Simulator { udid, bundle_id }
     }
 
-    /// The canvas between two panels on an iPad, in points: the theme's `spacing.gutter()`.
-    const GUTTER: f32 = 8.0;
-    /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`).
+    /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`),
+    /// which shows one pane at a time.
     const PHONE_BELOW: f32 = 700.0;
-
-    /// How far apart two neighbouring columns are drawn in a window `width` points wide: a
-    /// gutter on an iPad, none on a phone, whose panels are full-bleed.
-    fn gutter(width: f32) -> f32 {
-        if width >= PHONE_BELOW { GUTTER } else { 0.0 }
-    }
 
     /// The app connected to its worker and its first shell at a prompt.
     async fn shell(stack: &mut Stack) -> Dump {
@@ -203,94 +196,71 @@ mod tests {
     }
 
     /// Fingers through `touchesBegan:` / `touchesMoved:` / `touchesEnded:` and the pinch
-    /// recognizer's target. With two shells in two columns (⌘N): a horizontal two-finger swipe
-    /// drags the strip with the fingers and snaps to the column it lands on, which takes the
-    /// focus; taps reach the titlebar's "…" menu and a tile in the overview; a pinch in opens
-    /// the overview and a pinch out closes it.
+    /// recognizer's target. With two shells (⌘N): on an iPad they stand in two panes and a tap
+    /// on the first gives it the keyboard; a horizontal two-finger swipe and a pinch over a
+    /// shell move no pane; taps reach the titlebar's "…" menu and its "Command palette" row.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e ios"]
-    async fn fingers_on_the_simulator_swipe_tap_and_pinch() {
+    async fn fingers_on_the_simulator_tap_swipe_and_pinch() {
         let simulator = simulator();
         let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
         let dump = shell(&mut stack).await;
         let first = dump.item("terminal").unwrap().clone();
         let drv = &mut stack.driver;
         drv.keys("cmd-n").await.unwrap();
+        let item_by = |d: &Dump, id: &str| d.items.iter().find(|i| i.id == id).unwrap().clone();
         let two = drv
-            // At rest: the columns' panels a gutter apart (a phone's meet). An iPad's lone column
-            // sits centred and slides left as the second opens beside it, and a dump
-            // taken in that slide is no starting point.
-            .wait_for("a second shell, focused, beside the first", STEP, |d| {
-                let first_right =
-                    d.items.iter().find(|i| i.id == first.id).map(|i| i.bounds[0] + i.bounds[2]);
-                let gap = gutter(d.window.width);
-                d.items.len() == 2
-                    && d.items.iter().any(|i| {
-                        i.id != first.id
-                            && i.active
-                            && first_right
-                                .is_some_and(|right| (i.bounds[0] - right - gap).abs() < 1.0)
-                    })
+            .wait_for("a second shell, focused", STEP, |d| {
+                d.items.len() == 2 && d.items.iter().any(|i| i.id != first.id && i.active)
             })
             .await
             .unwrap();
-        let item_by = |d: &Dump, id: &str| d.items.iter().find(|i| i.id == id).unwrap().clone();
         let second = two.items.iter().find(|i| i.id != first.id).unwrap().clone();
-        assert_eq!(second.pos[1], item_by(&two, &first.id).pos[1] + 1, "{two:#?}");
-        let [x0, y0, ..] = item_by(&two, &first.id).bounds;
-
-        // A swipe to the right drags the first column back into view: the content follows
-        // the fingers, and the snap focuses the column it lands on.
-        let vw = two.window.width;
-        swipe(drv, &two, vw * 0.6).await;
-        let back = drv
-            .wait_for("the swipe to focus the first column", STEP, |d| {
+        let (vw, vh) = (two.window.width, two.window.height);
+        let tablet = vw >= PHONE_BELOW;
+        if tablet {
+            // Two panes side by side, the second right of the first.
+            let first_now = item_by(&two, &first.id);
+            assert!(
+                second.bounds[0] >= first_now.bounds[0] + first_now.bounds[2] - 1.0,
+                "{two:#?}"
+            );
+            let (tx, ty) = first_now.center();
+            drv.ui_tap(tx, ty).await.unwrap();
+            drv.wait_for("the tap to focus the first shell", STEP, |d| {
                 item_by(d, &first.id).active
                     && d.focused == format!("terminal:{}", first.session.as_deref().unwrap_or(""))
             })
             .await
             .unwrap();
-        let [x1, y1, w1, _] = item_by(&back, &first.id).bounds;
-        assert!(
-            x1 >= x0 && x1 >= 0.0 && x1 + w1 <= vw + 1.0,
-            "in view: {x0} → {x1}\nbefore: {:#?}\nafter: {:#?}",
-            two.items,
-            back.items
-        );
-        assert!((y1 - y0).abs() < 2.0, "locked to the swipe's axis: {y0} → {y1}");
-        assert!(!back.overview, "a swipe is not a pinch");
+        }
+        let before = drv.dump().await.unwrap();
+        let active = before.items.iter().find(|i| i.active).unwrap().id.clone();
+        let places =
+            |d: &Dump| d.items.iter().map(|i| (i.id.clone(), i.bounds)).collect::<Vec<_>>();
 
-        // And to the left, the second column again.
-        swipe(drv, &back, -vw * 0.6).await;
-        drv.wait_for("the swipe to focus the second column", STEP, |d| {
-            item_by(d, &second.id).active
+        // A swipe either way and a pinch each way over a shell: no pane moves and the focus
+        // stays where it was.
+        swipe(drv, &before, vw * 0.4).await;
+        swipe(drv, &before, -vw * 0.4).await;
+        let (cx, cy) = (vw / 2.0, vh / 2.0);
+        drv.ui_pinch(cx, cy, 0.6, 4).await.unwrap();
+        drv.ui_pinch(cx, cy, 1.6, 4).await.unwrap();
+        let after = drv.dump().await.unwrap();
+        assert_eq!(places(&after), places(&before), "a pane moved");
+        assert!(item_by(&after, &active).active, "the focus kept: {after:#?}");
+
+        // A tap on "…", a tap on its "Command palette": the palette is up.
+        tap(drv, "Button", "More").await;
+        drv.wait_for("the … menu", STEP, |d| {
+            d.a11y_node("MenuItem", Some("Command palette")).is_some()
         })
         .await
         .unwrap();
-
-        // A tap on "…", a tap on its "Overview": every workspace at a glance. A tap on the
-        // first shell there focuses it and closes the overview.
-        tap(drv, "Button", "More").await;
-        drv.wait_for("the … menu", STEP, |d| d.a11y_node("MenuItem", Some("Overview")).is_some())
+        tap(drv, "MenuItem", "Command palette").await;
+        drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
             .await
             .unwrap();
-        tap(drv, "MenuItem", "Overview").await;
-        let over = drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
-        let (tx, ty) = item_by(&over, &first.id).center();
-        drv.ui_tap(tx, ty).await.unwrap();
-        drv.wait_for("the tap to focus the first shell", STEP, |d| {
-            !d.overview && item_by(d, &first.id).active
-        })
-        .await
-        .unwrap();
-
-        // A pinch in opens the overview, a pinch out closes it.
-        let (cx, cy) = (vw / 2.0, two.window.height / 2.0);
-        drv.ui_pinch(cx, cy, 0.6, 4).await.unwrap();
-        drv.wait_for("a pinch in to open the overview", STEP, |d| d.overview).await.unwrap();
-        drv.ui_pinch(cx, cy, 1.6, 4).await.unwrap();
-        let closed = drv.wait_for("a pinch out to close it", STEP, |d| !d.overview).await.unwrap();
-        assert!(item_by(&closed, &first.id).active, "the focus kept: {closed:#?}");
         stack.shutdown().await;
     }
 

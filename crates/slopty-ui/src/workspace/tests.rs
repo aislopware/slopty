@@ -192,6 +192,13 @@ fn a_shell_left_for_a_file_is_drawn_without_the_keyboard(cx: &mut TestAppContext
     let session = SessionId::new();
     let shell = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w"));
     let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.txt".to_owned() }, 2);
+    // Both on show: the file in a pane right of the shell's.
+    let pane = pos_of(&view, cx, shell).pane;
+    view.update(cx, |v, cx| {
+        let right = Some(slopty_client::layout::Side::Right);
+        assert!(v.layout.place(file, slopty_client::layout::Drop { pane, edge: right }));
+        cx.notify();
+    });
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
     assert!(terminal_focused(&view, cx, session));
@@ -364,24 +371,94 @@ fn terminal_focused(
     })
 }
 
-/// "+" in the title bar, then its "New workspace" row.
-fn new_workspace_from_the_bar(cx: &mut VisualTestContext) {
-    for selector in ["new-menu", "menu-New workspace"] {
-        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"));
-        cx.simulate_click(at.center(), Modifiers::default());
-        cx.run_until_parked();
-    }
-}
-
 fn focused(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<TileRef> {
     view.read_with(cx, |v, _| v.focused())
 }
 
-fn column_of(view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef) -> usize {
-    view.read_with(cx, |v, _| v.layout().position(tile).map(|p| p.column)).expect("placed")
+/// Where `tile` is: its project, its tab and its pane.
+fn pos_of(
+    view: &Entity<WorkspaceView>,
+    cx: &VisualTestContext,
+    tile: TileRef,
+) -> slopty_client::layout::Pos {
+    view.read_with(cx, |v, _| v.layout().position(tile)).expect("placed")
 }
 
-/// Three shells this client opened, one after the other: three columns, the last focused.
+/// `tiles` made the tabs of one pane, the first's, in their order.
+fn one_pane(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tiles: &[TileRef]) {
+    let Some((first, rest)) = tiles.split_first() else { return };
+    let pane = pos_of(view, cx, *first).pane;
+    view.update(cx, |v, cx| {
+        for tile in rest {
+            assert!(v.layout.place(*tile, slopty_client::layout::Drop { pane, edge: None }));
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+/// `tile`'s pane dragged to `width` by the tab's first upright sash, from whichever side of it
+/// the pane stands, the room let down to a pane of 200 pt, and drawn again so a tab row's
+/// scroll asked for lands.
+fn pane_at(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef, width: f32) {
+    for _ in 0..4 {
+        let got =
+            view.read_with(cx, |v, _| v.tile_bounds(tile)).map_or(0.0, |b| f32::from(b.size.width));
+        if (got - width).abs() < 0.5 {
+            break;
+        }
+        view.update_in(cx, |v, _w, cx| {
+            v.layout.set_room(slopty_client::layout::Room { min_w: 200.0, min_h: 200.0 });
+            let frame = v.layout.frame();
+            let pane = v.layout.position(tile).expect("placed").pane;
+            let x = frame.panes.iter().find(|l| l.pane == pane).map_or(0.0, |l| l.rect.x);
+            let upright = |s: &&slopty_client::layout::tree::Sash| {
+                matches!(s.axis, slopty_client::layout::tree::SplitAxis::Row)
+            };
+            let sash = frame.sashes.iter().find(upright).cloned().expect("a sash beside it");
+            let delta = if x < sash.line.x { width - got } else { got - width };
+            v.layout.drag_sash(&sash, delta);
+            v.focus_tile(tile, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// `tile` moved into a pane of its own on `side` of `of`'s pane, on `of`'s tab: an arrival,
+/// which comes in a background tab, brought beside what the test looks at with it.
+fn beside(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    tile: TileRef,
+    of: TileRef,
+    side: slopty_client::layout::Side,
+) {
+    let pane = pos_of(view, cx, of).pane;
+    view.update(cx, |v, cx| {
+        let drop = slopty_client::layout::Drop { pane, edge: Some(side) };
+        v.layout_action(cx, |l| assert!(l.place(tile, drop), "placed beside"));
+    });
+    cx.run_until_parked();
+}
+
+/// `tile` moved to a new tab of the project on show, and that tab shown.
+fn on_new_tab(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) {
+    view.update(cx, |v, cx| {
+        let home = v.layout.shown_project().map(|p| p.home().clone()).expect("a project");
+        v.layout_action(cx, |l| {
+            l.remove(tile);
+            l.new_tab(tile, &home);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// Three shells this client opened, one after the other, each beside the last by the room
+/// rule: on the test's window the first above, the other two tabs of the pane below, the last
+/// focused.
 fn three_shells(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
@@ -581,11 +658,9 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(tile), "the start's tile closed: back to the shell");
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    assert_eq!(
-        column_of(&view, cx, second),
-        column_of(&view, cx, tile).saturating_add(1),
-        "right of it"
-    );
+    let (beside, shell) = (pos_of(&view, cx, second), pos_of(&view, cx, tile));
+    assert_eq!(beside.tab, shell.tab, "beside it, in its tab");
+    assert_ne!(beside.pane, shell.pane, "a pane of its own");
     assert_eq!(focused(&view, cx), Some(second));
 }
 
@@ -628,10 +703,10 @@ fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
     );
 }
 
-/// What another client opens lands at the end of the strip that holds that worker's tiles,
-/// and the focus stays where the human is.
+/// What another client opens is a background tab at the end of its project, and the focus
+/// stays where the human is.
 #[gpui::test]
-fn an_item_from_elsewhere_joins_the_end_without_taking_the_focus(cx: &mut TestAppContext) {
+fn an_item_from_elsewhere_is_a_background_tab(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
@@ -639,12 +714,18 @@ fn an_item_from_elsewhere_joins_the_end_without_taking_the_focus(cx: &mut TestAp
     cx.run_until_parked();
     let theirs = opens(&view, cx, &fake, SessionId::new(), ClientId::new(), 4);
     assert_eq!(focused(&view, cx), Some(first), "the focus stayed");
-    assert_eq!(column_of(&view, cx, theirs), 3, "at the end");
-    assert_eq!(column_of(&view, cx, second), 1);
+    let (at, mine) = (pos_of(&view, cx, theirs), pos_of(&view, cx, second));
+    assert_eq!(at.project, mine.project, "in the project of the worker's other work");
+    assert_ne!(at.tab, mine.tab, "a tab of its own");
+    let last = view.read_with(cx, |v, _| {
+        v.layout().projects()[at.project].tabs().last().map(slopty_client::layout::Tab::id)
+    });
+    assert_eq!(last, Some(at.tab), "at the end");
+    assert!(cx.debug_bounds(selector("item", theirs.item)).is_none(), "behind, not drawn");
 }
 
-/// Tiles of two workers share one layout: a second worker's first tile gets a workspace of
-/// its own (the first one is not empty), and a tile knows which worker it is.
+/// Tiles of two workers share one tiling: a second worker's first tile from elsewhere goes to
+/// its machine's project, and a tile knows which worker it is.
 #[gpui::test]
 fn two_workers_share_one_layout(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -654,7 +735,7 @@ fn two_workers_share_one_layout(cx: &mut TestAppContext) {
     let b = opens(&view, cx, &laptop, SessionId::new(), ClientId::new(), 1);
     view.read_with(cx, |v, _| {
         let (pa, pb) = (v.layout().position(a).unwrap(), v.layout().position(b).unwrap());
-        assert_ne!(pa.workspace, pb.workspace, "a new workspace for the laptop's first tile");
+        assert_ne!(pa.project, pb.project, "the laptop's first tile is its machine's project");
         assert_eq!(v.len(), 2);
         assert_eq!(b.worker, laptop.key);
     });
@@ -663,7 +744,7 @@ fn two_workers_share_one_layout(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(c));
     let (pa, pc) = view
         .read_with(cx, |v, _| (v.layout().position(a).unwrap(), v.layout().position(c).unwrap()));
-    assert_eq!(pa.workspace, pc.workspace, "local opens go where the human is");
+    assert_eq!(pa.project, pc.project, "local opens go where the human is");
 }
 
 /// A worker that drops keeps its tiles, which say it is away; the navigator says so on its
@@ -716,79 +797,44 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
 
 // ----- the keyboard ------------------------------------------------------------------------
 
-/// The niri keys move the focus and the columns: ⌘⌥←/→ step, ⌘1 jumps, ⌘⌥⇧← carries the
-/// column, ⌘] tucks a tile into the column on its right, and the keyboard follows the focus
-/// into each terminal.
+/// The pane keys move the focus and the tiles: ⌘⌥↑/↓ step between the panes, ⌘⌥[ through
+/// a pane's tabs, ⌘⌥⇧↑ carries the tile into the pane above, and the keyboard follows the
+/// focus into each terminal. ⇧⌘↩ zooms the pane over the tab, and again lets it go.
 #[gpui::test]
-fn the_layout_keys_move_the_focus_and_the_columns(cx: &mut TestAppContext) {
+fn the_pane_keys_move_the_focus_and_the_tiles(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(s1, first), (s2, second), (_s3, third)] = three_shells(&view, cx, &fake);
     assert_eq!(focused(&view, cx), Some(third));
+    assert_eq!(pos_of(&view, cx, second).pane, pos_of(&view, cx, third).pane, "tabs of one pane");
 
-    cx.simulate_keystrokes("cmd-alt-left");
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(second));
-    assert!(terminal_focused(&view, cx, s2), "the keyboard followed");
-
-    cx.simulate_keystrokes("cmd-1");
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(first));
-    assert!(terminal_focused(&view, cx, s1));
-
-    cx.simulate_keystrokes("cmd-alt-shift-right");
-    cx.run_until_parked();
-    assert_eq!(column_of(&view, cx, first), 1, "carried right");
-    assert_eq!(column_of(&view, cx, second), 0);
-    assert_eq!(focused(&view, cx), Some(first), "and still focused");
-
-    cx.simulate_keystrokes("cmd-]");
-    cx.run_until_parked();
-    let (pf, pt) = view.read_with(cx, |v, _| {
-        (v.layout().position(first).unwrap(), v.layout().position(third).unwrap())
-    });
-    assert_eq!(pf.column, pt.column, "consumed into the column on the right");
     cx.simulate_keystrokes("cmd-alt-up");
     cx.run_until_parked();
-    assert_ne!(focused(&view, cx), Some(first), "⌘⌥↑ walks the column");
-}
+    assert_eq!(focused(&view, cx), Some(first));
+    assert!(terminal_focused(&view, cx, s1), "the keyboard followed");
 
-/// A lone column fills the strip, its panel a gutter short of it, half a gutter each side.
-/// Beside another, ⌘R cycles it through the preset widths;
-/// the terminal's grid follows the width it comes to rest at. ⌘⇧↩ fills the view, and again
-/// restores.
-#[gpui::test]
-fn the_width_keys_resize_the_column_and_its_grid(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let session = SessionId::new();
-    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    cx.simulate_keystrokes("cmd-alt-down cmd-alt-[");
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(second), "the pane's tab before");
+    assert!(terminal_focused(&view, cx, s2));
+
+    cx.simulate_keystrokes("cmd-alt-shift-up");
+    cx.run_until_parked();
+    assert_eq!(pos_of(&view, cx, second).pane, pos_of(&view, cx, first).pane, "carried up");
+    assert_eq!(focused(&view, cx), Some(second), "and still focused");
+
     let width = |cx: &mut VisualTestContext| {
-        cx.debug_bounds(selector("item", tile.item)).map(|b| f32::from(b.size.width)).unwrap()
+        cx.debug_bounds(selector("item", second.item)).map(|b| f32::from(b.size.width))
     };
-    let cols = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).size().cols)
-    };
-    let strip = f32::from(cx.debug_bounds("strip").unwrap().size.width);
-    let gutter = Theme::default().spacing.gutter();
-    assert!((width(cx) + gutter - strip).abs() < 2.0, "alone, edge to edge: {}", width(cx));
-    let _beside = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
-    cx.run_until_parked();
-    let half = width(cx);
-    assert!((half + gutter - strip / 2.0).abs() < 2.0, "half the strip, edge to edge: {half}");
-    let half_cols = cols(cx);
-    cx.simulate_keystrokes("cmd-r");
-    cx.run_until_parked();
-    let wider = width(cx);
-    assert!(wider > half + 100.0, "⌘R: two thirds, {half} → {wider}");
-    assert!(cols(cx) > half_cols, "the grid grew with it");
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    assert!(width(cx) > strip - 40.0, "maximized: {}", width(cx));
+    let area = f32::from(cx.debug_bounds("area").expect("the area").size.width);
+    let zoomed = view.read_with(cx, |v, _| v.layout().frame().panes.len());
+    assert_eq!(zoomed, 1, "zoomed: one pane over the tab");
+    assert!(width(cx).is_some_and(|w| (w - area).abs() < 2.0), "the whole width");
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    assert!((width(cx) - wider).abs() < 2.0, "and back");
+    assert_eq!(view.read_with(cx, |v, _| v.layout().frame().panes.len()), 2, "and back");
 }
 
 /// ⌘-/⌘= change the terminal text size (not a zoom): the theme's mono size moves, within its
@@ -814,59 +860,8 @@ fn cmd_plus_and_minus_change_the_terminal_text(cx: &mut TestAppContext) {
 
 // ----- the trackpad and the wheel ----------------------------------------------------------
 
-/// A horizontal two-finger swipe drags the strip and snaps to a column when it ends: the
-/// focus lands on the column in view. The momentum macOS sends after the lift is swallowed,
-/// and never reaches the terminal under it.
-#[gpui::test]
-fn a_sideways_swipe_pages_the_strip_and_its_momentum_is_swallowed(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let [_, _, (s3, third)] = three_shells(&view, cx, &fake);
-    assert_eq!(focused(&view, cx), Some(third));
-    let at = cx.debug_bounds(selector("item", third.item)).unwrap().center();
-    // Fingers moving right: the content follows them right, towards the first column.
-    swipe(cx, at, (60.0, 0.0), 20, 10);
-    let now = focused(&view, cx).unwrap();
-    assert_ne!(now, third, "the strip moved off the last column");
-    let offset =
-        view.read_with(cx, |v, cx| v.terminal(s3).map(|t| t.read(cx).state().view_offset()));
-    assert_eq!(offset, Some(0), "the terminal under the swipe did not scroll");
-}
-
-/// Only momentum is swallowed after a strip swipe: a mouse that scrolls in pixels and reports
-/// no phases, right after one, scrolls the terminal under it.
-#[gpui::test]
-fn a_mouse_scroll_after_a_strip_swipe_reaches_the_terminal(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let session = SessionId::new();
-    let tile = opens(&view, cx, &fake, session, fake.me, 1);
-    view.update_in(cx, |v, _w, cx| {
-        let TermEvent::Frame(mut f) = frame(&["$ echo hi", "hi", ""]) else { return };
-        f.first_visible_line = LineIndex(50);
-        f.total_lines = 53;
-        v.term_event(session, TermEvent::Frame(f), cx);
-    });
-    cx.run_until_parked();
-    let at = cx.debug_bounds(selector("item", tile.item)).unwrap().center();
-    swipe(cx, at, (60.0, 0.0), 8, 0);
-    for _ in 0..4 {
-        cx.simulate_event(ScrollWheelEvent {
-            position: at,
-            delta: ScrollDelta::Pixels(point(px(0.0), px(30.0))),
-            modifiers: Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-            momentum_phase: None,
-        });
-    }
-    cx.run_until_parked();
-    let offset =
-        view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).state().view_offset());
-    assert!(offset > 0, "the mouse scrolled the shell's history");
-}
-
 /// A vertical swipe over a terminal is the terminal's: it scrolls into its history and the
-/// strip holds still.
+/// pane holds still.
 #[gpui::test]
 fn a_vertical_swipe_over_a_terminal_scrolls_its_history(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -886,37 +881,20 @@ fn a_vertical_swipe_over_a_terminal_scrolls_its_history(cx: &mut TestAppContext)
     let offset =
         view.read_with(cx, |v, cx| v.terminal(session).unwrap().read(cx).state().view_offset());
     assert!(offset > 0, "the shell scrolled into its history");
-    assert_eq!(after.origin, before.origin, "the strip stayed");
+    assert_eq!(after.origin, before.origin, "the pane stayed");
 }
 
-/// ⌘⌥ and the wheel step through the columns, one per notch.
+/// Dragging a tile's header onto the middle of another pane makes it one of that pane's tabs.
 #[gpui::test]
-fn cmd_alt_wheel_steps_the_columns(cx: &mut TestAppContext) {
+fn a_header_dragged_onto_a_pane_joins_its_tabs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    let [_, (_, second), (_, third)] = three_shells(&view, cx, &fake);
-    let at = cx.debug_bounds(selector("item", third.item)).unwrap().center();
-    cx.simulate_event(ScrollWheelEvent {
-        position: at,
-        delta: ScrollDelta::Lines(point(1.0, 0.0)),
-        modifiers: Modifiers { platform: true, alt: true, ..Modifiers::default() },
-        touch_phase: TouchPhase::Moved,
-        momentum_phase: None,
-    });
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(second), "one notch, one column left");
-}
-
-/// Dragging a tile's header onto the middle of another column puts it in that column.
-#[gpui::test]
-fn a_header_dragged_onto_a_column_joins_it(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
+    // The third is the tab the pane below shows.
+    let [(_, first), _, (_, third)] = three_shells(&view, cx, &fake);
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", first.item)).unwrap().center();
-    let onto = cx.debug_bounds(selector("item", second.item)).unwrap().center();
+    let onto = cx.debug_bounds(selector("item", third.item)).unwrap().center();
     cx.simulate_mouse_down(header, gpui::MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(
         point(header.x + px(20.0), header.y),
@@ -926,29 +904,30 @@ fn a_header_dragged_onto_a_column_joins_it(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(onto, Some(gpui::MouseButton::Left), Modifiers::default());
     cx.simulate_mouse_up(onto, gpui::MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
-    let (pf, ps) = view.read_with(cx, |v, _| {
-        (v.layout().position(first).unwrap(), v.layout().position(second).unwrap())
-    });
-    assert_eq!(pf.column, ps.column, "one column now: {pf:?} {ps:?}");
+    let (pf, pt) = (pos_of(&view, cx, first), pos_of(&view, cx, third));
+    assert_eq!(pf.pane, pt.pane, "one pane now: {pf:?} {pt:?}");
     assert_eq!(focused(&view, cx), Some(first), "the dragged tile keeps the focus");
 }
 
 // ----- drawing only what shows -------------------------------------------------------------
 
-/// Only tiles near the view are drawn: a column two screens away has no element and its
-/// terminal prepares no rows; bringing it into view draws it.
+/// Only what shows is drawn: a tile behind another in its pane has no element and its
+/// terminal prepares no rows; shown, it is drawn.
 #[gpui::test]
-fn tiles_far_from_the_view_are_not_drawn(cx: &mut TestAppContext) {
+fn tiles_not_shown_are_not_drawn(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let mut tiles = Vec::new();
     for version in 1..=6 {
         tiles.push(opens(&view, cx, &fake, SessionId::new(), fake.me, version));
     }
-    let first = tiles[0];
-    assert!(cx.debug_bounds(selector("item", first.item)).is_none(), "far left: not drawn");
     let drawn = view.read_with(cx, |v, _| v.drawn.placed.borrow().len());
     assert!(drawn < tiles.len(), "{drawn} of {} drawn", tiles.len());
+    let hidden = tiles
+        .iter()
+        .copied()
+        .find(|t| cx.debug_bounds(selector("item", t.item)).is_none())
+        .expect("a tile behind another");
     let rows = cx.update(|_window, cx| crate::terminal::rows_prepared(cx));
     let per_grid = view.read_with(cx, |v, cx| {
         v.terminal(session_of(v, tiles[5])).and_then(|t| t.read(cx).metrics()).map(|m| m.rows)
@@ -957,10 +936,9 @@ fn tiles_far_from_the_view_are_not_drawn(cx: &mut TestAppContext) {
         per_grid.is_some_and(|r| rows <= usize::from(r).saturating_mul(drawn)),
         "only the drawn grids prepared rows: {rows}"
     );
-    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(hidden, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("item", first.item)).is_some(), "in view: drawn");
-    assert!(cx.debug_bounds(selector("item", tiles[5].item)).is_none(), "far right now");
+    assert!(cx.debug_bounds(selector("item", hidden.item)).is_some(), "shown: drawn");
 }
 
 /// A shell's output redraws that shell's tile only: its neighbours are replayed from the view
@@ -999,7 +977,7 @@ fn output_redraws_its_own_tile_only(cx: &mut TestAppContext) {
     );
 }
 
-/// A remote window scrolled off screen lets its stream go after the grace, and asks for it
+/// A remote window on a tab not shown lets its stream go after the grace, and asks for it
 /// again when it is back in view.
 #[gpui::test]
 fn an_offscreen_window_lets_its_stream_go_after_the_grace(cx: &mut TestAppContext) {
@@ -1032,10 +1010,9 @@ fn an_offscreen_window_lets_its_stream_go_after_the_grace(cx: &mut TestAppContex
     assert!(view.read_with(cx, |v, _| v.screen(tile.item).is_some()), "streaming");
     assert_eq!(cx.active_idle_sleep_preventions(), 1, "a streaming window holds the device");
 
-    // Four shells of this client's push the window off to the left.
-    for version in 2..=5 {
-        opens(&view, cx, &fake, SessionId::new(), fake.me, version);
-    }
+    // A shell of this client's on a tab of its own, shown over the window's.
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    on_new_tab(&view, cx, shell);
     cx.executor().advance_clock(Duration::from_millis(10));
     cx.run_until_parked();
     view.update(cx, |_, cx| cx.notify());
@@ -1053,18 +1030,18 @@ fn an_offscreen_window_lets_its_stream_go_after_the_grace(cx: &mut TestAppContex
     assert!(open(&fake.drain()), "back in view: asked for again");
 }
 
-/// Listing the installed fonts is a synchronous trip to the font server: three shells drawn
-/// at once list them once, not once per view.
+/// Listing the installed fonts is a synchronous trip to the font server: the shells drawn at
+/// once list them once, not once per view.
 #[gpui::test]
 fn the_installed_fonts_are_listed_once_for_every_shell(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(shells[1].1, cx));
-    cx.run_until_parked();
-    for (_, tile) in shells {
-        assert!(cx.debug_bounds(selector("item", tile.item)).is_some(), "every shell is drawn");
-    }
+    let drawn = shells
+        .iter()
+        .filter(|(_, tile)| cx.debug_bounds(selector("item", tile.item)).is_some())
+        .count();
+    assert!(drawn > 1, "shells drawn at once: {drawn}");
     let picks = cx.update(|_window, cx| crate::terminal::family_picks(cx));
     assert_eq!(picks, 1, "one walk of the installed fonts for the whole app");
 }
@@ -1132,6 +1109,7 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let first_view = view.read_with(cx, |v, _| v.terminal(s2).cloned().unwrap());
     fake.drain();
+    let was = pos_of(&view, cx, second);
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     let sent = fake.drain();
@@ -1139,7 +1117,7 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
         sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Remove(i)) if *i == second.item)),
         "{sent:?}"
     );
-    assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "off the strip");
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "out of its pane");
     assert!(cx.debug_bounds("closed").is_some(), "the toast offers it back");
 
     cx.simulate_keystrokes("cmd-z");
@@ -1149,7 +1127,7 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
         sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(i)) if i.id == second.item)),
         "{sent:?}"
     );
-    assert_eq!(column_of(&view, cx, second), 1, "back where it was");
+    assert_eq!(pos_of(&view, cx, second).tab, was.tab, "back where it was");
     assert_eq!(focused(&view, cx), Some(second));
     assert!(
         view.read_with(cx, |v, _| v.terminal(s2).is_some_and(|t| *t == first_view)),
@@ -1260,10 +1238,10 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
     // The empty field lists a few commands; typing reaches the rest.
-    cx.simulate_keystrokes("o v e r");
+    cx.simulate_keystrokes("p r e v i o u s space p r o");
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Overview ⌥⌘O"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Previous project ⌥⌘⇞"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.palette_open()), "Esc empties the field first");
@@ -1346,7 +1324,7 @@ fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
     );
     let tile = TileRef { worker: fake.key, item: note };
     assert_eq!(focused(&view, cx), Some(tile));
-    assert_eq!(column_of(&view, cx, tile), column_of(&view, cx, shell).saturating_add(1));
+    assert_eq!(pos_of(&view, cx, tile).tab, pos_of(&view, cx, shell).tab, "beside the shell");
     let key = fake.key;
     view.update_in(cx, |v, _w, cx| {
         v.file_read(
@@ -1581,9 +1559,15 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SAVE_AFTER);
     cx.run_until_parked();
     let saved = read_layout(&path).ok().flatten().expect("written");
-    let restored = Layout::restore(saved, LayoutConfig::default());
+    let restored = Tiling::restore(saved.tiling, TilingConfig::default());
     assert_eq!(restored.focused(), Some(third));
-    assert_eq!(restored.position(first).map(|p| p.column), Some(0));
+    let path = |t: &Tiling, tile| {
+        let at = t.position(tile)?;
+        let tab = t.projects().get(at.project)?.tabs().iter().find(|x| x.id() == at.tab)?;
+        tab.root().path_of(at.pane)
+    };
+    let was = view.read_with(cx, |v, _| path(v.layout(), first));
+    assert_eq!(path(&restored, first), was, "in the pane it was in");
     assert_eq!(read_layout(&dir.join("missing.json")), Ok(None), "no file, no layout");
     std::fs::write(dir.join("bad.json"), "{").unwrap();
     assert_eq!(
@@ -1617,13 +1601,11 @@ mod handoffs;
 mod leaks;
 mod measure;
 mod menus;
-mod miniatures;
 mod modal_focus;
 mod nav_list;
 mod nav_projects;
 mod nav_rows;
 mod needs_you;
-mod niri_keys;
 mod no_workers;
 mod overlays;
 mod page_chrome;
@@ -1645,7 +1627,6 @@ mod save_copy;
 mod search;
 mod shell_drag;
 mod soak;
-mod strip_marks;
 mod tab_strip;
 mod thread_face;
 mod thread_start;
@@ -1668,10 +1649,8 @@ fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppCon
     let laptop = connect(&view, cx, 2, "laptop");
     let given = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     assert_eq!(focused(&view, cx), Some(typing), "the focus stays on the studio's shell");
-    let workspace_of = |tile| {
-        view.read_with(cx, |v, _| v.layout().position(tile).map(|p| p.workspace)).expect("placed")
-    };
-    assert_eq!(workspace_of(given), workspace_of(typing), "beside it, in the same workspace");
+    let project_of = |tile| pos_of(&view, cx, tile).project;
+    assert_eq!(project_of(given), project_of(typing), "beside it, in the same project");
     let next = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 2);
     assert_eq!(focused(&view, cx), Some(next), "a shell the human opens takes the focus");
 }

@@ -146,7 +146,8 @@ fn a_folder_tile_is_keyed_through_and_opens_a_file_beside_it(cx: &mut TestAppCon
     let (file_at, folder_at) =
         view.read_with(cx, |v, _| (v.layout().position(file), v.layout().position(tile)));
     let (file_at, folder_at) = (file_at.unwrap(), folder_at.unwrap());
-    assert_eq!(file_at.column.checked_sub(folder_at.column), Some(1), "right of the folder");
+    assert_eq!(file_at.tab, folder_at.tab, "on the folder's tab");
+    assert_ne!(file_at.pane, folder_at.pane, "in a pane of its own beside it");
     assert_eq!(folder_path(&view, cx, tile), "/w/proj/src", "the folder stays where it was");
 }
 

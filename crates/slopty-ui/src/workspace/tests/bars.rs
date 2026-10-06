@@ -74,35 +74,15 @@ fn finished(command: &str, exit: u8) -> Finished {
     Finished { command: command.to_owned(), exit: Some(exit), elapsed: Duration::from_secs(40) }
 }
 
-/// A workspace nobody named is named by where its first shell is: the repository, else the
-/// directory. Where neither says anything (a shell at home), its first tile's worker, never a
-/// number; with nothing on it, it is new. A name given wins.
-#[gpui::test]
-fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
+/// A shell's place is its repository, else its directory, and nothing at home: what a project
+/// in a repository is called.
+#[test]
+fn a_place_is_named_by_its_repository_else_its_directory() {
     use crate::workspace::tile::place_name;
     assert_eq!(place_name("/x/slopty/crates", Some("/x/slopty"), None).as_deref(), Some("slopty"));
     assert_eq!(place_name("/Users/me/src/app", None, None).as_deref(), Some("app"));
     assert_eq!(place_name("/Users/me", None, None), None, "home says nothing");
     assert_eq!(place_name("/", None, None), None);
-
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "New workspace", "nothing yet");
-    let _home = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let name = view.read_with(cx, |v, _| v.workspace_name());
-    assert_eq!(name, "studio", "a shell at home leaves it its worker's");
-    shell_in_repo(&view, cx, &studio, "/x/slopty/crates", "/x/slopty", "main");
-    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "slopty");
-    let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "slopty"), "the breadcrumb says it: {names:#?}");
-    view.update(cx, |v, cx| {
-        v.layout.set_workspace_name(0, Some("release".to_owned()));
-        cx.notify();
-    });
-    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
-    cx.run_until_parked();
-    let titled = tree(cx).into_iter().any(|n| n.is("Window", Some("release")));
-    assert!(titled, "the window is called by the workspace on show, not the app's name");
 }
 
 /// The title bar's readouts count the ports forwarded here, which list them, before the bell;
@@ -180,8 +160,8 @@ fn a_quick_round_trip_draws_no_chrome(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("readouts").is_none(), "and no readout says it");
 }
 
-/// The breadcrumb says where the focused shell is, `workspace / checkout / branch`, in that
-/// order on the bar's midline with its buttons, the branch's changes after it. A workspace
+/// The breadcrumb says where the focused shell is, `project / checkout / branch`, in that
+/// order on the bar's midline with its buttons, the branch's changes after it. A project
 /// named after the checkout leaves the checkout unsaid; another repository's says its name. The
 /// checkout opens a menu only when the same repository is checked out elsewhere in the layout:
 /// then its rows name each checkout's worker and go to a shell in it.
@@ -211,14 +191,10 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let at = |cx: &mut VisualTestContext, selector: &'static str| {
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
     };
-    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the workspace already says slopty");
+    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the project already says slopty");
     assert!(cx.debug_bounds("crumb-worker").is_none(), "one machine: no worker to name");
-    let (ws, branch, changes, bell) = (
-        at(cx, "crumb-workspace"),
-        at(cx, "crumb-branch"),
-        at(cx, "crumb-changes"),
-        at(cx, "bell"),
-    );
+    let (ws, branch, changes, bell) =
+        (at(cx, "crumb-project"), at(cx, "crumb-branch"), at(cx, "crumb-changes"), at(cx, "bell"));
     assert!(ws.right() <= branch.left(), "in order");
     assert!(branch.contains(&changes.center()), "the changes follow the branch");
     for part in [ws, branch] {
@@ -229,14 +205,14 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     assert!(names.iter().any(|l| l == "branch main"), "{names:#?}");
 
     // A shell in another repository says its checkout: words, with nothing to choose. Its
-    // project is on one machine, so no machine is named in the breadcrumb; the tile's header
-    // names it, since the workspace now holds two machines' tiles.
+    // own group is on one machine, so no machine is named in the breadcrumb; the tile's
+    // header names it, since its project now holds two machines' tiles.
     let mini = connect(&view, cx, 3, "mini");
     let (_, notes) = shell_in_repo(&view, cx, &mini, "/w/notes", "/w/notes", "draft");
     view.update_in(cx, |v, _w, cx| v.focus_tile(notes, cx));
     cx.run_until_parked();
     let (ws, checkout, branch) =
-        (at(cx, "crumb-workspace"), at(cx, "crumb-checkout"), at(cx, "crumb-branch"));
+        (at(cx, "crumb-project"), at(cx, "crumb-checkout"), at(cx, "crumb-branch"));
     assert!(ws.right() <= checkout.left() && checkout.right() <= branch.left(), "in order");
     assert!(cx.debug_bounds("crumb-worker").is_none(), "a project on one machine");
     assert!(cx.debug_bounds(selector("worker", notes.item)).is_some(), "the header says mini");
@@ -271,7 +247,7 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
     assert!(labels(&view, cx).iter().any(|l| l == "on studio"), "the focused tile's machine");
-    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the workspace already says slopty");
+    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the project already says slopty");
     click(cx, "crumb-worker");
     assert!(cx.debug_bounds("menu-studio").is_some(), "this clone, by its machine");
     click(cx, "menu-laptop");
@@ -281,27 +257,24 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     assert!(names.iter().any(|l| l == "on laptop"), "and the machine: {names:#?}");
 }
 
-/// A tile's header names its worker only where its workspace holds tiles of more than one: a
-/// workspace on one machine never pays for the chip, whatever else is connected.
+/// A tile's header names its worker only where its project holds tiles of more than one: a
+/// project on one machine never pays for the chip, whatever else is connected.
 #[gpui::test]
-fn the_header_chip_shows_only_where_the_workspace_spans_machines(cx: &mut TestAppContext) {
+fn the_header_chip_shows_only_where_the_project_spans_machines(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
     let (_, here) = shell_in_repo(&view, cx, &studio, "/w/a", "/w/a", "main");
     assert!(cx.debug_bounds(selector("worker", here.item)).is_none(), "one machine here");
-    new_workspace_from_the_bar(cx);
     let (_, there) = shell_in_repo(&view, cx, &laptop, "/w/b", "/w/b", "main");
-    assert!(cx.debug_bounds(selector("worker", there.item)).is_none(), "nor in its own");
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.move_window_up_or_to_workspace_up();
-        v.after_focus_moved(cx);
-        cx.notify();
-    });
-    cx.run_until_parked();
     assert!(cx.debug_bounds(selector("worker", there.item)).is_some(), "two machines meet");
     assert!(cx.debug_bounds(selector("worker", here.item)).is_some(), "both say theirs");
+    view.update_in(cx, |v, _w, cx| {
+        let home = slopty_client::layout::GroupKey::machine(there.worker);
+        v.layout_action(cx, |l| l.move_to_project(there, &home));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("worker", there.item)).is_none(), "alone in its own");
 }
 
 /// A machine's "…" waits for the pointer, and the keyboard brings it too: drawn with its ring

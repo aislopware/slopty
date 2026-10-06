@@ -11,10 +11,10 @@ use std::rc::Rc;
 
 use gpui::{App, Context, Pixels, Point, SharedString, Window};
 use slopty_client::groups::GroupKey;
-use slopty_client::layout::{Layout, TileRef, WorkerKey};
+use slopty_client::layout::{Drop, Side, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
-use super::actions::{CloseItem, FullscreenTile, ReloadPage, RenameItem};
+use super::actions::{CloseItem, ReloadPage, RenameItem, ZoomPane};
 use super::faces::Face;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
@@ -34,7 +34,7 @@ pub(super) enum Pressed {
     Navigator,
     /// Its own header.
     Header,
-    /// Its tab in a tabbed column: what to do to the column's other tabs, too.
+    /// Its tab in a pane of several: what to do to the pane's other tabs, too.
     Tab,
 }
 
@@ -139,7 +139,7 @@ impl WorkspaceView {
     }
 
     /// `tile`'s rows: Open (from the navigator), from its header an agent's other faces to show
-    /// and a page's reload, then Rename, Fullscreen, Move out of the column (from a tab), Copy
+    /// and a page's reload, then Rename, Zoom pane, Split out to the right (from a tab), Copy
     /// path where it has one, then Close and, from a tab, Close other tabs.
     ///
     /// The header holds no button at rest and touch has no hover, so its long press is where a
@@ -191,26 +191,29 @@ impl WorkspaceView {
             Some(&RenameItem),
             Rc::new(move |this, window, cx| this.start_rename(tile, window, cx)),
         ));
-        // On a phone a column is the screen's width already: fullscreen would add nothing.
+        // On a phone a pane is the screen already: a zoom would add nothing.
         if !self.phone {
             rows.push((
                 MenuGroup::Navigation,
-                "Fullscreen",
-                Some(&FullscreenTile),
-                Rc::new(move |this, _w, cx| {
+                "Zoom pane",
+                Some(&ZoomPane),
+                Rc::new(move |this, window, cx| {
                     this.focus_tile(tile, cx);
-                    this.width_action(cx, Layout::toggle_fullscreen);
+                    this.toggle_zoom(window, cx);
                 }),
             ));
         }
         if pressed == Pressed::Tab {
             rows.push((
                 MenuGroup::Navigation,
-                "Move out of the column",
+                "Split out to the right",
                 None,
                 Rc::new(move |this, _w, cx| {
                     this.focus_tile(tile, cx);
-                    this.layout_action(cx, Layout::consume_or_expel_window_right);
+                    let Some(pane) = this.layout.position(tile).map(|p| p.pane) else { return };
+                    this.layout_action(cx, |l| {
+                        l.place(tile, Drop { pane, edge: Some(Side::Right) });
+                    });
                 }),
             ));
         }
@@ -236,7 +239,7 @@ impl WorkspaceView {
                 "Close other tabs",
                 None,
                 Rc::new(move |this, window, cx| {
-                    for other in this.column_of(tile).into_iter().filter(|t| *t != tile) {
+                    for other in this.pane_tiles(tile).into_iter().filter(|t| *t != tile) {
                         this.close_tile(other, window, cx);
                     }
                     this.focus_tile(tile, cx);
@@ -317,15 +320,12 @@ impl WorkspaceView {
 }
 
 impl WorkspaceView {
-    /// The tiles of the column `tile` is in, top to bottom.
-    fn column_of(&self, tile: TileRef) -> Vec<TileRef> {
+    /// The tiles of the pane `tile` is in, as its tabs run.
+    pub(super) fn pane_tiles(&self, tile: TileRef) -> Vec<TileRef> {
         let Some(pos) = self.layout.position(tile) else { return Vec::new() };
-        self.layout
-            .workspaces()
-            .get(pos.workspace)
-            .and_then(|w| w.columns().get(pos.column))
-            .map(|c| c.tiles().iter().map(slopty_client::layout::Tile::tile).collect())
-            .unwrap_or_default()
+        let project = self.layout.projects().get(pos.project);
+        let tab = project.and_then(|p| p.tabs().iter().find(|t| t.id() == pos.tab));
+        tab.and_then(|t| t.pane(pos.pane)).map(|p| p.tiles().to_vec()).unwrap_or_default()
     }
 }
 

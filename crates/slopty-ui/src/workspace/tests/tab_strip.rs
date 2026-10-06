@@ -1,5 +1,5 @@
 //! The frame's top in the headless workspace: the navigator the window's height with the
-//! title bar from its edge, and the breadcrumb's way between workspaces.
+//! title bar from its edge, the breadcrumb's way between projects, and the project's tabs.
 
 use gpui::Modifiers;
 
@@ -11,8 +11,8 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-fn active(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> usize {
-    view.read_with(cx, |v, _| v.layout().active_workspace())
+fn shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<usize> {
+    view.read_with(cx, |v, _| v.layout().shown_index())
 }
 
 /// Docked, the navigator runs from the window's top and the title bar starts at its right
@@ -53,53 +53,29 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     );
 }
 
-/// The breadcrumb's workspace segment is how the bar goes between workspaces: its menu lists
-/// each one with something on it (the active one ticked, an empty active one too) and a new
-/// one. What waits in another workspace shows as a mark on the segment, inside it, and its
-/// label says so; no chord is spelled on it.
+/// The breadcrumb's project segment is how the bar goes between projects: its menu lists each
+/// one (the one on show ticked), and a row shows it. What waits in another project shows as a
+/// mark on the segment, inside it, and its label says so; no chord is spelled on it.
 #[gpui::test]
-fn the_breadcrumb_goes_between_workspaces(cx: &mut TestAppContext) {
+fn the_breadcrumb_goes_between_projects(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let [(first, _), _, _] = three_shells(&view, cx, &studio);
-    assert!(cx.debug_bounds("crumb-workspace").is_some());
-
-    new_workspace_from_the_bar(cx);
-    assert_eq!(active(&view, cx), 1, "+ goes to a new, empty workspace");
-    click(cx, "crumb-workspace");
-    assert!(cx.debug_bounds("menu-studio").is_some(), "the one with shells");
-    assert!(cx.debug_bounds("menu-New workspace").is_some(), "and a new one");
-    click(cx, "menu-studio");
-    assert_eq!(active(&view, cx), 0, "a row goes there");
-    assert!(cx.debug_bounds("menu").is_none(), "and closes the menu");
-
-    // A column moved down makes a second workspace with something in it.
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.move_window_down_or_to_workspace_down();
-        v.after_focus_moved(cx);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    let first_ws =
-        view.read_with(cx, |v, _| v.layout().position(v.tile_of_session(first).unwrap()).unwrap());
-    let other = usize::from(first_ws.workspace == 0);
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.focus_workspace(other);
-        v.after_focus_moved(cx);
-        cx.notify();
-    });
-    cx.run_until_parked();
+    let laptop = connect(&view, cx, 2, "laptop");
+    let mine = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    // From elsewhere: a background tab in the laptop's own project.
+    let session = SessionId::new();
+    let theirs = opens(&view, cx, &laptop, session, ClientId::new(), 1);
+    let here = shown(&view, cx);
+    assert_eq!(focused(&view, cx), Some(mine));
+    assert!(cx.debug_bounds("crumb-project").is_some());
     assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "at rest, no mark");
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(first), cx));
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     cx.run_until_parked();
     let (segment, mark) = (
-        cx.debug_bounds("crumb-workspace").expect("drawn"),
+        cx.debug_bounds("crumb-project").expect("drawn"),
         cx.debug_bounds("crumb-elsewhere").expect("what waits elsewhere"),
     );
     assert!(segment.contains(&mark.center()), "inside its segment: {segment:?} {mark:?}");
-
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
@@ -108,56 +84,69 @@ fn the_breadcrumb_goes_between_workspaces(cx: &mut TestAppContext) {
         tree.into_iter().filter(|n| n.role == "Button").filter_map(|n| n.label).collect();
     assert!(crumbs.iter().any(|l| l.ends_with(", elsewhere 1 needs you")), "{crumbs:#?}");
     assert!(crumbs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords: {crumbs:#?}");
+
+    click(cx, "crumb-project");
+    assert!(cx.debug_bounds("menu-studio").is_some(), "the one on show");
+    click(cx, "menu-laptop");
+    assert_ne!(shown(&view, cx), here, "a row shows its project");
+    assert_eq!(focused(&view, cx), Some(theirs), "on the tab it was left on");
+    assert!(cx.debug_bounds("menu").is_none(), "and closes the menu");
 }
 
-/// A shell in `cwd`, opened here.
-fn shell_at(
-    view: &Entity<WorkspaceView>,
-    cx: &mut VisualTestContext,
-    fake: &Fake,
-    version: u64,
-    cwd: Option<&str>,
-) -> TileRef {
-    opens_in(view, cx, fake, SessionId::new(), fake.me, version, cwd)
-}
-
-/// An unnamed workspace is named after the project most of its tiles share (a tie going to
-/// the first in the strip, so the name holds as the focus moves), the worker's name only
-/// where nothing else is shared, and the name the person gives wins.
+/// A project is named after its home, its machine's name where it has no project of its own,
+/// and the name the person gives wins; the window is called by it.
 #[gpui::test]
-fn a_workspace_is_named_after_the_project_most_of_its_tiles_share(cx: &mut TestAppContext) {
+fn a_project_is_named_after_its_home(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let name = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.workspace_name());
-    let home = shell_at(&view, cx, &studio, 1, None);
-    assert_eq!(name(cx), "studio", "a home shell shares only its machine");
-    let _site = shell_at(&view, cx, &studio, 2, Some("/w/site"));
-    assert_eq!(name(cx), "site", "a project before a machine");
-    let atlas_first = shell_at(&view, cx, &studio, 3, Some("/w/atlas"));
-    assert_eq!(name(cx), "site", "a tie goes to the first in the strip");
-    let atlas = shell_at(&view, cx, &studio, 4, Some("/w/atlas/docs"));
-    let session = view.read_with(cx, |v, _| session_of(v, atlas));
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| {
-        let moved = SessionSummary {
-            repo: Some("/w/atlas".to_owned()),
-            ..summary(session, Some("/w/atlas/docs"))
-        };
-        v.session_opened(key, moved, cx);
-        let first = SessionSummary {
-            repo: Some("/w/atlas".to_owned()),
-            ..summary(session_of(v, atlas_first), Some("/w/atlas"))
-        };
-        v.session_opened(key, first, cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(name(cx), "atlas", "two of atlas outnumber one of site");
-    view.update_in(cx, |v, _w, cx| v.focus_tile(home, cx));
-    cx.run_until_parked();
-    assert_eq!(name(cx), "atlas", "the focus does not rename it");
-    view.update_in(cx, |v, _w, cx| {
-        v.layout.set_workspace_name(0, Some("release".to_owned()));
+    let name = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.project_name());
+    let _home = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert_eq!(name(cx), "studio", "a home shell's project is its machine's");
+    let home = view.read_with(cx, |v, _| v.layout().shown_project().map(|p| p.home().clone()));
+    view.update(cx, |v, cx| {
+        v.layout.set_name(&home.expect("a project"), Some("release".to_owned()));
         cx.notify();
     });
     assert_eq!(name(cx), "release", "a given name wins");
+    cx.run_until_parked();
+    let titled = tree(cx).into_iter().any(|n| n.is("Window", Some("release")));
+    assert!(titled, "the window is called by the project on show, not the app's name");
+}
+
+/// The title bar runs the tabs of the project on show, each named by its focused work with a
+/// mark for each agent in it that needs the person; a press shows a tab, and its close closes
+/// what it holds.
+#[gpui::test]
+fn the_title_bar_shows_the_projects_tabs_and_their_agents(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let session = SessionId::new();
+    let other = opens(&view, cx, &studio, session, ClientId::new(), 2);
+    let tabs = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| {
+            v.layout()
+                .shown_project()
+                .map(|p| p.tabs().iter().map(slopty_client::layout::Tab::id).collect::<Vec<_>>())
+        })
+        .unwrap_or_default()
+    };
+    let ids = tabs(cx);
+    assert_eq!(ids.len(), 2, "its own tab, and the one from elsewhere");
+    let n = |i: usize| ids[i].get();
+    let sel = |what: &str, i: usize| -> &'static str {
+        Box::leak(format!("{what}-{}", n(i)).into_boxed_str())
+    };
+    assert!(cx.debug_bounds(sel("title-tab", 0)).is_some(), "drawn in the bar");
+    assert!(cx.debug_bounds(sel("title-tab", 1)).is_some());
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    let mark: &'static str = Box::leak(format!("title-tab-mark-{}-0", n(1)).into_boxed_str());
+    assert!(cx.debug_bounds(mark).is_some(), "its agent needs the person");
+    click(cx, sel("title-tab", 1));
+    assert_eq!(focused(&view, cx), Some(other), "a press shows the tab");
+    click(cx, sel("title-tab-close", 1));
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(other)), "closed with its tab");
+    assert_eq!(tabs(cx).len(), 1);
+    assert_eq!(focused(&view, cx), Some(first));
 }

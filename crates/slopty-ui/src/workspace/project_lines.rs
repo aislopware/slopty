@@ -249,17 +249,25 @@ impl WorkspaceView {
         Some(grouping.group(scope).map_or_else(|| scope.value().to_owned(), |g| self.group_name(g)))
     }
 
-    /// Go to `group`: the workspace that last held a tile of it, and its first tile there in
-    /// reading order. A project with no tile in the layout says so.
+    /// Go to `group`: its project, on the tab it was left on. A group whose work sits in
+    /// another project's tabs (a shell opened beside other work) goes to its first tile in
+    /// reading order there. A group with no tile in the tiling says so.
     pub(super) fn go_to_group(&mut self, group: &GroupKey, cx: &mut Context<Self>) {
-        self.refresh_homes();
-        let at = self.layout.latest_holding(group);
-        let tile = self.reading_order().into_iter().find(|t| {
-            let here =
-                at.is_none_or(|ws| self.layout.position(*t).is_some_and(|p| p.workspace == ws));
-            here && self.layout.home(*t) == Some(group)
-        });
-        match tile {
+        let project = self.layout.project_of(group).and_then(|ix| self.layout.projects().get(ix));
+        if project.is_some_and(|p| !p.tabs().is_empty()) {
+            let group = group.clone();
+            self.layout_action(cx, |l| l.show_project(&group));
+            if let Some(tile) = self.focused() {
+                self.navigated_to(tile);
+            }
+            return;
+        }
+        let grouping = self.project_groups();
+        let first = self
+            .reading_order()
+            .into_iter()
+            .find(|t| grouping.group_of(*t).is_some_and(|g| &g.key == group));
+        match first {
             Some(tile) => {
                 self.navigated_to(tile);
                 self.focus_tile(tile, cx);

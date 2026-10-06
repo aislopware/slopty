@@ -221,7 +221,6 @@ impl WorkspaceView {
         tracing::info!(path = %edit.path, wait = edit.wait, again, "edit a file a shell handed over");
         // A new tile opens right of the focused column: the shell's, once it has the focus.
         if let Some(shell) = edit.session.and_then(|s| self.tile_of_session(s)) {
-            self.tick();
             self.layout.focus(shell);
         }
         if edit.path.ends_with('/') && !edit.wait {

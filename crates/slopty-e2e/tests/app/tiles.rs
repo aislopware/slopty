@@ -513,7 +513,8 @@ fn pages(d: &Dump) -> Vec<&slopty_e2e::ItemInfo> {
     d.items.iter().filter(|i| i.kind == "browser").collect()
 }
 
-/// A page's `_blank` link opens a second page tile right of the first, on the worker's port.
+/// A page's `_blank` link opens a second page tile beside the first, on the worker's port: a
+/// tab of the first's pane, there being no room for a pane of its own at this size.
 /// That page's `alert` is a sheet in its tile, read from the accessibility tree, and ↩ answers
 /// it; its `confirm` follows, and OK runs the page's `window.close()`, which closes the tile.
 /// Back on the first page, ⌘F finds in it and the bar says how many matches the page holds.
@@ -538,7 +539,7 @@ async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
     let opener = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == popup);
     let opened = pages(&dump).into_iter().find(|i| i.browser.as_ref().unwrap().url == second);
     let (opener, opened) = (opener.unwrap(), opened.unwrap());
-    assert_eq!(opened.pos[1], opener.pos[1] + 1, "right of its opener: {opener:?} {opened:?}");
+    assert_eq!(opened.pos, opener.pos, "on its opener's pane: {opener:?} {opened:?}");
 
     let alert = "Hello from the second page";
     drv.wait_for("the alert, a sheet in the tile", STEP, |d| {
@@ -697,7 +698,8 @@ async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
         .unwrap();
     let folder = dump.item("folder").unwrap();
     let file = dump.item("file").unwrap();
-    assert_eq!(file.pos[1], folder.pos[1] + 1, "right of the folder: {folder:?} {file:?}");
+    // No room at this size for a pane beside the folder's, so a tab of it.
+    assert_eq!(file.pos, folder.pos, "on the folder's pane: {folder:?} {file:?}");
     assert!(file.active, "the file tile has the focus");
     stack.shutdown().await;
 }

@@ -7,8 +7,6 @@
 //! and chevrons at the strip's ends step it a tab's width at a time while there is more past
 //! them.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "drawn by the title bar once the strip goes"))]
-
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -71,9 +69,13 @@ pub(super) fn render<V: TitleTabsHost>(
             let id = tab.id;
             let n = id.get();
             let ink = if tab.shown { s.text } else { s.text_secondary };
+            // Each mark under an id of its own: every one is a "status" image to the a11y tree.
             let marks = tab.marks.iter().enumerate().map(|(i, st)| {
-                crate::icons::status_mark(theme, Some(*st), 1.0)
+                div()
+                    .id(("title-tab-mark", i))
+                    .flex_none()
                     .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
+                    .child(crate::icons::status_mark(theme, Some(*st), 1.0))
                     .into_any_element()
             });
             let close =
@@ -147,7 +149,7 @@ pub(super) fn render<V: TitleTabsHost>(
         .id("title-tabs")
         .debug_selector(|| "title-tabs".to_owned())
         .role(Role::TabList)
-        .flex_1()
+        .flex_initial()
         .min_w_0()
         .h_full()
         .flex()
@@ -156,8 +158,9 @@ pub(super) fn render<V: TitleTabsHost>(
         .overflow_x_scroll()
         .track_scroll(scroll)
         .children(items);
+    // As wide as its tabs and no wider, so what is left of the bar stays its empty span.
     div()
-        .flex_1()
+        .flex_initial()
         .min_w_0()
         .h_full()
         .flex()

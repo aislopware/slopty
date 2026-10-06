@@ -89,47 +89,44 @@ actions!(
         /// grouped by file as they are found and ↩ opening one in a file tile at its line; or,
         /// with the scope chip, the open tiles, ↩ going to one with its find bar open.
         SearchInFiles,
-        /// Focus the column to the left.
-        FocusColumnLeft,
-        /// Focus the column to the right.
-        FocusColumnRight,
-        /// Focus the workspace above.
-        FocusWorkspaceUp,
-        /// Focus the workspace below.
-        FocusWorkspaceDown,
-        /// Focus the tile above, or the workspace above from the top tile.
+        /// Focus the pane to the left of the focused one.
+        FocusLeft,
+        /// Focus the pane to the right.
+        FocusRight,
+        /// Focus the pane above.
         FocusUp,
-        /// Focus the tile below, or the workspace below from the bottom tile.
+        /// Focus the pane below.
         FocusDown,
-        /// Swap the focused column with the one to its left.
-        MoveColumnLeft,
-        /// Swap the focused column with the one to its right.
-        MoveColumnRight,
-        /// Move the focused column to the start of the strip.
-        MoveColumnToFirst,
-        /// Move the focused column to the end of the strip.
-        MoveColumnToLast,
-        /// Move the focused tile up its column, or to the workspace above from the top.
+        /// Move the focused tile into the pane to the left, or out along the tab's left edge.
+        MoveLeft,
+        /// Move the focused tile into the pane to the right, or out along the right edge.
+        MoveRight,
+        /// Move the focused tile into the pane above, or out along the top edge.
         MoveUp,
-        /// Move the focused tile down its column, or to the workspace below from the bottom.
+        /// Move the focused tile into the pane below, or out along the bottom edge.
         MoveDown,
-        /// Put the focused tile into the column on its left, or out into a column of its own.
-        ConsumeOrExpelLeft,
-        /// Put the focused tile into the column on its right, or out into a column of its own.
-        ConsumeOrExpelRight,
-        /// Give the focused column the next preset width.
-        CycleWidth,
-        /// Give the work in the focused column the whole width, the navigator put away, or put
-        /// both back as they were.
-        FocusMode,
-        /// Toggle the focused tile filling the whole view, without gaps or chrome around it.
-        FullscreenTile,
-        /// Scroll the strip so the focused column is in the middle.
-        CenterColumn,
-        /// Toggle the focused column between stacked tiles and tabs.
-        ToggleTabbed,
-        /// Toggle the overview: every workspace at half size.
-        ToggleOverview,
+        /// Zoom the focused pane over its tab, the navigator put away, or put both back.
+        ZoomPane,
+        /// Make the shares of every split in the tab equal.
+        EqualizePanes,
+        /// Show the project before the one on show, in the navigator's order.
+        PreviousProject,
+        /// Show the project after it.
+        NextProject,
+        /// Show the project's tab before the one on show.
+        PreviousTab,
+        /// Show the project's tab after it.
+        NextTab,
+        /// Show the project's last tab.
+        LastTab,
+        /// Back through the tabs visited.
+        GoBack,
+        /// Forward through the tabs visited.
+        GoForward,
+        /// Show the focused pane's tab before the one it shows.
+        PreviousPaneTab,
+        /// Show the focused pane's tab after it.
+        NextPaneTab,
         /// Terminal text one point larger.
         FontLarger,
         /// Terminal text one point smaller.
@@ -173,10 +170,10 @@ pub const MUTE_SOUND: &str = "Mute sound";
 /// The same line while it is muted.
 pub const UNMUTE_SOUND: &str = "Unmute sound";
 
-/// ⌘1…⌘9: focus column `index` (0-based) of the active workspace, as a browser's tabs.
+/// ⌘1…⌘8: show tab `index` (0-based) of the project on show, as a browser's tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
-pub struct FocusColumn {
+pub struct SelectTab {
     /// 0-based.
     pub index: usize,
 }
@@ -357,14 +354,6 @@ pub struct PinToProject {
     pub project: Option<slopty_client::layout::GroupKey>,
 }
 
-/// ⌘⌥1…⌘⌥9: focus workspace `index` (0-based; past the last, the trailing empty one).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct FocusWorkspace {
-    /// 0-based.
-    pub index: usize,
-}
-
 /// A tile's window of its own ([`super::popout`]): its picture takes every chord but the one
 /// that puts it back; the keymap binds that one there.
 pub(crate) const POP_OUT_CTX: &str = super::popout::CTX;
@@ -424,27 +413,26 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Name this tile", Box::new(RenameItem)),
         w(super::project_search::SEARCH_IN_FILES, Box::new(SearchInFiles)),
         w("Forwarded ports", Box::new(ListPorts)),
-        w("Column to the left", Box::new(FocusColumnLeft)),
-        w("Column to the right", Box::new(FocusColumnRight)),
-        w("Tile or workspace above", Box::new(FocusUp)),
-        w("Tile or workspace below", Box::new(FocusDown)),
-        w("Workspace above", Box::new(FocusWorkspaceUp)),
-        w("Workspace below", Box::new(FocusWorkspaceDown)),
-        w("First workspace", Box::new(FocusWorkspace { index: 0 })),
-        w("Move column left", Box::new(MoveColumnLeft)),
-        w("Move column right", Box::new(MoveColumnRight)),
-        w("Move column to the start", Box::new(MoveColumnToFirst)),
-        w("Move column to the end", Box::new(MoveColumnToLast)),
+        w("Pane to the left", Box::new(FocusLeft)),
+        w("Pane to the right", Box::new(FocusRight)),
+        w("Pane above", Box::new(FocusUp)),
+        w("Pane below", Box::new(FocusDown)),
+        w("Move tile left", Box::new(MoveLeft)),
+        w("Move tile right", Box::new(MoveRight)),
         w("Move tile up", Box::new(MoveUp)),
         w("Move tile down", Box::new(MoveDown)),
-        w("Into the column on the left", Box::new(ConsumeOrExpelLeft)),
-        w("Into the column on the right", Box::new(ConsumeOrExpelRight)),
-        w("Next column width", Box::new(CycleWidth)),
-        w("Focus mode", Box::new(FocusMode)),
-        w("Fullscreen tile", Box::new(FullscreenTile)),
-        w("Center column", Box::new(CenterColumn)),
-        w("Tabbed column", Box::new(ToggleTabbed)),
-        w("Overview", Box::new(ToggleOverview)),
+        w("Zoom pane", Box::new(ZoomPane)),
+        w("Equalize panes", Box::new(EqualizePanes)),
+        w("Previous project", Box::new(PreviousProject)),
+        w("Next project", Box::new(NextProject)),
+        w("Previous tab", Box::new(PreviousTab)),
+        w("Next tab", Box::new(NextTab)),
+        w("First tab", Box::new(SelectTab { index: 0 })),
+        w("Last tab", Box::new(LastTab)),
+        w("Back", Box::new(GoBack)),
+        w("Forward", Box::new(GoForward)),
+        w("Previous tab in the pane", Box::new(PreviousPaneTab)),
+        w("Next tab in the pane", Box::new(NextPaneTab)),
         w("Switch thread, terminal or board", Box::new(SwitchFace)),
         w("Thread density", Box::new(CycleDensity)),
         w("Stop the agent", Box::new(Interrupt)),
