@@ -31,7 +31,7 @@ pub fn shell<E: Styled>(el: E, theme: &Theme, zoom: f32, capped: bool, focused: 
     let el =
         if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(px(theme.radii.lg * zoom)) };
     let edge = if focused { hsla(theme.field_focus()) } else { hsla(s.border) };
-    let el = el.border(super::hair(theme)).border_color(edge).bg(hsla(s.elevated));
+    let el = el.border(super::HAIR).border_color(edge).bg(hsla(s.elevated));
     super::rests(el, theme, !capped, true)
 }
 

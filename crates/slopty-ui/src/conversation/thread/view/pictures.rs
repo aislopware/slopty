@@ -99,7 +99,7 @@ impl ThreadView {
                         .w(self.z(PICTURE_HEIGHT * aspect))
                         .rounded(self.z(theme.radii.md))
                         .overflow_hidden()
-                        .border(kit::hair(&theme))
+                        .border(kit::HAIR)
                         .border_color(hsla(s.border_subtle))
                         .map(|el| kit::inset(el, &theme))
                         .children(shown.map(|p| img(p).size_full().object_fit(ObjectFit::Cover))),

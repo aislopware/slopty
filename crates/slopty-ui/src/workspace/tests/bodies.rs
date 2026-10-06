@@ -1,5 +1,5 @@
 //! Tile bodies and their neighbours in the headless workspace: what a body says while it waits
-//! on its worker, where a file's unsaved dot sits, the header slot beside a failure the grid
+//! on its worker, where a file's "Edited" sits, the header slot beside a failure the grid
 //! shows, and the column divider's double-click.
 
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseUpEvent};
@@ -110,10 +110,10 @@ fn a_window_that_did_not_open_says_so_in_its_pane_and_gives_way_to_another(
     assert!(ops.contains(&ItemOp::Remove(tile.item)), "the failed pane gives way: {ops:?}");
 }
 
-/// A file with an unsaved edit carries its dot right after its title's text, a half unit on,
+/// A file with an unsaved edit says "Edited" right after its title's text, a half unit on,
 /// before the directory the file is in, and not at the far end of the header.
 #[gpui::test]
-fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
+fn edited_follows_the_title(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let path = "/w/notes.txt";
@@ -134,10 +134,10 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     cx.simulate_input("x");
     cx.run_until_parked();
     let name = bounds(cx, selector("name", tile.item));
-    let dot = bounds(cx, selector("unsaved", tile.item));
+    let edited = bounds(cx, selector("unsaved", tile.item));
     let place = bounds(cx, selector("place", tile.item));
-    near(f32::from(dot.left() - name.right()), Theme::default().spacing.xs);
-    assert!(place.left() > dot.right(), "the directory after them: {place:?} {dot:?}");
+    near(f32::from(edited.left() - name.right()), Theme::default().spacing.xs);
+    assert!(place.left() > edited.right(), "the directory after them: {place:?} {edited:?}");
 }
 
 /// A Markdown file's header carries the toggle between its preview and its source, which the

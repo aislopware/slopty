@@ -3,13 +3,11 @@
 //! Each pair the chrome sets side by side to mean opposite things (lines added and removed, a
 //! live mark and a failure, waiting and failed) is drawn through Machado, Oliveira and
 //! Fernandes's simulation of the three dichromacies at full severity (2009, the matrices in
-//! linear sRGB), in both appearances, and measured apart in Oklab. Increase Contrast is not
-//! held to it: its lift carries every tone toward the pole, so the tones meet there; the
-//! signs and marks beside them carry the difference.
+//! linear sRGB), in both appearances, and measured apart in Oklab.
 //! Each must stay as far apart as [`APART`]: past a just-noticeable step, far enough to be
 //! told apart at a glance in a diff's gutter, not only side by side.
 
-use super::{Contrast, Rgb, Theme, Variant};
+use super::{Rgb, Theme, Variant};
 
 /// The least Oklab distance two opposite tones keep under every simulation: about three
 /// just-noticeable differences (0.02 each in Oklab).
@@ -69,29 +67,41 @@ fn opposite_states_stay_apart_for_every_dichromacy() {
         [("protanopia", PROTANOPIA), ("deuteranopia", DEUTERANOPIA), ("tritanopia", TRITANOPIA)];
     let mut short = Vec::new();
     for variant in [Variant::Dark, Variant::Light] {
-        for contrast in [Contrast::Standard] {
-            let mut theme = Theme::new(variant);
-            theme.contrast = contrast;
-            theme.derive_chrome();
-            let s = theme.surfaces;
-            let pairs = [
-                ("added vs removed", s.success, s.error),
-                ("live vs error", s.accent, s.error),
-                ("warn vs error", s.warn, s.error),
-            ];
-            for (name, sight) in &sights {
-                for (pair, a, b) in pairs {
-                    let d = apart(a, b, sight);
-                    if d < APART {
-                        short.push(format!(
-                            "{variant:?} {contrast:?} {name} {pair} ({a:?} {b:?}): {d:.3}"
-                        ));
-                    }
+        let s = Theme::new(variant).surfaces;
+        let pairs = [
+            ("added vs removed", s.success, s.error),
+            ("live vs error", s.accent, s.error),
+            ("warn vs error", s.warn, s.error),
+        ];
+        for (name, sight) in &sights {
+            for (pair, a, b) in pairs {
+                let d = apart(a, b, sight);
+                if d < APART {
+                    short.push(format!("{variant:?} {name} {pair} ({a:?} {b:?}): {d:.3}"));
                 }
             }
         }
     }
     assert!(short.is_empty(), "too close (want {APART}):\n{}", short.join("\n"));
+}
+
+/// The three marks that say a thing went or goes on, working's blue, merged's violet and done's
+/// green, stay apart to a trichromat in both modes. A dichromat may see blue and violet alike;
+/// the glyphs (spokes, a filled check, a ring) carry the difference there.
+#[test]
+fn working_merged_and_done_marks_stay_apart() {
+    let normal = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for variant in [Variant::Dark, Variant::Light] {
+        let s = Theme::new(variant).surfaces;
+        for (pair, a, b) in [
+            ("working vs merged", s.working_fill, s.merged_fill),
+            ("working vs done", s.working_fill, s.success_fill),
+            ("merged vs done", s.merged_fill, s.success_fill),
+        ] {
+            let d = apart(a, b, &normal);
+            assert!(d >= APART, "{variant:?} {pair} ({a:?} {b:?}): {d:.3}");
+        }
+    }
 }
 
 /// The simulation holds what it should: a grey is seen as itself, and red and green, far

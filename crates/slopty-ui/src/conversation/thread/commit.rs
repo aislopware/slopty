@@ -599,7 +599,7 @@ impl CommitSheet {
             .flex_none()
             .flex()
             .items_center()
-            .gap(kit::hair(theme))
+            .gap(kit::HAIR)
             .child(
                 self.button("commit-merge", method.verb(), ButtonKind::Primary, busy)
                     .rounded_r(px(0.0))
@@ -792,10 +792,10 @@ impl CommitSheet {
     /// A field on the sunk well, the kit's one inset round it.
     fn field(&self, child: impl IntoElement) -> Div {
         let theme = &self.theme;
-        kit::sunk(div(), theme, theme.hair())
+        kit::sunk(div(), theme, slopty_theme::stroke::HAIR)
             .w_full()
             .rounded(px(theme.radii.md))
-            .border(kit::hair(theme))
+            .border(kit::HAIR)
             .border_color(hsla(theme.surfaces.border))
             .px(px(theme.spacing.xs))
             .child(child)
@@ -1029,9 +1029,9 @@ impl Render for CommitSheet {
                 .flex()
                 .flex_col()
                 .children(self.pull_part(cx))
-                .child(kit::rule(&theme, s.border_subtle))
+                .child(kit::rule(s.border_subtle))
                 .child(self.files_part(cx))
-                .child(kit::rule(&theme, s.border_subtle))
+                .child(kit::rule(s.border_subtle))
                 .child(self.commit_foot(cx)),
             Page::Open => self.open_page(cx),
         };
@@ -1063,7 +1063,7 @@ impl Render for CommitSheet {
                     }))
                     .overflow_y_scroll()
                     .child(self.head(cx))
-                    .child(kit::rule(&theme, s.border_subtle))
+                    .child(kit::rule(s.border_subtle))
                     .child(body),
             )
     }

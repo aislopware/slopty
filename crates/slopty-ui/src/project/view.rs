@@ -26,12 +26,11 @@ use slopty_proto::project::{
     NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
-use slopty_theme::{Rgb, Theme, Typography, alpha};
+use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
     Board, Lane, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, os_name, pull_words,
-    queue_words, run_on_words, short_commit, state_status, state_word, verdict_detail,
-    verdict_tail,
+    queue_words, run_on_words, short_commit, state_word, verdict_detail, verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
 use super::{
@@ -41,7 +40,7 @@ use super::{
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
-use crate::icons::{IconSize, Status, Symbol, icon, status_icon};
+use crate::icons::{IconSize, Phase, Status, Symbol, icon, status_icon};
 use crate::kit::progress::Progress;
 use crate::palette::{Plate, age_label, dotted};
 
@@ -513,19 +512,6 @@ impl ProjectView {
         self.seen.agents.get(&session)
     }
 
-    /// The mark a node draws: its agent's while the task follows it, else its state's.
-    fn node_status(&self, board: &Board, node: Node) -> Option<Status> {
-        let live = self.agent(board, node).map(|a| a.status);
-        match node {
-            None => live,
-            Some(task) => {
-                let state = board.tasks.get(&task)?.state;
-                let own = state_status(state);
-                Some(if state.follows_the_agent() { live.unwrap_or(own) } else { own })
-            }
-        }
-    }
-
     /// Where a view of it is summed up in words: its lanes and their tasks, for the
     /// self-test's dump and a screen reader.
     #[must_use]
@@ -558,18 +544,6 @@ impl ProjectView {
 pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
     let lanes = u16::try_from(Lane::ALL.len()).unwrap_or(u16::MAX);
     (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
-}
-
-/// A lane's tone: colour for the two lanes that need the person, and for the rest the ink
-/// of how far along they are, the finished a step brighter than what is still to do.
-const fn lane_tone(theme: &Theme, lane: Lane) -> Rgb {
-    let s = &theme.surfaces;
-    match lane {
-        Lane::NeedsYou => s.warn,
-        Lane::Failed => s.error,
-        Lane::Working | Lane::Verifying | Lane::UpNext => s.text_muted,
-        Lane::ReadyToMerge | Lane::Merged => s.text_secondary,
-    }
 }
 
 /// The push toggle's one name, said as pressed or not.
@@ -657,19 +631,6 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::PushAgain => "push again",
         TaskAction::Cancel => "cancel",
         TaskAction::Stop => "stop",
-    }
-}
-
-/// A status's tone on the board: colour only for what needs the person, warn for *Needs
-/// you* and error for *Failed*; every other state is the muted ink, and recedes.
-const fn board_tone(theme: &Theme, status: Status) -> Rgb {
-    let s = &theme.surfaces;
-    match status {
-        Status::NeedsYou => s.warn,
-        Status::Failed => s.error,
-        Status::Idle | Status::Working | Status::Running | Status::Done | Status::Away => {
-            s.text_muted
-        }
     }
 }
 
@@ -944,7 +905,7 @@ impl ProjectView {
                     .h(self.z(theme.density.row * 0.9))
                     .flex()
                     .items_center()
-                    .child(self.mark(Some(Status::NeedsYou))),
+                    .child(self.mark(Some(Phase::NeedsYou))),
             )
             .child(
                 div()
@@ -1112,8 +1073,9 @@ impl ProjectView {
             .child(text)
     }
 
-    /// A status mark in its fixed slot at the board's zoom.
-    fn mark(&self, status: Option<Status>) -> Div {
+    /// A phase's glyph in its fixed slot at the board's zoom, named by the phase; with none,
+    /// the agent's neutral mark.
+    fn mark(&self, phase: Option<Phase>) -> Div {
         let theme = &self.theme;
         let slot = div()
             .flex_none()
@@ -1121,13 +1083,14 @@ impl ProjectView {
             .flex()
             .items_center()
             .justify_center();
-        match status {
-            Some(status) => slot.child(status_icon(
-                theme,
-                status,
-                self.z(theme.typography.icon()),
-                hsla(board_tone(theme, status)),
-            )),
+        match phase {
+            Some(phase) => slot.child(
+                div()
+                    .id(phase.label())
+                    .role(Role::Image)
+                    .aria_label(phase.label())
+                    .child(phase.glyph(theme, self.z(theme.typography.icon()))),
+            ),
             None => slot.child(
                 icon(
                     theme,
@@ -1238,13 +1201,19 @@ impl ProjectView {
         let sp = theme.spacing;
         // A verdict names the verifier: a task its failure sent back is Up next, and a bare
         // "Failed" there read as the Failed lane, which is a task given up.
-        let (glyph, tone, word, detail, tail) = match check {
-            Check::Running { line, .. } => {
-                let status = Status::Working;
-                (None, board_tone(theme, status), "Verifying", line.clone(), Vec::new())
-            }
+        // The glyph wears its hue's mark step and the word stays neutral, a failure's excepted.
+        let (glyph, ink, tone, word, detail, tail) = match check {
+            Check::Running { line, .. } => (
+                None,
+                Status::Working.ink(theme),
+                s.text_muted,
+                "Verifying",
+                line.clone(),
+                Vec::new(),
+            ),
             Check::Verdict { run, .. } if run.passed => (
                 Some(Symbol::CheckmarkCircle),
+                s.success_fill,
                 s.text_secondary,
                 "Verifier passed",
                 verdict_detail(run),
@@ -1252,6 +1221,7 @@ impl ProjectView {
             ),
             Check::Verdict { run, .. } => (
                 Some(Symbol::XmarkCircle),
+                s.error_fill,
                 s.error,
                 "Verifier failed",
                 verdict_detail(run),
@@ -1291,11 +1261,11 @@ impl ProjectView {
             .gap(self.z(sp.xs))
             .min_w_0()
             .child(match glyph {
-                Some(glyph) => icon(theme, glyph, IconSize::Inline, hsla(tone))
+                Some(glyph) => icon(theme, glyph, IconSize::Inline, hsla(ink))
                     .size(self.z(theme.typography.icon()))
                     .into_any_element(),
                 None => {
-                    status_icon(theme, Status::Working, self.z(theme.typography.icon()), hsla(tone))
+                    status_icon(theme, Status::Working, self.z(theme.typography.icon()), hsla(ink))
                 }
             })
             .child(div().flex_none().text_color(hsla(tone)).child(word))
@@ -1397,7 +1367,6 @@ impl ProjectView {
     ) -> AnyElement {
         let theme = &self.theme;
         let sp = theme.spacing;
-        let tone = lane_tone(theme, lane);
         let count = tasks.len();
         let head = div()
             .flex()
@@ -1406,7 +1375,7 @@ impl ProjectView {
             .px(self.z(sp.xs))
             .pb(self.z(sp.xs))
             .text_size(self.z(theme.typography.small()))
-            .child(div().flex_none().size(self.z(6.0)).rounded_full().bg(hsla(tone)))
+            .child(Phase::of(lane).glyph(theme, self.z(theme.typography.small())))
             .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(lane.title()))
             .child(
                 crate::kit::tabular(div())
@@ -1445,7 +1414,18 @@ impl ProjectView {
         let node = Some(card.id);
         let picked = self.picked() == Some(node);
         let own = Lane::of(card.state);
-        let status = self.node_status(board, node);
+        // The card leads with its lane's phase, or, while an agent works the task, with what
+        // the agent says of itself; a task waiting on its own background work wears the dashed
+        // ring.
+        let lane_phase = match card.state {
+            TaskState::Waiting => Phase::Waiting,
+            state => Phase::of(Lane::of(state)),
+        };
+        let live = self.agent(board, node).map(|a| a.status);
+        let phase = Some(match live {
+            Some(status) if card.state.follows_the_agent() => lane_phase.with_agent(status),
+            _ => lane_phase,
+        });
         let key = format!("project-card-{}", card.id);
         let CardFacts { check, stages, meta } = self.card_facts(board, card);
         let held = stages.iter().any(|stage| stage.holds)
@@ -1500,7 +1480,7 @@ impl ProjectView {
             .items_start()
             .gap(self.z(sp.xs))
             .min_w_0()
-            .child(first_line(div()).child(self.mark(status)))
+            .child(first_line(div()).child(self.mark(phase)))
             .child(
                 first_line(crate::kit::tabular(div()))
                     .text_size(self.z(theme.typography.small()))

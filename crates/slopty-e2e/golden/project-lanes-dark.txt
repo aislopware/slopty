@@ -48,18 +48,24 @@ Button │ Show the orchestrator's terminal
 ProgressIndicator │ 1 of 6 merged │ 17%
 List │ Needs you
 ListItem │ Draw the lanes, Needs you, Which lanes come first?
+Image │ Needs you
 List │ Working
 ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts · slopty/board/1
+Image │ Waiting
 Label │ Runs on studio, macOS. Branch slopty/board/1
 List │ Up next
 ListItem │ Hold it to goldens, Up next, after #1 · reads only
+Image │ Up next
 ListItem │ Check the wire goldens, Up next
+Image │ Up next
 Log
 List │ Ready to merge
 ListItem │ Mirror the merge queue, Ready to merge
+Image │ Ready to merge
 Button │ Merge #6
 List │ Merged
 ListItem │ Write the decision, Merged
+Image │ Merged
 MultilineTextInput │ Message the orchestrator
 Button │ Send
 Group │ #1 Mirror the server's projects

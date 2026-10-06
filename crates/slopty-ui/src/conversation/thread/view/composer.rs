@@ -749,7 +749,7 @@ impl ThreadView {
             .map(|el| self.shell(el, capped, focused))
             // Under the tray, the one line in the shell: the quieter hairline, where the
             // tray's head meets the field.
-            .when(capped, |el| el.border_t_0().child(kit::rule(theme, s.border_subtle)))
+            .when(capped, |el| el.border_t_0().child(kit::rule(s.border_subtle)))
             .child(
                 div()
                     .w_full()

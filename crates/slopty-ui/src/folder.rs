@@ -665,7 +665,7 @@ impl FolderView {
                 .gap(px(theme.spacing.sm * k))
                 .h(px(theme.density.row * k))
                 .px(px(theme.spacing.inset() * k))
-                .border_b(crate::kit::hair(theme))
+                .border_b(crate::kit::HAIR)
                 .border_color(hsla(theme.surfaces.border_subtle))
                 .child(crate::icons::symbol(
                     theme,
@@ -924,7 +924,7 @@ impl FolderView {
             // the rows' icons and the header's glyph, not a pad's width right of them.
             .pl(px((theme.spacing.inset() - theme.spacing.xxs) * k))
             .pr(px(theme.spacing.inset() * k))
-            .border_b(crate::kit::hair(theme))
+            .border_b(crate::kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .text_size(px(theme.typography.small() * k))
             .child(trail)
@@ -1185,7 +1185,7 @@ impl FolderView {
                 .items_center()
                 .h(px(theme.density.row * k))
                 .px(px(theme.spacing.inset() * k))
-                .border_t(crate::kit::hair(theme))
+                .border_t(crate::kit::HAIR)
                 .border_color(hsla(theme.surfaces.border_subtle))
                 .text_size(px(theme.typography.small() * k))
                 .child(format!("{shown} of {total} listed"))

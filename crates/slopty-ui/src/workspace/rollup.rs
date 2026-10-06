@@ -1,8 +1,8 @@
 //! What a group of tiles adds up to where their own rows are out of sight: a folded worker in
 //! the navigator or on the rail, a workspace's tab in the title bar. One quiet mark, the most
-//! urgent first: a warn dot (and in the navigator how many wait on the human), else the
-//! working mark, else the unseen dot, else the calm mark of a command running. The navigator's slot
-//! keeps its width whether it holds a mark or nothing, so what sits beside it never moves.
+//! urgent first: the needs-you glyph (and in the navigator how many wait on the human), else the
+//! working mark, else the finish's check, else the calm mark of a command running. The navigator's
+//! slot keeps its width whether it holds a mark or nothing, so what sits beside it never moves.
 //!
 //! Also the navigator's second line: the words it is made of and when its age starts.
 
@@ -73,11 +73,11 @@ impl Rollup {
 /// What a rollup's slot shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Shown {
-    /// The warn dot, and the count beside it past one.
+    /// The needs-you glyph, and the count beside it past one.
     NeedsYou(usize),
     /// The working mark.
     Working,
-    /// The accent dot.
+    /// The finish's green check.
     Unseen,
     /// The calm mark.
     Running,
@@ -88,17 +88,16 @@ pub(super) fn slot_width(theme: &Theme) -> f32 {
     theme.typography.icon_large() + theme.spacing.md
 }
 
-/// A rollup's dot: 6 pt of a status fill, named for a screen reader. A group's summary is the
-/// quiet echo of its rows, never a second loud mark for the same event.
-fn dot(theme: &Theme, fill: slopty_theme::Rgb, label: &'static str) -> gpui::Stateful<Div> {
-    div()
-        .id("rollup-dot")
-        .role(Role::Image)
-        .aria_label(label)
-        .flex_none()
-        .size(px(theme.spacing.xs + theme.spacing.xxs))
-        .rounded_full()
-        .bg(hsla(fill))
+/// A rollup's mark: `status`'s glyph at the small size, in its ink, named `label` for a screen
+/// reader. A group's summary is the quiet echo of its rows: their glyph, a size down, never a
+/// second loud mark for the same event.
+fn mark(theme: &Theme, status: Status, label: &'static str) -> gpui::Stateful<Div> {
+    div().id("rollup-mark").role(Role::Image).aria_label(label).flex_none().child(status_icon(
+        theme,
+        status,
+        px(theme.typography.small()),
+        hsla(status.ink(theme)),
+    ))
 }
 
 /// The rollup's slot, `selector` naming it for tests, its content on its right edge. It keeps
@@ -123,18 +122,18 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
                     .flex_none()
                     .child(SharedString::from(n.to_string()))
             }))
-            .child(dot(theme, s.warn_fill, Status::NeedsYou.label())),
+            .child(mark(theme, Status::NeedsYou, Status::NeedsYou.label())),
         Shown::Working => slot.child(
             div().id("rollup-working").role(Role::Image).aria_label(Status::Working.label()).child(
                 status_icon(
                     theme,
                     Status::Working,
                     px(theme.typography.small()),
-                    hsla(s.text_muted),
+                    hsla(Status::Working.ink(theme)),
                 ),
             ),
         ),
-        Shown::Unseen => slot.child(dot(theme, s.accent_fill, "Unseen")),
+        Shown::Unseen => slot.child(mark(theme, Status::Done, "Unseen")),
         Shown::Running => slot.child(
             div().id("rollup-running").role(Role::Image).aria_label(Status::Running.label()).child(
                 status_icon(

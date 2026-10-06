@@ -8,10 +8,10 @@
 //! view. GPUI then has to draw on a non-opaque layer (`WindowBackgroundAppearance::Transparent`)
 //! and paint every region opaque except where the material is meant to show. One view the size
 //! of the window, rather than one placed under the sidebar, never has to follow the sidebar's
-//! width or motion a frame late. Under Reduce Transparency (which Increase Contrast turns on)
-//! AppKit draws the view as a solid colour of its own, so the window stays opaque. The material
-//! leans light or dark as the app's chrome over it does ([`Glass::set_dark`]), not as the
-//! system's appearance would have it, so a light theme on a dark Mac stands on light glass.
+//! width or motion a frame late. Under Reduce Transparency AppKit draws the view as a solid
+//! colour of its own, so the window stays opaque. The material leans light or dark as the
+//! app's chrome over it does ([`Glass::set_dark`]), not as the system's appearance would have
+//! it, so a light theme on a dark Mac stands on light glass.
 //!
 //! macOS only; iOS has no counterpart here yet.
 

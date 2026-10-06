@@ -1014,15 +1014,15 @@ impl ThreadView {
         div().flex_none().size(self.z(TOOL_ROW)).flex().items_center().justify_center()
     }
 
-    /// The mark of what waits on the person: [`Status::NeedsYou`] in the warn tone, the mark the
-    /// navigator's *Needs you* row and the bell wear. The calm dashed ring said "background
+    /// The mark of what waits on the person: [`Status::NeedsYou`] in its amber fill, the mark
+    /// the navigator's *Needs you* row and the bell wear. The calm dashed ring said "background
     /// work" on the one row that most needs the person.
     fn needs_you(&self) -> AnyElement {
         crate::icons::status_icon(
             &self.theme,
             Status::NeedsYou,
             self.z(self.theme.typography.icon()),
-            hsla(self.theme.surfaces.warn),
+            hsla(Status::NeedsYou.ink(&self.theme)),
         )
     }
 
@@ -1070,7 +1070,7 @@ impl ThreadView {
             .min_h(self.z(theme.density.control))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.xs))
-            .border(kit::hair(theme))
+            .border(kit::HAIR)
             .rounded(self.z(theme.radii.sm))
             .text_size(self.z(theme.typography.small()))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
@@ -1555,7 +1555,7 @@ impl ThreadView {
                         .ml(self.z(TOOL_ROW / 2.0))
                         .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
                         .py(self.z(theme.spacing.xxs))
-                        .border_l(kit::hair(theme))
+                        .border_l(kit::HAIR)
                         .border_color(hsla(s.border_subtle))
                         .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
@@ -1935,7 +1935,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.sm))
                 .px(self.z(theme.spacing.lg))
                 .min_h(self.z(kit::Row::Two.height(theme)))
-                .border_b(kit::hair(theme))
+                .border_b(kit::HAIR)
                 .border_color(hsla(s.border_subtle))
                 .child(
                     div()
@@ -1972,7 +1972,7 @@ impl ThreadView {
                         .items_center()
                         .gap(self.z(theme.spacing.xxs))
                         .text_size(self.z(theme.typography.small()))
-                        .text_color(hsla(st.tone(theme)))
+                        .text_color(hsla(st.word(theme)))
                         .child(crate::icons::status_mark(theme, Some(st), k))
                         .child(st.label())
                 }))

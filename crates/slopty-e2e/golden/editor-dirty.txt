@@ -16,7 +16,7 @@ Terminal │ shell │ ~ %
 Group │ main.rs
 Heading │ file main.rs
 Button │ Drag the file out
-Image │ Unsaved changes
+Label │ Edited
 Label │ project
 Button │ Fullscreen tile
 Button │ Close tile

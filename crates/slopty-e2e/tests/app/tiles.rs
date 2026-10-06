@@ -127,7 +127,7 @@ async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
         .wait_for("the edit, unsaved", STEP, |d| file_of(d).is_some_and(|f| f.edited))
         .await
         .unwrap();
-    assert!(dump.a11y_node("Image", Some("Unsaved changes")).is_some(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Label", Some("Edited")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "editor-dirty").await;
 
     drv.keys("cmd-s").await.unwrap();

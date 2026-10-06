@@ -1590,7 +1590,7 @@ impl FileView {
             .gap(px(theme.spacing.sm * k))
             .px(px(theme.spacing.inset() * k))
             .py(px(theme.spacing.xs * k))
-            .border_b(crate::kit::hair(theme))
+            .border_b(crate::kit::HAIR)
             .border_color(hsla(s.border))
             .bg(wash)
             .text_size(px(theme.typography.small() * k))
@@ -1624,7 +1624,7 @@ impl FileView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .border(crate::kit::hair(theme))
+            .border(crate::kit::HAIR)
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(label);

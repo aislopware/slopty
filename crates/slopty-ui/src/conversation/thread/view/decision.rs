@@ -210,7 +210,7 @@ impl ThreadView {
             .flex_none()
             .flex()
             .items_stretch()
-            .gap(kit::hair(theme))
+            .gap(kit::HAIR)
             .child(deny.rounded_r(self.z(0.0)))
             .child(chevron)
             .children(menu)

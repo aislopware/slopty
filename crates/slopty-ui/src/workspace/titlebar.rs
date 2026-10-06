@@ -345,9 +345,10 @@ impl WorkspaceView {
         let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
         let unread = total.saturating_add(self.to_review().len());
         let bell = has_workers.then(|| {
-            // Each fill with its own ink: a near-black on the green and on a state's fill.
+            // Each fill with its own ink: a near-black on the amber, and on done's green when
+            // only turns to review are unread (done is green, not the accent).
             let (fill, ink) =
-                if total > 0 { (s.warn_fill, s.fill_fg) } else { (s.accent_fill, s.accent_ink) };
+                if total > 0 { (s.warn_fill, s.fill_fg) } else { (s.success_fill, s.accent_ink) };
             let badge = (unread > 0).then(|| {
                 let count = SharedString::from(unread.to_string());
                 let side = theme.typography.caption() + spacing.xs + spacing.xxs;

@@ -847,9 +847,6 @@ impl gpui::RenderOnce for AfterGrace {
 /// How often the overlay's rates are recomputed, and the stream's health read.
 const HUD_PERIOD: Duration = Duration::from_millis(1000);
 
-/// The health mark's dot, in points at zoom 1.
-const HEALTH_DOT: f32 = 6.0;
-
 /// The controller's verdict as the overlay words it.
 #[must_use]
 pub const fn verdict_label(verdict: RateVerdict) -> &'static str {
@@ -1446,7 +1443,13 @@ impl ScreenView {
     ) -> Option<gpui::AnyElement> {
         let health = header.health?;
         let s = theme.surfaces;
-        let dot = if health == Health::Stalled { s.error_fill } else { s.warn_fill };
+        // Degraded is grey and a hollow triangle, since it asks nothing of the person; stalled
+        // is the filled one in red. Amber means "needs you" alone.
+        let (glyph, ink) = if health == Health::Stalled {
+            (crate::icons::Symbol::ExclamationmarkTriangleFill, s.error_fill)
+        } else {
+            (crate::icons::Symbol::ExclamationmarkTriangle, s.text_secondary)
+        };
         let view = view.clone();
         let mark = div()
             .id(SharedString::from(format!("health-{}", header.stream)))
@@ -1463,7 +1466,10 @@ impl ScreenView {
             .hover(move |el| el.bg(hsla(s.hover)))
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_secondary))
-            .child(div().flex_none().size(px(HEALTH_DOT * k)).rounded_full().bg(hsla(dot)))
+            .child(
+                crate::icons::icon(theme, glyph, crate::icons::IconSize::Inline, hsla(ink))
+                    .size(px(theme.typography.small() * k)),
+            )
             .child(health.word());
         Some(
             crate::a11y::tab_stop(mark, s.focus)
@@ -3627,7 +3633,7 @@ impl ScreenView {
             div()
                 .debug_selector(|| "stream-stats-details-lines".to_owned())
                 .pt(px(theme.spacing.xs))
-                .border_t(kit::hair(theme))
+                .border_t(kit::HAIR)
                 .border_color(hsla(s.border_subtle))
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
                 .text_size(px(theme.typography.caption()))

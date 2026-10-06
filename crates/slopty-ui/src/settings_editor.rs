@@ -450,7 +450,7 @@ impl Render for SettingsEditor {
                     .items_baseline()
                     .gap(px(spacing.sm))
                     .py(px(spacing.sm))
-                    .border_b(crate::kit::hair(&theme))
+                    .border_b(crate::kit::HAIR)
                     .border_color(hsla(s.border))
                     .child(crate::kit::title(&theme, "Settings"))
                     .when(self.mode == Mode::Toml, |el| {
@@ -474,7 +474,7 @@ impl Render for SettingsEditor {
                     .items_center()
                     .gap(px(spacing.md))
                     .py(px(spacing.sm))
-                    .border_t(crate::kit::hair(&theme))
+                    .border_t(crate::kit::HAIR)
                     .border_color(hsla(s.border))
                     .children(swap)
                     .child(div().flex_1())

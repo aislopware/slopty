@@ -2077,7 +2077,7 @@ impl Element for TerminalElement {
                 block_ticks,
                 rules,
                 rule: separator_color(theme),
-                rule_width: crate::kit::hair_painted(theme, window.scale_factor()),
+                rule_width: crate::kit::hair_painted(window.scale_factor()),
                 failed,
                 failed_heads,
                 failed_look,

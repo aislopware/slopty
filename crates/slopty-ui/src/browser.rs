@@ -1321,7 +1321,7 @@ impl BrowserView {
                     .role(Role::Group)
                     .aria_label(name.clone())
                     .aria_value(status.clone())
-                    .border_t(kit::hair(theme))
+                    .border_t(kit::HAIR)
                     .border_color(hsla(s.border))
                     .text_size(px(theme.typography.small()))
                     .font_family(theme.typography.ui_family.clone())

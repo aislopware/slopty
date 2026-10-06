@@ -172,7 +172,7 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.xs))
-            .border_b(kit::hair(theme))
+            .border_b(kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .child(self.icon(Symbol::QuestionmarkBubble, s.text_muted))
             .child(

@@ -76,6 +76,7 @@ symbols! {
     Checklist => "checklist",
     Checkmark => "checkmark",
     CheckmarkCircle => "checkmark.circle",
+    CheckmarkCircleFill => "checkmark.circle.fill",
     ChevronDown => "chevron.down",
     ChevronLeft => "chevron.left",
     /// A file of code.
@@ -105,6 +106,7 @@ symbols! {
     Ellipsis => "ellipsis",
     ExclamationmarkCircleFill => "exclamationmark.circle.fill",
     ExclamationmarkTriangle => "exclamationmark.triangle",
+    ExclamationmarkTriangleFill => "exclamationmark.triangle.fill",
     Eye => "eye",
     /// A video.
     Film => "film",

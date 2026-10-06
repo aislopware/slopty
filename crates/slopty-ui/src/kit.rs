@@ -17,7 +17,7 @@ use gpui::{
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
-use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha};
+use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha, stroke};
 
 use crate::colors::{hsla, hsla_alpha};
 
@@ -504,7 +504,7 @@ impl Overlay {
 pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
     let e = &theme.elevation;
     let drop = e.shadow.iter().filter(|l| l.shows()).map(|&layer| drop_shadow(theme, layer));
-    let edge = e.rim.float.map(|a| rim(theme, a, theme.hair()));
+    let edge = e.rim.float.map(|a| rim(theme, a, stroke::HAIR));
     drop.chain(edge).collect()
 }
 
@@ -517,7 +517,7 @@ pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
 /// last part casts the contact. `el` wears a hairline border; the rim lands just inside it.
 #[must_use]
 pub fn rests<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
-    el.shadow(rest_layers(theme, theme.hair(), first, last))
+    el.shadow(rest_layers(theme, stroke::HAIR, first, last))
 }
 
 /// The resting elevation's layers for one part of a stack whose border is `border` wide.
@@ -566,10 +566,9 @@ const RIM_DEPTH: f32 = 1.0;
 ///
 /// In light the floating surface's white, a step over the content, with the quieter hairline
 /// round it and a contact shadow; in dark the hover wash, a step over whatever plane it rests
-/// on, with its lit top edge, as coss's cards are. Under Increase Contrast its hairline is drawn
-/// in dark too. A wash is never a resting surface: in light it sinks what it fills, so the kit
-/// lint `a_resting_fill_is_raised_or_sunk` keeps the washes to the pointer and the selection.
-/// The caller keeps its own radius.
+/// on, with its lit top edge, as coss's cards are. A wash is never a resting surface: in light it
+/// sinks what it fills, so the kit lint `a_resting_fill_is_raised_or_sunk` keeps the washes to the
+/// pointer and the selection. The caller keeps its own radius.
 #[must_use]
 pub fn raised<E: Styled>(el: E, theme: &Theme) -> E {
     raised_part(el, theme, true, true)
@@ -581,16 +580,13 @@ pub fn raised<E: Styled>(el: E, theme: &Theme) -> E {
 #[must_use]
 pub fn raised_part<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
     let light = theme.variant() == Variant::Light;
-    let ringed = light || theme.contrast == slopty_theme::Contrast::Increased;
-    let border = if ringed { theme.hair() } else { 0.0 };
-    let s = theme.surfaces;
-    let ring = if light { s.border_subtle } else { s.border };
+    let border = if light { stroke::HAIR } else { 0.0 };
     let el = el.bg(raised_fill(theme));
-    let el = if ringed {
-        let el = el.border_l(hair(theme)).border_r(hair(theme));
-        let el = if first { el.border_t(hair(theme)) } else { el };
-        let el = if last { el.border_b(hair(theme)) } else { el };
-        el.border_color(hsla(ring))
+    let el = if light {
+        let el = el.border_l(HAIR).border_r(HAIR);
+        let el = if first { el.border_t(HAIR) } else { el };
+        let el = if last { el.border_b(HAIR) } else { el };
+        el.border_color(hsla(theme.surfaces.border_subtle))
     } else {
         el
     };
@@ -617,19 +613,12 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
 /// vanished into the page (the first run's address field read as a placeholder floating
 /// beside its button): there it wears the quieter hairline, as Radix's and shadcn's light
 /// fields do. In dark the wash already stands off the plane, and the field is a well with no
-/// edge. Under Increase Contrast the hairline is drawn in both.
+/// edge.
 #[must_use]
 pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
-    let ringed =
-        theme.variant() == Variant::Light || theme.contrast == slopty_theme::Contrast::Increased;
     let el = el.bg(raised_fill(theme));
-    if ringed {
-        let ring = if theme.variant() == Variant::Light {
-            theme.surfaces.border_subtle
-        } else {
-            theme.surfaces.border
-        };
-        sunk(el.border(hair(theme)).border_color(hsla(ring)), theme, theme.hair())
+    if theme.variant() == Variant::Light {
+        sunk(el.border(HAIR).border_color(hsla(theme.surfaces.border_subtle)), theme, stroke::HAIR)
     } else {
         sunk(el, theme, 0.0)
     }
@@ -643,12 +632,11 @@ pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
 /// It is chrome, not a document's field: no white ground, no ring and no sunk shade, which made
 /// the navigator's filter the brightest, hardest-edged thing beside the traffic lights. While it
 /// holds the keyboard (`focused`) it takes the selected fill and the hairline ring inside its
-/// edge ([`selected`]); under Increase Contrast it wears the hairline at rest too. As Apple's
+/// edge ([`selected`]). As Apple's
 /// sidebar search, `MonoCode`'s and Zed's are.
 #[must_use]
 pub fn search_field(theme: &Theme, focused: bool) -> Div {
     let (s, spacing) = (theme.surfaces, theme.spacing);
-    let increased = theme.contrast == slopty_theme::Contrast::Increased;
     selected(div(), theme, focused)
         .h(px(theme.density.row))
         .px(px(spacing.sm))
@@ -656,7 +644,6 @@ pub fn search_field(theme: &Theme, focused: bool) -> Div {
         .items_center()
         .gap(px(spacing.xs + spacing.xxs))
         .rounded_full()
-        .when(increased, |el| el.border(hair(theme)).border_color(hsla(s.border)))
         .child(crate::icons::icon(
             theme,
             crate::icons::Symbol::Magnifyingglass,
@@ -729,16 +716,13 @@ pub const TRACK_PAD: f32 = 2.0;
 /// as it slides from option to option.
 pub fn paint_thumb(theme: &Theme, bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window) {
     let radius = gpui::Corners::all(px(thumb_radius(theme)));
-    let ringed =
-        theme.variant() == Variant::Light || theme.contrast == slopty_theme::Contrast::Increased;
-    let border = if ringed { hair_painted(theme, window.scale_factor()) } else { px(0.0) };
+    let light = theme.variant() == Variant::Light;
+    let border = if light { hair_painted(window.scale_factor()) } else { px(0.0) };
     let layers = rest_layers(theme, f32::from(border), true, true);
     window.paint_drop_shadows(bounds, radius, &layers);
     let quad = gpui::fill(bounds, hsla(theme.surfaces.elevated)).corner_radii(radius);
-    let light = theme.variant() == Variant::Light;
-    let ring = if light { theme.surfaces.border_subtle } else { theme.surfaces.border };
-    window.paint_quad(if ringed {
-        quad.border_widths(border).border_color(hsla(ring))
+    window.paint_quad(if light {
+        quad.border_widths(border).border_color(hsla(theme.surfaces.border_subtle))
     } else {
         quad
     });
@@ -773,7 +757,7 @@ pub fn well<E: Styled>(el: E, theme: &Theme) -> E {
 #[must_use]
 pub fn elevate<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.elevated))
-        .border(hair(theme))
+        .border(HAIR)
         .border_color(hsla(theme.surfaces.border))
         .shadow(elevation(theme))
 }
@@ -946,7 +930,7 @@ pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> 
         el
     } else {
         let mut layers = vec![ring_inside(theme)];
-        layers.extend(theme.elevation.rim.rest.map(|a| rim(theme, a, theme.hair())));
+        layers.extend(theme.elevation.rim.rest.map(|a| rim(theme, a, stroke::HAIR)));
         el.shadow(layers)
     }
 }
@@ -974,7 +958,7 @@ fn ring_inside(theme: &Theme) -> BoxShadow {
         color: hsla(theme.surfaces.border),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
-        spread_radius: hair(theme),
+        spread_radius: HAIR,
         inset: true,
     }
 }
@@ -1069,25 +1053,21 @@ pub fn row(theme: &Theme, lines: Row) -> Div {
         .h(px(lines.height(theme)))
 }
 
-/// How wide chrome draws a hairline: [`Theme::hair`], one device pixel, or a full point under
-/// Increase Contrast.
+/// How wide chrome draws a hairline: [`stroke::HAIR`], one device pixel.
 ///
 /// Every border chrome draws is this wide: a sheet's edge, a pane's divider, a rule under a bar,
 /// a ring just inside a button. A full point was two device pixels on a Retina screen, so the
 /// chrome read ruled; the hairline shares are set for this width. A line that marks something
 /// (a failed block's bar) is a stroke of its own, not a hairline.
-#[must_use]
-pub const fn hair(theme: &Theme) -> gpui::Pixels {
-    px(theme.hair())
-}
+pub const HAIR: gpui::Pixels = px(stroke::HAIR);
 
-/// [`hair`] for a quad painted by hand at `scale` device pixels a point.
+/// [`HAIR`] for a quad painted by hand at `scale` device pixels a point.
 ///
 /// Whole device pixels, never under one, as GPUI snaps a border. A painted box's edges round on
 /// their own, so half a point at 3x would come out one pixel or two by where it fell.
 #[must_use]
-pub fn hair_painted(theme: &Theme, scale: f32) -> gpui::Pixels {
-    let device = theme.hair().mul_add(scale, -0.5).ceil().max(1.0);
+pub fn hair_painted(scale: f32) -> gpui::Pixels {
+    let device = stroke::HAIR.mul_add(scale, -0.5).ceil().max(1.0);
     px(device / scale)
 }
 
@@ -1096,8 +1076,8 @@ pub fn hair_painted(theme: &Theme, scale: f32) -> gpui::Pixels {
 /// Drawn as a border rather than a box of the hairline's height, since GPUI snaps a border to
 /// at least one device pixel where a box half a point tall rounds to nothing on a 1x screen.
 #[must_use]
-pub fn rule(theme: &Theme, tint: slopty_theme::Tint) -> Div {
-    div().flex_none().w_full().border_t(hair(theme)).border_color(hsla(tint))
+pub fn rule(tint: slopty_theme::Tint) -> Div {
+    div().flex_none().w_full().border_t(HAIR).border_color(hsla(tint))
 }
 
 /// A rule parting a list's or a menu's groups.
@@ -1113,7 +1093,7 @@ pub fn list_rule(theme: &Theme) -> gpui::AnyElement {
         .w_full()
         .py(px(theme.spacing.xs))
         .child(gpui::edge_fade(
-            rule(theme, theme.surfaces.border_subtle),
+            rule(theme.surfaces.border_subtle),
             gpui::EdgeFade::x(px(theme.spacing.xl)),
         ))
         .into_any_element()
@@ -1121,8 +1101,8 @@ pub fn list_rule(theme: &Theme) -> gpui::AnyElement {
 
 /// A vertical rule: [`rule`] standing up, the height of its parent.
 #[must_use]
-pub fn rule_v(theme: &Theme, tint: slopty_theme::Tint) -> Div {
-    div().flex_none().h_full().border_l(hair(theme)).border_color(hsla(tint))
+pub fn rule_v(tint: slopty_theme::Tint) -> Div {
+    div().flex_none().h_full().border_l(HAIR).border_color(hsla(tint))
 }
 
 /// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox).
@@ -1131,7 +1111,7 @@ pub fn rule_v(theme: &Theme, tint: slopty_theme::Tint) -> Div {
 /// shares the sheet's centre (6 inside 12).
 #[must_use]
 pub fn sheet_pad(theme: &Theme) -> f32 {
-    theme.radii.lg - theme.radii.sm - theme.hair()
+    theme.radii.lg - theme.radii.sm - stroke::HAIR
 }
 
 /// A row inside a floating sheet padded by [`sheet_pad`].
@@ -1144,7 +1124,7 @@ pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
     let pad = sheet_pad(theme);
     row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(slopty_theme::Radii::nested(
         theme.radii.lg,
-        theme.hair(),
+        stroke::HAIR,
         pad,
     )))
 }
@@ -1340,7 +1320,7 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
         .items_center()
         .justify_center()
         .rounded(px(theme.radii.xs * k))
-        .border(hair(theme));
+        .border(HAIR);
     if on {
         solid(el, theme).border_color(hsla(s.solid)).child(
             crate::icons::icon(
@@ -1352,7 +1332,7 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
             .size(px(theme.typography.small() * k)),
         )
     } else {
-        sunk(el.border_color(hsla(s.border)), theme, theme.hair())
+        sunk(el.border_color(hsla(s.border)), theme, stroke::HAIR)
     }
 }
 
@@ -2173,7 +2153,7 @@ mod tests {
             let mut picked = selected(div(), &theme, true);
             assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.selected))));
             let ring = picked.style().box_shadow.clone().unwrap_or_default();
-            assert!(ring.iter().all(|l| l.inset && l.spread_radius == hair(&theme)), "{ring:?}");
+            assert!(ring.iter().all(|l| l.inset && l.spread_radius == HAIR), "{ring:?}");
             let mut away = selected(div(), &theme, false);
             assert_eq!(away.style().background, Some(gpui::Fill::from(hsla(s.hover))), "not key");
             assert!(away.style().box_shadow.is_none(), "no ring off the keyboard");
@@ -2333,9 +2313,184 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// Chrome's sources as whole files of lines, test modules and comments left out.
+    fn chrome_files() -> Vec<(String, Vec<(usize, String)>)> {
+        let mut files: Vec<(String, Vec<(usize, String)>)> = Vec::new();
+        let lines = ["slopty-ui/src", "slopty-app/src"].into_iter().flat_map(chrome_lines);
+        for (file, line_no, line) in lines {
+            let line = if line.trim_start().starts_with("//") { String::new() } else { line };
+            match files.last_mut() {
+                Some((last, lines)) if *last == file => lines.push((line_no, line)),
+                _ => files.push((file, vec![(line_no, line)])),
+            }
+        }
+        files
+    }
+
+    /// The methods a `div()` chain at the start of `code` calls on itself, its arguments left
+    /// out: `div().size(px(6.0)).bg(hsla(x))` is `div().size().bg()`. It ends where the
+    /// chain does, at a `,`, `;` or the parenthesis that closes what holds it.
+    fn own_chain(code: &str) -> String {
+        let mut depth = 0_u32;
+        let mut own = String::new();
+        for c in code.chars() {
+            match c {
+                ')' | ',' | ';' if depth == 0 => break,
+                '(' => {
+                    if depth == 0 {
+                        own.push(c);
+                    }
+                    depth = depth.saturating_add(1);
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        own.push(c);
+                    }
+                }
+                _ if depth == 0 => own.push(c),
+                _ => {}
+            }
+        }
+        own
+    }
+
+    /// A dot: a `div()` filled, rounded to a circle and holding nothing, its own chain read
+    /// from `code`.
+    fn is_dot(code: &str) -> bool {
+        let own = own_chain(code);
+        own.contains(".rounded_full()")
+            && own.contains(".bg(")
+            && !own.contains(".child(")
+            && !own.contains(".children(")
+    }
+
+    #[test]
+    fn the_dot_check_knows_a_dot_from_a_glyph() {
+        assert!(is_dot("div().size(px(6.0)).rounded_full().bg(hsla(s.accent_fill))"));
+        assert!(is_dot("div().id(\"d\").size(px(d)).rounded_full().bg(hsla(fill)))"));
+        assert!(is_dot("div().size(px(6.0)).bg(hsla(dot)).rounded_full(),.child(word)"));
+        assert!(!is_dot("div().rounded_full().bg(hsla(s.warn_fill)).child(count)"), "a badge");
+        assert!(!is_dot("div().rounded_full().border(HAIR).child(div().size(px(6.0)))"));
+        assert!(!is_dot("div().size(px(6.0)).rounded_full().overflow_hidden()"), "no fill");
+    }
+
+    /// A state is a glyph, never a dot: what needs the person, what finished and what failed
+    /// each draw their own mark in its fill (`docs/decisions/ui.md`, "State is a glyph"). A dot
+    /// read as decoration, and a list of them as confetti. The ruled dots are not states.
+    #[test]
+    fn a_state_is_a_glyph_not_a_dot() {
+        const RULED: [(&str, &str); 3] = [
+            ("slopty-ui/src/settings_form.rs", "a switch's knob"),
+            ("slopty-ui/src/project/view.rs", "a switch's knob"),
+            ("slopty-ui/src/workspace/about.rs", "the brand mark's dots"),
+        ];
+        let mut wrong = Vec::new();
+        for (file, lines) in chrome_files() {
+            if RULED.iter().any(|(ruled, _)| file.ends_with(ruled)) {
+                continue;
+            }
+            let code: Vec<String> =
+                lines.iter().map(|(_, l)| l.split_whitespace().collect()).collect();
+            let joined = code.concat();
+            let mut at = 0_usize;
+            for ((line_no, line), squeezed) in lines.iter().zip(&code) {
+                let here = at;
+                at = at.saturating_add(squeezed.len());
+                let Some(found) = squeezed.find(".rounded_full()") else { continue };
+                let before = joined.get(..here.saturating_add(found)).unwrap_or_default();
+                let Some(div) = before.rfind("div()") else { continue };
+                if is_dot(joined.get(div..).unwrap_or_default()) {
+                    wrong
+                        .push(format!("{file}:{line_no}: a state drawn as a dot: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A text tone named as a whole token: `s.warn` but not `s.warn_fill`.
+    fn names_text_tone(call: &str) -> bool {
+        ["warn", "error", "success", "accent"].iter().any(|tone| {
+            call.split(&format!(".{tone}"))
+                .skip(1)
+                .any(|after| !after.starts_with(|c: char| c == '_' || c.is_alphanumeric()))
+        })
+    }
+
+    /// The call opened on `lines[at]` at `needle`, through its closing parenthesis, squeezed.
+    fn call_at(lines: &[(usize, String)], at: usize, needle: &str) -> String {
+        let text: String = lines.iter().skip(at).take(12).map(|(_, l)| l.as_str()).collect();
+        let Some((_, from)) = text.split_once(needle) else { return String::new() };
+        let mut depth = 1_u32;
+        let mut call = needle.to_owned();
+        for c in from.chars() {
+            call.push(c);
+            match c {
+                '(' => depth = depth.saturating_add(1),
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        call.split_whitespace().collect()
+    }
+
+    /// A status glyph in a text tone: `status_icon` or a filled circle or triangle symbol
+    /// handed `warn`, `error`, `success` or `accent` rather than their fill step.
+    fn glyph_in_text_tone(call: &str) -> Option<&'static str> {
+        let glyph = call.starts_with("status_icon(")
+            || (call.starts_with("icon(")
+                && (call.contains("CircleFill") || call.contains("TriangleFill")));
+        (glyph && names_text_tone(call))
+            .then_some("a status glyph in a text tone; it wears the `_fill` step (`Status::ink`)")
+    }
+
+    #[test]
+    fn the_glyph_tone_check_knows_a_fill_from_a_text_tone() {
+        assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(s.warn))").is_some());
+        assert!(
+            glyph_in_text_tone("icon(theme,Symbol::XmarkCircleFill,size,hsla(s.error))").is_some()
+        );
+        assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(s.warn_fill))").is_none());
+        assert!(glyph_in_text_tone("icon(theme,Symbol::Bell,size,hsla(s.warn))").is_none());
+        assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(ink))").is_none());
+    }
+
+    /// A status glyph wears its hue's fill step, never the text tone: the text steps are for
+    /// words, and a glyph in one read dimmer than its neighbours' (`docs/decisions/ui.md`,
+    /// "State is a glyph").
+    #[test]
+    fn a_status_glyph_wears_its_fill() {
+        let mut wrong = Vec::new();
+        for (file, lines) in chrome_files() {
+            for (ix, (line_no, line)) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for needle in ["status_icon(", "icon("] {
+                    let whole = line.split_once(needle).is_some_and(|(before, _)| {
+                        !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
+                    });
+                    if !whole {
+                        continue;
+                    }
+                    if let Some(why) = glyph_in_text_tone(&call_at(&lines, ix, needle)) {
+                        wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A colour picked at a call site rather than taken from the theme: a hex or channel
     /// literal handed to GPUI. The tokens derive every colour from the content, so a literal
-    /// is the one colour a custom background or Increase Contrast cannot move.
+    /// is the one colour a custom background cannot move.
     fn raw_colour(line: &str) -> Option<&'static str> {
         let code = !line.trim_start().starts_with("//");
         let literal = ["Rgb::hex(", "gpui::rgb(", "gpui::rgba(", "gpui::hsla(", "Rgb { r:"];
@@ -2718,9 +2873,9 @@ mod tests {
     }
 
     /// A card rests: in light white with the quieter hairline round it and a contact shadow,
-    /// one edge and no rim; in dark the hover wash, no shadow, light along its top edge, and a
-    /// hairline only under Increase Contrast. A card cut into parts lights only its first part's
-    /// top in dark and casts its contact only under the last part in light.
+    /// one edge and no rim; in dark the hover wash, no shadow, light along its top edge, and no
+    /// hairline. A card cut into parts lights only its first part's top in dark and casts its
+    /// contact only under the last part in light.
     #[test]
     fn a_card_rests_on_its_rim() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2758,8 +2913,6 @@ mod tests {
             assert_eq!((lit(true, false), lit(false, true)), (!light, false), "{variant:?}");
             assert!(!lit(false, false), "{variant:?}: a middle part has no rim");
         }
-        let theme = Theme { contrast: slopty_theme::Contrast::Increased, ..Theme::default() };
-        assert!(card(&theme).style().border_widths.top.is_some(), "ringed at more contrast");
     }
 
     /// What is sunk holds shade inside its top edge, a point past any border, and in dark a
@@ -2887,7 +3040,7 @@ mod tests {
         let boxed = (squeezed.contains(".h(px(1.0))") || squeezed.contains(".w(px(1.0))"))
             && squeezed.contains(".bg(hsla(")
             && squeezed.contains("border");
-        (preset || boxed).then_some("a hairline a point wide, not `kit::hair` or `kit::rule`")
+        (preset || boxed).then_some("a hairline a point wide, not `kit::HAIR` or `kit::rule`")
     }
 
     #[test]
@@ -2896,19 +3049,19 @@ mod tests {
         assert!(thick_hairline(".border_1().border_color(hsla(s.border))").is_some());
         assert!(thick_hairline(".when(first, gpui::Styled::border_t_1)").is_some());
         assert!(thick_hairline("div().h(px(1.0)).bg(hsla(s.border_subtle))").is_some());
-        assert!(thick_hairline(".border_b(kit::hair(theme))").is_none());
+        assert!(thick_hairline(".border_b(kit::HAIR)").is_none());
         assert!(thick_hairline(".border(px(slopty_theme::stroke::EDGE))").is_none(), "an edge");
         assert!(thick_hairline(".border_x_0()").is_none(), "no border");
         assert!(thick_hairline(".when(x, gpui::Styled::border_dashed)").is_none(), "a style");
         assert!(thick_hairline("// .border_1()").is_none(), "a comment");
     }
 
-    /// Every border chrome draws is a hairline, one device pixel ([`hair`], a point under
-    /// Increase Contrast), or a named stroke that marks something (`stroke::EDGE`,
-    /// `stroke::MARK`). At a full point each rule was two pixels on a Retina screen.
+    /// Every border chrome draws is a hairline, one device pixel ([`HAIR`]), or a named stroke that
+    /// marks something (`stroke::EDGE`, `stroke::MARK`). At a full point each rule was two
+    /// pixels on a Retina screen.
     #[test]
     fn a_chrome_border_is_kit_hair() {
-        // Call sites whose owners move them onto `kit::hair` in their next change.
+        // Call sites whose owners move them onto `kit::HAIR` in their next change.
         const AWAITING: [&str; 0] = [];
         let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
@@ -3063,17 +3216,13 @@ mod tests {
     }
 
     /// A painted hairline is whole device pixels, never under one, as GPUI snaps a border: one
-    /// at 1x, 2x and 3x, and a point's worth under Increase Contrast.
+    /// at 1x, 2x and 3x.
     #[test]
     fn a_painted_hairline_is_one_device_pixel() {
-        let mut theme = Theme::default();
         for scale in [1.0_f32, 2.0, 3.0] {
-            let device = f32::from(hair_painted(&theme, scale)) * scale;
+            let device = f32::from(hair_painted(scale)) * scale;
             assert!((device - 1.0).abs() < 1e-4, "{scale}x: {device} device pixels");
         }
-        theme.contrast = slopty_theme::Contrast::Increased;
-        let device = f32::from(hair_painted(&theme, 2.0)) * 2.0;
-        assert!((device - 2.0).abs() < 1e-4, "a point at 2x: {device}");
     }
 
     /// The ruling in `docs/decisions/ui.md`, as a check rather than a paragraph: chrome takes

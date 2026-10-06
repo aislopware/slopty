@@ -1702,7 +1702,7 @@ impl TerminalView {
                 // The grid's own background, the program's when it set one: the header stands
                 // where the top row was, parted from the output under it by the block hairline.
                 .bg(hsla(Colors::new(&theme.terminal, self.state.colors()).theme.bg))
-                .border_b(crate::kit::hair(theme))
+                .border_b(crate::kit::HAIR)
                 .border_color(super::element::separator_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
@@ -4582,7 +4582,7 @@ mod tests {
         };
         let mut out = Vec::new();
         for q in &quads {
-            let hair = crate::kit::hair_painted(&Theme::default(), scale);
+            let hair = crate::kit::hair_painted(scale);
             if !(near(q.bounds.size.height, hair)
                 && near(q.bounds.size.width, bounds.size.width)
                 && near(q.bounds.origin.x, bounds.origin.x))

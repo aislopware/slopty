@@ -4519,7 +4519,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Colour goes to what needs the person: one vocabulary of five words** (2026-10-01, the
   GUI-first brief, `.research/gui-first-2026-10-01/plan.md` §4.1). This amends the 2026-09-05
-  rule that the busy states wear the accent.
+  rule that the busy states wear the accent. (Amended 2026-10-06 by "State is a glyph; colour
+  is a hue per state and an identity per machine": the marks below are glyphs in their fills,
+  a finish is a green check rather than the accent dot, and Working's glyph is blue.)
   - **The words.** *Needs you* in `warn`, *Failed* in `error`, *Working* and *Waiting* in
     `text_muted`, and a finish not yet seen as the accent dot with no word. Rest shows
     nothing, only the kind's glyph. `Status::Running` reads "Waiting", and its calm mark is a
@@ -4626,7 +4628,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `attention::tests::nothing_notifies_while_the_person_is_at_another_device` and
     `an_agent_that_ended_unseen_is_listed_to_review`.
 
-- ✅ **Increase Contrast derives its own chrome** (2026-10-02, GUI-first plan, accessibility).
+- ❌ **Increase Contrast derives its own chrome** (2026-10-02, GUI-first plan, accessibility;
+  superseded 2026-10-06 by "Light and dark only; the Increase Contrast variant is deleted").
   The system's Increase Contrast (iOS: Darker System Colors) sets `Theme::contrast` before
   `derive_chrome`, so a `[colors]` background gets the contrasted chrome too, and the app
   follows the setting as it changes (`watch_increase_contrast`; a self-test keeps the
@@ -6957,7 +6960,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
   `.research/icons-2026-10-05.md` §4.3–4.4 and §5, steps 3 to 5 of its plan). Supersedes "One
-  icon set at one weight" above. At 1x, the person's view, only 14 % of the Hugeicons ink
+  icon set at one weight" above. (Amended 2026-10-06 by "State is a glyph": the empty and
+  dashed rings are painted by `icons::Ring`, since SF's `circle.dashed` lost its gaps at 1x.) At 1x, the person's view, only 14 % of the Hugeicons ink
   pixels were solid; SF Symbols at the text's size have 77 % more, and sharpen and grey with
   the system font beside them.
   - **The platform draws them** (`slopty_platform::symbols`). A `Symbol` is one of a closed
@@ -7569,3 +7573,76 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the 17 pt rows by weight, not by size. Tests: `a_phone_bar_is_a_navigation_bar`,
   `a_phone_drawer_names_the_workspace`. Golden: `thread-phone`; the iOS phone goldens are
   retaken on the simulator.
+- ✅ **State is a glyph; colour is a hue per state and an identity per machine** (2026-10-06,
+  `.research/status-color-2026-10-06.md`, checkpoint 1 of its build order; amends "Colour goes
+  to what needs the person" and "The chrome's icons are SF Symbols", and overrules the earlier
+  studies where its §8 says so). The person found the status marks plain and asked for colour
+  with elegance. Every reference (Linear, the Codex app, T3 Code, Warp, Raycast) gives a state
+  one glyph in one hue and keeps the words beside it neutral; none draws a state as a dot.
+  - **One family of circles.** Needs you is `exclamationmark.circle.fill` in `warn_fill`,
+    failed `xmark.circle.fill` in `error_fill`, a finish not yet seen
+    `checkmark.circle.fill` in `success_fill` (it fades in over `Pace::Settle`, at once under
+    Reduce Motion), working the stepped spokes in `working_fill`. Waiting is a dashed ring
+    and idle, where a mark is needed, an empty ring, both muted. Away keeps `wifi.slash`.
+    Rows still show nothing at rest.
+  - **The rings are ours** (`icons::Ring`: `Empty`, `Dashed`, `Pie(share)`). SF's
+    `circle.dashed` drew gaps under a device pixel at 1x and read as a plain circle. The
+    painter puts the outer edge on the device grid and strokes a whole number of device
+    pixels, one at 1x. A dashed ring's six gaps are two pixels or more there.
+  - **The board speaks the same family** (`icons::Phase`, named so because the project model
+    already has a `Stage`). Up next is the empty ring, verifying a pie of its share (half
+    while unknown) in `working_fill`, ready to merge `checkmark.circle` in `success_fill`,
+    merged the filled check in `merged_fill`, violet as GitHub's merged is. A lane head leads
+    with its lane's glyph at the small size. A card follows its agent once one is on it.
+  - **Two hues and an identity set join the theme.** `working`/`working_fill` (OKLCH hue 250)
+    and `merged`/`merged_fill` (300), each a text step and a fill step, plus `identity`, eight
+    hues for a machine's or a project's own glyph (identity colour itself is the next
+    checkpoint). Every fill sits at one lightness per mode: 0.72 in dark, 0.58 to 0.64 in
+    light. Amber keeps its own (OKLCH yellow at 0.6 is olive), and so does red, since at the
+    others' higher lightness red turns pink and it stays where the colour-blind pairs pinned
+    it. The identity set leaves out red, amber, green, blue and violet. Each of its hues
+    stands 20 degrees or more from every status hue, so the spec's purple moved to a magenta
+    at 325 (it sat 10 from merged) and indigo to 272.
+  - **A glyph carries the hue; words stay neutral.** `Status::ink` is the fill step and
+    `Status::word` a neutral tone, failure alone keeping `error`. Inside a thread's stream the
+    spinner stays muted (`Status::quiet_ink`). The bell's count, when only reviews are unread,
+    is the green fill, not the accent.
+  - **Dots are gone.** The navigator's unseen dot, the rollups', the stream health's, the
+    unreachable server's and the lane heads' are glyphs now. A file's unsaved dot is the word
+    "Edited" after its name (a label in `text_muted`, as macOS's "— Edited"), and a
+    miniature's state says "Edited" too.
+  - Tests: theme `status_fills_share_one_lightness`, `identity_keeps_clear_of_the_states`,
+    `a_status_fill_reads_as_a_mark`, `vision::working_merged_and_done_marks_stay_apart`;
+    icons `each_status_has_its_own_mark`,
+    `a_status_wears_its_fill_and_its_word_stays_neutral`,
+    `ring::tests::a_ring_is_one_device_pixel_at_1x`, `a_dashed_ring_shows_its_gaps_at_1x`,
+    `the_pie_fills_its_share_clockwise_from_twelve`; the kit lints
+    `a_state_is_a_glyph_not_a_dot` (a filled, childless `rounded_full` box anywhere in the
+    chrome, the two switch knobs and the brand mark's dots ruled out of it) and
+    `a_status_glyph_wears_its_fill` (no status glyph handed a text tone);
+    `workspace::tests::bodies::edited_follows_the_title`,
+    `frame::an_unseen_check_marks_a_finished_tile_until_it_is_looked_at`.
+- ✅ **Light and dark only; the Increase Contrast variant is deleted** (2026-10-06, ruled with the
+  status-colour pass). Supersedes "Increase Contrast derives its own chrome" and the Increase
+  Contrast clauses of every entry above that carries one: the focused tile's line, the
+  calm-and-green pass, the frame's focus line, focus as a line, the elevations, stage 3 of the
+  design-systems study, the APCA floor, colour-blind pairs, a field on its page, a focused
+  field, the glass under the navigator, "A control's outline reads 3:1" (3:1 stands; the
+  level over it is gone) and the hairline entry (`Theme::hair` and its full point).
+  - **What goes.** `slopty_theme::Contrast`, `Theme::contrast`, `Theme::set_back`,
+    `Theme::hair` and the `HAIR_CONTRAST` stroke. `Surfaces::derive` takes the content alone
+    and `field_focus` no contrast. The kit's ringed-in-dark branches (cards, fields, the
+    search field, the segmented thumb), the overview's flush ring, the progress track's
+    louder tone, `slopty_platform::motion::watch_increase_contrast` and
+    `increase_contrast`, the app's watch, the self-test's `Command::Contrast` and the
+    `workspace-navigator-contrast` golden.
+  - **The hairline is a constant.** `kit::hair(theme)` is `kit::HAIR`, `kit::hair_painted`
+    takes the scale alone, and `kit::rule`/`rule_v` take the tint alone; each was handed a
+    theme only to read the contrast.
+  - **What stays.** The terminal's `minimum_contrast` (the program's colours lifted to read,
+    ghostty's setting) and its per-frame memo. Under the system's Reduce Transparency AppKit
+    still draws the glass solid by itself.
+  - Tests: the theme's contrast-looping tests read the one look; the tests of the variant
+    itself (`increase_contrast_raises_text_and_hairlines`,
+    `the_chrome_follows_the_theme_s_contrast`, the hairline's point and the stage's black)
+    went with it, as did the app's `increase_contrast_derives_the_chrome_for_it`.

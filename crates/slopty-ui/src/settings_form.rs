@@ -1657,7 +1657,7 @@ impl SettingsForm {
                     div()
                         .flex_none()
                         .h(px(theme.typography.small()))
-                        .border_l(crate::kit::hair(theme))
+                        .border_l(crate::kit::HAIR)
                         .border_color(hsla(s.border_subtle))
                         .when(beside, gpui::Styled::invisible)
                         .into_any_element(),
@@ -1901,7 +1901,7 @@ impl SettingsForm {
                         .flex_none()
                         .size(px(theme.typography.icon()))
                         .rounded(px(theme.radii.xs))
-                        .border(crate::kit::hair(theme))
+                        .border(crate::kit::HAIR)
                         .border_color(hsla(s.border))
                         .bg(hsla(colour))
                 })
@@ -1981,7 +1981,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
                 .child(
                     div()
                         .when(parted && !first, |el| {
-                            el.border_t(crate::kit::hair(theme)).border_color(hsla(s.border_subtle))
+                            el.border_t(crate::kit::HAIR).border_color(hsla(s.border_subtle))
                         })
                         .child(child),
                 )

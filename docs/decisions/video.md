@@ -2630,7 +2630,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The bars round a picture of another aspect were the tile's content colour, so in the light
   appearance a dark desktop sat between wide white bands and its edge was lost.
   - The body behind a picture is `surfaces.stage`: a neutral near-black (`STAGE`, #0a0a0a) in
-    both appearances, and black under Increase Contrast. Every remote-desktop client checked
+    both appearances (black under Increase Contrast until that variant was deleted on
+    2026-10-06, `ui.md` "Light and dark only"). Every remote-desktop client checked
     letterboxes on black (RustDesk, Moonlight, Jump Desktop), as the HIG's video guidance does.
   - Only the body is the stage. The header stays on the theme, and a tile still waiting for its
     first picture is the page its words are on, since muted text does not read on near-black

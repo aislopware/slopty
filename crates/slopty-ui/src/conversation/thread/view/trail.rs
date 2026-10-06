@@ -121,7 +121,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.sm))
                 .min_h(self.z(kit::Row::One.height(theme)))
-                .border_b(kit::hair(theme))
+                .border_b(kit::HAIR)
                 .border_color(hsla(s.border_subtle))
                 .child(self.icon_button("thread-back", Symbol::ChevronLeft, "Back").on_click(
                     cx.listener(|this, _ev, window, cx| {

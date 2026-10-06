@@ -545,15 +545,6 @@ fn apply(
             crate::invite::open_link(url);
             Reply::Ok
         }
-        Command::Contrast { increased } => {
-            let contrast = if increased {
-                slopty_theme::Contrast::Increased
-            } else {
-                slopty_theme::Contrast::Standard
-            };
-            workspace.update(cx, |ws, cx| ws.set_contrast(contrast, cx));
-            Reply::Ok
-        }
         Command::Resume { what } => match slopty_platform::resume::Resume::named(&what) {
             Some(resume) => {
                 workspace.read(cx).resume(resume);

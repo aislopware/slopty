@@ -120,12 +120,6 @@ pub enum Command {
         /// The resume's name.
         what: String,
     },
-    /// Derive the chrome as the system's Increase Contrast would have it, on or off. The app's
-    /// own setting is stood in for; this Mac's is never read or changed.
-    Contrast {
-        /// Increase Contrast is on.
-        increased: bool,
-    },
     /// Ask the server to forget a worker it lists as not online, as the hosts popover's Forget
     /// does; it leaves the app when the directory unlists it.
     ForgetWorker {

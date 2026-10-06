@@ -4,9 +4,10 @@
 //! A [`Symbol`] is one of a closed list. A file's type is one of nine of them
 //! ([`FileType::symbol`]). An agent wears its owner's mark ([`AgentMark`]), drawn by us from
 //! the owner's outline into the same kind of mask, and an agent with none the neutral
-//! [`AGENT`]. Nothing else is drawn by us but the working mark's twelve spokes and the dot of a
-//! finish not yet seen (`docs/decisions/ui.md`, "The chrome's icons are SF Symbols";
-//! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
+//! [`AGENT`]. Nothing else is drawn by us but the working mark's twelve spokes and the rings of
+//! a state ([`Ring`]), which SF cannot draw crisp at 1x (`docs/decisions/ui.md`, "The chrome's
+//! icons are SF Symbols" and "State is a glyph"; `docs/decisions/brand.md`, "Each agent wears
+//! its owner's mark").
 //!
 //! An icon takes its size from the type scale: [`IconSize::Inline`] sits in the slot
 //! [`slopty_theme::Typography::icon`] beside the chrome's secondary text and is drawn at that
@@ -20,9 +21,9 @@ use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId, Global,
-    GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, PathBuilder, Pixels, Point, ScaledPixels, SharedString, Stateful,
+    AnimationExt as _, AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId,
+    Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement,
+    LayoutId, ParentElement as _, PathBuilder, Pixels, Point, ScaledPixels, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, TransformationMatrix, Window, canvas, div, point,
     px, radians,
 };
@@ -35,8 +36,10 @@ use crate::colors::hsla;
 pub use crate::file_types::FileType;
 
 mod marks;
+mod ring;
 
 pub use marks::AgentMark;
+pub use ring::Ring;
 
 /// The thread of an agent with no mark of its own ([`AgentMark::Neutral`]), an ACP agent's:
 /// one neutral mark in the ink beside it, a conversation, its agent named in words.
@@ -461,12 +464,14 @@ pub fn symbol(theme: &Theme, symbol: impl Into<Mark>, side: Pixels, ink: Hsla) -
 }
 
 /// The one vocabulary for how a thing is doing, wherever it is shown: a tile's header, a
-/// navigator row, the palette, a toast. Each state has one icon and one tone, so a glance
+/// navigator row, the palette, a toast. Each state has one glyph and one hue, so a glance
 /// reads the same everywhere.
 ///
-/// Colour goes only to what needs the person: *Needs you* in `warn`, *Failed* in `error`, and
-/// the accent dot of a finish not yet seen. Busy states recede into the muted tone, and so does
-/// a worker out of reach, so `warn` means "needs you" and nothing else.
+/// Every state is a glyph, never a dot: one family of circles, filled where it carries colour
+/// (`docs/decisions/ui.md`, "State is a glyph"). The glyph carries the hue and the words beside
+/// it stay neutral: working blue, needs you amber, failed red and a finish not yet seen green,
+/// each in its mark's fill step ([`Status::ink`]). Waiting, idle and a worker out of reach are
+/// grey, so amber means "needs you" and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     /// Nothing to say: a shell at its prompt, an agent at rest.
@@ -487,30 +492,52 @@ pub enum Status {
 }
 
 impl Status {
-    /// The symbol that marks it; `None` for the two marks drawn by us, the working mark's
-    /// spokes and the dot of a finish ([`status_icon`]). The two that carry colour are filled,
-    /// so the colour has a body at 1x.
+    /// The symbol that marks it; `None` for the marks drawn by us, the working mark's spokes
+    /// and the rings of idle and waiting ([`status_icon`]). The three that carry colour are
+    /// filled, so the colour has a body at 1x.
     #[must_use]
     pub const fn symbol(self) -> Option<Symbol> {
         match self {
-            Self::Idle => Some(Symbol::Circle),
-            Self::Working | Self::Done => None,
-            Self::Running => Some(Symbol::CircleDashed),
+            Self::Idle | Self::Working | Self::Running => None,
             Self::NeedsYou => Some(Symbol::ExclamationmarkCircleFill),
+            Self::Done => Some(Symbol::CheckmarkCircleFill),
             Self::Failed => Some(Symbol::XmarkCircleFill),
             Self::Away => Some(Symbol::WifiSlash),
         }
     }
 
-    /// Its tone.
+    /// Its glyph's ink: the hue's mark step, never its text step, so a glyph has the body a
+    /// mark needs on both grounds. Working blue, needs you amber, failed red, done green; the
+    /// rest grey.
     #[must_use]
-    pub const fn tone(self, theme: &Theme) -> Rgb {
+    pub const fn ink(self, theme: &Theme) -> Rgb {
         let s = &theme.surfaces;
         match self {
-            Self::Idle | Self::Working | Self::Running | Self::Away => s.text_muted,
-            Self::NeedsYou => s.warn,
-            Self::Done => s.accent,
-            Self::Failed => s.error,
+            Self::Idle | Self::Running | Self::Away => s.text_muted,
+            Self::Working => s.working_fill,
+            Self::NeedsYou => s.warn_fill,
+            Self::Done => s.success_fill,
+            Self::Failed => s.error_fill,
+        }
+    }
+
+    /// Its glyph's ink where colour stays out, inside a thread's stream and over a drop: the
+    /// working mark grey, every other as [`Self::ink`].
+    #[must_use]
+    pub const fn quiet_ink(self, theme: &Theme) -> Rgb {
+        match self {
+            Self::Working => theme.surfaces.text_muted,
+            _ => self.ink(theme),
+        }
+    }
+
+    /// The tone of its word beside the glyph: neutral, but a failure's, which keeps the
+    /// failure's text tone.
+    #[must_use]
+    pub const fn word(self, theme: &Theme) -> Rgb {
+        match self {
+            Self::Failed => theme.surfaces.error,
+            _ => theme.surfaces.text_muted,
         }
     }
 
@@ -543,21 +570,111 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
         .items_center()
         .justify_center();
     match status {
+        Some(Status::Done) => {
+            slot.role(Role::Image).aria_label(Status::Done.label()).child(Arrive {
+                child: Some(div().flex_none().child(status_icon(
+                    theme,
+                    Status::Done,
+                    px(theme.typography.icon() * k),
+                    hsla(Status::Done.ink(theme)),
+                ))),
+                inner: None,
+            })
+        }
         Some(status) => slot.role(Role::Image).aria_label(status.label()).child(status_icon(
             theme,
             status,
             px(theme.typography.icon() * k),
-            hsla(status.tone(theme)),
+            hsla(status.ink(theme)),
         )),
         None => slot,
     }
 }
 
+/// A finish's check arriving: it fades in over [`crate::kit::Pace::Settle`] the first frame its
+/// slot shows it, and under Reduce Motion it is there at once. It reads the setting as it is
+/// laid out, as the working mark does, so no caller hands it the app.
+struct Arrive {
+    child: Option<Div>,
+    inner: Option<AnyElement>,
+}
+
+impl IntoElement for Arrive {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Arrive {
+    type PrepaintState = ();
+    type RequestLayoutState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let child = self.child.take().unwrap_or_else(div);
+        let mut inner = if crate::kit::motion(cx) {
+            child
+                .with_animation("arrive", crate::kit::Pace::Settle.animation(), |el, t| {
+                    el.opacity(t)
+                })
+                .into_any_element()
+        } else {
+            child.into_any_element()
+        };
+        let layout = inner.request_layout(window, cx);
+        self.inner = Some(inner);
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        if let Some(inner) = &mut self.inner {
+            inner.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(inner) = &mut self.inner {
+            inner.paint(window, cx);
+        }
+    }
+}
+
 /// `status` as an empty state's mark, in `color` at the chrome's zoom `k`.
 ///
-/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working spokes or
-/// the dot of a finish at the heading's size, so a tile's state reads at the size of the
-/// notice it heads.
+/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working spokes or a
+/// ring at the heading's size, so a tile's state reads at the size of the notice it heads.
 #[must_use]
 pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyElement {
     match status.symbol() {
@@ -572,29 +689,126 @@ pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyE
 ///
 /// [`Status::Working`]'s spokes step round ([`spin_step`]), the only mark that moves;
 /// [`Status::Running`] (waiting on its own background work) is a still dashed ring, since a mark
-/// that moves says work is in progress; [`Status::Done`] is a dot, the navigator's unseen one at
-/// that size, centred where an icon would be.
+/// that moves says work is in progress; [`Status::Idle`] is an empty ring, for the places a mark
+/// is required. The rest are their symbols.
 #[must_use]
 pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> AnyElement {
     match status {
         Status::Working => Spinner { side, color, inner: None }.into_any_element(),
-        Status::Done => {
-            let dot = side * ((theme.spacing.xs + theme.spacing.xxs) / theme.typography.icon());
-            div()
-                .flex_none()
-                .size(side)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(dot).rounded_full().bg(color))
-                .into_any_element()
-        }
+        Status::Idle => Ring::Empty.draw(side, color),
+        Status::Running => Ring::Dashed.draw(side, color),
         _ => match status.symbol() {
             Some(symbol) => {
                 icon(theme, symbol, IconSize::Inline, color).size(side).into_any_element()
             }
             None => div().flex_none().size(side).into_any_element(),
         },
+    }
+}
+
+/// Where a task stands in its life on a project's board, as its lane says.
+///
+/// The same family of circles as [`Status`], from up next's empty ring through verifying's pie
+/// to merged's violet check (`docs/decisions/ui.md`, "State is a glyph"). Not a pipeline's
+/// stage (`project::model::Stage`), which is a step of a task's way to the merge.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Phase {
+    /// An agent waits on the person.
+    NeedsYou,
+    /// Given up.
+    Failed,
+    /// An agent is on it.
+    Working,
+    /// Its agent waits on work of its own in the background.
+    Waiting,
+    /// Made, and nothing runs for it yet.
+    UpNext,
+    /// Its verifier runs, this share of the way.
+    Verifying(f32),
+    /// Its verifier passed; it waits for the merge.
+    ReadyToMerge,
+    /// On the target branch.
+    Merged,
+}
+
+impl Phase {
+    /// How far a verifier is said to be along when nothing says: half.
+    pub const VERIFYING: Self = Self::Verifying(0.5);
+
+    /// A lane's stage, the one its head wears.
+    #[must_use]
+    pub const fn of(lane: crate::project::model::Lane) -> Self {
+        use crate::project::model::Lane;
+        match lane {
+            Lane::NeedsYou => Self::NeedsYou,
+            Lane::Failed => Self::Failed,
+            Lane::Working => Self::Working,
+            Lane::UpNext => Self::UpNext,
+            Lane::Verifying => Self::VERIFYING,
+            Lane::ReadyToMerge => Self::ReadyToMerge,
+            Lane::Merged => Self::Merged,
+        }
+    }
+
+    /// The stage a live agent's `status` puts a task it works on in: its own lane's, unless
+    /// the agent says more.
+    #[must_use]
+    pub const fn with_agent(self, status: Status) -> Self {
+        match status {
+            Status::NeedsYou => Self::NeedsYou,
+            Status::Failed => Self::Failed,
+            Status::Working => Self::Working,
+            Status::Running => Self::Waiting,
+            Status::Idle | Status::Done | Status::Away => self,
+        }
+    }
+
+    /// Its glyph's ink.
+    #[must_use]
+    pub const fn ink(self, theme: &Theme) -> Rgb {
+        let s = &theme.surfaces;
+        match self {
+            Self::NeedsYou => s.warn_fill,
+            Self::Failed => s.error_fill,
+            Self::Working | Self::Verifying(_) => s.working_fill,
+            Self::Waiting | Self::UpNext => s.text_muted,
+            Self::ReadyToMerge => s.success_fill,
+            Self::Merged => s.merged_fill,
+        }
+    }
+
+    /// Its name for the accessibility tree.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Failed => "Failed",
+            Self::Working => "Working",
+            Self::Waiting => "Waiting",
+            Self::UpNext => "Up next",
+            Self::Verifying(_) => "Verifying",
+            Self::ReadyToMerge => "Ready to merge",
+            Self::Merged => "Merged",
+        }
+    }
+
+    /// Its glyph, `side` square, in its ink.
+    #[must_use]
+    pub fn glyph(self, theme: &Theme, side: Pixels) -> AnyElement {
+        let ink = hsla(self.ink(theme));
+        let symbol = |symbol: Symbol| {
+            icon(theme, symbol, IconSize::Inline, ink).size(side).into_any_element()
+        };
+        match self {
+            Self::NeedsYou => symbol(Symbol::ExclamationmarkCircleFill),
+            Self::Failed => symbol(Symbol::XmarkCircleFill),
+            Self::Working => status_icon(theme, Status::Working, side, ink),
+            Self::Waiting => Ring::Dashed.draw(side, ink),
+            Self::UpNext => Ring::Empty.draw(side, ink),
+            Self::Verifying(share) => Ring::Pie(share).draw(side, ink),
+            Self::ReadyToMerge => symbol(Symbol::CheckmarkCircle),
+            Self::Merged => symbol(Symbol::CheckmarkCircleFill),
+        }
     }
 }
 
@@ -1022,17 +1236,41 @@ mod tests {
         }
     }
 
-    /// Each status the OS draws has its own symbol, and the two that carry colour are filled;
-    /// working and done are ours.
+    /// Each status the OS draws has its own symbol, and the three that carry colour are
+    /// filled; working's spokes and the idle and waiting rings are ours.
     #[test]
     fn each_status_has_its_own_mark() {
-        let all = [Status::Idle, Status::Running, Status::NeedsYou, Status::Failed, Status::Away];
+        let all = [Status::NeedsYou, Status::Done, Status::Failed, Status::Away];
         let symbols: std::collections::HashSet<_> = all.iter().filter_map(|s| s.symbol()).collect();
         assert_eq!(symbols.len(), all.len());
         assert_eq!(Status::NeedsYou.symbol(), Some(Symbol::ExclamationmarkCircleFill));
+        assert_eq!(Status::Done.symbol(), Some(Symbol::CheckmarkCircleFill));
         assert_eq!(Status::Failed.symbol(), Some(Symbol::XmarkCircleFill));
-        assert_eq!(Status::Working.symbol(), None);
-        assert_eq!(Status::Done.symbol(), None);
+        for ours in [Status::Idle, Status::Working, Status::Running] {
+            assert_eq!(ours.symbol(), None, "{ours:?} is drawn by us");
+        }
+    }
+
+    /// A glyph wears its hue's mark step, and grey where it says nothing needs a look; working
+    /// is grey only where colour stays out. A word beside it is neutral but a failure's.
+    #[test]
+    fn a_status_wears_its_fill_and_its_word_stays_neutral() {
+        for theme in
+            [Theme::new(slopty_theme::Variant::Dark), Theme::new(slopty_theme::Variant::Light)]
+        {
+            let s = &theme.surfaces;
+            assert_eq!(Status::Working.ink(&theme), s.working_fill);
+            assert_eq!(Status::NeedsYou.ink(&theme), s.warn_fill);
+            assert_eq!(Status::Done.ink(&theme), s.success_fill);
+            assert_eq!(Status::Failed.ink(&theme), s.error_fill);
+            assert_eq!(Status::Running.ink(&theme), s.text_muted);
+            assert_eq!(Status::Working.quiet_ink(&theme), s.text_muted);
+            assert_eq!(Status::NeedsYou.word(&theme), s.text_muted);
+            assert_eq!(Status::Failed.word(&theme), s.error);
+            assert_eq!(Phase::Merged.ink(&theme), s.merged_fill);
+            assert_eq!(Phase::of(crate::project::model::Lane::Verifying), Phase::VERIFYING);
+            assert_eq!(Phase::UpNext.with_agent(Status::Running), Phase::Waiting);
+        }
     }
 
     /// Twelve steps make one turn a second, each held a twelfth of a second, and the timer

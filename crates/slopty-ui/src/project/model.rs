@@ -1085,17 +1085,3 @@ pub const fn state_word(state: TaskState) -> &'static str {
         _ => Lane::of(state).title(),
     }
 }
-
-/// A task state as a status mark draws it.
-#[must_use]
-pub const fn state_status(state: TaskState) -> crate::icons::Status {
-    use crate::icons::Status;
-    match state {
-        TaskState::Planned => Status::Idle,
-        TaskState::Running | TaskState::Verifying => Status::Working,
-        TaskState::Waiting => Status::Running,
-        TaskState::Blocked => Status::NeedsYou,
-        TaskState::Done | TaskState::Merged => Status::Done,
-        TaskState::Failed => Status::Failed,
-    }
-}

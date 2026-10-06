@@ -217,7 +217,7 @@ impl WorkspaceView {
             .min_h_0()
             .mt(px(theme.spacing.xs))
             .pt(px(theme.spacing.sm))
-            .border_t(crate::kit::hair(theme))
+            .border_t(crate::kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .flex()
             .flex_col()
@@ -399,7 +399,7 @@ impl WorkspaceView {
         let state = if facts.conflict {
             "Changed on disk"
         } else if facts.unsaved {
-            "Unsaved"
+            "Edited"
         } else if digest.is_some_and(|d| d.read_only) {
             "Read only"
         } else {
@@ -617,7 +617,7 @@ impl WorkspaceView {
             .font_family(t.ui_family.clone())
             .text_size(px(t.small()))
             .bg(hsla(theme.content()))
-            .border_t(crate::kit::hair(theme))
+            .border_t(crate::kit::HAIR)
             .border_color(hsla(s.border_subtle))
             .child(name.flex_none().max_w_2_3())
             .children(meta);

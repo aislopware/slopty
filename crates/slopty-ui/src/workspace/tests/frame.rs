@@ -489,18 +489,18 @@ fn a_workers_tiles_come_in_order_of_attention(cx: &mut TestAppContext) {
 }
 
 /// A tile whose long command finished well while the human looked elsewhere carries the
-/// unseen dot at its row's end. The dot stands aside while the tile is at work, and goes once
-/// the tile is looked at. One that failed ends its row with the failure's mark instead, which
+/// unseen check at its row's end. The check stands aside while the tile is at work, and goes
+/// once the tile is looked at. One that failed ends its row with the failure's mark instead, which
 /// comes first.
 #[gpui::test]
-fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppContext) {
+fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let built = SessionId::new();
     let tile = opens(&view, cx, &studio, built, studio.me, 1);
     let _last = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
-    let dot = selector("nav-unseen", tile.item);
-    assert!(cx.debug_bounds(dot).is_none(), "nothing unseen yet");
+    let check = selector("nav-unseen", tile.item);
+    assert!(cx.debug_bounds(check).is_none(), "nothing unseen yet");
     view.update_in(cx, |v, _w, cx| {
         let done =
             Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
@@ -509,7 +509,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
     cx.run_until_parked();
     let (lane, at) = (
         cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
-        cx.debug_bounds(dot).expect("the dot"),
+        cx.debug_bounds(check).expect("the check"),
     );
     assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
     let said = labels(&view, cx);
@@ -521,7 +521,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
     });
     cx.run_until_parked();
     let failed = cx.debug_bounds(selector("nav-state", tile.item)).expect("the failure's mark");
-    assert!(cx.debug_bounds(dot).is_none(), "the failure comes first");
+    assert!(cx.debug_bounds(check).is_none(), "the failure comes first");
     assert!(lane.right() >= failed.right() && failed.left() > lane.center().x, "{failed:?}");
     assert!(labels(&view, cx).iter().any(|l| l == "make, Failed, unseen"), "named by what it ran");
 
@@ -529,14 +529,14 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(built) }, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds(dot).is_none(), "not while it works");
+    assert!(cx.debug_bounds(check).is_none(), "not while it works");
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(built) }, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds(dot).is_some(), "back once it rests");
+    assert!(cx.debug_bounds(check).is_some(), "back once it rests");
     click(cx, selector("nav-tile", tile.item));
-    assert!(cx.debug_bounds(dot).is_none(), "looked at");
+    assert!(cx.debug_bounds(check).is_none(), "looked at");
 }
 
 /// How many times the workspace draws in one second of a 120 Hz display: each tick delivers

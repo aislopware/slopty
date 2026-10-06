@@ -804,15 +804,11 @@ pub mod stroke {
     /// GPUI rounds a stroke to whole device pixels, never under one, so it is one pixel on a
     /// Retina screen, on a 1x one and on a 3x phone alike. Linear draws its borders this way; at a
     /// full point every rule on a Retina screen was two pixels and read as a ruled form. The
-    /// hairline shares are set for this width ([`crate::Theme::hair`] keeps a full point under
-    /// Increase Contrast).
+    /// hairline shares are set for this width.
     pub const HAIR: f32 = 0.5;
-    /// A hairline under Increase Contrast: a full point.
-    pub const HAIR_CONTRAST: f32 = 1.0;
     /// A point: a line that is a thing's own edge rather than a divider.
     ///
-    /// Seen whole at any contrast: an unticked box's outline, a drop target's ring, the cut round a
-    /// badge.
+    /// Seen whole: an unticked box's outline, a drop target's ring, the cut round a badge.
     pub const EDGE: f32 = 1.0;
     /// A line that marks one thing among its peers.
     ///
@@ -887,11 +883,8 @@ pub const BRAND: Rgb = Rgb::hex(0x004a_c06c);
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
 const AA: f32 = 4.5;
 
-/// WCAG AAA for body text: the least contrast chrome text has under Increase Contrast.
-const AAA: f32 = 7.0;
-
 /// WCAG's least contrast for what is seen but not read (1.4.11): a control's outline always
-/// reaches it, a dividing hairline under Increase Contrast, the quieter one a [`LEVEL`] under.
+/// reaches it.
 const NON_TEXT: f32 = 3.0;
 
 /// APCA's floor for secondary text on every ground it lands on: its 60 for content text that
@@ -982,8 +975,23 @@ pub struct Surfaces {
     /// Warn as a mark: the attention bar, the bell's badge, a dot, a wash. Amber in both
     /// variants, where the `warn` text tone is a dark ochre in the light one.
     pub warn_fill: Rgb,
-    /// Error as a mark: a failed block's wash, a dot, a badge.
+    /// Error as a mark: a failed block's wash, a failed glyph, a badge.
     pub error_fill: Rgb,
+    /// Working as text, for the rare word that has to say it in its hue. Blue.
+    pub working: Rgb,
+    /// Working as a mark: the working spokes in lists, headers, the board and the rollups,
+    /// so the most common state reads apart from idle at a glance. Blue, never the accent, a
+    /// link or the focus.
+    pub working_fill: Rgb,
+    /// Merged as text, for the rare word that has to say it in its hue. Violet.
+    pub merged: Rgb,
+    /// Merged as a mark: a merged task's check, a merged pull request's glyph. Violet, as
+    /// GitHub's merged is.
+    pub merged_fill: Rgb,
+    /// A machine's or a project's own colour, on its glyph alone, picked by a hash of its id
+    /// (`slopty_ui::kit::identity_ink`). Eight hues at the status fills' lightness, each kept
+    /// clear of every status hue, so a machine's glyph never reads as a state.
+    pub identity: [Rgb; IDENTITY_HUES],
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
     /// Text on the accent fill: a badge's count on the green. A near-black green in both
@@ -999,9 +1007,9 @@ pub struct Surfaces {
     /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
     pub brand: Rgb,
     /// What a remote window or display sits on where its picture does not reach: a neutral
-    /// near-black in both variants, as every remote-desktop client letterboxes, and black under
-    /// Increase Contrast. A remote screen is media, and dark bars keep its edge read as a
-    /// screen's (`docs/decisions/video.md`, "Remote pictures sit on a dark stage").
+    /// near-black in both variants, as every remote-desktop client letterboxes. A remote screen
+    /// is media, and dark bars keep its edge read as a screen's (`docs/decisions/video.md`,
+    /// "Remote pictures sit on a dark stage").
     pub stage: Rgb,
 }
 
@@ -1062,6 +1070,14 @@ struct Tones {
     error: Rgb,
     warn_fill: Rgb,
     error_fill: Rgb,
+    /// Working as text and as a mark.
+    working: Oklch,
+    working_fill: Oklch,
+    /// Merged as text and as a mark.
+    merged: Oklch,
+    merged_fill: Oklch,
+    /// The identity hues, at the fills' lightness.
+    identity: [Oklch; IDENTITY_HUES],
     fill_fg: Rgb,
     /// The solid's ink: the far end of the ladder from the text.
     solid_ink: Step,
@@ -1072,6 +1088,48 @@ pub const BRAND_OKLCH: Oklch = Oklch { l: 0.72, c: 0.16, h: 150.0 };
 
 /// A near-black of the brand's hue: words on a green mark, in both variants.
 const ON_GREEN: Oklch = Oklch { l: 0.22, c: 0.04, h: BRAND_OKLCH.h };
+
+/// How many identity colours there are ([`Surfaces::identity`]).
+pub const IDENTITY_HUES: usize = 8;
+
+/// The identity hues, in degrees, with their chroma as a share of the mode's: orange, lime,
+/// teal, sky, indigo, magenta, pink, and a sand at a third of it. Red, amber, green, blue and
+/// violet are the states' and are left out; each hue sits 20 degrees or more from every
+/// status hue, the sand excepted, since at its chroma it reads as no state. So indigo sits at
+/// 272, not 270, where a channel's rounding could bring it under 20 from working's 250, and
+/// the purple is a magenta at 325, since at 310 it sat 10 from merged's violet.
+const IDENTITY: [(f32, f32); IDENTITY_HUES] = [
+    (50.0, 1.0),
+    (125.0, 1.0),
+    (185.0, 1.0),
+    (225.0, 1.0),
+    (272.0, 1.0),
+    (325.0, 1.0),
+    (355.0, 1.0),
+    (85.0, 0.05 / 0.13),
+];
+
+/// The identity hues at lightness `l` and chroma `c`.
+const fn identity(light: f32, chroma: f32) -> [Oklch; IDENTITY_HUES] {
+    const fn one(light: f32, chroma: f32, (hue, share): (f32, f32)) -> Oklch {
+        Oklch { l: light, c: chroma * share, h: hue }
+    }
+    let [orange, lime, teal, sky, indigo, magenta, pink, sand] = IDENTITY;
+    [
+        one(light, chroma, orange),
+        one(light, chroma, lime),
+        one(light, chroma, teal),
+        one(light, chroma, sky),
+        one(light, chroma, indigo),
+        one(light, chroma, magenta),
+        one(light, chroma, pink),
+        one(light, chroma, sand),
+    ]
+}
+
+/// Working's hue, a blue (OKLCH), and merged's, a violet.
+const WORKING_HUE: f32 = 250.0;
+const MERGED_HUE: f32 = 300.0;
 
 /// Dark: the bars and the navigator sink toward black, everything above the content climbs
 /// toward the text.
@@ -1121,6 +1179,13 @@ const DARK_TONES: Tones = Tones {
     error: Rgb::hex(0xff9095),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
+    // The new hues at the green's lightness as a mark (0.72) and Radix's step 11 as text (0.80),
+    // so blue and violet are as loud as the green beside them.
+    working: Oklch { l: 0.80, c: 0.11, h: WORKING_HUE },
+    working_fill: Oklch { l: 0.72, c: 0.15, h: WORKING_HUE },
+    merged: Oklch { l: 0.80, c: 0.11, h: MERGED_HUE },
+    merged_fill: Oklch { l: 0.72, c: 0.15, h: MERGED_HUE },
+    identity: identity(0.72, 0.13),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
@@ -1170,6 +1235,13 @@ const LIGHT_TONES: Tones = Tones {
     error: Rgb::hex(0x8f0214),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
+    // A mark at 0.58, 3:1 and more on paper with the most chroma it holds there, and a word
+    // at 0.50, AA on paper.
+    working: Oklch { l: 0.50, c: 0.15, h: WORKING_HUE },
+    working_fill: Oklch { l: 0.58, c: 0.17, h: WORKING_HUE },
+    merged: Oklch { l: 0.50, c: 0.15, h: MERGED_HUE },
+    merged_fill: Oklch { l: 0.58, c: 0.17, h: MERGED_HUE },
+    identity: identity(0.58, 0.15),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::White, share: 1.0 },
 };
@@ -1258,13 +1330,9 @@ impl Surfaces {
     /// the focus tone set back toward the field's [`Self::elevated`] ground, so focus is said
     /// quietly. A near-black ring round a whole card was the loudest thing on the screen. It
     /// keeps the least of [`FIELD_FOCUS`] of the focus tone that still clears 3:1 against the
-    /// ground (WCAG 1.4.11, non-text contrast); under Increase Contrast it is the focus tone
-    /// whole.
+    /// ground (WCAG 1.4.11, non-text contrast).
     #[must_use]
-    pub fn field_focus(&self, contrast: Contrast) -> Rgb {
-        if contrast == Contrast::Increased {
-            return self.focus;
-        }
+    pub fn field_focus(&self) -> Rgb {
         let mut share = FIELD_FOCUS;
         loop {
             let edge = self.elevated.mix(self.focus, share);
@@ -1289,13 +1357,10 @@ impl Surfaces {
     /// cannot: no text colour reads 4.5:1 on both it and a step above it. There the tones
     /// go as far as black or white do.
     ///
-    /// Under [`Contrast::Increased`] every text tone, muted text included, clears AAA (7:1)
-    /// instead, and the hairlines are laid on thicker until the dividing one reads 3:1 on every
-    /// surface it crosses (WCAG's least for what is seen and not read), the quieter one a
-    /// level under it. The fills stay: a fill is seen by its hue, and the focus ring takes
-    /// the lifted accent.
+    /// The chrome is light and dark only, with no third look for the system's Increase
+    /// Contrast (`docs/decisions/ui.md`, "Light and dark only").
     #[must_use]
-    pub fn derive(content: Rgb, contrast: Contrast) -> Self {
+    pub fn derive(content: Rgb) -> Self {
         let t = if content.is_light() { LIGHT_TONES } else { DARK_TONES };
         let at = |step: Step| {
             let toward = match step.toward {
@@ -1320,14 +1385,7 @@ impl Surfaces {
         // A hairline is the ink laid over the surface, so over the content it is the step. It
         // crosses planes and the wells on them, never a selected fill.
         let crossed = grounds(hover);
-        let hairline = |step: Step, least: f32| match contrast {
-            Contrast::Standard => Tint::of(t.text, step.share),
-            Contrast::Increased => thicken(Tint::of(t.text, step.share), &crossed, least),
-        };
-        let floor = match contrast {
-            Contrast::Standard => AA,
-            Contrast::Increased => AAA,
-        };
+        let floor = AA;
         let tier = |share: f32| content.mix(t.text, share);
         let text_muted =
             lift_to(tier(t.text_muted), &under, t.pole, Floor { ratio: floor, lc: MUTED_LC });
@@ -1343,6 +1401,10 @@ impl Surfaces {
         let green = lift_to(t.accent.rgb(), &under, t.pole, word);
         let green_fill = t.accent_fill.rgb();
         let done = lift_to(t.success.rgb(), &under, t.pole, word);
+        let (working, merged) = (
+            lift_to(t.working.rgb(), &under, t.pole, word),
+            lift_to(t.merged.rgb(), &under, t.pole, word),
+        );
         Self {
             canvas,
             panel,
@@ -1351,16 +1413,9 @@ impl Surfaces {
             selected,
             pressed,
             band,
-            border: hairline(t.border, NON_TEXT),
-            border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
-            control: thicken(
-                Tint::of(t.text, t.border.share),
-                &crossed,
-                match contrast {
-                    Contrast::Standard => NON_TEXT,
-                    Contrast::Increased => NON_TEXT * LEVEL,
-                },
-            ),
+            border: Tint::of(t.text, t.border.share),
+            border_subtle: Tint::of(t.text, t.border_subtle.share),
+            control: thicken(Tint::of(t.text, t.border.share), &crossed, NON_TEXT),
             text,
             text_secondary,
             text_muted,
@@ -1373,15 +1428,17 @@ impl Surfaces {
             success_fill: t.success_fill.rgb(),
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
+            working,
+            working_fill: t.working_fill.rgb(),
+            merged,
+            merged_fill: t.merged_fill.rgb(),
+            identity: t.identity.map(Oklch::rgb),
             fill_fg: t.fill_fg,
             accent_ink: t.accent_ink.rgb(),
             solid: text,
             solid_ink: at(t.solid_ink),
             brand: BRAND,
-            stage: match contrast {
-                Contrast::Standard => STAGE,
-                Contrast::Increased => Rgb::hex(0),
-            },
+            stage: STAGE,
         }
     }
 }
@@ -1397,9 +1454,6 @@ impl Surfaces {
     /// washes over them: each text tone moves toward black or white only as far as that takes,
     /// as Apple's sidebars set their labels deeper on vibrancy, and no further than black or
     /// white themselves. Every other colour stays.
-    ///
-    /// Only under the standard contrast: Increase Contrast turns Reduce Transparency on, and the
-    /// navigator is opaque.
     #[must_use]
     pub fn on_glass(self) -> Self {
         let pole = if self.canvas.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
@@ -1421,6 +1475,8 @@ impl Surfaces {
             success: lift_to(self.success, &under, pole, word),
             warn: lift_to(self.warn, &under, pole, word),
             error: lift_to(self.error, &under, pole, word),
+            working: lift_to(self.working, &under, pole, word),
+            merged: lift_to(self.merged, &under, pole, word),
             ..self
         }
     }
@@ -1776,17 +1832,6 @@ pub enum Variant {
     Light,
 }
 
-/// The system's contrast setting (Increase Contrast on macOS and iOS), which the chrome
-/// follows.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
-pub enum Contrast {
-    /// The standard look.
-    #[default]
-    Standard,
-    /// Increase Contrast is on: what is set back at a share of its colour shows whole.
-    Increased,
-}
-
 /// How the terminal behaves: settings that are neither colours nor type but ride with them,
 /// so one `set_theme` reaches every view when the file changes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1947,8 +1992,6 @@ pub struct Theme {
     pub radii: Radii,
     /// The spacing scale.
     pub spacing: Spacing,
-    /// The system's contrast setting.
-    pub contrast: Contrast,
 }
 
 impl Default for Theme {
@@ -1974,20 +2017,19 @@ impl Theme {
         Self {
             terminal,
             behaviour: Behaviour::default(),
-            surfaces: Surfaces::derive(terminal.bg, Contrast::Standard),
+            surfaces: Surfaces::derive(terminal.bg),
             elevation: Elevation::of(terminal.bg),
             density: Density::default(),
             typography: Typography::default(),
             radii: Radii::default(),
             spacing: Spacing::default(),
-            contrast: Contrast::default(),
         }
     }
 
-    /// Derive the chrome again from the terminal's background and the contrast, after
-    /// something changed them (a `[colors]` background in the settings, Increase Contrast).
+    /// Derive the chrome again from the terminal's background, after something changed it (a
+    /// `[colors]` background in the settings).
     pub fn derive_chrome(&mut self) {
-        self.surfaces = Surfaces::derive(self.terminal.bg, self.contrast);
+        self.surfaces = Surfaces::derive(self.terminal.bg);
         self.elevation = Elevation::of(self.terminal.bg);
     }
 
@@ -1999,11 +2041,10 @@ impl Theme {
         self.terminal.bg
     }
 
-    /// The edge of a text field that has the keyboard, under this theme's contrast
-    /// ([`Surfaces::field_focus`]).
+    /// The edge of a text field that has the keyboard ([`Surfaces::field_focus`]).
     #[must_use]
     pub fn field_focus(&self) -> Rgb {
-        self.surfaces.field_focus(self.contrast)
+        self.surfaces.field_focus()
     }
 
     /// Which variant the colours are: light when the terminal's background reads as light,
@@ -2011,26 +2052,6 @@ impl Theme {
     #[must_use]
     pub const fn variant(&self) -> Variant {
         if self.terminal.bg.is_light() { Variant::Light } else { Variant::Dark }
-    }
-
-    /// The share `alpha` of a colour that is set back, or the whole colour under Increase
-    /// Contrast.
-    #[must_use]
-    pub const fn set_back(&self, alpha: f32) -> f32 {
-        match self.contrast {
-            Contrast::Standard => alpha,
-            Contrast::Increased => 1.0,
-        }
-    }
-
-    /// How wide a hairline is drawn, in points: one device pixel ([`stroke::HAIR`]), or a full
-    /// point under Increase Contrast, where the hairlines are also laid on thicker.
-    #[must_use]
-    pub const fn hair(&self) -> f32 {
-        match self.contrast {
-            Contrast::Standard => stroke::HAIR,
-            Contrast::Increased => stroke::HAIR_CONTRAST,
-        }
     }
 
     /// How lit an unlit dot of the mark is, over this theme's content.
@@ -2050,14 +2071,8 @@ mod vision;
 mod tests {
     use super::*;
 
-    /// What is set back shows at its share, and whole under Increase Contrast.
-    #[test]
-    fn increase_contrast_shows_what_is_set_back_whole() {
-        let mut theme = Theme::default();
-        assert!((theme.set_back(alpha::STRONG) - alpha::STRONG).abs() < f32::EPSILON);
-        theme.contrast = Contrast::Increased;
-        assert!((theme.set_back(alpha::STRONG) - 1.0).abs() < f32::EPSILON);
-    }
+    /// WCAG AAA for body text: what the primary solid's ink reads at.
+    const AAA: f32 = 7.0;
 
     #[test]
     fn palette_cube_and_greys() {
@@ -2096,7 +2111,7 @@ mod tests {
         assert_eq!(Theme::default().variant(), Variant::Dark);
         let light = Theme::new(Variant::Light);
         assert_eq!(light.variant(), Variant::Light);
-        assert_eq!(light.surfaces, Surfaces::derive(TerminalPalette::LIGHT.bg, Contrast::Standard));
+        assert_eq!(light.surfaces, Surfaces::derive(TerminalPalette::LIGHT.bg));
         assert_eq!(light.elevation, Elevation::LIGHT);
         assert_eq!(light.typography, Typography::default());
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
@@ -2320,20 +2335,18 @@ mod tests {
 
     /// The keyboard's ring is neutral, the chrome's text and not the green, so green keeps
     /// meaning live and done; drawn at its strength it clears 3:1 on every ground it rings,
-    /// on every background and at either contrast.
+    /// on every background.
     #[test]
     fn the_focus_ring_is_neutral_and_seen_everywhere() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            for contrast in [Contrast::Standard, Contrast::Increased] {
-                let s = Surfaces::derive(content, contrast);
-                assert_eq!(s.focus, s.text, "{name}: the ring is the text's tone");
-                assert_ne!(s.focus, s.accent, "{name}: not the green");
-                for (ground, under) in under_text(&s, content) {
-                    let ring = under.mix(s.focus, alpha::STRONG);
-                    let ratio = ring.contrast(under);
-                    assert!(ratio >= NON_TEXT, "{name} {contrast:?} on {ground}: {ratio:.2}");
-                }
+            let s = Surfaces::derive(content);
+            assert_eq!(s.focus, s.text, "{name}: the ring is the text's tone");
+            assert_ne!(s.focus, s.accent, "{name}: not the green");
+            for (ground, under) in under_text(&s, content) {
+                let ring = under.mix(s.focus, alpha::STRONG);
+                let ratio = ring.contrast(under);
+                assert!(ratio >= NON_TEXT, "{name} on {ground}: {ratio:.2}");
             }
         }
     }
@@ -2429,7 +2442,7 @@ mod tests {
     }
 
     /// The chrome text colours, with their names.
-    fn inks(s: &Surfaces) -> [(&'static str, Rgb); 7] {
+    fn inks(s: &Surfaces) -> [(&'static str, Rgb); 9] {
         [
             ("text", s.text),
             ("text_secondary", s.text_secondary),
@@ -2438,6 +2451,8 @@ mod tests {
             ("warn", s.warn),
             ("error", s.error),
             ("accent", s.accent),
+            ("working", s.working),
+            ("merged", s.merged),
         ]
     }
 
@@ -2465,7 +2480,7 @@ mod tests {
     fn chrome_text_clears_wcag_aa() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content, Contrast::Standard);
+            let s = Surfaces::derive(content);
             let under = under_text(&s, content);
             for (ink, fg) in inks(&s) {
                 for (surface, bg) in &under {
@@ -2503,7 +2518,7 @@ mod tests {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
             let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
-            let s = Surfaces::derive(content, Contrast::Standard).on_glass();
+            let s = Surfaces::derive(content).on_glass();
             let glass = Tint::of(s.canvas, alpha::GLASS);
             let grounds: Vec<Rgb> = WALLPAPERS
                 .into_iter()
@@ -2548,7 +2563,7 @@ mod tests {
         let default =
             |name: &str| BACKGROUNDS.iter().find(|(n, _)| *n == name).map(|&(_, bg)| Rgb::hex(bg));
         for content in [default("default dark"), default("default light")].into_iter().flatten() {
-            let opaque = Surfaces::derive(content, Contrast::Standard);
+            let opaque = Surfaces::derive(content);
             let glass = opaque.on_glass();
             let canvas = opaque.canvas.oklch().l;
             for wall in WALLPAPERS {
@@ -2568,6 +2583,8 @@ mod tests {
                 success: opaque.success,
                 warn: opaque.warn,
                 error: opaque.error,
+                working: opaque.working,
+                merged: opaque.merged,
                 ..glass
             };
             assert_eq!(text, opaque, "{content:?}: only text moves");
@@ -2594,45 +2611,40 @@ mod tests {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
             let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
-            for contrast in [Contrast::Standard, Contrast::Increased] {
-                let s = Surfaces::derive(content, contrast);
-                let surfaces: Vec<Rgb> =
-                    under_text(&s, content).into_iter().map(|(_, c)| c).collect();
-                for (ink, fg, least) in [
-                    ("text_secondary", s.text_secondary, SECONDARY_LC),
-                    ("text_muted", s.text_muted, MUTED_LC),
-                    ("accent", s.accent, MUTED_LC),
-                    ("warn", s.warn, MUTED_LC),
-                    ("error", s.error, MUTED_LC),
-                ] {
-                    let lc = worst_lc(fg, &surfaces);
-                    assert!(lc >= least || fg == pole, "{name} {contrast:?}: {ink} Lc {lc:.1}");
-                }
+            let s = Surfaces::derive(content);
+            let surfaces: Vec<Rgb> = under_text(&s, content).into_iter().map(|(_, c)| c).collect();
+            for (ink, fg, least) in [
+                ("text_secondary", s.text_secondary, SECONDARY_LC),
+                ("text_muted", s.text_muted, MUTED_LC),
+                ("accent", s.accent, MUTED_LC),
+                ("warn", s.warn, MUTED_LC),
+                ("error", s.error, MUTED_LC),
+                ("working", s.working, MUTED_LC),
+                ("merged", s.merged, MUTED_LC),
+            ] {
+                let lc = worst_lc(fg, &surfaces);
+                assert!(lc >= least || fg == pole, "{name}: {ink} Lc {lc:.1}");
             }
         }
     }
 
-    /// A remote picture's stage is one near-black whatever the content, and black at more
-    /// contrast.
+    /// A remote picture's stage is one near-black whatever the content.
     #[test]
-    fn the_stage_is_the_same_near_black_in_both_variants_and_black_at_more_contrast() {
+    fn the_stage_is_the_same_near_black_in_both_variants() {
         for content in [Rgb::hex(0x0016_1616), Rgb::hex(0x00ff_ffff), Rgb::hex(0x0028_2c34)] {
-            assert_eq!(Surfaces::derive(content, Contrast::Standard).stage, STAGE, "{content:?}");
-            assert_eq!(Surfaces::derive(content, Contrast::Increased).stage, Rgb::hex(0));
+            assert_eq!(Surfaces::derive(content).stage, STAGE, "{content:?}");
         }
         assert!(STAGE.contrast(Rgb::hex(0)) < 1.1, "near-black");
     }
 
-    /// Under Increase Contrast every chrome text tone, muted text included, reads at least
-    /// 7:1 on every surface it can land on, or as far as black or white go there; the dividing
-    /// hairline reads 3:1 on every surface it crosses and the quiet one stays under it; and
-    /// nothing reads weaker than in the standard look.
+    /// A focused field's edge clears 3:1 on its card, quieter than the keyboard's ring and
+    /// louder than its hairline at rest.
     #[test]
     fn a_focused_field_says_so_quietly_and_still_clears_three_to_one() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let plain = Surfaces::derive(content, Contrast::Standard);
-            let edge = plain.field_focus(Contrast::Standard);
+            let plain = Surfaces::derive(content);
+            let edge = plain.field_focus();
             let (said, full) =
                 (edge.contrast(plain.elevated), plain.focus.contrast(plain.elevated));
             assert!(said >= NON_TEXT, "{name}: the edge reads {said:.2} on its card");
@@ -2640,78 +2652,28 @@ mod tests {
             let rest = plain.border.over(plain.elevated);
             assert!(said > rest.contrast(plain.elevated), "{name}: stronger than at rest");
             println!("MEASURE field focus {name}: {said:.2}:1, the ring {full:.2}:1");
-            let more = Surfaces::derive(content, Contrast::Increased);
-            assert_eq!(more.field_focus(Contrast::Increased), more.focus, "{name}: whole");
-        }
-    }
-
-    #[test]
-    fn increase_contrast_raises_text_and_hairlines() {
-        for (name, bg) in BACKGROUNDS {
-            let content = Rgb::hex(bg);
-            let (plain, more) = (
-                Surfaces::derive(content, Contrast::Standard),
-                Surfaces::derive(content, Contrast::Increased),
-            );
-            let surfaces: Vec<Rgb> =
-                under_text(&more, content).into_iter().map(|(_, c)| c).collect();
-            let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
-            for ((ink, fg), (_, was)) in inks(&more).into_iter().zip(inks(&plain)) {
-                let reads = worst(fg, &surfaces);
-                assert!(
-                    reads >= AAA || fg == pole,
-                    "{name}: {ink} reads {reads:.2} under increased contrast"
-                );
-                assert!(reads >= worst(was, &surfaces), "{name}: {ink} reads weaker");
-            }
-            let crossed = &surfaces[..5];
-            let line = |l: Tint| {
-                crossed.iter().map(|&bg| l.over(bg).contrast(bg)).fold(f32::INFINITY, f32::min)
-            };
-            assert!(line(more.border) >= NON_TEXT, "{name}: border {:.2}", line(more.border));
-            assert!(
-                line(more.border_subtle) < line(more.border),
-                "{name}: the quiet one is quieter"
-            );
-            assert!(line(more.border_subtle) > line(plain.border_subtle), "{name}: raised");
-            assert_eq!(more.accent_fill, plain.accent_fill, "{name}: the fills stay");
         }
     }
 
     /// An unticked box's outline reads 3:1 on every surface it can sit on, for every supported
-    /// background, and a level more under Increase Contrast, where the dividing hairline takes
-    /// 3:1 itself. It sat at about 1.3 as a dividing hairline did.
+    /// background. It sat at about 1.3 as a dividing hairline did.
     #[test]
     fn a_control_s_outline_reads_three_to_one_everywhere() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            for (contrast, least) in
-                [(Contrast::Standard, NON_TEXT), (Contrast::Increased, NON_TEXT * LEVEL)]
-            {
-                let s = Surfaces::derive(content, contrast);
-                let crossed = planes(&s, content).map(|(_, c)| c);
-                let reads = crossed
-                    .iter()
-                    .map(|&bg| s.control.over(bg).contrast(bg))
-                    .fold(f32::INFINITY, f32::min);
-                assert!(reads >= least, "{name} {contrast:?}: {reads:.2}");
-                let border = crossed
-                    .iter()
-                    .map(|&bg| s.border.over(bg).contrast(bg))
-                    .fold(f32::INFINITY, f32::min);
-                assert!(reads > border, "{name} {contrast:?}: louder than a divider");
-            }
+            let s = Surfaces::derive(content);
+            let crossed = planes(&s, content).map(|(_, c)| c);
+            let reads = crossed
+                .iter()
+                .map(|&bg| s.control.over(bg).contrast(bg))
+                .fold(f32::INFINITY, f32::min);
+            assert!(reads >= NON_TEXT, "{name}: {reads:.2}");
+            let border = crossed
+                .iter()
+                .map(|&bg| s.border.over(bg).contrast(bg))
+                .fold(f32::INFINITY, f32::min);
+            assert!(reads > border, "{name}: louder than a divider");
         }
-    }
-
-    /// The theme's own contrast decides the chrome it derives.
-    #[test]
-    fn the_chrome_follows_the_theme_s_contrast() {
-        let mut theme = Theme::new(Variant::Light);
-        theme.contrast = Contrast::Increased;
-        theme.derive_chrome();
-        assert_eq!(theme.surfaces, Surfaces::derive(theme.content(), Contrast::Increased));
-        assert_ne!(theme.surfaces, Theme::new(Variant::Light).surfaces);
     }
 
     /// The default themes keep the tones they were designed with: the lift is a guard for
@@ -2721,7 +2683,7 @@ mod tests {
         for (content, tones) in
             [(TerminalPalette::DARK.bg, DARK_TONES), (TerminalPalette::LIGHT.bg, LIGHT_TONES)]
         {
-            let s = Surfaces::derive(content, Contrast::Standard);
+            let s = Surfaces::derive(content);
             let tier = |share: f32| content.mix(tones.text, share);
             for (name, derived, designed) in [
                 ("text", s.text, tones.text),
@@ -2747,7 +2709,7 @@ mod tests {
     #[test]
     fn a_mid_grey_background_cannot_clear_aa() {
         let content = Rgb::hex(0x77_7777);
-        let s = Surfaces::derive(content, Contrast::Standard);
+        let s = Surfaces::derive(content);
         let surfaces: Vec<Rgb> = under_text(&s, content).into_iter().map(|(_, c)| c).collect();
         assert!(worst(s.text, &surfaces) < AA, "{:?}", s.text);
         assert_eq!(s.text, DARK_TONES.pole, "as far as it goes");
@@ -2762,7 +2724,7 @@ mod tests {
     fn the_ladder_is_monotonic() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content, Contrast::Standard);
+            let s = Surfaces::derive(content);
             let l = Rgb::luminance;
             let c_rgb = content;
             let c = l(content);
@@ -2812,7 +2774,7 @@ mod tests {
         theme.terminal.bg = Rgb::hex(0xfd_f6e3);
         assert_eq!(theme.variant(), Variant::Light, "the variant is the background's");
         theme.derive_chrome();
-        assert_eq!(theme.surfaces, Surfaces::derive(theme.content(), theme.contrast));
+        assert_eq!(theme.surfaces, Surfaces::derive(theme.content()));
         assert_eq!(theme.elevation, Elevation::LIGHT);
         let canvas = theme.surfaces.canvas;
         assert!(canvas.r > canvas.b, "the cream survives in the bars: {canvas:?}");
@@ -2967,6 +2929,88 @@ mod tests {
         }
     }
 
+    /// One lightness per role (C1): the status and identity marks share one L in each mode, so
+    /// no hue shouts over another, 0.72 on near-black and 0.58 to 0.64 on paper. Amber and red
+    /// keep their own lightness: amber at 0.6 is olive, and red at the others' higher L turns
+    /// pink, so it stays where the colour-blind pairs (`vision`) pinned it.
+    #[test]
+    fn status_fills_share_one_lightness() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let s = Theme::new(variant).surfaces;
+            let named = [
+                ("success_fill", s.success_fill),
+                ("working_fill", s.working_fill),
+                ("merged_fill", s.merged_fill),
+            ];
+            let identity =
+                s.identity.iter().enumerate().map(|(i, &c)| (format!("identity {i}"), c));
+            for (name, fill) in named.map(|(n, c)| (n.to_owned(), c)).into_iter().chain(identity) {
+                let l = fill.oklch().l;
+                let fits = match variant {
+                    Variant::Dark => (l - 0.72).abs() <= 0.01,
+                    Variant::Light => (0.575..=0.645).contains(&l),
+                };
+                assert!(fits, "{variant:?}: {name} {fill:?} at L {l:.3}");
+            }
+        }
+    }
+
+    /// Each new hue has its band (C2), and an identity colour sits 20 degrees or more from every
+    /// status mark's hue, the sand excepted, so a machine's glyph never reads as a state.
+    #[test]
+    fn identity_keeps_clear_of_the_states() {
+        let apart = |a: f32, b: f32| (a - b).abs().min(360.0 - (a - b).abs());
+        for variant in [Variant::Dark, Variant::Light] {
+            let s = Theme::new(variant).surfaces;
+            let states = [
+                ("success_fill", s.success_fill, 145.0..=155.0),
+                ("warn_fill", s.warn_fill, 70.0..=85.0),
+                ("error_fill", s.error_fill, 18.0..=30.0),
+                ("working", s.working, 245.0..=255.0),
+                ("working_fill", s.working_fill, 245.0..=255.0),
+                ("merged", s.merged, 295.0..=305.0),
+                ("merged_fill", s.merged_fill, 295.0..=305.0),
+            ];
+            for (name, colour, band) in &states {
+                let h = colour.oklch().h;
+                assert!(band.contains(&h), "{variant:?}: {name} {colour:?} at {h:.1}°");
+            }
+            let sand = s.identity.len() - 1;
+            for (i, colour) in s.identity.iter().enumerate().take(sand) {
+                let h = colour.oklch().h;
+                for (name, state, _) in &states {
+                    let off = apart(h, state.oklch().h);
+                    assert!(
+                        off >= 20.0,
+                        "{variant:?}: identity {i} at {h:.1}° is {off:.1}° off {name}"
+                    );
+                }
+            }
+            for (i, a) in s.identity.iter().enumerate() {
+                for b in s.identity.iter().skip(i + 1) {
+                    let off = apart(a.oklch().h, b.oklch().h);
+                    assert!(off >= 20.0, "{variant:?}: {a:?} and {b:?} are {off:.1}° apart");
+                }
+            }
+        }
+    }
+
+    /// Working's and merged's marks read as marks (C3): 3:1 and more on the content and on the
+    /// panel in both modes.
+    #[test]
+    fn a_status_fill_reads_as_a_mark() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            for (name, fill) in [("working_fill", s.working_fill), ("merged_fill", s.merged_fill)] {
+                for (ground, under) in [("content", theme.content()), ("panel", s.panel)] {
+                    let seen = fill.contrast(under);
+                    assert!(seen >= NON_TEXT, "{variant:?}: {name} on {ground} is {seen:.2}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn elevation_and_density() {
         let dark = Theme::new(Variant::Dark);
@@ -3044,7 +3088,7 @@ mod tests {
     fn the_primary_is_the_neutral_solid() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content, Contrast::Standard);
+            let s = Surfaces::derive(content);
             assert_eq!(s.solid, s.text, "{name}: the solid is the text as a fill");
             let ink = s.solid_ink.contrast(s.solid);
             assert!(ink >= AAA, "{name}: ink on the solid is {ink:.2}");
@@ -3058,36 +3102,32 @@ mod tests {
         assert_eq!(Theme::new(Variant::Light).surfaces.solid_ink, Rgb::hex(0xff_ffff));
     }
 
-    /// Every control and every word on a coloured fill reads, for every supported background,
-    /// in the standard look and under Increase Contrast: the solid stands 3:1 off every
-    /// surface it can sit on (WCAG 1.4.11), its ink reads AA on it, and AAA under Increase
-    /// Contrast, at rest and pressed (the solid given [`alpha::DIM`] toward the content, the
+    /// Every control and every word on a coloured fill reads, for every supported background:
+    /// the solid stands 3:1 off every surface it can sit on (WCAG 1.4.11), its ink reads AA on
+    /// it, at rest and pressed (the solid given [`alpha::DIM`] toward the content, the
     /// most the kit gives it); a badge's count reads AA on every fill.
     #[test]
-    fn controls_and_the_words_on_fills_read_in_both_contrasts() {
+    fn controls_and_the_words_on_fills_read() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            for (contrast, floor) in [(Contrast::Standard, AA), (Contrast::Increased, AAA)] {
-                let s = Surfaces::derive(content, contrast);
-                for (surface, under) in under_text(&s, content) {
-                    let seen = s.solid.contrast(under);
-                    assert!(seen >= NON_TEXT, "{name} {contrast:?}: solid on {surface} {seen:.2}");
-                }
-                for (state, fill) in
-                    [("rest", s.solid), ("pressed", s.solid.mix(content, alpha::DIM))]
-                {
-                    let ink = s.solid_ink.contrast(fill);
-                    assert!(ink >= floor, "{name} {contrast:?}: ink on the {state} solid {ink:.2}");
-                }
-                for (fill, on) in [
-                    ("accent_fill", s.accent_fill, s.accent_ink),
-                    ("warn_fill", s.warn_fill, s.fill_fg),
-                    ("error_fill", s.error_fill, s.fill_fg),
-                ]
-                .map(|(n, f, o)| (n, o.contrast(f)))
-                {
-                    assert!(on >= AA, "{name} {contrast:?}: words on {fill} {on:.2}");
-                }
+            let s = Surfaces::derive(content);
+            for (surface, under) in under_text(&s, content) {
+                let seen = s.solid.contrast(under);
+                assert!(seen >= NON_TEXT, "{name}: solid on {surface} {seen:.2}");
+            }
+            for (state, fill) in [("rest", s.solid), ("pressed", s.solid.mix(content, alpha::DIM))]
+            {
+                let ink = s.solid_ink.contrast(fill);
+                assert!(ink >= AA, "{name}: ink on the {state} solid {ink:.2}");
+            }
+            for (fill, on) in [
+                ("accent_fill", s.accent_fill, s.accent_ink),
+                ("warn_fill", s.warn_fill, s.fill_fg),
+                ("error_fill", s.error_fill, s.fill_fg),
+            ]
+            .map(|(n, f, o)| (n, o.contrast(f)))
+            {
+                assert!(on >= AA, "{name}: words on {fill} {on:.2}");
             }
         }
     }
@@ -3150,15 +3190,6 @@ mod tests {
                 (share(s.selected) - share(s.hover), share(s.pressed) - share(s.selected));
             assert!(next >= step - 0.005, "pressed is a step past selected: {step:.3} {next:.3}");
         }
-    }
-
-    /// A hairline is one device pixel, a full point under Increase Contrast.
-    #[test]
-    fn a_hairline_is_one_device_pixel_and_a_point_at_more_contrast() {
-        let mut theme = Theme::default();
-        assert!((theme.hair() - 0.5).abs() < f32::EPSILON);
-        theme.contrast = Contrast::Increased;
-        assert!((theme.hair() - 1.0).abs() < f32::EPSILON);
     }
 
     /// A well on the chrome (the navigator's filter) and a row's hover stand off the bars in

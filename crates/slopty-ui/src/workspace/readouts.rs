@@ -286,7 +286,7 @@ impl WorkspaceView {
                 .aria_expanded(self.menu == Some(super::titlebar::MenuKind::Server))
                 .text_color(hsla(s.text_secondary))
                 .child(measure)
-                .child(state_dot(theme, s.text_muted))
+                .child(icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted)))
                 .child(text)
                 .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
@@ -723,11 +723,6 @@ fn frame_text(cx: &App) -> Option<SharedString> {
     crate::frames::stats(cx)
         .filter(|s| s.frames > 0)
         .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into())
-}
-
-/// A small dot of a state's fill beside a readout's words.
-fn state_dot(theme: &Theme, fill: slopty_theme::Rgb) -> Div {
-    div().flex_none().size(px(theme.spacing.xs + theme.spacing.xxs)).rounded_full().bg(hsla(fill))
 }
 
 /// `el` holding `text`, its parts (joined by [`META_SEPARATOR`]) set apart by the faint dot.

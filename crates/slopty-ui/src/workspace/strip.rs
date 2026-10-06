@@ -984,11 +984,10 @@ impl WorkspaceView {
                         // Where you are: lifted, and a hairline in the text's tone outside a
                         // gap of the strip's own ground, Geist's double ring, since green means
                         // "done" and a heavy flush outline read as the old chosen-card tell.
-                        // Under Increase Contrast it is flush, wider and whole.
                         let ring = overview_ring(theme);
                         kit::elevate(el, theme).outline_ring(ring)
                     } else {
-                        el.border(kit::hair(theme)).border_color(hsla(s.border))
+                        el.border(kit::HAIR).border_color(hsla(s.border))
                     }
                 })
                 // The panes' own surface, lifted or not: the block is what they sit on.
@@ -1438,24 +1437,14 @@ impl WorkspaceView {
     }
 }
 
-/// The active overview block's ring under Increase Contrast, in points.
-const OVERVIEW_EDGE: f32 = 1.5;
-
 /// The gap between the active overview block and its ring, in points.
 pub(super) const OVERVIEW_GAP: f32 = 2.0;
 
 /// The ring round the active overview block: a hairline of the text at `alpha::RING` outside
-/// [`OVERVIEW_GAP`], or flush, [`OVERVIEW_EDGE`] wide and whole under Increase Contrast.
+/// [`OVERVIEW_GAP`].
 pub(super) fn overview_ring(theme: &slopty_theme::Theme) -> gpui::Outline {
-    let color = hsla_alpha(theme.surfaces.text, theme.set_back(alpha::RING));
-    match theme.contrast {
-        slopty_theme::Contrast::Standard => {
-            gpui::Outline { color, width: kit::hair(theme), offset: px(OVERVIEW_GAP) }
-        }
-        slopty_theme::Contrast::Increased => {
-            gpui::Outline { color, width: px(OVERVIEW_EDGE), offset: px(0.0) }
-        }
-    }
+    let color = hsla_alpha(theme.surfaces.text, alpha::RING);
+    gpui::Outline { color, width: kit::HAIR, offset: px(OVERVIEW_GAP) }
 }
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and

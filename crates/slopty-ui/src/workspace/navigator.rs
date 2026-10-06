@@ -85,7 +85,7 @@ use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::Rung;
-use slopty_theme::{Contrast, Rgb, Theme, Typography, Variant, alpha};
+use slopty_theme::{Rgb, Theme, Typography, Variant, alpha};
 
 use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{
@@ -231,9 +231,9 @@ pub(super) struct NavState {
 /// tones that read there ([`slopty_theme::Surfaces::on_glass`]). Everything right of it paints
 /// the canvas whole, so the material shows only through the navigator.
 ///
-/// Never under Increase Contrast, which turns Reduce Transparency on, nor in the self-test
-/// build, whose renders are compared pixel for pixel. Under Reduce Transparency AppKit draws the
-/// material as a solid colour of its own, and the window is opaque again.
+/// Never in the self-test build, whose renders are compared pixel for pixel. Under Reduce
+/// Transparency AppKit draws the material as a solid colour of its own, and the window is opaque
+/// again.
 #[derive(Default)]
 pub(super) struct OnGlass {
     /// The material, and whether it leans dark.
@@ -561,9 +561,9 @@ pub(super) const fn status_word(status: Option<Status>) -> Option<Status> {
 
 /// How strongly a tile's row is drawn: one at work recedes until it is hovered or selected,
 /// so what needs the person leads the list.
-pub(super) const fn row_strength(theme: &Theme, status: Option<Status>, selected: bool) -> f32 {
+pub(super) const fn row_strength(status: Option<Status>, selected: bool) -> f32 {
     match status {
-        Some(Status::Working | Status::Running) if !selected => theme.set_back(alpha::STRONG),
+        Some(Status::Working | Status::Running) if !selected => alpha::STRONG,
         _ => 1.0,
     }
 }
@@ -622,25 +622,6 @@ fn at_rest(agent: &ThreadStand) -> bool {
 /// The readouts' clock in Unix milliseconds, as the workers stamp an agent's change.
 fn now_ms(cx: &gpui::App) -> u64 {
     crate::clock::now(cx).as_millis()
-}
-
-/// The unseen dot: something ended there while the human was elsewhere. It sits centred in a
-/// fixed slot at the end of a row's first line, so a title keeps its length with or without it.
-pub(super) fn unseen_dot(theme: &Theme, selector: String, shown: bool) -> Div {
-    let s = &theme.surfaces;
-    let dot = theme.spacing.xs + theme.spacing.xxs;
-    div().flex_none().w(px(theme.spacing.sm)).flex().items_center().justify_center().when(
-        shown,
-        |slot| {
-            slot.child(
-                div()
-                    .debug_selector(move || selector)
-                    .size(px(dot))
-                    .rounded_full()
-                    .bg(hsla(s.accent_fill)),
-            )
-        },
-    )
 }
 
 /// One row of the navigator's list: its density's height, on the one edge grid (the wash sits
@@ -778,7 +759,7 @@ fn nesting_guide(theme: &Theme) -> Div {
         .top_0()
         .bottom_0()
         .left(px(x))
-        .border_l(kit::hair(theme))
+        .border_l(kit::HAIR)
         .border_color(hsla(theme.surfaces.border_subtle))
 }
 
@@ -1242,10 +1223,9 @@ impl WorkspaceView {
 
     /// The panel's width in `mode`: a phone's drawer leaves a margin of the strip showing.
     /// The material under a docked navigator follows how it sits and the theme: there while
-    /// it docks at the standard contrast, leaning as the theme does.
+    /// it docks, leaning as the theme does.
     pub(super) fn settle_glass(&mut self, window: &Window) {
-        let wanted =
-            self.nav.drawn == Some(Mode::Docked) && self.theme.contrast == Contrast::Standard;
+        let wanted = self.nav.drawn == Some(Mode::Docked);
         let dark = self.theme.variant() == Variant::Dark;
         let under = self.nav.glass.place(wanted, dark, window);
         self.nav.glass.follow(under, &self.theme);
@@ -2585,13 +2565,13 @@ impl WorkspaceView {
             // step is left to the unfocused tiles' headers. Docked on a Mac, it is that surface
             // laid over the system's glass.
             .bg(self.nav.glass.ground(theme))
-            .border_r(kit::hair(theme))
+            .border_r(kit::HAIR)
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. It meets the window's
             // top, left and bottom edges, so only its trailing edge carries the hairline.
             .when(mode != Mode::Docked, |panel| {
-                kit::elevate(panel, theme).border_0().border_r(kit::hair(theme))
+                kit::elevate(panel, theme).border_0().border_r(kit::HAIR)
             })
             // Esc in the filter empties it and hands the keyboard back; with it empty, Esc lets
             // go of the scope.
@@ -2751,7 +2731,7 @@ impl WorkspaceView {
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
             .bg(hsla(s.canvas))
-            .border_r(kit::hair(theme))
+            .border_r(kit::HAIR)
             .border_color(hsla(s.border))
             .children(buttons)
             .into_any_element()
@@ -2905,7 +2885,7 @@ impl WorkspaceView {
         // the row, and the agent is named in its words.
         .child(lead_slot(theme, {
             let side = px(theme.typography.icon());
-            let tone = hsla(agent.status.tone(theme));
+            let tone = hsla(agent.status.ink(theme));
             crate::icons::status_icon(theme, agent.status, side, tone).into_any_element()
         }))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
@@ -3414,7 +3394,7 @@ impl WorkspaceView {
             .flatten()
             .collect::<Vec<_>>()
             .join(", ");
-        let strength = row_strength(theme, t.status.or(Some(Status::Working)), false);
+        let strength = row_strength(t.status.or(Some(Status::Working)), false);
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         let state = t.status.filter(|m| *m != Status::Idle);
         let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_muted), 1.0)
@@ -3529,7 +3509,7 @@ impl WorkspaceView {
         let (first, second) = line_heights(theme);
         // A row at work recedes until the pointer is on it: its inks at a share, so its wash
         // stays whole and nothing is drawn through a layer.
-        let strength = row_strength(theme, t.mark, selected);
+        let strength = row_strength(t.mark, selected);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         // What the row is leads it, and never changes while it lives: its kind, or its agent's
@@ -3559,9 +3539,13 @@ impl WorkspaceView {
                     )
                     .into_any_element(),
             ),
-            None if t.unseen => {
-                Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
-            }
+            // Something ended there while the person was elsewhere: the finish's green check, in
+            // the slot a state stands in, so a title keeps its length with or without it.
+            None if t.unseen => Some(
+                status_mark(theme, Some(Status::Done), 1.0)
+                    .debug_selector(move || format!("nav-unseen-{id}"))
+                    .into_any_element(),
+            ),
             None => clock.map(gpui::IntoElement::into_any_element).or_else(|| {
                 t.age.clone().map(|age| {
                     readout(theme, age)
@@ -3905,23 +3889,19 @@ mod tests {
         assert_eq!(ranks, [0, 1, 2, 2, 3, 4, 5, 5]);
     }
 
-    /// A row at work recedes until it is selected; one that needs the person never does, and
-    /// Increase Contrast draws them all whole.
+    /// A row at work recedes until it is selected; one that needs the person never does.
     #[test]
     fn working_rows_recede_and_a_row_that_needs_you_does_not() {
-        let mut theme = Theme::default();
-        assert!((row_strength(&theme, Some(Status::Working), false) - alpha::STRONG).abs() < 1e-6);
-        assert!((row_strength(&theme, Some(Status::Running), false) - alpha::STRONG).abs() < 1e-6);
+        assert!((row_strength(Some(Status::Working), false) - alpha::STRONG).abs() < 1e-6);
+        assert!((row_strength(Some(Status::Running), false) - alpha::STRONG).abs() < 1e-6);
         for (status, selected) in [
             (Some(Status::Working), true),
             (Some(Status::NeedsYou), false),
             (Some(Status::Failed), false),
             (None, false),
         ] {
-            assert!((row_strength(&theme, status, selected) - 1.0).abs() < 1e-6, "{status:?}");
+            assert!((row_strength(status, selected) - 1.0).abs() < 1e-6, "{status:?}");
         }
-        theme.contrast = Contrast::Increased;
-        assert!((row_strength(&theme, Some(Status::Working), false) - 1.0).abs() < 1e-6);
     }
     /// On glass the navigator's ground is the canvas at [`alpha::GLASS`] and its text the
     /// theme's tones for glass, derived once for each theme and followed when the theme
@@ -3941,7 +3921,7 @@ mod tests {
         assert_eq!(glass.theme(&dark).typography, dark.typography, "only the tones move");
 
         let mut light = dark.clone();
-        light.surfaces = slopty_theme::Surfaces::derive(Rgb::hex(0x00fd_fcfb), Contrast::Standard);
+        light.surfaces = slopty_theme::Surfaces::derive(Rgb::hex(0x00fd_fcfb));
         glass.follow(true, &light);
         assert_eq!(glass.theme(&light).surfaces, light.surfaces.on_glass(), "a new theme");
         assert_ne!(glass.theme(&light).surfaces.text_muted, light.surfaces.text_muted);

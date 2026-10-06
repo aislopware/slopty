@@ -1937,7 +1937,7 @@ impl CommandPalette {
                     crate::kit::meta(crate::kit::tabular(div()), theme)
                         .debug_selector(move || format!("palette-trailing-{ix}"))
                         .flex_none()
-                        .when_some(tone, |el, tone| el.text_color(hsla(tone.tone(theme))))
+                        .when_some(tone, |el, tone| el.text_color(hsla(tone.word(theme))))
                         .child(SharedString::from(text))
                 }
             }))

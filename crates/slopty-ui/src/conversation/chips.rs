@@ -146,7 +146,7 @@ fn picture_chip(
         .size(z(THUMBNAIL))
         .rounded(z(theme.radii.sm))
         .overflow_hidden()
-        .border(kit::hair(theme))
+        .border(kit::HAIR)
         .border_color(hsla(s.border_subtle))
         .map(|el| kit::inset(el, theme))
         .child(img(picture).size_full().object_fit(ObjectFit::Cover))

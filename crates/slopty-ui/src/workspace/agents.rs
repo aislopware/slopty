@@ -459,7 +459,14 @@ impl WorkspaceView {
         // The pill's tone is its status mark's. Working, at rest or finished, the slot's mark
         // is the statement.
         let status = Some(agent_mark_of(agent)).filter(|s| wears_pill(*s))?;
-        let (full, color) = (agent_status_text(agent), status.tone(theme));
+        // The pill's words in their hue's text tone: amber for one waiting, red for a failure.
+        let s = &theme.surfaces;
+        let color = match status {
+            Status::NeedsYou => s.warn,
+            Status::Failed => s.error,
+            _ => s.text_muted,
+        };
+        let full = agent_status_text(agent);
         // The word alone: what is asked is the navigator's line and the pointer's, not a
         // second sentence in every header (a screen reader still hears it in full).
         let label = agent_status_word(agent);

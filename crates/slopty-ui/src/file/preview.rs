@@ -725,7 +725,7 @@ impl FileView {
                     .w_full()
                     .aspect_ratio(w / h.max(1.0))
                     .bg(hsla(s.elevated))
-                    .border(crate::kit::hair(theme))
+                    .border(crate::kit::HAIR)
                     .border_color(hsla(s.border))
                     .role(Role::Image)
                     .aria_label(SharedString::from(format!(

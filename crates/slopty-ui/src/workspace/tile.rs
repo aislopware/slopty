@@ -50,6 +50,9 @@ type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
 
+/// What a file's header says after its name while it holds an edit not yet on disk.
+pub(crate) const EDITED: &str = "Edited";
+
 /// The width of a program's progress bar (`OSC 9;4`) in its terminal's header, beside its
 /// figure.
 const PROGRESS_W: f32 = 48.0;
@@ -962,7 +965,7 @@ impl WorkspaceView {
         let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
         // Drawn as a border on an empty box: GPUI snaps a border to at least one device pixel,
         // where a box half a point wide would round to nothing on a 1x screen.
-        let hair = self.theme.hair();
+        let hair = slopty_theme::stroke::HAIR;
         let line = || {
             div().absolute().opacity(placed.alpha).border_color(hsla(self.theme.surfaces.border))
         };
@@ -1139,7 +1142,7 @@ impl WorkspaceView {
             .cursor_grab()
             .bg(hsla(theme.content()))
             .when(!shapes && foreign, |el| {
-                el.border_b(kit::hair(theme)).border_color(hsla(s.border_subtle))
+                el.border_b(kit::HAIR).border_color(hsla(s.border_subtle))
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -1394,19 +1397,22 @@ impl WorkspaceView {
                     ChromeText::new(name, px(theme.typography.small()), k).zooming(chrome.zooming),
                 )
         });
-        // A file with an edit not yet on disk says so with a dot after its name, as an editor's
-        // tab does; saving keeps the dot until the worker has written it.
+        // A file with an edit not yet on disk says so in a word after its name, as macOS's
+        // "Edited" follows a document's title; saving keeps it until the worker has written it.
         let unsaved = self.file_facts(id).unsaved;
         let unsaved = unsaved.then(|| {
             div()
                 .id("unsaved")
                 .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
-                .role(Role::Image)
-                .aria_label("Unsaved changes")
+                .role(Role::Label)
+                .aria_label(EDITED)
                 .flex_none()
-                .size(px(theme.spacing.sm * k))
-                .rounded_full()
-                .bg(hsla(s.text_secondary))
+                .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
+                .text_color(hsla(s.text_muted))
+                .child(
+                    ChromeText::new(EDITED, px(theme.typography.small()), k)
+                        .zooming(chrome.zooming),
+                )
         });
         let tabbed = placed.tabs.is_some();
         let header = if tabbed {
@@ -1433,7 +1439,7 @@ impl WorkspaceView {
             // The title keeps its width and what is beside it gives way: the place first, then
             // the readouts at the end (an agent's pill), the title last. Each takes what it
             // needs, and an empty stretch between them takes the rest.
-            // The unsaved dot follows the title it qualifies, as an editor's tab has it, not
+            // "Edited" follows the title it qualifies, as a document's title bar has it, not
             // the far end of the bar.
             let named = div()
                 .min_w_0()
@@ -2524,7 +2530,7 @@ impl WorkspaceView {
             })
         });
         if centred {
-            let mark = crate::icons::notice_status(theme, status, hsla(status.tone(theme)), k);
+            let mark = crate::icons::notice_status(theme, status, hsla(status.ink(theme)), k);
             let buttons = div()
                 .flex()
                 .flex_wrap()
@@ -2588,7 +2594,7 @@ impl WorkspaceView {
                 theme,
                 status,
                 px(theme.typography.icon() * k),
-                hsla(status.tone(theme)),
+                hsla(status.ink(theme)),
             ))
             .child(ChromeText::new(text, px(theme.typography.small()), k).zooming(chrome.zooming))
             .when_some(detail, gpui::ParentElement::child)

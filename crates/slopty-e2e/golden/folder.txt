@@ -11,7 +11,7 @@ Heading │ terminal project
 Button │ Fullscreen tile
 Button │ Close tile
 Group
-Terminal │ shell │ ty-e2e-5b39ae00/project %
+Terminal │ shell │ $SCRATCH/project %
 Group │ project
 Heading │ folder project
 Button │ Enclosing folder
@@ -20,8 +20,8 @@ Button │ Close tile
 Group │ Folder $SCRATCH/project │ 3 items (focused)
 Navigation │ $SCRATCH/project
 Link │ /
-Link │ …
-Link │ T
+Link │ private
+Link │ tmp
 Link │ slopty-e2e-5b39ae00
 Label │ project
 ListBox │ Entries
