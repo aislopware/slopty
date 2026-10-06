@@ -21,6 +21,7 @@ use super::actions::{
     MoveUp, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
     ToggleTabbed, UndoClose,
 };
+use super::attention::About;
 use super::navigator::Mode;
 use super::toast::ToastKind;
 use super::{
@@ -60,7 +61,7 @@ impl WorkspaceView {
         self.navigated_to(tile);
         match self.item(tile).map(|i| i.kind.clone()) {
             Some(ItemKind::Terminal { session }) => {
-                self.finished.remove(&session);
+                self.finished.remove(&About::Session(session));
                 self.pending_focus = Some(session);
             }
             // A file tile is an editor: the keyboard goes into its text, as into a shell.
@@ -73,7 +74,10 @@ impl WorkspaceView {
             // A review walks its files and hunks by key.
             Some(ItemKind::Review { thread }) => self.pending_focus_review = Some(thread),
             // A thread's keyboard is its composer's.
-            Some(ItemKind::Thread { .. }) => self.focus_thread_item(tile.item, cx),
+            Some(ItemKind::Thread { thread }) => {
+                self.finished.remove(&About::Thread(thread));
+                self.focus_thread_item(tile.item, cx);
+            }
             // A thread on its way: the composer writing its first message.
             None if self.starting.has(tile.item) => self.focus_start(tile.item),
             // A remote window takes the keyboard only when clicked: its chords are the

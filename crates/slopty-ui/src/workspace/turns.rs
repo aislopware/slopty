@@ -9,6 +9,7 @@ use gpui::Context;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::Phase;
 
+use super::attention::About;
 use super::{Finished, WorkspaceView};
 
 /// What an agent's finished turn says when its worker gave no words of the turn's own.
@@ -17,16 +18,17 @@ pub(super) const TURN_FINISHED: &str = "Turn finished";
 /// The turns under way and the ones that ended unread.
 #[derive(Debug, Default)]
 pub(super) struct Turns {
-    /// When each agent's turn under way began, on its worker's clock.
-    began: HashMap<SessionId, WallMs>,
-    /// The sessions whose unread finish is an agent's turn rather than a command.
-    ended: HashSet<SessionId>,
+    /// When each agent's turn under way began, on its worker's clock: a terminal's agent's, or
+    /// a thread's with no terminal.
+    began: HashMap<About, WallMs>,
+    /// What an unread finish of is an agent's turn rather than a command.
+    ended: HashSet<About>,
 }
 
 impl Turns {
     /// A command's finish took `session`'s place: it is no turn to review.
     pub(super) fn command_ended(&mut self, session: SessionId) {
-        self.ended.remove(&session);
+        self.ended.remove(&About::Session(session));
     }
 }
 
@@ -50,56 +52,71 @@ impl WorkspaceView {
     /// went idle without finishing, or an agent that is gone, has nothing to say.
     pub(super) fn agent_turn(
         &mut self,
-        session: SessionId,
+        about: About,
         phase: Phase,
         since: WallMs,
     ) -> Option<Duration> {
         let began = &mut self.turns.began;
         match phase {
             Phase::Working | Phase::Waiting => {
-                began.entry(session).or_insert(since);
+                began.entry(about).or_insert(since);
                 None
             }
             Phase::NeedsYou => None,
             Phase::Done => {
-                let began = began.remove(&session)?;
+                let began = began.remove(&about)?;
                 let ran = since.as_millis().saturating_sub(began.as_millis());
                 Some(Duration::from_millis(ran))
             }
             Phase::Idle | Phase::Failed | Phase::Stopped => {
-                began.remove(&session);
+                began.remove(&about);
                 None
             }
         }
     }
 
-    /// An agent's turn of `elapsed` ended in `session`. Long enough, and not watched, it earns
-    /// a header badge, a row under *To review*, a count on the bell and a note while the app is
-    /// away ([`super::attention::Look::turns`]), cleared when the tile is focused. The corner
-    /// says nothing: it speaks only for what needs the person.
+    /// An agent's turn of `elapsed` ended, in a terminal or a thread with none (`about`). Long
+    /// enough, and not watched, it earns a header badge, a row under *To review*, a count on
+    /// the bell, the tile's unseen dot and a note while the app is away
+    /// ([`super::attention::Look::turns`]), cleared when the tile is focused. The corner says
+    /// nothing: it speaks only for what needs the person.
     pub(super) fn agent_finished(
         &mut self,
-        session: SessionId,
+        about: About,
         elapsed: Duration,
         cx: &mut Context<Self>,
     ) {
-        let watched = self.app_active
-            && self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
+        let tile = match about {
+            About::Session(session) => self.tile_of_session(session),
+            About::Thread(thread) => self.tile_of_thread(thread),
+        };
+        let watched = self.app_active && tile.is_some_and(|t| self.focused() == Some(t));
         if watched || elapsed < self.slow_command {
             return;
         }
         // What the agent last said of the turn, as its thread's row has it.
-        let said = self.face_summary(session).filter(|d| !d.trim().is_empty());
+        let said = match about {
+            About::Session(session) => self.face_summary(session),
+            About::Thread(thread) => self.thread_line(thread).map(str::to_owned),
+        };
+        let said = said.filter(|d| !d.trim().is_empty());
         let command = said.unwrap_or_else(|| TURN_FINISHED.to_owned());
-        self.finished.insert(session, Finished { command, exit: None, elapsed });
+        self.finished.insert(about, Finished { command, exit: None, elapsed });
         let finished = &self.finished;
-        self.turns.ended.retain(|s| finished.contains_key(s));
-        self.turns.ended.insert(session);
+        self.turns.ended.retain(|a| finished.contains_key(a));
+        self.turns.ended.insert(about);
         cx.notify();
     }
 
-    /// The sessions whose unread finish is an agent's turn.
-    pub(super) fn agent_turns(&self) -> impl Iterator<Item = SessionId> + '_ {
-        self.turns.ended.iter().copied().filter(|s| self.finished.contains_key(s))
+    /// What an unread finish of is an agent's turn: a terminal's, or a thread's its worker's
+    /// table still holds.
+    pub(super) fn agent_turns(&self) -> impl Iterator<Item = About> + '_ {
+        self.turns.ended.iter().copied().filter(|about| {
+            self.finished.contains_key(about)
+                && match about {
+                    About::Session(_) => true,
+                    About::Thread(thread) => self.thread_stand(*thread).is_some(),
+                }
+        })
     }
 }

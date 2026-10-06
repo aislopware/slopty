@@ -1139,13 +1139,16 @@ impl WorkspaceView {
             })
             .map(|(id, _)| *id)
             .collect();
-        // Where each terminal's agent moved, for its turn's length.
-        let turned: Vec<(SessionId, thread::Phase, slopty_core::WallMs)> = stands
+        // Where each agent moved, for its turn's length: a terminal's, or a thread's with none.
+        let turned: Vec<(super::attention::About, thread::Phase, slopty_core::WallMs)> = stands
             .iter()
             .filter_map(|(id, stand)| {
-                let (session, now) = (stand.terminal?, stand.status.as_ref()?);
+                let now = stand.status.as_ref()?;
+                let about = stand
+                    .terminal
+                    .map_or(super::attention::About::Thread(*id), super::attention::About::Session);
                 let was = old.get(id).and_then(|w| w.status.as_ref()).map(|s| s.phase);
-                (was != Some(now.phase)).then_some((session, now.phase, now.since_ms))
+                (was != Some(now.phase)).then_some((about, now.phase, now.since_ms))
             })
             .collect();
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
@@ -1173,9 +1176,9 @@ impl WorkspaceView {
                 None => self.faces.threads.terminals.remove(&row.id),
             };
         }
-        for (session, phase, since) in turned {
-            if let Some(elapsed) = self.agent_turn(session, phase, since) {
-                self.agent_finished(session, elapsed, cx);
+        for (about, phase, since) in turned {
+            if let Some(elapsed) = self.agent_turn(about, phase, since) {
+                self.agent_finished(about, elapsed, cx);
             }
         }
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());

@@ -19,6 +19,7 @@ use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 use slopty_proto::thread::ThreadId;
 
+use super::attention::About;
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::file::{FileView, FileViewEvent};
 use crate::screen::ScreenView;
@@ -441,12 +442,12 @@ impl WorkspaceView {
         for item in w.doc.items() {
             self.drop_item_views(item.id, cx);
             if let ItemKind::Terminal { session } = item.kind {
-                self.finished.remove(&session);
+                self.finished.remove(&About::Session(session));
                 self.terminals.remove(&session);
             }
         }
         for session in w.sessions.keys() {
-            self.finished.remove(session);
+            self.finished.remove(&About::Session(*session));
             self.terminals.remove(session);
         }
         let (gone, closed): (Vec<_>, Vec<_>) =
@@ -741,7 +742,7 @@ impl WorkspaceView {
         }
         self.handoff.forget_session(session);
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
-        self.finished.remove(&session);
+        self.finished.remove(&About::Session(session));
         self.update_awake(cx);
         self.reconcile(cx);
         self.agents_moved(cx);

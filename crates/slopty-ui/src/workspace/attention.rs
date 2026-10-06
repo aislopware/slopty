@@ -587,9 +587,16 @@ impl WorkspaceView {
             .collect();
         let turns = self
             .agent_turns()
-            .filter_map(|session| {
-                let (route, title) = self.attention_route(session)?;
-                let done = self.finished.get(&session)?;
+            .filter_map(|about| {
+                let (route, title) = match about {
+                    About::Session(session) => self.attention_route(session)?,
+                    About::Thread(thread) => {
+                        let worker = self.thread_stand(thread)?.worker;
+                        let item = self.tile_of_thread(thread).map(|t| t.item);
+                        (Route { worker, item, about }, self.thread_title(thread))
+                    }
+                };
+                let done = self.finished.get(&about)?;
                 let command = super::tile::command_words(&done.command);
                 let body = format!("{command} \u{b7} {}", done.label());
                 Some(Turn { route, title, body })

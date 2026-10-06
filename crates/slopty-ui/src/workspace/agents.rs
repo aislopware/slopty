@@ -15,6 +15,7 @@ use slopty_proto::thread::{Phase, Request, Wait};
 use slopty_theme::alpha;
 
 use super::actions::NextAttention;
+use super::attention::About;
 use super::faces::{ThreadStand, ThreadWait};
 use super::tile::Chrome;
 use super::{Finished, WorkspaceEvent, WorkspaceView};
@@ -255,19 +256,27 @@ impl WorkspaceView {
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
     }
 
-    /// The agents whose turn ended while nobody looked, left to review: unread,
-    /// in reading order.
-    pub(super) fn to_review(&self) -> Vec<Waiting> {
-        let mut ended: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
-            .agent_turns()
-            .filter_map(|session| {
+    /// The agents whose turn ended while nobody looked, left to review: unread, in reading
+    /// order. A terminal's agent counts while its tile is here; a thread with no terminal
+    /// (Codex beside no TUI, pi, an ACP agent, a message's runs) counts with or without one.
+    pub(super) fn to_review(&self) -> Vec<Step> {
+        self.steps_in_reading_order(self.agent_turns().filter_map(|about| self.step_of(about)))
+    }
+
+    /// The ladder's step for what `about` names: a terminal whose tile is here, or a thread
+    /// its worker's table holds, with its tile when one shows it.
+    pub(super) fn step_of(&self, about: About) -> Option<Step> {
+        match about {
+            About::Session(session) => {
                 let tile = self.tile_of_session(session)?;
-                let at = Waiting { worker: tile.worker, tile: Some(tile), session };
-                Some((self.layout.position(tile), at))
-            })
-            .collect();
-        ended.sort_by_key(|(pos, w)| (pos.map(|p| (p.workspace, p.column, p.tile)), w.session));
-        ended.into_iter().map(|(_, w)| w).collect()
+                Some(Step::Session(Waiting { worker: tile.worker, tile: Some(tile), session }))
+            }
+            About::Thread(thread) => {
+                let worker = self.thread_stand(thread)?.worker;
+                let tile = self.tile_of_thread(thread);
+                Some(Step::Thread(ThreadWait { worker, thread, tile }))
+            }
+        }
     }
 
     /// Drop what the server said about threads: on `worker` (gone), or everywhere (`None`,
@@ -313,11 +322,7 @@ impl WorkspaceView {
             self.finished
                 .iter()
                 .filter(|(_, done)| done.exit.is_some_and(|e| e != 0) == failed)
-                .filter_map(|(session, _)| {
-                    let tile = self.tile_of_session(*session)?;
-                    let at = Waiting { worker: tile.worker, tile: Some(tile), session: *session };
-                    Some(Step::Session(at))
-                })
+                .filter_map(|(about, _)| self.step_of(*about))
                 .collect::<Vec<_>>()
         };
         let threads = |rung: Rung| self.threads_on(rung).into_iter().map(Step::Thread);
@@ -426,7 +431,7 @@ impl WorkspaceView {
             return;
         }
         self.turns.command_ended(session);
-        self.finished.insert(session, done);
+        self.finished.insert(About::Session(session), done);
         cx.notify();
     }
 

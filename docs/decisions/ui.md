@@ -8438,3 +8438,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Remove stands in the primary style until kit has a destructive one.
   - Tests: `workspace::tests::bars::removing_a_machine_asks_first_and_says_what_stays`;
     `slopty-app` `ssh::tests::a_removal_takes_the_worker_off_then_the_server_forgets_it`.
+
+- ✅ **A finished turn of a thread with no terminal is left to review** (2026-10-06, readiness
+  2026-10-08 R2). Only a terminal's agent earned *To review*, the bell's count, the away note
+  and the tile's unseen dot: a turn was timed from the terminal's session, so Codex beside no
+  TUI, pi, an ACP agent and a message's runs ended their turns unseen.
+  - The turns under way and the finishes not looked at are kept by what they are about
+    (`attention::About`): a terminal's session, or a thread with none. Every worker's table
+    feeds them alike: a thread's row moving to working starts its turn, and done ends it.
+  - A thread's finish reads as a terminal's: long enough (`SLOW_COMMAND`) and unwatched, it
+    lists under *To review* with the agent's last line, counts on the bell, posts a note while
+    the app is away, and dots its tile. A thread with no tile here is still listed; its row
+    opens it. Focusing its tile clears it, and a thread its worker's table no longer holds is
+    not counted.
+  - Test: `workspace::tests::thread_waits::a_threads_finished_turn_without_a_terminal_is_to_review`.

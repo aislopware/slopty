@@ -573,3 +573,68 @@ fn a_closed_agent_tile_comes_back_as_its_thread_taken_up_again(cx: &mut TestAppC
         .collect();
     assert_eq!(resumed, [vec!["--resume".to_owned(), "5f1c".to_owned()]], "taken up again");
 }
+
+/// A turn of a thread with no terminal (Codex beside no TUI, pi, an ACP agent, a message's
+/// runs) that ends while nobody looks is left to review as a terminal's agent's is: its row
+/// under *To review* with what the agent last said, a count on the bell, a note while the app
+/// is away and the unseen dot on its tile. Looking at its tile clears all of them; a short turn,
+/// or one watched, earns none.
+#[gpui::test]
+fn a_threads_finished_turn_without_a_terminal_is_to_review(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Phase, Status as Stands};
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = None;
+    let mut row = state.row(WallMs::ZERO);
+    let thread = row.id;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.txt".to_owned() }, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    let base = row.status.clone();
+    let at = move |phase: Phase, ms: u64| Stands {
+        phase,
+        since_ms: WallMs::from_millis(ms),
+        ..base.clone()
+    };
+    let turn = |row: &mut ThreadRow, cx: &mut VisualTestContext, from: u64, to: u64| {
+        row.status = at(Phase::Working, from);
+        table(&view, cx, key, vec![row.clone()]);
+        row.status = at(Phase::Done, to);
+        row.last_line = Some("Fixed the flaky test".to_owned());
+        table(&view, cx, key, vec![row.clone()]);
+    };
+
+    turn(&mut row, cx, 1_000, 61_000);
+    view.update(cx, |v, _| {
+        let review = v.to_review();
+        assert!(
+            matches!(review.as_slice(), [agents::Step::Thread(w)] if w.thread == thread),
+            "a row under To review: {review:?}"
+        );
+        assert_eq!(v.bell_count(), 1, "the bell counts it");
+        let look = v.attention_look();
+        let [ended] = look.turns.as_slice() else { panic!("one turn: {look:?}") };
+        assert_eq!(ended.route.about, attention::About::Thread(thread), "a note of its own");
+        assert_eq!(ended.route.item, Some(tile.item), "that leads to its tile");
+        let item = v.item(tile).cloned().expect("the tile");
+        assert!(v.tile_marks(tile, &item).1, "its tile's unseen dot");
+    });
+    let line = leak(format!("nav-review-{thread}"));
+    assert!(cx.debug_bounds(line).is_some(), "drawn under To review");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    view.update(cx, |v, _| {
+        assert!(v.to_review().is_empty() && v.bell_count() == 0, "looked at: nothing left");
+        let item = v.item(tile).cloned().expect("the tile");
+        assert!(!v.tile_marks(tile, &item).1, "and no dot");
+    });
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    turn(&mut row, cx, 70_000, 71_000);
+    assert!(view.read_with(cx, |v, _| v.to_review().is_empty()), "a short turn earns nothing");
+}

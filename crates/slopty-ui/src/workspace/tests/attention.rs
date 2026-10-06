@@ -1090,7 +1090,14 @@ fn an_agent_that_ended_unseen_is_listed_to_review(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("nav-to-review").is_some(), "the section lists it");
     let words = view.read_with(cx, |v, _| v.to_review());
-    assert_eq!(words.iter().map(|w| w.session).collect::<Vec<_>>(), [away]);
+    let sessions: Vec<_> = words
+        .iter()
+        .filter_map(|w| match w {
+            super::super::agents::Step::Session(at) => Some(at.session),
+            super::super::agents::Step::Thread(_) => None,
+        })
+        .collect();
+    assert_eq!(sessions, [away]);
     press(cx, leak(format!("nav-review-{away}")));
     assert_eq!(view.read_with(cx, |v, _| v.focused()), Some(tiles[0]), "it went there");
     assert!(cx.debug_bounds("nav-to-review").is_none(), "looked at, nothing is left to review");

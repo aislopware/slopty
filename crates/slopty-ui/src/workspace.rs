@@ -767,7 +767,9 @@ pub struct WorkspaceView {
     /// The quiet line about the server in the titlebar ("server offline"), if any.
     server_status: Option<SharedString>,
     /// Long shell commands that finished unwatched, by session.
-    finished: HashMap<SessionId, Finished>,
+    /// What ended while nobody looked, by what it is about: a terminal's command or agent turn,
+    /// or the turn of a thread with no terminal ([`attention::About`]).
+    finished: HashMap<attention::About, Finished>,
     slow_command: Duration,
     /// How long a command runs before its tile says so ([`RUNNING_AFTER`]).
     running_after: Duration,
@@ -1305,7 +1307,7 @@ impl WorkspaceView {
     /// The badge a session's last long command left, if the tile has not been looked at since.
     #[must_use]
     pub fn finished(&self, session: SessionId) -> Option<&Finished> {
-        self.finished.get(&session)
+        self.finished.get(&attention::About::Session(session))
     }
 
     /// Whether moves animate. The self-test turns this off so a dump right after an action

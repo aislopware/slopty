@@ -1097,7 +1097,7 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
     let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(6) };
     let full = done.label();
     view.update_in(cx, |v, _w, cx| {
-        v.finished.insert(session, done);
+        v.finished.insert(attention::About::Session(session), done);
         cx.notify();
     });
     cx.run_until_parked();

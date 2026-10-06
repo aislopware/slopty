@@ -24,6 +24,7 @@ use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Theme, Typography};
 
 use super::actions::{AddWindow, CloseItem};
+use super::attention::About;
 use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
@@ -1130,7 +1131,9 @@ impl WorkspaceView {
             return header.into_any_element();
         }
         let unwatched = match &item.kind {
-            ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
+            ItemKind::Terminal { session } => {
+                self.finished.get(&About::Session(*session)).map(|f| (*session, f))
+            }
             _ => None,
         };
         // A command that ended unwatched: the slot's mark says how, so a good end reads as the
@@ -1861,7 +1864,7 @@ impl WorkspaceView {
         }
         let session = session?;
         let failed = |exit: i64| if exit == 0 { Status::Done } else { Status::Failed };
-        if let Some(done) = self.finished.get(&session) {
+        if let Some(done) = self.finished.get(&About::Session(session)) {
             return Some(failed(done.exit.map_or(0, i64::from)));
         }
         if let Some(SessionState::Exited { status }) = self.summary(session).map(|s| &s.state) {

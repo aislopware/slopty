@@ -93,6 +93,7 @@ use super::agents::{
     Step, Waiting, agent_ask_text, agent_mark_of, agent_status_text, agent_status_word, needs_human,
 };
 use super::approvals::Answer;
+use super::attention::About;
 use super::faces::ThreadStand;
 use super::grouping::{Grouping, group_glyph, parent_of, section_name};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
@@ -1462,7 +1463,8 @@ impl WorkspaceView {
     pub(super) fn tile_marks(&self, tile: TileRef, item: &Item) -> (Option<Status>, bool) {
         let mark = self.tile_status(tile, item);
         let unwatched = match item.kind {
-            ItemKind::Terminal { session } => self.finished.contains_key(&session),
+            ItemKind::Terminal { session } => self.finished.contains_key(&About::Session(session)),
+            ItemKind::Thread { thread } => self.finished.contains_key(&About::Thread(thread)),
             _ => false,
         };
         (mark, unwatched && !matches!(mark, Some(Status::Working | Status::NeedsYou)))
@@ -1608,7 +1610,8 @@ impl WorkspaceView {
     pub(super) fn last_command(&self, session: slopty_core::SessionId) -> Option<String> {
         let shell = self.shell(session);
         let typed = shell.and_then(|s| s.running.clone().or_else(|| s.last.clone()));
-        let typed = typed.or_else(|| self.finished.get(&session).map(|f| f.command.clone()))?;
+        let typed = typed
+            .or_else(|| self.finished.get(&About::Session(session)).map(|f| f.command.clone()))?;
         let words = super::tile::command_words(&typed);
         (!words.is_empty() && !super::tile::only_moves(words)).then(|| words.to_owned())
     }
@@ -2197,10 +2200,19 @@ impl WorkspaceView {
     fn thread_nav_agent(&self, wait: super::faces::ThreadWait, status: Status) -> NavAgent {
         let stand = self.thread_stand(wait.thread);
         let asks = stand.and_then(|st| st.asks.as_ref());
-        let words = asks
-            .map(|a| crate::markdown::plain_line(&a.title))
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_default();
+        // Under *To review*, which says it ended: what it said it did, else how long it ran.
+        let ended =
+            self.finished.get(&About::Thread(wait.thread)).filter(|_| status == Status::Done);
+        let words = match ended {
+            Some(done) if done.command == super::turns::TURN_FINISHED => {
+                kit::duration(done.elapsed)
+            }
+            Some(done) => done.command.clone(),
+            None => asks
+                .map(|a| crate::markdown::plain_line(&a.title))
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_default(),
+        };
         let title = match wait.tile.and_then(|t| self.item(t)) {
             Some(item) => self.tile_title(item),
             None => self.thread_title(wait.thread),
@@ -2231,7 +2243,9 @@ impl WorkspaceView {
                     // the turn ran.
                     self.face_summary(at.session)
                         .or_else(|| {
-                            self.finished.get(&at.session).map(|f| kit::duration(f.elapsed))
+                            self.finished
+                                .get(&About::Session(at.session))
+                                .map(|f| kit::duration(f.elapsed))
                         })
                         .unwrap_or_default()
                 } else {
@@ -2543,8 +2557,7 @@ impl WorkspaceView {
             rows.push(heading("nav-needs-you", NEEDS_YOU));
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
-        let sessions = self.to_review().into_iter().map(Step::Session).collect();
-        let review = agents(sessions, Status::Done);
+        let review = agents(self.to_review(), Status::Done);
         if !review.is_empty() {
             rows.push(heading("nav-to-review", TO_REVIEW));
             rows.extend(review.into_iter().map(NavRow::Agent));
