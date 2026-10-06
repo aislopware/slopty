@@ -4,13 +4,18 @@
 //!
 //! They are gpui-kit's questionnaire: one question on show at a time with its header, its
 //! answers and what each means, a field for an answer of one's own under them ("Other"), and
-//! a question that offers nothing is that field alone. The keyboard walks it as the
-//! questionnaire's contract says: ↑/↓ move between answers, a digit takes its answer, ↵ goes
-//! on with a filled one, ⌘↵ goes on from anywhere, ←/→ step between questions.
+//! a question that offers nothing is that field alone. A question that takes several answers
+//! says "Select all that apply" under it. The keyboard walks it as the questionnaire's
+//! contract says, and as `MonoCode`'s question form does: ↑/↓ move between answers, Home and
+//! End go to the first and the last, a digit takes its answer, ↵ goes on with a filled one,
+//! ⌘↵ goes on from anywhere, ←/→ step between questions. Going on needs an answer; Skip goes
+//! on without one (`docs/decisions/ui.md`, "A question is answered from the keyboard, or
+//! skipped").
 //!
 //! One [`Intent::Answer`](slopty_proto::thread::wire::Intent::Answer) answers them all
 //! ([`Answer::choice`]). A multi-choice answer joins its picks ([`Answer::JOIN`]) and puts the
-//! words of one's own last, as Claude Code's own dialog does.
+//! words of one's own last, as Claude Code's own dialog does. A question skipped is answered
+//! with nothing.
 
 use std::cell::Cell;
 
@@ -24,8 +29,8 @@ use gpui_kit::component::questionnaire::{
     Questionnaire, QuestionnaireActions, QuestionnaireAnswer, QuestionnaireChoice,
     QuestionnaireChoiceDefinition, QuestionnaireChoices, QuestionnaireError, QuestionnaireInput,
     QuestionnaireInputDefinition, QuestionnaireItem, QuestionnaireItemDefinition,
-    QuestionnaireNext, QuestionnairePrevious, QuestionnaireShortcutMode, QuestionnaireState,
-    QuestionnaireSubmission, QuestionnaireSubmit, QuestionnaireTitle,
+    QuestionnaireNext, QuestionnairePrevious, QuestionnaireShortcutMode, QuestionnaireSkip,
+    QuestionnaireState, QuestionnaireSubmission, QuestionnaireSubmit, QuestionnaireTitle,
 };
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::detail::{Answer, Question};
@@ -37,13 +42,24 @@ pub const OTHER: &str = "Other";
 /// What the field of a question that offers nothing says before anything is typed.
 pub const WRITTEN: &str = "Your answer";
 
+/// Said under a question that takes several answers.
+pub const SELECT_ALL: &str = "Select all that apply";
+
+/// What the answered line says of a question skipped.
+pub const SKIPPED: &str = "Skipped";
+
 /// An answer to `questions` in words, for the line that stands for the card once answered:
 /// the answers in their order ([`Answer::read`]), or the choice itself when it holds none.
 #[must_use]
 pub fn words(questions: &[Question], choice: &str) -> String {
     Answer::read(questions, choice).map_or_else(
         || choice.to_owned(),
-        |answers| answers.into_iter().map(|a| a.answer).collect::<Vec<_>>().join("; "),
+        |answers| {
+            let said = answers
+                .into_iter()
+                .map(|a| if a.answer.trim().is_empty() { SKIPPED.to_owned() } else { a.answer });
+            said.collect::<Vec<_>>().join("; ")
+        },
     )
 }
 
@@ -100,8 +116,10 @@ impl Questions {
                 let field = cx.new(|cx| {
                     TextareaState::new(window, cx).auto_grow(1, 6).placeholder(placeholder)
                 });
+                // Not required, so Skip can pass it over; going on still needs an answer, as
+                // the questionnaire holds an optional question left empty unanswered.
                 QuestionnaireItemDefinition::new(ix.to_string(), question.text.clone())
-                    .with_required(true)
+                    .with_required(false)
                     .with_multiple(question.multi_select)
                     .with_choices(question.options.iter().enumerate().map(|(at, offered)| {
                         let choice = QuestionnaireChoiceDefinition::new(
@@ -184,6 +202,36 @@ impl Questions {
         });
     }
 
+    /// Home and End, bare, while an answer has the keyboard: the first answer of the question
+    /// on show, or its last, gets it. The field keeps them for its text. Whether the key was
+    /// taken.
+    fn to_end(
+        state: &Entity<QuestionnaireState>,
+        key: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let first = match key.key.as_str() {
+            "home" => true,
+            "end" => false,
+            _ => return false,
+        };
+        let held = state.read(cx);
+        if key.modifiers.number_of_modifiers() != 0 || held.is_current_input_focused(window) {
+            return false;
+        }
+        let Some(item) = held.current_item().cloned() else { return false };
+        let choices = held
+            .item_definition(&item)
+            .map(QuestionnaireItemDefinition::choices)
+            .unwrap_or_default();
+        let Some(to) = (if first { choices.first() } else { choices.last() }) else {
+            return false;
+        };
+        let value = to.value().clone();
+        state.update(cx, |state, cx| state.focus_choice(&item, &value, window, cx))
+    }
+
     /// The questionnaire drawn: the question on show, its answers, the field, what is
     /// missing, and the ways on, with `lead` (the request's own answers) first in their row.
     /// The question's header is the card's to show ([`Questions::current`]).
@@ -202,8 +250,16 @@ impl Questions {
                         .map(|at| QuestionnaireChoice::new(state, name.clone(), at.to_string())),
                 )
             });
+            let several = (question.multi_select && !question.options.is_empty()).then(|| {
+                div()
+                    .debug_selector(|| "thread-question-several".to_owned())
+                    .text_size(gpui::px(theme.typography.small()))
+                    .text_color(crate::colors::hsla(theme.surfaces.text_muted))
+                    .child(SELECT_ALL)
+            });
             QuestionnaireItem::new(state, name.clone())
                 .child(QuestionnaireTitle::new(state, name.clone()))
+                .children(several)
                 .children(answers)
                 .child(crate::kit::field(
                     QuestionnaireInput::new(state, name.clone()).min_h(field),
@@ -221,6 +277,14 @@ impl Questions {
                     .id("thread-question")
                     .debug_selector(|| "thread-question".to_owned())
                     .track_scroll(&self.body)
+                    .on_key_down({
+                        let state = state.clone();
+                        move |event, window, cx| {
+                            if Self::to_end(&state, &event.keystroke, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }
+                    })
                     .w_full()
                     .min_h_0()
                     .flex()
@@ -238,6 +302,7 @@ impl Questions {
                     .child(div().flex().flex_wrap().gap(gpui::px(spacing.xxs)).children(lead))
                     .child(div().flex_1())
                     .child(QuestionnairePrevious::new(state))
+                    .child(QuestionnaireSkip::new(state))
                     .child(QuestionnaireNext::new(state))
                     .child(QuestionnaireSubmit::new(state)),
             )

@@ -106,6 +106,72 @@ fn questions_are_answered_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("answered-q").is_some(), "its answers show in its place");
 }
 
+/// As `MonoCode`'s question form: Home and End go to a question's first answer and its last;
+/// going on needs an answer, so ⌘↵ on none stays; Skip goes on without one; a question that
+/// takes several answers says so. The question skipped is answered with nothing, and the
+/// answered line says it was skipped.
+#[gpui::test]
+fn a_question_is_walked_by_home_and_end_and_skipped(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps = vec![Cap::named(Cap::APPROVALS)];
+    state.requests = vec![asking(
+        "q",
+        Vec::new(),
+        vec![
+            question("Which base?", None, &[("main", ""), ("next", ""), ("release", "")], false),
+            question("Which checks?", None, &[("Lint", ""), ("Tests", "")], true),
+        ],
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let form = view.read_with(cx, |v, _| v.questionnaire()).expect("a questionnaire");
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            form.read(cx).focused_current_choice(window).map(ToString::to_string)
+        })
+    };
+    assert_eq!(focused(cx).as_deref(), Some("0"), "the first answer has the keyboard");
+    assert!(cx.debug_bounds("thread-question-several").is_none(), "one answer to pick");
+    cx.simulate_keystrokes("end");
+    assert_eq!(focused(cx).as_deref(), Some("2"), "End: the last answer");
+    cx.simulate_keystrokes("home");
+    assert_eq!(focused(cx).as_deref(), Some("0"), "Home: the first");
+
+    cx.simulate_keystrokes("cmd-enter");
+    let current = |cx: &mut VisualTestContext| {
+        form.read_with(cx, |f, _| f.current_item().map(ToString::to_string))
+    };
+    assert_eq!(current(cx).as_deref(), Some("0"), "no answer, so nothing goes on");
+    assert_eq!(intents(&sent), [], "and nothing went");
+
+    let skip: &'static str =
+        Box::leak(format!("questionnaire-{}-Skip", form.entity_id()).into_boxed_str());
+    let at = cx.debug_bounds(skip).expect("Skip").center();
+    cx.simulate_click(at, Modifiers::none());
+    assert_eq!(current(cx).as_deref(), Some("1"), "Skip went on");
+    assert!(cx.debug_bounds("thread-question-several").is_some(), "Select all that apply");
+    cx.simulate_keystrokes("2 cmd-enter");
+
+    let answers =
+        r#"[{"question":"Which base?","answer":""},{"question":"Which checks?","answer":"Tests"}]"#;
+    assert_eq!(
+        intents(&sent),
+        [Intent::Answer { ask: AskId("q".to_owned()), choice: answers.to_owned(), message: None }]
+    );
+    let said = crate::conversation::thread::questions::words(
+        &[
+            question("Which base?", None, &[("main", "")], false),
+            question("Which checks?", None, &[("Tests", "")], true),
+        ],
+        answers,
+    );
+    assert_eq!(said, "Skipped; Tests");
+}
+
 /// pi's text dialog: one question that offers nothing is a field, focused, whose words are
 /// the answer as they are. Slopty drives pi with no prompt of its own, so nothing offers to
 /// answer in a terminal.
