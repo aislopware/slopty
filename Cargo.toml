@@ -343,6 +343,8 @@ objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
     "UIFeedbackGenerator",
     "UINotificationFeedbackGenerator",
 ] }
+# The Photos picker on iOS (`slopty_platform::file_drop::picker`). Features are per crate.
+objc2-photos-ui = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 # The browser tile's `WKWebView` (`slopty_platform::web`). Features are per crate.
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 # Local notifications and the icon badge (`slopty_platform::notify`). Features are per crate.

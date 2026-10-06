@@ -233,6 +233,8 @@ objc2-ui-kit = { workspace = true, features = [
     "UIButtonConfiguration",
     "UIColor",
 ] }
+# The Photos picker beside the Files one (`file_drop::picker`): its configuration and results.
+objc2-photos-ui = { workspace = true, features = [ "PHPicker" ] }
 objc2-web-kit = { workspace = true, features = [
     "block2",
     "WKNavigation",

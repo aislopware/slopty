@@ -341,6 +341,38 @@ impl Landing {
     }
 }
 
+/// What waits on the main thread for files that load off it (a picker's sink, which is not
+/// `Send`), each under an id the loading side carries, and taken once.
+#[cfg(any(target_os = "ios", test))]
+#[derive(Debug)]
+pub(crate) struct Waiting<T> {
+    next: u64,
+    waiting: Vec<(u64, T)>,
+}
+
+#[cfg(any(target_os = "ios", test))]
+impl<T> Default for Waiting<T> {
+    fn default() -> Self {
+        Self { next: 0, waiting: Vec::new() }
+    }
+}
+
+#[cfg(any(target_os = "ios", test))]
+impl<T> Waiting<T> {
+    /// Keep `value` until its id is taken.
+    pub(crate) fn wait(&mut self, value: T) -> u64 {
+        self.next = self.next.wrapping_add(1);
+        self.waiting.push((self.next, value));
+        self.next
+    }
+
+    /// What waits under `id`, once: `None` when it was taken or never was.
+    pub(crate) fn take(&mut self, id: u64) -> Option<T> {
+        let at = self.waiting.iter().position(|(waiting, _)| *waiting == id)?;
+        Some(self.waiting.swap_remove(at).1)
+    }
+}
+
 /// Where a view's drags and drops go.
 type Sink = Rc<dyn DropSink>;
 
@@ -821,7 +853,7 @@ mod ios {
     use objc2::runtime::{NSObjectProtocol, ProtocolObject};
     use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_foundation::{
-        NSArray, NSError, NSItemProviderFileOptions, NSObject, NSString, NSURL,
+        NSArray, NSError, NSItemProvider, NSItemProviderFileOptions, NSObject, NSString, NSURL,
     };
     use objc2_ui_kit::{
         UIDragDropSession as _, UIDropInteraction, UIDropInteractionDelegate, UIDropOperation,
@@ -830,7 +862,7 @@ mod ios {
     use parking_lot::Mutex;
 
     use super::out::{DATA_UTI, FOLDER_UTI};
-    use super::{Landing, arrive, deliver, root};
+    use super::{Dropped, Landing, arrive, deliver, root};
 
     pub(super) struct Ivars {
         host: usize,
@@ -904,70 +936,78 @@ mod ios {
                 let p = session.locationInView(&view);
                 (p.x, p.y)
             });
-            let landing = match Landing::new(&root(), items.count(), at) {
-                Ok(landing) => landing,
-                Err(e) => {
-                    tracing::warn!(error = %e, "no directory for a drop");
-                    return;
-                }
-            };
-            let dir = landing.dir().to_path_buf();
-            tracing::info!(files = items.count(), dir = %dir.display(), "files dropped");
-            let landing = Arc::new(Mutex::new(landing));
             let host = self.ivars().host;
-            for item in &items {
-                let provider = item.itemProvider();
-                let suggested = provider.suggestedName().map(|n| n.to_string());
-                let (landing, dir) = (Arc::clone(&landing), dir.clone());
-                // Loaded as a file or a folder, whatever its own type (a photo's HEIC, a PDF):
-                // the provider brings the representation that conforms.
-                let uti = [DATA_UTI, FOLDER_UTI].into_iter().map(NSString::from_str).find(|t| {
-                    provider.hasRepresentationConformingToTypeIdentifier_fileOptions(
-                        t,
-                        NSItemProviderFileOptions::empty(),
-                    )
-                });
-                let Some(uti) = uti else {
-                    let dropped = landing.lock().resolve(Err((None, "nothing to read".to_owned())));
-                    if let Some(dropped) = dropped {
-                        deliver(host, dropped);
-                    }
-                    continue;
-                };
-                let copied = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
-                    // SAFETY: Foundation rule: the URL is null or valid for the call; the
-                    // file at it is removed once the call returns, so it is moved out here.
-                    let url = unsafe { url.as_ref() };
-                    // SAFETY: Foundation rule: the error is null or valid for the call.
-                    let error = unsafe { error.as_ref() };
-                    let from = url.and_then(NSURL::path).map(|p| PathBuf::from(p.to_string()));
-                    let outcome = match (from, error) {
-                        (Some(from), None) => {
-                            let name = from
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .or_else(|| suggested.clone())
-                                .unwrap_or_else(|| "dropped".to_owned());
-                            arrive(&dir, &from, &name)
-                        }
-                        (_from, Some(error)) => {
-                            Err((None, error.localizedDescription().to_string()))
-                        }
-                        (None, None) => Err((None, "not a file".to_owned())),
-                    };
-                    let dropped = landing.lock().resolve(outcome);
-                    if let Some(dropped) = dropped {
-                        deliver(host, dropped);
-                    }
-                });
-                // SAFETY: Foundation rule: a type some representation conforms to and a completion
-                // called once, off the main thread, which it may be: it holds only `Send`
-                // values. The progress may be ignored.
-                let _progress = unsafe {
-                    provider
-                        .loadFileRepresentationForTypeIdentifier_completionHandler(&uti, &copied)
-                };
+            let providers = items.iter().map(|item| item.itemProvider()).collect();
+            let done: Arc<dyn Fn(Dropped) + Send + Sync> = Arc::new(move |d| deliver(host, d));
+            load(providers, at, &done);
+        }
+    }
+
+    /// Load each provider's file or folder into a landing of their own, dropped at `at`, and
+    /// hand the landing to `done` once the last one resolves, on whichever thread that is.
+    pub(super) fn load(
+        providers: Vec<Retained<NSItemProvider>>,
+        at: (f64, f64),
+        done: &Arc<dyn Fn(Dropped) + Send + Sync>,
+    ) {
+        let landing = match Landing::new(&root(), providers.len(), at) {
+            Ok(landing) => landing,
+            Err(e) => {
+                tracing::warn!(error = %e, "no directory for a drop");
+                return;
             }
+        };
+        let dir = landing.dir().to_path_buf();
+        tracing::info!(files = providers.len(), dir = %dir.display(), "files arrive");
+        let landing = Arc::new(Mutex::new(landing));
+        for provider in providers {
+            let suggested = provider.suggestedName().map(|n| n.to_string());
+            let (landing, dir, done) = (Arc::clone(&landing), dir.clone(), Arc::clone(done));
+            // Loaded as a file or a folder, whatever its own type (a photo's HEIC, a PDF):
+            // the provider brings the representation that conforms.
+            let uti = [DATA_UTI, FOLDER_UTI].into_iter().map(NSString::from_str).find(|t| {
+                provider.hasRepresentationConformingToTypeIdentifier_fileOptions(
+                    t,
+                    NSItemProviderFileOptions::empty(),
+                )
+            });
+            let Some(uti) = uti else {
+                let dropped = landing.lock().resolve(Err((None, "nothing to read".to_owned())));
+                if let Some(dropped) = dropped {
+                    done(dropped);
+                }
+                continue;
+            };
+            let copied = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
+                // SAFETY: Foundation rule: the URL is null or valid for the call; the
+                // file at it is removed once the call returns, so it is moved out here.
+                let url = unsafe { url.as_ref() };
+                // SAFETY: Foundation rule: the error is null or valid for the call.
+                let error = unsafe { error.as_ref() };
+                let from = url.and_then(NSURL::path).map(|p| PathBuf::from(p.to_string()));
+                let outcome = match (from, error) {
+                    (Some(from), None) => {
+                        let name = from
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .or_else(|| suggested.clone())
+                            .unwrap_or_else(|| "dropped".to_owned());
+                        arrive(&dir, &from, &name)
+                    }
+                    (_from, Some(error)) => Err((None, error.localizedDescription().to_string())),
+                    (None, None) => Err((None, "not a file".to_owned())),
+                };
+                let dropped = landing.lock().resolve(outcome);
+                if let Some(dropped) = dropped {
+                    done(dropped);
+                }
+            });
+            // SAFETY: Foundation rule: a type some representation conforms to and a completion
+            // called once, off the main thread, which it may be: it holds only `Send` values.
+            // The progress may be ignored.
+            let _progress = unsafe {
+                provider.loadFileRepresentationForTypeIdentifier_completionHandler(&uti, &copied)
+            };
         }
     }
 
@@ -997,6 +1037,19 @@ mod ios {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What waits is taken under its own id and once only; another's id or a second take finds
+    /// nothing, and the others wait on.
+    #[test]
+    fn what_waits_is_taken_once_by_its_id() {
+        let mut waiting = Waiting::default();
+        let (first, second) = (waiting.wait("first"), waiting.wait("second"));
+        assert_ne!(first, second);
+        assert_eq!(waiting.take(second), Some("second"));
+        assert_eq!(waiting.take(second), None, "once only");
+        assert_eq!(waiting.take(second.wrapping_add(7)), None, "nothing under another id");
+        assert_eq!(waiting.take(first), Some("first"), "the other waited on");
+    }
 
     /// Every drop gets a directory of its own; the files that arrived whole are handed on in
     /// order once the last one resolves, and one that failed is named, left out, and what it
