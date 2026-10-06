@@ -1250,6 +1250,11 @@ more full-window layer.
     fork both before and after this sync. It shapes a lone `.` before `1.`. Not from this
     change; still to find.
 
+- ✅ **ghostty takes upstream `c3203ea4`** (2026-10-06, fork `02fe7604`, libghostty-rs `88358b7a`).
+  Its three commits release the renderer's shaders when the render thread exits (#14542) and
+  update the vouched list. Slopty builds only libghostty-vt, which they do not touch; taken to
+  keep the fork level with upstream.
+
 - ✅ **Linux clippy compiles the build scripts' C with zig** (2026-10-06). The server's push
   client is rustls on ring (`docs/decisions/platform.md`). ring compiles C for its target, and
   it has no path without a C compiler. Plain `cargo clippy` for `x86_64-unknown-linux-musl` on
