@@ -274,7 +274,11 @@ mod roundtrip {
             .spawn(
                 id,
                 SpawnSpec {
-                    command: vec!["/bin/sh".into(), "-c".into(), "read x; exit 7".into()],
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "read x; stty -echo; printf ready; read y; exit 7".into(),
+                    ],
                     cwd: None,
                     env: Vec::new(),
                     size: size(),
@@ -285,7 +289,13 @@ mod roundtrip {
         let attached = client.attach(id).await.unwrap();
         let master = PtyMaster::new(attached.master).unwrap();
         master.write_all(b"go\r").await.unwrap();
-        let _echo = read_until(&master, b"go", attached.backlog).await;
+        let echo = read_until(&master, b"go", attached.backlog).await;
+        // The shell ends with nothing left for the master to read: a Linux pty drops what is
+        // unread when the last slave closes (an exit on the first line took its echo with it),
+        // and macOS holds the close until it is read. So it stops echoing, says so, and only
+        // then waits for the line that ends it.
+        let _ready = read_until(&master, b"ready", echo).await;
+        master.write_all(b"\r").await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(10), exits.recv())
             .await
             .expect("the exit, unprompted")
