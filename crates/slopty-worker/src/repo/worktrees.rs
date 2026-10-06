@@ -8,11 +8,17 @@
 //! the task settles, the server asks for it to go ([`remove`]). Nothing that is not saved
 //! elsewhere is lost: a worktree with anything not committed, or with a terminal still working
 //! in it, is kept and said, and its branch goes only when every commit on it landed.
+//!
+//! A new worktree starts current: from its base branch as `origin` has it, fetched for a moment
+//! first, unless the clone holds commits `origin` lacks ([`base_of`]). The files the clone's
+//! `.worktreeinclude` names that git ignores (`.env`, local certificates) are copied in, as
+//! Claude Code's own worktrees do, since a fresh checkout has none of them ([`carry_ignored`]).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use slopty_proto::agent::Worktree;
-use slopty_proto::thread::wire::Start;
+use slopty_proto::thread::wire::{NewWorktree, Start};
 
 use super::bundle::{self, branch_ref};
 use super::{common_dir, git_dir};
@@ -74,18 +80,32 @@ pub struct Made {
     pub clone_branch: Option<String>,
 }
 
+/// How long a new worktree waits on `origin` for its base before it starts from what the clone
+/// has: a start is shown at once, and a slow or unreachable remote must not hold it.
+const FETCH_WAIT: Duration = Duration::from_secs(10);
+
+/// The file in a clone's root naming the ignored files a new worktree gets a copy of, in
+/// `.gitignore`'s syntax, as Claude Code reads it.
+const WORKTREE_INCLUDE: &str = ".worktreeinclude";
+
 /// Make the worktree `name` of the clone rooted at `clone`, as Claude Code's `--worktree <name>`
 /// does.
 ///
-/// It is `.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s default
-/// branch, else `HEAD`. One there already is reopened as it is. Unlike Claude Code's, a branch
-/// of that name there already is checked out where it is, never reset to the base, so the work
-/// of a task tried again is kept.
+/// It is `.claude/worktrees/<name>` on branch `worktree-<name>`, from `base` ([`base_of`]),
+/// with the ignored files `.worktreeinclude` names copied in ([`carry_ignored`]). One there
+/// already is reopened as it is. Unlike Claude Code's, a branch of that name there already is
+/// checked out where it is, never reset to the base, so the work of a task tried again is kept.
 ///
 /// # Errors
-/// [`Failed::NotOne`] for a `clone` that is no clone's root or a `name` that is no single
-/// plain name, [`Failed::Other`] for a git that failed.
-pub async fn make(git: &Path, clone: &Path, name: &str) -> Result<Made, Failed> {
+/// [`Failed::NotOne`] for a `clone` that is no clone's root, a `name` that is no single plain
+/// name or a `base` that is no branch here or on `origin`, [`Failed::Other`] for a git that
+/// failed.
+pub async fn make(
+    git: &Path,
+    clone: &Path,
+    name: &str,
+    base: Option<&str>,
+) -> Result<Made, Failed> {
     let plain = !name.is_empty()
         && !name.starts_with('.')
         && !name.contains(['/', '\\'])
@@ -115,20 +135,107 @@ pub async fn make(git: &Path, clone: &Path, name: &str) -> Result<Made, Failed> 
     }
     let path_text = path.to_string_lossy();
     let exists = ["rev-parse", "--verify", "--quiet", "--end-of-options", &branch_ref(&branch)?];
-    let args: Vec<&str> = if bundle::run(git, &clone, &exists).await.is_ok() {
-        vec!["worktree", "add", "--end-of-options", &path_text, &branch]
+    let fresh = bundle::run(git, &clone, &exists).await.is_err();
+    if fresh {
+        let from = base_of(git, &clone, base.or(clone_branch.as_deref())).await?;
+        let args =
+            ["worktree", "add", "--no-track", "-b", &branch, "--end-of-options", &path_text, &from];
+        bundle::run(git, &clone, &args).await?;
     } else {
-        let has_origin = ["rev-parse", "--verify", "--quiet", "origin/HEAD^{commit}"];
-        let base = if bundle::run(git, &clone, &has_origin).await.is_ok() {
-            "origin/HEAD"
-        } else {
-            "HEAD"
-        };
-        vec!["worktree", "add", "--no-track", "-b", &branch, "--end-of-options", &path_text, base]
-    };
-    bundle::run(git, &clone, &args).await?;
+        bundle::run(git, &clone, &["worktree", "add", "--end-of-options", &path_text, &branch])
+            .await?;
+    }
     let path = std::fs::canonicalize(&path).unwrap_or(path);
+    if fresh {
+        carry_ignored(git, &clone, &path).await;
+    }
     Ok(Made { path, branch, clone, clone_branch })
+}
+
+/// What a new worktree starts from: the branch `wanted`, as current as can be had at once.
+///
+/// `origin`'s copy is fetched for at most [`FETCH_WAIT`]. When it holds every commit of the
+/// clone's own branch, the worktree starts from it (current, nothing lost); when the clone's
+/// branch has commits `origin` lacks, or `origin` has no such branch or could not be reached,
+/// from the clone's branch. With no branch wanted (a detached `HEAD`), from `HEAD`.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a branch neither the clone nor `origin` has.
+async fn base_of(git: &Path, clone: &Path, wanted: Option<&str>) -> Result<String, Failed> {
+    let Some(branch) = wanted else { return Ok("HEAD".to_owned()) };
+    let local = branch_ref(branch)?;
+    let has = async |name: String| {
+        let commit = format!("{name}^{{commit}}");
+        bundle::run(git, clone, &["rev-parse", "--verify", "--quiet", "--end-of-options", &commit])
+            .await
+            .is_ok()
+    };
+    let is_branch = has(local.clone()).await;
+    // A detached clone is named by its commit, which is no branch: it starts from `HEAD`.
+    if !is_branch && branch.len() >= 7 && branch.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok("HEAD".to_owned());
+    }
+    let remote = format!("refs/remotes/origin/{branch}");
+    if bundle::run(git, clone, &["remote", "get-url", "origin"]).await.is_ok() {
+        let spec = format!("+{local}:{remote}");
+        let fetch = ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", &spec];
+        if let Err(failed) = bundle::run_within(git, clone, &fetch, FETCH_WAIT).await {
+            tracing::info!(%failed, branch, "a worktree starts from the clone's copy");
+        }
+    }
+    let on_origin = has(remote.clone()).await;
+    match (is_branch, on_origin) {
+        (true, true) => {
+            let behind = ["merge-base", "--is-ancestor", "--end-of-options", &local, &remote];
+            let current = bundle::run(git, clone, &behind).await.is_ok();
+            Ok(if current { remote } else { local })
+        }
+        (true, false) => Ok(local),
+        (false, true) => Ok(remote),
+        (false, false) => Err(Failed::NotOne(format!("{branch} is no branch here or on origin"))),
+    }
+}
+
+/// Copy into the new worktree at `tree` the files of `clone` its `.worktreeinclude` names
+/// (`.gitignore` syntax) that git ignores there: a fresh checkout has the tracked files, and an
+/// untracked file git does not ignore would show as a change. Nothing is overwritten, and a
+/// file that cannot be copied is passed over: the worktree is made either way.
+async fn carry_ignored(git: &Path, clone: &Path, tree: &Path) {
+    let include = clone.join(WORKTREE_INCLUDE);
+    if !include.is_file() {
+        return;
+    }
+    let from = format!("--exclude-from={}", include.display());
+    let listed = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"];
+    let named = ["ls-files", "-z", "--others", "--ignored", &from];
+    let (ignored, wanted) =
+        tokio::join!(bundle::run(git, clone, &listed), bundle::run(git, clone, &named));
+    let (Ok(ignored), Ok(wanted)) = (ignored, wanted) else { return };
+    let ignored: std::collections::HashSet<&str> =
+        ignored.split('\0').filter(|p| !p.is_empty()).collect();
+    let paths: Vec<PathBuf> = wanted
+        .split('\0')
+        .filter(|p| !p.is_empty() && ignored.contains(p))
+        .map(PathBuf::from)
+        // `.claude/worktrees` holds the other worktrees: never copied into this one.
+        .filter(|p| !p.starts_with(AGENT_WORKTREES.iter().collect::<PathBuf>()))
+        .collect();
+    let (clone, tree) = (clone.to_path_buf(), tree.to_path_buf());
+    let copied = tokio::task::spawn_blocking(move || {
+        paths
+            .iter()
+            .filter(|path| {
+                let to = tree.join(path);
+                !to.exists()
+                    && to.parent().is_none_or(|dir| std::fs::create_dir_all(dir).is_ok())
+                    && std::fs::copy(clone.join(path), &to).is_ok()
+            })
+            .count()
+    })
+    .await;
+    if let Ok(copied) = copied {
+        tracing::info!(copied, "ignored files carried into a new worktree");
+    }
 }
 
 /// Move `start` into the worktree it names ([`Start::worktree`]), made or reopened by [`make`]
@@ -145,7 +252,7 @@ pub async fn make(git: &Path, clone: &Path, name: &str) -> Result<Made, Failed> 
 /// [`Failed::NotOne`] for a `cwd` in no repository or a name that is no plain name, and
 /// [`Failed::Other`] for a machine with no git or a git that failed.
 pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
-    let Some(name) = start.worktree.take() else { return Ok(None) };
+    let Some(NewWorktree { name, base }) = start.worktree.take() else { return Ok(None) };
     let git =
         crate::changes::git().ok_or_else(|| Failed::Other("this machine has no git".to_owned()))?;
     let cwd = crate::file::expand_home(Path::new(&start.cwd));
@@ -155,7 +262,7 @@ pub async fn enter(start: &mut Start) -> Result<Option<Worktree>, Failed> {
             .await
             .map_err(|e| Failed::Other(e.to_string()))??
     };
-    let made = make(git, &clone, &name).await?;
+    let made = make(git, &clone, &name, base.as_deref()).await?;
     let home = slopty_platform::dirs::home();
     let (at, path) = (made.path.join(&within), made.path.clone());
     let at = tokio::task::spawn_blocking(move || {
@@ -424,7 +531,7 @@ mod tests {
         git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
         let head = git_in(&clone, &["rev-parse", "HEAD"]);
 
-        let made = make(git, &clone, "slopty-p-1").await.expect("made");
+        let made = make(git, &clone, "slopty-p-1", None).await.expect("made");
         let root = std::fs::canonicalize(&clone).expect("canonical");
         assert_eq!(made.path, root.join(".claude/worktrees/slopty-p-1"));
         assert_eq!(
@@ -433,23 +540,75 @@ mod tests {
         );
         assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), head);
         std::fs::write(made.path.join("half.txt"), "kept").expect("write");
-        let again = make(git, &clone, "slopty-p-1").await.expect("found");
+        let again = make(git, &clone, "slopty-p-1", None).await.expect("found");
         assert_eq!(again.path, made.path);
         assert!(again.path.join("half.txt").exists(), "reopened as it is");
 
         let (tree, branch) = agent_tree(&clone, "slopty-p-2");
         let work = git_in(&tree, &["rev-parse", "HEAD"]);
         git_in(&clone, &["worktree", "remove", "--force", &tree.to_string_lossy()]);
-        let tried_again = make(git, &clone, "slopty-p-2").await.expect("made");
+        let tried_again = make(git, &clone, "slopty-p-2", None).await.expect("made");
         assert_eq!(tried_again.branch, branch);
         assert_eq!(git_in(&tried_again.path, &["rev-parse", "HEAD"]), work, "its work kept");
 
         for name in ["", "../out", "a/b", ".hidden", "with space"] {
-            let refused = make(git, &clone, name).await;
+            let refused = make(git, &clone, name, None).await;
             assert!(matches!(refused, Err(Failed::NotOne(_))), "{name:?}: {refused:?}");
         }
-        let inside = make(git, &clone.join(".claude"), "slopty-p-3").await;
+        let inside = make(git, &clone.join(".claude"), "slopty-p-3", None).await;
         assert!(matches!(inside, Err(Failed::NotOne(_))), "{inside:?}");
+    }
+
+    /// A new worktree starts from its branch as `origin` has it, fetched first, unless the
+    /// clone holds commits `origin` lacks; from a branch only `origin` has; from `HEAD` when
+    /// the clone is detached; and not at all from a branch neither has. It gets a copy of the
+    /// ignored files `.worktreeinclude` names, and nothing else untracked.
+    #[tokio::test]
+    async fn a_new_worktree_starts_current_and_carries_the_ignored_files_it_names() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let (origin, clone, other) =
+            (tmp.path().join("origin.git"), tmp.path().join("clone"), tmp.path().join("other"));
+        git_in(tmp.path(), &["init", "-q", "--bare", "-b", "main", &origin.to_string_lossy()]);
+        git_in(tmp.path(), &["clone", "-q", &origin.to_string_lossy(), &clone.to_string_lossy()]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        git_in(&clone, &["push", "-q", "origin", "main"]);
+        git_in(tmp.path(), &["clone", "-q", &origin.to_string_lossy(), &other.to_string_lossy()]);
+        git_in(&other, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+        git_in(&other, &["push", "-q", "origin", "main"]);
+        let c1 = git_in(&other, &["rev-parse", "HEAD"]);
+        git_in(&other, &["push", "-q", "origin", "main:feature"]);
+
+        std::fs::write(clone.join(".gitignore"), ".env\ncerts/\nsecret.txt\n").expect("write");
+        std::fs::write(clone.join(".worktreeinclude"), ".env\ncerts/\nnotes.txt\n").expect("write");
+        std::fs::create_dir_all(clone.join("certs")).expect("mkdir");
+        for (file, text) in
+            [(".env", "KEY=1"), ("certs/dev.pem", "pem"), ("secret.txt", "no"), ("notes.txt", "no")]
+        {
+            std::fs::write(clone.join(file), text).expect("write");
+        }
+        let behind = make(git, &clone, "behind", None).await.expect("made");
+        assert_eq!(git_in(&behind.path, &["rev-parse", "HEAD"]), c1, "origin's, fetched");
+        let read = |file: &str| std::fs::read_to_string(behind.path.join(file)).ok();
+        assert_eq!(read(".env").as_deref(), Some("KEY=1"));
+        assert_eq!(read("certs/dev.pem").as_deref(), Some("pem"));
+        assert_eq!(read("secret.txt"), None, "ignored but not named");
+        assert_eq!(read("notes.txt"), None, "named but not ignored: it would show as a change");
+
+        git_in(&clone, &["pull", "-q", "--ff-only", "origin", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c2 not pushed"]);
+        let c2 = git_in(&clone, &["rev-parse", "HEAD"]);
+        let ahead = make(git, &clone, "ahead", None).await.expect("made");
+        assert_eq!(git_in(&ahead.path, &["rev-parse", "HEAD"]), c2, "the work not pushed kept");
+
+        let feature = make(git, &clone, "feature", Some("feature")).await.expect("made");
+        assert_eq!(git_in(&feature.path, &["rev-parse", "HEAD"]), c1, "a branch origin alone has");
+        let none = make(git, &clone, "none", Some("nowhere")).await;
+        assert!(matches!(none, Err(Failed::NotOne(_))), "{none:?}");
+
+        git_in(&clone, &["checkout", "-q", "--detach", "HEAD~1"]);
+        let detached = make(git, &clone, "detached", None).await.expect("made");
+        assert_eq!(git_in(&detached.path, &["rev-parse", "HEAD"]), c1, "from HEAD");
     }
 
     /// A start naming a worktree moves into it, made from the main checkout of the repository
@@ -477,7 +636,7 @@ mod tests {
             prompt: None,
             model: None,
             args: Vec::new(),
-            worktree: worktree.map(str::to_owned),
+            worktree: worktree.map(NewWorktree::named),
         };
 
         let mut plain = start(&clone, None);
@@ -593,7 +752,7 @@ mod tests {
         std::fs::create_dir_all(&clone).expect("mkdir");
         git_in(&clone, &["init", "-q", "-b", "main"]);
         git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
-        let made = make(git, &clone, "fix-login").await.expect("made");
+        let made = make(git, &clone, "fix-login", None).await.expect("made");
         let tree = made.path.clone();
         for step in ["one", "two"] {
             std::fs::write(tree.join(format!("{step}.txt")), step).expect("write");

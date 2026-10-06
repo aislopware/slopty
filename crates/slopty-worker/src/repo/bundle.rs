@@ -259,6 +259,16 @@ async fn digest_of(path: &Path) -> Result<(u64, [u8; 32]), String> {
 
 /// `git -C repo args…`, asking nothing, within [`TIMEOUT`]: its output, or what it said.
 pub(super) async fn run(git: &Path, repo: &Path, args: &[&str]) -> Result<String, Failed> {
+    run_within(git, repo, args, TIMEOUT).await
+}
+
+/// [`run`], given up on (and the git killed) after `wait`.
+pub(super) async fn run_within(
+    git: &Path,
+    repo: &Path,
+    args: &[&str],
+    wait: Duration,
+) -> Result<String, Failed> {
     let ran = tokio::process::Command::new(git)
         .arg("-C")
         .arg(repo)
@@ -267,7 +277,7 @@ pub(super) async fn run(git: &Path, repo: &Path, args: &[&str]) -> Result<String
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .output();
-    let out = tokio::time::timeout(TIMEOUT, ran)
+    let out = tokio::time::timeout(wait, ran)
         .await
         .map_err(|_elapsed| {
             Failed::Other(format!("git {} took too long", args.first().unwrap_or(&"")))

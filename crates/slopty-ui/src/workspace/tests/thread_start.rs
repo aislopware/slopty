@@ -776,7 +776,9 @@ fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
         })
         .collect();
     let [start] = sent.as_slice() else { panic!("one start: {sent:?}") };
-    let name = start.worktree.as_deref().expect("a worktree");
+    let worktree = start.worktree.as_ref().expect("a worktree");
+    assert_eq!(worktree.base, None, "from the branch the clone has checked out");
+    let name = worktree.name.as_str();
     let suffix = name.strip_prefix("codex-").expect("named after its agent");
     assert!(suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
     assert_eq!(start.cwd, "/w/atlas", "the first folder in it, the most recent shell's");

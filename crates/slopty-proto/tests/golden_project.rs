@@ -23,7 +23,7 @@ mod golden_project {
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
-    use slopty_proto::thread::wire::Start;
+    use slopty_proto::thread::wire::{NewWorktree, Start};
     use slopty_proto::thread::{AgentId, ThreadId};
     use uuid::Uuid;
 
@@ -483,7 +483,10 @@ mod golden_project {
             prompt: Some("Read your brief.".to_owned()),
             model: None,
             args: Vec::new(),
-            worktree: Some("slopty-slopty-6".to_owned()),
+            worktree: Some(NewWorktree {
+                name: "slopty-slopty-6".to_owned(),
+                base: Some("main".to_owned()),
+            }),
         };
         snap(
             "start_thread",

@@ -27,8 +27,8 @@ mod threads {
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
-        Expanded, Intent, IntentDone, Outcome, PastSessions, Start, TableFrame, ThreadFrame,
-        ThreadRequest,
+        Expanded, Intent, IntentDone, NewWorktree, Outcome, PastSessions, Start, TableFrame,
+        ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
         AgentId, AskId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId,
@@ -1296,7 +1296,7 @@ mod threads {
             prompt: None,
             model: None,
             args: Vec::new(),
-            worktree: Some("claude-c0ffee".to_owned()),
+            worktree: Some(NewWorktree::named("claude-c0ffee")),
         };
         let answer = async |a: &mut Client, start: Start| {
             let id = IntentId::new();

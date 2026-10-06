@@ -30,8 +30,8 @@ use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
 use slopty_proto::thread::wire::{
-    Authors, IntentDone, ItemHit, Outcome, RequestCard, SEARCH_THREADS, Start, TableFrame,
-    ThreadFrame, ThreadHit, ThreadHits, ThreadRequest, ThreadRow,
+    Authors, IntentDone, ItemHit, NewWorktree, Outcome, RequestCard, SEARCH_THREADS, Start,
+    TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{self, AgentId, IntentId, ThreadId, TurnId};
 use slopty_proto::{ClientMsg, RequestId};
@@ -409,7 +409,7 @@ impl WorkspaceView {
             prompt,
             model: None,
             args: starting.agent_args(),
-            worktree: starting.worktree.clone(),
+            worktree: starting.worktree.clone().map(NewWorktree::named),
         };
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));

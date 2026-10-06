@@ -247,11 +247,31 @@ pub struct Start {
     pub model: Option<String>,
     /// More arguments for the agent, checked by its adapter.
     pub args: Vec<String>,
-    /// A git worktree of its own to work in, by name: the worker makes it from the clone
-    /// `cwd` is in (`.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s
-    /// default branch, else `HEAD`), or reopens it when it is there, and the agent starts in
-    /// it where `cwd` stands in the clone. A start whose `cwd` is in no clone is refused.
-    pub worktree: Option<String>,
+    /// A git worktree of its own to work in: the worker makes it from the clone `cwd` is in
+    /// (`.claude/worktrees/<name>` on branch `worktree-<name>`), or reopens it when it is
+    /// there, and the agent starts in it where `cwd` stands in the clone. A start whose `cwd`
+    /// is in no clone is refused.
+    pub worktree: Option<NewWorktree>,
+}
+
+/// A worktree a thread starts in ([`Start::worktree`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct NewWorktree {
+    /// Its name: a single plain name, the branch `worktree-<name>`.
+    pub name: String,
+    /// The branch it starts from; the one the clone has checked out when `None`, else the
+    /// clone's `HEAD`. The worker fetches it from `origin` first, for a moment, and starts
+    /// from `origin`'s copy when that holds every commit of the clone's own, so the worktree
+    /// is current without losing work not yet pushed.
+    pub base: Option<String>,
+}
+
+impl NewWorktree {
+    /// The worktree `name`, from the branch the clone has checked out.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self { name: name.into(), base: None }
+    }
 }
 
 /// Something a client asks a thread to do.

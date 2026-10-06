@@ -21,7 +21,7 @@ use slopty_proto::project::{
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
 use slopty_proto::terminal::{RepoId, SessionSummary};
-use slopty_proto::thread::wire::Start;
+use slopty_proto::thread::wire::{NewWorktree, Start};
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::{
@@ -584,12 +584,20 @@ struct Place {
     worktree: Option<Worktree>,
 }
 
-/// The git worktree a writing agent works in, made by the agent itself.
+/// The git worktree a writing agent works in.
 enum Worktree {
     /// Claude Code's, by the name it is given (`--worktree <name>`), reopened by that name.
     Named(String),
     /// Codex's, which it makes and names itself (`--worktree`).
     Codex,
+    /// One the worker makes for any other agent ([`slopty_proto::thread::wire::NewWorktree`]),
+    /// from the project's target, so the task's work starts where it is to land.
+    Worker {
+        /// Its name, reopened by it.
+        name: String,
+        /// The branch it starts from: the project's target.
+        base: String,
+    },
 }
 
 /// Where `worker` has a clone of `project`'s repository.
@@ -638,7 +646,7 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
                  your work there, and name its branch when you report done.",
                 plain(path)
             ),
-            Some(Worktree::Named(name)) => format!(
+            Some(Worktree::Named(name) | Worktree::Worker { name, .. }) => format!(
                 "- You work in a git worktree of your own, {name}, made from the clone at {} \
                  (branch worktree-{name}). Commit your work there, and name that branch when \
                  you report done.",
@@ -1593,9 +1601,10 @@ impl Hub {
                         }
                         Runner::Codex { .. } => Some(Worktree::Codex),
                         // The worker makes it, where Claude Code makes its own.
-                        Runner::Agent { .. } => {
-                            Some(Worktree::Named(format!("slopty-{project}-{task}")))
-                        }
+                        Runner::Agent { .. } => Some(Worktree::Worker {
+                            name: format!("slopty-{project}-{task}"),
+                            base: record.target.clone(),
+                        }),
                         Runner::Claude { .. } | Runner::Command { .. } => None,
                     };
                     Place { path, worktree }
@@ -1670,8 +1679,10 @@ impl Hub {
             // Its adapter gives it Slopty's tools and its role through the agent's own doors.
             Runner::Agent { agent, prompt, model, args } => {
                 let worktree = match worktree {
-                    Some(Worktree::Named(name)) => Some(name),
-                    Some(Worktree::Codex) | None => None,
+                    Some(Worktree::Worker { name, base }) => {
+                        Some(NewWorktree { name, base: Some(base) })
+                    }
+                    Some(Worktree::Named(_) | Worktree::Codex) | None => None,
                 };
                 let start = Start { agent, cwd, drive: None, prompt, model, args, worktree };
                 let start = Verb::StartThread {

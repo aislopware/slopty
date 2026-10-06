@@ -1544,9 +1544,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   agents on one repository at once is a daily pattern, and only a project's tasks could have a
   worktree made for them. `Start` now carries `worktree`, a name, and the worker makes it for any
   start, a client's or a task's, through the one path the tasks used (`repo::worktrees::enter`
-  over `make`): `.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s default
-  branch else `HEAD`, reopened as it is when it is there, as Claude Code's own `--worktree`
-  would. `Verb::StartThread` lost its own `worktree` field, which this replaces.
+  over `make`): `.claude/worktrees/<name>` on branch `worktree-<name>`, reopened as it is when
+  it is there, as Claude Code's own `--worktree` would. `Verb::StartThread` lost its own
+  `worktree` field, which this replaces. (Its base: the entry "A new worktree starts current"
+  below, which replaced `origin`'s default branch.)
   - *From the folder, not the root.* The clone is the main checkout of the repository the
     start's folder is in, so a start from inside another worktree makes one beside it rather
     than one nested in it. The agent stands where the folder stood in the clone, when that
@@ -1812,3 +1813,25 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     machines linked, each line names its machine.
   - Tests: `workspace::tests::palette_threads::the_palette_asks_every_linked_workers_threads_once_the_field_rests`
     and `workspace::tests::palette_threads::the_palette_asks_no_threads_for_commands_or_a_single_character`.
+
+- ✅ **A new worktree starts current, from its base, with the ignored files it needs**
+  (2026-10-06, `.research/readiness-2026-10-07.md` ranks 3, 4 and 5). A worktree made from
+  `origin/HEAD` as last fetched was stale, lacked the person's commits not yet pushed, ignored
+  which branch the folder had checked out, and was cut from the default branch for a project
+  whose target is another; and it had none of the ignored files a checkout needs to run
+  (`.env`, local certificates). `Start::worktree` is now a `NewWorktree { name, base }`:
+  - *The base* is the branch `base` names: the project's target for a task's agent, the branch
+    the clone has checked out for a person's start, `HEAD` for a detached clone. The worker
+    fetches it from `origin` for at most ten seconds, then starts from `origin`'s copy when it
+    holds every commit of the clone's own, else from the clone's branch: current, and nothing
+    unpushed lost. A slow or unreachable remote costs at most the ten seconds; a branch neither
+    side has is refused in words (`repo::worktrees::base_of`).
+  - *`.worktreeinclude`*, in `.gitignore`'s syntax in the clone's root as Claude Code reads it,
+    names the files a new worktree gets a copy of. Only those git ignores are copied: a tracked
+    file is there already, and an untracked one git does not ignore would show as a change.
+    Git does the matching (`ls-files --others --ignored`, once with the standard excludes and
+    once with the include file), so the syntax is git's own. Nothing is overwritten and a copy
+    that fails is passed over: the worktree is made either way (`carry_ignored`). Orca and
+    Claude Code do the same.
+  - A Claude Code task still runs `claude --worktree`, which makes its own from its own base.
+  - Test: `repo::worktrees::tests::a_new_worktree_starts_current_and_carries_the_ignored_files_it_names`.

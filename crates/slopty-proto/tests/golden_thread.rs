@@ -16,8 +16,8 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, Outcome, Page,
-        PastSession, PastSessions, Pick, PromptHit, Review, ReviewScope, Start, TableFrame,
+        AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, NewWorktree, Outcome,
+        Page, PastSession, PastSessions, Pick, PromptHit, Review, ReviewScope, Start, TableFrame,
         ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
@@ -370,7 +370,7 @@ mod golden_thread {
                     prompt: None,
                     model: None,
                     args: Vec::new(),
-                    worktree: Some("claude-3f9a2c".to_owned()),
+                    worktree: Some(NewWorktree::named("claude-3f9a2c")),
                 }),
             },
         );
