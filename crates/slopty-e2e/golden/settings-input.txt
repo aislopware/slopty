@@ -26,6 +26,8 @@ Tab │ Network
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Heading │ Input
+Button │ Done
 TabPanel │ Input
 Heading │ Keys
 RadioGroup │ Option as Alt │ Off
@@ -55,4 +57,3 @@ Switch │ Hide pointer while typing
 SpinButton │ Scroll speed │ 1.0×
 Button │ Decrease
 Button │ Increase
-Button │ Done

@@ -406,3 +406,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     twice stays one line). Golden: `settings-input`. `clipboard.workers` sits under "Share
     the clipboard" in the Input page's Clipboard group. `worker.acp` goes on its table's
     home page, as any key the layout does not name does.
+
+- ✅ **The settings are a macOS 26 pane** (2026-10-06; the person asked for settings that read
+  as a macOS 26 pane; `.research/status-color-2026-10-06.md` §7). A title bar over both
+  columns, a footer under them, and a hairline between every pair of rows made the dialog a
+  stack of boxes.
+  - **No title bar and no foot.** The sidebar runs the dialog's full height. The page column
+    heads itself, as System Settings does: the page's name in the panel title role, on the
+    search field's line, with Done at the line's end. A search or a single column is headed
+    "Settings". The file's face has its own head: "Settings" with the file's name muted, then
+    "Edit with controls", Cancel and Save. Neither head has a rule under it; the page fades
+    under the head only while some of it is scrolled there (`gpui::edge_fade`).
+  - **Groups are titled and spaced, not ruled.** A group's heading is the section role in the
+    text's ink. Its rows stay one card, parted by a step of space, since each row's
+    description already makes it a block. Row words are the chrome role at the regular weight,
+    as System Settings sets them; descriptions stay metadata in `text_muted`.
+  - **Both heads fit their room** (`kit::priority_row`). Done, Cancel and Save never leave.
+    The way to the file, or back to the controls, gives way to its glyph alone where its words
+    do not fit (curly braces, a gear).
+  - Tests: `settings_editor::tests::{the_columns_start_together,
+    the_file_is_the_sidebars_advanced_path, a_narrow_sheet_keeps_its_heads_whole}` and
+    `settings_form::tests::a_groups_rows_are_one_card_under_its_label`. Goldens: `settings`,
+    `settings-dark`, `settings-form`, `settings-keyboard`, `settings-about`, `settings-input`.

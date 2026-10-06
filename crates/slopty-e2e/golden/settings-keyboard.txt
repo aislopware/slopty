@@ -26,6 +26,8 @@ Tab │ Network
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Heading │ Keyboard
+Button │ Done
 TabPanel │ Keyboard
 Heading │ General
 ListItem │ New terminal │ ⌘T, ⌘N
@@ -422,4 +424,3 @@ ListItem │ Cut │ ⌘X
 Button │ Keys for Cut │ ⌘X
 ListItem │ Select all │ ⌘A
 Button │ Keys for Select all │ ⌘A
-Button │ Done

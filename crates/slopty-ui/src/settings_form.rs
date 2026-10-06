@@ -52,6 +52,7 @@ use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
 
 use crate::colors::hsla;
 use crate::icons::{IconSize, Symbol};
+use crate::kit::ButtonKind;
 use crate::palette::PaletteItem;
 
 #[path = "settings_form_schema.rs"]
@@ -111,6 +112,12 @@ const CONTENT_MIN: f32 = 480.0;
 
 /// The way to the file's own text, an advanced path kept apart from the task's Done.
 pub const EDIT_FILE: &str = "Edit as TOML";
+
+/// The form's name, over a search's results and over the single column.
+pub const SETTINGS: &str = "Settings";
+
+/// The least the page's title narrows to beside Done, in ems of the chrome's size.
+const TITLE_FLOOR_EMS: f32 = 6.0;
 
 /// The narrowest window that has the sidebar beside a page of at least 480 pt, with the
 /// dialog's margins either side.
@@ -473,7 +480,7 @@ impl SettingsForm {
     /// The height the form asks for; a short window gets less and the page scrolls.
     #[must_use]
     pub fn height(theme: &Theme) -> f32 {
-        PAGE_ROWS * theme.density.row_two_line
+        PAGE_ROWS.mul_add(theme.density.row_two_line, theme.density.row + theme.spacing.sm)
     }
 
     /// The rows shown, in order: the query's matches across every section, else the chosen
@@ -1058,24 +1065,77 @@ impl SettingsForm {
         crate::a11y::tab_stop(el, s.focus)
     }
 
-    /// A quiet label over the rows it names: a group on a section's page, a section's name
-    /// over its rows in a search or a single column.
-    ///
-    /// The page's first label stands on the search field's line: the field's top and height,
-    /// its words centred, so the two columns start together.
+    /// A group's heading over the rows it names, as System Settings titles its groups: the
+    /// section role in the text's ink, a step of space over its card and more above it. In a
+    /// search or a single column it names the section instead.
     fn heading(&self, text: &'static str, n: usize, first: bool) -> AnyElement {
         let theme = &self.theme;
-        let label = crate::kit::label(theme, text)
+        let spacing = theme.spacing;
+        crate::kit::typed(div(), theme.roles().section, 1.0)
             .id(("settings-heading", n))
             .debug_selector(move || format!("settings-heading-{n}"))
             .role(gpui::accesskit::Role::Heading)
-            .aria_label(text);
-        if first {
-            label.mt(px(theme.spacing.sm)).h(px(theme.density.row)).flex().items_center()
+            .aria_label(text)
+            .flex_none()
+            .text_color(hsla(theme.surfaces.text))
+            .pt(px(if first { spacing.md } else { spacing.xl }))
+            .pb(px(spacing.sm))
+            .child(text)
+            .into_any_element()
+    }
+
+    /// The page's head, as a macOS 26 pane titles itself: the page's name on its line and Done
+    /// at its end, with no rule under it (the page fades under it once scrolled). In one column
+    /// it says "Settings" and offers the file before Done, its words giving way to its glyph
+    /// alone where there is no room for them (`kit::priority_row`).
+    fn head(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let (s, spacing) = (theme.surfaces, theme.spacing);
+        let searching = !self.query.trim().is_empty();
+        let words = if self.narrow || searching { SETTINGS } else { self.section.label() };
+        let title = crate::kit::typed(div(), theme.roles().panel_title, 1.0)
+            .id("settings-title")
+            .debug_selector(|| "settings-title".to_owned())
+            .role(gpui::accesskit::Role::Heading)
+            .aria_label(words)
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(hsla(s.text))
+            .child(words);
+        let done = crate::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
+            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
+        let row = crate::kit::priority_row("settings-head-row")
+            .h(px(theme.density.row))
+            .gap(px(spacing.sm))
+            .title(title, px(theme.typography.ui_size * TITLE_FLOOR_EMS))
+            .end();
+        let row = if self.narrow {
+            let file = crate::kit::button(theme, "settings-edit-toml", EDIT_FILE, ButtonKind::Link)
+                .on_click(
+                    cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)),
+                );
+            let glyph = crate::kit::icon_button(
+                theme,
+                "settings-edit-toml-glyph",
+                Symbol::Curlybraces,
+                EDIT_FILE,
+            )
+            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)));
+            row.item("file", crate::kit::Priority::HIGH, file).menu(glyph)
         } else {
-            label.pt(px(theme.spacing.xl)).pb(px(theme.spacing.xxs))
-        }
-        .into_any_element()
+            row
+        };
+        div()
+            .id("settings-head")
+            .debug_selector(|| "settings-head".to_owned())
+            .flex_none()
+            .w_full()
+            .mt(px(spacing.sm))
+            .px(px(spacing.inset()))
+            .child(row.item("done", crate::kit::Priority::ESSENTIAL, done))
+            .into_any_element()
     }
 
     /// The Keyboard page's lines for the form's text: the keymap in effect with the text's
@@ -1428,8 +1488,8 @@ impl SettingsForm {
             (Vec::new(), Vec::new())
         };
         let about = !searching && (self.narrow || self.section == Section::About);
-        // Each child with what it is in a group's card: a row (and whether a hairline parts it
-        // from the one before), else not part of a card.
+        // Each child with what it is in a group's card: a row (and whether space parts it from
+        // the one before), else not part of a card.
         let mut parts: Vec<(Part, AnyElement)> = Vec::new();
         let mut placed = Vec::new();
         let mut last: Option<&'static str> = None;
@@ -1441,9 +1501,9 @@ impl SettingsForm {
                 last = Some(heading);
             }
             placed.push((ix, parts.len()));
-            parts.push((Part::Row { parted: true }, self.row(ix, row, cx)));
+            parts.push((Part::Row { spaced: true }, self.row(ix, row, cx)));
             if self.font_open && row.field.kind == Kind::Font {
-                parts.push((Part::Row { parted: false }, self.font_list(ix, row, cx)));
+                parts.push((Part::Row { spaced: false }, self.font_list(ix, row, cx)));
             }
         }
         if let Some(said) = self.keys_said(&said) {
@@ -1455,7 +1515,7 @@ impl SettingsForm {
                 parts.push((Part::Apart, self.heading(heading, parts.len(), last.is_none())));
                 last = Some(heading);
             }
-            parts.push((Part::Row { parted: true }, self.key_line(row, cx)));
+            parts.push((Part::Row { spaced: true }, self.key_line(row, cx)));
         }
         let mut children = carded(&theme, parts);
         if about {
@@ -1489,12 +1549,10 @@ impl SettingsForm {
             .px(px(theme.spacing.inset()))
             .pb(px(theme.spacing.md))
             .children(children);
-        // The well sits outside the fade, so the edge fades the rows into it, not into the
-        // dialog's white.
-        let page = gpui::edge_fade(page, gpui::EdgeFade::y(px(theme.spacing.lg)))
-            .hidden_by_scroll(&self.scroll);
-        crate::kit::well(div().flex_1().min_w_0().h_full().flex(), &theme)
-            .child(page)
+        // What scrolls under the head fades into the well there, as a macOS 26 pane's content
+        // does under its bar, only while some of it is scrolled under; no rule.
+        gpui::edge_fade(page, gpui::EdgeFade::y(px(theme.spacing.lg)))
+            .hidden_by_scroll(&self.scroll)
             .into_any_element()
     }
 
@@ -1542,7 +1600,7 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.md))
                     .child(
-                        crate::kit::typed(div(), theme.roles().action, 1.0)
+                        crate::kit::typed(div(), theme.roles().chrome, 1.0)
                             .flex_1()
                             .min_w_0()
                             .text_color(hsla(s.text))
@@ -1986,38 +2044,33 @@ fn well(theme: &Theme) -> Div {
 /// What a child of the page is in a group's card.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Part {
-    /// A row of a group; `parted` when a hairline sets it off from the row before (a font's
-    /// list hangs from its row with none).
-    Row { parted: bool },
+    /// A row of a group; `spaced` when a step of space sets it off from the row before (a
+    /// font's list hangs from its row with none).
+    Row { spaced: bool },
     /// A heading, a notice: not in a card.
     Apart,
 }
 
 /// The page's children with each run of rows set in a card ([`crate::kit::card_part`]), as
-/// System Settings and Zed's settings group them: white on the page's quiet well in light, a
-/// step over the sheet in dark, its rows parted by the quiet hairline inset from the card's
-/// edges. Each row stays a child of the page, so scrolling to one still finds it.
+/// System Settings groups them: white on the page's quiet well in light, a step over the sheet
+/// in dark. Its rows are parted by space alone: each has a description under its words, which
+/// already makes it a block, so a hairline between them only added lines. Each row stays a
+/// child of the page, so scrolling to one still finds it.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
-    let s = theme.surfaces;
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
     parts
         .into_iter()
         .enumerate()
         .map(|(i, (part, child))| {
-            let Part::Row { parted } = part else { return child };
+            let Part::Row { spaced } = part else { return child };
             let first = !row_at(i.checked_sub(1));
             let last = !row_at(i.checked_add(1));
             crate::kit::card_part(theme, first, last)
                 .debug_selector(move || format!("settings-card-{i}"))
                 .px(px(theme.spacing.inset()))
-                .child(
-                    div()
-                        .when(parted && !first, |el| {
-                            el.border_t(crate::kit::HAIR).border_color(hsla(s.border_subtle))
-                        })
-                        .child(child),
-                )
+                .when(spaced && !first, |el| el.pt(px(theme.spacing.xs)))
+                .child(child)
                 .into_any_element()
         })
         .collect()
@@ -2162,17 +2215,25 @@ impl Render for SettingsForm {
             .size_full()
             .min_h_0()
             .flex();
+        // The head, the search in one column, and the page on the page's quiet well, which
+        // sits outside the fade so the edge fades the rows into it, not into the sheet.
+        let head = self.head(cx);
+        let column =
+            crate::kit::well(div().flex_1().min_w_0().min_h_0().flex().flex_col(), &self.theme)
+                .child(head)
+                .when(self.narrow, |el| {
+                    el.child(
+                        crate::kit::inset_x(div(), &self.theme)
+                            .flex_none()
+                            .py(px(self.theme.spacing.sm))
+                            .child(self.search_field(cx)),
+                    )
+                })
+                .child(div().flex_1().min_h_0().flex().child(page));
         if self.narrow {
-            root.flex_col()
-                .child(
-                    crate::kit::inset_x(div(), &self.theme)
-                        .flex_none()
-                        .py(px(self.theme.spacing.sm))
-                        .child(self.search_field(cx)),
-                )
-                .child(div().flex_1().min_h_0().flex().child(page))
+            root.child(column)
         } else {
-            root.child(self.sidebar(window, cx)).child(page)
+            root.child(self.sidebar(window, cx)).child(column)
         }
     }
 }

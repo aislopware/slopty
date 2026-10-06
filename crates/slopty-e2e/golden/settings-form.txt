@@ -26,6 +26,8 @@ Tab │ Network
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Heading │ Terminal
+Button │ Done
 TabPanel │ Terminal
 Heading │ Font
 ComboBox │ Family │ JetBrains Mono
@@ -57,4 +59,3 @@ RadioGroup │ Alert │ When hidden
 RadioButton │ Never
 RadioButton │ When hidden
 RadioButton │ Always
-Button │ Done

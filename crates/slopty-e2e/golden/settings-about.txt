@@ -26,6 +26,8 @@ Tab │ Network
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Heading │ About
+Button │ Done
 TabPanel │ About
 Group │ About
 Label │ Slopty
@@ -33,4 +35,3 @@ Heading │ Links
 Link │ Source code
 Link │ Changes in each release
 Link │ Report a problem
-Button │ Done

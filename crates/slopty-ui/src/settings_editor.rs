@@ -23,7 +23,6 @@
 //! The field is as tall as the file (between [`MIN_ROWS`] and [`MAX_ROWS`] lines), not a
 //! fixed share of the window: two lines of TOML in a window-high box was mostly empty field.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
@@ -426,76 +425,74 @@ impl Render for SettingsEditor {
                     )
             }
         };
-        // Beside the sidebar the file is the sidebar's advanced path, and the foot holds only
-        // the task's exit; stacked in one column, with no sidebar, the foot offers it.
-        let swap = match self.mode {
-            Mode::Form => crate::settings_form::narrow(window, &theme).then(|| {
-                button("settings-edit-toml", crate::settings_form::EDIT_FILE, ButtonKind::Link)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.show_toml(window, cx)))
-            }),
-            Mode::Toml => Some(
-                button("settings-edit-form", "Edit with controls", ButtonKind::Link)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx))),
-            ),
-        };
-        // The form has nothing to save, since each change is applied as it is made; the file's
-        // face has, and Cancel drops it.
-        let actions = div().flex().items_center().gap(px(spacing.xs)).map(|el| match self.mode {
-            Mode::Form => el.child(
-                button("settings-done", "Done", ButtonKind::Primary)
-                    .on_click(cx.listener(|this, _ev, _w, cx| this.close(cx))),
-            ),
-            Mode::Toml => el
-                .child(button("settings-cancel", "Cancel", ButtonKind::Ghost).on_click(
-                    cx.listener(|_this, _ev, _w, cx| cx.emit(SettingsEditorEvent::Dismiss)),
-                ))
+        // The form heads its own page (its name and Done, a macOS 26 pane's); the file's face
+        // has this head: the file's name, the way back to the controls, Cancel and Save. No
+        // rule under it and no foot: the field ends where the dialog does.
+        let head = (self.mode == Mode::Toml).then(|| {
+            let back = |id| {
+                button(id, "Edit with controls", ButtonKind::Link)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx)))
+            };
+            let glyph = crate::kit::icon_button(
+                &theme,
+                "settings-edit-form-glyph",
+                crate::icons::Symbol::Gearshape,
+                "Edit with controls",
+            )
+            .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx)));
+            let title = div()
+                .min_w_0()
+                .flex()
+                .items_baseline()
+                .gap(px(spacing.sm))
                 .child(
-                    button("settings-save", "Save", ButtonKind::Primary)
-                        .on_click(cx.listener(|this, _ev, _w, cx| this.save(cx))),
-                ),
+                    crate::kit::typed(div(), theme.roles().panel_title, 1.0)
+                        .flex_none()
+                        .text_color(hsla(s.text))
+                        .child(crate::settings_form::SETTINGS),
+                )
+                .child(
+                    div()
+                        .id("settings-path")
+                        .debug_selector(|| "settings-path".to_owned())
+                        .aria_label(self.path.clone())
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(self.file_name.clone()),
+                );
+            let cancel = button("settings-cancel", "Cancel", ButtonKind::Ghost)
+                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(SettingsEditorEvent::Dismiss)));
+            let save = button("settings-save", "Save", ButtonKind::Primary)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.save(cx)));
+            let row = crate::kit::priority_row("settings-file-head-row")
+                .h(px(theme.density.row))
+                .gap(px(spacing.sm))
+                .title(title, px(theme.typography.ui_size * 6.0))
+                .end()
+                .item("controls", crate::kit::Priority::HIGH, back("settings-edit-form"))
+                .item("cancel", crate::kit::Priority::ESSENTIAL, cancel)
+                .item("save", crate::kit::Priority::ESSENTIAL, save)
+                .menu(glyph);
+            crate::kit::inset_x(div(), &theme)
+                .id("settings-file-head")
+                .debug_selector(|| "settings-file-head".to_owned())
+                .flex_none()
+                .w_full()
+                .mt(px(spacing.sm))
+                .child(row)
         });
         let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::Editor)
             .id("settings-editor")
             .debug_selector(|| "settings-editor".to_owned())
             .role(gpui::accesskit::Role::Dialog)
             .aria_label("Settings")
-            .child(
-                crate::kit::inset_x(div(), &theme)
-                    .flex_none()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(spacing.sm))
-                    .py(px(spacing.sm))
-                    .border_b(crate::kit::HAIR)
-                    .border_color(hsla(s.border))
-                    .child(crate::kit::title(&theme, "Settings"))
-                    .when(self.mode == Mode::Toml, |el| {
-                        el.child(
-                            div()
-                                .id("settings-path")
-                                .debug_selector(|| "settings-path".to_owned())
-                                .aria_label(self.path.clone())
-                                .text_size(px(theme.typography.small()))
-                                .text_color(hsla(s.text_muted))
-                                .child(self.file_name.clone()),
-                        )
-                    }),
-            )
+            .children(head)
             .child(body)
-            .children(error)
-            .child(
-                crate::kit::inset_x(div(), &theme)
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.md))
-                    .py(px(spacing.sm))
-                    .border_t(crate::kit::HAIR)
-                    .border_color(hsla(s.border))
-                    .children(swap)
-                    .child(div().flex_1())
-                    .child(actions),
-            );
+            .children(error);
         let layer = crate::palette::Layer::Dialog.priority();
         if self.leaving {
             let dialog = dialog.debug_selector(|| "settings-leaving".to_owned());
@@ -652,8 +649,8 @@ mod tests {
 
     /// Where the window has room the dialog is about 800 pt wide, its sidebar beside a page of
     /// at least 480 pt, and the file is the sidebar's advanced path at its foot, apart from
-    /// Done; it opens the file's face. Stacked in one column, with no sidebar, the dialog's foot
-    /// offers the file instead.
+    /// Done at the page's head; it opens the file's face. Stacked in one column, with no
+    /// sidebar, the head offers the file beside Done instead.
     #[gpui::test]
     fn the_file_is_the_sidebars_advanced_path(cx: &mut TestAppContext) {
         let (view, _events, cx) = editor(cx, "", Mode::Form);
@@ -668,14 +665,14 @@ mod tests {
         let file = cx.debug_bounds("settings-edit-toml").expect("the file's way");
         let done = cx.debug_bounds("settings-done").expect("Done");
         assert!(file.right() <= page.left(), "in the sidebar: {file:?} {page:?}");
-        assert!(file.bottom() <= done.top(), "over the foot, apart from Done");
+        assert!(file.top() > done.bottom(), "at the sidebar's foot, apart from Done at the head");
         click(cx, "settings-edit-toml");
         assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Toml, "the file's face");
         click(cx, "settings-edit-form");
         let narrow = crate::settings_form::sidebar_from(&Theme::default()) - 1.0;
         cx.simulate_resize(gpui::size(px(narrow), px(800.0)));
         cx.run_until_parked();
-        let file = cx.debug_bounds("settings-edit-toml").expect("the foot's link");
+        let file = cx.debug_bounds("settings-edit-toml").expect("the head's link");
         let done = cx.debug_bounds("settings-done").expect("Done");
         assert!((f32::from(file.center().y - done.center().y)).abs() < 1.0, "on Done's line");
     }
@@ -862,14 +859,51 @@ mod tests {
         assert!(tree.iter().any(|n| n.is("Heading", Some("Streams"))), "{tree:#?}");
     }
 
-    /// The page's first label stands on the search field's line, so the columns start together.
+    /// The page's head stands on the search field's line, so the columns start together: the
+    /// page's name and Done on it, as a macOS 26 pane is titled, with no title bar over both.
     #[gpui::test]
     fn the_columns_start_together(cx: &mut TestAppContext) {
         let (_view, _events, cx) = editor(cx, "", Mode::Form);
         let search = cx.debug_bounds("settings-search").expect("the search");
-        let label = cx.debug_bounds("settings-heading-0").expect("the first label");
-        assert!(f32::from((search.top() - label.top()).abs()) < 0.5, "{search:?} {label:?}");
-        assert!(f32::from((search.size.height - label.size.height).abs()) < 0.5);
+        let title = cx.debug_bounds("settings-title").expect("the page's name");
+        let done = cx.debug_bounds("settings-done").expect("Done");
+        let dialog = cx.debug_bounds("settings-editor").expect("the dialog");
+        assert!((search.center().y - title.center().y).abs() < px(0.5), "{search:?} {title:?}");
+        assert!((done.center().y - title.center().y).abs() < px(0.5), "Done on its line");
+        assert!(done.right() > title.right() && done.right() <= dialog.right(), "at its end");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let general = Section::ALL[0].label();
+        assert!(tree.iter().any(|n| n.is("Heading", Some(general))), "{tree:#?}");
+    }
+
+    /// A sheet as narrow as a phone's heads each face with what it needs at its end, all inside
+    /// the dialog: Done and the way to the file on the form's, Cancel and Save and the way back
+    /// on the file's. Where the words of the way do not fit, its glyph stands for them.
+    #[gpui::test]
+    fn a_narrow_sheet_keeps_its_heads_whole(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, "", Mode::Form);
+        for width in [320.0, 260.0] {
+            cx.simulate_resize(gpui::size(px(width), px(700.0)));
+            cx.run_until_parked();
+            let dialog = cx.debug_bounds("settings-editor").expect("the dialog");
+            let inside = |cx: &mut VisualTestContext, s: &'static str| {
+                cx.debug_bounds(s)
+                    .is_some_and(|b| b.left() >= dialog.left() && b.right() <= dialog.right())
+            };
+            assert!(inside(cx, "settings-done"), "{width}: Done");
+            let file = inside(cx, "settings-edit-toml") || inside(cx, "settings-edit-toml-glyph");
+            assert!(file, "{width}: the way to the file, in words or its glyph");
+            view.update_in(cx, SettingsEditor::show_toml);
+            cx.run_until_parked();
+            assert!(inside(cx, "settings-save") && inside(cx, "settings-cancel"), "{width}");
+            let back = inside(cx, "settings-edit-form") || inside(cx, "settings-edit-form-glyph");
+            assert!(back, "{width}: the way back to the controls");
+            view.update_in(cx, SettingsEditor::show_form);
+            cx.run_until_parked();
+        }
+        cx.simulate_resize(gpui::size(px(260.0), px(700.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-edit-toml-glyph").is_some(), "260 pt: the glyph alone");
     }
 
     /// The widths a sheet is written for: a phone's, or an iPad's in Slide Over, and the

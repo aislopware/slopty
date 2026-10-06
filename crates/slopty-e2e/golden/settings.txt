@@ -44,6 +44,8 @@ Tab │ Network
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Heading │ Appearance
+Button │ Done
 TabPanel │ Appearance
 Heading │ Interface
 RadioGroup │ Theme │ Light
@@ -70,4 +72,3 @@ TextInput │ Cursor
 TextInput │ Text under the cursor
 TextInput │ Selection
 TextInput │ ANSI colours
-Button │ Done
