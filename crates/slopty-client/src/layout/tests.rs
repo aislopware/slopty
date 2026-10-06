@@ -1895,6 +1895,49 @@ fn wide_work_meets_the_leading_edge_and_leaves_no_bare_band() {
     near(board.w, WIDE_LEAST);
     near(shell.x + shell.w, 0.0);
     near(agent.x, WIDE_LEAST);
+    near(agent.w, 1032.0 - WIDE_LEAST);
+}
+
+/// The column beside wide work takes the room that work leaves, so the pair fills the strip
+/// edge to edge and neither is cut: a thread opened beside a board, the column before wide
+/// work that is last. It goes back to the width a column opens at when the work leaves or
+/// stops being wide, or when another column comes between them, and a width the person chose
+/// stays theirs.
+#[test]
+fn the_column_beside_wide_work_fills_the_room_it_leaves() {
+    let mut l = columns(1);
+    l.set_viewport(1032.0, 800.0);
+    l.suit(t(1), true);
+    l.open(t(2), Placement::Local);
+    l.focus(t(1));
+    let (board, thread) = (rect(&l, t(1)), rect(&l, t(2)));
+    near(board.x, 0.0);
+    near(board.w, WIDE_LEAST);
+    near(thread.x, WIDE_LEAST);
+    near(thread.x + thread.w, 1032.0);
+    l.focus(t(2));
+    near(rect(&l, t(2)).x + rect(&l, t(2)).w, 1032.0);
+
+    l.suit(t(1), false);
+    near(stored_width_of(&l, t(2)), 516.0);
+
+    let mut l = columns(2);
+    l.suit(t(2), true);
+    near(stored_width_of(&l, t(1)), THIRD);
+    let (before, wide) = (rect(&l, t(1)), rect(&l, t(2)));
+    near(before.x, 0.0);
+    near(wide.x + wide.w, 1280.0);
+    l.focus(t(1));
+    l.open(t(3), Placement::Local);
+    near(stored_width_of(&l, t(1)), HALF);
+    near(stored_width_of(&l, t(3)), THIRD);
+
+    let mut l = columns(2);
+    l.focus(t(2));
+    l.switch_preset_width(true);
+    let chosen = stored_width_of(&l, t(2));
+    l.suit(t(1), true);
+    near(stored_width_of(&l, t(2)), chosen);
 }
 
 /// The view never shows room before the first column: a strip narrower than the view starts

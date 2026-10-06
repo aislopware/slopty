@@ -747,6 +747,10 @@ pub struct Column {
     full_width: bool,
     fullscreen: bool,
     mode: DisplayMode,
+    /// It holds wide work and is at the width that work asks for ([`Layout::suit`]).
+    wide: bool,
+    /// It sits beside wide work at the room that work leaves ([`Workspace::settle_beside`]).
+    beside: bool,
 }
 
 impl Column {
@@ -759,7 +763,18 @@ impl Column {
             full_width,
             fullscreen: false,
             mode: DisplayMode::Normal,
+            wide: false,
+            beside: false,
         }
+    }
+
+    /// Whether the person gave it its width: a preset, a drag, a reset, focus mode,
+    /// fullscreen. Such a width is theirs and no work moves it.
+    const fn chosen(&self) -> bool {
+        self.preset.is_some()
+            || self.full_width
+            || self.fullscreen
+            || matches!(self.width, ColumnWidth::Fixed(_))
     }
 
     /// Its tiles, top to bottom.
@@ -1473,13 +1488,10 @@ impl Workspace {
     fn suit(&mut self, ctx: &Ctx, column: usize, wide: bool) {
         let g = self.geom(&ctx.g);
         let Some(col) = self.columns.get_mut(column) else { return };
-        let chosen = col.preset.is_some()
-            || col.full_width
-            || col.fullscreen
-            || matches!(col.width, ColumnWidth::Fixed(_));
-        if chosen {
+        if col.chosen() {
             return;
         }
+        col.wide = wide;
         let width = if wide {
             let working = g.working_w();
             let share = WIDE_SHARE.max((WIDE_LEAST / working).min(1.0));
@@ -1489,22 +1501,74 @@ impl Workspace {
         } else {
             ctx.new_width
         };
-        if col.width == width {
-            return;
-        }
+        let changed = col.width != width;
         let old = col.resolved_width(&g);
         col.width = width;
         let new = col.resolved_width(&g);
-        self.resize = None;
         // The camera holds still over the focused column, as a resize of another one does.
         if column < self.active {
             self.view.offset(-(new - old));
         }
+        if !self.settle_beside(ctx) && !changed {
+            return;
+        }
+        self.resize = None;
         // Focused work that opens wide meets the working area's leading edge, its neighbour
         // after it, as far as the strip's end allows ([`Self::fit_offset`]).
         let leading =
             (wide && column == self.active).then(|| self.column_x(column, &ctx.g) - g.working_x());
         self.animate_view_to_column(ctx, leading, self.active);
+    }
+
+    /// The column beside wide work takes the room that work leaves when nobody chose its
+    /// width, so the pair meets both edges of the working area and neither is cut; a column
+    /// that no longer sits there goes back to the width a column opens at. Beside is the
+    /// column after the wide one, or the one before it when it is last, as the camera shows
+    /// wide work ([`Self::suit`]). The camera holds still over the focused column. Whether a
+    /// width changed.
+    fn settle_beside(&mut self, ctx: &Ctx) -> bool {
+        let g = self.geom(&ctx.g);
+        let count = self.columns.len();
+        let room = self.columns.iter().enumerate().find_map(|(idx, col)| match col.width {
+            ColumnWidth::Proportion(share) if col.wide && !col.chosen() && share < 1.0 => {
+                let next = idx.saturating_add(1);
+                let beside = if next < count { Some(next) } else { idx.checked_sub(1) };
+                beside.map(|beside| (beside, ColumnWidth::Proportion(1.0 - share)))
+            }
+            _ => None,
+        });
+        let mut changed = false;
+        let mut shift = 0.0;
+        for (idx, col) in self.columns.iter_mut().enumerate() {
+            let width = match room {
+                Some((beside, width)) if beside == idx && !col.wide && !col.chosen() => {
+                    col.beside = true;
+                    width
+                }
+                _ if col.beside => {
+                    col.beside = false;
+                    // Its own wide work, or the person, sized it since.
+                    if col.wide || col.chosen() {
+                        continue;
+                    }
+                    ctx.new_width
+                }
+                _ => continue,
+            };
+            if col.width == width {
+                continue;
+            }
+            let old = col.resolved_width(&g);
+            col.width = width;
+            changed = true;
+            if idx < self.active {
+                shift += col.resolved_width(&g) - old;
+            }
+        }
+        if shift != 0.0 {
+            self.view.offset(-shift);
+        }
+        changed
     }
 
     fn toggle_full_width(&mut self, ctx: &Ctx) {
@@ -1850,6 +1914,7 @@ impl Workspace {
     /// After a change: every tile that moved slides from where it was drawn (`before`) to its
     /// new place; a size change of at most [`RESIZE_THRESHOLD`] lands at once.
     fn flip(&mut self, ctx: &Ctx, before: &[(TileRef, Rect)]) {
+        self.settle_beside(ctx);
         let targets = self.target_rects(ctx);
         let tiles = self.columns.iter_mut().flat_map(|c| c.tiles.iter_mut());
         for ((key, target), tile) in targets.into_iter().zip(tiles) {
@@ -3262,7 +3327,12 @@ impl Layout {
                                 .map(|t| SavedTile { tile: t.key, height: t.height })
                                 .collect(),
                             active_tile: c.active,
-                            width: c.width,
+                            // Work suits its own column and the one beside it again.
+                            width: if (c.wide || c.beside) && !c.chosen() {
+                                self.ctx().new_width
+                            } else {
+                                c.width
+                            },
                             preset: c.preset,
                             full_width: c.full_width,
                             mode: c.mode,
@@ -3313,6 +3383,8 @@ impl Layout {
                         full_width: sc.full_width,
                         fullscreen: false,
                         mode: sc.mode,
+                        wide: false,
+                        beside: false,
                     })
                 })
                 .collect();

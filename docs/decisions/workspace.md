@@ -1636,8 +1636,20 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     width, and the neighbour is one column away. Masking a sliver to its ground was the other
     choice. It was turned down because it is still a strip that holds nothing, and it would hide
     work the camera could simply leave out.
+  - *The neighbour fills the room wide work leaves* (2026-10-06). The person saw a thread
+    beside a board (720 of a 1032 pt strip) cut at the window's edge: its header, its empty
+    state and its composer ended mid-word, because the thread kept the half width a column
+    opens at. Now the column beside wide work takes the room that work leaves when nobody chose
+    its width, so the pair meets both edges and each lays itself out at the width it shows at
+    (`Workspace::settle_beside`, run on every change). Beside is the column after the wide one,
+    or the one before when the wide one is last, as the camera shows them. It goes back to the
+    opening width when the work leaves, stops being wide, or another column comes between, and
+    a width the person chose stays theirs. Both widths are saved as the opening width, since the
+    work suits them again when it shows. niri's peek of a cut neighbour was the alternative. It
+    reads as a broken layout here, where a column holds a composer and words, not a window.
   - Tests: `layout::tests::{wide_work_meets_the_leading_edge_and_leaves_no_bare_band,
     a_strip_narrower_than_the_view_starts_at_its_edge, wide_work_leaves_no_sliver_beside_it,
+    the_column_beside_wide_work_fills_the_room_it_leaves,
     a_fling_past_either_end_stops_at_the_end_snap}`.
 
 - ✅ **New work starts where the focused work is** (2026-10-05, readiness 10-06 N16 and N14).
