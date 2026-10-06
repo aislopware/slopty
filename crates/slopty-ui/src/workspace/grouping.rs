@@ -1,6 +1,6 @@
 //! What each tile is known by, and which tiles are one body of work: the facts the client
 //! already holds turned into [`slopty_client::groups`]'s open map, and the groups the
-//! navigator, the workspaces' names, the breadcrumb, the palette and the placement of a tile
+//! navigator, the projects' names, the breadcrumb, the palette and the placement of a tile
 //! from elsewhere read.
 //!
 //! A tile's facts come from what this client has today: its worker (`machine`, `os`), what it

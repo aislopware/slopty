@@ -2,7 +2,7 @@
 //!
 //! GPUI draws a view again only when something it read changed, and an entity updated while
 //! the window draws counts as written: every view that read it is built again. The chrome and
-//! the strip are views of their own that draw the workspace's state, so they read it rather
+//! the panes are views of their own that draw the workspace's state, so they read it rather
 //! than update it. A [`Draw`] stands in for the workspace's `Context` while they do: it reads
 //! as the [`App`] does, hands out listeners bound to the workspace as `Context::listener`
 //! does, and keeps back whatever the build would change in another entity (a terminal's zoom,

@@ -1494,7 +1494,7 @@ fn every_card_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut Tes
     click(cx, "project-card-project-node-3-where");
     let verbs = sent(&mut queue, cx, |_| Outcome::Facts(Vec::new()));
     assert_eq!(verbs, [Verb::WorkerFacts { worker: None }], "a place still to come moves");
-    // Last: the click falls through to its card, which opens its agent and moves the strip.
+    // Last: the click falls through to its card, which opens its agent and shows it.
     click(cx, "project-card-project-node-1-where");
     assert_eq!(sent(&mut queue, cx, done), [], "a running one's place stays");
 }

@@ -828,7 +828,7 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("menu-Machines").is_none(), "the machines are the navigator's");
 }
 
-/// What a frame costs while the pointer moves over a shell and the strip is built for
+/// What a frame costs while the pointer moves over a shell and the area is built for
 /// something else in the same frame (a spring, a hover on its chrome): 60 shells and 60 notes
 /// with the navigator docked, the pointer crossing the focused shell's grid a cell at a time.
 /// Run by hand (it prints, it does not judge); `docs/MEASUREMENTS.md` has the numbers and the
@@ -914,7 +914,7 @@ fn measure_the_keyboard_moving_beside_the_chrome(cx: &mut TestAppContext) {
 /// What the keyboard moving between two shells costs when a view of its own moves it (a click
 /// in a body, a find bar giving it back), with nothing in the workspace asked: over 60 shells
 /// and 60 notes with the navigator docked, the frame that draws the move, and how many times
-/// the workspace and the strip were built for it. Run by hand (it prints, it does not judge);
+/// the workspace and the area were built for it. Run by hand (it prints, it does not judge);
 /// `docs/MEASUREMENTS.md` has the numbers and the command.
 #[gpui::test]
 #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
@@ -958,7 +958,7 @@ fn measure_the_keyboard_moving_on_its_own_beside_the_chrome(cx: &mut TestAppCont
     let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
     println!(
         "MEASURE the keyboard moving on its own beside the chrome, 60 shells + 60 notes, {MOVES} \
-         moves: p50 {:.3} ms p95 {:.3} ms; the workspace built {} times, the strip {}",
+         moves: p50 {:.3} ms p95 {:.3} ms; the workspace built {} times, the area {}",
         pct(50),
         pct(95),
         workspace.saturating_sub(start_builds.0),

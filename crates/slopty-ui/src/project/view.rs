@@ -1195,7 +1195,7 @@ impl ProjectView {
     /// The lanes as one grouped list, in their order, the most urgent first, as Linear's
     /// grouped issues are: a lane's head (its glyph, its name, its count) over its rows, the
     /// groups parted by space alone. *Merged* folds to its head while nothing in it needs the
-    /// person. The board never scrolls sideways: a sideways swipe moves the strip.
+    /// person. The board never scrolls sideways.
     fn board(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let lanes = board.lanes();
         let mut orchestrator = self.orchestrator_row(board, cx);

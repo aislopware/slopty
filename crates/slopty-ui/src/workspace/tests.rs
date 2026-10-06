@@ -45,7 +45,6 @@ impl Fake {
     }
 }
 
-/// A focused workspace, drawn once so the strip's size is known.
 /// A workspace whose frames hold still: GPUI's fades and slides run on the wall clock, so a
 /// test that judges a frame against one drawn from scratch ([`crate::retained::stale`]) runs
 /// under Reduce Motion, where a slow machine cannot catch one half way.
@@ -60,7 +59,7 @@ fn navigator_docked(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> boo
     view.read_with(cx, |v, _| v.nav.drawn == Some(navigator::Mode::Docked))
 }
 
-/// Where the last frame drew `tile`, from the strip's own placements: in release too, where
+/// Where the last frame drew `tile`, from the area's own placements: in release too, where
 /// GPUI records no debug bounds.
 fn drawn_at(
     view: &Entity<WorkspaceView>,
@@ -1657,10 +1656,10 @@ fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppCon
 
 mod chrome;
 
-/// The empty workspace sits where this frame's layout puts it, never where the strip's size as
+/// The empty workspace sits where this frame's layout puts it, never where the area's size as
 /// the last frame measured it would. When chrome comes or goes (the title bar's
-/// buttons, with the first worker) the strip changes size, and a page placed from the old size
-/// stayed there until something else drew the strip again: the app self-test's stale frame at
+/// buttons, with the first worker) the area changes size, and a page placed from the old size
+/// stayed there until something else drew the area again: the app self-test's stale frame at
 /// launch, its text 5 px low, a fifth of the 25 px bar.
 #[gpui::test]
 fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) {
@@ -1679,7 +1678,7 @@ fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) 
     };
     let settled = frame(cx);
     assert!(cx.debug_bounds("empty-worker-0").is_some(), "the empty workspace lists the worker");
-    // What a strip laid out taller in the last frame leaves for this one.
+    // What an area laid out taller in the last frame leaves for this one.
     view.update(cx, |v, _cx| {
         let mut was = v.drawn.viewport.get();
         was.size.height += px(25.0);

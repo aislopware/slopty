@@ -141,7 +141,7 @@ impl WorkspaceView {
         }
     }
 
-    /// The surface while it is shown, for the frame to draw over the strip.
+    /// The surface while it is shown, for the frame to draw over the panes.
     pub(super) fn search_drawn(&self) -> Option<Entity<ProjectSearch>> {
         self.search.kept.as_ref().filter(|_| self.search.shown).map(|(_, view)| view.clone())
     }

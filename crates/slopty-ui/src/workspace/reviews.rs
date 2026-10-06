@@ -37,7 +37,7 @@ use crate::review::{ReviewEvent, ReviewView};
 /// The palette's line that opens a folder's changes.
 pub(super) const REVIEW_CHANGES: &str = "Review changes";
 
-/// What the strip keeps of review tiles.
+/// What the workspace keeps of review tiles.
 #[derive(Default)]
 pub(super) struct Reviews {
     /// The threads with a review item, as the registries said last.

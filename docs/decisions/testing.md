@@ -478,7 +478,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     hold is what they assert. Those tests now run in about 50 ms.
   - Tests: `a_closed_terminal_leaves_nothing`, `a_closed_stream_leaves_nothing`,
     `a_closed_file_with_an_edit_leaves_nothing`, `a_closed_page_note_and_folder_leave_nothing`,
-    `the_overlays_and_the_overview_leave_nothing`, `a_closed_agent_with_its_face_leaves_nothing`
+    `the_overlays_leave_nothing`, `a_closed_agent_with_its_face_leaves_nothing`
     and `a_removed_worker_with_open_tiles_leaves_nothing` (`slopty-ui`).
 
 - ✅ **Every decoder a peer reaches is fuzzed, and only a named test is retried** (2026-09-29).

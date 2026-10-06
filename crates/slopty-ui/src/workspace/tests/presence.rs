@@ -6,7 +6,7 @@ use slopty_proto::thread::attention::Seat;
 
 use super::*;
 
-/// A Mac is a desk; what it says is on screen are the terminals the strip drew, and the focus
+/// A Mac is a desk; what it says is on screen are the terminals the panes drew, and the focus
 /// is the focused tile's terminal. A phone-sized window is carried.
 #[gpui::test]
 fn presence_names_the_seat_the_terminals_in_view_and_the_focused_one(cx: &mut TestAppContext) {

@@ -12,7 +12,7 @@
 //! to the worker as `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the workspace
 //! binds (⌘T/⌘O/⌘W, the text size) never reach the view because GPUI runs key bindings before key
 //! listeners; every other chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also
-//! asks the worker for a smaller stream when it is painted small (a narrow column, the overview),
+//! asks the worker for a smaller stream when it is painted small (a narrow pane, a phone),
 //! quantised so the encoder is not rebuilt on every step.
 //!
 //! On a phone or an iPad the picture zooms inside its tile: a pinch magnifies it about the
@@ -325,7 +325,8 @@ pub struct ScreenView {
     quality: Quality,
     quality_changed: Instant,
     /// The painted width a change asked for inside the cooldown, taken when it ends: without
-    /// it a window left at a small scale by the overview stays there until something repaints.
+    /// it a window left at a small scale by a pane that narrowed stays there until something
+    /// repaints.
     wanted_width: Option<f32>,
     /// The worker's last cursor sample.
     cursor: CursorState,
@@ -2690,7 +2691,7 @@ impl ScreenView {
     }
 
     /// Touch: a long press over the picture is a right click on the worker (context menus);
-    /// a plain drag stays the strip's. Returns whether the gesture was claimed.
+    /// a plain drag stays the workspace's. Returns whether the gesture was claimed.
     fn long_press(&mut self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
         if ev.phase != TouchPhase::Started || !self.inside(ev.start_position) {
             return false;
@@ -4404,7 +4405,7 @@ mod tests {
 
     /// A width asked for inside the cooldown is not dropped: it is taken when the cooldown
     /// ends, even with nothing drawing the view again, and the latest width asked for wins.
-    /// (The overview closing is such a width: without it the window stayed small.)
+    /// (A zoom let go is such a width: without it the window stayed small.)
     #[gpui::test]
     fn a_width_asked_for_inside_the_cooldown_is_taken_when_it_ends(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
@@ -6325,14 +6326,14 @@ mod tests {
         assert_eq!(stripe_places(rect(0., 0., 1., 1.), whole), None);
     }
 
-    /// A tile the strip holds.
-    struct Strip {
+    /// A pane holding the tile, which moves it and stops drawing it.
+    struct Host {
         screen: gpui::Entity<ScreenView>,
         left: f32,
         shown: bool,
     }
 
-    impl Render for Strip {
+    impl Render for Host {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().overflow_hidden().children(self.shown.then(|| {
                 div()
@@ -6346,11 +6347,11 @@ mod tests {
         }
     }
 
-    /// The layer follows its tile as the strip scrolls it, in the frame that moves it; half off
-    /// the viewport it is clipped to what shows, and a tile the strip no longer draws places it
+    /// The layer follows its tile as its pane moves it, in the frame that moves it; half off
+    /// the viewport it is clipped to what shows, and a tile its pane no longer draws places it
     /// nowhere, which hides it.
     #[gpui::test]
-    fn the_layer_follows_its_tile_through_the_strip(cx: &mut gpui::TestAppContext) {
+    fn the_layer_follows_its_tile_as_its_pane_moves(cx: &mut gpui::TestAppContext) {
         let (out, _rx) = mpsc::channel(64);
         let opened = Opened {
             stream: StreamId(4),
@@ -6358,20 +6359,20 @@ mod tests {
             size: (800, 600),
             quality: Quality { scale: 1.0, ..Quality::default() },
         };
-        let (strip, cx) = cx.add_window_view(|_window, cx| {
+        let (host, cx) = cx.add_window_view(|_window, cx| {
             let handle = ScreenHandle::detached(StreamId(4));
             let screen = cx.new(|cx| ScreenView::new(opened, handle, out, Theme::default(), cx));
-            Strip { screen, left: 0.0, shown: true }
+            Host { screen, left: 0.0, shown: true }
         });
         cx.simulate_resize(size(px(600.0), px(300.0)));
-        let view = strip.read_with(cx, |s, _| s.screen.clone());
+        let view = host.read_with(cx, |s, _| s.screen.clone());
         view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
         cx.run_until_parked();
         let whole = rect(0., 0., 400., 300.);
         assert_eq!(layer(&view, cx), Some((whole, whole)));
 
         for left in [40.0, 120.0, 400.0] {
-            strip.update(cx, |s, cx| {
+            host.update(cx, |s, cx| {
                 s.left = left;
                 s.screen.update(cx, |_, cx| cx.notify());
                 cx.notify();
@@ -6385,7 +6386,7 @@ mod tests {
             );
         }
 
-        strip.update(cx, |s, cx| {
+        host.update(cx, |s, cx| {
             s.shown = false;
             cx.notify();
         });

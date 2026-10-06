@@ -3,7 +3,7 @@
 //! sits beside that work, under its tile's header at its trailing edge, and moves with the
 //! tile. Every other notice sits in the title bar, between where the focused work is and the
 //! readouts: a lane no tile draws in, so it never lies over a composer's send button or a
-//! shell's last rows, as one floating in the strip's corner did. On a phone, whose bar has no
+//! shell's last rows, as one floating in the workspace's corner did. On a phone, whose bar has no
 //! such lane, they hang under the bar's middle. Each is one line, marked with what it is about
 //! when it is about something, with at most its actions; they stay [`SAY_FOR`] and no more
 //! than [`SHOWN`] are up at once in one place, side by side, the newest nearest the readouts.

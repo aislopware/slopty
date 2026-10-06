@@ -34,8 +34,8 @@ fn the_empty_workspaces_mark_is_lit_while_a_worker_is_reachable(cx: &mut TestApp
     assert!(!cursor_lit(&view, cx), "its link dropped: unlit again");
 }
 
-/// The cursor blinks at the caret's cadence, and a blink draws the mark alone: the strip it
-/// sits on is not built again. Under Reduce Motion it holds steady, its clock stopped.
+/// The cursor blinks at the caret's cadence, and a blink draws the mark alone: the panes it
+/// sits on are not built again. Under Reduce Motion it holds steady, its clock stopped.
 #[gpui::test]
 fn the_cursor_blinks_without_building_the_strip_and_holds_under_reduce_motion(
     cx: &mut TestAppContext,

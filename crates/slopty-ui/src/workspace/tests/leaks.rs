@@ -187,9 +187,9 @@ fn a_closed_page_note_and_folder_leave_nothing(cx: &mut TestAppContext) {
 }
 
 /// The palette opened, typed into and dismissed; the window picker and a tile's name field the
-/// same; the overview opened and closed.
+/// same.
 #[gpui::test]
-fn the_overlays_and_the_overview_leave_nothing(cx: &mut TestAppContext) {
+fn the_overlays_leave_nothing(cx: &mut TestAppContext) {
     let (view, cx, _fake) = studio(cx);
     closes_clean(&view, cx, |cx| {
         cx.simulate_keystrokes("cmd-o");

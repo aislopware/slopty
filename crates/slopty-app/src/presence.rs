@@ -25,7 +25,7 @@ const AWAY_AFTER: Duration = Duration::from_secs(120);
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 
 /// A change in the workspace goes up this long after it, once the frame that drew it is down,
-/// and a burst of changes (a strip animating) goes up once.
+/// and a burst of changes (a sash dragged) goes up once.
 const SETTLE: Duration = Duration::from_millis(150);
 
 /// The app's side of the person's presence.

@@ -5,8 +5,8 @@
 //! [`Threads::frame`], [`Threads::done`]) and sends the messages its calls hand back; it reads
 //! and writes the [`cache`] off its UI thread.
 //!
-//! - **The table** ([`TableState`]) follows its own cursor, so the overview is right the moment the
-//!   link comes back, with only the rows that changed.
+//! - **The table** ([`TableState`]) follows its own cursor, so the navigator is right the moment
+//!   the link comes back, with only the rows that changed.
 //! - **A mirror per open thread** ([`Mirror`]) applies the worker's frames with the same reducer
 //!   the worker runs ([`slopty_proto::thread::ThreadState::apply`]). It is drawn from the cache in
 //!   the first frame and caught up from its cursor: after a blink, only the actions missed come.

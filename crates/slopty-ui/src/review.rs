@@ -12,7 +12,7 @@
 //!
 //! * [`findings`] — what an agent's own review found, read from its answer.
 //! * [`model`] — the files in order, the comments, and the picks; nothing draws.
-//! * [`view`] — the tile, [`ReviewView`], for the strip to host.
+//! * [`view`] — the tile, [`ReviewView`], for a pane to host.
 
 pub mod findings;
 pub mod model;

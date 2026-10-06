@@ -1,5 +1,5 @@
 //! A page tile's page is a native the window composes: its body is the page's element, so the
-//! page shows where the strip draws the tile and GPUI draws over it what it draws after. The
+//! page shows where its pane draws the tile and GPUI draws over it what it draws after. The
 //! page's keyboard is GPUI's focus on that element, both ways. The web view itself is stood in
 //! for: the test platform records its host.
 

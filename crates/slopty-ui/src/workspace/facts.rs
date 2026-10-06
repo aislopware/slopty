@@ -1,4 +1,4 @@
-//! What the strip and the chrome show of a body that changes on its own: a shell's command and
+//! What the panes and the chrome show of a body that changes on its own: a shell's command and
 //! title, a stream's first frame and sound, a file's unsaved edit, a page's address and title, a
 //! folder's way up. Copied out of the body each time it changes, and news for the views that show
 //! it only when the copy changes.
@@ -6,7 +6,7 @@
 //! GPUI draws a view again when an entity it read changed. A shell changes with every line of
 //! output, a stream with every frame; a header or a navigator
 //! row that read them would be built again as often, for a title or a mark that stayed as it
-//! was. So the strip and the chrome read these facts, which are the workspace's, and never the
+//! was. So the panes and the chrome read these facts, which are the workspace's, and never the
 //! bodies themselves.
 
 use std::time::{Duration, Instant};
@@ -108,7 +108,7 @@ pub(super) struct FileFacts {
     /// A Markdown file's text is in: whether its preview shows (else its source). `None` for
     /// any other file, or one with no text yet.
     pub preview: Option<bool>,
-    /// Its text is in the editor: the overview can say what it holds.
+    /// Its text is in the editor.
     pub has_text: bool,
     /// It changed on disk under an unsaved edit.
     pub conflict: bool,
@@ -227,7 +227,7 @@ impl WorkspaceView {
     }
 
     /// Copy item `id`'s page again. Its title or address names its tile everywhere; its way
-    /// back is the strip's news.
+    /// back is the panes' news.
     pub(super) fn page_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(view) = self.browsers.get(&id) else { return };
         let now = PageFacts::of(view.read(cx));
@@ -262,7 +262,7 @@ impl WorkspaceView {
     }
 
     /// Keep the readouts' clock moving, once a second, while a command runs, each tick news for
-    /// the views that count: the strip's headers and the navigator's rows.
+    /// the views that count: the panes' headers and the navigator's rows.
     pub(super) fn keep_time(&mut self, cx: &Context<Self>) {
         if self.facts.ticking || !self.readouts_run() {
             return;
@@ -289,7 +289,7 @@ impl WorkspaceView {
     }
 
     /// Move the readouts' clock to now, and tell the views that show a count: the navigator for
-    /// a command's time, the strip for a header's.
+    /// a command's time, the panes for a header's.
     pub(super) fn tick_readouts(&mut self, cx: &mut Context<Self>) {
         self.facts.ticked = Some(Self::readout_now());
         let counting = |session: &SessionId| self.running_for(*session).is_some();

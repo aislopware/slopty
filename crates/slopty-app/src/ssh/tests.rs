@@ -545,7 +545,7 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(dials.get(), 1);
 
-    // A shell of it on the strip, as its last link left it.
+    // A shell of it in a pane, as its last link left it.
     let key = crate::workers::worker_key(id);
     let session = slopty_core::SessionId::new();
     let item = Item {

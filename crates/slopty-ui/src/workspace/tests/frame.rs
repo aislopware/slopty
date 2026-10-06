@@ -139,8 +139,7 @@ fn dragging_the_handle_resizes_the_navigator_within_its_clamps(cx: &mut TestAppC
 /// *Needs you* shows while an agent waits, in view or not, above *Workers*, whose heading
 /// shows only then: alone it would head nothing. The waiting tile's own row says so too, and
 /// folding its worker away leaves the section as it was. Each worker lists its tiles beneath it,
-/// with an accessible name, until its row folds them. The workspaces are no section of the
-/// navigator: they are the title bar's, named with their count.
+/// with an accessible name, until its row folds them.
 #[gpui::test]
 fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -154,7 +153,6 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
         f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).origin.y)
     };
     assert!(cx.debug_bounds("nav-workers").is_none(), "a lone section has no heading");
-    assert!(cx.debug_bounds("nav-workspaces").is_none(), "the tabs list the workspaces");
     assert!(cx.debug_bounds(selector("nav-tile", mine.item)).is_some(), "a tile under its worker");
 
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));

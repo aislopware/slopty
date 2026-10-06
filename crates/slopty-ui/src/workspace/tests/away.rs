@@ -86,7 +86,7 @@ fn a_closed_file_tile_comes_back_with_its_edit(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
-    assert!(file_state(&view, cx, tile).is_none(), "off the strip");
+    assert!(file_state(&view, cx, tile).is_none(), "out of the layout");
     studio.drain();
     cx.simulate_keystrokes("cmd-z");
     cx.run_until_parked();
@@ -117,7 +117,7 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
     assert!(held, "the shell keeps its view, and the keyboard with it");
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
-    assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "off the strip");
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "out of the layout");
     cx.executor().advance_clock(UNDO_CLOSE);
     cx.executor().advance_clock(IDLE_SHELL_KEPT);
     cx.run_until_parked();

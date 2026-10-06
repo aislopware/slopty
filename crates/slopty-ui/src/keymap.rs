@@ -37,7 +37,7 @@ mod chord;
 pub enum Scope {
     /// The app itself, whatever has the keyboard.
     App,
-    /// The workspace: tiles, columns and workspaces.
+    /// The workspace: tiles, panes, tabs and projects.
     Workspace,
     /// A web page tile.
     Page,

@@ -1,4 +1,4 @@
-//! Which tiles are one body of work: the grouping the navigator, the workspaces' names, the
+//! Which tiles are one body of work: the grouping the navigator, the projects' names, the
 //! breadcrumb and the palette read, and the home a tile arriving from elsewhere is placed by.
 //!
 //! Pure. The caller says what it knows of each tile as open [`Facts`] (a fact key and the

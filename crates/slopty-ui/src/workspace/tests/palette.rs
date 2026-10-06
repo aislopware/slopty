@@ -1,5 +1,5 @@
-//! The palette's sections, the picker's waiting row, the empty workspace and the overview's
-//! labels, in the headless workspace.
+//! The palette's sections, the picker's waiting row, the empty workspace and the
+//! palette's labels, in the headless workspace.
 
 use gpui::{AppContext as _, Modifiers};
 use slopty_client::layout::Saved;

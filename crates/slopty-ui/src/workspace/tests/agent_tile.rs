@@ -217,7 +217,7 @@ fn a_thread_whose_terminal_already_has_a_tile_goes_to_it(cx: &mut TestAppContext
     let ops = item_ops(&mut studio);
     assert_eq!(ops, [ItemOp::Remove(tile.item)], "only the thread's tile goes");
     view.read_with(cx, |v, _| {
-        assert!(!v.layout().contains(tile), "gone from the strip");
+        assert!(!v.layout().contains(tile), "gone from the layout");
         assert_eq!(v.focused(), Some(terminal), "the terminal's tile has the focus");
         assert_eq!(v.tile_of_thread(thread), Some(terminal));
     });

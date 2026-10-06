@@ -4,8 +4,8 @@
 //!
 //! The ranking is zoxide's ([`slopty_client::groups::Frecency`]), kept with the layout, and
 //! counts a visit each time the focus comes to a tile of another project than the last. It
-//! ranks only the palette's projects, a transient switcher: the navigator's groups and the strip
-//! keep their places.
+//! ranks only the palette's projects, a transient switcher: the navigator's groups and the
+//! panes keep their places.
 
 use gpui::{AppContext as _, Context, Window};
 use gpui_kit::component::input::InputState;

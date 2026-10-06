@@ -11,9 +11,9 @@
 //! GPUI cannot draw a page, so the page is the platform's web view (`slopty_platform::web`),
 //! which the window composes with GPUI's content through a native host: the tile's body is a
 //! `native_view` element, and the page shows wherever that element is drawn, cut to what clips
-//! it (the strip) and under whatever GPUI draws after it (a menu, the palette, a toast, a
-//! script's dialog). A tile drawn scaled (the overview) shows the page's last snapshot, as a
-//! page laid out at that size would reflow. GPUI's focus on the element is the page's
+//! it (its pane) and under whatever GPUI draws after it (a menu, the palette, a toast, a
+//! script's dialog). A render of the window, which cannot see a native view, draws the page's
+//! last snapshot in its place. GPUI's focus on the element is the page's
 //! keyboard: a click in the page focuses it, and focus leaving it gives the keyboard back.
 //!
 //! What a browser brings of its own sits in the tile: the find bar above the page, a
@@ -220,8 +220,7 @@ pub struct BrowserView {
     page_focus: FocusHandle,
     /// Hears the page take the keyboard and give it back, once the view is in a window.
     focus_watch: Vec<Subscription>,
-    /// The tile is drawn at its own size, so the page itself shows. Drawn scaled (the
-    /// overview, the strip zoomed out) it shows its snapshot.
+    /// The page itself shows. Off, the tile draws its snapshot instead, taken as it goes.
     live: bool,
     /// When Esc last went to the page, for a second one soon after to give the keyboard back.
     last_escape: Option<Instant>,
@@ -413,8 +412,8 @@ impl BrowserView {
         self.host.as_ref().map(|h| &h.host)
     }
 
-    /// Whether the tile is drawn at its own size, which shows the page itself; scaled, it
-    /// shows its snapshot, taken again as it goes.
+    /// Whether the page itself shows; off, the tile draws its snapshot, taken again as it
+    /// goes.
     pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
         if self.live != live {
             self.live = live;

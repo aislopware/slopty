@@ -148,7 +148,7 @@ pub(super) struct ThreadFaces {
     cache: Option<PathBuf>,
     /// The review tile of each thread whose review was asked for, kept while it is open.
     reviews: HashMap<ThreadId, Entity<ReviewView>>,
-    /// The reviews thread views asked for, in order: made in the next sync, for the strip to
+    /// The reviews thread views asked for, in order: made in the next sync, for the workspace to
     /// open ([`WorkspaceView::take_review`]), each on the scope named where one is. Several at
     /// once are a message's runs.
     review_asked: Vec<(WorkerKey, ThreadId, Option<crate::review::Scope>)>,
@@ -160,7 +160,7 @@ pub(super) struct ThreadFaces {
     /// Each thread's title as its worker's table last said, for its tile's header.
     titles: HashMap<ThreadId, String>,
     /// The last line each thread's agent wrote as its worker's table last said, for the
-    /// navigator, the overview and the palette.
+    /// navigator and the palette.
     lines: HashMap<ThreadId, String>,
     /// Each thread's agent as its worker's table last said, for the mark its tile leads with.
     agents: HashMap<ThreadId, AgentId>,
@@ -321,7 +321,7 @@ impl WorkspaceView {
     }
 
     /// The review tile a thread view asked for since this was last asked, with the worker
-    /// whose agent runs its thread, for the strip to open as a tile there (`Handed::Review`).
+    /// whose agent runs its thread, for the workspace to open as a tile there (`Handed::Review`).
     pub fn take_review(&mut self) -> Option<(WorkerKey, ThreadId, Entity<ReviewView>)> {
         let made = &mut self.faces.threads.review_made;
         let (key, thread) = (!made.is_empty()).then(|| made.remove(0))?;
@@ -379,7 +379,7 @@ impl WorkspaceView {
         self.faces.threads.reviews.get(&thread)
     }
 
-    /// The strip closed `thread`'s review tile: the thread is no longer followed for it.
+    /// The workspace closed `thread`'s review tile: the thread is no longer followed for it.
     pub fn review_closed(&mut self, thread: ThreadId) {
         self.faces.threads.reviews.remove(&thread);
     }
@@ -1232,7 +1232,7 @@ impl WorkspaceView {
         }
         self.settle_thread_tiles(cx);
         self.count_runs(cx);
-        // The overview's agents say their newest words as the table brings them.
+        // The navigator's agents say their newest words as the table brings them.
         cx.notify();
     }
 
@@ -1810,7 +1810,7 @@ impl WorkspaceView {
         out.into_iter().map(|(_, w)| w).collect()
     }
 
-    /// One line of what `session`'s agent does, for the navigator and the overview: the last
+    /// One line of what `session`'s agent does, for the navigator and the palette: the last
     /// line its thread's agent wrote. The agent's words are Markdown, and the line says them as
     /// plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {

@@ -79,7 +79,7 @@ impl WorkspaceView {
             // A thread on its way: the composer writing its first message.
             None if self.starting.has(tile.item) => self.focus_start(tile.item),
             // A remote window takes the keyboard only when clicked: its chords are the
-            // worker's, and a key walk through the strip must not land in one by accident.
+            // worker's, and a key walk through the panes must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
         }
         cx.notify();
@@ -560,8 +560,8 @@ impl WorkspaceView {
     }
 
     /// Open a session on `key` in `cwd` (the worker's default when `None`; `~` its home). The
-    /// worker makes its item, and the item's arrival (ours) opens a column right of the focus.
-    /// A worker out of reach makes nothing, so that is said ([`Self::reachable_for`]).
+    /// worker makes its item, and the item's arrival (ours) opens beside the focus by the room
+    /// rule. A worker out of reach makes nothing, so that is said ([`Self::reachable_for`]).
     pub(super) fn open_session_on(
         &mut self,
         key: WorkerKey,
@@ -663,7 +663,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Put window `window` of the focused tile's worker in the strip, titled `title`, as
+    /// Put window `window` of the focused tile's worker beside the focus, titled `title`, as
     /// picking it in the ⌘O picker does.
     pub fn pick_window(
         &mut self,

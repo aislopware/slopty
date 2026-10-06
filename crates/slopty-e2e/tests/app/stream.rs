@@ -393,7 +393,7 @@ async fn worker_side(stack: &Stack, client: &str) -> WorkerSide {
     }
 }
 
-/// Open the drawn editor window in the strip and wait until it has shown [`FRAMES`].
+/// Open the drawn editor window in a pane and wait until it has shown [`FRAMES`].
 async fn open_editor(drv: &mut Driver) -> Dump {
     drv.ok(&Command::PickWindow { window: EDITOR.0, title: EDITOR.1.to_owned() }).await.unwrap();
     drv.wait_for("the drawn window's frames", FIRST_FRAMES, shown).await.unwrap()

@@ -52,7 +52,7 @@ fn typing_under_a_resting_pointer_keeps_the_hold(cx: &mut TestAppContext) {
 }
 
 /// A notice about no one tile sits in the title bar, over no tile: with a shell open it lies
-/// inside the bar, above the strip; with no worker yet the bar holds it all the same.
+/// inside the bar, above the panes; with no worker yet the bar holds it all the same.
 #[gpui::test]
 fn a_notice_sits_in_the_title_bar_over_no_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

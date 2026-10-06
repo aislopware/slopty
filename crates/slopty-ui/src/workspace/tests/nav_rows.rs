@@ -756,7 +756,7 @@ fn a_phone_drawer_floats_clear_of_the_edges(cx: &mut TestAppContext) {
     assert!(near(panel.left(), step), "clear of the leading edge: {panel:?}");
     assert!(near(panel.top(), step), "clear of the top (no status bar here): {panel:?}");
     assert!(near(h - panel.bottom(), step), "clear of the bottom: {panel:?}");
-    assert!(w - panel.right() > step, "the strip still shows past it: {panel:?}");
+    assert!(w - panel.right() > step, "the panes still show past it: {panel:?}");
     assert!(!shown(cx, "nav-lights-row"), "no row of window controls");
     assert!(!shown(cx, "nav-workspace-title"), "no large title");
     let field = cx.debug_bounds("nav-filter-field").expect("the search field");
@@ -1224,7 +1224,7 @@ fn the_rail_scrolls_its_projects(cx: &mut TestAppContext) {
 }
 
 /// A shell that moves to another checkout moves row to its new project at once; its tile stays
-/// where it was in the strip.
+/// where it was in its pane.
 #[gpui::test]
 fn a_shell_that_changes_checkout_moves_row_not_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
