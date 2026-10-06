@@ -273,6 +273,11 @@ pub struct NewWorktree {
     /// from `origin`'s copy when that holds every commit of the clone's own, so the worktree
     /// is current without losing work not yet pushed.
     pub base: Option<String>,
+    /// The pull request of `origin` whose head it checks out, in place of `base`, which is then
+    /// not read. Its branch tracks the pull request, so gh finds it from the worktree: a pull
+    /// request from a branch of `origin` itself tracks that branch, one from a fork its
+    /// `pull/<n>/head`.
+    pub pull: Option<u32>,
     /// Whether the repository's own setup runs in it before anything starts there, once: the
     /// first setup file of another tool's that the worktree's checkout has (`conductor.json`,
     /// `.cursor/worktrees.json` and the like). `false` starts without it, as the person asked
@@ -284,7 +289,7 @@ impl NewWorktree {
     /// The worktree `name`, from the branch the clone has checked out, set up.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
-        Self { name: name.into(), base: None, setup: true }
+        Self { name: name.into(), base: None, pull: None, setup: true }
     }
 }
 
@@ -738,6 +743,9 @@ pub struct PullSeen {
     pub url: String,
     /// Its title.
     pub title: String,
+    /// The branch it merges into, as the forge names it: what its whole change is read
+    /// against.
+    pub base: String,
     /// Where it stands.
     pub stands: PullStands,
     /// How many of its checks failed.

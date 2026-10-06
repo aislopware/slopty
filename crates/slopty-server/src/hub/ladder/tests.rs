@@ -357,6 +357,7 @@ async fn a_resting_thread_s_pull_request_lifts_it() {
         number: 42,
         url: "https://github.com/o/r/pull/42".to_owned(),
         title: "Fix the login".to_owned(),
+        base: "main".to_owned(),
         stands,
         failed: u32::from(stands == PullStands::ChecksFailed),
         failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),

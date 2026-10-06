@@ -403,6 +403,7 @@ fn pull(number: u32, stands: PullStands) -> PullSeen {
         number,
         url: format!("https://github.com/o/r/pull/{number}"),
         title: "Fix the build".to_owned(),
+        base: "main".to_owned(),
         stands,
         failed: 0,
         failed_first: None,

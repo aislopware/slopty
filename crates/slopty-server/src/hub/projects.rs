@@ -1637,7 +1637,7 @@ impl Hub {
             Runner::Claude { prompt, mut args } => {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| {
                     args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
-                    NewWorktree { name, base: Some(base), setup: true }
+                    NewWorktree { name, base: Some(base), pull: None, setup: true }
                 });
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
                 let agent = AgentKind::ClaudeCode;
@@ -1681,6 +1681,7 @@ impl Hub {
                     worktree: worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                         name,
                         base: Some(base),
+                        pull: None,
                         setup: true,
                     }),
                 };
@@ -1691,6 +1692,7 @@ impl Hub {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                     name,
                     base: Some(base),
+                    pull: None,
                     setup: true,
                 });
                 let start = Start {

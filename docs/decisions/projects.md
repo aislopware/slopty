@@ -2116,4 +2116,32 @@ follow-up)
     terminal last drew it, `bash -e` in the worktree stopping at its first failure), and
     `repo::worktrees::a_new_worktree_runs_its_setup_once_it_succeeds` (a failure kept and run
     again, a success not rerun, a pass-over for good). The goldens `outcome_setup_failed` and
-    `link_worker_setting_up`. The start tile's side is still to come.
+    `link_worker_setting_up`.
+  - **The start tile says it.** While the setup runs, the tile says "Setting up from
+    conductor.json" under the working mark, with its newest line under that, in the terminal's
+    face, muted, on one line, cut with an ellipsis. Each word from the worker replaces the last.
+    A failed setup gives the draft back, as a refusal does. Over it the tile says "Setup from
+    conductor.json failed" with the exit code when there is one, and the last lines in an
+    inset, as a failed verifier's are. Two ways on follow. "Try again" sends the same start
+    under a new intent to the same worktree, which the worker reopens and sets up again.
+    "Start without setup" does the same with the setup off. A start with no draft (another
+    run of the same message) keeps its tile for the same. Test:
+    `workspace::tests::thread_start::a_start_tile_says_its_worktrees_setup_and_takes_it_again`.
+
+- ✅ **A worktree can check out a pull request** (2026-10-06, readiness rank 18's wire). To
+  review a pull request by its number, an agent needs its head in a worktree of its own, where
+  gh reads it as that pull request and its review compares against the right base.
+  - `NewWorktree::pull` names `origin`'s pull request. A new worktree starts from its head,
+    fetched as `refs/pull/<n>/head`, in place of `base`. Its branch `worktree-<name>` tracks
+    where gh looks, as `gh pr checkout` sets it. If one branch of `origin` is at the head,
+    the pull request comes from that branch, and the worktree tracks `refs/heads/<branch>`, so
+    a pull updates it (a push names the branch, `git push origin HEAD:<branch>`). Otherwise it
+    is a fork's, and the worktree tracks `refs/pull/<n>/head`. A pull request `origin` does not
+    have is refused as "origin has no pull request #n". Reopening a worktree reads no pull
+    request, as it reads no base. The setup runs as it does in any new worktree.
+  - `PullSeen::base` carries the branch a thread's pull request merges into, so that pull
+    request's review reads its whole change against that branch rather than `origin`'s
+    default.
+  - Test: `repo::worktrees::a_worktree_of_a_pull_request_checks_out_its_head_and_tracks_it`
+    (a fork's head and a branch's, one not there, a reopen). The thread table's goldens
+    changed.

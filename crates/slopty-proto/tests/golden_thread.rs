@@ -689,6 +689,7 @@ mod golden_thread {
             number: 42,
             url: "https://github.com/o/r/pull/42".to_owned(),
             title: "Fix the login".to_owned(),
+            base: "main".to_owned(),
             stands: PullStands::ChecksFailed,
             failed: 1,
             failed_first: Some("lint".to_owned()),

@@ -161,6 +161,7 @@ pub fn seen(status: &PullStatus) -> PullSeen {
         number: status.number,
         url: status.url.clone(),
         title: status.title.clone(),
+        base: status.base.clone(),
         stands,
         failed: n(failed),
         failed_first,
