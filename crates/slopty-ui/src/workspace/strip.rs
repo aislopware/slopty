@@ -141,6 +141,9 @@ pub(super) struct Drawn {
     /// A frame of motion is asked for and not yet run: one chain of them, however many
     /// builds and pointer moves ask.
     pub motion: Cell<bool>,
+    /// Each tabbed column's tab row, by its first tile: where it is scrolled, and the tab it
+    /// last brought into view.
+    pub tab_rows: RefCell<HashMap<ItemId, (gpui::ScrollHandle, ItemId)>>,
 }
 
 /// What a body takes from its tile: its zoom, and what else its kind is laid out by.
@@ -173,6 +176,7 @@ impl Default for Drawn {
             marks_timer: RefCell::default(),
             marks_gen: Cell::default(),
             motion: Cell::default(),
+            tab_rows: RefCell::default(),
         }
     }
 }
@@ -1004,14 +1008,12 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.sm))
                 .overflow_hidden()
-                .whitespace_nowrap()
                 .font_family(theme.typography.ui_family.clone())
                 .child(
                     div()
                         .debug_selector(move || format!("overview-name-{ix}"))
                         .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .truncate()
                         .text_size(px(theme.typography.ui_size))
                         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(ink))
@@ -1027,8 +1029,7 @@ impl WorkspaceView {
                     div()
                         .debug_selector(move || format!("overview-glance-{ix}"))
                         .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .truncate()
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .child(SharedString::from(glance))

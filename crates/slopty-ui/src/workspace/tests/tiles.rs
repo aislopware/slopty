@@ -104,7 +104,8 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
     let (placed_id, bare_id) = (placed.id, bare.id);
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| {
-        v.session_opened(key, summary(here, Some("/srv/deployments/production-eu-west")), cx);
+        let deep = "/srv/deployments/production-eu-west/releases/2026-10-06/artifacts/signed";
+        v.session_opened(key, summary(here, Some(deep)), cx);
         v.session_opened(key, summary(nowhere, None), cx);
         for (version, item) in [(1, placed), (2, bare)] {
             let op = ItemOp::Add(item);
@@ -119,7 +120,8 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
     let (title, alone) = (width(cx, "name", placed_id), width(cx, "name", bare_id));
     assert!((title - alone).abs() < 1.0, "the title is whole beside its place: {title} vs {alone}");
     let place = width(cx, "place", placed_id);
-    assert!(place > 0.0 && place < 100.0, "the place gave way: {place}");
+    // The path is three times what the header leaves it.
+    assert!(place > 0.0 && place < 200.0, "the place gave way: {place}");
 }
 
 /// The worker's name is worth a chip only when the workspace holds another worker's tile it
@@ -719,9 +721,10 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("closed").is_none(), "the offer is taken");
 }
 
-/// The header's right end is one strip: the agent's pill at rest; the face toggle, fullscreen
-/// and close while the pointer is on the header, the toggle a control among them and never
-/// among the readouts; and the swap moves nothing (the strip, the title).
+/// The header's right end: the agent's pill at rest; the face toggle, fullscreen and close
+/// while the pointer is on the header, laid over the pill's place on the header's ground and
+/// keeping no room at rest, the toggle a control among them and never among the readouts; and
+/// the swap moves nothing.
 #[gpui::test]
 fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -753,25 +756,26 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
     let bounds = |cx: &mut VisualTestContext, part: &str| {
         cx.debug_bounds(selector(part, waiting.item)).unwrap_or_else(|| panic!("{part} drawn"))
     };
-    let (strip, name, pill) = (bounds(cx, "strip"), bounds(cx, "name"), bounds(cx, "agent"));
-    assert!(strip.contains(&pill.center()), "the pill is in the strip");
-    let side = crate::kit::icon_button_side(&Theme::default());
-    // Thread and terminal on the switch, the step that sets it apart, fullscreen and close.
+    let (header, name, pill) = (bounds(cx, "title"), bounds(cx, "name"), bounds(cx, "agent"));
+    let inset = Theme::default().spacing.inset();
     let apart = Theme::default().spacing.sm;
-    let room = 4.0_f32.mul_add(side, apart);
-    assert!(f32::from(strip.size.width) >= room - 0.5, "room for the buttons");
+    assert!(
+        (f32::from(header.right() - pill.right()) - inset).abs() < 0.5,
+        "the pill ends the header at rest: {pill:?} in {header:?}"
+    );
     assert!(!quads_at(cx, pill).is_empty(), "the pill shows at rest");
+    assert!(name.right() <= pill.left(), "the title ends before it: {name:?} {pill:?}");
 
-    let header = bounds(cx, "title").center();
-    cx.simulate_mouse_move(header, None, Modifiers::none());
+    cx.simulate_mouse_move(header.center(), None, Modifiers::none());
     cx.run_until_parked();
     assert!(quads_at(cx, pill).is_empty(), "hovered: the pill gives way");
-    assert_eq!(bounds(cx, "strip"), strip, "the strip holds its place");
     assert_eq!(bounds(cx, "name"), name, "and so does the title");
+    let controls = bounds(cx, "controls");
+    assert!(controls.right() <= pill.right() + px(0.5), "over the pill's place: {controls:?}");
     let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
-    assert!(strip.contains(&close.center()), "close sits in the same strip");
+    assert!(controls.contains(&close.center()), "close is one of them");
     let face = cx.debug_bounds(selector("faces", waiting.item)).expect("the face switch");
-    assert!(strip.contains(&face.center()), "the switch is one of the controls");
+    assert!(controls.contains(&face.center()), "the switch is one of the controls");
     assert!(face.right() <= close.left(), "before close: {face:?} {close:?}");
     let next = cx.debug_bounds(selector("fullscreen", waiting.item)).unwrap_or(close);
     let gap = f32::from(next.left() - face.right());

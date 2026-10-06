@@ -42,8 +42,8 @@ impl Priority {
 
 /// The keys of the items a [`PriorityRow`] left out at its last layout, for its menu.
 ///
-/// Shared with the closure that opens the menu; it is written each time the row is laid out,
-/// so it says what the row on screen leaves out.
+/// Shared with the closure that opens the menu, and kept by the view across frames; it is
+/// written each time the row is laid out, so it says what the row on screen leaves out.
 #[derive(Clone, Default, Debug)]
 pub struct Dropped(Rc<RefCell<Vec<SharedString>>>);
 
@@ -54,14 +54,23 @@ impl Dropped {
         self.0.borrow().clone()
     }
 
+    /// How many items were left out.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.borrow().len()
+    }
+
     /// Whether `key` was left out.
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
         self.0.borrow().iter().any(|k| k == key)
     }
 
-    fn set(&self, keys: Vec<SharedString>) {
+    /// Notes what the last layout left out; whether that changed.
+    fn set(&self, keys: Vec<SharedString>) -> bool {
+        let changed = *self.0.borrow() != keys;
         *self.0.borrow_mut() = keys;
+        changed
     }
 }
 
@@ -89,6 +98,10 @@ pub struct PriorityRow {
     title: Option<(AnyElement, Pixels)>,
     /// Items under it leave before the title narrows.
     title_priority: Priority,
+    /// The title takes all the room the rest leave, not only its own width.
+    title_fills: bool,
+    /// Sized by its content, as its parent allows, rather than by its style.
+    fit_content: bool,
     /// Where the next item goes.
     side: Side,
     menu: Option<AnyElement>,
@@ -108,6 +121,8 @@ pub fn priority_row(id: impl Into<ElementId>) -> PriorityRow {
         items: Vec::new(),
         title: None,
         title_priority: Priority::MEDIUM,
+        title_fills: false,
+        fit_content: false,
         side: Side::Leading,
         menu: None,
         overlay: None,
@@ -144,7 +159,10 @@ impl PriorityRow {
             side: Side::Leading,
             element: div_marker(),
         });
-        self.title = Some((element.into_any_element(), floor));
+        // In a block of its own, which takes the width it is laid out at: a flex row laid out
+        // as a root keeps its content's width whatever room it is offered.
+        let title = gpui::ParentElement::child(gpui::div(), element).into_any_element();
+        self.title = Some((title, floor));
         self
     }
 
@@ -154,6 +172,21 @@ impl PriorityRow {
     #[must_use]
     pub const fn title_priority(mut self, priority: Priority) -> Self {
         self.title_priority = priority;
+        self
+    }
+
+    /// The title takes all the room the others leave, as a field that is being typed in does.
+    #[must_use]
+    pub const fn title_fills(mut self, fills: bool) -> Self {
+        self.title_fills = fills;
+        self
+    }
+
+    /// As wide as its items, the title whole, as its parent allows: it shrinks from there as a
+    /// flex item, and leaves out what no longer fits.
+    #[must_use]
+    pub const fn fit_content(mut self) -> Self {
+        self.fit_content = true;
         self
     }
 
@@ -267,10 +300,26 @@ fn needed(
     sum + gap * f32::from(count.saturating_sub(1))
 }
 
+/// What a row measured of its items before it was laid out: each at its own width.
+pub struct Measured {
+    sizes: Vec<Size<Pixels>>,
+    title: Option<(AnyElement, Size<Pixels>, Pixels)>,
+    menu: Option<(AnyElement, Size<Pixels>)>,
+}
+
+impl PriorityRow {
+    /// The text style it gives what it lays out, as a `div` gives its children.
+    fn given_text(&self) -> Option<gpui::TextStyleRefinement> {
+        let mut style = Style::default();
+        style.refine(&self.style);
+        style.text_style().cloned()
+    }
+}
+
 impl Element for PriorityRow {
     /// What it laid out, to paint.
     type PrepaintState = Vec<AnyElement>;
-    type RequestLayoutState = ();
+    type RequestLayoutState = Measured;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -286,10 +335,47 @@ impl Element for PriorityRow {
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.refine(&self.style);
-        (window.request_layout(style, [], cx), ())
+    ) -> (LayoutId, Measured) {
+        let text = self.given_text();
+        window.with_text_style(text, |window| {
+            let mut style = Style::default();
+            style.refine(&self.style);
+            // Every item at its own width, from its shaped text: before the row is laid out, so a
+            // row sized by its content knows its width in the same frame.
+            let natural =
+                Size { width: AvailableSpace::MaxContent, height: AvailableSpace::MaxContent };
+            let sizes: Vec<Size<Pixels>> = self
+                .items
+                .iter_mut()
+                .map(|item| item.element.layout_as_root(natural, window, cx))
+                .collect();
+            let title = self.title.take().map(|(mut element, floor)| {
+                let size = element.layout_as_root(natural, window, cx);
+                (element, size, floor.min(size.width))
+            });
+            let menu = self.menu.take().map(|mut element| {
+                let size = element.layout_as_root(natural, window, cx);
+                (element, size)
+            });
+            if self.fit_content {
+                // A gap given in ems or points; a fraction of a width that is not known yet is
+                // none.
+                let gap = style.gap.width.to_pixels(px(0.0).into(), window.rem_size());
+                let widths: Vec<(Priority, Pixels)> = self
+                    .items
+                    .iter()
+                    .zip(&sizes)
+                    .map(|(item, size)| (item.priority, size.width))
+                    .collect();
+                let all = vec![true; widths.len()];
+                let whole = needed(&widths, &all, gap, None)
+                    + title.as_ref().map_or(px(0.0), |(_, size, _)| size.width);
+                style.size.width = gpui::Length::Definite(whole.into());
+                style.flex_shrink = 1.0;
+                style.min_size.width = gpui::Length::Definite(px(0.0).into());
+            }
+            (window.request_layout(style, [], cx), Measured { sizes, title, menu })
+        })
     }
 
     fn prepaint(
@@ -297,122 +383,126 @@ impl Element for PriorityRow {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        request_layout: &mut Measured,
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
-        let high = bounds.size.height;
-        let mut style = Style::default();
-        style.refine(&self.style);
-        let gap = style.gap.width.to_pixels(bounds.size.width.into(), window.rem_size());
-        let natural =
-            Size { width: AvailableSpace::MaxContent, height: AvailableSpace::MaxContent };
-        let mut items = std::mem::take(&mut self.items);
-        let sizes: Vec<Size<Pixels>> =
-            items.iter_mut().map(|item| item.element.layout_as_root(natural, window, cx)).collect();
-        let title = self.title.take().map(|(mut element, floor)| {
-            let size = element.layout_as_root(natural, window, cx);
-            (element, size, floor.min(size.width))
-        });
-        let mut menu = self.menu.take().map(|mut element| {
-            let size = element.layout_as_root(natural, window, cx);
-            (element, size)
-        });
-        // The title's place is an item that stays whatever happens.
-        let measured: Vec<(Priority, Pixels)> = items
-            .iter()
-            .zip(&sizes)
-            .map(|(item, size)| {
-                (item.priority, if item.key.is_empty() { px(0.0) } else { size.width })
-            })
-            .collect();
-        let title_fit = title.as_ref().and_then(|(_, size, least)| {
-            Some(TitleFit {
-                at: items.iter().position(|item| item.key.is_empty())?,
-                natural: size.width,
-                least: *least,
-                priority: self.title_priority,
-            })
-        });
-        let menu_width = menu.as_ref().map(|(_, size)| size.width);
-        let stays = fit_row(&measured, title_fit, gap, menu_width, bounds.size.width);
-        self.dropped.set(
-            items
+        let text = self.given_text();
+        window.with_text_style(text, |window| {
+            let high = bounds.size.height;
+            let mut style = Style::default();
+            style.refine(&self.style);
+            let gap = style.gap.width.to_pixels(bounds.size.width.into(), window.rem_size());
+            let items = std::mem::take(&mut self.items);
+            let sizes = std::mem::take(&mut request_layout.sizes);
+            let title = request_layout.title.take();
+            let mut menu = request_layout.menu.take();
+            // The title's place is an item that stays whatever happens.
+            let measured: Vec<(Priority, Pixels)> = items
+                .iter()
+                .zip(&sizes)
+                .map(|(item, size)| {
+                    (item.priority, if item.key.is_empty() { px(0.0) } else { size.width })
+                })
+                .collect();
+            let title_fit = title.as_ref().and_then(|(_, size, least)| {
+                Some(TitleFit {
+                    at: items.iter().position(|item| item.key.is_empty())?,
+                    natural: size.width,
+                    least: *least,
+                    priority: self.title_priority,
+                })
+            });
+            let menu_width = menu.as_ref().map(|(_, size)| size.width);
+            let stays = fit_row(&measured, title_fit, gap, menu_width, bounds.size.width);
+            let moved = self.dropped.set(
+                items
+                    .iter()
+                    .zip(&stays)
+                    .filter(|(item, stays)| !**stays && !item.key.is_empty())
+                    .map(|(item, _)| item.key.clone())
+                    .collect(),
+            );
+            // What a menu says follows what was left out now: draw once more if that moved.
+            if moved && menu.is_some() {
+                window.refresh();
+            }
+            let menu_shown = menu.is_some() && stays.iter().any(|s| !s);
+            // What the title may take: the row less every other item shown, the menu and the gaps.
+            let rest = needed(&measured, &stays, gap, menu_width);
+            let mut title = title.map(|(mut element, size, least)| {
+                let room = (bounds.size.width - rest).max(px(0.0));
+                let width = if self.title_fills { room } else { size.width.min(room) };
+                let width = width.max(least.min(room));
+                let laid = element.layout_as_root(
+                    Size {
+                        width: AvailableSpace::Definite(width),
+                        height: AvailableSpace::MaxContent,
+                    },
+                    window,
+                    cx,
+                );
+                (element, Size { width, height: laid.height })
+            });
+            // Leading items from the left edge, trailing ones and the menu against the right.
+            let trailing: Vec<Pixels> = items
                 .iter()
                 .zip(&stays)
-                .filter(|(item, stays)| !**stays && !item.key.is_empty())
-                .map(|(item, _)| item.key.clone())
-                .collect(),
-        );
-        let menu_shown = menu.is_some() && stays.iter().any(|s| !s);
-        // What the title may take: the row less every other item shown, the menu and the gaps.
-        let rest = needed(&measured, &stays, gap, menu_width);
-        let mut title = title.map(|(mut element, size, least)| {
-            let room = (bounds.size.width - rest).max(px(0.0));
-            let width = size.width.min(room).max(least.min(room));
-            let laid = element.layout_as_root(
-                Size { width: AvailableSpace::Definite(width), height: AvailableSpace::MaxContent },
-                window,
-                cx,
-            );
-            (element, Size { width, height: laid.height })
-        });
-        // Leading items from the left edge, trailing ones and the menu against the right.
-        let trailing: Vec<Pixels> = items
-            .iter()
-            .zip(&stays)
-            .zip(&sizes)
-            .filter(|((item, s), _)| **s && item.side == Side::Trailing)
-            .map(|(_, size)| size.width)
-            .chain(menu.as_ref().filter(|_| menu_shown).map(|(_, size)| size.width))
-            .collect();
-        let trailing_width = trailing.iter().fold(px(0.0), |sum, w| sum + *w + gap);
-        let centred = |size: Size<Pixels>| (high - size.height).max(px(0.0)) / 2.0;
-        let mut x = bounds.origin.x;
-        let mut trailing_x = bounds.origin.x + bounds.size.width - trailing_width + gap;
-        let mut shown = Vec::new();
-        for ((item, stay), size) in items.into_iter().zip(stays).zip(&sizes) {
-            if !stay {
-                continue;
+                .zip(&sizes)
+                .filter(|((item, s), _)| **s && item.side == Side::Trailing)
+                .map(|(_, size)| size.width)
+                .chain(menu.as_ref().filter(|_| menu_shown).map(|(_, size)| size.width))
+                .collect();
+            let trailing_width = trailing.iter().fold(px(0.0), |sum, w| sum + *w + gap);
+            let centred = |size: Size<Pixels>| (high - size.height).max(px(0.0)) / 2.0;
+            let mut x = bounds.origin.x;
+            let mut trailing_x = bounds.origin.x + bounds.size.width - trailing_width + gap;
+            let mut shown = Vec::new();
+            for ((item, stay), size) in items.into_iter().zip(stays).zip(&sizes) {
+                if !stay {
+                    continue;
+                }
+                if item.key.is_empty() {
+                    if let Some((mut element, size)) = title.take() {
+                        element.prepaint_at(point(x, bounds.origin.y + centred(size)), window, cx);
+                        x += size.width + gap;
+                        shown.push(element);
+                    }
+                    continue;
+                }
+                let mut element = item.element;
+                let at = match item.side {
+                    Side::Leading => {
+                        let at = x;
+                        x += size.width + gap;
+                        at
+                    }
+                    Side::Trailing => {
+                        let at = trailing_x;
+                        trailing_x += size.width + gap;
+                        at
+                    }
+                };
+                element.prepaint_at(point(at, bounds.origin.y + centred(*size)), window, cx);
+                shown.push(element);
             }
-            if item.key.is_empty() {
-                if let Some((mut element, size)) = title.take() {
-                    element.prepaint_at(point(x, bounds.origin.y + centred(size)), window, cx);
-                    x += size.width + gap;
-                    shown.push(element);
-                }
-                continue;
+            if let Some((mut element, size)) = menu.take().filter(|_| menu_shown) {
+                element.prepaint_at(point(trailing_x, bounds.origin.y + centred(size)), window, cx);
+                shown.push(element);
             }
-            let mut element = item.element;
-            let at = match item.side {
-                Side::Leading => {
-                    let at = x;
-                    x += size.width + gap;
-                    at
-                }
-                Side::Trailing => {
-                    let at = trailing_x;
-                    trailing_x += size.width + gap;
-                    at
-                }
-            };
-            element.prepaint_at(point(at, bounds.origin.y + centred(*size)), window, cx);
-            shown.push(element);
-        }
-        if let Some((mut element, size)) = menu.take().filter(|_| menu_shown) {
-            element.prepaint_at(point(trailing_x, bounds.origin.y + centred(size)), window, cx);
-            shown.push(element);
-        }
-        if let Some(mut element) = self.overlay.take() {
-            let size = element.layout_as_root(natural, window, cx);
-            let at = point(
-                bounds.origin.x + bounds.size.width - size.width,
-                bounds.origin.y + centred(size),
-            );
-            element.prepaint_at(at, window, cx);
-            shown.push(element);
-        }
-        shown
+            if let Some(mut element) = self.overlay.take() {
+                let natural =
+                    Size { width: AvailableSpace::MaxContent, height: AvailableSpace::MaxContent };
+                let size = element.layout_as_root(natural, window, cx);
+                let at = point(
+                    bounds.origin.x + bounds.size.width - size.width,
+                    bounds.origin.y + centred(size),
+                );
+                element.prepaint_at(at, window, cx);
+                shown.push(element);
+            }
+            shown
+        })
     }
 
     fn paint(
@@ -420,14 +510,23 @@ impl Element for PriorityRow {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        _request_layout: &mut Measured,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        for element in prepaint {
-            element.paint(window, cx);
-        }
+        let text = self.given_text();
+        window.with_text_style(text, |window| {
+            for element in prepaint {
+                element.paint(window, cx);
+            }
+        });
+    }
+}
+
+impl std::fmt::Debug for Measured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Measured").field("sizes", &self.sizes).finish_non_exhaustive()
     }
 }
 
@@ -514,11 +613,15 @@ mod tests {
 
     impl Render for Row {
         fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            // A flex row, as a header's title is: it narrows to the width it is given.
+            let words =
+                div().debug_selector(|| "words".to_owned()).min_w_0().w(px(200.0)).h(px(16.0));
             let title = div()
                 .debug_selector(|| "title".to_owned())
+                .flex()
                 .min_w_0()
                 .overflow_hidden()
-                .child(sized("words", 200.0));
+                .child(words);
             div().child(
                 priority_row("row")
                     .w(px(self.width))
@@ -572,6 +675,8 @@ mod tests {
         assert_eq!(menu.right(), px(240.0), "last at the end");
         let title = laid(cx, "title").expect("the title");
         assert_eq!(title.size.width, px(128.0), "what the rest leave: {title:?}");
+        let words = laid(cx, "words").expect("the title's words");
+        assert_eq!(words.size.width, px(128.0), "and its words narrow with it");
         let state = laid(cx, "state").expect("the state stays");
         assert!(title.right() <= state.left(), "nothing overlaps: {title:?} {state:?}");
     }

@@ -32,10 +32,15 @@ use super::tile::place_name;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::a11y::tab_stop;
+use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{IconSize, Symbol, icon};
 use crate::kit;
+
+/// The most room a workspace's name takes in the bar, in ems: a long name ends in an ellipsis
+/// rather than push "+" and the bell off.
+const WORKSPACE_NAME_EM: f32 = 20.0;
 
 /// A checkout: a repository's working tree on one worker (or a directory outside one).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -127,8 +132,18 @@ impl WorkspaceView {
         all
     }
 
-    /// The breadcrumb, laid in the bar after the navigator's toggle.
-    pub(super) fn render_breadcrumb(&self, cx: &Draw<'_, Self>) -> AnyElement {
+    /// The breadcrumb, laid in the bar after the navigator's toggle, with `new` ("+") after
+    /// its last segment.
+    ///
+    /// It is a [`kit::priority_row`] filling what the bar leaves: the workspace and "+" always
+    /// stand; the worker goes first and then the checkout where the bar is narrow, and the
+    /// branch, last, ends in an ellipsis down to six letters' room. A step ("/") belongs to the
+    /// segment after it, so none is ever left at an end.
+    pub(super) fn render_breadcrumb(
+        &self,
+        new: Option<AnyElement>,
+        cx: &Draw<'_, Self>,
+    ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let spacing = theme.spacing;
@@ -147,21 +162,32 @@ impl WorkspaceView {
             Some(words) => format!("{name}, elsewhere {words}"),
             None => name.to_string(),
         };
-        let mut parts = vec![
-            self.crumb(MenuKind::Workspaces, "crumb-workspace", label.into(), cx)
-                .child(
-                    div()
-                        .debug_selector(|| "crumb-workspace-name".to_owned())
-                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-                        .text_color(hsla(s.text))
-                        .child(name.clone()),
-                )
-                .child(self.chevron())
-                .when(elsewhere.shown().is_some(), |el| {
-                    el.child(rollup_slot(theme, "crumb-elsewhere".to_owned(), elsewhere, true))
-                })
-                .into_any_element(),
-        ];
+        let stepped = |segment: AnyElement| {
+            div().flex().items_center().gap(px(spacing.xxs)).child(step()).child(segment)
+        };
+        let workspace = self
+            .crumb(MenuKind::Workspaces, "crumb-workspace", label.into(), cx)
+            .child(
+                div()
+                    .debug_selector(|| "crumb-workspace-name".to_owned())
+                    .min_w_0()
+                    .max_w(px(theme.typography.ui_size * WORKSPACE_NAME_EM))
+                    .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                    .text_color(hsla(s.text))
+                    .child(ChromeText::new(name.clone(), px(theme.typography.ui_size), 1.0).fill()),
+            )
+            .child(self.chevron())
+            .when(elsewhere.shown().is_some(), |el| {
+                el.child(rollup_slot(theme, "crumb-elsewhere".to_owned(), elsewhere, true))
+            });
+        let mut row = kit::priority_row("breadcrumb")
+            .flex_1()
+            .min_w_0()
+            .h(px(theme.density.row))
+            .gap(px(spacing.xxs))
+            .text_size(px(theme.typography.ui_size))
+            .text_color(hsla(s.text_secondary))
+            .item("workspace", kit::Priority::ESSENTIAL, workspace);
         // A project on more than one worker names the focused tile's, so three machines'
         // clones of one repository do not read as one; the menu of its clones is then the
         // machine's, each clone named by its machine.
@@ -181,7 +207,7 @@ impl WorkspaceView {
             )
             .child(SharedString::from(worker))
             .when(more, |el| el.child(self.chevron()));
-            parts.extend([step(), segment.into_any_element()]);
+            row = row.item("worker", kit::Priority::LOW, stepped(segment.into_any_element()));
         }
         // A workspace is named after its project until it is named otherwise, and that name
         // said twice in a row is noise; a menu of checkouts keeps its segment.
@@ -197,19 +223,24 @@ impl WorkspaceView {
             } else {
                 self.words("crumb-checkout", name.clone()).child(name).into_any_element()
             };
-            parts.extend([step(), segment]);
+            row = row.item("checkout", kit::Priority::MEDIUM, stepped(segment));
         }
         if let Some((branch, changes)) = crumbs.branch {
             let branch = SharedString::from(branch);
             let changes = changes.and_then(|c| kit::changes(theme, c.added, c.removed));
             let words = self
                 .words("crumb-branch", SharedString::from(format!("branch {branch}")))
+                .flex_initial()
                 .gap(px(spacing.xs))
                 .child(
                     icon(theme, Symbol::ArrowTriangleBranch, IconSize::Inline, hsla(s.text_muted))
                         .size(px(theme.typography.icon())),
                 )
-                .child(branch)
+                .child(
+                    div()
+                        .min_w_0()
+                        .child(ChromeText::new(branch, px(theme.typography.ui_size), 1.0).fill()),
+                )
                 .when_some(changes, |el, size| {
                     el.child(
                         div()
@@ -218,22 +249,25 @@ impl WorkspaceView {
                             .child(size),
                     )
                 });
-            parts.extend([step(), words.into_any_element()]);
+            row = row.title(
+                stepped(words.into_any_element()).min_w_0(),
+                px(theme.typography.ui_size * 6.0),
+            );
+        }
+        if let Some(new) = new {
+            row = row.item("new", kit::Priority::ESSENTIAL, new);
         }
         div()
-            .id("breadcrumb")
+            .id("where")
             .debug_selector(|| "breadcrumb".to_owned())
             .role(Role::Group)
             .aria_label("Where")
-            .flex_shrink(1.0)
+            .flex_1()
             .min_w_0()
-            .overflow_hidden()
+            .h_full()
             .flex()
             .items_center()
-            .gap(px(spacing.xxs))
-            .text_size(px(theme.typography.ui_size))
-            .text_color(hsla(s.text_secondary))
-            .children(parts)
+            .child(row)
             .into_any_element()
     }
 

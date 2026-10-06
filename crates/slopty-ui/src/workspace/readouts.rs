@@ -549,19 +549,16 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .whitespace_nowrap()
                     .child(
                         div()
-                            .overflow_hidden()
-                            .text_ellipsis()
+                            .truncate()
                             .text_color(hsla(s.text))
                             .child(SharedString::from(row.name)),
                     )
                     .child(
                         meta(tabular(div()), theme)
                             .debug_selector(move || format!("transfers-words-{xfer}"))
-                            .overflow_hidden()
-                            .text_ellipsis()
+                            .truncate()
                             .child(SharedString::from(detail)),
                     )
                     .children(progress),

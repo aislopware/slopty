@@ -74,6 +74,10 @@ pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 const LANE_W: f32 = 280.0;
 /// How far a card that arrives travels up into its place, at zoom 1.
 const ARRIVE: f32 = 4.0;
+/// The least the board's name narrows to in its header, in ems of the chrome's text, before
+/// its progress leaves.
+const TITLE_FLOOR_EM: f32 = 8.0;
+
 /// The most facts a row's or a card's second line holds: two separators.
 const META_PARTS: usize = 3;
 
@@ -480,16 +484,13 @@ impl ProjectView {
             .px(self.z(sp.xxs))
             .rounded(self.z(theme.radii.sm))
             .overflow_hidden()
-            .whitespace_nowrap()
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(tone))
             .child(
                 icon(theme, glyph, IconSize::Inline, hsla(tone))
                     .size(self.z(theme.typography.small())),
             )
-            .child(
-                div().min_w_0().overflow_hidden().text_ellipsis().child(SharedString::from(short)),
-            )
+            .child(div().min_w_0().truncate().child(SharedString::from(short)))
             .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
@@ -712,39 +713,55 @@ impl ProjectView {
                 this.open_checks(window, cx);
             }
         }));
-        let title = div()
-            .flex()
-            .items_center()
-            .gap(self.z(sp.xs))
+        let name = div()
+            .id("project-title")
+            .debug_selector(|| "project-title".to_owned())
+            .role(Role::Heading)
             .min_w_0()
-            .child(
-                icon(theme, Symbol::RectangleSplit3x1, IconSize::Inline, hsla(s.text_secondary))
-                    .size(self.z(theme.typography.icon())),
-            )
-            .child(
-                div()
-                    .id("project-title")
-                    .debug_selector(|| "project-title".to_owned())
-                    .role(Role::Heading)
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(self.z(theme.typography.title()))
-                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(project.title.clone())),
-            )
-            .child(
-                self.facts(
-                    std::iter::once(readout("project-live", live))
-                        .chain(progress.map(|p| readout("project-progress", p))),
-                ),
-            )
-            .child(checks_toggle)
-            .child(push_toggle)
-            .child(terminal);
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_size(self.z(theme.typography.title()))
+            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .text_color(hsla(s.text))
+            .child(SharedString::from(project.title.clone()));
+        // The name, then how far along it is and what runs, then its controls. Where the board
+        // is narrow the running count leaves first, then the name narrows to its floor, and
+        // only then does the progress leave: the bar under the name says it too. The dot
+        // between the two readouts goes with the count, so it never parts nothing.
+        let lead = icon(theme, Symbol::RectangleSplit3x1, IconSize::Inline, hsla(s.text_secondary))
+            .size(self.z(theme.typography.icon()));
+        let parted = progress.is_some();
+        let live = readout("project-live", live);
+        let live = if parted {
+            div()
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xs))
+                .child(crate::kit::separator(theme).text_size(self.z(theme.typography.small())))
+                .child(live)
+                .into_any_element()
+        } else {
+            live.into_any_element()
+        };
+        let mut title = crate::kit::priority_row("project-header")
+            .h(self.z(crate::kit::icon_button_side(theme)))
+            .gap(self.z(sp.xs))
+            .item("lead", crate::kit::Priority::ESSENTIAL, lead)
+            .title(name, self.z(theme.typography.ui_size * TITLE_FLOOR_EM))
+            .end();
+        if let Some(progress) = progress {
+            title = title.item(
+                "progress",
+                crate::kit::Priority::MEDIUM,
+                readout("project-progress", progress),
+            );
+        }
+        let title = title
+            .item("live", crate::kit::Priority::LOW, live)
+            .item("checks", crate::kit::Priority::ESSENTIAL, checks_toggle)
+            .item("push", crate::kit::Priority::ESSENTIAL, push_toggle)
+            .item("terminal", crate::kit::Priority::ESSENTIAL, terminal);
         let meta = div()
             .id("project-place")
             .debug_selector(|| "project-place".to_owned())
@@ -766,22 +783,6 @@ impl ProjectView {
             .child(title)
             .child(meta)
             .child(self.bar(board))
-    }
-
-    /// Readouts side by side, parted by the quiet middle dot, so two counts never read as one
-    /// run of words.
-    fn facts(&self, readouts: impl Iterator<Item = Stateful<Div>>) -> Div {
-        let theme = &self.theme;
-        let mut row = div().flex_none().flex().items_center().gap(self.z(theme.spacing.xs));
-        for (ix, readout) in readouts.enumerate() {
-            if ix > 0 {
-                row = row.child(
-                    crate::kit::separator(theme).text_size(self.z(theme.typography.small())),
-                );
-            }
-            row = row.child(readout);
-        }
-        row
     }
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
@@ -1780,24 +1781,19 @@ impl ProjectView {
     /// when it must, a stage holding the merge back in the text ink: none of it is a control, so
     /// none of it wears a button's edge. Only a stage that failed is coloured, in the error ink
     /// with its mark, since that is what someone has to act on.
-    fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<Div> {
+    fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<crate::kit::FactsRow> {
         if stages.is_empty() {
             return None;
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
+        // Wrapped between stages, never with a dot left at either end of a line.
+        let mut row = crate::kit::facts_row(SharedString::from(format!("{key}-stages")), theme)
             .gap_x(self.z(sp.xs))
-            .min_w_0()
+            .gap_y(self.z(sp.xxs))
             .text_size(self.z(theme.typography.small()));
-        for (ix, stage) in stages.iter().enumerate() {
-            if ix > 0 {
-                row = row.child(crate::kit::separator(theme));
-            }
+        for stage in stages {
             let id = format!("{key}-{}", stage.kind.word());
             let selector = id.clone();
             let ink = if stage.failed {
@@ -1812,7 +1808,7 @@ impl ProjectView {
                     .flex_none()
                     .size(self.z(theme.typography.icon()))
             });
-            row = row.child(
+            row = row.fact(
                 div()
                     .id(SharedString::from(id))
                     .debug_selector(move || selector)

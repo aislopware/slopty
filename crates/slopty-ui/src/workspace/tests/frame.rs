@@ -320,7 +320,7 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
     let (navigator, toggle, crumbs, new, bell) = (
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
-        bounds(cx, "breadcrumb"),
+        bounds(cx, "crumb-workspace"),
         bounds(cx, "new-menu"),
         bounds(cx, "bell"),
     );

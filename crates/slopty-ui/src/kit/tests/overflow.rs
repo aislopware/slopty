@@ -75,14 +75,31 @@ fn ellipsis_around_chrome_text(own: &str, whole: &str) -> Option<&'static str> {
         .then_some("an ellipsis around a `ChromeText`, which ignores it; use `ChromeText::fill`")
 }
 
+/// Whether a `ChromeText`'s words are fixed: a literal or a constant, which cannot grow.
+fn fixed_words(child: &str) -> bool {
+    let words = child.trim_start_matches("ChromeText::new(");
+    words.starts_with('"')
+        || words
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .next()
+            .is_some_and(|name| {
+                let last = name.rsplit("::").next().unwrap_or_default();
+                !last.is_empty()
+                    && last
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
+}
+
 /// A chip of words that never shrinks and has no bound: it takes its whole width whatever the
 /// room, and what is beside it gives way to nothing.
 fn unbounded_chip(own: &str, whole: &str) -> Option<&'static str> {
     (own.contains(".flex_none()")
         && !own.contains(".max_w(")
+        && !own.contains(".max_w_full()")
         && whole.split(".child(").skip(1).any(|child| {
             let first = child.split(").child(").next().unwrap_or_default();
-            child.starts_with("ChromeText::new(") && !first.contains(".fill")
+            child.starts_with("ChromeText::new(") && !first.contains(".fill") && !fixed_words(child)
         }))
     .then_some(
         "a chip of words that never shrinks; bound it (`max_w`) or put it in a `kit::priority_row`",
@@ -107,6 +124,8 @@ fn the_overflow_checks_know_a_cut_from_an_ellipsis() {
     let chip = "div().flex_none().child(icon).child(ChromeText::new(name,s,k))";
     assert!(unbounded_chip(&own_chain(chip), chip).is_some());
     let bounded = "div().flex_none().max_w(px(m)).child(ChromeText::new(name,s,k).fill())";
+    let fixed = "div().flex_none().child(ChromeText::new(EDITED,s,k))";
+    assert!(unbounded_chip(&own_chain(fixed), fixed).is_none(), "fixed words cannot grow");
     assert!(unbounded_chip(&own_chain(bounded), bounded).is_none());
 }
 
@@ -128,14 +147,7 @@ fn flagged_chains(
 /// Words that do not fit end in an ellipsis or fade; nothing is clipped mid-glyph.
 #[test]
 fn no_words_are_cut_mid_glyph() {
-    const AWAITING: [&str; 6] = [
-        "slopty-ui/src/workspace/readouts.rs",
-        "slopty-ui/src/workspace/tile.rs",
-        "slopty-ui/src/workspace/miniature.rs",
-        "slopty-ui/src/workspace/strip.rs",
-        "slopty-ui/src/terminal/view.rs",
-        "slopty-ui/src/project/view.rs",
-    ];
+    const AWAITING: [&str; 1] = ["slopty-ui/src/terminal/view.rs"];
     let wrong = flagged_chains(&AWAITING, cut_mid_glyph);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
@@ -143,15 +155,13 @@ fn no_words_are_cut_mid_glyph() {
 /// A `ChromeText` ends its own words: an ellipsis asked of the box around it does nothing.
 #[test]
 fn no_ellipsis_is_asked_around_chrome_text() {
-    const AWAITING: [&str; 1] = ["slopty-ui/src/workspace/tile.rs"];
-    let wrong = flagged_chains(&AWAITING, ellipsis_around_chrome_text);
+    let wrong = flagged_chains(&[], ellipsis_around_chrome_text);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// A chip of words that never shrinks has a bound, or stands in a priority row.
 #[test]
 fn a_chip_of_words_has_a_bound() {
-    const AWAITING: [&str; 1] = ["slopty-ui/src/workspace/tile.rs"];
-    let wrong = flagged_chains(&AWAITING, unbounded_chip);
+    let wrong = flagged_chains(&[], unbounded_chip);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

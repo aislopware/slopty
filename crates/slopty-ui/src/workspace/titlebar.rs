@@ -364,8 +364,7 @@ impl WorkspaceView {
         let leading = if docked { spacing.sm } else { LEADING_INSET + f32::from(safe.left) };
         let trailing = spacing.md + f32::from(safe.right);
         let phone = self.phone;
-        let place = has_workers
-            .then(|| if phone { self.render_phone_title() } else { self.render_breadcrumb(cx) });
+        let phone_title = (has_workers && phone).then(|| self.render_phone_title());
         let theme = &self.theme;
         let s = &theme.surfaces;
 
@@ -395,6 +394,10 @@ impl WorkspaceView {
                     this.toggle_menu(MenuKind::New, window, cx);
                 }))
         });
+
+        // Where the focused work is, "+" after its last segment.
+        let where_ = (has_workers && !phone)
+            .then(|| self.render_breadcrumb(new.map(gpui::IntoElement::into_any_element), cx));
 
         // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
         // left to review; it opens the navigator at them.
@@ -513,8 +516,8 @@ impl WorkspaceView {
                     .children(toggle)
                     .children(search)
                     .children(new_agent)
-                    .children(place)
-                    .children(new),
+                    .children(phone_title)
+                    .children(where_),
             )
             .children(lane)
             .children(readouts)

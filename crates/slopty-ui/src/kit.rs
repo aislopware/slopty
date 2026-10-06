@@ -23,6 +23,7 @@ use crate::colors::{hsla, hsla_alpha};
 
 mod change;
 mod disclosure;
+mod facts;
 pub mod find;
 mod fit;
 pub mod menu;
@@ -35,11 +36,12 @@ mod shimmer;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
 pub use disclosure::Disclosure;
+pub use facts::{FactAt, FactsRow, MeasuredFacts, facts_row, wrap_facts};
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use press::menu_press;
-pub use priority::{Dropped, Priority, PriorityRow, TitleFit, fit_row, priority_row};
+pub use priority::{Dropped, Measured, Priority, PriorityRow, TitleFit, fit_row, priority_row};
 pub use room::{Room, room_query};
 pub use shimmer::{Shimmer, shimmer};
 pub use spark::Spark;
@@ -1348,13 +1350,17 @@ pub const NOTICE_MARK: f32 = 28.0;
 
 /// What a tile's body says when it has nothing to show, as one block in its middle.
 ///
-/// A mark on its own, [`NOTICE_MARK`] square ([`notice_mark`]) with no plate under it, a line at
-/// `small()` in the medium weight saying what is so, and under it an optional muted line saying why
-/// or where. The caller adds the identity and its actions under it.
+/// A mark on its own, [`NOTICE_MARK`] square ([`notice_mark`]) with no plate under it, a line in
+/// the task title role in the text's ink saying what is so, and under it an optional line at
+/// the chrome size in `text_secondary` saying why or where. Where the state has one obvious
+/// next step the caller adds it under them ([`notice_action`]); its identity too.
+///
+/// The words keep to a measure of [`NOTICE_MEASURE`] ems where the tile is wide and to the
+/// tile less its margins where it is narrow, wrapping and never cut: the block fits any room.
 ///
 /// A remote window on its way, a file that cannot be opened here and an empty or missing
-/// folder all say it this way. Before, a file printed its summary alone ("binary, 2 MB") and a
-/// reason ran as one clause ("Too large to edit here: 40 MB, past 16 MB"), each a lowercase
+/// folder all say it this way. Before, the title was a footnote under its mark (12 pt in
+/// `text_secondary`), and a file printed its summary alone ("binary, 2 MB"), each a lowercase
 /// sentence adrift in the body.
 #[must_use]
 pub fn notice(
@@ -1365,6 +1371,7 @@ pub fn notice(
     detail: Option<SharedString>,
 ) -> Div {
     let s = &theme.surfaces;
+    let roles = theme.roles();
     div()
         .flex()
         .flex_col()
@@ -1385,15 +1392,27 @@ pub fn notice(
                 .child(mark),
         )
         .child(
-            div()
-                .text_size(px(theme.typography.small() * k))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                .text_color(hsla(s.text_secondary))
+            typed(div(), roles.task_title, k)
+                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE * k))
+                .text_color(hsla(s.text))
                 .child(title.into()),
         )
         .children(detail.map(|detail| {
-            meta(div(), theme).text_size(px(theme.typography.small() * k)).child(detail)
+            typed(div(), roles.chrome, k)
+                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE * k))
+                .text_color(hsla(s.text_secondary))
+                .child(detail)
         }))
+}
+
+/// How wide a [`notice`]'s words run at most, in ems of the chrome's size: a short paragraph's
+/// measure, so a wide tile does not stretch them to one long line.
+pub const NOTICE_MEASURE: f32 = 26.0;
+
+/// A [`notice`]'s one next step, under its words: a secondary button, a step of space apart.
+#[must_use]
+pub fn notice_action(theme: &Theme, id: &'static str, label: &'static str) -> gpui::Stateful<Div> {
+    button(theme, id, label, ButtonKind::Secondary).mt(px(theme.spacing.sm))
 }
 
 /// A [`notice`]'s mark: a kind's symbol, light and large at the page heading's size, in

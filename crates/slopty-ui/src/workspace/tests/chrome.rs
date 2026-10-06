@@ -590,7 +590,7 @@ fn the_workspace_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
         window.text_system().shape_line(text.into(), size, &[run], None).width
     });
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
-    let crumbs = cx.debug_bounds("breadcrumb").expect("drawn");
+    let crumbs = cx.debug_bounds("crumb-workspace").expect("drawn");
     let new = cx.debug_bounds("new-menu").expect("+");
     let gap = f32::from(new.left() - crumbs.right());
     assert!((0.0..=Theme::default().spacing.md).contains(&gap), "+ follows it: {gap}");
@@ -660,6 +660,44 @@ fn no_bar_runs_along_the_bottom_and_a_notice_sits_by_its_work(cx: &mut TestAppCo
         "a failure outlives its tile: {texts:?}"
     );
     assert!(bounds(cx, "notices").is_some(), "and moves to the title bar");
+}
+
+/// Notices the bar has no room for are never cut off unseen: the newest stays whole, the
+/// older go behind a count, and the count opens them under it. With room again they come back
+/// beside it and the count goes.
+#[gpui::test]
+fn the_notices_the_bar_has_no_room_for_go_behind_a_count_that_opens_them(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let wide = size(px(1800.0), px(900.0));
+    cx.simulate_resize(wide);
+    let older = "The settings did not parse: an unknown key at line twelve".to_owned();
+    let newer = "The save did not land: the worker closed the file first".to_owned();
+    view.update(cx, |v, cx| v.show_failure(older.clone(), cx));
+    view.update(cx, |v, cx| v.show_failure(newer.clone(), cx));
+    cx.run_until_parked();
+    let texts = view.read_with(cx, |v, _| v.toast_texts());
+    assert_eq!(texts, [older.clone(), newer.clone()], "both up");
+    assert!(cx.debug_bounds("notices-more").is_none(), "with room, both shown and no count");
+
+    cx.simulate_resize(size(px(760.0), px(900.0)));
+    cx.run_until_parked();
+    let titlebar = cx.debug_bounds("titlebar").expect("the title bar");
+    let lane = cx.debug_bounds("notices").expect("the notices");
+    assert!(lane.right() <= titlebar.right(), "within the bar: {lane:?} {titlebar:?}");
+    let more = cx.debug_bounds("notices-more").expect("the older behind a count");
+    assert!(lane.contains(&more.center()), "the count is in the lane: {more:?} {lane:?}");
+    assert!(cx.debug_bounds("notices-left").is_none(), "closed until asked");
+    click_at(cx, "notices-more");
+    let left = cx.debug_bounds("notices-left").expect("the count opens the older notice");
+    assert!(left.top() >= more.bottom(), "under the count: {left:?} {more:?}");
+    click_at(cx, "notices-more");
+    assert!(cx.debug_bounds("notices-left").is_none(), "and closes it again");
+
+    cx.simulate_resize(wide);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("notices-more").is_none(), "room again, the count goes");
 }
 
 /// On a phone under the touch density every button is a finger's 44 pt, and the title bar

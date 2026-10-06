@@ -6,13 +6,14 @@
 //! shell's last rows, as one floating in the strip's corner did. On a phone, whose bar has no
 //! such lane, they hang under the bar's middle. Each is one line, marked with what it is about
 //! when it is about something, with at most its actions; they stay [`SAY_FOR`] and no more
-//! than [`SHOWN`] are up at once in one place, side by side, the newest nearest the readouts. One
-//! whose time comes while the pointer is over them stays until the pointer leaves, then
-//! [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away; one whose time comes
-//! while the app is not in front waits the same way for it to come back, so nothing lapses
-//! unseen. A failure stays until it is dismissed, offering its words to copy. A notice rises a
-//! hair into place as it fades in, and fades where it stands when its time is up; under Reduce
-//! Motion it comes and goes at once.
+//! than [`SHOWN`] are up at once in one place, side by side, the newest nearest the readouts.
+//! Where there is no room for them all, the newest stays whole and the older go behind a count
+//! that opens them under it, so none is cut off unseen. One whose time comes while the pointer is
+//! over them stays until the pointer leaves, then [`SAY_AFTER_HOVER`] more, so a notice being read
+//! is never taken away; one whose time comes while the app is not in front waits the same way for
+//! it to come back, so nothing lapses unseen. A failure stays until it is dismissed, offering its
+//! words to copy. A notice rises a hair into place as it fades in, and fades where it stands when
+//! its time is up; under Reduce Motion it comes and goes at once.
 
 use std::time::Duration;
 
@@ -42,6 +43,10 @@ pub(super) const SHOWN: usize = 2;
 /// The widest a notice gets, in points: past it the line ends in an ellipsis.
 const TOAST_MAX_W: f32 = 400.0;
 
+/// The least the newest notice narrows to, in ems of the chrome's text, before older ones in
+/// its place have all gone behind the count.
+const NEWEST_FLOOR_EM: f32 = 10.0;
+
 /// The notices up now, oldest first. Made with the first notice and kept from then on.
 #[derive(Default)]
 pub(super) struct Toast {
@@ -50,7 +55,26 @@ pub(super) struct Toast {
     shown: Vec<Shown>,
     /// The pointer is over the stack: no notice leaves meanwhile.
     hovered: bool,
+    /// What each place's row left out at its last layout, for its count, and where its count
+    /// was drawn.
+    kept: std::cell::RefCell<std::collections::HashMap<Place, Kept>>,
+    /// The place whose left-out notices are open under its count.
+    opened: Option<Place>,
 }
+
+/// What a place's row keeps across frames.
+#[derive(Default)]
+struct Kept {
+    /// What it left out.
+    dropped: crate::kit::Dropped,
+    /// Where its count was drawn: a press there toggles what it opened, so the click away
+    /// leaves it be.
+    count: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+}
+
+/// Where notices are said: the title bar, or beside a tile (`Shown::at`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Place(Option<TileRef>);
 
 /// One notice up.
 struct Shown {
@@ -250,6 +274,11 @@ impl WorkspaceView {
         let Some(toast) = self.toast.as_mut() else { return false };
         let before = toast.shown.len();
         toast.shown.retain(|shown| !which(shown));
+        let shown = &toast.shown;
+        toast.kept.borrow_mut().retain(|at, _| shown.iter().any(|s| s.at == at.0));
+        if toast.opened.is_some_and(|at| !shown.iter().any(|s| s.at == at.0)) {
+            toast.opened = None;
+        }
         // The numbering carries on when the last notice goes, so a timer left from before
         // can never take down a newer notice that happens to reuse its number.
         toast.shown.len() != before
@@ -535,56 +564,142 @@ impl WorkspaceView {
         shown.at.filter(|tile| self.layout.contains(*tile))
     }
 
-    /// The title bar's notices up now, side by side, the newest nearest the readouts.
+    /// The title bar's notices up now: the newest whole, nearest the readouts, and older ones
+    /// beside it while the bar has room for them.
     pub(super) fn render_notices(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
-        let toast = self.toast.as_ref()?;
-        let notices: Vec<gpui::AnyElement> = toast
-            .shown
-            .iter()
-            .filter(|shown| self.beside_tile(shown).is_none())
-            .map(|shown| self.render_one(shown, cx))
-            .collect();
-        self.notice_row("notices", notices)
+        self.notice_row(None, "notices", cx)
     }
 
-    /// The notices about `tile`'s own work, side by side for its trailing edge under its
-    /// header, the newest nearest the edge.
+    /// The notices about `tile`'s own work, for its trailing edge under its header, the newest
+    /// nearest the edge.
     pub(super) fn render_tile_notices(
         &self,
         tile: TileRef,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        let toast = self.toast.as_ref()?;
-        let notices: Vec<gpui::AnyElement> = toast
-            .shown
-            .iter()
-            .filter(|shown| self.beside_tile(shown) == Some(tile))
-            .map(|shown| self.render_one(shown, cx))
-            .collect();
-        self.notice_row("tile-notices", notices)
+        self.notice_row(Some(tile), "tile-notices", cx)
     }
 
-    /// `notices` in a row named `selector`, painted over whatever is up there, a popover's
-    /// click-away included; nothing when there are none.
+    /// The notices up at `place` in a row named `selector`, painted over whatever is up there, a
+    /// popover's click-away included; nothing when there are none. The row is as wide as its
+    /// notices where there is room. Where there is not, older notices go behind a count ("+1")
+    /// that opens them under it, and the newest, always shown, ends in an ellipsis.
     fn notice_row(
         &self,
+        place: Option<TileRef>,
         selector: &'static str,
-        notices: Vec<gpui::AnyElement>,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        if notices.is_empty() {
-            return None;
+        let toast = self.toast.as_ref()?;
+        let here: Vec<&Shown> =
+            toast.shown.iter().filter(|shown| self.beside_tile(shown) == place).collect();
+        let (newest, older) = here.split_last()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (dropped, count_at) = {
+            let mut kept = toast.kept.borrow_mut();
+            let kept = kept.entry(Place(place)).or_default();
+            (kept.dropped.clone(), std::rc::Rc::clone(&kept.count))
+        };
+        let key = |shown: &Shown| SharedString::from(format!("notice-{}", shown.seq));
+        let id = place.map_or_else(String::new, |t| t.item.as_uuid().to_string());
+        let mut row = crate::kit::priority_row(SharedString::from(format!("notice-row-{id}")))
+            .dropped(&dropped)
+            .fit_content()
+            .h(px(theme.density.hit))
+            .gap(px(theme.spacing.xs))
+            .title_priority(crate::kit::Priority::ESSENTIAL);
+        // The older the notice, the sooner it goes behind the count.
+        for (age, shown) in older.iter().enumerate() {
+            let rank = u8::try_from(age).unwrap_or(u8::MAX);
+            let priority = crate::kit::Priority(crate::kit::Priority::LOW.0.saturating_add(rank));
+            row = row.item(key(shown), priority, self.render_one(shown, cx));
+        }
+        let floor = px(theme.typography.ui_size * NEWEST_FLOOR_EM);
+        row = row.title(self.render_one(newest, cx), floor);
+        let open = toast.opened == Some(Place(place)) && dropped.count() > 0;
+        if !older.is_empty() {
+            let count = dropped.count().max(1);
+            let label = SharedString::from(format!("+{count}"));
+            let aria = SharedString::from(format!("{count} more notices"));
+            let pill = div()
+                .id("notice-more")
+                .debug_selector(move || format!("{selector}-more"))
+                .role(Role::Button)
+                .aria_label(aria)
+                .aria_expanded(open)
+                .h(px(theme.density.hit))
+                .flex()
+                .items_center()
+                .px(px(theme.spacing.sm))
+                .map(|el| crate::kit::raised(el, theme))
+                .rounded(px(theme.radii.sm))
+                .text_color(hsla(s.text_secondary))
+                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                .cursor_pointer()
+                .occlude()
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    if let Some(toast) = this.toast.as_mut() {
+                        let at = Place(place);
+                        toast.opened = (toast.opened != Some(at)).then_some(at);
+                        cx.notify();
+                    }
+                }))
+                .child(label);
+            let left: Vec<gpui::AnyElement> = older
+                .iter()
+                .filter(|shown| open && dropped.contains(&key(shown)))
+                .map(|shown| self.render_one(shown, cx))
+                .collect();
+            let out_at = std::rc::Rc::clone(&count_at);
+            let panel = (!left.is_empty()).then(|| {
+                let stack = div()
+                    .id("notice-left")
+                    .debug_selector(move || format!("{selector}-left"))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(theme.spacing.xs))
+                    .font_family(theme.typography.ui_family.clone())
+                    .text_size(px(theme.typography.small()))
+                    .on_mouse_down_out(cx.listener(
+                        move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                            let on_count = out_at.get().is_some_and(|at| at.contains(&ev.position));
+                            if let Some(toast) = this.toast.as_mut().filter(|_| !on_count) {
+                                toast.opened = None;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .children(left);
+                div().absolute().top_full().right_0().pt(px(theme.spacing.xs)).child(
+                    gpui::deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::TopRight)
+                            .snap_to_window_with_margin(px(theme.spacing.sm))
+                            .child(stack),
+                    )
+                    .with_priority(crate::palette::Layer::Toast.priority()),
+                )
+            });
+            let count = div()
+                .relative()
+                .on_children_prepainted(move |bounds, _w, _cx| {
+                    count_at.set(bounds.first().copied());
+                })
+                .child(tab_stop(pill, s.focus))
+                .children(panel);
+            row = row.menu(count);
         }
         let row = div()
             .debug_selector(move || selector.to_owned())
             .flex_initial()
             .min_w_0()
-            .overflow_hidden()
             .flex()
             .items_center()
-            .gap(px(self.theme.spacing.xs))
-            .font_family(self.theme.typography.ui_family.clone())
-            .text_size(px(self.theme.typography.small()))
-            .children(notices);
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(px(theme.typography.small()))
+            .child(row);
         Some(
             gpui::deferred(row)
                 .with_priority(crate::palette::Layer::Toast.priority())
