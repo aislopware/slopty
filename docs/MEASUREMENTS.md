@@ -15276,3 +15276,32 @@ cargo build --release --example glass_cost   # in .research/gpui-fast
   app. The key-to-photon numbers elsewhere in this file are for opaque windows. Until that
   callback exists, the evidence for glass is that the frame counts and intervals above do not
   move.
+
+## 2026-10-06 — what a search of a worker's threads costs
+
+The palette's Threads section asks each linked worker to search every thread it keeps
+(`ThreadRequest::Search`), the same ask a thread's find bar makes for its older turns. The
+question was whether the worker's side is cheap enough for the ask to follow the typing, or
+whether the wait before it must spare the worker.
+
+`search_cost` builds 100 threads of 40 turns each, every turn being a person's message, three
+tool calls and an answer of about 300 bytes: 20,000 items in all. It then searches them 100
+times for each of three queries: two letters found almost everywhere (`pa`), a two-word phrase
+(`parser error`) and a word found nowhere (`zebra`). It runs a debug build on an M1 Max.
+
+```sh
+cargo test -p slopty-worker --lib search_cost -- --ignored --nocapture
+```
+
+| query | p50 | p95 | max |
+| --- | --- | --- | --- |
+| `pa` | 3.71 ms | 4.02 ms | 5.00 ms |
+| `parser error` | 3.85 ms | 3.92 ms | 4.09 ms |
+| `zebra` | 0.89 ms | 0.94 ms | 1.03 ms |
+
+- The worker answers in under 5 ms even for a debug build. So the wait before an ask
+  (`find::ASK_AFTER` in slopty-ui, 120 ms) is not there to spare the worker. It is there so a
+  burst of keys makes one ask once it rests, not one ask per key. Slower typing may ask once
+  a key, which the worker's cost allows, and the answer still lands well inside a glance.
+  The find bar and the palette share it, with `find::ASK_FROM` (two characters) as the
+  shortest query asked.

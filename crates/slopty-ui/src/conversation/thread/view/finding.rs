@@ -3,11 +3,9 @@
 //! The matches run newest first, as the thread reads from its end: ↵ steps back through them
 //! and ⇧↵ forward, round. The items the client holds are matched as the person types
 //! ([`find::matches`]); where the thread has older turns than it holds, the worker is asked
-//! too (`ThreadHub::search`, after [`ASK_AFTER`] of quiet) and its hits in those turns come
+//! too (`ThreadHub::search`, after [`find::ASK_AFTER`] of quiet) and its hits in those turns come
 //! after the held ones. Going to one pages the thread back until its turn is held. A match in
 //! a folded turn, a closed group or a closed step opens what hides it.
-
-use std::time::Duration;
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, Focusable as _, FollowMode, IntoElement as _,
@@ -21,12 +19,6 @@ use crate::conversation::thread::find::{self, Found};
 use crate::conversation::thread::rows::Row;
 use crate::kit::find::{PLACEHOLDER, Tally};
 use crate::kit::{self, FindBar};
-
-/// How long the words rest before the worker is asked for older turns.
-pub(crate) const ASK_AFTER: Duration = Duration::from_millis(120);
-
-/// The fewest characters the worker is asked to search for.
-const ASK_FROM: usize = 2;
 
 /// The find bar: its field, the matches newest first, the one on show, and the older turns'
 /// matches the worker left out.
@@ -112,9 +104,9 @@ impl ThreadView {
             find.going = None;
             find.at = 0;
         }
-        if older && query.chars().count() >= ASK_FROM {
+        if older && query.chars().count() >= find::ASK_FROM {
             let task = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(ASK_AFTER).await;
+                cx.background_executor().timer(find::ASK_AFTER).await;
                 let _gone = this.update(cx, |this, cx| {
                     this.hub.update(cx, |hub, cx| hub.search(&query, cx));
                     if let Some(find) = &mut this.finder {

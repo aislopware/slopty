@@ -1610,6 +1610,7 @@ mod overlays;
 mod page_chrome;
 mod page_host;
 mod palette;
+mod palette_threads;
 mod pins;
 mod played;
 mod popout;

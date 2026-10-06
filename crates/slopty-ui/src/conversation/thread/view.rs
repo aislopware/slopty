@@ -110,13 +110,11 @@ mod composer;
 mod composing;
 mod decision;
 pub mod denying;
+pub mod exited;
 mod finding;
 mod goal;
 mod going;
 mod keyed;
-#[cfg(test)]
-pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
-pub mod exited;
 mod later;
 mod message_menu;
 mod notes;

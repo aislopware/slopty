@@ -327,6 +327,8 @@ impl WorkspaceView {
     ) {
         self.palette_return = window.focused(cx);
         self.menu = None;
+        // A palette opens on an empty field: no ask of the last one's is waited on or shown.
+        self.faces.search = super::faces::ThreadSearch::default();
         // The palette is where the human went next: a drawer or an overlaid navigator over the
         // strip would only sit between it and what it goes to.
         self.nav.open = false;
@@ -341,7 +343,7 @@ impl WorkspaceView {
         });
         cx.subscribe(&palette, |this, palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
-                this.palette_changed(text);
+                this.palette_changed(&palette, text, cx);
                 return;
             }
             this.palette = None;
@@ -416,6 +418,11 @@ impl WorkspaceView {
                     this.palette_return = None;
                     this.go_to_group(group, cx);
                 }
+                PaletteEvent::Run(PaletteRun::Thread { thread, turn }) => {
+                    this.palette_return = None;
+                    let opens = crate::authorship::Opens { thread: *thread, turn: Some(*turn) };
+                    this.open_thread_at(opens, cx);
+                }
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
             cx.notify();
@@ -443,13 +450,22 @@ impl WorkspaceView {
     }
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's
-    /// files under the focused shell's directory, or the worker's home.
-    fn palette_changed(&self, text: &str) {
+    /// files under the focused shell's directory, or the worker's home; and the workspace's
+    /// own palette asks every linked worker's threads for the words ([`Self::ask_threads`]).
+    fn palette_changed(
+        &mut self,
+        palette: &Entity<CommandPalette>,
+        text: &str,
+        cx: &Context<Self>,
+    ) {
         if let Some(query) = palette::files_query(text)
             && let Some(key) = self.context_worker()
         {
             let root = self.active_cwd().unwrap_or_else(|| "~".to_owned());
             self.send(key, ClientMsg::FindFiles { root, query: query.to_owned() });
+        }
+        if palette.read(cx).is_live() {
+            self.ask_threads(text, cx);
         }
     }
 

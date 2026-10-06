@@ -142,7 +142,7 @@ fn a_match_opens_the_fold_over_it_and_return_walks_back(cx: &mut TestAppContext)
     assert_eq!(found(&view, cx), (0, 3), "round again");
     cx.simulate_keystrokes("shift-enter");
     assert_eq!(found(&view, cx), (2, 3), "and back");
-    cx.executor().advance_clock(crate::conversation::thread::view::FIND_ASK_AFTER);
+    cx.executor().advance_clock(crate::conversation::thread::find::ASK_AFTER);
     cx.run_until_parked();
     assert!(searches(&sent).is_empty(), "every turn is held: nothing to ask");
 
@@ -172,7 +172,7 @@ fn a_match_in_an_older_turn_pages_back_to_it(cx: &mut TestAppContext) {
     cx.simulate_input("parser");
     cx.run_until_parked();
     assert!(searches(&sent).is_empty(), "not while typing");
-    cx.executor().advance_clock(crate::conversation::thread::view::FIND_ASK_AFTER);
+    cx.executor().advance_clock(crate::conversation::thread::find::ASK_AFTER);
     cx.run_until_parked();
     assert_eq!(searches(&sent), ["parser"], "asked once the words rest");
 

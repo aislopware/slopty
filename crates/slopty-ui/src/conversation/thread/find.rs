@@ -11,6 +11,18 @@ use slopty_proto::thread::{Item, ItemBody, ItemId, ThreadId, ThreadState, TurnId
 
 use super::rows::Row;
 
+/// How long the words rest before a worker is asked to search its threads for them.
+///
+/// A thread's find bar waits this long before it asks for its older turns, and the palette
+/// before it asks about every thread. A worker searches
+/// a hundred threads of forty turns in about 4 ms (`search_cost`, `docs/MEASUREMENTS.md`
+/// 2026-10-06), so the wait is not to spare the worker: it asks once a burst of keys rests,
+/// rather than once a key, and its answer still comes well inside a glance.
+pub const ASK_AFTER: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// The fewest characters a worker is asked to search for.
+pub const ASK_FROM: usize = 2;
+
 /// Where a match is: an item the client holds, or one in an older turn the worker found.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Found {

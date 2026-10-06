@@ -538,6 +538,13 @@ pub enum PaletteRun {
     Group(slopty_client::layout::GroupKey),
     /// Open again the tile closed as this closing (the workspace's count of them).
     Reopen(u64),
+    /// Open this thread at the turn where its words were found.
+    Thread {
+        /// The thread.
+        thread: slopty_proto::thread::ThreadId,
+        /// The turn the words were said in.
+        turn: slopty_proto::thread::TurnId,
+    },
 }
 
 impl PaletteRun {
@@ -550,7 +557,8 @@ impl PaletteRun {
             | Self::Item(_)
             | Self::Worker(_)
             | Self::Project(_)
-            | Self::Group(_) => "Go to",
+            | Self::Group(_)
+            | Self::Thread { .. } => "Go to",
             Self::OpenFile { .. }
             | Self::OpenFolder { .. }
             | Self::OpenShell { .. }
@@ -581,6 +589,7 @@ impl Clone for PaletteRun {
             Self::Project(project) => Self::Project(project.clone()),
             Self::Group(group) => Self::Group(group.clone()),
             Self::Reopen(closing) => Self::Reopen(*closing),
+            Self::Thread { thread, turn } => Self::Thread { thread: *thread, turn: *turn },
         }
     }
 }
@@ -607,6 +616,9 @@ impl std::fmt::Debug for PaletteRun {
             Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
             Self::Group(group) => f.debug_tuple("Group").field(group).finish(),
             Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
+            Self::Thread { thread, turn } => {
+                f.debug_struct("Thread").field("thread", thread).field("turn", turn).finish()
+            }
         }
     }
 }
@@ -628,6 +640,8 @@ pub enum Section {
     Commands,
     /// A path: typed into the field, or found by the worker.
     Files,
+    /// A thread where the field's words were said, found by its worker.
+    Threads,
 }
 
 impl Section {
@@ -640,6 +654,7 @@ impl Section {
             Self::Workers => "Machines",
             Self::Commands => "Commands",
             Self::Files => "Files",
+            Self::Threads => "Threads",
         }
     }
 
@@ -650,6 +665,7 @@ impl Section {
             Self::Workers => "workers",
             Self::Commands => "commands",
             Self::Files => "files",
+            Self::Threads => "threads",
         }
     }
 }
@@ -792,6 +808,22 @@ impl PaletteItem {
     pub fn item(title: &str, icon: impl Into<Mark>, item: slopty_core::ItemId) -> Self {
         let run = PaletteRun::Item(item);
         Self::line(title.to_owned(), String::new(), run, Some(icon.into()), Section::Tiles)
+    }
+
+    /// A thread where the field's words were said, by its title and its agent's mark, with the
+    /// words round the match after the title: going to it opens the thread at that turn.
+    #[must_use]
+    pub fn thread_hit(
+        title: &str,
+        agent: Option<&str>,
+        said: &str,
+        thread: slopty_proto::thread::ThreadId,
+        turn: slopty_proto::thread::TurnId,
+    ) -> Self {
+        let icon = agent.map_or_else(|| icons::AGENT.into(), Mark::agent);
+        let run = PaletteRun::Thread { thread, turn };
+        Self::line(title.to_owned(), String::new(), run, Some(icon), Section::Threads)
+            .placed(Some(said.to_owned()))
     }
 
     /// The same line, with what its tile's header places its title by.
@@ -1021,6 +1053,7 @@ pub(crate) fn in_sections<T: Listed>(items: Vec<T>, path_first: bool) -> Vec<T> 
         Section::Workers => 3,
         Section::Commands => 4,
         Section::Files => 5,
+        Section::Threads => 6,
     };
     let mut items = items;
     items.sort_by_key(|item| rank(item.item().section));
@@ -1053,6 +1086,7 @@ pub(crate) enum At {
     Path(usize),
     Item(usize),
     Found(usize),
+    Thread(usize),
 }
 
 /// One line of the list: a group's heading, or the match at that place in the matches.
@@ -1342,6 +1376,8 @@ pub struct CommandPalette {
     typed: Option<Rc<TypedLines>>,
     /// `Open <path>` for the files the worker found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
+    /// The threads the workers found the field's words in, listed last; dropped on a change.
+    threads: Vec<PaletteItem>,
     input: Entity<InputState>,
     /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
     scope: FocusHandle,
@@ -1452,6 +1488,7 @@ impl CommandPalette {
             path_items: Vec::new(),
             typed: None,
             found: Vec::new(),
+            threads: Vec::new(),
             input,
             scope: cx.focus_handle(),
             matched: Vec::new(),
@@ -1588,6 +1625,36 @@ impl CommandPalette {
         cx.notify();
     }
 
+    /// The threads the workers found the field's words in, for `query`: the Threads section,
+    /// last in the list, while the field still says `query`. The line the person is on stays
+    /// selected: a line above the section keeps its place, since the section comes last, and a
+    /// thread's line is found again by where it goes, wherever a later answer puts it.
+    pub fn set_threads(&mut self, query: &str, lines: Vec<PaletteItem>, cx: &mut Context<Self>) {
+        if self.input.read(cx).value().trim() != query {
+            return;
+        }
+        let on = self.selected(self.matched.len());
+        let goes = |at: &At, this: &Self| match at {
+            At::Thread(ix) => this.threads.get(*ix).and_then(|item| match item.run {
+                PaletteRun::Thread { thread, turn } => Some((thread, turn)),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let chosen = self.matched.get(on).and_then(|at| goes(at, self));
+        self.threads = lines;
+        self.refresh(cx);
+        self.selected = match chosen {
+            Some(chosen) => self
+                .matched
+                .iter()
+                .position(|at| goes(at, self) == Some(chosen))
+                .unwrap_or_else(|| self.matched.len().saturating_sub(self.threads.len())),
+            None => on,
+        };
+        cx.notify();
+    }
+
     /// The items matching the field, in the order they are shown, group by group: a path
     /// typed into it (`Open <path>`, or a shell and a conversation in a directory) first, then
     /// the tiles, the workers and the commands the text matches, then the files the worker
@@ -1606,6 +1673,7 @@ impl CommandPalette {
             At::Path(ix) => self.path_items.get(ix),
             At::Item(ix) => self.items.get(ix),
             At::Found(ix) => self.found.get(ix),
+            At::Thread(ix) => self.threads.get(ix),
         }
     }
 
@@ -1636,6 +1704,9 @@ impl CommandPalette {
         // history sit under a heading of their own, so the list says why they are there.
         let recent = recent_commands(cx);
         let found = self.found.iter().enumerate().map(|(ix, item)| (At::Found(ix), item));
+        // Last of all, so a thread found while the person moves through the list never moves
+        // the line they are on.
+        let threads = self.threads.iter().enumerate().map(|(ix, item)| (At::Thread(ix), item));
         let out = if empty {
             let kept = kept.into_iter().map(|(at, item, _)| (at, item));
             if self.brief {
@@ -1661,6 +1732,7 @@ impl CommandPalette {
             kept.sort_by_key(|(_, item, _)| sections.iter().position(|s| *s == item.section));
             out.extend(kept.into_iter().map(|(at, item, _)| (at, item)));
             out.extend(found);
+            out.extend(threads);
             out
         };
         let recent = if self.brief && empty { recent } else { Vec::new() };
@@ -1707,6 +1779,7 @@ impl CommandPalette {
         let text = self.input.read(cx).value().to_string();
         self.path_items = self.typed_lines(&text);
         self.found.clear();
+        self.threads.clear();
         self.refresh(cx);
         cx.emit(PaletteEvent::Changed(text));
         cx.notify();
@@ -2206,6 +2279,11 @@ impl CommandPalette {
     #[must_use]
     const fn work_done(&self) -> (usize, usize) {
         self.counts.get()
+    }
+
+    /// The line the person is on.
+    pub(crate) fn chosen(&self) -> Option<&PaletteItem> {
+        self.matched.get(self.selected(self.matched.len())).and_then(|at| self.at(*at))
     }
 }
 

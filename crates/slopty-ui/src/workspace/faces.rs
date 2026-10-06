@@ -30,8 +30,8 @@ use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
 use slopty_proto::thread::wire::{
-    Authors, IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits,
-    ThreadRequest, ThreadRow,
+    Authors, IntentDone, ItemHit, Outcome, RequestCard, SEARCH_THREADS, Start, TableFrame,
+    ThreadFrame, ThreadHit, ThreadHits, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{self, AgentId, IntentId, ThreadId, TurnId};
 use slopty_proto::{ClientMsg, RequestId};
@@ -39,8 +39,9 @@ use slopty_proto::{ClientMsg, RequestId};
 use super::actions::SwitchFace;
 use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
-use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, hub};
+use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, find, hub};
 use crate::icons::{Status, Symbol};
+use crate::palette::{CommandPalette, PaletteItem};
 use crate::review::ReviewView;
 
 /// What the workspace keeps about faces.
@@ -55,6 +56,38 @@ pub(super) struct Faces {
     pub drafts: HashMap<SessionId, String>,
     /// The thread views and the hubs they read.
     pub threads: ThreadFaces,
+    /// The live palette's ask of every worker for the threads its words were said in.
+    pub search: ThreadSearch,
+}
+
+/// The live palette's ask of every linked worker for the threads its field's words were said
+/// in, and what they answered. Answers come in any order, from each worker and for each ask,
+/// so each is kept only while its words are still the field's.
+#[derive(Default)]
+pub(super) struct ThreadSearch {
+    /// The words last asked for, trimmed; empty when the field says nothing worth an ask.
+    words: String,
+    /// The wait before the ask: dropped, and so never sent, when the words change first.
+    _asking: Option<gpui::Task<()>>,
+    /// Each worker's threads for `words`, in the order the workers answered.
+    heard: Vec<(WorkerKey, Vec<ThreadHit>)>,
+}
+
+/// The words of the palette's field worth asking the workers' threads for: two characters or
+/// more ([`find::ASK_FROM`]), and not a search of the commands alone (`>`).
+fn threads_query(text: &str) -> Option<&str> {
+    let words = text.trim();
+    (crate::palette::commands_only(words).is_none() && words.chars().count() >= find::ASK_FROM)
+        .then_some(words)
+}
+
+/// What `hit` shows of where its words were said: the words round the match, on one line, an
+/// ellipsis where they were cut.
+fn said(hit: &ItemHit) -> String {
+    let words = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let before = if hit.cut_before { "…" } else { "" };
+    let after = if hit.cut_after { "…" } else { "" };
+    format!("{before}{words}{after}")
 }
 
 /// A tile to become the tile of the live terminal its agent runs in.
@@ -366,7 +399,9 @@ impl WorkspaceView {
         prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(starting) = self.starting.get(item) else { return };
+        let Some(starting) = self.starting.get(item) else {
+            return;
+        };
         let key = starting.worker;
         let id = IntentId::new();
         let start = Start {
@@ -462,7 +497,9 @@ impl WorkspaceView {
 
     /// Where each of `worker`'s threads works, as its table last said.
     pub(super) fn places_on(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadPlace> {
-        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
+        let Some(hub) = self.faces.threads.hubs.get(&worker) else {
+            return Vec::new();
+        };
         let places = &self.faces.threads.places;
         hub.read(cx).threads().rows().rows.keys().filter_map(|t| places.get(t).cloned()).collect()
     }
@@ -585,10 +622,86 @@ impl WorkspaceView {
         hub
     }
 
-    /// What `key` found in its threads for the words its hub last asked.
+    /// What `key` found in its threads for the words its hub last asked, or the palette did.
     pub fn thread_hits(&mut self, key: WorkerKey, hits: ThreadHits, cx: &mut Context<Self>) {
+        self.palette_threads_heard(key, &hits, cx);
         let hub = self.thread_hub(key, cx);
         hub.update(cx, |hub, cx| hub.thread_hits(hits, cx));
+    }
+
+    /// The live palette's field says `text`. Once it rests [`find::ASK_AFTER`], every worker
+    /// linked then is asked which of its threads said it; a worker with no link is not asked,
+    /// and nothing waits for it. New words drop the last ask's wait and its answers, and an
+    /// answer for any other words is never shown ([`Self::palette_threads_heard`]).
+    pub(super) fn ask_threads(&mut self, text: &str, cx: &Context<Self>) {
+        let words = threads_query(text).unwrap_or_default();
+        if words == self.faces.search.words {
+            return;
+        }
+        if words.is_empty() {
+            self.faces.search = ThreadSearch::default();
+            return;
+        }
+        let asked = words.to_owned();
+        let words = words.to_owned();
+        let asking = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(find::ASK_AFTER).await;
+            let _gone = this.update(cx, |this, _cx| {
+                let linked: Vec<WorkerKey> = this
+                    .workers
+                    .iter()
+                    .filter(|(_, w)| w.link.is_some())
+                    .map(|(k, _)| *k)
+                    .collect();
+                for key in linked {
+                    let ask = ThreadRequest::Search { query: words.clone(), limit: SEARCH_THREADS };
+                    this.send(key, ClientMsg::Thread(ask));
+                }
+            });
+        });
+        self.faces.search = ThreadSearch { words: asked, _asking: Some(asking), heard: Vec::new() };
+    }
+
+    /// `key` answered the palette's ask: kept, and the Threads section drawn again, while its
+    /// words are still the ones asked for.
+    fn palette_threads_heard(&mut self, key: WorkerKey, hits: &ThreadHits, cx: &mut Context<Self>) {
+        let search = &mut self.faces.search;
+        if search.words.is_empty() || hits.query != search.words {
+            return;
+        }
+        search.heard.retain(|(k, _)| *k != key);
+        search.heard.push((key, hits.threads.clone()));
+        let Some(palette) = self.palette.clone().filter(|p| p.read(cx).is_live()) else {
+            return;
+        };
+        let lines = self.palette_thread_lines();
+        let words = self.faces.search.words.clone();
+        palette.update(cx, |p: &mut CommandPalette, cx| p.set_threads(&words, lines, cx));
+    }
+
+    /// The Threads section: each worker's threads in its own order, best first, taken in turn
+    /// so no worker's best waits behind another's worst; a thread's line names its worker when
+    /// there are two to tell apart.
+    fn palette_thread_lines(&self) -> Vec<PaletteItem> {
+        let heard = &self.faces.search.heard;
+        let named = self.workers.values().filter(|w| w.link.is_some()).count() > 1;
+        let longest = heard.iter().map(|(_, threads)| threads.len()).max().unwrap_or_default();
+        (0..longest)
+            .flat_map(|rank| {
+                heard.iter().filter_map(move |(key, threads)| Some((*key, threads.get(rank)?)))
+            })
+            .filter_map(|(key, hit)| {
+                let first = hit.hits.first()?;
+                let title = self.thread_title(hit.thread);
+                let agent = self.thread_agent(hit.thread);
+                let mut line =
+                    PaletteItem::thread_hit(&title, agent, &said(first), hit.thread, first.turn);
+                if named {
+                    line.worker = self.workers.get(&key).map(|w| w.name.clone());
+                }
+                Some(line)
+            })
+            .collect()
     }
 
     /// `key` said who wrote the lines of a file a tile shows.
@@ -937,7 +1050,9 @@ impl WorkspaceView {
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
     /// its parent's business, not a tile's, and an aside its asker's.
     pub(super) fn threads_of_sessions(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let Some(hub) = self.faces.threads.hubs.get(&key) else { return };
+        let Some(hub) = self.faces.threads.hubs.get(&key) else {
+            return;
+        };
         let rows: Vec<&ThreadRow> =
             hub.read(cx).threads().rows().rows.values().filter(|r| !hub::is_aside(r)).collect();
         let found: Vec<(SessionId, ThreadId)> = rows
@@ -1016,7 +1131,9 @@ impl WorkspaceView {
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
         for thread in came_to_need.into_iter().filter(|_| linked) {
             cx.emit(WorkspaceEvent::Attention(thread));
-            let Some(stand) = self.faces.threads.stands.get(&thread) else { continue };
+            let Some(stand) = self.faces.threads.stands.get(&thread) else {
+                continue;
+            };
             let word = super::agents::agent_status_word(stand).to_lowercase();
             if let Some(tile) = self.tile_of_thread(thread) {
                 self.attention_toast(tile, Status::NeedsYou, &word, cx);
@@ -1056,7 +1173,9 @@ impl WorkspaceView {
             if current == Some(thread) {
                 continue;
             }
-            let Some(key) = self.worker_of_session(*session) else { continue };
+            let Some(key) = self.worker_of_session(*session) else {
+                continue;
+            };
             let handed = self.faces.threads.handed.remove(session);
             let view = if let Some(view) = handed.filter(|v| v.read(cx).thread() == thread) {
                 view
@@ -1356,7 +1475,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // Bound only while an agent runs in the focused terminal ([`Applies::agent`]).
-        let Some(session) = self.focused_session() else { return };
+        let Some(session) = self.focused_session() else {
+            return;
+        };
         let faces = self.faces_of(session);
         if faces.len() < 2 {
             self.show_notice(NO_THREAD_YET.to_owned(), cx);

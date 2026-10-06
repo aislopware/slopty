@@ -1772,3 +1772,31 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `workspace::tests::strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one`; in
     `slopty-e2e`'s `smooth`, the overview scenarios (g), (i) and (m) now hold that a resting
     overview draws no frame for the output it covers. Goldens: `overview`, `overview-dark`.
+
+- ✅ **The palette finds words said in any thread, on every machine** (2026-10-06, journeys
+  audit J2, `.research/journeys-2026-10-06.md`). A thread's find bar could already ask its
+  worker about turns it no longer held (`ThreadRequest::Search`), but nothing asked about every
+  thread at once. The person had to remember which agent, on which machine, had talked about
+  something. Now the palette's field asks it of every machine: a **Threads** section at the
+  end of the list shows a line per thread where the words were said, with its title, its
+  agent's mark and the words round the match. Choosing a line opens the thread at that turn
+  (`PaletteRun::Thread`, `open_thread_at`).
+  - **Asked once the field rests.** The workspace's own palette (`is_live`) waits
+    `find::ASK_AFTER` (120 ms) after the last key, then asks each worker linked at that
+    moment. It asks only for two characters or more (`find::ASK_FROM`) and never for a search
+    of the commands alone (`>`). The find bar shares both constants. A worker searches 20 000
+    items in under 5 ms (`docs/MEASUREMENTS.md`, "what a search of a worker's threads costs"),
+    so the wait is not there to spare it. It turns a burst of keys into one ask.
+  - **Out-of-order answers are dropped by their words.** Every answer carries the words it
+    was asked for (`ThreadHits::query`), and it is kept only while those are still the
+    field's. New words drop the last answers and the ask still waiting, so a slow machine's
+    answer to an older keystroke never lands under newer words.
+  - **An offline machine is not asked.** Nothing waits for it and no line or error stands in
+    for it. Its threads come back the next time the field changes after its link returns.
+  - **The list never moves under the person.** The section comes last, so answers arriving
+    never shift a line above it. On a thread's line, the choice follows that thread wherever
+    a later answer puts it. Each machine's threads keep its own order, best first, and the
+    machines take turns, so no machine's best match waits behind another's worst. With two
+    machines linked, each line names its machine.
+  - Tests: `workspace::tests::palette_threads::the_palette_asks_every_linked_workers_threads_once_the_field_rests`
+    and `workspace::tests::palette_threads::the_palette_asks_no_threads_for_commands_or_a_single_character`.

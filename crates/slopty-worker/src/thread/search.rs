@@ -271,4 +271,63 @@ mod tests {
         let hits = search(&host, "needle", 0);
         assert_eq!(hits.threads.len(), 1, "a limit of none is one");
     }
+
+    /// What a search costs the worker over a day's threads: 100 threads of 40 turns, each a
+    /// message, an answer of about 300 bytes and three calls, searched for a frequent word, a
+    /// two-word phrase and a word found nowhere. The palette's Threads section asks once the
+    /// field rests (`find::ASK_AFTER` in slopty-ui); this is what each ask costs.
+    #[test]
+    #[ignore = "measurement: cargo test -p slopty-worker --lib search_cost -- --ignored --nocapture"]
+    fn search_cost() {
+        let words = ["parser", "error", "span", "cursor", "reset", "token", "lexer", "build"];
+        let threads = (0..100_u32)
+            .map(|t| {
+                let actions = (0..40_u32)
+                    .flat_map(|turn| {
+                        let at = u64::from(t * 1_000 + turn * 10);
+                        let w = |k: u32| words[usize::try_from((t + turn + k) % 8).unwrap()];
+                        let answer = (0..6)
+                            .map(|k| {
+                                format!(
+                                    "The {} keeps its {} and the {} moves on.",
+                                    w(k),
+                                    w(k + 1),
+                                    w(k + 2)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let id = |kind: &str| format!("{kind}{t}.{turn}");
+                        vec![
+                            item(
+                                &id("u"),
+                                turn,
+                                at,
+                                person(&format!("Fix the {} in the {}", w(0), w(3))),
+                            ),
+                            item(&id("c1"), turn, at + 1, tool(&format!("cargo test {}", w(1)))),
+                            item(&id("c2"), turn, at + 2, tool("cargo clippy")),
+                            item(&id("c3"), turn, at + 3, tool(&format!("rg {}", w(2)))),
+                            item(&id("a"), turn, at + 4, ItemBody::Text(Clipped::whole(&answer))),
+                        ]
+                    })
+                    .collect();
+                (meta(&format!("thread {t}")), actions)
+            })
+            .collect();
+        let (_dir, host, _ids) = host(threads);
+        for query in ["pa", "parser error", "zebra"] {
+            let mut took: Vec<std::time::Duration> = std::iter::repeat_with(|| {
+                let started = std::time::Instant::now();
+                let hits = search(&host, query, SEARCH_THREADS);
+                let took = started.elapsed();
+                std::hint::black_box(hits);
+                took
+            })
+            .take(100)
+            .collect();
+            took.sort();
+            println!("{query:>14}: p50 {:?}, p95 {:?}, max {:?}", took[49], took[94], took[99]);
+        }
+    }
 }
