@@ -169,11 +169,7 @@ fn a_files_tab_says_edited(cx: &mut TestAppContext) {
     let tab = bounds(cx, selector("tab", tile.item));
     let edited = bounds(cx, selector("unsaved", tile.item));
     assert!(tab.left() < edited.left() && edited.right() <= tab.right(), "{tab:?} {edited:?}");
-    assert!(
-        tree(cx)
-            .iter()
-            .any(|n| n.role == "Label" && n.label.as_deref() == Some(super::tile::EDITED))
-    );
+    assert!(tree(cx).iter().any(|n| n.role == "Label" && n.label.as_deref() == Some(tile::EDITED)));
 }
 
 /// A Markdown file's header carries the toggle between its preview and its source, which the

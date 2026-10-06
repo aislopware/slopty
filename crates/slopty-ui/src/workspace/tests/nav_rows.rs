@@ -21,6 +21,15 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
+/// The project whose header is `row` folded or unfolded by its chevron, which shows under the
+/// pointer: a click on the row itself goes to the project.
+fn fold(cx: &mut VisualTestContext, row: &'static str) {
+    let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row} is not drawn"));
+    cx.simulate_mouse_move(at.center(), None, Modifiers::default());
+    cx.run_until_parked();
+    click(cx, leak(row.replacen("nav-group-", "nav-group-fold-", 1)));
+}
+
 fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
     cx.debug_bounds(selector).is_some()
 }
@@ -163,7 +172,7 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     let away = opens_in(&view, cx, &laptop, SessionId::new(), laptop.me, 1, Some("/w/notes"));
     let row = |t: TileRef| selector("nav-tile", t.item);
     let project = GroupKey::new(fact::FOLDER, &groups::at(studio.key, "/w/oss/slopty"));
-    click(cx, leak(format!("nav-group-{project}")));
+    fold(cx, leak(format!("nav-group-{project}")));
     assert!(!shown(cx, row(slopty)), "folded");
 
     filter(cx, "SLOPTY");
@@ -347,7 +356,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     // way at the line's end and is never pressed to a lone ellipsis between its neighbours.
     assert!(shown(cx, "nav-needs-you"), "the section lists it in view");
     let project = GroupKey::new(fact::REPO, &groups::at(key, "/Users/me/oss/slopty"));
-    click(cx, leak(format!("nav-group-{project}")));
+    fold(cx, leak(format!("nav-group-{project}")));
     assert!(shown(cx, "nav-needs-you"), "and folded away");
     assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "the words and the place");
     for part in ["separator", "place"] {
@@ -893,7 +902,7 @@ fn a_project_header_says_the_machines_it_spans(cx: &mut TestAppContext) {
     let home_row = cx.debug_bounds(selector("nav-tile", home.item)).expect("the home shell");
     assert!(worker.bottom() <= home_row.top(), "under its worker");
 
-    click(cx, repo_key(origin));
+    fold(cx, repo_key(origin));
     let order = view.read_with(cx, |v, _| v.navigator_tiles());
     for tile in [here, there, unknown] {
         assert!(!order.contains(&tile), "folded with its project");

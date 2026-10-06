@@ -253,6 +253,18 @@ impl WorkspaceView {
     /// another project's tabs (a shell opened beside other work) goes to its first tile in
     /// reading order there. A group with no tile in the tiling says so.
     pub(super) fn go_to_group(&mut self, group: &GroupKey, cx: &mut Context<Self>) {
+        if !self.reach_group(group, cx) {
+            self.say_no_tile(group, cx);
+        }
+    }
+
+    /// `group` has no tile in the tiling: say so.
+    pub(super) fn say_no_tile(&mut self, group: &GroupKey, cx: &mut Context<Self>) {
+        self.show_notice(format!("{} has no tile here", group.value()), cx);
+    }
+
+    /// [`Self::go_to_group`] but for the notice: whether `group` had a tile to go to.
+    pub(super) fn reach_group(&mut self, group: &GroupKey, cx: &mut Context<Self>) -> bool {
         let project = self.layout.project_of(group).and_then(|ix| self.layout.projects().get(ix));
         if project.is_some_and(|p| !p.tabs().is_empty()) {
             let group = group.clone();
@@ -260,20 +272,17 @@ impl WorkspaceView {
             if let Some(tile) = self.focused() {
                 self.navigated_to(tile);
             }
-            return;
+            return true;
         }
         let grouping = self.project_groups();
         let first = self
             .reading_order()
             .into_iter()
             .find(|t| grouping.group_of(*t).is_some_and(|g| &g.key == group));
-        match first {
-            Some(tile) => {
-                self.navigated_to(tile);
-                self.focus_tile(tile, cx);
-            }
-            None => self.show_notice(format!("{} has no tile here", group.value()), cx),
-        }
+        let Some(tile) = first else { return false };
+        self.navigated_to(tile);
+        self.focus_tile(tile, cx);
+        true
     }
 
     /// The focus came to `tile`: a visit to its project when that is not the one gone to last.

@@ -1992,3 +1992,18 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     a_title_tab_dropped_on_a_project_row_moves_there_whole}`, and
     `slopty_client::layout::tiling::tests::{a_tile_dropped_on_the_strip_is_a_tab_where_it_fell,
     a_title_tab_moves_along_the_strip, a_title_tab_moves_whole_to_another_project}`.
+- ✅ **A project's row goes to the project** (2026-10-07, step 6 of the study's §4.2). The
+  navigator's project header was a fold toggle. Now a click on it shows the project on the tab
+  it was left on, as the rail's project button and the breadcrumb's project menu already did.
+  The chevron, which shows under the pointer and stands at rest on touch, is now a button of
+  its own that folds; the row's context menu folds too.
+  - A project with no tile here, whose agents' threads run elsewhere, opens an agent's
+    composer in a tab of its own in that project, in its place on the machine. A row then
+    never ends in "has no tile here" while the project has a place to start in. One with no
+    place on a linked machine still says so.
+  - A tile's row goes to its project, its tab and its pane. Carried to a pane's edge, it splits
+    that pane (step 5).
+  - Tests: `workspace::tests::nav_projects::{a_project_row_shows_its_project_on_the_tab_it_was_left_on,
+    a_tile_row_goes_to_its_tab_and_pane, a_tile_row_dragged_to_a_panes_edge_splits_it,
+    a_project_row_with_no_tile_here_opens_a_composer_there}`. The fold tests in `nav_rows.rs`
+    fold by the chevron.

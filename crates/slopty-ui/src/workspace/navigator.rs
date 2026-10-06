@@ -3165,8 +3165,10 @@ impl WorkspaceView {
     /// A project's header: its glyph and its name in the medium weight, where it is when
     /// another listed has its name, then on the right edge the machines it spans, led by what
     /// its tiles add up to while it is folded. Under the pointer the chevron and "+" (a new shell
-    /// in its clone) take the readouts' place; nothing moves when either shows. A click folds it.
-    /// On touch the chevron stands at rest and "+" is the long press's.
+    /// in its clone) take the readouts' place; nothing moves when either shows. A click shows
+    /// the project on the tab it was left on, or, with no tile of it here, an agent's composer
+    /// in a tab of its own in its clone; the chevron folds it. On touch the chevron stands at
+    /// rest and "+" is the long press's.
     fn group_header(&self, group: &NavGroup, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -3250,6 +3252,25 @@ impl WorkspaceView {
                 }));
             tab_stop(el, s.focus)
         });
+        let (fold_key, fold_id) = (key.clone(), key.clone());
+        let fold = lead_slot(theme, disclosure(theme, chevron, s.text_muted))
+            .id(SharedString::from(format!("nav-group-fold-{key}")))
+            .debug_selector(move || format!("nav-group-fold-{fold_id}"))
+            .role(Role::Button)
+            .aria_label(if folded { "Unfold" } else { "Fold" })
+            .aria_expanded(!folded)
+            .rounded(px(theme.radii.xs))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.hover)))
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                if !this.nav.folded.remove(&fold_key) {
+                    this.nav.folded.insert(fold_key.clone());
+                }
+                cx.notify();
+            }));
+        let fold = tab_stop(fold, s.focus);
         // A finger has no hover: on touch the chevron stands at rest, after the place.
         let hover = div()
             .when(!touch, |el| {
@@ -3264,7 +3285,7 @@ impl WorkspaceView {
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xxs))
-            .child(lead_slot(theme, disclosure(theme, chevron, s.text_muted)))
+            .child(fold)
             .children(add);
         let trailing = div()
             .relative()
@@ -3276,7 +3297,7 @@ impl WorkspaceView {
             .justify_end()
             .child(rest)
             .child(hover);
-        let fold = key.clone();
+        let (home, start) = (key.clone(), group.new_shell.clone());
         let (spots, spot_key) = (Rc::clone(&self.drop_spots), key.clone());
         let spot = super::area::spot(move |b| spots.put_project(&spot_key, b));
         // Something carried over the row would go to this project.
@@ -3296,11 +3317,18 @@ impl WorkspaceView {
             .child(lead)
             .child(name)
             .child(trailing)
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                if !this.nav.folded.remove(&fold) {
-                    this.nav.folded.insert(fold.clone());
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.navigated();
+                if this.reach_group(&home, cx) {
+                    return;
                 }
-                cx.notify();
+                let Some((worker, cwd)) = start.clone() else {
+                    this.say_no_tile(&home, cx);
+                    return;
+                };
+                let home = home.clone();
+                this.layout_action(cx, |l| l.show_project(&home));
+                this.start_in(worker, cwd, window, cx);
             }))
             .into_any_element()
     }

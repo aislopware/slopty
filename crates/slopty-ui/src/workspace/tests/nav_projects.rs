@@ -1,6 +1,7 @@
 //! Declared projects in the navigator: each heads its group with its board's row, and is
 //! listed with that row alone where none of its tiles is here. A thread at work with no tile
-//! here lists under its project.
+//! here lists under its project. A project's row shows the project on the tab it was left on,
+//! a tile's row goes to its tab and pane, and a row carried to a pane's edge splits it.
 
 use gpui::Modifiers;
 use slopty_client::groups::{self, GroupKey, fact};
@@ -188,4 +189,128 @@ fn on_a_phone_the_drawer_lists_the_projects_then_the_workers(cx: &mut TestAppCon
         top(cx, leak(format!("nav-worker-{}", studio.key))),
     ];
     assert!(order.is_sorted(), "projects, then workers: {order:?}");
+}
+
+/// The key of the group `tile` lists under, as its header's selector.
+fn head_of(view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef) -> &'static str {
+    let key = view.read_with(cx, |v, _| v.project_groups().group_of(tile).map(|g| g.key.clone()));
+    leak(format!("nav-group-{}", key.expect("its group")))
+}
+
+fn shown_project(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<usize> {
+    view.read_with(cx, |v, _| v.layout().shown_index())
+}
+
+/// A project's row shows that project on the tab it was left on, and its chevron folds it
+/// without going there.
+#[gpui::test]
+fn a_project_row_shows_its_project_on_the_tab_it_was_left_on(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (_, first) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    let (_, second) = shell_in(&view, cx, &studio, 2, "/w/atlas", true);
+    on_new_tab(&view, cx, second);
+    let left_on = pos_of(&view, cx, second).tab;
+    assert_ne!(pos_of(&view, cx, first).tab, left_on, "two tabs");
+    let (_, bolt) = shell_in(&view, cx, &studio, 3, "/w/bolt", false);
+    let (atlas_row, bolt_row) = (head_of(&view, cx, first), head_of(&view, cx, bolt));
+
+    click(cx, bolt_row);
+    assert_eq!(shown_project(&view, cx), Some(pos_of(&view, cx, bolt).project), "bolt's");
+    assert_eq!(focused(&view, cx), Some(bolt));
+    click(cx, atlas_row);
+    assert_eq!(shown_project(&view, cx), Some(pos_of(&view, cx, first).project), "atlas's");
+    let tab = view.read_with(cx, |v, _| v.layout().shown_tab().map(slopty_client::layout::Tab::id));
+    assert_eq!(tab, Some(left_on), "on the tab it was left on");
+    assert_eq!(focused(&view, cx), Some(second));
+
+    let at = cx.debug_bounds(bolt_row).expect("bolt's row").center();
+    cx.simulate_mouse_move(at, None, Modifiers::default());
+    cx.run_until_parked();
+    click(cx, leak(bolt_row.replacen("nav-group-", "nav-group-fold-", 1)));
+    assert!(cx.debug_bounds(selector("nav-tile", bolt.item)).is_none(), "folded");
+    assert_eq!(shown_project(&view, cx), Some(pos_of(&view, cx, first).project), "still atlas");
+}
+
+/// A tile's row goes to its project, its tab and its pane, from another project on show.
+#[gpui::test]
+fn a_tile_row_goes_to_its_tab_and_pane(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (_, first) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    let (_, second) = shell_in(&view, cx, &studio, 2, "/w/atlas", true);
+    on_new_tab(&view, cx, second);
+    let (_, bolt) = shell_in(&view, cx, &studio, 3, "/w/bolt", false);
+    click(cx, head_of(&view, cx, bolt));
+    assert_eq!(focused(&view, cx), Some(bolt), "bolt on show");
+
+    click(cx, selector("nav-tile", first.item));
+    let at = pos_of(&view, cx, first);
+    assert_eq!(shown_project(&view, cx), Some(at.project), "its project");
+    let tab = view.read_with(cx, |v, _| v.layout().shown_tab().map(slopty_client::layout::Tab::id));
+    assert_eq!(tab, Some(at.tab), "its tab, not the one atlas was left on");
+    assert_eq!(focused(&view, cx), Some(first), "its pane, focused");
+}
+
+/// A tile's row carried to a pane's edge splits that pane there, its tile in a pane of its own
+/// in the tab on show, focused.
+#[gpui::test]
+fn a_tile_row_dragged_to_a_panes_edge_splits_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let (_, atlas) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    let (_, bolt) = shell_in(&view, cx, &studio, 2, "/w/bolt", false);
+    view.update(cx, |v, cx| v.focus_tile(atlas, cx));
+    cx.run_until_parked();
+    let pane = cx.debug_bounds(selector("item", atlas.item)).expect("atlas drawn");
+    let from = cx.debug_bounds(selector("nav-tile", bolt.item)).expect("bolt's row").center();
+    let to = point(pane.right() - px(6.0), pane.center().y);
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, left, Modifiers::default());
+    cx.simulate_mouse_move(point(from.x + px(12.0), from.y), Some(left), Modifiers::default());
+    cx.simulate_mouse_move(to, Some(left), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("drop-wash").is_some(), "the panel it would become is washed");
+    cx.simulate_mouse_up(to, left, Modifiers::default());
+    cx.run_until_parked();
+
+    let (a, b) = (pos_of(&view, cx, atlas), pos_of(&view, cx, bolt));
+    assert_eq!((a.project, a.tab), (b.project, b.tab), "in atlas's tab");
+    assert_ne!(a.pane, b.pane, "a pane of its own");
+    let (left_pane, right_pane) = (
+        cx.debug_bounds(selector("item", atlas.item)).expect("atlas"),
+        cx.debug_bounds(selector("item", bolt.item)).expect("bolt"),
+    );
+    assert!(left_pane.right() <= right_pane.left(), "split on the right edge");
+    assert_eq!(focused(&view, cx), Some(bolt), "focused");
+}
+
+/// A project's row with no tile of it here (its threads at work elsewhere) opens an agent's
+/// composer in a tab of its own in that project, in its place on the machine.
+#[gpui::test]
+fn a_project_row_with_no_tile_here_opens_a_composer_there(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let (_, atlas) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, healthy(), cx);
+        v.threads_linked(key, cx);
+    });
+    let elsewhere = thread_at("/w/docs", None);
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![elsewhere] };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+    cx.run_until_parked();
+    let docs = GroupKey::new(fact::FOLDER, &groups::at(key, "/w/docs"));
+
+    click(cx, leak(format!("nav-group-{docs}")));
+    let start = focused(&view, cx).expect("the composer has the focus");
+    assert_ne!(start, atlas);
+    let cwd = view.read_with(cx, |v, _| v.starting.get(start.item).map(|s| s.cwd.clone()));
+    assert_eq!(cwd.as_deref(), Some("/w/docs"), "in its place");
+    let project = view.read_with(cx, |v, _| {
+        let at = v.layout().position(start)?;
+        v.layout().projects().get(at.project).map(|p| p.home().clone())
+    });
+    assert_eq!(project, Some(docs), "in a tab of that project");
 }
