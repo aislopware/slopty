@@ -113,5 +113,8 @@ in it until checked here.
   output, not anybody's screen, and a numeric diff cannot see a defect the golden itself encodes.
   Everything above still holds: no other window, no image from outside those two directories, and
   a golden still passes or fails on its numbers.
+- A second, granted 2026-10-06: design mockups an image model generates for reference (Codex's
+  image generation) may be opened for design review, kept under `.research/mockups-*/`. They are
+  generated pictures of a design, not anybody's screen; nothing else above changes.
 - Daemons started for a measurement are killed when it ends. Worktrees and ports are shared
   with other sessions.
