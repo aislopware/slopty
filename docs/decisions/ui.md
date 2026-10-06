@@ -5988,6 +5988,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (2026-10-04, a design review of the `thread-work` renders).
   - **Sections.** The tray over the composer stacks refusals, answers, the plan, the edits,
     the queue, the commands run in the background, the agent's background tasks and the meter.
+    (Superseded 2026-10-07 by "One reading measure, MonoCode's": a base unit of space parts
+    them, no hairline.)
     Each is now parted from the next by a `border_subtle` hairline. Before, they were parted
     only by space, and a background command read as a step of the plan above it. This amends
     the earlier "no rule between the two" ruling for the composer's pending work. The
@@ -8767,3 +8769,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `icons::tests::{an_icon_fills_its_slot_on_the_ladder, a_file_leads_with_its_types_icon,
     a_file_icon_is_drawn_at_its_size_in_colour}`, `icons::git::tests::each_git_glyph_is_tablers`,
     `file_types::tests::a_file_is_known_by_its_name_then_its_extension`.
+
+- ✅ **A turn's work is one line, open while it runs** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` items 5 and 6, M14 and M15). A settled turn's
+  work already folded to one line over its answer, but the turn under way drew every call
+  loose, so a long turn was a wall of calls, and the line it would fold into only appeared
+  once it ended. MonoCode's transcript keeps one activity line per turn: open while the turn
+  works or waits on the person, folded once it is done.
+  - **The turn under way has its line too** (`rows::turn_rows`). Its work shows under the line,
+    open, as it comes, and two or more quiet calls in a row there are still one line of their
+    own. The line says what the work did so far ("Working: Read 3 files · Ran a command",
+    `Fold::running`), with no time; the working row at the foot keeps the clock. A steer splits
+    it as it splits a settled turn's. A click folds it (`ThreadView::shut`), and once the turn
+    settles it folds unless the reader opened it then. Find opens either kind
+    (`ThreadView::open_turn`).
+  - **A call is one line: its kind, its verb and file, how it stands at its end**
+    (`view/tools.rs`). The lead is the kind's mark, or the file's type for a call on one file,
+    and no longer turns red: the spinner while it runs and the amber mark while it waits stay.
+    A call on one file says its verb in the tense of how it stands ("Read", "Edited",
+    "Editing", "Edit" while it asks), then the file named first. The name opens the file in a
+    tile of its own on the thread's machine (`ThreadViewEvent::OpenFile`, a path under the
+    agent's folder made absolute); the rest of the line opens the call's diff or output in
+    place, as before. A failure is marked at the line's end, an ✕ before "Failed" in the error
+    tone; "Not allowed", "Stopped" and "Waiting for you" stay words. The line reads aloud as it
+    reads ("Read src/lib.rs", "Count lines, Failed").
+  - Kept: a command is still its own words (7052), the body's well still has no border, and
+    Allow and Deny still sit under a waiting call. Nothing here animates as it arrives, so a
+    turn read from history draws as a live one does.
+  - Tests: `rows::tests::{the_live_turns_work_is_open_under_its_line_and_it_says_it_works,
+    quiet_calls_in_a_row_are_one_line_in_the_live_turn,
+    a_turn_left_open_folds_once_the_next_begins}`,
+    `thread::tests::steps::{a_turns_work_is_open_under_its_line_while_it_runs_and_folds_when_done,
+    a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end}`.
+
+- ✅ **The composer's ledge says where the work is** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` item 7, M10). The place, a new worktree's base and
+  the meter stood in the composer's foot among the model and the mode. The place was the first
+  thing to leave for want of room, and the meter wandered to wherever the foot's end fell.
+  MonoCode's composer keeps a ledge over its field for where the work is, with the context meter
+  at its right, and a foot for how the agent works.
+  - **The ledge** (`ThreadView::ledge`, `thread-ledge`) is a row at the top of the composer
+    card. On its left are the place chip and, beside it, the branch: a new worktree's base as a
+    switch ("from main"), or the branch checked out, as words, while the draft starts in the
+    folder itself. The meter sits at its right. Nothing on it leaves for want of room: the place
+    gives up its width first and the meter keeps its own.
+  - **Only while it says where.** A thread with rows has no ledge: its tile's header already
+    says where it is, and a row over the field for the meter alone took the thread's height for
+    one figure (in the e2e window it pushed the prompt's picture out of view). Its meter stays
+    at the foot's end, as before (`ThreadView::on_ledge`).
+  - **The foot** keeps the "+", the model, the effort, the mode, the background work, the pull
+    request, the changes, the screen, the handoff and the send. It still leaves the least
+    needed first into the "+" menu, which no longer lists a place or a base.
+  - Deleted: `FOOT_PLACE`, `FOOT_BASE` and their "+" menu rows with `PLACE` and `BASE_BRANCH`.
+  - Tests: `thread::tests::face::a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus` (a
+    thread with rows has no ledge) and
+    `workspace::tests::thread_start::the_place_chip_starts_a_worktree_from_a_branch_picked`
+    (the place on the ledge, the branch checked out as words).
+
+- ✅ **One reading measure, MonoCode's** (2026-10-07, `.research/ui-audit-monocode-2026-10-06.md`
+  item 8, M12). The transcript, the tray and the composer already shared one centred column,
+  and the tray's code already parted its groups by a base unit of space rather than the
+  hairlines "The tray's sections each stand apart" ruled, as MonoCode's stack does; that
+  entry's hairlines are superseded here. What was left was the measure: 736 pt of text against
+  MonoCode's 896 pt column (`max-w-4xl`) with 16 pt pads on its rows.
+  - `thread::view::COLUMN` is 864 pt, MonoCode's column less its pads. The gutters by room are
+    unchanged (48, 24, 16), so a wide tile's column is 960 pt and a narrow one gives way as
+    before. A Markdown file's preview keeps to the same measure (`file::reading`), so a file
+    still reads as an answer does.
+  - The queue, a question and a limit stand over the composer in the tray, on the same column.
+    A question taking the composer's place is item 18.
+  - Tests: `conversation::thread::tests::steps::the_column_s_gutter_follows_the_tile_s_room`
+    and `file::tests::reading::the_preview_keeps_to_the_reading_measure`, both read
+    `COLUMN`.

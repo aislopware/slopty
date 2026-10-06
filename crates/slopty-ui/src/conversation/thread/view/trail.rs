@@ -23,6 +23,7 @@ use crate::kit;
 pub(super) struct Above {
     thread: ThreadId,
     open: HashSet<TurnId>,
+    shut: HashSet<TurnId>,
     items_open: HashSet<ItemId>,
     whole: HashSet<ItemId>,
     scroll: ListOffset,
@@ -64,6 +65,7 @@ impl ThreadView {
         self.trail.push(Above {
             thread: self.thread,
             open: std::mem::take(&mut self.open),
+            shut: std::mem::take(&mut self.shut),
             items_open: std::mem::take(&mut self.items_open),
             whole: std::mem::take(&mut self.whole),
             scroll: self.list.logical_scroll_top(),
@@ -85,6 +87,7 @@ impl ThreadView {
         self.hub.update(cx, |hub, cx| hub.close(left, cx));
         self.thread = above.thread;
         self.open = above.open;
+        self.shut = above.shut;
         self.items_open = above.items_open;
         self.whole = above.whole;
         self.asked_at = 0;

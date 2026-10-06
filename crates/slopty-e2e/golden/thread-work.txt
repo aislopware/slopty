@@ -29,11 +29,13 @@ Article │ You: The header clips its chips on a narrow window, as here.
 Button │ Picture, 600 × 200
 Button │ Branch from here
 Button │ Copy message
+Button │ Working: Ran a command · Read a file · 1 more
 Button │ Thought for 3 s
 Article │ Plan: Let the header's chips give way
 Button │ Copy plan
 Button │ Update the task list
 Button │ Read /work/shots/header.png
+Link │ Open /work/shots/header.png
 Button │ Build the release binary
 Article │ The chips now give way from the right, the model first. The release build runs in the background; I will check a phone-width window once it is done.
 Button │ Copy message

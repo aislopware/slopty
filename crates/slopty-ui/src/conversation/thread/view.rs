@@ -1,8 +1,9 @@
 //! The thread view: one agent's thread drawn from this client's mirror of it, for any agent.
 //!
-//! A header names the thread and says where it is; under it runs one reading column, 736 pt at
-//! most, prose at 15/1.6, each settled turn folded to one line over its answer and the live
-//! turn whole; under the column sit the activity bar and the composer.
+//! A header names the thread and says where it is; under it runs one reading column,
+//! [`COLUMN`] at most, each turn's work under one line over its answer, open while the turn
+//! runs and folded once it is done; at the column's foot sit the activity bar and the
+//! composer, on the same measure.
 //!
 //! Everything the person does goes through the hub's outbox and shows in the frame they did
 //! it: a message as a bubble on its way, an answer flipping its card, a stop as "Stopping".
@@ -59,8 +60,12 @@ fn message_group(id: &ItemId) -> SharedString {
 /// How long a copy button says it copied.
 const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
-/// The widest the reading column's text runs, in points (`design.md` §3).
-pub const COLUMN: f32 = 736.0;
+/// The widest the reading column's text runs, in points.
+///
+/// `MonoCode`'s 896 pt column (`max-w-4xl`) less its rows' 16 pt pads, shared by the
+/// transcript, the tray and the composer (`docs/decisions/ui.md`, "One reading measure,
+/// `MonoCode`'s").
+pub const COLUMN: f32 = 864.0;
 
 /// The most of the window's height what else waits in the tray (the plan, the edits, the
 /// queue) takes before it scrolls.
@@ -183,6 +188,11 @@ pub enum ThreadViewEvent {
         /// What follows the `@`.
         query: String,
     },
+    /// Open the file a call named, on the thread's machine, in a tile of its own.
+    OpenFile {
+        /// Its path, absolute, or under `~`.
+        path: String,
+    },
 }
 
 /// One thread, drawn.
@@ -222,6 +232,8 @@ pub struct ThreadView {
     composer: Entity<TextareaState>,
     /// Settled turns the reader opened.
     open: HashSet<TurnId>,
+    /// Turns under way the reader folded.
+    shut: HashSet<TurnId>,
     /// Calls and reasoning the reader opened.
     items_open: HashSet<ItemId>,
     /// The picture open large over the thread.
@@ -464,6 +476,7 @@ impl ThreadView {
             list,
             composer,
             open: HashSet::new(),
+            shut: HashSet::new(),
             items_open: HashSet::new(),
             viewing: None,
             groups: HashSet::new(),
@@ -718,6 +731,7 @@ impl ThreadView {
                     state,
                     unshown: &unshown,
                     open: &self.open,
+                    shut: &self.shut,
                     groups: &self.groups,
                 });
                 let keys = built
@@ -772,9 +786,11 @@ impl ThreadView {
             | Row::Reasoning { item }
             | Row::Tool { item }
             | Row::Note { item } => mirror.rev(item).wrapping_mul(8) | flags(item),
+            // A fold under way says what its work did so far, which grows with its span.
             Row::Fold { turn, open, .. } => {
                 let ended = state.turn(*turn).and_then(|t| t.ended_ms).map_or(0, WallMs::as_millis);
-                ended.wrapping_mul(2) | u64::from(*open)
+                let grown = (span.len() as u64).wrapping_mul(4);
+                ended.wrapping_mul(2).wrapping_add(grown) | u64::from(*open)
             }
             Row::Group { open, .. } => (span.len() as u64).wrapping_mul(2) | u64::from(*open),
             Row::Working { .. } => 0,
@@ -1015,6 +1031,7 @@ impl ThreadView {
             self.items_open.clear();
         } else {
             self.open.extend(settled);
+            self.shut.clear();
             self.items_open.extend(steps);
         }
         self.rebuild(cx);
@@ -1036,11 +1053,20 @@ impl ThreadView {
         }
     }
 
+    /// Open `turn`'s work, or fold it: a settled turn's is folded until opened, and one under
+    /// way's open until folded.
     fn toggle_turn(&mut self, turn: TurnId, cx: &mut Context<Self>) {
-        if !self.open.remove(&turn) {
-            self.open.insert(turn);
+        let settled = self.state(cx).is_some_and(|state| rows::settled(state, turn));
+        let turned = if settled { &mut self.open } else { &mut self.shut };
+        if !turned.remove(&turn) {
+            turned.insert(turn);
         }
         self.rebuild(cx);
+    }
+
+    /// Open `turn`'s work, whether it is settled or under way. Whether it was folded.
+    pub(super) fn open_turn(&mut self, turn: TurnId) -> bool {
+        self.shut.remove(&turn) | self.open.insert(turn)
     }
 
     fn toggle_group(&mut self, first: ItemId, cx: &mut Context<Self>) {
@@ -1359,7 +1385,7 @@ impl ThreadView {
         }
     }
 
-    /// The column every row sits in: centred, its text 736 pt at most, inside the room's
+    /// The column every row sits in: centred, its text [`COLUMN`] at most, inside the room's
     /// gutters ([`Self::gutter`]).
     fn column(&self, child: impl IntoElement) -> Div {
         let gutter = self.gutter();
@@ -1800,7 +1826,10 @@ impl ThreadView {
     fn fold_row(&self, ix: usize, turn: TurnId, open: bool, cx: &Context<Self>) -> AnyElement {
         let Some(state) = self.state(cx) else { return div().into_any_element() };
         let Some(figures) = state.turn(turn) else { return div().into_any_element() };
-        let fold = Fold::of(figures, self.turn_items(ix, turn, cx));
+        let fold = Fold {
+            running: !rows::settled(state, turn),
+            ..Fold::of(figures, self.turn_items(ix, turn, cx))
+        };
         let theme = &self.theme;
         let s = theme.surfaces;
         let changes = kit::changes(theme, fold.added, fold.removed);

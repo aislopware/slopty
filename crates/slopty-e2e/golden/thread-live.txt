@@ -30,6 +30,7 @@ Button │ Branch from here
 Button │ Copy message
 Article │ Let me run it.
 Button │ Copy message
+Button │ Working: Ran a command
 Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
 Button │ Add to the message

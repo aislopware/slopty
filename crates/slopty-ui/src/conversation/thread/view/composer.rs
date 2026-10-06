@@ -366,6 +366,9 @@ impl ThreadView {
         };
         let chip = self
             .chip("thread-place", format!("Place, {}", place.said()))
+            // On the ledge the place gives up width before the meter does.
+            .flex_shrink_1()
+            .min_w_0()
             .text_color(hsla(s.text_muted))
             .child(kit::fit_label("thread-place-words", words, theme));
         if self.place_switch(cx).is_none() {
@@ -377,12 +380,68 @@ impl ThreadView {
         )
     }
 
-    /// The branch a draft's new worktree starts from, beside its place: "from main", a menu of
-    /// the branches its clone knows ([`Self::base_switch`]).
+    /// The composer's ledge, over its field, as `MonoCode`'s: where the work is on its left (the
+    /// place and the branch), how full the context is at its right. Only while the tile's
+    /// header does not say where ([`Self::on_ledge`]): a row for the meter alone would take
+    /// the thread's height for one figure, so the foot keeps it then.
+    fn ledge(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.on_ledge(cx) {
+            return None;
+        }
+        let place = self.place_chip(cx);
+        let base = self.base_chip(cx);
+        let meter = self.meter(cx);
+        let theme = &self.theme;
+        Some(
+            div()
+                .id("thread-ledge")
+                .debug_selector(|| "thread-ledge".to_owned())
+                .w_full()
+                .h(px(theme.density.control))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .gap(px(theme.spacing.xxs))
+                        .children(place)
+                        .children(base),
+                )
+                .children(meter)
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the composer has a ledge: while it says where the work is, which is while the
+    /// thread asks its first message ([`Self::hero`]).
+    fn on_ledge(&self, cx: &Context<Self>) -> bool {
+        self.hero(cx).is_some()
+    }
+
+    /// The branch beside a draft's place: in a new worktree the one it starts from, "from
+    /// main", a menu of the branches its clone knows ([`Self::base_switch`]); in the folder
+    /// itself the one checked out, as words.
     fn base_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        self.base_switch(cx)?;
         let theme = &self.theme;
         let s = theme.surfaces;
+        if self.base_switch(cx).is_none() {
+            let current = self.place_switch(cx)?.current.clone()?;
+            return Some(
+                self.chip("thread-branch", format!("Branch, {current}"))
+                    .role(Role::Label)
+                    .flex_shrink_1()
+                    .min_w_0()
+                    .text_color(hsla(s.text_muted))
+                    .child(self.icon(Symbol::ArrowTriangleBranch, s.text_muted))
+                    .child(kit::fit_label("thread-branch-name", current, theme))
+                    .into_any_element(),
+            );
+        }
         let base = self.draft_base(cx).unwrap_or_else(|| "HEAD".to_owned());
         let chip = self
             .chip("thread-base", format!("Base branch, {base}"))
@@ -771,6 +830,7 @@ impl ThreadView {
                     .pt(px(theme.spacing.sm))
                     // The strips over the field are a row's words.
                     .text_size(px(theme.roles().chrome.size))
+                    .children(self.ledge(cx))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.limit_strip(cx))
@@ -809,9 +869,10 @@ impl ThreadView {
 
     /// The composer's foot, one row that fits the room it is given (`kit::priority_row`): the
     /// "+" and the send never leave; the rest leave the least needed first (the handoff, the
-    /// place, the screen, the pull request, the mode, effort and work, the changes, the meter,
-    /// the model) and wait in the "+" menu, so Send never leaves the card
-    /// (`docs/decisions/ui.md`, "How surfaces adapt to their room").
+    /// screen, the pull request, the mode, effort and work, the changes, the model) and wait in
+    /// the "+" menu, so Send never leaves the card (`docs/decisions/ui.md`, "How surfaces adapt
+    /// to their room"). Where the work is and how full the context is stand on the ledge over
+    /// the field ([`Self::ledge`]).
     fn composer_foot(&self, editing: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let row = kit::priority_row("thread-foot")
@@ -824,8 +885,6 @@ impl ThreadView {
                 None => row,
             };
         let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
-        let row = item(row, FOOT_PLACE, self.place_chip(cx));
-        let row = item(row, FOOT_BASE, self.base_chip(cx));
         let row = item(row, FOOT_MODEL, self.model_chip(cx));
         let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
@@ -833,7 +892,8 @@ impl ThreadView {
         let row = item(row, FOOT_PULL, self.pull_chip(cx));
         let row = item(row, FOOT_CHANGES, self.changes(cx));
         let row = item(row, FOOT_SCREEN, self.screen_chip(cx));
-        let row = item(row.end(), FOOT_METER, self.meter(cx));
+        let meter = (!self.on_ledge(cx)).then(|| self.meter(cx)).flatten();
+        let row = item(row.end(), FOOT_METER, meter);
         let row = item(row, FOOT_HANDOFF, self.handoff_button(cx));
         let row = item(row, FOOT_INTERRUPT, self.interrupt_send(cx));
         let row = item(row, FOOT_SEND, Some(self.send_button(cx)));
@@ -850,13 +910,9 @@ fn outlined<E: Styled>(el: E, theme: &Theme) -> E {
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
 /// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
-/// Where an empty thread works: among the first to leave.
-const FOOT_PLACE: (&str, kit::Priority) = ("place", kit::Priority(40));
-/// The branch a draft's new worktree starts from: the first to leave.
-const FOOT_BASE: (&str, kit::Priority) = ("base", kit::Priority(32));
 /// The model.
 const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));
-/// How full the context is.
+/// How full the context is, while the composer has no ledge for it.
 const FOOT_METER: (&str, kit::Priority) = ("meter", kit::Priority(160));
 /// "Interrupt and send", while something is typed during a turn.
 const FOOT_INTERRUPT: (&str, kit::Priority) = ("interrupt", kit::Priority(152));
@@ -1082,28 +1138,6 @@ impl ThreadView {
                         })
                         .detail(name)
                     }),
-                k if k == FOOT_PLACE.0 => self.place_switch(cx).and_then(|_| {
-                    let (_, place) = self.hero(cx)?;
-                    Some(
-                        kit::MenuItem::new("place", PLACE, move |_w, cx| {
-                            let _gone = to.update(cx, |this, cx| {
-                                this.add_open = false;
-                                this.toggle_places(cx);
-                            });
-                        })
-                        .detail(place.within().unwrap_or_default()),
-                    )
-                }),
-                k if k == FOOT_BASE.0 => self.base_switch(cx).map(|_| {
-                    let base = self.draft_base(cx).unwrap_or_else(|| "HEAD".to_owned());
-                    kit::MenuItem::new("base", BASE_BRANCH, move |_w, cx| {
-                        let _gone = to.update(cx, |this, cx| {
-                            this.add_open = false;
-                            this.toggle_bases(cx);
-                        });
-                    })
-                    .detail(base)
-                }),
                 k if k == FOOT_METER.0 => state.map(|st| {
                     let words = meter_words(&st.meters, crate::clock::now(cx));
                     let first = words.into_iter().next().unwrap_or_else(|| CONTEXT.to_owned());
@@ -1190,19 +1224,11 @@ impl ThreadView {
 /// The "+" menu's row that lists the agent's models, while the foot has no room for the chip.
 const MODEL: &str = "Model";
 
-/// The "+" menu's row that switches where a draft starts, while the foot has no room for its
-/// place chip.
-const PLACE: &str = "Place";
-
-/// The "+" menu's row that lists the branches a draft's new worktree can start from, while the
-/// foot has no room for its base chip.
-const BASE_BRANCH: &str = "Base branch";
+/// The "+" menu's row that opens the review, while the foot has no room for the changes.
+const REVIEW_CHANGES: &str = "Review the changes";
 
 /// The "+" menu's row for the meter, before the agent has said how full its context is.
 const CONTEXT: &str = "Context";
-
-/// The "+" menu's row that opens the review, while the foot has no room for the changes.
-const REVIEW_CHANGES: &str = "Review the changes";
 
 /// The "+" menu's row that opens the commit sheet on the repository the thread works in.
 const COMMIT: &str = "Commit\u{2026}";

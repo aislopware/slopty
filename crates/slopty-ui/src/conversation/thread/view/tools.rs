@@ -1,12 +1,15 @@
 //! A call, drawn as Zed's and Codex's threads draw one: a line on the thread's plane.
 //!
-//! Every call is one line, whatever it did: its mark, what it did (a file named first and its
-//! folder after), how it stands, how long it took, and a disclosure that shows under the
-//! pointer. Opened, its diff, its command and output or its sources sit under it in a quiet
-//! well indented to its words. A call that only looked is muted; one that changed or ran
-//! something is a step stronger. How it stands is said by its mark and a word, never by an
-//! edge: no call is a card, so no row of the thread is boxed where its neighbours are not. A
-//! request whose call is on screen is answered under the call's line.
+//! Every call is one line, whatever it did: its kind's mark (a file's type for a call on one
+//! file), what it did (a file's verb, then the file named first and its folder after; a
+//! command's own words), how it stands, how long it took, and a disclosure that shows under
+//! the pointer. The file's name opens the file in a tile of its own; the rest of the line
+//! opens its diff, its command and output or its sources under it, in a quiet well indented to
+//! its words. A call that only looked is muted; one that changed or ran something is a step
+//! stronger. How it stands is said by its mark while it runs or waits, and after it by an icon
+//! and a word at its end, never by an edge: no call is a card, so no row of the thread is
+//! boxed where its neighbours are not. A request whose call is on screen is answered under the
+//! call's line.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -20,7 +23,10 @@ use gpui::{
 use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
 use slopty_theme::{Rgb, Surfaces};
 
-use super::{PEEK_LINES, TOOL_ROW, ThreadView, call_path, patch_of, path_patch, tail, tool_icon};
+use super::{
+    PEEK_LINES, TOOL_ROW, ThreadView, ThreadViewEvent, call_path, patch_of, path_patch, tail,
+    tool_icon,
+};
 use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
@@ -74,14 +80,34 @@ pub(super) fn tidy(text: &str, cwd: &str) -> String {
     out
 }
 
-/// Whether `state` says the call did not do what it set out to.
-const fn failed(state: &ToolState) -> bool {
-    matches!(state, ToolState::Failed | ToolState::Rejected | ToolState::Cancelled)
+/// What a call on one file did to it, in the tense of how it stands: "Edited", "Editing" while
+/// it runs, "Edit" while it waits to be allowed. `None` for a call of another kind.
+const fn file_verb(call: &ToolCall) -> Option<&'static str> {
+    let [done, doing, asked] = match &call.detail {
+        Some(ToolDetail::Read(_)) => ["Read", "Reading", "Read"],
+        Some(ToolDetail::Edit(_)) => ["Edited", "Editing", "Edit"],
+        Some(ToolDetail::Write(_)) => ["Wrote", "Writing", "Write"],
+        _ => return None,
+    };
+    Some(match call.state {
+        ToolState::Streaming | ToolState::Running => doing,
+        ToolState::Pending { .. } => asked,
+        _ => done,
+    })
 }
 
-/// What a call's line says of how it stands, and in which tone, once that is not "done" or
-/// "under way" (which its mark and its time say): it waits on the person, it failed, it was
-/// not allowed, or it was stopped. The word is the state's one cue besides the mark's tone.
+/// `path` as the machine opens it: absolute, or under `~`, as it is; else under the agent's
+/// folder `cwd`.
+fn opened_at(path: &str, cwd: &str) -> String {
+    if path.starts_with('/') || path == "~" || path.starts_with("~/") || cwd.is_empty() {
+        return path.to_owned();
+    }
+    format!("{}/{path}", cwd.trim_end_matches('/'))
+}
+
+/// What a call's line says at its end of how it stands, and in which tone, once that is not
+/// "done" or "under way" (which its mark and its time say): it waits on the person, it
+/// failed, it was not allowed, or it was stopped. A failure is marked with an icon besides.
 const fn standing(state: &ToolState, s: &Surfaces) -> Option<(&'static str, Rgb)> {
     match state {
         ToolState::Pending { .. } => Some(("Waiting for you", s.warn)),
@@ -160,8 +186,7 @@ impl ThreadView {
             _ => {
                 let kind = tool_icon(&call.kind);
                 let glyph = call_path(call).map_or_else(|| kind.into(), crate::icons::file_mark);
-                let tone = if failed(&call.state) { s.error } else { s.text_muted };
-                crate::icons::symbol(theme, glyph, px(theme.typography.icon()), hsla(tone))
+                crate::icons::symbol(theme, glyph, px(theme.typography.icon()), hsla(s.text_muted))
             }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
@@ -177,15 +202,26 @@ impl ThreadView {
             None if call.title.is_empty() => call.name.clone(),
             None => tidy(&call.title, &cwd),
         };
+        // Read aloud as it reads: a file's verb and the file, then how it stands.
+        let said = match (file_verb(call), call_path(call)) {
+            (Some(verb), Some(path)) => format!("{verb} {}", tidy(path, &cwd)),
+            _ => title.clone(),
+        };
         let label = match (&call.state, child) {
             (ToolState::Streaming, _) => format!("Preparing {}", call.name),
             (_, Some(_)) => format!("Subagent {title}"),
-            _ => title.clone(),
+            _ => said,
         };
-        let file = path_patch(call).map(|(path, _)| {
+        let label = match standing(&call.state, &s) {
+            Some((word, _)) => format!("{label}, {word}"),
+            None => label,
+        };
+        let path = call_path(call).map(|path| opened_at(path, &cwd));
+        let file = call_path(call).map(|path| {
             let (name, dir) = lines::name_first(path);
             (name.to_owned(), tidy(&format!("{dir}/"), &cwd).trim_end_matches('/').to_owned())
         });
+        let verb = file_verb(call).filter(|_| file.is_some());
         let a_file = file.is_some();
         let file = file.or(mcp);
         let changes = patch_of(call).and_then(|p| kit::changes(theme, p.added, p.removed));
@@ -197,21 +233,36 @@ impl ThreadView {
         let ink = if quiet { s.text_muted } else { s.text_secondary };
         let lead_ink = if a_file { s.text } else { ink };
         let group: SharedString = format!("call-{}", id.0).into();
+        let name_id = format!("call-file-{}", id.0);
         let what = match file {
             Some((name, dir)) => div()
                 .min_w_0()
                 .flex()
                 .items_baseline()
                 .gap(px(theme.spacing.xs))
+                .children(verb.map(|v| div().flex_none().text_color(hsla(ink)).child(v)))
                 .child(
                     div()
+                        .id(ElementId::Name(name_id.clone().into()))
+                        .debug_selector(move || name_id)
                         .flex_none()
                         .max_w(gpui::relative(0.7))
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_color(hsla(lead_ink))
-                        .child(SharedString::from(name)),
+                        .child(SharedString::from(name))
+                        // The name opens the file; the rest of the line, the call.
+                        .when_some(path, |el, path| {
+                            el.role(Role::Link)
+                                .aria_label(SharedString::from(format!("Open {path}")))
+                                .cursor_pointer()
+                                .hover(gpui::Styled::underline)
+                                .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(ThreadViewEvent::OpenFile { path: path.clone() });
+                                }))
+                        }),
                 )
                 .child(
                     div()
@@ -270,10 +321,18 @@ impl ThreadView {
                     .child(SharedString::from(words))
             }))
             .children(changes)
-            .children(
-                standing(&call.state, &s)
-                    .map(|(word, tone)| div().flex_none().text_color(hsla(tone)).child(word)),
-            )
+            .children(standing(&call.state, &s).map(|(word, tone)| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xxs))
+                    .text_color(hsla(tone))
+                    .when(matches!(call.state, ToolState::Failed), |el| {
+                        el.child(self.icon(Symbol::Xmark, tone))
+                    })
+                    .child(word)
+            }))
             .child(
                 div()
                     .flex_none()

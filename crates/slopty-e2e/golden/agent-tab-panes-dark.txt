@@ -6,10 +6,12 @@ Button │ Search
 Button │ New agent
 Heading │ Projects
 Button │ repo
+Button │ Fold
 Button │ New shell in repo
 Button │ NOTES.md
 Button │ Close tile
 Button │ Ship the project board
+Button │ Fold
 Button │ Board, 1 needs you · 1 of 6 merged
 Image │ Needs you
 Button │ Orchestrator

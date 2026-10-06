@@ -1,8 +1,10 @@
 //! A thread as the view's rows.
 //!
-//! Each turn's message, then its work, a settled turn folded to one line over its answer, the
-//! live turn whole (two or more quiet calls in a row there as one line, "Read 3 files ·
-//! Searched once"), and the sends on their way at the foot.
+//! Each turn's message, then its work under one line over its answer, and the sends on their
+//! way at the foot. The line is open while the turn is under way, its work showing under it
+//! as it comes (two or more quiet calls in a row there as one line, "Read 3 files · Searched
+//! once"), and folded once the turn is done (`docs/decisions/ui.md`, "A turn's work is one
+//! line, open while it runs").
 //!
 //! Nothing here draws. [`build`] runs over the mirror on every change and is cheap enough to:
 //! it walks the items once and allocates a row each.
@@ -30,8 +32,9 @@ pub enum Row {
         /// The item.
         item: ItemId,
     },
-    /// A settled turn's work as one line, open or folded: one for the work before each
-    /// message the person sent into the turn, and one after the last.
+    /// A turn's work as one line, open or folded: one for the work before each message the
+    /// person sent into the turn, and one after the last. Open while the turn is under way,
+    /// folded once it settled, unless the reader turned it.
     Fold {
         /// The turn.
         turn: TurnId,
@@ -56,7 +59,8 @@ pub enum Row {
         /// The item.
         item: ItemId,
     },
-    /// Quiet calls done one after another in the live turn, as one line, open or folded.
+    /// Quiet calls done one after another in the live turn's open work, as one line, open or
+    /// folded.
     Group {
         /// The first of them, which names the group.
         first: ItemId,
@@ -111,6 +115,8 @@ pub struct Input<'a> {
     pub unshown: &'a [&'a Sent],
     /// The settled turns the reader opened.
     pub open: &'a HashSet<TurnId>,
+    /// The turns under way the reader folded.
+    pub shut: &'a HashSet<TurnId>,
     /// The groups of quiet calls the reader opened, by their first call.
     pub groups: &'a HashSet<ItemId>,
 }
@@ -146,7 +152,6 @@ pub fn build_spans(input: Input<'_>) -> Built {
     let capacity = state.items.len().saturating_add(4);
     let mut built =
         Built { rows: Vec::with_capacity(capacity), spans: Vec::with_capacity(capacity) };
-    let last = state.last_turn().map(|t| t.id);
     let mut at = 0;
     while let Some(first) = state.items.get(at) {
         let turn = first.turn;
@@ -156,15 +161,14 @@ pub fn build_spans(input: Input<'_>) -> Built {
             .map_or(0, |rest| rest.iter().take_while(|i| i.turn == turn).count());
         let run = at..at.saturating_add(len);
         let items = state.items.get(run.clone()).unwrap_or_default();
-        let figures = state.turn(turn);
-        // A turn the agent never wrote the end of (its stop went unheard) is over once a
-        // newer one began: only the last turn can still be under way.
-        let settled =
-            figures.is_some_and(|t| !matches!(t.state, TurnState::Active) || Some(t.id) != last);
-        if turn == TurnId::BEFORE || !settled {
+        if turn == TurnId::BEFORE {
             live_rows(&mut built, items, run.start, input.groups);
+        } else if settled(state, turn) {
+            let open = input.open.contains(&turn);
+            turn_rows(&mut built, turn, items, run.clone(), open, None);
         } else {
-            turn_rows(&mut built, turn, items, run.clone(), input.open.contains(&turn));
+            let open = !input.shut.contains(&turn);
+            turn_rows(&mut built, turn, items, run.clone(), open, Some(input.groups));
         }
         at = run.end;
     }
@@ -175,6 +179,16 @@ pub fn build_spans(input: Input<'_>) -> Built {
         built.push(Row::Sending { intent: sent.id }, 0..0);
     }
     built
+}
+
+/// Whether `turn` is over: ended, or not the last.
+///
+/// A turn the agent never wrote the end of (its stop went unheard) is over once a newer one
+/// began: only the last turn can still be under way. One the thread does not hold is not.
+#[must_use]
+pub fn settled(state: &ThreadState, turn: TurnId) -> bool {
+    let last = state.last_turn().map(|t| t.id);
+    state.turn(turn).is_some_and(|t| !matches!(t.state, TurnState::Active) || Some(t.id) != last)
 }
 
 /// The turn the agent is working on: the last one, while open and the agent says it works.
@@ -205,15 +219,23 @@ pub fn plan(item: &Item) -> bool {
     matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Plan { .. })))
 }
 
-/// A settled turn: its message, the fold over its work, then its answer, the last thing the
-/// agent wrote. A plan stands outside the fold where it was proposed. Opened, the work shows
-/// between the fold and the answer.
+/// A turn: its message, the fold over its work, then its answer, the last thing the agent
+/// wrote so far. A plan stands outside the fold where it was proposed. Open, the work shows
+/// between the fold and the answer, in its order; a turn under way's quiet calls in a row as
+/// one line there (`groups`, the ones the reader opened).
 ///
 /// A message the person sent into the turn while it ran (a steer) stands where it was sent,
 /// and splits the work: a fold over what came before it, another over what came after, so
 /// the steer is never folded away and each fold says what its stretch did. The turn opens
 /// as one.
-fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>, open: bool) {
+fn turn_rows(
+    built: &mut Built,
+    turn: TurnId,
+    items: &[Item],
+    run: Range<usize>,
+    open: bool,
+    groups: Option<&HashSet<ItemId>>,
+) {
     let answer = items.iter().rposition(|i| matches!(i.body, ItemBody::Text(_)));
     let work = |ix: usize, i: &Item| {
         Some(ix) != answer && !matches!(i.body, ItemBody::User(_)) && !plan(i)
@@ -221,7 +243,8 @@ fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>,
     let mut part = 0_u32;
     let mut start = 0_usize;
     let mut folded = false;
-    for (ix, item) in items.iter().enumerate() {
+    let mut ix = 0_usize;
+    while let Some(item) = items.get(ix) {
         let at = run.start.saturating_add(ix);
         if ix > 0 && matches!(item.body, ItemBody::User(_)) {
             part = part.saturating_add(1);
@@ -230,6 +253,7 @@ fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>,
         }
         if !work(ix, item) {
             built.push(row_of(item), at..at.saturating_add(1));
+            ix = ix.saturating_add(1);
             continue;
         }
         if !folded {
@@ -246,8 +270,33 @@ fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>,
             built.push(Row::Fold { turn, part, open }, stretch);
             folded = true;
         }
-        if open {
-            built.push(row_of(item), at..at.saturating_add(1));
+        if !open {
+            ix = ix.saturating_add(1);
+            continue;
+        }
+        let len = groups.map_or(0, |_| {
+            let rest = items.get(ix..).unwrap_or_default().iter();
+            rest.take_while(|i| groupable(i)).count()
+        });
+        match groups {
+            Some(opened) if len >= GROUP => {
+                let shown = opened.contains(&item.id);
+                let span = at..at.saturating_add(len);
+                built.push(Row::Group { first: item.id.clone(), open: shown }, span);
+                if shown {
+                    for (k, call) in
+                        items.get(ix..ix.saturating_add(len)).unwrap_or_default().iter().enumerate()
+                    {
+                        let at = at.saturating_add(k);
+                        built.push(row_of(call), at..at.saturating_add(1));
+                    }
+                }
+                ix = ix.saturating_add(len);
+            }
+            _ => {
+                built.push(row_of(item), at..at.saturating_add(1));
+                ix = ix.saturating_add(1);
+            }
         }
     }
 }
@@ -256,7 +305,7 @@ fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>,
 const GROUP: usize = 2;
 
 /// Whether `item` is a call that only looked and is done: a group's kind of call.
-fn groups(item: &Item) -> bool {
+fn groupable(item: &Item) -> bool {
     if plan(item) {
         return false;
     }
@@ -284,7 +333,7 @@ fn live_rows(built: &mut Built, items: &[Item], start: usize, open: &HashSet<Ite
     let mut ix = 0_usize;
     while let Some(item) = items.get(ix) {
         let at = start.saturating_add(ix);
-        let len = items.get(ix..).unwrap_or_default().iter().take_while(|i| groups(i)).count();
+        let len = items.get(ix..).unwrap_or_default().iter().take_while(|i| groupable(i)).count();
         if len < GROUP {
             built.push(row_of(item), at..at.saturating_add(1));
             ix = ix.saturating_add(1);
@@ -321,6 +370,8 @@ fn row_of(item: &Item) -> Row {
 /// What a settled turn's work adds up to.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Fold {
+    /// The turn is still under way: its line says what it did so far.
+    pub running: bool,
     /// How it ended.
     pub ended: Ended,
     /// From its start to its end, when both are known.
@@ -424,9 +475,13 @@ impl Fold {
         }
     }
 
-    /// "Worked 55 s", "Stopped after 12 s", "Failed after 3 s", or the verb alone.
+    /// "Worked 55 s", "Stopped after 12 s", "Failed after 3 s", or the verb alone; "Working"
+    /// while it runs.
     #[must_use]
     pub fn lead(&self) -> String {
+        if self.running {
+            return "Working".to_owned();
+        }
         let took = self.took.map(crate::kit::duration);
         match (self.ended, took) {
             (Ended::Complete, Some(t)) => format!("Worked {t}"),
@@ -500,7 +555,7 @@ impl Fold {
     /// or how it ended short ("Stopped after 12 s"); nothing when the line says it already.
     #[must_use]
     pub fn when(&self) -> Option<String> {
-        if self.what().is_empty() {
+        if self.running || self.what().is_empty() {
             return None;
         }
         match (self.ended, self.took) {
@@ -637,8 +692,13 @@ mod tests {
             vec![user("u", 1), exec("x", 1), text("mid", 1), read("r", 1), text("end", 1)],
         );
         let mut open = HashSet::new();
-        let rows =
-            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &open,
+            shut: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         let id = |s: &str| ItemId(s.to_owned());
         assert_eq!(
             rows,
@@ -649,8 +709,13 @@ mod tests {
             ]
         );
         open.insert(TurnId(1));
-        let rows =
-            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &open,
+            shut: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert_eq!(
             rows,
             [
@@ -678,6 +743,7 @@ mod tests {
             state: &state,
             unshown: &[],
             open: &open,
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -696,8 +762,13 @@ mod tests {
         let key = |ix: usize| built.rows.get(ix).map(Row::key);
         assert_ne!(key(1), key(3), "two rows, two keys");
         open.insert(TurnId(1));
-        let rows =
-            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &open,
+            shut: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert_eq!(
             rows,
             [
@@ -724,8 +795,13 @@ mod tests {
             vec![user("u", 1), read("r", 1), plan("p", 1), text("end", 1)],
         );
         let none = HashSet::new();
-        let rows =
-            build(Input { state: &settled, unshown: &[], open: &none, groups: &HashSet::new() });
+        let rows = build(Input {
+            state: &settled,
+            unshown: &[],
+            open: &none,
+            shut: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         let id = |s: &str| ItemId(s.to_owned());
         assert_eq!(
             rows,
@@ -744,14 +820,21 @@ mod tests {
         let mut working =
             state(vec![live], vec![user("u", 1), read("r1", 1), plan("p", 1), read("r2", 1)]);
         working.status.phase = Phase::Working;
-        let rows =
-            build(Input { state: &working, unshown: &[], open: &none, groups: &HashSet::new() });
+        let rows = build(Input {
+            state: &working,
+            unshown: &[],
+            open: &none,
+            shut: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert!(rows.contains(&Row::Tool { item: id("p") }), "{rows:?}");
         assert!(!rows.iter().any(|r| matches!(r, Row::Group { .. })), "{rows:?}");
     }
 
+    /// The turn under way shows its work under its line, open, as it comes; the reader may
+    /// fold it, and it says it works at its foot either way.
     #[test]
-    fn the_live_turn_never_folds_and_says_it_works() {
+    fn the_live_turns_work_is_open_under_its_line_and_it_says_it_works() {
         let mut live = turn(2, TurnState::Active, 0);
         live.ended_ms = None;
         let mut state = state(
@@ -763,6 +846,7 @@ mod tests {
             state: &state,
             unshown: &[],
             open: &HashSet::new(),
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -772,17 +856,39 @@ mod tests {
                 Row::User { item: id("u1") },
                 Row::Text { item: id("a1") },
                 Row::User { item: id("u2") },
+                Row::Fold { turn: TurnId(2), part: 0, open: true },
                 Row::Tool { item: id("x") },
                 Row::Text { item: id("a2") },
                 Row::Working { turn: TurnId(2) },
             ],
             "a turn with nothing but its answer has no fold"
         );
+        let shut = HashSet::from([TurnId(2)]);
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &HashSet::new(),
+            shut: &shut,
+            groups: &HashSet::new(),
+        });
+        assert_eq!(
+            rows.get(2..),
+            Some(
+                &[
+                    Row::User { item: id("u2") },
+                    Row::Fold { turn: TurnId(2), part: 0, open: false },
+                    Row::Text { item: id("a2") },
+                    Row::Working { turn: TurnId(2) },
+                ][..]
+            ),
+            "folded by the reader, its answer so far stays"
+        );
         state.status.phase = Phase::Idle;
         let rows = build(Input {
             state: &state,
             unshown: &[],
             open: &HashSet::new(),
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert!(
@@ -809,6 +915,7 @@ mod tests {
             state: &state,
             unshown: &unshown,
             open: &HashSet::new(),
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert_eq!(rows, [Row::Sending { intent: now.id }, Row::Sending { intent: refused.id }]);
@@ -846,6 +953,7 @@ mod tests {
             state: &state,
             unshown: &[],
             open: &HashSet::new(),
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         let id = |s: &str| ItemId(s.to_owned());
@@ -856,13 +964,15 @@ mod tests {
                 Row::Fold { turn: TurnId(1), part: 0, open: false },
                 Row::Text { item: id("a1") },
                 Row::User { item: id("u2") },
+                Row::Fold { turn: TurnId(2), part: 0, open: true },
                 Row::Tool { item: id("r") },
-            ]
+            ],
+            "the last is still under way, its work open"
         );
     }
 
-    /// In the live turn, quiet calls done one after another are one line, which opens to
-    /// show them; a lone one, and a call that acts, stay rows of their own.
+    /// In the live turn's open work, quiet calls done one after another are one line, which
+    /// opens to show them; a lone one, and a call that acts, stay rows of their own.
     #[test]
     fn quiet_calls_in_a_row_are_one_line_in_the_live_turn() {
         let state = state(
@@ -872,12 +982,14 @@ mod tests {
         let id = |s: &str| ItemId(s.to_owned());
         let mut groups = HashSet::new();
         let built = |groups: &HashSet<ItemId>| {
-            build(Input { state: &state, unshown: &[], open: &HashSet::new(), groups })
+            let none = HashSet::new();
+            build(Input { state: &state, unshown: &[], open: &none, shut: &none, groups })
         };
         assert_eq!(
             built(&groups),
             [
                 Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), part: 0, open: true },
                 Row::Group { first: id("r1"), open: false },
                 Row::Tool { item: id("x") },
                 Row::Tool { item: id("r3") },
@@ -885,7 +997,7 @@ mod tests {
         );
         groups.insert(id("r1"));
         assert_eq!(
-            built(&groups).get(1..4),
+            built(&groups).get(2..5),
             Some(
                 &[
                     Row::Group { first: id("r1"), open: true },
@@ -905,6 +1017,7 @@ mod tests {
             state: &state,
             unshown: &[],
             open: &HashSet::new(),
+            shut: &HashSet::new(),
             groups: &HashSet::new(),
         });
         assert!(rows.iter().any(|r| matches!(r, Row::Fold { .. })), "{rows:?}");

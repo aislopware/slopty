@@ -184,7 +184,7 @@ impl ThreadView {
             .is_some_and(|i| matches!(i.body, ItemBody::Reasoning(_) | ItemBody::Tool(_)));
         let mut changed = step && self.items_open.insert(found.item);
         match find::row_of(&self.rows, &self.spans, at).and_then(|ix| self.rows.get(ix)) {
-            Some(Row::Fold { turn, open: false, .. }) => changed |= self.open.insert(*turn),
+            Some(Row::Fold { turn, open: false, .. }) => changed |= self.open_turn(*turn),
             Some(Row::Group { first, open: false }) => changed |= self.groups.insert(first.clone()),
             _ => {}
         }

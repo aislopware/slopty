@@ -1060,6 +1060,7 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
     assert!(add.right() <= send.left(), "the + leads, the send ends");
     let gone: Vec<&str> = chips.into_iter().filter(|c| cx.debug_bounds(c).is_none()).collect();
     assert!(gone.contains(&"thread-tasks"), "312 pt holds the foot only by leaving some out");
+    assert!(cx.debug_bounds("thread-ledge").is_none(), "a thread with rows has no ledge");
     open_plus(cx);
     for chip in gone {
         let row = match chip {

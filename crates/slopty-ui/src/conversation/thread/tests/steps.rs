@@ -12,7 +12,7 @@ use slopty_proto::thread::{
     ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
 };
 
-use super::{hub, snapshot, view};
+use super::{asked, hub, snapshot, view};
 use crate::conversation::CycleDensity;
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
@@ -312,4 +312,100 @@ fn a_steer_stands_between_the_folds_of_its_turn(cx: &mut TestAppContext) {
     let tools = view
         .read_with(cx, |v, _| v.rows().iter().filter(|r| matches!(r, Row::Tool { .. })).count());
     assert_eq!(tools, 2, "the turn opens as one");
+}
+
+/// A turn's work is one line: open while the turn works, its calls under it as they come and
+/// the line saying what they did so far; folded by a click; folded once the turn is done,
+/// saying how long it took.
+#[gpui::test]
+fn a_turns_work_is_open_under_its_line_while_it_runs_and_folds_when_done(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Active)];
+    state.status.phase = slopty_proto::thread::Phase::Working;
+    state.items = vec![user("u", 1), call("x", 1, kind::EXEC, None, None)];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let line = tree.iter().any(|n| n.is("Button", Some("Working: Ran a command")));
+    assert!(line, "what it did so far: {tree:#?}");
+    assert!(cx.debug_bounds("tool-x").is_some(), "its call under it");
+    assert!(cx.debug_bounds("thread-working").is_some(), "and it says it works");
+
+    let at = cx.debug_bounds("fold-1").expect("the line").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tool-x").is_none(), "folded by the reader");
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tool-x").is_some(), "and opened again");
+
+    state.turns = vec![turn(1, TurnState::Complete)];
+    state.status.phase = slopty_proto::thread::Phase::Idle;
+    state.items.push(item("a", 1, ItemBody::Text(Clipped::whole("Done."))));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tool-x").is_none(), "folded once the turn is done");
+    assert!(cx.debug_bounds("item-a").is_some(), "over its answer");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let line = tree.iter().any(|n| n.is("Button", Some("Worked 4 s: Ran a command")));
+    assert!(line, "{tree:#?}");
+    let rows = view.read_with(cx, |v, _| v.rows().len());
+    assert_eq!(rows, 3, "the message, the line and the answer");
+}
+
+/// A call on one file is one line: the file's type, its verb and the file named first, and the
+/// name opens the file on the thread's machine, under the agent's folder, while the rest of the
+/// line opens the call. A failed call is marked at its end with an icon and a word.
+#[gpui::test]
+fn a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end(cx: &mut TestAppContext) {
+    use slopty_proto::thread::detail::ReadDetail;
+
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Active)];
+    state.status.phase = slopty_proto::thread::Phase::Working;
+    let read = ToolDetail::Read(ReadDetail {
+        path: "src/lib.rs".to_owned(),
+        offset: None,
+        limit: None,
+        lines: None,
+        total_lines: None,
+    });
+    let mut failed = call("f", 1, kind::EXEC, None, None);
+    if let ItemBody::Tool(call) = &mut failed.body {
+        call.state = ToolState::Failed;
+    }
+    state.items = vec![user("u", 1), call("r", 1, kind::READ, Some(read), None), failed];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    let asked = asked(cx, &view);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Link", Some("Open /w/src/lib.rs"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Button", Some("Read src/lib.rs"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Button", Some("Count lines, Failed"))), "{tree:#?}");
+
+    let before = view.read_with(cx, |v, _| v.keys().to_vec());
+    let name = cx.debug_bounds("call-file-r").expect("the file's name").center();
+    cx.simulate_click(name, Modifiers::none());
+    cx.run_until_parked();
+    let opened: Vec<String> = asked
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            crate::conversation::thread::ThreadViewEvent::OpenFile { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, ["/w/src/lib.rs"], "under the agent's folder");
+    let after = view.read_with(cx, |v, _| v.keys().to_vec());
+    assert_eq!(before, after, "the name opened the file, not the call");
 }

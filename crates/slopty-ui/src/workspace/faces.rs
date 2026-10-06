@@ -1435,6 +1435,7 @@ impl WorkspaceView {
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
+            ThreadViewEvent::OpenFile { path } => self.open_file_on(Some(key), &path, None, cx),
         }
     }
 
@@ -1516,6 +1517,11 @@ impl WorkspaceView {
             ThreadViewEvent::FindFiles { root, query } => {
                 if let Some(key) = self.worker_of_session(session) {
                     self.send(key, ClientMsg::FindFiles { root, query });
+                }
+            }
+            ThreadViewEvent::OpenFile { path } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.open_file_on(Some(key), &path, None, cx);
                 }
             }
         }

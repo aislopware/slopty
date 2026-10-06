@@ -1039,6 +1039,10 @@ fn the_place_chip_starts_a_worktree_from_a_branch_picked(cx: &mut TestAppContext
     settle(cx);
     assert_eq!(roles(cx, place), ["Button"], "a switch once they came");
     assert!(cx.debug_bounds("thread-base").is_none(), "no base in the folder itself");
+    assert_eq!(roles(cx, "Branch, feature"), ["Label"], "but the branch checked out, as words");
+    let ledge = cx.debug_bounds("thread-ledge").expect("the composer's ledge");
+    let chip = cx.debug_bounds("thread-place").expect("the place");
+    assert!(ledge.contains(&chip.center()), "where the work is, on the ledge over the field");
 
     let click = |cx: &mut VisualTestContext, what: &str| {
         let at = cx.debug_bounds(Box::leak(what.to_owned().into_boxed_str())).expect(what);

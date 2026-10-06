@@ -565,8 +565,10 @@ impl WorkspaceView {
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(worker, slopty_proto::ClientMsg::FindFiles { root, query });
             }
-            // A draft has no thread to review, watch or show the terminal of yet.
+            // A draft has no thread to review, watch or show the terminal of yet, nor a call
+            // naming a file.
             ThreadViewEvent::ShowTerminal
+            | ThreadViewEvent::OpenFile { .. }
             | ThreadViewEvent::Review { .. }
             | ThreadViewEvent::ReviewRuns { .. }
             | ThreadViewEvent::Watch { .. }

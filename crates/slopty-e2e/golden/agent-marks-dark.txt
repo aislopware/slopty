@@ -8,6 +8,7 @@ Heading │ Needs you
 Button │ Claude Code, Wants to run a command, Needs you
 Heading │ Projects
 Button │ atlas
+Button │ Fold
 Button │ New shell in atlas
 Button │ Claude Code, Needs approval
 Image │ Claude Code
@@ -52,9 +53,9 @@ Button │ Commit on atlas
 Button │ Close tile
 Group │ Thread
 Heading │ What should opencode do in atlas?
+Label │ Place, in atlas on studio
 MultilineTextInput │ Message
 Button │ Add to the message
-Label │ in atlas on studio
 Button │ Model, Canned
 Button │ Mode, build
 Button │ Send

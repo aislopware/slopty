@@ -42,6 +42,7 @@ Button │ Branch from here
 Button │ Copy message
 Article │ I'll look at the editor and scroll its page.
 Button │ Copy message
+Button │ Working: 1 step
 Button │ App click · computer-use
 Status │ Working
 MultilineTextInput │ Message (focused)

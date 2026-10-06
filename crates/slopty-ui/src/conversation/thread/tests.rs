@@ -177,7 +177,7 @@ fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
         "the question, by the folder's name"
     );
     assert!(cx.debug_bounds("thread-empty").is_none(), "no notice in the rows' place");
-    assert!(cx.debug_bounds("thread-place").is_some(), "where, in the composer's foot");
+    assert!(cx.debug_bounds("thread-place").is_some(), "where, on the composer's ledge");
     let middle = |cx: &mut VisualTestContext| {
         let composer = cx.debug_bounds("thread-composer").expect("the composer");
         composer.bottom() < px(450.0)
@@ -544,11 +544,13 @@ fn timing_of_the_thread_path() {
     let mirrored = threads.mirror(thread).and_then(slopty_client::threads::Mirror::state).unwrap();
     let open = std::collections::HashSet::new();
     let groups = std::collections::HashSet::new();
+    let shut = std::collections::HashSet::new();
     let built = median(|| {
         drop(std::hint::black_box(rows::build(Input {
             state: mirrored,
             unshown: &[],
             open: &open,
+            shut: &shut,
             groups: &groups,
         })));
     });
@@ -559,6 +561,7 @@ fn timing_of_the_thread_path() {
             state: mirrored,
             unshown: &[],
             open: &all,
+            shut: &shut,
             groups: &groups,
         })));
     });

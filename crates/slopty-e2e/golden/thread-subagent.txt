@@ -29,6 +29,8 @@ Navigation │ Subagent Count lines
 Button │ Back
 Article │ You: Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else.
 Button │ Copy message
+Button │ Working: Read a file
 Button │ Read /work/main.rs
+Link │ Open /work/main.rs
 Article │ 4
 Button │ Copy message
