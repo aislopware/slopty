@@ -262,6 +262,31 @@ fn a_long_diff_keeps_its_counts() {
     assert!(whole.ends_with("@@ -2000,1 +3000,0 @@\n-gone\n"));
 }
 
+/// A file made whole comes back with an empty diff, and counts every line it wrote as added,
+/// so the turn says what it changed.
+#[test]
+fn a_created_file_counts_its_lines_as_added() {
+    let created = json!({"type": "create", "filePath": "/w/notes.md", "content": "# Notes\nhello",
+        "originalFile": null, "structuredPatch": []});
+    let jsonl = [
+        line(&call(
+            "a1",
+            None,
+            "t1",
+            "Write",
+            &json!({"file_path": "/w/notes.md", "content": "# Notes\nhello"}),
+        )),
+        line(&result("u1", Some("a1"), "t1", "created", &created)),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let ToolDetail::Write(write) = &tool(&c, &MAIN, "t1").detail else { panic!("write") };
+    assert_eq!((write.kind, write.lines), (WriteKind::Create, 2));
+    assert_eq!((write.patch.added, write.patch.removed), (2, 0));
+    assert!(write.patch.hunks.is_empty(), "no diff to show");
+}
+
 /// An edit's hunks are headed from the file as it was, as git heads them, in the clipped hunks
 /// and in the whole patch alike.
 #[test]

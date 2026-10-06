@@ -305,7 +305,7 @@ expression: "decode(\"tools\").snapshot()"
               kind: Create
               patch:
                 hunks: []
-                added: 0
+                added: 2
                 removed: 0
                 clipped_lines: 0
                 full: ~

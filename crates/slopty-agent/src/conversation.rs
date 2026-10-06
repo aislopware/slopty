@@ -1241,6 +1241,10 @@ fn apply_result(
                 _ => write.kind,
             };
             write.patch = patch();
+            // A file made whole comes with an empty diff: every line it wrote is added.
+            if write.kind == WriteKind::Create && write.patch.hunks.is_empty() {
+                write.patch.added = write.patch.added.max(write.lines);
+            }
             result.is_some()
         }
         ToolDetail::Read(read) => {
