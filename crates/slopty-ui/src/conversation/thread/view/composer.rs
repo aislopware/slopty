@@ -195,12 +195,9 @@ impl ThreadView {
         )
     }
 
-    /// What the thread changed, in the foot; while a request is on show its card's head says
-    /// it instead, one place at a time.
+    /// What the thread changed, in the foot, a request on show or not: the edits are the
+    /// thread's, and a permission's card asks only its own question.
     fn changes(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if self.shown_waiting(cx).is_some() {
-            return None;
-        }
         let edited = self.state(cx).map(activity::edited).unwrap_or_default();
         self.changes_chip("thread-changes", self.changed(cx), &edited, cx)
     }

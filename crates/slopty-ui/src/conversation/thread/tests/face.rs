@@ -935,11 +935,11 @@ fn the_meter_says_its_share_from_half_full(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-meter-figure").is_some(), "60 %: in figures too");
 }
 
-/// While a request is on show, what the turn edited rides its card's head and opens the
-/// review; the composer's chip and a row of its own in the tray stay away, so the edits are
-/// said once.
+/// A request's card asks only its own question: what the turn edited stays the thread's, on
+/// the composer's chip, which opens the review, while the card is on show and after it goes;
+/// the tray does not say it a second time.
 #[gpui::test]
-fn a_requests_card_carries_the_turns_edits_once(cx: &mut TestAppContext) {
+fn a_requests_card_leaves_the_edits_to_the_thread(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::thread("edit");
     let thread = state.meta.id;
@@ -948,14 +948,14 @@ fn a_requests_card_carries_the_turns_edits_once(cx: &mut TestAppContext) {
     let (view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    let head = cx.debug_bounds("request-changes").expect("the edits on the card's head");
     let card = cx.debug_bounds("request-a").expect("the card");
-    assert!(card.contains(&head.center()), "inside it");
-    assert!(cx.debug_bounds("thread-changes").is_none(), "not on the composer as well");
+    let chip = cx.debug_bounds("thread-changes").expect("the edits on the composer");
+    assert!(!card.contains(&chip.center()), "outside the card");
+    assert!(cx.debug_bounds("request-changes").is_none(), "nothing of them on the card");
     assert!(cx.debug_bounds("thread-edited").is_none(), "nor in a row of the tray");
 
     let asked = super::asked(cx, &view);
-    cx.simulate_click(head.center(), Modifiers::none());
+    cx.simulate_click(chip.center(), Modifiers::none());
     assert!(
         asked.borrow().iter().any(|e| matches!(
             e,
@@ -967,7 +967,7 @@ fn a_requests_card_carries_the_turns_edits_once(cx: &mut TestAppContext) {
     state.requests.clear();
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("request-changes").is_none(), "with the card gone, so are they");
+    assert!(cx.debug_bounds("thread-changes").is_some(), "the chip stays with the card gone");
 }
 
 /// A turn whose edits counted no line (an agent that reports none) still has the composer's

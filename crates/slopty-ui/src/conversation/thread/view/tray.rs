@@ -261,7 +261,7 @@ impl ThreadView {
         let placement = self.marks.get().asked.map_or(Placement::Tray, |(_, p)| p);
         let request = waiting.get(at).filter(|_| placement != Placement::Inline).map(|current| {
             let asked = (current.request, at, waiting.len());
-            self.request_card(asked, placement, &bar.edited, cx)
+            self.request_card(asked, placement, cx)
         });
         // Each kind of thing stands in a group of its own, a base unit of space between groups,
         // so a row never reads as belonging to the group above it. Space, not a rule: rules
@@ -276,8 +276,8 @@ impl ThreadView {
                 .collect(),
         );
         groups.push(bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect());
-        // Over the composer the edits are its changes chip, or the request card's head while
-        // one is on show: a row of their own here said them a second time.
+        // Over the composer the edits are its changes chip: a row of their own here said them a
+        // second time.
         if !bar.edited.is_empty() && !tucked {
             groups.push(vec![self.edited_section(&bar.edited, cx)]);
         }
@@ -631,16 +631,16 @@ impl ThreadView {
             .children(scope)
     }
 
-    /// The request on show, in the tray, one card: what it asks on its head row, with what the
-    /// turn has `edited` so far, "2 of 5" with the way to the others, and the way back to its
-    /// call when that is scrolled away; then the command, then one row of answers. An approval
+    /// The request on show, in the tray, one card: what it asks on its head row, "2 of 5" with
+    /// the way to the others, and the way back to its call when that is scrolled away; then the
+    /// command, then one row of answers. What the turn edited is the thread's, said by the
+    /// composer's chip, never on a permission. An approval
     /// is answered only by a press, so a stray key cannot answer it; questions are a
     /// questionnaire, which the keyboard walks once it is in it.
     fn request_card(
         &self,
         (request, at, of): (&Request, usize, usize),
         placement: Placement,
-        edited: &[Edited],
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
@@ -758,7 +758,6 @@ impl ThreadView {
             });
             (None, body)
         };
-        let changes = self.changes_chip("request-changes", edited_counts(edited), edited, cx);
         div()
             .id(ElementId::Name(format!("request-{id}").into()))
             .debug_selector(move || format!("request-{id}"))
@@ -789,7 +788,6 @@ impl ThreadView {
                             .text_color(hsla(s.text))
                             .child(SharedString::from(title)),
                     )
-                    .children(changes)
                     .children(counter.map(|c| {
                         kit::tabular(div())
                             .flex_none()

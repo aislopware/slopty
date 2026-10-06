@@ -7700,12 +7700,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     deny" after a hairline. It was a third answer on the title's line. With nothing to answer
     here it is still the card's one answer, and with no plain deny to hang it from it leads
     the row.
-  - **The edits are said once.** While a request is on show, what the turn changed rides its
-    card's head after the title and opens the review; the composer's changes chip stands aside.
-    Otherwise the composer's chip says it. The tray's "Edits" row shows only where there is no
-    composer (a subagent's thread). The chip is the one door to the review, so it never hangs
-    on the counts: a turn whose edits counted no line (a file Claude Code created whole, whose
-    result carries an empty diff) shows a pencil and the file's name, or how many files.
+  - **The edits are said once.** The composer's changes chip says what the turn changed,
+    whether a request is on show or not, and opens the review. Amended 2026-10-06: the counts
+    rode a request's card head while it showed, which read as the permission's own figures
+    ("Allow Bash? +2 −1"); a permission's card asks only its question. The tray's "Edits" row
+    shows only where there is no composer (a subagent's thread). The chip is the one door to
+    the review, so it never hangs on the counts: a turn whose edits counted no line (a file
+    Claude Code created whole, whose result carries an empty diff) shows a pencil and the
+    file's name, or how many files.
   - **The composer's foot** is "+", the model, then the place, the meter and send. The model
     is its name alone: the agent's mark leads the tile's header. The mode and the effort show
     only when the agent is not at its default ("default" by id or name), and a mode or effort
