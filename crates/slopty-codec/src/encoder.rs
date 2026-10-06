@@ -1271,6 +1271,20 @@ mod tests {
         out
     }
 
+    /// One keyframe goes through a real session and comes out: the gate's probe of whether a
+    /// runner's encoder answers at all (`xtask/src/gate.rs`, `videotoolbox_step`), so it stays
+    /// the smallest coding there is.
+    #[test]
+    fn the_encoder_codes_one_frame() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        let keyframe = FrameOptions { force_keyframe: true, ..FrameOptions::default() };
+        encoder.encode(&frame(0), 0, &keyframe).unwrap();
+        encoder.flush().unwrap();
+        let out = collect(&rx, 1);
+        assert_eq!(out.iter().map(|p| (p.pts_us, p.keyframe)).collect::<Vec<_>>(), [(0, true)]);
+    }
+
     /// A refresh is always a picture that stands on its own: a delta off a reference where the
     /// session has them, a keyframe where it has none, and a keyframe asked for outright is not
     /// also flagged as a refresh.

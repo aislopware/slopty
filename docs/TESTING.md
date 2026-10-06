@@ -179,9 +179,12 @@ hardware) are listed in nextest's `ci` profile and run in every local `cargo gat
 ### VideoToolbox
 A runner's virtual Mac shares its host's media engine, and at times its encoder stops ("No real
 codec", `docs/decisions/video.md`). The tests that code then hang in the driver, past any kill.
-So CI runs the `videotoolbox` test group on its own after the rest, under a 10-minute deadline.
-If that run fails on a runner whose encoder logged that it stopped, the lane passes with a
-warning. Any other failure fails the lane. So a change to the coding path (`slopty-codec`,
+So CI runs the `videotoolbox` test group on its own after the rest, under a 5-minute deadline,
+and asks the encoder first and after a failure with one real frame
+(`encoder::tests::the_encoder_codes_one_frame`, 30 s). An encoder that does not answer before
+the run skips it with a warning. A failed run on a runner whose encoder stopped answering, or
+logged that it stopped, passes with a warning. A failure while the encoder still codes fails the
+lane, since the hang is then ours. So a change to the coding path (`slopty-codec`,
 `slopty-capture`, the worker's `screen`) runs the group on this Mac's real encoder before it
 lands:
 `cargo nextest run -p slopty-codec -p slopty-worker -E 'group(videotoolbox)'`.

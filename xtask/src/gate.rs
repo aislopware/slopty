@@ -968,6 +968,7 @@ fn test_lane(
         videotoolbox_step(
             cmd!(sh, "cargo nextest run {p...} --profile {profile} --no-tests=pass -E {expr}")
                 .env(crate::runner::RUNNER_VAR, &runner),
+            &Probe { sh },
         )
     } else {
         Ok(())
@@ -980,57 +981,101 @@ fn test_lane(
 /// The nextest test group of the tests that code through VideoToolbox (`.config/nextest.toml`).
 const VIDEOTOOLBOX: &str = "group(videotoolbox)";
 
-/// How long the VideoToolbox tests may take on a runner. Green, the slowest shard's took under
-/// two minutes.
-const VIDEOTOOLBOX_DEADLINE: Duration = Duration::from_mins(10);
+/// How long the VideoToolbox tests may take on a runner. Green, the step's p90 is 198 s and its
+/// slowest under 300 (`.research/dev-speed-2026-10-06.md` item 7).
+const VIDEOTOOLBOX_DEADLINE: Duration = Duration::from_mins(5);
 
-/// Run the VideoToolbox tests on their own, after the rest, and judge a failure by whether the
-/// runner's encoder had stopped.
-///
-/// A hosted runner's virtual Mac shares its host's media engine. At times its encoder stops
-/// ("No real codec", `docs/decisions/video.md`) with only a few dozen clients open (run
-/// 37185543085: 46). Every test that codes then times out, and its killed process stays stuck in
-/// exit inside the driver, where no signal ends it, so nextest waited on it until the job was
-/// cancelled. Here a run past [`VIDEOTOOLBOX_DEADLINE`] is killed. A failure on a runner whose
-/// encoder said it stopped says nothing of the change, so it is a warning. Any other failure
-/// fails the lane. A change to the coding path runs these tests on a Mac's real encoder before it
-/// lands (`docs/TESTING.md`, "VideoToolbox").
-fn videotoolbox_step(command: xshell::Cmd<'_>) -> Result<()> {
+/// The test that codes one frame, and nothing else, through a real session.
+const ENCODER_PROBE: &str = "encoder::tests::the_encoder_codes_one_frame";
+
+/// How long the probe may take, its test binary already built: one frame codes in milliseconds,
+/// so only an encoder that does not answer runs this long.
+const PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Whether the runner's encoder answers: [`ENCODER_PROBE`]'s binary built with no deadline, then
+/// run under [`PROBE_DEADLINE`].
+struct Probe<'a> {
+    /// The tree the tests run in.
+    sh: &'a Shell,
+}
+
+impl Probe<'_> {
+    /// Whether one frame coded in time. A probe that could not even be built answers yes: the
+    /// encoder is not what failed then.
+    fn answers(&self) -> bool {
+        let sh = self.sh;
+        let build = cmd!(sh, "cargo test -p slopty-codec --lib --no-run --quiet");
+        if !std::process::Command::from(build).status().is_ok_and(|s| s.success()) {
+            return true;
+        }
+        let run = cmd!(sh, "cargo test -p slopty-codec --lib --quiet -- --exact {ENCODER_PROBE}");
+        within(std::process::Command::from(run), PROBE_DEADLINE) == Some(true)
+    }
+}
+
+/// Run `command` in a process group of its own: whether it passed, or `None` when it outlived
+/// `deadline` and the whole group was killed.
+fn within(mut command: std::process::Command, deadline: Duration) -> Option<bool> {
     use std::os::unix::process::CommandExt as _;
 
-    println!("▶ videotoolbox");
-    let started = Instant::now();
-    let mut command = std::process::Command::from(command);
     command.process_group(0);
-    let mut child = command.spawn().context("videotoolbox: nextest failed to start")?;
+    let Ok(mut child) = command.spawn() else { return Some(false) };
     let group = child.id();
     let (done, waited) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _sent = done.send(child.wait());
     });
-    let passed = if let Ok(status) = waited.recv_timeout(VIDEOTOOLBOX_DEADLINE) {
-        status.context("videotoolbox: waiting on nextest")?.success()
-    } else {
-        println!("  the run passed {VIDEOTOOLBOX_DEADLINE:?}: killing it");
-        let _killed = std::process::Command::new("/bin/kill")
-            .args(["-KILL", "--", &format!("-{group}")])
-            .status();
-        false
-    };
+    if let Ok(status) = waited.recv_timeout(deadline) {
+        return Some(status.is_ok_and(|s| s.success()));
+    }
+    let _killed = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .status();
+    None
+}
+
+/// Run the VideoToolbox tests on their own, after the rest, and judge a failure by whether the
+/// runner's encoder still answers.
+///
+/// A hosted runner's virtual Mac shares its host's media engine. At times its encoder stops
+/// ("No real codec", `docs/decisions/video.md`) with only a few dozen clients open (run
+/// 37185543085: 46). Every test that codes then times out, and its killed process stays stuck in
+/// exit inside the driver, where no signal ends it. So a run past [`VIDEOTOOLBOX_DEADLINE`] is
+/// killed, and the encoder is asked twice with [`Probe`]: before the run, where an encoder that
+/// does not answer skips the step, and after a failed one, where an encoder that stopped answering
+/// (or said so in the log) makes the failure a warning, since it says nothing of the change. A
+/// failure while the encoder still answers fails the lane: the hang is ours. A change to the
+/// coding path runs these tests on a Mac's real encoder before it lands (`docs/TESTING.md`,
+/// "VideoToolbox").
+fn videotoolbox_step(command: xshell::Cmd<'_>, probe: &Probe<'_>) -> Result<()> {
+    println!("▶ videotoolbox");
+    if !probe.answers() {
+        println!(
+            "::warning title=VideoToolbox::this runner's video encoder does not code one frame, \
+             so its VideoToolbox tests were not run"
+        );
+        println!("  ⚠ videotoolbox: skipped, the runner's encoder does not answer");
+        return Ok(());
+    }
+    let started = Instant::now();
+    let ran = within(std::process::Command::from(command), VIDEOTOOLBOX_DEADLINE);
     let took = started.elapsed();
-    if passed {
+    if ran == Some(true) {
         println!("  ✓ videotoolbox ({took:.1?})");
         return Ok(());
     }
-    if crate::watchdog::encoder_stopped() {
+    if ran.is_none() {
+        println!("  the run passed {VIDEOTOOLBOX_DEADLINE:?}: killed it");
+    }
+    if crate::watchdog::encoder_stopped() || !probe.answers() {
         println!(
-            "::warning title=VideoToolbox::this runner's video encoder stopped (\"No real \
-             codec\"), so its VideoToolbox tests say nothing of the change"
+            "::warning title=VideoToolbox::this runner's video encoder stopped during the run, so \
+             its VideoToolbox tests say nothing of the change"
         );
         println!("  ⚠ videotoolbox ({took:.1?}): the runner's encoder stopped");
         return Ok(());
     }
-    println!("  ✘ videotoolbox ({took:.1?})");
+    println!("  ✘ videotoolbox ({took:.1?}): the encoder still codes, so the failure is ours");
     anyhow::bail!("step failed: videotoolbox")
 }
 
@@ -1588,10 +1633,43 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, Shard, Source, failed_tests, list, next_step,
-        one_gpui, spawned_selection, summary_of,
+        BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests, list,
+        next_step, one_gpui, spawned_selection, summary_of, within,
     };
     use crate::tools::repo_root;
+
+    /// A command run within a deadline says whether it passed, and one that outlives it is
+    /// killed with every process it started: a hung encoder test leaves nothing behind.
+    #[test]
+    fn a_run_past_its_deadline_is_killed_with_its_group() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let short = Duration::from_secs(5);
+        assert_eq!(within(Command::new("/usr/bin/true"), short), Some(true));
+        assert_eq!(within(Command::new("/usr/bin/false"), short), Some(false));
+        let pid_file = std::env::temp_dir().join(format!("gate-within-{}", std::process::id()));
+        let mut hung = Command::new("/bin/sh");
+        let line = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+        hung.args(["-c", &line]);
+        let started = Instant::now();
+        assert_eq!(within(hung, Duration::from_millis(500)), None);
+        assert!(started.elapsed() < short, "not waited out");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        std::fs::remove_file(&pid_file).unwrap();
+        // Killed: gone, or a zombie its new parent has yet to reap.
+        let state = Command::new("/bin/ps").args(["-o", "stat=", "-p", pid.trim()]).output();
+        let state = String::from_utf8(state.unwrap().stdout).unwrap();
+        assert!(state.trim().is_empty() || state.starts_with('Z'), "the group's sleep: {state}");
+    }
+
+    /// The probe names a test the encoder's module has.
+    #[test]
+    fn the_encoder_probe_is_a_test_of_the_codec() {
+        let encoder = include_str!("../../crates/slopty-codec/src/encoder.rs");
+        let name = ENCODER_PROBE.rsplit("::").next().unwrap();
+        assert!(encoder.contains(&format!("fn {name}()")), "{ENCODER_PROBE} is gone");
+    }
 
     /// The gate builds what the tests look for, under the variables they read.
     #[test]

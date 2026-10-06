@@ -2742,6 +2742,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *What CI does then.* The VideoToolbox tests are bounded at a minute on CI (they take
     9.2 s at most on a green runner), so a stopped encoder fails the shard in minutes,
     naming its tests, instead of cancelling the job.
+  - *Told apart from a hang of ours* (2026-10-06). The log check ("No real codec") missed two
+    of four stopped encoders (`.research/dev-speed-2026-10-06.md` item 7), and three reds on
+    2026-10-06 were synthetic-stream tests that passed here in seconds. The gate now asks the
+    encoder itself: one keyframe through a real session, under 30 s, before the group runs
+    (an encoder that does not answer skips it) and again after a failed run (one that stopped
+    answering makes the failure a warning). A failure while the encoder still codes fails the
+    lane. The step's deadline is 5 minutes, over a green p90 of 198 s. Tests:
+    `a_run_past_its_deadline_is_killed_with_its_group` and
+    `the_encoder_probe_is_a_test_of_the_codec` (`xtask` gate), and the probe itself,
+    `the_encoder_codes_one_frame` (`slopty-codec`).
   - *Not proven: how a runner gets there.* The whole worker shard on a fresh guest adds 61
     clients (4 → 65), far from 1020, and a hosted runner is a fresh virtual Mac per job. The
     hangs match the stopped encoder in every sign, but either the runner's guest starts a job
