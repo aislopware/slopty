@@ -572,6 +572,10 @@ pub enum MenuGroup {
     Tile,
     /// The breadcrumb's: the projects, or a repository's checkouts.
     Places,
+    /// A phone's title: the panes of the tab on show.
+    Panes,
+    /// A phone's title: the project's tabs.
+    Tabs,
     /// "+": the worker a new tile goes to, where there are several.
     Target,
     /// "+": what a new tile can be.
@@ -1010,8 +1014,8 @@ impl WorkspaceView {
     /// device), its tiles waiting for their workers.
     pub fn new(theme: Theme, saved: Option<Saved>, cx: &mut Context<Self>) -> Self {
         let layout = match saved.clone() {
-            Some(saved) => Tiling::restore(saved.tiling, TilingConfig::default()),
-            None => Tiling::new(TilingConfig::default()),
+            Some(saved) => Tiling::restore(saved.tiling, tiling_config()),
+            None => Tiling::new(tiling_config()),
         };
         let navigator = saved.as_ref().map(|s| s.navigator.clone()).unwrap_or_default();
         // A terminal's own change (an echo) is not the workspace's, and a pane's own news
@@ -2361,6 +2365,12 @@ impl WorkspaceView {
             navigator::Mode::Docked => away.into_any_element(),
         }
     }
+}
+
+/// The tiling's constants for this device: touch's on iOS (an iPad's panes at the touch
+/// minimum, and Split View below 900 pt drawn as a phone), a pointer's on the Mac.
+const fn tiling_config() -> TilingConfig {
+    if cfg!(target_os = "ios") { TilingConfig::TOUCH } else { TilingConfig::POINTER }
 }
 
 /// Write `saved` to `path` atomically; a failure is logged, never fatal: the layout is this

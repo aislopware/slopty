@@ -55,9 +55,18 @@ pub struct TilingConfig {
     pub phone_below: f32,
 }
 
+impl TilingConfig {
+    /// A pointer's (a Mac's): panes of [`Room::POINTER`], and a phone's model only below
+    /// 700 pt.
+    pub const POINTER: Self = Self { room: Room::POINTER, phone_below: 700.0 };
+    /// Touch's (an iPhone's, an iPad's): panes of [`Room::TOUCH`], and a phone's model below
+    /// 900 pt, so an iPad in Split View narrower than that shows one pane as a phone does.
+    pub const TOUCH: Self = Self { room: Room::TOUCH, phone_below: 900.0 };
+}
+
 impl Default for TilingConfig {
     fn default() -> Self {
-        Self { room: Room::POINTER, phone_below: 700.0 }
+        Self::POINTER
     }
 }
 
@@ -170,6 +179,11 @@ impl Tiling {
     /// Change the least room a pane takes (touch, or a pointer).
     pub const fn set_room(&mut self, room: Room) {
         self.config.room = room;
+    }
+
+    /// Change its constants: a pointer's, or touch's.
+    pub const fn set_config(&mut self, config: TilingConfig) {
+        self.config = config;
     }
 
     /// The area a tab is laid out in, `w` by `h` points from the origin.

@@ -100,6 +100,8 @@ pub(super) enum MenuKind {
     Server,
     /// A tile's or a project's own menu, opened by a press on it (`context_menus`).
     Context,
+    /// A phone's title: the tab's panes and the project's tabs, as the phone draws one pane.
+    Switch,
 }
 
 /// What the title bar's empty span asks of the window, as a native title bar does.
@@ -348,7 +350,7 @@ impl WorkspaceView {
         let leading = if docked { spacing.sm } else { LEADING_INSET + f32::from(safe.left) };
         let trailing = spacing.md + f32::from(safe.right);
         let phone = self.phone;
-        let phone_title = (has_workers && phone).then(|| self.render_phone_title());
+        let phone_title = (has_workers && phone).then(|| self.render_phone_switch(cx));
         let theme = &self.theme;
         let s = &theme.surfaces;
 
@@ -498,6 +500,50 @@ impl WorkspaceView {
             .child(buttons)
             .children(hanging)
             .into_any_element()
+    }
+
+    /// A phone's title, and while the tab has panes or the project tabs the phone does not
+    /// draw, the menu that goes to them ([`MenuKind::Switch`]), its chevron after the title
+    /// as the breadcrumb's segments have theirs.
+    fn render_phone_switch(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let title = self.render_phone_title();
+        let (panes, tabs) = self.switch_counts();
+        if panes < 2 && tabs < 2 {
+            return title;
+        }
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let which = MenuKind::Switch;
+        let anchors = Rc::clone(&self.anchors.at);
+        let measure = canvas(
+            move |bounds, _window, _cx| {
+                anchors.borrow_mut().insert(which, bounds);
+            },
+            |_bounds, (), _window, _cx| {},
+        )
+        .absolute()
+        .inset_0();
+        let switch = div()
+            .id("phone-switch")
+            .debug_selector(|| "phone-switch".to_owned())
+            .role(Role::Button)
+            .aria_label(menu_name(which))
+            .aria_expanded(self.menu == Some(which))
+            .relative()
+            .flex_shrink(1.0)
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .cursor_pointer()
+            .child(measure)
+            .child(title)
+            .child(self.chevron())
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .on_click(
+                cx.listener(move |this, _ev, window, cx| this.toggle_menu(which, window, cx)),
+            );
+        crate::a11y::tab_stop(switch, s.focus).into_any_element()
     }
 
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
@@ -683,6 +729,7 @@ impl WorkspaceView {
                 self.context_menu.as_ref().map(|m| m.entries.clone()).unwrap_or_default()
             }
             MenuKind::Checkouts => self.checkout_entries(&entity),
+            MenuKind::Switch => self.switch_entries(&entity),
             // The palette's names for the same actions, which the rows run as the keys do.
             MenuKind::New => {
                 self.target_entries(&entity).into_iter().chain(Self::new_entries(&entry)).collect()
@@ -718,15 +765,19 @@ impl WorkspaceView {
         };
         let mut menu = kit::Menu::new();
         let mut group = entries.first().map(|entry| entry.group);
-        for entry in entries {
+        // Two rows of one name (two shells in one folder) are two rows: the second keyed apart.
+        let mut keys = std::collections::HashSet::new();
+        for (n, entry) in entries.into_iter().enumerate() {
             if group != Some(entry.group) {
                 group = Some(entry.group);
                 menu.separate();
             }
-            menu.push(
-                kit::MenuItem::with_run(entry.label.clone(), entry.label, entry.run)
-                    .detail(entry.detail),
-            );
+            let key = if keys.insert(entry.label.clone()) {
+                entry.label.clone()
+            } else {
+                SharedString::from(format!("{}-{n}", entry.label))
+            };
+            menu.push(kit::MenuItem::with_run(key, entry.label, entry.run).detail(entry.detail));
         }
         // A base unit below the bar, the right edge on the window's inset, where the tiles'
         // headers end: a popover lined up with what it covers rather than hung off its button a
@@ -765,9 +816,10 @@ impl WorkspaceView {
                             el.left(at.map_or_else(|| px(spacing.inset()), |b| b.origin.x))
                         };
                         match which {
-                            MenuKind::New | MenuKind::Projects | MenuKind::Checkouts => {
-                                left(el.top(under_bar))
-                            }
+                            MenuKind::New
+                            | MenuKind::Projects
+                            | MenuKind::Checkouts
+                            | MenuKind::Switch => left(el.top(under_bar)),
                             // The server's readout sits among the trailing ones: its menu ends
                             // on the readout's right edge.
                             MenuKind::Server => el.top(under_bar).right(at.map_or_else(
@@ -877,6 +929,7 @@ const fn menu_name(which: MenuKind) -> &'static str {
         MenuKind::Checkouts => "Checkouts",
         MenuKind::Server => "Server",
         MenuKind::Context => "Menu",
+        MenuKind::Switch => "Panes and tabs",
     }
 }
 

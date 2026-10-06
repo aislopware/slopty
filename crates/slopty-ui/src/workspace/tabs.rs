@@ -8,20 +8,21 @@
 //! refused leaves the queue, and a link that drops takes its asks with it.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
-use gpui::{Context, Window};
+use gpui::{App, Context, SharedString, WeakEntity, Window};
 use slopty_client::layout::tiling::TabId;
 use slopty_client::layout::{GroupKey, Side, Tab, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::RequestId;
 use slopty_proto::items::ItemKind;
 
-use super::WorkspaceView;
 use super::actions::{
     CloseOtherTabs, MOVE_TO_PROJECT, MoveToProject, MoveToProjectOf, OTHER_TABS, OtherTabs,
     ShowTab, SplitDown, SplitRight, StartAgent, StartThread, TabTerminal,
 };
 use super::title_tabs::TitleTabsHost as _;
+use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::palette::PaletteItem;
 
 /// Where a shell this client asked for goes once its item comes.
@@ -92,6 +93,55 @@ impl WorkspaceView {
         if shown.is_none() && !asked && self.layout.shown_tab().is_some() {
             self.new_terminal_as(Opening::Terminal, cx);
         }
+    }
+
+    /// What a phone's title menu would list: the panes of the tab on show, and the project's
+    /// tabs.
+    pub(super) fn switch_counts(&self) -> (usize, usize) {
+        let panes =
+            self.layout.shown_tab().map_or(0, |t| t.panes().filter(|p| !p.hidden()).count());
+        let tabs = self.layout.shown_project().map_or(0, |p| p.tabs().len());
+        (panes, tabs)
+    }
+
+    /// A phone's title menu ([`super::titlebar::MenuKind::Switch`]): the panes of the tab on
+    /// show by their shown tile, the focused one ticked, while there are two or more; then the
+    /// project's tabs, the one on show ticked, while there are two or more.
+    pub(super) fn switch_entries(&self, entity: &WeakEntity<Self>) -> Vec<MenuEntry> {
+        let (panes, tabs) = self.switch_counts();
+        let tick = |on: bool| SharedString::from(if on { "\u{2713}" } else { "" });
+        let mut entries = Vec::new();
+        if panes > 1 {
+            let focused = self.focused();
+            let shown = self.layout.shown_tab().into_iter().flat_map(Tab::panes);
+            for tile in shown.filter(|p| !p.hidden()).filter_map(slopty_client::layout::Pane::shown)
+            {
+                let label = self.item(tile).map(|item| self.tile_title(item)).unwrap_or_default();
+                let entity = entity.clone();
+                entries.push(MenuEntry {
+                    group: MenuGroup::Panes,
+                    label: label.into(),
+                    detail: tick(focused == Some(tile)),
+                    run: Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        let _gone = entity.update(cx, |this, cx| this.focus_tile(tile, cx));
+                    }),
+                });
+            }
+        }
+        if tabs > 1 {
+            for tab in self.title_tabs() {
+                let (id, entity) = (tab.id, entity.clone());
+                entries.push(MenuEntry {
+                    group: MenuGroup::Tabs,
+                    label: tab.title,
+                    detail: tick(tab.shown),
+                    run: Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        let _gone = entity.update(cx, |this, cx| this.show_tab(id, cx));
+                    }),
+                });
+            }
+        }
+        entries
     }
 
     /// A shell on the focused tile's worker (or the one "+" chose), in the focused shell's

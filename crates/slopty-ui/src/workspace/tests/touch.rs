@@ -1,5 +1,7 @@
-//! A pinch over the panes in the headless workspace: over a remote picture it zooms the
-//! picture; over a terminal it leaves the picture and the layout alone.
+//! Touch in the headless workspace. A pinch over a remote picture zooms the picture; over a
+//! terminal it leaves the picture and the layout alone. A phone shows one pane, its title the
+//! way to the tab's other panes and the project's tabs; an iPad splits by the touch minimum,
+//! and in Split View below 900 pt shows one pane as a phone does.
 
 use gpui::{Bounds, PinchEvent};
 use slopty_proto::screen::VideoCodec;
@@ -188,4 +190,99 @@ fn the_palettes_remote_gestures_reach_the_active_picture(cx: &mut TestAppContext
     assert!(!remote(cx), "and off again");
     let listed = palette_items().iter().any(|i| i.label == crate::screen::REMOTE_GESTURES);
     assert!(listed, "the palette offers it");
+}
+
+fn leak(selector: String) -> &'static str {
+    Box::leak(selector.into_boxed_str())
+}
+
+fn click_at(cx: &mut VisualTestContext, selector: &'static str) {
+    let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"));
+    cx.simulate_click(at.center(), Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// The labels of the menu's rows, in order.
+fn menu_rows(cx: &mut VisualTestContext) -> Vec<String> {
+    tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label).collect()
+}
+
+/// A phone draws the focused pane alone over the tab. Its title opens the tab's panes and the
+/// project's tabs, the ones on show ticked; a pane picked is focused and drawn, a tab picked
+/// shown. With one pane and one tab the title opens nothing.
+#[gpui::test]
+fn a_phone_shows_one_pane_and_its_title_goes_to_the_others(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let solo = opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/w/solo"));
+    cx.simulate_resize(size(px(390.0), px(760.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("phone-title").is_some(), "the phone's title");
+    assert!(cx.debug_bounds("phone-switch").is_none(), "nothing else to go to");
+
+    cx.simulate_resize(size(px(VIEWPORT.0), px(VIEWPORT.1)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-d");
+    let right = opens_in(&view, cx, &fake, SessionId::new(), fake.me, 2, Some("/w/right"));
+    let away = opens_in(&view, cx, &fake, SessionId::new(), fake.me, 3, Some("/w/away"));
+    on_new_tab(&view, cx, away);
+    view.update(cx, |v, cx| v.focus_tile(right, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.layout().frame().panes.len()), 2, "two panes wide");
+
+    cx.simulate_resize(size(px(390.0), px(760.0)));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.layout().frame().panes.len()), 1, "one on a phone");
+    assert!(drawn_at(&view, cx, right).is_some() && drawn_at(&view, cx, solo).is_none());
+
+    click_at(cx, "phone-switch");
+    let rows = menu_rows(cx);
+    assert_eq!(rows.len(), 4, "two panes, then two tabs: {rows:?}");
+    let title = |cx: &mut VisualTestContext, t: TileRef| {
+        view.read_with(cx, |v, _| v.item(t).map(|i| v.tile_title(i))).expect("an item")
+    };
+    let (solo_title, right_title, away_title) =
+        (title(cx, solo), title(cx, right), title(cx, away));
+    assert_eq!(rows[..2], [solo_title.clone(), right_title], "the panes, in order");
+    assert_eq!(rows[3], away_title, "then the tabs");
+    click_at(cx, leak(format!("menu-{solo_title}")));
+    assert_eq!(focused(&view, cx), Some(solo), "the pane picked");
+    assert!(drawn_at(&view, cx, solo).is_some() && drawn_at(&view, cx, right).is_none());
+
+    click_at(cx, "phone-switch");
+    click_at(cx, leak(format!("menu-{away_title}")));
+    assert_eq!(focused(&view, cx), Some(away), "the tab picked, shown");
+}
+
+/// An iPad splits by the touch minimum: on a 1024 pt screen a shell opened beside the focus
+/// gets a pane of its own to its right, where a pointer's minimum would put it below. In Split
+/// View below 900 pt it is drawn as a phone: one pane, the phone's title.
+#[gpui::test]
+fn an_ipad_splits_by_the_touch_room_and_in_split_view_shows_one_pane(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    view.update(cx, |v, _| v.layout.set_config(TilingConfig::TOUCH));
+    cx.simulate_resize(size(px(1024.0), px(768.0)));
+    cx.run_until_parked();
+    let fake = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    view.update(cx, |v, cx| v.open_command(vec!["top".to_owned()], cx));
+    let beside = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let area = view.read_with(cx, |v, _| v.layout().area().w);
+    assert!(
+        area < 2.0 * slopty_client::layout::tree::PANE_MIN_W,
+        "too narrow for a pointer's: {area}"
+    );
+    let (a, b) = (pos_of(&view, cx, first), pos_of(&view, cx, beside));
+    assert_eq!(a.tab, b.tab, "in the tab");
+    assert_ne!(a.pane, b.pane, "a pane of its own");
+    let (left, right) =
+        (drawn_at(&view, cx, first).expect("drawn"), drawn_at(&view, cx, beside).expect("drawn"));
+    assert!(right.left() >= left.right() - px(0.5), "beside, not below: {left:?} {right:?}");
+    assert!(cx.debug_bounds("phone-title").is_none(), "an iPad's bar");
+
+    // Split View's two thirds of an 11-inch iPad: wider than a phone by a pointer's rule.
+    cx.simulate_resize(size(px(800.0), px(768.0)));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.layout().frame().panes.len()), 1, "one pane");
+    assert!(cx.debug_bounds("phone-switch").is_some(), "the phone's title, its way to the other");
 }

@@ -2022,3 +2022,25 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::tab_commands::{cmd_alt_t_shows_hides_and_shows_the_same_shell,
     a_zoom_fills_the_tab_and_both_come_back}` (the zoom puts the docked navigator away and both
     come back), and `layout::tiling::tests` for the terminal's toggle.
+- ✅ **The phone shows one pane; the iPad splits by the touch room** (2026-10-07, step 8 of the
+  study's §4.2).
+  - **Constants by device.** On iOS the tiling takes `TilingConfig::TOUCH`: panes of the touch
+    minimum (480 pt), and a phone's model below 900 pt. A Mac takes `TilingConfig::POINTER`
+    (520 pt panes, a phone's model only below 700 pt).
+    - A 1024 pt iPad therefore opens a shell beside the focus in a pane to its right, where a
+      pointer's minimum would put it below.
+    - Split View narrower than 900 pt is drawn as a phone. The navigator's modes already used
+      the same threshold, so the layout, the bar and the navigator change model at one width.
+  - **A phone's title is the way to what it does not draw.** The focused pane fills the tab.
+    While the tab has other panes, or the project other tabs, the title gains the breadcrumb's
+    chevron. It opens "Panes and tabs": the tab's panes by their shown tile, then the project's
+    tabs, with the focused pane and the tab on show ticked. A pane picked is focused and drawn;
+    a tab picked is shown.
+  - **Menu keys stay unique.** Two rows of one name, such as two shells in one folder, get keys
+    of their own, so a bar menu never holds two rows with one id.
+  - **Deferred: lifting a header or a tab with a long press on iPad.** A long press there
+    already opens the tile's menu, as iPadOS's context menus do. A press then a move already
+    carries a header or a tab, as it does with a pointer.
+  - Tests: `workspace::tests::touch::{a_phone_shows_one_pane_and_its_title_goes_to_the_others,
+    an_ipad_splits_by_the_touch_room_and_in_split_view_shows_one_pane}`. The iOS goldens are
+    retaken in the simulator lane.

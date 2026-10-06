@@ -328,7 +328,7 @@ impl WorkspaceView {
     }
 
     /// The chevron of a segment that opens a menu.
-    fn chevron(&self) -> gpui::Div {
+    pub(super) fn chevron(&self) -> gpui::Div {
         let theme = &self.theme;
         Drawn::disclosure(theme, Symbol::ChevronDown)
             .slot(px(IconSize::Inline.slot(theme)), hsla(theme.surfaces.text_muted))
