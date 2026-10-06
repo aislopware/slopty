@@ -203,6 +203,58 @@ mod tests {
         assert_eq!(caller.presence_said(), Some(at(false)));
     }
 
+    /// The phone this client is goes up when said and on each change, not again for the same,
+    /// to a new link at once, and its withdrawal names the client.
+    #[tokio::test]
+    async fn the_phone_goes_on_each_change_and_to_each_new_link() {
+        use slopty_core::ClientId;
+        use slopty_proto::push::PushDevice;
+        use slopty_proto::server::ToServer;
+        let listener =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let addr = HostAddr::new("127.0.0.1", port);
+        let (task, mut events) =
+            spawn(&tokio::runtime::Handle::current(), endpoint, addr, role(), None);
+        let caller = task.caller();
+        let me = ClientId::new();
+        let device = PushDevice {
+            token: "0f".repeat(32),
+            key: [7; 32],
+            sandbox: true,
+            topic: "dev.aislopware.slopty".to_owned(),
+            quiet_ms: 30_000,
+        };
+        let heard =
+            async |rx: &mut slopty_net::framed::FramedRecv<ToServer>| match tokio::time::timeout(
+                WAIT,
+                rx.recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            {
+                ToServer::PushDevice { client, device } => (client, device),
+                other => panic!("{other:?}"),
+            };
+
+        let mut link = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not linked") };
+        caller.push_device(me, Some(device.clone()));
+        assert_eq!(heard(&mut link.rx).await, (me, Some(device.clone())));
+        caller.push_device(me, Some(device.clone()));
+        caller.push_device(me, None);
+        assert_eq!(heard(&mut link.rx).await, (me, None), "the same again sent nothing");
+
+        caller.push_device(me, Some(device.clone()));
+        assert_eq!(heard(&mut link.rx).await, (me, Some(device.clone())));
+        link.conn.close(0_u32.into(), b"restart");
+        while !matches!(next(&mut events).await, ServerEvent::Unlinked { .. }) {}
+        let mut again = welcome(&listener, Vec::new()).await;
+        assert_eq!(heard(&mut again.rx).await, (me, Some(device)), "a new link is told at once");
+    }
+
     /// A UDP relay in front of the server at `port` that can go deaf both ways, as a path that
     /// died while the device slept does: nothing is closed, nothing more arrives. Returns its
     /// port and the switch.

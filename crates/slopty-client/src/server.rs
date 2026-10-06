@@ -15,11 +15,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use slopty_core::WorkerId;
+use slopty_core::{ClientId, WorkerId};
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{HostAddr, NetError};
 use slopty_proto::RequestId;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::push::PushDevice;
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
 use slopty_proto::thread::attention::Presence;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -69,8 +70,13 @@ pub struct ServerTask {
     task: tokio::task::JoinHandle<()>,
     calls: mpsc::Sender<Call>,
     presence: Arc<watch::Sender<Option<Presence>>>,
+    phone: Arc<watch::Sender<Option<Phone>>>,
     resume: Arc<Notify>,
 }
+
+/// What this client last said of itself as a phone the server may push to: its identity, and
+/// the device, or none to take it back.
+type Phone = (ClientId, Option<PushDevice>);
 
 impl ServerTask {
     /// Something may have killed the link (the device slept, the path moved): a live link is
@@ -83,7 +89,11 @@ impl ServerTask {
     /// A handle that sends verbs up this link, for as long as it runs.
     #[must_use]
     pub fn caller(&self) -> ServerCaller {
-        ServerCaller { calls: self.calls.clone(), presence: Arc::clone(&self.presence) }
+        ServerCaller {
+            calls: self.calls.clone(),
+            presence: Arc::clone(&self.presence),
+            phone: Arc::clone(&self.phone),
+        }
     }
 }
 
@@ -97,6 +107,8 @@ pub struct ServerCaller {
     calls: mpsc::Sender<Call>,
     /// Where the person is, sent on every change and again on every link.
     presence: Arc<watch::Sender<Option<Presence>>>,
+    /// The phone this client is, sent on every change and again on every link.
+    phone: Arc<watch::Sender<Option<Phone>>>,
 }
 
 impl ServerCaller {
@@ -133,6 +145,19 @@ impl ServerCaller {
     pub fn presence_said(&self) -> Option<Presence> {
         self.presence.borrow().clone()
     }
+
+    /// Say this client, `client`, is a phone the server may push to as `device`, or, with
+    /// none, no longer. Nothing goes when it is what was said last; a new link is told at once.
+    pub fn push_device(&self, client: ClientId, device: Option<PushDevice>) {
+        let phone = (client, device);
+        self.phone.send_if_modified(|now| {
+            let changed = now.as_ref() != Some(&phone);
+            if changed {
+                *now = Some(phone);
+            }
+            changed
+        });
+    }
 }
 
 impl ServerCaller {
@@ -142,7 +167,8 @@ impl ServerCaller {
     pub fn queued() -> (Self, CallQueue) {
         let (calls, queued) = mpsc::channel(CALL_DEPTH);
         let presence = Arc::new(watch::Sender::new(None));
-        (Self { calls, presence }, CallQueue { queued })
+        let phone = Arc::new(watch::Sender::new(None));
+        (Self { calls, presence, phone }, CallQueue { queued })
     }
 }
 
@@ -204,10 +230,12 @@ pub fn spawn(
     let (calls, queued) = mpsc::channel(CALL_DEPTH);
     let presence = Arc::new(watch::Sender::new(None));
     let said = presence.subscribe();
+    let phone = Arc::new(watch::Sender::new(None));
     let resume = Arc::new(Notify::new());
-    let up = Up { calls: queued, presence: said, resume: Arc::clone(&resume) };
+    let up =
+        Up { calls: queued, presence: said, phone: phone.subscribe(), resume: Arc::clone(&resume) };
     let task = runtime.spawn(run(endpoint, addr, role, first, tx, up));
-    (ServerTask { task, calls, presence, resume }, rx)
+    (ServerTask { task, calls, presence, phone, resume }, rx)
 }
 
 async fn run(
@@ -270,19 +298,20 @@ async fn run(
     }
 }
 
-/// What goes up the link from this client: verbs, and where the person is; and the word to
-/// probe it ([`ServerTask::resume`]).
+/// What goes up the link from this client: verbs, where the person is, and the phone it is;
+/// and the word to probe it ([`ServerTask::resume`]).
 #[derive(Debug)]
 struct Up {
     calls: mpsc::Receiver<Call>,
     presence: watch::Receiver<Option<Presence>>,
+    phone: watch::Receiver<Option<Phone>>,
     resume: Arc<Notify>,
 }
 
 /// Hand on everything the link carries and send up every verb until it ends; the reason, or
 /// `None` once nobody listens.
 async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> Option<String> {
-    let Up { calls, presence, resume } = up;
+    let Up { calls, presence, phone, resume } = up;
     tracing::debug!(server = %link.remote, name = %link.name, "server linked");
     let ServerLink { conn, name, link, tx: mut up, mut rx, .. } = link;
     let close = || conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
@@ -290,9 +319,10 @@ async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> 
         close();
         return None;
     }
-    // A new link knows nothing of where the person is: it is told at once.
+    // A new link knows nothing of where the person is, nor of the phone: it is told at once.
     presence.mark_changed();
-    let mut said_open = true;
+    phone.mark_changed();
+    let (mut said_open, mut phone_open) = (true, true);
     let mut pending: HashMap<RequestId, Call> = HashMap::new();
     let mut next: RequestId = 0;
     // A probe on its way: what had arrived when its PING went, and when it gives up.
@@ -339,6 +369,18 @@ async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> 
                 let said = presence.borrow_and_update().clone();
                 if let Some(said) = said
                     && let Err(e) = up.send(&ToServer::Presence(said)).await
+                {
+                    break e.to_string();
+                }
+            }
+            changed = phone.changed(), if phone_open => {
+                if changed.is_err() {
+                    phone_open = false;
+                    continue;
+                }
+                let said = phone.borrow_and_update().clone();
+                if let Some((client, device)) = said
+                    && let Err(e) = up.send(&ToServer::PushDevice { client, device }).await
                 {
                     break e.to_string();
                 }
