@@ -121,6 +121,8 @@ slopty-media.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
+# The iOS test plays the server: it seals a notice to the phone's key (`tests/ios_uikit.rs`).
+slopty-push = { workspace = true, features = [ "getrandom" ] }
 slopty-testkit.workspace = true
 image.workspace = true
 tempfile.workspace = true

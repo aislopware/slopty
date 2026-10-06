@@ -8015,6 +8015,7 @@ dependencies = [
  "slopty-platform",
  "slopty-proto",
  "slopty-pty",
+ "slopty-push",
  "slopty-shape",
  "slopty-testkit",
  "tempfile",
@@ -8171,7 +8172,6 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
  "slopty-platform",
- "thiserror 2.0.21",
  "tracing",
 ]
 

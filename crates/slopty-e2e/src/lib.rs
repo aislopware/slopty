@@ -307,6 +307,24 @@ pub enum Command {
         /// The banner's tag, which is the session UUID.
         tag: String,
     },
+    /// Hand the app a device token as the app delegate's `didRegisterForRemoteNotifications`
+    /// would (iOS only), ask for notes with no prompt (provisional), and answer the public half
+    /// of the phone's push key ([`Reply::PushKey`]). A simulator's own token is not what the
+    /// test seals to, so the test names one.
+    PushRegister {
+        /// The token's bytes.
+        token: Vec<u8>,
+    },
+    /// The notes the Notification Centre shows for the app ([`Reply::Delivered`]).
+    Delivered,
+    /// Open a push whose APNs `payload` (its JSON) carries a sealed body, as the notification
+    /// extension does, with the key and the token the app kept in the Keychain they share
+    /// ([`Reply::Opened`]). `simctl push` hands a note straight to the system and never starts
+    /// the extension, so this is how a test reaches its work.
+    OpenPush {
+        /// The payload, as the server sends it to APNs.
+        payload: String,
+    },
     /// Keep the app's main thread busy for `ms` milliseconds, as a hang does: nothing is drawn
     /// and no input is answered meanwhile. The hang monitor's case.
     HoldMain {
@@ -543,11 +561,38 @@ pub enum Reply {
         /// Taken.
         taken: bool,
     },
+    /// A [`Command::PushRegister`]: the public half of the phone's X25519 key.
+    PushKey {
+        /// Its 32 bytes.
+        key: Vec<u8>,
+    },
+    /// A [`Command::Delivered`]: each note shown, as the system lists them.
+    Delivered {
+        /// The notes.
+        notes: Vec<DeliveredNote>,
+    },
+    /// A [`Command::OpenPush`]: the note the push opened to.
+    Opened {
+        /// The note.
+        note: DeliveredNote,
+    },
     /// The command failed.
     Error {
         /// Why.
         message: String,
     },
+}
+
+/// A note in the Notification Centre ([`Reply::Delivered`]), or one a push opened to
+/// ([`Reply::Opened`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct DeliveredNote {
+    /// Its identifier.
+    pub id: String,
+    /// The first line.
+    pub title: String,
+    /// What follows it.
+    pub body: String,
 }
 
 /// A snapshot of the app's state.

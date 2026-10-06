@@ -161,6 +161,22 @@ pub(crate) fn serve(
                     Ok(()) => after_frame(window, Reply::Ok, cx).await,
                     Err(message) => Reply::Error { message },
                 },
+                // The system's own answers, from the async task: nothing on screen changes.
+                Command::PushRegister { token } => push_register(&token).await,
+                Command::OpenPush { payload } => open_push(&payload),
+                Command::Delivered => {
+                    let notes = slopty_platform::notify::delivered().await;
+                    Reply::Delivered {
+                        notes: notes
+                            .into_iter()
+                            .map(|n| slopty_e2e::DeliveredNote {
+                                id: n.id,
+                                title: n.title,
+                                body: n.body,
+                            })
+                            .collect(),
+                    }
+                }
                 // Input settles on the next frame: focus moved by a click is only in the
                 // dispatch tree once it has been drawn, so a keystroke sent before that would
                 // go nowhere. Reply after the frame, and the driver never races the app.
@@ -484,6 +500,50 @@ mod uikit {
     }
 }
 
+/// [`Command::PushRegister`]: `token` arrives as the app delegate hands it over, notes are
+/// allowed with no prompt, and the phone's push key is made (or read back) as for a server.
+#[cfg(target_os = "ios")]
+async fn push_register(token: &[u8]) -> Reply {
+    use slopty_platform::notify::{Alerts, ask_quietly, pushed};
+    pushed::token_arrived(token);
+    let alerts = ask_quietly().await;
+    if alerts != Alerts::Allowed {
+        return Reply::Error { message: format!("notes are {alerts:?}") };
+    }
+    match pushed::device_key() {
+        Ok(key) => Reply::PushKey { key: key.public().to_vec() },
+        Err(e) => error(&e),
+    }
+}
+
+/// [`Command::OpenPush`]: the payload's top-level keys are the `userInfo` the extension reads.
+#[cfg(target_os = "ios")]
+fn open_push(payload: &str) -> Reply {
+    let info: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(info) => info,
+        Err(e) => return error(&e),
+    };
+    let text = |key: &str| info.get(key)?.as_str().map(str::to_owned);
+    match slopty_platform::notify::pushed::note_from(text) {
+        Ok(note) => Reply::Opened {
+            note: slopty_e2e::DeliveredNote { id: note.id, title: note.title, body: note.body },
+        },
+        Err(e) => error(&e),
+    }
+}
+
+/// [`Command::OpenPush`] where nothing is pushed to.
+#[cfg(not(target_os = "ios"))]
+fn open_push(_payload: &str) -> Reply {
+    Reply::Error { message: "only an iPhone or an iPad is pushed to".into() }
+}
+
+/// [`Command::PushRegister`] where nothing is pushed to.
+#[cfg(not(target_os = "ios"))]
+fn push_register(_token: &[u8]) -> std::future::Ready<Reply> {
+    std::future::ready(Reply::Error { message: "only an iPhone or an iPad is pushed to".into() })
+}
+
 fn error(e: &dyn std::fmt::Display) -> Reply {
     Reply::Error { message: format!("{e:#}") }
 }
@@ -787,6 +847,9 @@ fn apply(
             Reply::Ok
         }
         Command::Dump
+        | Command::PushRegister { .. }
+        | Command::OpenPush { .. }
+        | Command::Delivered
         | Command::KeepDragged { .. }
         | Command::DragOver { .. }
         | Command::DragDrop { .. }

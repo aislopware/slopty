@@ -79,6 +79,18 @@ pub struct Note {
     pub urgent: bool,
 }
 
+/// A note the system shows in its Notification Centre ([`delivered`]): one posted here, or
+/// one the notification extension opened from a push.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Delivered {
+    /// Its identifier.
+    pub id: String,
+    /// The first line.
+    pub title: String,
+    /// What follows it.
+    pub body: String,
+}
+
 /// A notification the human tapped, or one of its buttons.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Tap {
@@ -281,7 +293,10 @@ impl Notifier for Memory {
 }
 
 #[cfg(target_vendor = "apple")]
-pub use apple::{System, ask, content_of, install, open_settings, settings, taps, taps_finished};
+pub use apple::{
+    System, ask, ask_quietly, content_of, delivered, install, open_settings, settings, taps,
+    taps_finished,
+};
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
 
@@ -590,9 +605,19 @@ mod apple {
             .getNotificationSettingsWithCompletionHandler(&read);
     }
 
+    /// The options the app asks for: alerts, sounds and the badge.
+    const ASKED: UNAuthorizationOptions = UNAuthorizationOptions::Alert
+        .union(UNAuthorizationOptions::Sound)
+        .union(UNAuthorizationOptions::Badge);
+
     /// Ask for alerts, sounds and the badge (the system's prompt, which shows once ever) and
     /// hand the answer to `then`, on the framework's queue.
     fn request(then: impl Fn(Alerts) + 'static) {
+        request_with(ASKED, then);
+    }
+
+    /// Ask for `options`, handing the answer to `then` on the framework's queue.
+    fn request_with(options: UNAuthorizationOptions, then: impl Fn(Alerts) + 'static) {
         let answered = RcBlock::new(move |granted: Bool, error: *mut NSError| {
             // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
             // duration of the completion handler.
@@ -604,12 +629,7 @@ mod apple {
             then(if granted { Alerts::Allowed } else { Alerts::Denied });
         });
         UNUserNotificationCenter::currentNotificationCenter()
-            .requestAuthorizationWithOptions_completionHandler(
-                UNAuthorizationOptions::Alert
-                    | UNAuthorizationOptions::Sound
-                    | UNAuthorizationOptions::Badge,
-                &answered,
-            );
+            .requestAuthorizationWithOptions_completionHandler(options, &answered);
     }
 
     /// What an authorisation status means for a note.
@@ -663,6 +683,54 @@ mod apple {
         let (send, answered) = answer();
         request(send);
         answered.await.unwrap_or(Alerts::Unasked)
+    }
+
+    /// Ask for notes with no prompt: provisional authorisation.
+    ///
+    /// Its notes go quietly to the Notification Centre until the person keeps or turns them
+    /// off there. The self-test's simulator has no person to answer the prompt [`ask`] raises,
+    /// and `simctl` cannot grant notes; the app itself never asks this way.
+    pub async fn ask_quietly() -> Alerts {
+        if !in_bundle() {
+            return Alerts::Unavailable;
+        }
+        let (send, answered) = answer();
+        request_with(ASKED | UNAuthorizationOptions::Provisional, send);
+        answered.await.unwrap_or(Alerts::Unasked)
+    }
+
+    /// The notes the Notification Centre shows for this app now, newest first as the system
+    /// lists them; none outside an app bundle.
+    pub async fn delivered() -> Vec<super::Delivered> {
+        if !in_bundle() {
+            return Vec::new();
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Mutex::new(Some(tx));
+        let listed = RcBlock::new(move |notes: std::ptr::NonNull<NSArray<UNNotification>>| {
+            // SAFETY: UserNotifications rule: the array handed to the completion handler is a
+            // valid object for the duration of the call.
+            let notes = unsafe { notes.as_ref() };
+            let notes: Vec<super::Delivered> = notes
+                .iter()
+                .map(|note| {
+                    let request = note.request();
+                    let content = request.content();
+                    super::Delivered {
+                        id: request.identifier().to_string(),
+                        title: content.title().to_string(),
+                        body: content.body().to_string(),
+                    }
+                })
+                .collect();
+            let tx = tx.lock().take();
+            if let Some(tx) = tx {
+                let _unheard = tx.send(notes);
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&listed);
+        rx.await.unwrap_or_default()
     }
 
     /// Open the system's settings at Slopty's notifications, where the person turns them on.

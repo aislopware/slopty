@@ -103,33 +103,11 @@ define_class!(
     }
 );
 
-/// Why a push stays as it came.
-#[derive(Debug, thiserror::Error)]
-enum Kept {
-    /// It carries no sealed body.
-    #[error("no sealed body in the push")]
-    Unsealed,
-    /// The key or the token is not there yet.
-    #[error("the app has kept no key and token yet")]
-    NoKey,
-    /// The Keychain did not answer.
-    #[error("{0}")]
-    Keychain(#[from] pushed::keychain::KeychainError),
-    /// It did not open.
-    #[error("{0}")]
-    Open(#[from] pushed::OpenError),
-}
-
 /// The note `given`'s sealed body opens to.
-fn note(given: &UNNotificationContent) -> Result<slopty_platform::notify::Note, Kept> {
+fn note(given: &UNNotificationContent) -> Result<slopty_platform::notify::Note, pushed::Kept> {
     let info = given.userInfo();
-    let text = |key: &str| -> Option<String> {
+    pushed::note_from(|key| {
         let value = info.objectForKey(&NSString::from_str(key))?;
         value.downcast::<NSString>().ok().map(|s| s.to_string())
-    };
-    let (Some(enc), Some(sealed)) = (text(pushed::ENC), text(pushed::SEALED)) else {
-        return Err(Kept::Unsealed);
-    };
-    let (key, token) = pushed::stored()?.ok_or(Kept::NoKey)?;
-    Ok(pushed::opened(&enc, &sealed, &token, &key)?)
+    })
 }

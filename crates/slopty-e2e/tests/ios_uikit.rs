@@ -52,7 +52,7 @@ mod tests {
         }
         let drv = &mut stack.driver;
         drv.ui_key("enter").await.unwrap();
-        drv.wait_for("cat -v to start", STEP, |d| !d.rows_containing("cat -v").is_empty())
+        drv.wait_for("cat -v to start", STEP, |d| !d.lines_containing("cat -v").is_empty())
             .await
             .unwrap();
     }
@@ -114,7 +114,7 @@ mod tests {
             }
         }
         let drv = &mut stack.driver;
-        drv.wait_for("cat -v from the keys", STEP, |d| !d.rows_containing("cat -v").is_empty())
+        drv.wait_for("cat -v from the keys", STEP, |d| !d.lines_containing("cat -v").is_empty())
             .await
             .unwrap();
         // Named keys are consumed by the view and encoded by the terminal: the tty echoes
@@ -124,7 +124,7 @@ mod tests {
         drv.ui_key("right").await.unwrap();
         let dump = drv
             .wait_for("the escape and arrow sequences", STEP, |d| {
-                !d.rows_containing("^[^[[A^[[C").is_empty()
+                !d.lines_containing("^[^[[A^[[C").is_empty()
             })
             .await
             .unwrap();
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(left_arrows(&later), 1, "a cancelled key does not repeat: {later:#?}");
         // ⌃C is a chord (no key_char): consumed, encoded, and cat exits.
         drv.ui_key("ctrl-c").await.unwrap();
-        drv.wait_for("cat to exit", STEP, |d| !d.rows_containing("^C").is_empty()).await.unwrap();
+        drv.wait_for("cat to exit", STEP, |d| !d.lines_containing("^C").is_empty()).await.unwrap();
         assert_eq!(dump.focused, format!("terminal:{session}"), "{dump:#?}");
 
         // ⌘⇧N: command and shift from the press's flags, `n` from its usage; ⌘W takes the
@@ -184,7 +184,7 @@ mod tests {
         .unwrap();
         drv.ui_key("x").await.unwrap();
         drv.wait_for("x typed plainly after the cancelled chord", STEP, |d| {
-            !d.rows_containing("x").is_empty()
+            !d.lines_containing("x").is_empty()
         })
         .await
         .unwrap();
@@ -301,16 +301,16 @@ mod tests {
         // The shell echoes the line and cat prints it back: two rows of exactly `â`.
         let dump = drv
             .wait_for("cat to print the composed letter", STEP, |d| {
-                d.rows_containing("\u{e2}").iter().filter(|r| r.trim() == "\u{e2}").count() >= 2
+                d.lines_containing("\u{e2}").iter().filter(|r| r.trim() == "\u{e2}").count() >= 2
             })
             .await
             .unwrap();
         assert!(
-            dump.rows_containing("a\u{e2}").is_empty(),
+            dump.lines_containing("a\u{e2}").is_empty(),
             "the base letter was erased: {dump:#?}"
         );
         drv.ui_key("ctrl-c").await.unwrap();
-        drv.wait_for("cat to exit", STEP, |d| !d.rows_containing("^C").is_empty()).await.unwrap();
+        drv.wait_for("cat to exit", STEP, |d| !d.lines_containing("^C").is_empty()).await.unwrap();
         stack.shutdown().await;
     }
 
@@ -336,22 +336,104 @@ mod tests {
         };
         let (ex, ey) = centre("Escape");
         drv.ui_tap(ex, ey).await.unwrap();
-        drv.wait_for("escape from the bar", STEP, |d| !d.rows_containing("^[").is_empty())
+        drv.wait_for("escape from the bar", STEP, |d| !d.lines_containing("^[").is_empty())
             .await
             .unwrap();
         let (ux, uy) = centre("Up arrow");
         drv.ui_tap(ux, uy).await.unwrap();
-        drv.wait_for("up from the bar", STEP, |d| !d.rows_containing("^[^[[A").is_empty())
+        drv.wait_for("up from the bar", STEP, |d| !d.lines_containing("^[^[[A").is_empty())
             .await
             .unwrap();
         let (kx, ky) = centre("Control");
         drv.ui_tap(kx, ky).await.unwrap();
         drv.ui_insert_text("c").await.unwrap();
         drv.wait_for("cat to exit on the armed ⌃C", STEP, |d| {
-            !d.rows_containing("^C").is_empty()
+            !d.lines_containing("^C").is_empty()
         })
         .await
         .unwrap();
+        stack.shutdown().await;
+    }
+
+    /// A push the server sealed to the phone shows as APNs' fixed words until it is opened, and
+    /// opens, with the key and the token the app kept in the Keychain it shares with its
+    /// notification extension, into the note the app would have posted. The test plays the
+    /// server: it hands the app a device token as the app delegate would (notes allowed
+    /// quietly, since no one answers a prompt here) and seals a notice to the phone's key under
+    /// that token.
+    ///
+    /// `simctl push` hands the payload straight to the system, which never starts the extension
+    /// for it, so the note it shows is the payload's own words, and the opening is the
+    /// extension's own function run in the app ([`Command::OpenPush`]). Only a real APNs sandbox
+    /// push starts the extension itself.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
+    async fn a_sealed_push_shows_its_fallback_and_opens_with_the_kept_key() {
+        use slopty_proto::push::PushBody;
+        use slopty_proto::thread::ThreadId;
+        use slopty_proto::thread::attention::{Notice, NoticeKind, Subject, ThreadAt};
+        use slopty_push::apns;
+
+        let simulator = simulator();
+        let (udid, bundle) = (simulator.udid.clone(), simulator.bundle_id.clone());
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator).await.unwrap();
+        let token: Vec<u8> = (0_u8..32).map(|b| b.wrapping_mul(7).wrapping_add(3)).collect();
+        let hex = data_encoding::HEXLOWER.encode(&token);
+        let key = stack.driver.push_register(&token).await.unwrap();
+
+        let thread = ThreadId::new();
+        let notice = Notice {
+            kind: NoticeKind::NeedsYou,
+            about: Subject::Thread(ThreadAt { worker: slopty_core::WorkerId::new(), thread }),
+            tile: None,
+            title: "Ship the login fix".to_owned(),
+            text: "Wants to run cargo test".to_owned(),
+            worked_ms: None,
+            via: None,
+        };
+        let body = slopty_proto::codec::encode_body(&PushBody { notice, ask: None }).unwrap();
+        let sealed = slopty_push::seal::seal(&key, &hex, &body).unwrap();
+        let push = apns::Push {
+            token: hex,
+            sandbox: true,
+            urgent: true,
+            thread: "e2e-thread".to_owned(),
+            collapse: "e2e-note".to_owned(),
+            sealed,
+        };
+        let request = apns::request(&push, &bundle, "e2e").unwrap();
+        let payload = stack.path("push.apns");
+        std::fs::write(&payload, &request.body).unwrap();
+        let pushed = tokio::process::Command::new("xcrun")
+            .args(["simctl", "push", &udid, &bundle])
+            .arg(&payload)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            pushed.status.success(),
+            "simctl push: {}",
+            String::from_utf8_lossy(&pushed.stderr)
+        );
+
+        let deadline = tokio::time::Instant::now() + STEP;
+        let shown = loop {
+            let notes = stack.driver.delivered().await.unwrap();
+            if let Some(note) = notes.into_iter().next() {
+                break note;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "no note shown");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        assert_eq!((shown.title.as_str(), shown.body.as_str()), (apns::TITLE, apns::URGENT));
+
+        let payload = std::str::from_utf8(&request.body).unwrap();
+        let opened = stack.driver.open_push(payload).await;
+        let opened =
+            opened.unwrap_or_else(|e| panic!("{e:#}\napp log:\n{}", app_log_tail(&stack, 40)));
+        assert_eq!(opened.title, "Ship the login fix", "the notice's words, not APNs'");
+        assert_eq!(opened.body, "Wants to run cargo test");
+        assert!(opened.id.ends_with(&thread.to_string()), "the thread's note: {}", opened.id);
         stack.shutdown().await;
     }
 }

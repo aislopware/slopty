@@ -197,6 +197,42 @@ pub fn stored() -> Result<Option<(DeviceKey, String)>, keychain::KeychainError> 
     Ok(Some((key, token)))
 }
 
+/// Why a push stays as it came, rather than opening into its note.
+#[cfg(target_os = "ios")]
+#[derive(Debug, thiserror::Error)]
+pub enum Kept {
+    /// It carries no sealed body.
+    #[error("no sealed body in the push")]
+    Unsealed,
+    /// The key or the token is not there yet.
+    #[error("the app has kept no key and token yet")]
+    NoKey,
+    /// The Keychain did not answer.
+    #[error("{0}")]
+    Keychain(#[from] keychain::KeychainError),
+    /// It did not open.
+    #[error("{0}")]
+    Open(#[from] OpenError),
+}
+
+/// The note a push opens to, its `userInfo` read through `text`, with the key and the token
+/// the app kept.
+///
+/// It is the notification extension's whole work, and the self-test's
+/// (`docs/decisions/platform.md`, "Notes reach a pocketed phone").
+///
+/// # Errors
+/// [`Kept`] when the push carries no sealed body, the app kept no key and token yet, the
+/// Keychain does not answer, or the body does not open.
+#[cfg(target_os = "ios")]
+pub fn note_from(text: impl Fn(&str) -> Option<String>) -> Result<Note, Kept> {
+    let (Some(enc), Some(sealed)) = (text(ENC), text(SEALED)) else {
+        return Err(Kept::Unsealed);
+    };
+    let (key, token) = stored()?.ok_or(Kept::NoKey)?;
+    Ok(opened(&enc, &sealed, &token, &key)?)
+}
+
 #[cfg(target_os = "ios")]
 pub mod keychain {
     //! The push's two items in the Keychain: generic passwords under one service.

@@ -897,7 +897,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The extension** (`apps/slopty-notify`, a Rust appex) opens the body with the key and the
     token and shows `note_of(body)`: the id, words, `userInfo`, category and urgency the app's
     own note would have, so a tap, Allow and Deny route as they do on a local note. A body that
-    does not open shows APNs' fixed words.
+    does not open shows APNs' fixed words. Its work is one function in `slopty-platform`
+    (`pushed::note_from`), which the self-test runs too.
+  - **What a simulator can prove.** `simctl push` does not go through APNs: the simulator's
+    bridge hands the payload straight to the notification centre (its log says
+    `CoreSimulatorBridge … Adding notification request`), so the extension never starts and
+    the note shows APNs' fixed words. The simulator test therefore proves the rest: the
+    payload is one the system takes, its fallback reads "Slopty" and "An agent needs you", and
+    the body opens with the key and the token the app kept in the Keychain it shares with the
+    extension, under the simulator build's real entitlements (2026-10-06). Only a real APNs
+    sandbox push, with the person's own APNs key, starts the extension itself; a simulator on
+    Apple silicon receives those, so that check needs the key and nothing else.
   - **This Mac's checklist** has a "Notes on your phone" line while the server runs on this
     Mac, whose settings decide it. While `[server.push]` is off the line is quiet and not in the
     way, and Set up opens Settings with the keyboard in the relay's field. A server on another
@@ -922,7 +932,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - `slopty-client` `the_phone_goes_on_each_change_and_to_each_new_link`;
     - `slopty-app` `push::tests` (what is sent, and when listening stops) and
       `this_mac::tests::a_server_here_says_how_notes_reach_a_phone`; `slopty-ui`
-      `settings_form::tests::a_named_setting_opens_on_its_row`.
+      `settings_form::tests::a_named_setting_opens_on_its_row`;
+    - `slopty-e2e` `ios_uikit` `a_sealed_push_shows_its_fallback_and_opens_with_the_kept_key`
+      on a simulator: a token handed over as the app delegate would, notes allowed
+      provisionally (no prompt), a notice sealed to the phone's key, `simctl push`, then the
+      shown note and the opened one read back over the test socket.
 
 - ✅ **The Mac window is never narrower than a phone** (2026-10-06,
   `.research/responsive-2026-10-06.md`, finding 13). No minimum was set, so AppKit let the

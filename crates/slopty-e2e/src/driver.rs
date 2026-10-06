@@ -309,6 +309,48 @@ impl Driver {
         self.ok(&Command::NotificationResponse { tag: tag.to_owned() }).await
     }
 
+    /// Register `token` as the phone's device token, with notes allowed quietly; the public
+    /// half of the phone's push key.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or the app has no push key (it is not an iPhone or an iPad).
+    pub async fn push_register(&mut self, token: &[u8]) -> Result<Vec<u8>> {
+        let command = Command::PushRegister { token: token.to_vec() };
+        match self.call(&command).await? {
+            Reply::PushKey { key } => Ok(key),
+            Reply::Error { message } => bail!("{command:?}: {message}"),
+            other => bail!("{command:?}: unexpected {other:?}"),
+        }
+    }
+
+    /// The note the push `payload` opens to, opened as the notification extension opens it.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks or the push does not open: no sealed body, no key or token kept,
+    /// the Keychain not shared, or a body sealed to another phone.
+    pub async fn open_push(&mut self, payload: &str) -> Result<crate::DeliveredNote> {
+        match self.call(&Command::OpenPush { payload: payload.to_owned() }).await? {
+            Reply::Opened { note } => Ok(note),
+            Reply::Error { message } => bail!("OpenPush: {message}"),
+            other => bail!("OpenPush: unexpected {other:?}"),
+        }
+    }
+
+    /// The notes the Notification Centre shows for the app.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn delivered(&mut self) -> Result<Vec<crate::DeliveredNote>> {
+        match self.call(&Command::Delivered).await? {
+            Reply::Delivered { notes } => Ok(notes),
+            Reply::Error { message } => bail!("Delivered: {message}"),
+            other => bail!("Delivered: unexpected {other:?}"),
+        }
+    }
+
     /// The app's state.
     ///
     /// # Errors

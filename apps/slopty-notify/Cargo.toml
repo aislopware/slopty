@@ -28,5 +28,4 @@ objc2-user-notifications = { workspace = true, features = [
 ] }
 # The pushed note's opening and mapping, and the Keychain it reads (`notify::pushed`).
 slopty-platform.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
