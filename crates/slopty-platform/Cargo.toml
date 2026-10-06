@@ -27,6 +27,10 @@ objc2.workspace = true
 objc2-audio-toolbox.workspace = true
 # The clipboard origin marker's type and format (`transfer::ORIGIN_TYPE`), shared with the worker.
 slopty-proto.workspace = true
+# A pushed note: the phone's key, the seal it opens, and the notice inside (`notify::pushed`).
+slopty-push = { workspace = true, features = [ "getrandom" ] }
+slopty-core.workspace = true
+thiserror.workspace = true
 block2.workspace = true
 # A drop's files, received off the main thread, reach the app on it (`file_drop`).
 dispatch2.workspace = true
@@ -174,8 +178,18 @@ libc.workspace = true
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
 objc2-game-controller.workspace = true
-# The main run loop's observer that asks again for a forgotten worker's page store (`web`).
-objc2-core-foundation = { workspace = true, features = [ "CFRunLoop" ] }
+# The main run loop's observer that asks again for a forgotten worker's page store (`web`), and
+# the Keychain's queries for the push key (`notify::pushed::keychain`).
+objc2-core-foundation = { workspace = true, features = [
+    "CFRunLoop",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+# The phone's push key and device token, kept where its notification extension reads them
+# (`notify::pushed::keychain`).
+objc2-security = { workspace = true, features = [ "SecBase", "SecItem" ] }
 objc2-ui-kit = { workspace = true, features = [
     "UIApplication",
     "UIResponder",

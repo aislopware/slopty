@@ -29,10 +29,28 @@
 //!
 //! `BackgroundGrace` keeps an iOS app running for the short time the system grants after it
 //! leaves the screen, so the links stay up and what arrives just after the phone is pocketed
-//! still notifies.
+//! still notifies. Past it, the server pushes: a note sealed to the phone, which its
+//! notification extension opens into the note the app would have posted.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+
+#[cfg(target_vendor = "apple")]
+pub mod pushed;
+
+/// The `userInfo` keys a note carries for its tap, the app's notes and pushed ones alike.
+pub mod info {
+    /// The worker the note is about, as the app keys it (its id's 128 bits, in decimal).
+    pub const WORKER: &str = "worker";
+    /// The tile's item.
+    pub const ITEM: &str = "item";
+    /// The terminal's session.
+    pub const SESSION: &str = "session";
+    /// The thread, for a note about one with no terminal.
+    pub const THREAD: &str = "thread";
+    /// The thread's request an approval note answers.
+    pub const ASK: &str = "ask";
+}
 
 /// One notification.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -263,7 +281,7 @@ impl Notifier for Memory {
 }
 
 #[cfg(target_vendor = "apple")]
-pub use apple::{System, ask, install, open_settings, settings, taps, taps_finished};
+pub use apple::{System, ask, content_of, install, open_settings, settings, taps, taps_finished};
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
 
@@ -783,6 +801,26 @@ mod apple {
     /// Hand `note` to the centre now: a nil trigger delivers at once, and the identifier
     /// replaces whatever is up under it.
     fn add(center: &UNUserNotificationCenter, note: &Note) {
+        let content = content_of(note);
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&note.id),
+            &content,
+            None,
+        );
+        let id = note.id.clone();
+        let added = RcBlock::new(move |error: *mut NSError| {
+            // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
+            // duration of the completion handler.
+            if let Some(error) = unsafe { error.as_ref() } {
+                tracing::warn!(id, error = %error.localizedDescription(), "note not delivered");
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&added));
+    }
+
+    /// `note` as the system shows it: what the app posts, and what the notification extension
+    /// hands back for a push.
+    pub fn content_of(note: &Note) -> Retained<UNMutableNotificationContent> {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&note.title));
         content.setBody(&NSString::from_str(&note.body));
@@ -813,20 +851,7 @@ mod apple {
         unsafe {
             content.setUserInfo(info);
         }
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str(&note.id),
-            &content,
-            None,
-        );
-        let id = note.id.clone();
-        let added = RcBlock::new(move |error: *mut NSError| {
-            // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
-            // duration of the completion handler.
-            if let Some(error) = unsafe { error.as_ref() } {
-                tracing::warn!(id, error = %error.localizedDescription(), "note not delivered");
-            }
-        });
-        center.addNotificationRequest_withCompletionHandler(&request, Some(&added));
+        content
     }
 
     /// Every string key with a string value in a `userInfo` dictionary.
@@ -968,6 +993,20 @@ mod ios {
             task.set(id);
             tracing::debug!(reason, "background grace");
             Some(Self { task, mtm })
+        }
+
+        /// How much of the grant is left; `None` while the app is in front, where the system
+        /// counts none, or once the grant is given back.
+        #[must_use]
+        pub fn remaining(&self) -> Option<std::time::Duration> {
+            // SAFETY: as in `begin`.
+            let invalid = unsafe { UIBackgroundTaskInvalid };
+            if self.task.get() == invalid {
+                return None;
+            }
+            let left = UIApplication::sharedApplication(self.mtm).backgroundTimeRemaining();
+            // In front, UIKit says `DBL_MAX`.
+            (left < f64::from(u32::MAX)).then(|| std::time::Duration::from_secs_f64(left.max(0.0)))
         }
     }
 
