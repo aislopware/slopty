@@ -1198,7 +1198,7 @@ mod tests {
         let opening = |cwd: Option<&Path>| Verb::OpenTerminal {
             worker: reg.worker,
             cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
-            command: ["/bin/sh", "-c", "{ pwd -P; git rev-parse HEAD; } > \"$WHERE\""]
+            command: ["/bin/sh", "-c", "pwd -P > \"$WHERE\".part && mv \"$WHERE\".part \"$WHERE\""]
                 .map(String::from)
                 .to_vec(),
             env: vec![("WHERE".to_owned(), record.to_string_lossy().into_owned())],
@@ -1210,12 +1210,11 @@ mod tests {
                 base: Some("main".to_owned()),
             }),
         };
-        let lines = async || {
+        let opened_in = async || {
             let looking = async {
                 loop {
-                    let text = std::fs::read_to_string(&record).unwrap_or_default();
-                    if text.lines().count() == 2 {
-                        return text.lines().map(str::to_owned).collect::<Vec<_>>();
+                    if let Ok(text) = std::fs::read_to_string(&record) {
+                        return text.trim().to_owned();
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
@@ -1226,8 +1225,8 @@ mod tests {
         let opened = peer.ask(opening(Some(&clone))).await;
         assert!(matches!(opened, Outcome::Opened(_)), "{opened:?}");
         let tree = std::fs::canonicalize(&clone).unwrap().join(".claude/worktrees/slopty-demo-1");
-        let seen = lines().await;
-        assert_eq!(seen, [tree.to_string_lossy().into_owned(), main.clone()], "from main");
+        assert_eq!(opened_in().await, tree.to_string_lossy());
+        assert_eq!(git(&tree, &["rev-parse", "HEAD"]), main, "from main");
         assert_eq!(git(&tree, &["branch", "--show-current"]), "worktree-slopty-demo-1");
         assert_eq!(git(&clone, &["branch", "--show-current"]), "feature", "the clone untouched");
 
@@ -1236,7 +1235,8 @@ mod tests {
         std::fs::remove_file(&record).unwrap();
         let again = peer.ask(opening(Some(&clone))).await;
         assert!(matches!(again, Outcome::Opened(_)), "{again:?}");
-        assert_eq!(lines().await, [tree.to_string_lossy().into_owned(), work], "reopened as is");
+        assert_eq!(opened_in().await, tree.to_string_lossy());
+        assert_eq!(git(&tree, &["rev-parse", "HEAD"]), work, "reopened as is");
 
         let nowhere = peer.ask(opening(None)).await;
         assert!(matches!(nowhere, Outcome::Error { code: ErrorCode::Invalid, .. }), "{nowhere:?}");
