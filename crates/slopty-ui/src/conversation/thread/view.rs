@@ -2322,6 +2322,7 @@ impl Render for ThreadView {
         self.heroed = hero.is_some();
         let dock = self.docks.map(|n| {
             div()
+                .debug_selector(|| "thread-dock".to_owned())
                 .w_full()
                 .with_animation(("thread-dock", n), kit::Pace::Sheet.animation(), |mut el, t| {
                     el.style().flex_grow = Some(1.0 - t);

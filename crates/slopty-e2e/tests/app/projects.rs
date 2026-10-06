@@ -292,7 +292,8 @@ const NOTES: &str = "# Notes on the board\n\nEach lane is a group of rows, and a
 what moves its task on; the rest waits under it until it needs reading.\n\n- Draw the lanes\n\
 - Hold it to goldens\n- Write the decision\n";
 
-/// The column at the board's side, 312 pt, holding every kind of tile a person puts there:
+/// The column at the board's side, 312 pt of the window whose panel stands a gutter in from
+/// either side (296 pt), holding every kind of tile a person puts there:
 /// task 1's agent, a Markdown file and a terminal (`cat`, so no run's path shows) stacked,
 /// light and dark; then the same column with a fourth tile, tabbed, the last tab active.
 /// Nothing in it may run past its edges (`docs/decisions/ui.md`, "How surfaces adapt to their
@@ -338,7 +339,7 @@ async fn narrow_column_beside_the_board(stack: &mut ProjectStack, agent: &str) {
         .await
         .unwrap();
     let narrow = d.items.iter().find(|i| i.session.as_deref() == Some(agent)).unwrap();
-    assert!((narrow.bounds[2] - 312.0).abs() < 1.0, "the column beside a board: {narrow:?}");
+    assert!((narrow.bounds[2] - 296.0).abs() < 1.0, "the column beside a board: {narrow:?}");
     stack.driver.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
     rested(&mut stack.driver).await;
     golden(stack, "narrow-columns").await;

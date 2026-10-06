@@ -2091,14 +2091,16 @@ fn row_height(theme: &Theme) -> f32 {
 }
 
 /// The page's children with each run of rows set in one ring, as System Settings groups them:
-/// a quiet hairline round the group at `radii.md` with no fill, the rows the content itself,
-/// each parted from the one before by an inset hairline that starts where the titles do. Each
+/// the hairline that bounds a region (`border`) round the group at `radii.md` with no fill, the
+/// rows the content itself, each parted from the one before by the quieter hairline inside a
+/// region (`border_subtle`), inset to start where the titles do. On near-black the quieter one
+/// alone left the group's edge all but gone. Each
 /// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
 /// its row with no rule.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
-    let ring = hsla(theme.surfaces.border_subtle);
+    let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.border_subtle));
     let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
     parts
         .into_iter()
@@ -2126,7 +2128,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
                             .left(inset)
                             .right_0()
                             .h(crate::kit::HAIR)
-                            .bg(ring),
+                            .bg(rule),
                     )
                 })
                 .child(child)
@@ -2348,6 +2350,22 @@ mod tests {
                 && q.background != gpui::Background::from(hsla(theme.content()))
         });
         assert!(!filled, "no fill under the ring");
+        // The ring bounds a region; the rules part rows inside it, a step quieter.
+        let at_origin = |b: gpui::Bounds<gpui::Pixels>| {
+            move |q: &&gpui::Quad| {
+                (q.bounds.origin.y.0 / scale - f32::from(b.top())).abs() < 0.5
+                    && (q.bounds.origin.x.0 / scale - f32::from(b.left())).abs() < 0.5
+            }
+        };
+        let ring = quads.iter().filter(at_origin(first)).find(|q| q.border_widths.top.0 > 0.0);
+        let ring = ring.expect("the ring's top edge");
+        assert_eq!(ring.border_color, hsla(theme.surfaces.border), "the ring is a region's edge");
+        let drawn = quads.iter().find(at_origin(rule)).expect("the rule drawn");
+        assert_eq!(
+            drawn.background,
+            gpui::Background::from(hsla(theme.surfaces.border_subtle)),
+            "a rule inside the ring is the quieter hairline"
+        );
     }
 
     /// A setting named from elsewhere opens on its page with the keyboard in its field and its

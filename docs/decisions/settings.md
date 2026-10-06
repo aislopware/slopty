@@ -436,12 +436,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   between rows. It read as a web form. Most descriptions only said the title again ("Follow the
   system, or stay light or dark", "Empty keeps the theme's own").
   - **The page lies on the content plane.** The sidebar keeps its tone step (`panel`).
-  - **A group is a ring.** A `border_subtle` hairline at `radii.md` runs round its rows, with
-    no fill, as t3code's settings groups are drawn. Its head is the section role in the
+  - **A group is a ring.** A `border` hairline at `radii.md` runs round its rows, with no
+    fill, as t3code's settings groups are drawn. The ring bounds a region, so it takes the
+    region's hairline; the rules between its rows take the quieter `border_subtle`. Drawn in
+    `border_subtle` as well, the ring all but vanished on the dark sheet. Its head is the section role in the
     secondary tone, a row tall, at the group's leading inset.
   - **A row is one line**, as System Settings draws it: the title in the action role at the
     start and the control at the end, 36 pt tall on a pointer and 44 under a finger. Rows are
-    parted by an inset hairline that starts where the titles do. Under a row stands only what is
+    parted by an inset `border_subtle` hairline that starts where the titles do. Under a row stands only what is
     wrong with it: a value that was not written, in the error's colour, or a login item the
     system holds off.
   - **What a group must say is its footer.** The descriptions that restated their titles are

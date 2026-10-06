@@ -31,6 +31,17 @@ mod tests {
         Simulator { udid, bundle_id }
     }
 
+    /// The canvas between two panels on an iPad, in points: the theme's `spacing.gutter()`.
+    const GUTTER: f32 = 8.0;
+    /// A viewport narrower than this is a phone (`slopty_client::layout`'s `phone_below`).
+    const PHONE_BELOW: f32 = 700.0;
+
+    /// How far apart two neighbouring columns are drawn in a window `width` points wide: a
+    /// gutter on an iPad, none on a phone, whose panels are full-bleed.
+    fn gutter(width: f32) -> f32 {
+        if width >= PHONE_BELOW { GUTTER } else { 0.0 }
+    }
+
     /// The app connected to its worker and its first shell at a prompt.
     async fn shell(stack: &mut Stack) -> Dump {
         stack
@@ -206,16 +217,19 @@ mod tests {
         let drv = &mut stack.driver;
         drv.keys("cmd-n").await.unwrap();
         let two = drv
-            // At rest: the columns abut. An iPad's lone column sits centred and slides left as
-            // the second opens beside it, and a dump taken in that slide is no starting point.
+            // At rest: the columns' panels a gutter apart (a phone's meet). An iPad's lone column
+            // sits centred and slides left as the second opens beside it, and a dump
+            // taken in that slide is no starting point.
             .wait_for("a second shell, focused, beside the first", STEP, |d| {
                 let first_right =
                     d.items.iter().find(|i| i.id == first.id).map(|i| i.bounds[0] + i.bounds[2]);
+                let gap = gutter(d.window.width);
                 d.items.len() == 2
                     && d.items.iter().any(|i| {
                         i.id != first.id
                             && i.active
-                            && first_right.is_some_and(|right| (right - i.bounds[0]).abs() < 1.0)
+                            && first_right
+                                .is_some_and(|right| (i.bounds[0] - right - gap).abs() < 1.0)
                     })
             })
             .await

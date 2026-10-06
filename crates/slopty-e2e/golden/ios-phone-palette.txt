@@ -24,5 +24,6 @@ ListBoxOption │ Name this tile ⌘E
 ListBoxOption │ Open settings ⌘,
 ListBoxOption │ New note ⇧⌘N
 Heading │ Commands
+ListBoxOption │ New terminal ⌘T
 TextInput │ Command (focused)
 Button │ Cancel

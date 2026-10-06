@@ -79,11 +79,24 @@ fn picture(dump: &Dump, label: &str) -> (PixelRect, PixelRect) {
 /// Device pixels next to the picture's edge left out of the bars: the edge's own filtering.
 const BAR_MARGIN: u32 = 3;
 
+/// How far the tile's panel paints over the body's edge, in points: its corners, rounded to the
+/// theme's `radii.md`, with its ring along them. The panel's edge, not the body's.
+const PANEL_EDGE: f32 = 8.0;
+
 /// The body beside the picture is bare: every pixel of the bars above and below it (or left and
 /// right of it) is the body's one colour, so the picture kept its aspect instead of being
-/// stretched over them. Returns how many device pixels of bar there were.
-fn assert_bare_beside(frame: &image::RgbaImage, body: PixelRect, picture: PixelRect) -> u64 {
+/// stretched over them. The panel's edge round the body (`edge` device pixels) is left out.
+/// Returns how many device pixels of bar there were.
+fn assert_bare_beside(
+    frame: &image::RgbaImage,
+    body: PixelRect,
+    picture: PixelRect,
+    edge: u32,
+) -> u64 {
     let [bx, by, bw, bh] = body;
+    let (bx, by) = (bx.saturating_add(edge), by.saturating_add(edge));
+    let (bw, bh) =
+        (bw.saturating_sub(edge.saturating_mul(2)), bh.saturating_sub(edge.saturating_mul(2)));
     let [px, py, pw, ph] = picture;
     let below = py.saturating_add(ph).saturating_add(BAR_MARGIN);
     let right = px.saturating_add(pw).saturating_add(BAR_MARGIN);
@@ -155,7 +168,13 @@ async fn golden_stream(
     let frame = drv.render(&dir.join(format!("{name}.png"))).await.unwrap();
     // The stats overlay floats at the body's corner, over whatever is there.
     if dump.a11y_node("Status", Some("Stream stats")).is_none() {
-        let bare = assert_bare_beside(&frame, body, picture);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "window pixels"
+        )]
+        let edge = (PANEL_EDGE * dump.window.scale).ceil() as u32;
+        let bare = assert_bare_beside(&frame, body, picture, edge);
         println!("MEASURE {name}: picture {picture:?} in body {body:?}, {bare} px of bare body");
     }
     let existing = golden_dir().join(format!("{name}.png"));

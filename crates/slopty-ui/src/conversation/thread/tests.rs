@@ -217,8 +217,10 @@ fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
 }
 
 /// With motion on, the composer does not jump to the foot after the first message: it sets
-/// off from the middle and moves there over the sheet's time, on wall time, so the test reads
-/// where it starts and, with motion then reduced, where the move ends.
+/// off from the middle and the dock's move starts, which ends with the composer at the foot.
+/// The move runs on wall time, which a busy machine may have spent before any frame is read, so
+/// the test reads where the composer stands before, that the move started, and, with motion
+/// then reduced, where it ends.
 #[gpui::test]
 fn the_composer_moves_to_the_foot_after_the_first_message(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -234,14 +236,39 @@ fn the_composer_moves_to_the_foot_after_the_first_message(cx: &mut TestAppContex
         cx.run_until_parked();
         cx.debug_bounds("thread-composer").expect("the composer").bottom()
     };
+    let before = bottom(cx);
+    assert!(before < px(450.0), "it stands in the middle: {before:?}");
+    assert!(cx.debug_bounds("thread-dock").is_none(), "nothing moves before the message");
     let mut moved = fixtures::thread("edit");
     moved.meta.id = thread;
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 1), cx));
-    let setting_off = bottom(cx);
-    assert!(setting_off < px(450.0), "it sets off from the middle: {setting_off:?}");
+    let _setting_off = bottom(cx);
+    assert!(cx.debug_bounds("thread-dock").is_some(), "the move to the foot sets off");
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     let landed = bottom(cx);
     assert!(landed > px(560.0), "and ends at the foot: {landed:?}");
+}
+
+/// Under Reduce Motion the first message puts the composer at the foot at once: no move sets
+/// off.
+#[gpui::test]
+fn under_reduce_motion_the_composer_docks_at_once(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let mut moved = fixtures::thread("edit");
+    moved.meta.id = thread;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 1), cx));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let at_once = cx.debug_bounds("thread-composer").expect("the composer").bottom();
+    assert!(at_once > px(560.0), "at the foot at once: {at_once:?}");
+    assert!(cx.debug_bounds("thread-dock").is_none(), "no move under Reduce Motion");
 }
 
 /// On touch a request's answers are a finger's target, 44 points tall, as the theme's touch
