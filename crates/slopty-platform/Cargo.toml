@@ -38,8 +38,14 @@ dispatch2.workspace = true
 parking_lot.workspace = true
 # A thread's QoS class (`user_interactive_thread`): pthread/qos.h, which rustix does not wrap.
 libc.workspace = true
-# Outlines drawn into alpha masks of our own (`outline`).
-objc2-core-graphics = { workspace = true, features = [ "CGBitmapContext", "CGContext" ] }
+# Outlines drawn into alpha masks of our own, stroked with round caps and joins (`outline`).
+objc2-core-graphics = { workspace = true, features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "CGPath",
+] }
 objc2-foundation = { workspace = true, features = [
     "NSURL",
     "NSURLRequest",
