@@ -426,7 +426,7 @@ mod tests {
         let typography = theme_for(&s, true).typography;
         assert_eq!((typography.prose(), typography.ui_size), (20.0, 13.0), "the chrome stays");
         s.font.prose_size = 2.0;
-        assert_eq!(theme_for(&s, true).typography.prose(), 15.0);
+        assert_eq!(theme_for(&s, true).typography.prose(), 14.0);
     }
 
     #[test]

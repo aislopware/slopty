@@ -179,7 +179,7 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .overflow_hidden()
             .font_family(t.ui_family.clone())
-            .child(self.miniature_name(placed, item, t.task_title()))
+            .child(self.miniature_name(placed, item, theme.roles().task_title.size))
             .child(facts)
             .children(tail);
         let words = SharedString::from(format!("miniature-in-{}", id.as_uuid()));

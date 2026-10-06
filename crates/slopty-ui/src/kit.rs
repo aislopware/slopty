@@ -964,6 +964,64 @@ pub fn selected<E: Styled>(el: E, theme: &Theme, focused: bool) -> E {
     }
 }
 
+/// The plane a list lies on, which says how its selection shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Plane {
+    /// The canvas the frame lies on: the docked navigator, the settings sheet's sections. A
+    /// selection rises off it ([`slopty_theme::Surfaces::chosen_on_canvas`]).
+    Canvas,
+    /// Anything raised or read: a float (the palette, a menu, a sheet) or a tile's content. A
+    /// selection is the wash ([`selected`]): white on white would vanish.
+    Float,
+}
+
+/// `el` drawn as the selected row of a list on `plane`, live while that list has the keyboard
+/// (`focused`), else at the hover's step.
+///
+/// On the canvas no ring is drawn: in light the row rises to the raised surface on the resting
+/// contact ([`slopty_theme::Elevation::rest`]), in dark it takes the wash. On a float it is
+/// [`selected`].
+pub fn selected_on<E: Styled>(el: E, theme: &Theme, plane: Plane, focused: bool) -> E {
+    match plane {
+        Plane::Float => selected(el, theme, focused),
+        Plane::Canvas if focused => {
+            let s = &theme.surfaces;
+            el.bg(hsla(s.chosen_on_canvas)).shadow(rest_layers(theme, 0.0, false, true))
+        }
+        Plane::Canvas => el.bg(hsla(theme.surfaces.hover_on_canvas)),
+    }
+}
+
+/// The hover's wash on `plane`: a step up off the light canvas, the ink's wash elsewhere.
+#[must_use]
+pub fn hover_on(theme: &Theme, plane: Plane) -> Hsla {
+    match plane {
+        Plane::Canvas => hsla(theme.surfaces.hover_on_canvas),
+        Plane::Float => hsla(theme.surfaces.hover),
+    }
+}
+
+/// Paint the selection on `plane` into `bounds` at `radius`, as [`selected_on`] draws it with
+/// the keyboard there: for a selection that moves on its own (a list's plate).
+pub fn paint_chosen(
+    theme: &Theme,
+    plane: Plane,
+    bounds: gpui::Bounds<gpui::Pixels>,
+    radius: gpui::Pixels,
+    window: &mut Window,
+) {
+    let corners = gpui::Corners::all(radius);
+    let fill = match plane {
+        Plane::Canvas => {
+            let layers = rest_layers(theme, 0.0, false, true);
+            window.paint_drop_shadows(bounds, corners, &layers);
+            theme.surfaces.chosen_on_canvas
+        }
+        Plane::Float => theme.surfaces.selected,
+    };
+    window.paint_quad(gpui::fill(bounds, hsla(fill)).corner_radii(corners));
+}
+
 /// A hairline ring just inside an element's edge, in the border's tone: it holds a shape on a
 /// surface whose tone sits near its fill, and takes no room.
 fn ring_inside(theme: &Theme) -> BoxShadow {
@@ -1210,6 +1268,21 @@ pub fn icon_button_at(
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
+/// [`icon_button`] with its icon in `ink`, not its words' tier: the bell while something needs
+/// the person, in the warn fill.
+#[must_use]
+pub fn icon_button_inked(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    icon: crate::icons::Symbol,
+    label: &'static str,
+    ink: Rgb,
+) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    eased(square_icon(theme, id.into(), icon, label, 1.0, ink))
+        .hover(move |el| el.bg(hsla(s.hover)))
+}
+
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
 fn square_icon(
     theme: &Theme,
@@ -1355,7 +1428,7 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
 
 /// The side of an empty state's mark, in points at zoom 1.
 ///
-/// It holds a symbol at the page heading's size ([`slopty_theme::Typography::heading`]) at the
+/// It holds a symbol at the page heading's size (`roles().page_heading`) at the
 /// light weight and large scale, as the system's own empty states draw theirs.
 pub const NOTICE_MARK: f32 = 28.0;
 
@@ -2608,20 +2681,18 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// A machine's or a project's own colour goes on its glyph and nowhere else
-    /// (`docs/decisions/ui.md`, "A machine and a project wear their own colour"): the identity
-    /// hues are read only through [`identity_ink`] and [`machine_ink`], and those are called
-    /// only where a machine's or a project's glyph is drawn.
+    /// A machine's or a project's own colour goes on the navigator's head and nowhere else: the
+    /// identity hues are read only through [`identity_ink`] and [`machine_ink`], and those are
+    /// called only there.
     #[test]
     fn identity_colour_stays_on_its_glyph() {
-        const GLYPHS: [&str; 8] = [
+        // The navigator's machine and project heads, and nowhere else (`docs/decisions/ui.md`,
+        // "Premium foundations"): a palette row, a tile's header, the breadcrumb and the empty
+        // workspace draw a machine in its words' tier.
+        const GLYPHS: [&str; 3] = [
             "slopty-ui/src/kit/identity.rs",
-            "slopty-ui/src/palette.rs",
             "slopty-ui/src/workspace/navigator.rs",
-            "slopty-ui/src/workspace/tile.rs",
-            "slopty-ui/src/workspace/breadcrumb.rs",
-            "slopty-ui/src/workspace/strip.rs",
-            "slopty-ui/src/workspace/miniature.rs",
+            // Until the board's task meta goes to its words' tier (lane A, the same ruling).
             "slopty-ui/src/project/view.rs",
         ];
         let mut wrong = Vec::new();
@@ -2965,8 +3036,8 @@ mod tests {
                     .filter(|(f, ..)| f == file)
                     .map(|(_, _, l)| l.as_str());
                 let title = [
-                    "typography.title()",
-                    "typography.display()",
+                    "panel_title",
+                    "page_heading",
                     "Role::Heading",
                     "APP_NAME",
                     "pub fn title(",
@@ -2978,6 +3049,36 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// One type scale: a size is a role's ([`slopty_theme::TypeRoles`]) or the chrome's own
+    /// steps, never the parallel `title`, `heading`, `display` and `task_title` sizes, which
+    /// drew 15 pt titles where the roles said 16 and let sizes drift a point apart.
+    #[test]
+    fn one_type_scale() {
+        let gone = ["title()", "heading()", "display()", "task_title()"];
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            for (file, line_no, line) in chrome_lines(dir) {
+                let code = line.split("//").next().unwrap_or_default();
+                // The receiver is the typography itself: `typography`, or its usual `ty` and `t`.
+                let parallel = gone.iter().any(|f| {
+                    code.match_indices(&format!(".{f}")).any(|(at, _)| {
+                        let receiver = code
+                            .get(..at)
+                            .unwrap_or_default()
+                            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                            .next()
+                            .unwrap_or_default();
+                        matches!(receiver, "typography" | "ty" | "t")
+                    })
+                });
+                if parallel {
+                    wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "a size off the one scale:\n{}", wrong.join("\n"));
     }
 
     /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a

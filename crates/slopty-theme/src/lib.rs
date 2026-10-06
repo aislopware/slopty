@@ -512,7 +512,7 @@ impl From<&TerminalPalette> for Colors {
 
 /// Type tokens.
 ///
-/// The chrome scale hangs off `ui_size` ([`Self::caption`], [`Self::small`], [`Self::title`]),
+/// The chrome scale hangs off `ui_size` ([`Self::caption`], [`Self::small`], [`Self::roles`]),
 /// so a settings change moves every label together.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Typography {
@@ -565,20 +565,6 @@ impl Typography {
         (self.ui_size - 1.0).max(7.0)
     }
 
-    /// What a piece of work is called where it is the thing to act on: a request put to the
-    /// person, a task (base + 1, at the medium weight). A step over the chrome, so the decision
-    /// reads before the facts round it.
-    #[must_use]
-    pub fn task_title(&self) -> f32 {
-        self.ui_size + 1.0
-    }
-
-    /// Titles of panels and dialogs (base + 2).
-    #[must_use]
-    pub fn title(&self) -> f32 {
-        self.ui_size + 2.0
-    }
-
     /// Prose read at length: an assistant's answer and the prompt it answers, at the regular
     /// weight on [`Self::prose_line_height`]; [`Self::prose_size`], never under 6.
     #[must_use]
@@ -596,20 +582,6 @@ impl Typography {
     #[must_use]
     pub fn icon_large(&self) -> f32 {
         self.ui_size + 3.0
-    }
-
-    /// The heading of a page inside the window: the settings' page title, a note's title
-    /// (base + 7). The step between a dialog's title and the first run's.
-    #[must_use]
-    pub fn heading(&self) -> f32 {
-        self.ui_size + 7.0
-    }
-
-    /// The heading of a page that is the whole window, the first run (base + 13). Past 20 the
-    /// system face switches to its Display cut on its own.
-    #[must_use]
-    pub fn display(&self) -> f32 {
-        self.ui_size + 13.0
     }
 }
 
@@ -872,14 +844,16 @@ pub mod alpha {
     pub const SCRIM_ASIDE: f32 = 0.22;
     /// The work under a light floating sidebar, in the warm ink.
     pub const SCRIM_ASIDE_ON_PAPER: f32 = 0.10;
+    /// Half way: the pointer over a light canvas row, half way up to the raised selection.
+    pub const HALF: f32 = 0.5;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
     /// The docked navigator's canvas over the system's sidebar material (macOS).
     ///
-    /// At nine tenths the desktop behind the window shows only as a faint, blurred cast, as in
-    /// Finder's and Mail's sidebars, and the navigator's text keeps its floors over any
-    /// wallpaper, white or black, a shade deeper at most ([`crate::Surfaces::on_glass`]).
-    pub const GLASS: f32 = 0.90;
+    /// The lowest share, to 0.02, at which the chrome's text keeps its floors over any wallpaper,
+    /// white or black ([`crate::Surfaces::on_glass`] lifting it): t3code's glass is 0.80. At nine
+    /// tenths the material barely showed.
+    pub const GLASS: f32 = 0.82;
     /// An unlit dot of the mark on a dark surface (the brand's ink plate).
     pub const UNLIT: f32 = 0.2;
     /// An unlit dot of the mark on a light surface, where 0.2 fades into the paper.
@@ -940,6 +914,14 @@ pub struct Surfaces {
     pub selected: Tint,
     /// What is held down: a step past `selected`, so a press reads apart from a hover.
     pub pressed: Tint,
+    /// The chosen row of a list that lies on the canvas (the docked navigator, the settings
+    /// sheet's sections). In light it rises to the raised surface, white on the dimmer canvas,
+    /// as t3code's sidebar lifts its selection; a grey wash on a grey plane read dull. In dark
+    /// it is [`Self::selected`]: a lift on near-black is a wash.
+    pub chosen_on_canvas: Tint,
+    /// The pointer over a row on the canvas: half way up to [`Self::chosen_on_canvas`] in
+    /// light, a step up and not down; [`Self::hover`] in dark.
+    pub hover_on_canvas: Tint,
     /// A terminal block's head band, the rows its command was typed on: the content with a few
     /// hundredths of the ink, as Zed's active line is, in both variants. It is its own step so
     /// a band under an unfocused header (on `panel`) does not read as a second header, and so it
@@ -998,8 +980,9 @@ pub struct Surfaces {
     /// GitHub's merged is.
     pub merged_fill: Rgb,
     /// A machine's or a project's own colour, on its glyph alone, picked by a hash of its id
-    /// (`slopty_ui::kit::identity_ink`). Eight hues at the status fills' lightness, each kept
-    /// clear of every status hue, so a machine's glyph never reads as a state.
+    /// (`slopty_ui::kit::identity_ink`). Eight hues near the status fills' lightness at under
+    /// half their chroma (0.06 dark, 0.07 light), each kept clear of every status hue: a tint that
+    /// tells machines apart side by side and never competes with a state.
     pub identity: [Rgb; IDENTITY_HUES],
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
@@ -1188,13 +1171,15 @@ const DARK_TONES: Tones = Tones {
     error: Rgb::hex(0xff9095),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
-    // The new hues at the green's lightness as a mark (0.72) and Radix's step 11 as text (0.80),
-    // so blue and violet are as loud as the green beside them.
+    // The new hues at the green's lightness as a mark (0.72) and Radix's step 11 as text (0.80).
+    // Chroma goes by urgency: working and merged are calm states the person need not act on, so
+    // their marks sit under the amber and red at full chroma (0.11 and 0.09), every hue kept.
     working: Oklch { l: 0.80, c: 0.11, h: WORKING_HUE },
-    working_fill: Oklch { l: 0.72, c: 0.15, h: WORKING_HUE },
+    working_fill: Oklch { l: 0.72, c: 0.11, h: WORKING_HUE },
     merged: Oklch { l: 0.80, c: 0.11, h: MERGED_HUE },
-    merged_fill: Oklch { l: 0.72, c: 0.15, h: MERGED_HUE },
-    identity: identity(0.72, 0.13),
+    merged_fill: Oklch { l: 0.72, c: 0.09, h: MERGED_HUE },
+    // A tint that tells machines apart side by side, not a state's chroma.
+    identity: identity(0.72, 0.06),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
@@ -1247,10 +1232,11 @@ const LIGHT_TONES: Tones = Tones {
     // A mark at 0.58, 3:1 and more on paper with the most chroma it holds there, and a word
     // at 0.50, AA on paper.
     working: Oklch { l: 0.50, c: 0.15, h: WORKING_HUE },
-    working_fill: Oklch { l: 0.58, c: 0.17, h: WORKING_HUE },
+    // Calm states a step under the urgent ones' chroma, as in dark.
+    working_fill: Oklch { l: 0.58, c: 0.12, h: WORKING_HUE },
     merged: Oklch { l: 0.50, c: 0.15, h: MERGED_HUE },
-    merged_fill: Oklch { l: 0.58, c: 0.17, h: MERGED_HUE },
-    identity: identity(0.58, 0.15),
+    merged_fill: Oklch { l: 0.58, c: 0.10, h: MERGED_HUE },
+    identity: identity(0.60, 0.07),
     fill_fg: Rgb::hex(0x0a0b0e),
     solid_ink: Step { toward: Toward::White, share: 1.0 },
 };
@@ -1414,6 +1400,12 @@ impl Surfaces {
             lift_to(t.working.rgb(), &under, t.pole, word),
             lift_to(t.merged.rgb(), &under, t.pole, word),
         );
+        let light = content.is_light();
+        let (chosen_on_canvas, hover_on_canvas) = if light {
+            (Tint::of(elevated, 1.0), Tint::of(elevated, alpha::HALF))
+        } else {
+            (selected, hover)
+        };
         Self {
             canvas,
             panel,
@@ -1421,6 +1413,8 @@ impl Surfaces {
             hover,
             selected,
             pressed,
+            chosen_on_canvas,
+            hover_on_canvas,
             band,
             border: Tint::of(t.text, t.border.share),
             border_subtle: Tint::of(t.text, t.border_subtle.share),
@@ -2153,11 +2147,19 @@ mod tests {
         assert!((Radii::nested(r.lg, 1.0, r.xs) - 7.0).abs() < f32::EPSILON, "inside a border");
         assert!(Radii::nested(r.xs, 1.0, r.md).abs() < f32::EPSILON, "never under zero");
 
-        // `MonoCode`'s chrome sizes: 13, 12 (the most used), 11; prose 15; then the page
-        // headings, 20 and 26, weights no higher than semibold.
+        // `MonoCode`'s chrome sizes: 13, 12 (the most used), 11; prose 14; then the titles and
+        // page headings by their roles, 15, 20 and 26, weights no higher than semibold.
         let mut t = Typography::default();
+        let roles = t.roles(false);
         assert_eq!(
-            (t.caption(), t.small(), t.ui_size, t.title(), t.heading(), t.display()),
+            (
+                t.caption(),
+                t.small(),
+                t.ui_size,
+                roles.panel_title.size,
+                roles.page_heading.size,
+                roles.first_run.size
+            ),
             (11.0, 12.0, 13.0, 15.0, 20.0, 26.0),
             "one name per size"
         );
@@ -2167,7 +2169,8 @@ mod tests {
             assert!(Typography::STRONG_WEIGHT <= 600.0, "semibold at the most");
         };
         t.ui_size = 8.0;
-        assert_eq!((t.caption(), t.small(), t.title()), (6.0, 7.0, 10.0), "clamped at the floor");
+        let title = t.roles(false).panel_title.size;
+        assert_eq!((t.caption(), t.small(), title), (6.0, 7.0, 10.0), "clamped at the floor");
         let s = Spacing::default();
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
         assert!(s.xl < s.xxl && s.xxl < s.xxxl, "the page steps follow");
@@ -2214,6 +2217,38 @@ mod tests {
     fn lightness(c: Rgb) -> f32 {
         let y = c.luminance();
         if y > 216.0 / 24_389.0 { 116.0_f32.mul_add(y.cbrt(), -16.0) } else { y * 24_389.0 / 27.0 }
+    }
+
+    /// A selection on the canvas rises, never darkens: in light the chosen row is the raised
+    /// surface itself, lighter than the canvas it lies on, and the pointer's step is half way up
+    /// to it; in dark both are the ink's washes, as everywhere else.
+    #[test]
+    fn a_selection_on_the_canvas_rises_in_light() {
+        for (name, bg) in BACKGROUNDS {
+            let s = Surfaces::derive(Rgb::hex(bg));
+            let (chosen, hover) = (
+                s.chosen_on_canvas.over(s.canvas).oklch().l,
+                s.hover_on_canvas.over(s.canvas).oklch().l,
+            );
+            let canvas = s.canvas.oklch().l;
+            if Rgb::hex(bg).is_light() {
+                assert_eq!(
+                    s.chosen_on_canvas.over(s.canvas),
+                    s.elevated,
+                    "{name}: the raised surface"
+                );
+                assert!(
+                    chosen > hover && hover > canvas,
+                    "{name}: {canvas:.3} < {hover:.3} < {chosen:.3}"
+                );
+            } else {
+                assert_eq!(
+                    (s.chosen_on_canvas, s.hover_on_canvas),
+                    (s.selected, s.hover),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2409,6 +2444,27 @@ mod tests {
         let larger = Typography { ui_size: 15.0, ..Typography::default() }.roles(false);
         assert_eq!(at(larger.task_title), (16.0, 22.0, 500.0), "it follows the chrome size");
         assert_eq!(larger.prose, desk.prose, "prose keeps its own size");
+        // The strong weight is a title's alone: a dialog's or a panel's, and a page's heading.
+        // A section's head and the first run's hero are medium.
+        for roles in [desk, touch] {
+            let strong: Vec<f32> = [
+                roles.caption,
+                roles.metadata,
+                roles.chrome,
+                roles.action,
+                roles.task_title,
+                roles.section,
+                roles.prose,
+                roles.first_run,
+            ]
+            .iter()
+            .map(|r| r.weight)
+            .filter(|w| *w > Typography::MEDIUM_WEIGHT)
+            .collect();
+            assert!(strong.is_empty(), "only titles are strong: {strong:?}");
+            let strong = |r: TypeRole| (r.weight - Typography::STRONG_WEIGHT).abs() < f32::EPSILON;
+            assert!(strong(roles.panel_title) && strong(roles.page_heading), "titles are strong");
+        }
         let finger = Theme { density: Density::TOUCH, ..Theme::default() };
         assert_eq!(finger.roles(), touch);
         assert_eq!(Theme::default().roles(), desk);
@@ -2567,11 +2623,10 @@ mod tests {
     }
 
     /// Glass reads as the chrome it is, in light as in dark: over the worst wallpaper its ground
-    /// stays within a tenth of OKLCH lightness and a little of the canvas, its text tones go
-    /// at most 0.05 L deeper than they are on the opaque chrome (a muted grey a shade darker,
-    /// never a second hierarchy), and nothing but text moves. Light's lift is the larger, since
-    /// a cast of black on paper takes more from its text than white takes on near-black; both
-    /// stay inside the same bound.
+    /// moves off the canvas by no more than the share of the wallpaper it lets through, its text
+    /// tones go at most a tenth of L deeper than on the opaque chrome (a grey a shade
+    /// darker, never a second hierarchy: the floors test keeps each tier a step apart), and
+    /// nothing but text moves. At 0.90 the glass was too opaque to be seen; at 0.82 it shows.
     #[test]
     fn glass_reads_as_the_chrome_in_light_and_dark() {
         let default =
@@ -2583,11 +2638,15 @@ mod tests {
             for wall in WALLPAPERS {
                 let ground = Tint::of(opaque.canvas, alpha::GLASS).over(Rgb::hex(wall));
                 let off = (ground.oklch().l - canvas).abs();
-                assert!(off <= 0.11, "{content:?} over {wall:06x}: the ground is {off:.3} L off");
+                let through = 1.0 - alpha::GLASS;
+                assert!(
+                    off <= through,
+                    "{content:?} over {wall:06x}: the ground is {off:.3} L off"
+                );
             }
             for ((ink, was), (_, now)) in inks(&opaque).into_iter().zip(inks(&glass)) {
                 let deeper = (now.oklch().l - was.oklch().l).abs();
-                assert!(deeper <= 0.05, "{content:?}: {ink} moves {deeper:.3} L on glass");
+                assert!(deeper <= 0.10, "{content:?}: {ink} moves {deeper:.3} L on glass");
             }
             let text = Surfaces {
                 text: opaque.text,

@@ -17,7 +17,7 @@
 //! Then *Projects*: the tiles grouped by the first fact of the layout's chain each has
 //! ([`slopty_client::groups`]): its declared project, else its repository (one block for every
 //! clone of it on every worker), else its folder. Each project has a header disclosing its
-//! tiles: its glyph and its name in the strong weight (where it is, when another listed has
+//! tiles: its glyph and its name in the medium weight (where it is, when another listed has
 //! that name), then on its right edge the machines it spans where there are several workers,
 //! led by what its tiles add up to while it is folded; the pointer brings out the chevron and,
 //! for a project with a place, "+" (a new shell in its clone on the focused tile's machine,
@@ -638,20 +638,23 @@ fn now_ms(cx: &gpui::App) -> u64 {
 }
 
 /// One row of the navigator's list: its density's height, on the one edge grid (the wash sits
-/// a base unit in from the panel's edges), a tab stop named `label`. The pointer washes it
-/// `raised`; the selected row sits on the list's plate, which settles from row to row.
+/// a base unit in from the panel's edges), a tab stop named `label`, its id and its test
+/// selector the one `selector`. The pointer's step and the
+/// selection follow the `plane` the list lies on ([`kit::selected_on`]); the selected row sits
+/// on the list's plate, which settles from row to row.
 pub(super) fn row(
     theme: &Theme,
     lines: kit::Row,
-    id: impl Into<ElementId>,
     selector: String,
     label: SharedString,
     selected: bool,
+    plane: kit::Plane,
 ) -> Stateful<Div> {
     let s = theme.surfaces;
     let spacing = theme.spacing;
+    let hover = kit::hover_on(theme, plane);
     let el = div()
-        .id(id)
+        .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector)
         .role(Role::Button)
         .aria_label(label)
@@ -665,7 +668,7 @@ pub(super) fn row(
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .text_size(px(theme.roles().chrome.size))
-        .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
+        .when(!selected, |el| el.hover(move |el| el.bg(hover)));
     tab_stop(el, s.focus)
 }
 
@@ -1350,6 +1353,12 @@ impl WorkspaceView {
         self.nav.glass.theme(&self.theme)
     }
 
+    /// The plane the navigator's rows lie on: the canvas while it docks, a float laid over the
+    /// frame (an overlay, a phone's drawer), where its panel is the raised surface.
+    pub(super) fn nav_plane(&self) -> kit::Plane {
+        if self.nav.drawn == Some(Mode::Docked) { kit::Plane::Canvas } else { kit::Plane::Float }
+    }
+
     pub(super) fn navigator_panel_width(&self, mode: Mode, window: &Window) -> f32 {
         match mode {
             Mode::Drawer => {
@@ -1436,8 +1445,9 @@ impl WorkspaceView {
     /// What a tile's second line says, and its age: a shell's agent words or its command,
     /// then where it is (its directory and branch); a page's address; a file's directory; a
     /// note's progress or next line. Empty when nothing is worth a line: the worker's name is
-    /// its header's, a home directory alone says nothing, and a kind is its icon's. Such a
-    /// row is one line.
+    /// its header's, a home directory alone says nothing, and a kind is its icon's. The
+    /// overview's miniatures say it whole; a navigator row drops a file's place
+    /// ([`Self::nav_tile_meta`]).
     ///
     /// An agent waiting on the human gives what it asks and not its state: the row's first line
     /// ends in "Needs approval" already, and "Needs approval: …" under it said the state twice.
@@ -1473,6 +1483,39 @@ impl WorkspaceView {
             | ItemKind::Thread { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
         }
+    }
+
+    /// [`Self::tile_meta`] as a navigator row says it: a file or a folder leaves its place to its
+    /// tile's header and says it only while another listed reads alike, as the palette tells two
+    /// such apart. A shell keeps its line, which says only what its title does not: what it is
+    /// doing, the directory below its title's root, its branch.
+    pub(super) fn nav_tile_meta(
+        &self,
+        item: &Item,
+        now: SystemTime,
+        cx: &gpui::App,
+    ) -> (String, Option<Duration>) {
+        match &item.kind {
+            ItemKind::File { .. } | ItemKind::Folder { .. } => {
+                let place = self.reads_alike(item).then(|| self.tile_place(item)).flatten();
+                (place.unwrap_or_default(), None)
+            }
+            _ => self.tile_meta(item, now, cx),
+        }
+    }
+
+    /// Whether another file or folder in the layout reads as `item` does: the same kind and the
+    /// same name before any twin's number, so only its place tells them apart.
+    fn reads_alike(&self, item: &Item) -> bool {
+        let title = self.derived_title(item);
+        let file = matches!(item.kind, ItemKind::File { .. });
+        self.items().any(|(worker, other)| {
+            other.id != item.id
+                && matches!(other.kind, ItemKind::File { .. }) == file
+                && matches!(other.kind, ItemKind::File { .. } | ItemKind::Folder { .. })
+                && self.layout.contains(TileRef { worker, item: other.id })
+                && self.derived_title(other) == title
+        })
     }
 
     /// What a shell's second line says it is doing (its agent's words, else its command) and
@@ -1514,7 +1557,7 @@ impl WorkspaceView {
     ) -> (String, Option<Duration>) {
         let worker = machine.then(|| self.worker_name(tile.worker));
         let ItemKind::Terminal { session } = item.kind else {
-            let (meta, age) = self.tile_meta(item, now, cx);
+            let (meta, age) = self.nav_tile_meta(item, now, cx);
             return (meta_line([worker.as_deref(), Some(meta.as_str())]), age);
         };
         let (doing, since) = self.shell_doing(session);
@@ -1615,7 +1658,7 @@ impl WorkspaceView {
                         group.places().filter(|(w, _)| *w == tile.worker).map(|(_, p)| p).collect();
                     self.tile_meta_in_group(tile, item, (&roots, spanned), now, cx)
                 }
-                _ => self.tile_meta(item, now, cx),
+                _ => self.nav_tile_meta(item, now, cx),
             };
             let project_name = project.map(|g| self.group_name(g));
             let empty = groups::Facts::new();
@@ -2746,7 +2789,12 @@ impl WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.nav.list.plate.under_on(theme, moves, Some(self.clock_instant())))
+            .child(self.nav.list.plate.under_on(
+                theme,
+                self.nav_plane(),
+                moves,
+                Some(self.clock_instant()),
+            ))
             .child(rows)
             .into_any_element()
     }
@@ -2969,7 +3017,8 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
-            .child(title(agent.title.clone(), hsla(s.text)))
+            // At rest a tier under the content, as every row is: its glyph keeps the urgency.
+            .child(title(agent.title.clone(), hsla(s.text_secondary)))
             .children(time);
         // The agent's words, then where it runs, as a tile's second line reads: one line joined
         // by the same separator, so the place is what gives way first and is never pressed to a
@@ -3005,42 +3054,35 @@ impl WorkspaceView {
             .when(blank, |el| el.child(div().flex_1()))
             .children(answers);
         let step = agent.at;
-        row(
-            theme,
-            kit::Row::Two,
-            ElementId::Name(format!("{prefix}-{key}").into()),
-            format!("{prefix}-{key}"),
-            label.into(),
-            false,
-        )
-        .items_start()
-        .pt(px(theme.spacing.xs))
-        // It leads with how it stands, as every row does: what it waits on is the point of
-        // the row, and the agent is named in its words.
-        .child(lead_slot(theme, {
-            let side = px(theme.typography.icon());
-            let tone = hsla(agent.status.ink(theme));
-            crate::icons::status_icon(theme, agent.status, side, tone).into_any_element()
-        }))
-        .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
-        // Focused, the row answers as its buttons do: ⌘↵ allows, ⌘⌫ denies. Only here, where
-        // the person has put the keyboard on this one request.
-        .when_some(agent.answer.clone(), |el, answer| {
-            let deny = answer.clone();
-            el.key_context(crate::conversation::REQUEST_CTX)
-                .on_action(cx.listener(
-                    move |this, _: &crate::conversation::AllowRequest, _w, cx| {
-                        this.answer_row(&answer, true, cx);
-                    },
-                ))
-                .on_action(cx.listener(
-                    move |this, _: &crate::conversation::DenyRequest, _w, cx| {
-                        this.answer_row(&deny, false, cx);
-                    },
-                ))
-        })
-        .into_any_element()
+        row(theme, kit::Row::Two, format!("{prefix}-{key}"), label.into(), false, self.nav_plane())
+            .items_start()
+            .pt(px(theme.spacing.xs))
+            // It leads with how it stands, as every row does: what it waits on is the point of
+            // the row, and the agent is named in its words.
+            .child(lead_slot(theme, {
+                let side = px(theme.typography.icon());
+                let tone = hsla(agent.status.ink(theme));
+                crate::icons::status_icon(theme, agent.status, side, tone).into_any_element()
+            }))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
+            // Focused, the row answers as its buttons do: ⌘↵ allows, ⌘⌫ denies. Only here, where
+            // the person has put the keyboard on this one request.
+            .when_some(agent.answer.clone(), |el, answer| {
+                let deny = answer.clone();
+                el.key_context(crate::conversation::REQUEST_CTX)
+                    .on_action(cx.listener(
+                        move |this, _: &crate::conversation::AllowRequest, _w, cx| {
+                            this.answer_row(&answer, true, cx);
+                        },
+                    ))
+                    .on_action(cx.listener(
+                        move |this, _: &crate::conversation::DenyRequest, _w, cx| {
+                            this.answer_row(&deny, false, cx);
+                        },
+                    ))
+            })
+            .into_any_element()
     }
 
     /// A workspace in the phone's drawer: its glyph, its name and how many tiles it holds. The
@@ -3057,21 +3099,14 @@ impl WorkspaceView {
         let label = SharedString::from(format!("{}, {count}", space.name));
         let ink = if space.active { s.text } else { s.text_secondary };
         let row =
-            row(
-                theme,
-                kit::Row::One,
-                ElementId::Name(format!("nav-space-{ix}").into()),
-                format!("nav-space-{ix}"),
-                label,
-                false,
-            )
-            // No glyph: a workspace is its name, and the empty slot keeps the names' edge.
-            .child(lead_slot(theme, div()))
-            .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
-                el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            }))
-            .child(readout(theme, space.tiles.to_string()))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
+            row(theme, kit::Row::One, format!("nav-space-{ix}"), label, false, self.nav_plane())
+                // No glyph: a workspace is its name, and the empty slot keeps the names' edge.
+                .child(lead_slot(theme, div()))
+                .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
+                    el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                }))
+                .child(readout(theme, space.tiles.to_string()))
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
         row.into_any_element()
     }
 
@@ -3096,12 +3131,12 @@ impl WorkspaceView {
         ));
         // A group's head: the name at the medium weight, a name and not a title, and the machine
         // by its form beside it at the same weight, in its own colour; muted only while away.
-        let strong = theme.roles().action.weight;
+        let named = theme.roles().action.weight;
         let machine = |ink: Rgb| {
             crate::palette::lead_slot_weighted(
                 theme,
                 self.machine_glyph(key),
-                weight_beside(strong),
+                weight_beside(named),
                 hsla(ink),
                 1.0,
             )
@@ -3122,7 +3157,7 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .font_weight(gpui::FontWeight(strong))
+            .font_weight(gpui::FontWeight(named))
             .text_color(hsla(s.text))
             .child(SharedString::from(worker.name.clone()));
         // Only when something is wrong with the worker itself: a line under its name, in the
@@ -3306,14 +3341,7 @@ impl WorkspaceView {
                 None => el.child(rest).child(hover),
             });
         let lines = if worker.warning.is_some() { kit::Row::Two } else { kit::Row::One };
-        let row = row(
-            theme,
-            lines,
-            ElementId::Name(format!("nav-worker-{key}").into()),
-            format!("nav-worker-{key}"),
-            label,
-            false,
-        );
+        let row = row(theme, lines, format!("nav-worker-{key}"), label, false, self.nav_plane());
         Self::machine_menu_press(row, key, cx)
             .group(group)
             .child(lead)
@@ -3329,7 +3357,7 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A project's header: its glyph and its name in the strong weight, where it is when
+    /// A project's header: its glyph and its name in the medium weight, where it is when
     /// another listed has its name, then on the right edge the machines it spans, led by what
     /// its tiles add up to while it is folded. Under the pointer the chevron and "+" (a new shell
     /// in its clone) take the readouts' place; nothing moves when either shows. A click folds it.
@@ -3348,11 +3376,11 @@ impl WorkspaceView {
             if folded { ", folded" } else { "" }
         ));
         // The name at the medium weight, its glyph beside it at the same weight.
-        let strong = theme.roles().action.weight;
+        let named = theme.roles().action.weight;
         let lead = crate::palette::lead_slot_weighted(
             theme,
             group.glyph,
-            weight_beside(strong),
+            weight_beside(named),
             hsla(group_ink(theme, &group.key)),
             1.0,
         );
@@ -3364,7 +3392,7 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .font_weight(gpui::FontWeight(strong))
+            .font_weight(gpui::FontWeight(named))
             .text_color(hsla(s.text))
             .child(SharedString::from(group.name.clone()));
         let hover_group = SharedString::from(format!("nav-group-hover-{key}"));
@@ -3449,14 +3477,8 @@ impl WorkspaceView {
             .child(rest)
             .child(hover);
         let fold = key.clone();
-        let row = row(
-            theme,
-            kit::Row::One,
-            ElementId::Name(format!("nav-group-{key}").into()),
-            format!("nav-group-{key}"),
-            label,
-            false,
-        );
+        let row =
+            row(theme, kit::Row::One, format!("nav-group-{key}"), label, false, self.nav_plane());
         Self::project_menu_press(row, key, group.new_shell.clone(), cx)
             .group(hover_group)
             .child(lead)
@@ -3486,33 +3508,26 @@ impl WorkspaceView {
         let lead = crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(ink), 1.0);
         let words_id = id.clone();
         let project = board.project.clone();
-        row(
-            theme,
-            kit::Row::One,
-            ElementId::Name(format!("nav-board-{id}").into()),
-            format!("nav-board-{id}"),
-            label,
-            false,
-        )
-        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
-        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
-        .child(lead)
-        // "Board" is one short word and stays whole; the words beside it give way instead.
-        .child(title(BOARD, hsla(s.text_secondary)).flex_none())
-        .child(
-            tabular(meta(div(), theme))
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_right()
-                .child(board.words.clone())
-                .debug_selector(move || format!("nav-board-words-{words_id}")),
-        )
-        .children(state.map(|st| status_mark(theme, Some(st), 1.0)))
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
-        .into_any_element()
+        row(theme, kit::Row::One, format!("nav-board-{id}"), label, false, self.nav_plane())
+            .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+            .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
+            .child(lead)
+            // "Board" is one short word and stays whole; the words beside it give way instead.
+            .child(title(BOARD, hsla(s.text_secondary)).flex_none())
+            .child(
+                tabular(meta(div(), theme))
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_right()
+                    .child(board.words.clone())
+                    .debug_selector(move || format!("nav-board-words-{words_id}")),
+            )
+            .children(state.map(|st| status_mark(theme, Some(st), 1.0)))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
+            .into_any_element()
     }
 
     /// A thread at work with no tile here, set back as a row at work is: its status glyph,
@@ -3534,34 +3549,27 @@ impl WorkspaceView {
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
         let (worker, thread) = (t.worker, t.thread);
-        row(
-            theme,
-            kit::Row::One,
-            ElementId::Name(format!("nav-thread-{id}").into()),
-            format!("nav-thread-{id}"),
-            label.into(),
-            false,
-        )
-        .group(row_group.clone())
-        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
-        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
-        .child(lead)
-        .child(
-            title(t.title.clone(), faded(ink))
-                .group_hover(row_group, move |st| st.text_color(hsla(ink))),
-        )
-        .children(t.word.map(|word| readout(theme, word)))
-        // One mark at the line's end: how it is doing, else how long it has rested.
-        .children(match state {
-            Some(st) => Some(
-                status_mark(theme, Some(st), 1.0)
-                    .debug_selector(move || format!("nav-thread-state-{id}"))
-                    .into_any_element(),
-            ),
-            None => t.age.clone().map(|age| readout(theme, age).into_any_element()),
-        })
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
-        .into_any_element()
+        row(theme, kit::Row::One, format!("nav-thread-{id}"), label.into(), false, self.nav_plane())
+            .group(row_group.clone())
+            .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+            .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
+            .child(lead)
+            .child(
+                title(t.title.clone(), faded(ink))
+                    .group_hover(row_group, move |st| st.text_color(hsla(ink))),
+            )
+            .children(t.word.map(|word| readout(theme, word)))
+            // One mark at the line's end: how it is doing, else how long it has rested.
+            .children(match state {
+                Some(st) => Some(
+                    status_mark(theme, Some(st), 1.0)
+                        .debug_selector(move || format!("nav-thread-state-{id}"))
+                        .into_any_element(),
+                ),
+                None => t.age.clone().map(|age| readout(theme, age).into_any_element()),
+            })
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
+            .into_any_element()
     }
 
     /// The fold over the threads at rest with no tile here, a heading the list ends with: its
@@ -3813,16 +3821,16 @@ impl WorkspaceView {
                 .children(bar)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
-        let row = row(
-            theme,
-            lines,
-            ElementId::Name(format!("nav-tile-{id}").into()),
-            format!("nav-tile-{id}"),
-            label.into(),
-            selected,
-        );
+        let row =
+            row(theme, lines, format!("nav-tile-{id}"), label.into(), selected, self.nav_plane());
         Self::tile_menu_press(row, tile, super::context_menus::Pressed::Navigator, cx)
-            .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
+            .map(|row| {
+                if selected {
+                    self.nav.list.plate.seat(row, tile, theme, self.nav_plane())
+                } else {
+                    row
+                }
+            })
             .group(row_group)
             // The two lines sit in the middle of the row at either density, the kind beside the
             // first.
@@ -3882,7 +3890,10 @@ fn heading(
     first: bool,
 ) -> Stateful<Div> {
     let id = selector.clone();
+    // A tier under the rows it heads, which are a tier under the content: the navigator
+    // recedes and the work leads, as Linear's dimmer sidebars do.
     crate::palette::section_heading(theme, id.into(), text, first)
+        .text_color(hsla(theme.surfaces.text_muted))
         .debug_selector(move || selector.to_string())
 }
 

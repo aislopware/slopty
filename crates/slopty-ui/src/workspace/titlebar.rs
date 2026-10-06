@@ -404,44 +404,29 @@ impl WorkspaceView {
         let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
         let unread = total.saturating_add(self.to_review().len());
         let bell = has_workers.then(|| {
-            // Each fill with its own ink: a near-black on the amber, and on done's green when
-            // only turns to review are unread (done is green, not the accent).
-            let (fill, ink) =
-                if total > 0 { (s.warn_fill, s.fill_fg) } else { (s.success_fill, s.accent_ink) };
-            let badge = (unread > 0).then(|| {
-                let count = SharedString::from(unread.to_string());
-                let side = theme.typography.caption() + spacing.xs + spacing.xxs;
-                let hovered = hsla(s.hover.over(theme.content()));
-                // A ring of the bar's colour cuts the disc out of the bell's stroke, as a
-                // badge on a Mac's dock is cut out of its icon; under the pointer it takes
-                // the button's hover fill.
-                kit::tabular(div())
+            // No count disc, the one web badge the app had: the glyph itself says it, as the
+            // Mac's own monochrome `bell.badge` does, in its words' tier, and in the warn fill
+            // only while something needs the person. The count is said, not drawn.
+            let symbol = if unread > 0 { Symbol::BellBadge } else { Symbol::Bell };
+            let label = super::navigator::NEEDS_YOU;
+            let button = if total > 0 {
+                kit::icon_button_inked(theme, "bell", symbol, label, s.warn_fill)
+            } else {
+                kit::icon_button(theme, "bell", symbol, label)
+            };
+            let count = (unread > 0).then(|| {
+                div()
                     .id("bell-count")
                     .debug_selector(|| "bell-count".to_owned())
                     .role(Role::Status)
                     .aria_label(SharedString::from(format!("{unread} new")))
                     .absolute()
-                    .top(px(-spacing.xs))
-                    .right(px(-spacing.xs))
-                    .h(px(side))
-                    .min_w(px(side))
-                    .px(px(spacing.xxs))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border(px(slopty_theme::stroke::EDGE))
-                    .border_color(hsla(theme.content()))
-                    .group_hover(BELL, move |el| el.border_color(hovered))
-                    .bg(hsla(fill))
-                    .text_color(hsla(ink))
-                    .text_size(px(theme.typography.caption()))
-                    .child(count)
+                    .size_0()
             });
-            kit::icon_button(theme, "bell", Symbol::Bell, super::navigator::NEEDS_YOU)
+            button
                 .group(BELL)
                 .relative()
-                .children(badge)
+                .children(count)
                 .on_click(cx.listener(|this, _ev, window, cx| this.needs_you_shown(window, cx)))
         });
         let more = kit::icon_button(theme, "more", Symbol::Ellipsis, "More")

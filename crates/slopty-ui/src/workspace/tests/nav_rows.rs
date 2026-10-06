@@ -1306,3 +1306,68 @@ fn a_shell_that_changes_checkout_moves_row_not_tile(cx: &mut TestAppContext) {
     assert_eq!(order, [atlas, site], "the moved shell's row joined atlas");
     assert_eq!(view.read_with(cx, |v, _| v.layout().position(site)), at, "its tile did not move");
 }
+
+/// A file's row leaves its folder to its tile's header: it is one line. Two files that read
+/// alike are told apart by their folders, as the palette tells them apart.
+#[gpui::test]
+fn a_files_row_says_its_folder_only_beside_a_namesake(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let notes = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a/notes.md".into() }, 1);
+    let meta = |cx: &mut VisualTestContext, title: &str| {
+        let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+        lines.into_iter().filter(|(t, ..)| t == title).map(|(_, m, _)| m).collect::<Vec<_>>()
+    };
+    assert_eq!(meta(cx, "notes.md"), [""], "one line: the header names its folder");
+    let row = cx.debug_bounds(selector("nav-tile", notes.item)).expect("drawn");
+    let one = Theme::default().density.row;
+    assert!((f32::from(row.size.height) - one).abs() < 0.5, "a one-line row: {row:?}");
+
+    let _other = arrives(&view, cx, &studio, ItemKind::File { path: "/w/b/notes.md".into() }, 2);
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    let said: Vec<&str> = lines
+        .iter()
+        .filter(|(t, ..)| t.starts_with("notes.md"))
+        .map(|(_, m, _)| m.as_str())
+        .collect();
+    assert_eq!(said.len(), 2, "both listed: {lines:?}");
+    assert!(said.iter().all(|m| !m.is_empty()), "a namesake tells them apart: {said:?}");
+    assert_ne!(said.first(), said.get(1), "each by its own folder: {said:?}");
+}
+
+/// Docked on the canvas, a light navigator's selected row rises to the raised surface, white
+/// on the dimmer canvas, with no ring; laid over the frame on a phone, its panel is the raised
+/// surface already, so the row takes the wash.
+#[gpui::test]
+fn a_docked_selection_rises_to_white(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let theme = Theme::new(slopty_theme::Variant::Light);
+    view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+    cx.run_until_parked();
+    let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the focused row");
+    let fill_at = |cx: &mut VisualTestContext, row: Bounds<Pixels>, fill: gpui::Hsla| {
+        let fill = gpui::Background::from(fill);
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+            window.painted_quads().into_iter().any(|q| {
+                q.background == fill
+                    && near(q.bounds.origin.y.0, row.origin.y)
+                    && near(q.bounds.size.height.0, row.size.height)
+            })
+        })
+    };
+    let white = crate::colors::hsla(theme.surfaces.elevated);
+    let wash = crate::colors::hsla(theme.surfaces.selected);
+    assert!(fill_at(cx, row, white), "the raised surface under the docked selection");
+    assert!(!fill_at(cx, row, wash), "not the grey wash");
+
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row in the drawer");
+    assert!(fill_at(cx, row, wash), "on the drawer's raised panel, the wash");
+}

@@ -2400,8 +2400,7 @@ impl Workspace {
                 if welcome {
                     kit::typed(el, roles.first_run, 1.0)
                 } else {
-                    el.text_size(px(ty.title()))
-                        .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+                    kit::typed(el, roles.panel_title, 1.0)
                 }
             })
             .text_color(hsla(s.text))
@@ -3150,7 +3149,8 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(self.theme.radii.sm))
-            .text_size(px(if word { ty.small() } else { ty.title() }))
+            // A glyph cap at a title's size, a word cap at the metadata's.
+            .text_size(px(if word { ty.small() } else { self.theme.roles().panel_title.size }))
             .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .map(|el| {
                 if lit {

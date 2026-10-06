@@ -31,10 +31,11 @@ fn title_leads(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: T
 }
 
 /// With two tiles in view neither header is a band and nothing is drawn over either: both sit
-/// on the content. The focused one's title leads in the primary tone and the other's is muted,
-/// and the tone goes with the focus. No line, ring or frame says it.
+/// on the content. The focused one's title leads in the primary tone at the medium weight and
+/// the other's steps back a tier to the secondary tone at the regular weight, and both go with
+/// the focus. No line, ring or frame says it.
 #[gpui::test]
-fn the_focused_tile_is_said_by_its_titles_tone_alone(cx: &mut TestAppContext) {
+fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
@@ -56,7 +57,7 @@ fn the_focused_tile_is_said_by_its_titles_tone_alone(cx: &mut TestAppContext) {
         assert!(over.is_empty(), "{tile:?}: nothing drawn along its top: {over:?}");
     }
     assert_eq!(tile::title_ink(&theme, true), theme.surfaces.text);
-    assert_eq!(tile::title_ink(&theme, false), theme.surfaces.text_muted);
+    assert_eq!(tile::title_ink(&theme, false), theme.surfaces.text_secondary);
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();

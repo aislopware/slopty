@@ -72,6 +72,7 @@ symbols! {
     ArrowUpToLine => "arrow.up.to.line",
     ArrowUturnBackward => "arrow.uturn.backward",
     Bell => "bell",
+    BellBadge => "bell.badge",
     CharacterCursorIbeam => "character.cursor.ibeam",
     Checklist => "checklist",
     Checkmark => "checkmark",

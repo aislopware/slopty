@@ -355,7 +355,7 @@ impl Default for Font {
             mono_line_height: 1.0,
             ligatures: true,
             ui_size: 13.0,
-            prose_size: 15.0,
+            prose_size: 14.0,
         }
     }
 }
@@ -1619,7 +1619,7 @@ mod tests {
         assert_eq!(loaded.settings.font.mono_size, 14.0);
         assert_eq!(loaded.settings.font.ui_size, 12.0);
         assert_eq!(loaded.settings.font.prose_size, 18.0, "reading has its own size");
-        assert_eq!(Settings::default().font.prose_size, 15.0, "two over the chrome's");
+        assert_eq!(Settings::default().font.prose_size, 14.0, "one over the chrome's");
     }
 
     #[test]

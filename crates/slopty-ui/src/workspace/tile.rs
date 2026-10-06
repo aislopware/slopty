@@ -1429,8 +1429,9 @@ impl WorkspaceView {
             let name = w.name.clone();
             let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
             let muted = hsla(s.text_muted);
-            // The glyph wears its machine's own colour; the name stays quiet.
-            let tint = hsla(kit::machine_ink(theme, tile.worker, w.link.is_none()));
+            // The glyph in its name's quiet tier: a machine's own colour is the navigator's
+            // head's alone.
+            let tint = muted;
             div()
                 .id("worker")
                 .debug_selector(move || format!("worker-{}", id.as_uuid()))
@@ -1532,7 +1533,7 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let id = item.id;
         // The lead wears its title's tier and weight: the focused title's text at the medium
-        // weight, any other's muted at the regular.
+        // weight, any other's secondary tone at the regular.
         let ink = title_ink(&self.theme, focused);
         let weight =
             if focused { crate::icons::Weight::Medium } else { crate::icons::Weight::Regular };
@@ -3516,10 +3517,11 @@ fn pill(
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
-/// A header's title tone: focus is said by it alone. The focused tile's title
-/// leads in primary text (at the medium weight), every other steps back to the muted tone, so
-/// a wall of tiles reads as titles still and one of them as the one in hand. A tab row's tabs
-/// follow it too.
+/// A header's title tone: focus is said by tone as well as weight. The focused tile's title
+/// leads in primary text at the medium weight; every other steps back a tier, to the secondary
+/// tone at the regular weight, so a wall of tiles reads as titles still and one of them as the
+/// one in hand, not as one bold word among greys. The place after a title stays muted in both.
+/// A tab row's tabs follow it too.
 pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb {
-    if focused { theme.surfaces.text } else { theme.surfaces.text_muted }
+    if focused { theme.surfaces.text } else { theme.surfaces.text_secondary }
 }

@@ -237,10 +237,11 @@ impl Plate {
         row: E,
         key: impl Hash,
         theme: &Theme,
+        plane: crate::kit::Plane,
     ) -> E {
         let glide = Rc::clone(&self.0);
         let key = key_of(key);
-        let fill = hsla(theme.surfaces.selected);
+        let theme = theme.clone();
         let radius = px(theme.radii.sm);
         row.child(
             gpui::canvas(
@@ -252,7 +253,7 @@ impl Plate {
                 },
                 move |bounds, (), window, _cx| {
                     if glide.borrow().seated == Some(key) {
-                        window.paint_quad(gpui::fill(bounds, fill).corner_radii(radius));
+                        crate::kit::paint_chosen(&theme, plane, bounds, radius, window);
                     }
                 },
             )
@@ -264,25 +265,27 @@ impl Plate {
     /// The plate, to lay first in the region the rows scroll in, so it paints under them. It
     /// fills that region and draws only inside it.
     pub(crate) fn under(&self, theme: &Theme) -> impl IntoElement + use<> {
-        self.under_on(theme, true, None)
+        self.under_on(theme, crate::kit::Plane::Float, true, None)
     }
 
-    /// [`Self::under`], on its row at once unless `moves` (as under Reduce Motion, for a list
-    /// whose owner holds its chrome still), and on its owner's clock: the plate glides by
-    /// `now`, the instant the owner's frame stands for, so it moves in step with the owner's
-    /// other motion (the workspace's springs) and a frame drawn again at that instant draws it
-    /// in the same place. `None` reads GPUI's clock at paint: the wall in the app, the test's
-    /// own under a test, so no test can be caught by a slow machine half way through a move.
+    /// [`Self::under`] for a list on `plane`, on its row at once unless `moves` (as under Reduce
+    /// Motion, for a list whose owner holds its chrome still), and on its owner's clock: the
+    /// plate glides by `now`, the instant the owner's frame stands for, so it moves in step
+    /// with the owner's other motion (the workspace's springs) and a frame drawn again at that
+    /// instant draws it in the same place. `None` reads GPUI's clock at paint: the wall in the
+    /// app, the test's own under a test, so no test can be caught by a slow machine half way
+    /// through a move.
     pub(crate) fn under_on(
         &self,
         theme: &Theme,
+        plane: crate::kit::Plane,
         moves: bool,
         now: Option<Instant>,
     ) -> impl IntoElement + use<> {
-        let fill = hsla(theme.surfaces.selected);
+        let theme = theme.clone();
         let radius = px(theme.radii.sm);
         self.under_painted(moves, now, move |plate, window| {
-            window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
+            crate::kit::paint_chosen(&theme, plane, plate, radius, window);
         })
     }
 
@@ -689,9 +692,6 @@ pub struct PaletteItem {
     /// mark). A command has none: it is its words (`docs/decisions/ui.md`, "A command is its
     /// words").
     pub icon: Option<Mark>,
-    /// Whose own colour the mark wears: a machine's or a project's group key
-    /// ([`crate::kit::identity_ink`]); `None` for a mark in the lead's tier.
-    pub identity: Option<slopty_client::groups::GroupKey>,
     /// How the tile or worker is doing: while it is not idle its mark ends the line, and its
     /// word is read with the line.
     pub status: Option<Status>,
@@ -724,7 +724,6 @@ impl PaletteItem {
             keys,
             run,
             icon,
-            identity: None,
             status: None,
             worker: None,
             cwd: None,
@@ -764,16 +763,13 @@ impl PaletteItem {
     /// A worker by its name, `detail` (its round trip, or what is wrong) on the right.
     #[must_use]
     pub fn worker(name: &str, detail: &str, worker: slopty_client::layout::WorkerKey) -> Self {
-        Self {
-            identity: Some(slopty_client::groups::GroupKey::machine(worker)),
-            ..Self::line(
-                name.to_owned(),
-                detail.to_owned(),
-                PaletteRun::Worker(worker),
-                Some(Mark::Symbol(Symbol::ServerRack)),
-                Section::Workers,
-            )
-        }
+        Self::line(
+            name.to_owned(),
+            detail.to_owned(),
+            PaletteRun::Worker(worker),
+            Some(Mark::Symbol(Symbol::ServerRack)),
+            Section::Workers,
+        )
     }
 
     /// `Reopen <title>` for a tile closed as closing `seq`, the latest first.
@@ -793,21 +789,14 @@ impl PaletteItem {
     /// A project by its title: ↩ shows its board.
     #[must_use]
     pub fn project(title: &str, project: slopty_proto::project::ProjectId) -> Self {
-        let key = slopty_client::groups::GroupKey::new(
-            slopty_client::groups::fact::PROJECT,
-            project.as_str(),
-        );
         let run = PaletteRun::Project(project);
-        Self {
-            identity: Some(key),
-            ..Self::line(
-                title.to_owned(),
-                String::new(),
-                run,
-                Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
-                Section::Tiles,
-            )
-        }
+        Self::line(
+            title.to_owned(),
+            String::new(),
+            run,
+            Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
+            Section::Tiles,
+        )
     }
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
@@ -817,12 +806,8 @@ impl PaletteItem {
         glyph: impl Into<Mark>,
         group: slopty_client::layout::GroupKey,
     ) -> Self {
-        let identity = crate::kit::wears_identity(&group).then(|| group.clone());
         let run = PaletteRun::Group(group);
-        Self {
-            identity,
-            ..Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
-        }
+        Self::line(name.to_owned(), String::new(), run, Some(glyph.into()), Section::Projects)
     }
 
     /// An item in the workspace by its title; its icon says what it is.
@@ -932,14 +917,6 @@ impl PaletteItem {
         let run = PaletteRun::OpenAgent { cwd: cwd.to_owned() };
         let label = format!("New agent in {cwd}");
         Self::line(label, String::new(), run, None, Section::Files)
-    }
-
-    /// The same line, its mark in the own colour of the machine or project `key` names
-    /// ([`crate::kit::identity_ink`]).
-    #[must_use]
-    pub fn with_identity(mut self, key: slopty_client::groups::GroupKey) -> Self {
-        self.identity = Some(key);
-        self
     }
 
     /// The same line with another kind icon, or an agent's mark.
@@ -1140,7 +1117,9 @@ pub(crate) fn section_heading(
 ) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
     let above = if first { theme.spacing.sm } else { theme.spacing.lg };
-    crate::kit::inset_x(crate::kit::label(theme, text.clone()), theme)
+    let label =
+        crate::kit::typed(crate::kit::label(theme, text.clone()), theme.roles().section, 1.0);
+    crate::kit::inset_x(label, theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
@@ -1893,13 +1872,14 @@ impl CommandPalette {
         let spacing = theme.spacing;
         let pad = list_pad(theme);
         let pressed = s.pressed;
-        // A machine's or a project's mark wears its own colour, chosen or not, and a machine
-        // out of reach goes grey; any other mark is a tier under its words.
-        let icon_ink = match &item.identity {
-            Some(_) if item.status == Some(Status::Away) => s.text_muted,
-            Some(key) => crate::kit::identity_ink(theme, key),
-            None if chosen => s.text,
-            None => s.text_secondary,
+        // A mark is a tier under its words, its words' tier when chosen; a machine out of reach
+        // goes grey. A machine's own colour is the navigator's head's alone.
+        let icon_ink = if item.status == Some(Status::Away) {
+            s.text_muted
+        } else if chosen {
+            s.text
+        } else {
+            s.text_secondary
         };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         // How it is doing ends the line as its mark; its word, which the mark says, is read

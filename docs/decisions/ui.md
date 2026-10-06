@@ -8199,3 +8199,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `conversation::thread::tests::{an_empty_thread_is_its_composer_under_a_question,
     the_composer_moves_to_the_foot_after_the_first_message}`,
     `conversation::thread::view::tests::an_empty_thread_asks_what_to_do_where`.
+- ✅ **Premium foundations: the theme batch** (2026-10-06,
+  `.research/premium-foundations-2026-10-06.md` changes 2–6, 9, 10, 12, 13). The person still
+  found the UI provincial. Five token values were off the references and are seen on every
+  screen, so the fix starts at the theme.
+  - **Reading type 14/22** (`Typography::default().prose_size` 15 → 14, and the settings'
+    default with it). zeron sets 14/22 and t3code 14 × 1.625; at 15 beside 13 pt chrome the
+    thread read as a blog post set large. Touch prose is 16/26.
+  - **One type scale; the strong weight is for titles.**
+    - `section` is 12/16 at 500, drawn a tier under the rows it heads.
+    - `panel_title` is 15/20 and `page_heading` 20/26, both at 600.
+    - `first_run` is 26/32 at 500, SF's Display cut.
+    - The navigator's machine and project heads move from 600 to 500: a name, not a title.
+    - `Typography::{title, heading, display, task_title}` are deleted. Every site reads
+      `roles()`.
+    - Lints: `kit::tests::one_type_scale` (no call to the old sizes on the typography),
+      `strong_weight_is_for_titles` (600 only by a title's role), and the theme test that only
+      `panel_title` and `page_heading` are strong.
+  - **A light selection rises.** On the canvas (the docked navigator) the chosen row is the
+    raised surface, white on the dimmer canvas, on the resting contact, with no inner ring. The
+    pointer's step is half way up to it (`Surfaces::chosen_on_canvas`, `hover_on_canvas`,
+    `alpha::HALF`). In dark both are the washes. On a float, including the phone's drawer and
+    an overlaid navigator, the selection stays the wash, since white on white would vanish
+    (`kit::Plane`, `kit::selected_on`, `kit::paint_chosen`, the list plate's plane).
+  - **A dimmer navigator.** A row's words rest in `text_secondary` and take `text` at 500 when
+    chosen. Section labels are the section role in `text_muted`. The machine and project heads
+    stay in `text`. This is Linear's dimmer sidebar: the work leads.
+  - **Colour by urgency.**
+    - Identity drops to C 0.06 in dark and 0.07 in light (L 0.60), a tint that tells machines
+      apart without competing with a state.
+    - Working's fill drops to C 0.11 dark and 0.12 light; merged's to 0.09 and 0.10. The amber
+      and red keep full chroma: they are what the person must act on. Every hue is kept.
+    - The identity tint now lands on the navigator's heads alone. The palette's machine and
+      project rows, the start's machine list, a tile header's machine, the breadcrumb and the
+      empty workspace's machines draw their glyph in their words' tier. `PaletteItem::identity`
+      and `with_identity` are deleted.
+    - `identity_colour_stays_on_its_glyph` allows `navigator.rs` only, with `project/view.rs`
+      until lane A's board meta moves.
+  - **No bell disc.** The amber or green count disc, the one web badge in the app, is gone.
+    The bell's glyph becomes `bell.badge` while anything is unread, in its words' tier, and
+    takes the warn fill only while something needs the person. The count is said to a screen
+    reader ("1 new"), not drawn.
+  - **No repeated second lines.** A file's or a folder's navigator row leaves its folder to its
+    tile's header and is one line. It shows the folder only beside a namesake, as the palette
+    tells two apart. A shell's line stays: it says only what its title does not (what it is
+    doing, the directory below the title's root, its branch). The overview's miniatures keep
+    the whole line (`nav_tile_meta` against `tile_meta`).
+  - **Tile focus by tone as well as weight.** An unfocused title steps back to
+    `text_secondary` at 400 and the focused one leads in `text` at 500. The weight-only swap
+    made "Terminal" look bold among greys.
+  - **Glass that shows.** `alpha::GLASS` drops from 0.90 to 0.82. That is the lowest step of
+    0.02 at which every text tone keeps its floors over any wallpaper, and t3code's glass is
+    0.80. The chrome-reads test now bounds the ground by the share the glass lets through, and
+    a text tone's shift on glass by a tenth of L, with the tiers still a step apart. The glass
+    spanning the whole frame (the title bar, the gutters, the status bar) lands with the panels
+    (change 1), because without them the frame has no canvas of its own to show it.
+  - **Overrules.**
+    - The 2026-10-05 premium pass's "the tokens are sound; the slop is composition". Five values
+      were off, and composition alone cannot give a tile a plane.
+    - The identity chroma of "A machine and a project wear their own colour" (status-color
+      §5.2): every hue stays, at under half the chroma, on the navigator's heads only.
+    - Status-color §7's "no rule between settings rows", now that rows are one line (lane A's
+      change 7, `docs/decisions/settings.md`).
+  - Tests: `slopty_theme::tests::{the_type_roles_are_the_scale_the_critique_set,
+    a_selection_on_the_canvas_rises_in_light, glass_reads_as_the_chrome_in_light_and_dark,
+    text_on_glass_keeps_its_floors_over_any_wallpaper}`, `kit::tests::{one_type_scale,
+    strong_weight_is_for_titles, identity_colour_stays_on_its_glyph}`,
+    `icons::tests::an_icon_takes_its_words_size_and_weight`,
+    `workspace::tests::nav_rows::{a_docked_selection_rises_to_white,
+    a_files_row_says_its_folder_only_beside_a_namesake}`,
+    `workspace::tests::frame::the_frame_says_where_the_focused_tile_is_once` (no disc, the count
+    said),
+    `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`.

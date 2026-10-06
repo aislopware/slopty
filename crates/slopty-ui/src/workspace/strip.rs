@@ -1108,10 +1108,8 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let muted = hsla(s.text_muted);
         let title = |text: &'static str| {
-            kit::inset_x(div(), theme)
+            kit::typed(kit::inset_x(div(), theme), theme.roles().panel_title, 1.0)
                 .pb(px(spacing.xs))
-                .text_size(px(theme.typography.title()))
-                .font_weight(FontWeight(Typography::STRONG_WEIGHT))
                 .text_color(hsla(s.text))
                 .child(text)
         };
@@ -1222,6 +1220,10 @@ impl WorkspaceView {
                     Some((_, word)) => format!("New terminal on {}, {word}", w.name),
                     None => format!("New terminal on {}", w.name),
                 };
+                // Its words' tier, grey while away; a machine's own colour is the navigator's
+                // head's alone.
+                let away = w.link.is_none();
+                let ink = if away { s.text_muted } else { s.text_secondary };
                 let row = kit::row(theme, kit::Row::One)
                     .id(("empty-worker", ix))
                     .debug_selector(move || format!("empty-worker-{ix}"))
@@ -1235,7 +1237,7 @@ impl WorkspaceView {
                     .child(crate::palette::lead_slot(
                         theme,
                         crate::icons::machine(w.caps.as_ref().map(|c| c.form)),
-                        hsla(kit::machine_ink(theme, key, w.link.is_none())),
+                        hsla(ink),
                         1.0,
                     ))
                     .child(

@@ -196,8 +196,9 @@ impl WorkspaceView {
         if let Some(worker) = machine.clone() {
             let at = self.focused().map(|t| t.worker);
             let glyph = at.map_or(Symbol::ServerRack, |w| self.machine_glyph(w));
+            // In its words' tier: a machine's own colour is the navigator's head's alone.
             let away = at.is_some_and(|w| self.away_state(w).is_some());
-            let tint = at.map_or(s.text_muted, |w| kit::machine_ink(theme, w, away));
+            let tint = if away { s.text_muted } else { s.text_secondary };
             let label = SharedString::from(format!("on {worker}"));
             let segment = if more {
                 self.crumb(MenuKind::Checkouts, "crumb-worker", label, cx)

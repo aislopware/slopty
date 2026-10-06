@@ -326,9 +326,7 @@ impl WorkspaceView {
                             For::Agent => Box::new(NewAgentOn { agent, worker }),
                             For::Project => Box::new(NewProjectOn { agent, worker }),
                         };
-                        PaletteItem::new(&name, action, &[])
-                            .with_icon(self.machine_glyph(worker))
-                            .with_identity(slopty_client::groups::GroupKey::machine(worker))
+                        PaletteItem::new(&name, action, &[]).with_icon(self.machine_glyph(worker))
                     })
                     .collect();
                 self.open_step(lines, PICK_MACHINE, window, cx);

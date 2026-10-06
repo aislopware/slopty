@@ -253,7 +253,22 @@ fn the_frame_says_where_the_focused_tile_is_once(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("readouts").is_none(), "the title bar says none of it again");
     assert!(!names.iter().any(|l| l.contains("1 working")), "no agent counts: {names:#?}");
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
-    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
+    let count = cx.debug_bounds("bell-count").expect("the bell counts the one waiting");
+    assert_eq!(count.size, size(px(0.0), px(0.0)), "said, not drawn: no disc on the bell");
+    let tree = tree(cx);
+    assert!(tree.iter().any(|n| n.is("Status", Some("1 new"))), "the count is said: {tree:#?}");
+    let amber = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn_fill));
+    let bell = cx.debug_bounds("bell").expect("the bell");
+    let disc = cx.update(|window, _| {
+        window.painted_quads().into_iter().any(|q| {
+            q.background == amber && {
+                let scale = window.scale_factor();
+                let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
+                bell.contains(&at)
+            }
+        })
+    });
+    assert!(!disc, "no amber disc over the bell");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting), "⌘⇧A still goes to the one waiting");
