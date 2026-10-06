@@ -1051,13 +1051,14 @@ fn a_resize_while_compact_changes_the_stored_proportion() {
     let mut l = columns(2);
     l.set_viewport(511.0, 800.0);
     let full = rect(&l, t(2)).w;
-    let half = COMPACT_WORKING / 2.0;
+    // Half of Split View's width is under a lane, so the column keeps a lane's width.
+    let half = PEEK_LEAST.max(COMPACT_WORKING / 2.0);
     assert!(l.resize_begin(1));
-    l.resize_update(-100.0);
+    l.resize_update(100.0);
     l.resize_end();
     near(rect(&l, t(2)).w, full);
     l.set_viewport(1280.0, 800.0);
-    let share = (half - 100.0) / COMPACT_WORKING;
+    let share = (half + 100.0) / COMPACT_WORKING;
     near(rect(&l, t(2)).w, 1280.0 * share);
 }
 
@@ -1638,7 +1639,7 @@ fn an_interactive_resize_follows_the_pointer_and_clamps() {
     l.resize_update(5000.0);
     near(width_of(&l, t(1)), 1280.0);
     l.resize_update(-5000.0);
-    near(width_of(&l, t(1)), 128.0);
+    near(width_of(&l, t(1)), PEEK_LEAST);
     l.resize_end();
     assert!(!l.resize_update(10.0), "ended");
     assert!(!l.resize_begin(7));
@@ -1951,6 +1952,23 @@ fn a_strip_narrower_than_the_view_starts_at_its_edge() {
     near(rect(&l, t(1)).x, 0.0);
     let last = rect(&l, t(2));
     assert!(last.x + last.w <= 1280.0, "{last:?}");
+}
+
+/// No column is narrower than [`PEEK_LEAST`], the narrowest that reads as work, unless the
+/// working width is: not the third preset on a half-screen window, not a drag.
+#[test]
+fn a_column_is_never_narrower_than_a_lane() {
+    let mut l = columns(2);
+    l.set_viewport(735.0, 800.0);
+    l.switch_preset_width(false);
+    l.switch_preset_width(false);
+    assert!(width_of(&l, t(2)) >= PEEK_LEAST - 0.01, "{}", width_of(&l, t(2)));
+    assert!(l.resize_begin(1));
+    l.resize_update(-5000.0);
+    l.resize_end();
+    near(width_of(&l, t(2)), PEEK_LEAST);
+    l.set_viewport(200.0, 800.0);
+    near(width_of(&l, t(2)), 200.0);
 }
 
 /// Wide work that would leave less than [`PEEK_LEAST`] beside it takes the whole working

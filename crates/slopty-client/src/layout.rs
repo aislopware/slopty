@@ -607,15 +607,20 @@ impl Geom {
         2.0_f32.mul_add(-self.strut, self.view_w).max(1.0)
     }
 
+    /// A width in points, never under [`Self::min_width`]: a third of a half-screen window is
+    /// a lane too.
     fn resolve(&self, width: ColumnWidth) -> f32 {
-        match width {
-            ColumnWidth::Proportion(p) => (self.working_w() * p).max(1.0),
-            ColumnWidth::Fixed(w) => w.max(1.0),
-        }
+        let points = match width {
+            ColumnWidth::Proportion(p) => self.working_w() * p,
+            ColumnWidth::Fixed(w) => w,
+        };
+        points.max(self.min_width())
     }
 
+    /// The narrowest a column is: [`PEEK_LEAST`], the narrowest that reads as work, or the
+    /// whole working width where that is less.
     fn min_width(&self) -> f32 {
-        (self.working_w() / 10.0).max(1.0)
+        PEEK_LEAST.min(self.working_w())
     }
 
     fn max_width(&self) -> f32 {
