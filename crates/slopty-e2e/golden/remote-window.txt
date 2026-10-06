@@ -11,13 +11,11 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Safari
 Heading │ window Safari
-Button │ Fullscreen tile
 Button │ Close tile
 Status │ Window is no longer available. Safari is not open on e2e-worker any more.
 Button │ Choose another window

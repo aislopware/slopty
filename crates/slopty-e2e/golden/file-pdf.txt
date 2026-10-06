@@ -11,7 +11,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
@@ -19,7 +18,6 @@ Group │ report.pdf
 Heading │ file report.pdf
 Button │ Drag the file out
 Label │ project
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/project/report.pdf │ PDF, 2 pages, 6 KB (focused)
 Document │ PDF, 2 pages, 6 KB

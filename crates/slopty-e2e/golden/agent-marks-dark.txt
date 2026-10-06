@@ -39,10 +39,9 @@ Group │ Claude Code
 Heading │ Claude Code
 Image │ Claude Code
 Button │ Commit on atlas
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Status │ Needs approval: Wants to run a command
+Image │ Needs you
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Dialog │ Wants to run a command
@@ -54,7 +53,6 @@ Button │ Send
 Group │ opencode
 Heading │ opencode
 Button │ Commit on atlas
-Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Status
@@ -66,11 +64,9 @@ Button │ Send
 Group │ Claude Code 2
 Heading │ Claude Code 2
 Image │ Claude Code
+Status │ Working
 Image │ Working
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Status
@@ -82,7 +78,6 @@ Group │ pi
 Heading │ pi
 Image │ pi
 Button │ Commit on atlas
-Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Status

@@ -1735,13 +1735,21 @@ impl WorkspaceView {
             .unwrap_or_default();
         // In a narrow column a tab gives way to its mark and four letters' room before the
         // row scrolls.
-        let tab_min = if kit::Room::of(placed.target.w, theme).is_narrow() {
+        let narrow = kit::Room::of(placed.target.w, theme).is_narrow();
+        let tab_min = if narrow {
             theme
                 .spacing
                 .xs
                 .mul_add(2.0, theme.typography.ui_size.mul_add(4.0, theme.typography.icon_large()))
         } else {
             TAB_MIN
+        };
+        // The shown tab keeps its close in its row, so in a narrow column its floor is the same
+        // four letters' room past the close and its gap.
+        let shown_min = if narrow {
+            tab_min + theme.spacing.xs + kit::icon_button_side(theme)
+        } else {
+            tab_min
         };
         let tabs: Vec<gpui::AnyElement> = column
             .iter()
@@ -1750,6 +1758,7 @@ impl WorkspaceView {
                 let item = self.item(tab)?;
                 let id = item.id;
                 let shown = tab == placed.tile;
+                let floor = if shown { shown_min } else { tab_min };
                 let on = shown && placed.focused;
                 let ink = title_ink(theme, on);
                 let weight =
@@ -1809,7 +1818,7 @@ impl WorkspaceView {
                         // As wide as its title, between the two bounds; tabs that do not fit give
                         // way alike down to the narrower one.
                         .flex_initial()
-                        .min_w(px(tab_min * k))
+                        .min_w(px(floor * k))
                         .max_w(px(TAB_MAX * k))
                         .h(px(theme.density.row * k))
                         .flex()

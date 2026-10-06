@@ -11,7 +11,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
@@ -20,7 +19,6 @@ Heading │ file main.rs
 Button │ Drag the file out
 Label │ Edited
 Label │ project
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited, changed on disk
 Status │ Changed on disk

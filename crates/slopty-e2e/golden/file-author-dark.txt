@@ -26,7 +26,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
@@ -34,11 +33,9 @@ Group │ Retry the refresh
 Heading │ Claude Code Retry the refresh
 Image │ Claude Code
 Button │ Commit on repo
+Status │ Turn finished
 Image │ Done
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: Make the refresh retry with one idempotency key
@@ -56,7 +53,6 @@ Group │ refresh.rs
 Heading │ file refresh.rs
 Button │ Drag the file out
 Label │ src
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/repo/src/refresh.rs │ 6 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/repo/src/refresh.rs │ pub fn refresh(client: &Client, token: &Token) -> Result<Token> {⏎    let key = IdempotencyKey::new();⏎    let fresh = retry(3, || client.post_with("/refresh", token, &key))?;⏎    store.save(&fresh)?;⏎    Ok(fresh)⏎} (focused)

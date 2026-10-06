@@ -11,14 +11,11 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Slopty test page
 Heading │ browser Slopty test page
 Button │ Address │ http://127.0.0.1:$PORT/
-Button │ Reload
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ Page http://127.0.0.1:$PORT/ │ Slopty test page

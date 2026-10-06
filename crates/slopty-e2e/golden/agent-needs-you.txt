@@ -13,10 +13,9 @@ Group │ Claude Code
 Heading │ Claude Code
 Image │ Claude Code
 Label │ home
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Status │ Needs approval: Wants to run a command
+Image │ Needs you
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Dialog │ Wants to run a command
@@ -28,10 +27,7 @@ Button │ Send
 Group │ Fix the login redirect
 Heading │ Claude Code Fix the login redirect
 Image │ Claude Code
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Status

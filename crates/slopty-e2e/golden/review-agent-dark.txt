@@ -23,11 +23,9 @@ Group │ Retry the refresh
 Heading │ Claude Code Retry the refresh
 Image │ Claude Code
 Button │ Commit on repo
+Status │ Turn finished
 Image │ Done
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: Make the refresh retry with one idempotency key
@@ -48,7 +46,6 @@ Button │ Review the changes
 Button │ Send
 Group │ Review
 Heading │ review Review
-Button │ Fullscreen tile
 Button │ Close tile
 Group │ Review (focused)
 TabList

@@ -927,7 +927,8 @@ fn a_narrow_tab_row_keeps_its_shown_tab_in_view(cx: &mut TestAppContext) {
 
 /// A tab not shown keeps its close out of its row at rest, so a narrow tab keeps its mark and
 /// its four letters' room: its name runs to the tab's end. Its close is still drawn, over the
-/// tab's end, for the pointer and the keyboard.
+/// tab's end, for the pointer and the keyboard. The shown tab keeps its close in its row and
+/// its letters' room beside it.
 #[gpui::test]
 fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -951,6 +952,8 @@ fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
     let shown = cx.debug_bounds(selector("name", last.item)).expect("drawn");
     let close = cx.debug_bounds(selector("tab-close", last.item)).expect("drawn");
     assert!(shown.right() <= close.left(), "the shown tab keeps its close in its row");
+    let letters = f32::from(shown.size.width);
+    assert!(letters >= theme.typography.ui_size * 2.0, "and its letters' room: {letters}");
 }
 
 /// On a phone a column is the screen's width already and the tile has no header: its rows are

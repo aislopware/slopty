@@ -10,14 +10,12 @@ Button │ Needs you
 Button │ More
 Group │ project
 Heading │ terminal project
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ $SCRATCH/project %
 Group │ project
 Heading │ folder project
 Button │ Enclosing folder
-Button │ Fullscreen tile
 Button │ Close tile
 Group │ Folder $SCRATCH/project │ 3 items (focused)
 Navigation │ $SCRATCH/project

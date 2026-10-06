@@ -11,13 +11,11 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Synthetic editor
 Heading │ window Synthetic editor
-Button │ Fullscreen tile
 Button │ Close tile
 Button │ Show its window
 Status │ In its own window

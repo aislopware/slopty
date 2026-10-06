@@ -34,18 +34,13 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ Claude Code Orchestrator
 Image │ Claude Code
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-RadioButton │ Board
-Button │ Fullscreen tile
+Button │ Show thread
 Button │ Close tile
 Group │ Project board │ Needs you 1, Failed 1, Working 1, Up next 1, Ready to merge 1, Merged 1
 Heading
@@ -87,10 +82,7 @@ Button │ Send
 Group │ #1 Mirror the server's projects
 Heading │ Claude Code #1 Mirror the server's projects
 Image │ Claude Code
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Status
@@ -103,13 +95,11 @@ Heading │ file NOTES.md
 Button │ Drag the file out
 Label │ repo
 Button │ Show source
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/repo/NOTES.md │ 7 lines, Markdown
 Document │ Preview of $SCRATCH/repo/NOTES.md │ # Notes on the board⏎⏎Each lane is a group of rows, and a row says only what moves its task on; the rest waits under it until it needs reading.⏎⏎- Draw the lanes⏎- Hold it to goldens⏎- Write the decision
 Group │ Terminal 2
 Heading │ terminal Terminal 2
-Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell

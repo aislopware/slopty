@@ -648,12 +648,12 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
 }
 
 /// An agent whose turn ended with a background command still running says what it waits on,
-/// not that it needs the person; and its status line's pull request and worktree ride on its
-/// header: the request's number toned by its review, a click from its page, and the
-/// worktree's name beside it. Played through the worker's control socket and the real relay.
+/// not that it needs the person; and its status line's worktree rides on its header, its
+/// branch in the hint. Played through the worker's control socket and the real relay. (Its
+/// pull request is its thread's row's, which the worker reads from the forge.)
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
+async fn a_paused_agent_says_what_it_waits_on_and_wears_its_worktree() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -691,9 +691,8 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
     assert!(line.wait_with_output().await.unwrap().status.success(), "the status line ran");
     let drv = &mut stack.driver;
     let dump = drv
-        .wait_for("the pull request on the header", STEP, |d| {
-            d.a11y_node("Link", Some("Pull request 1234, approved")).is_some()
-                && d.a11y_node("Label", Some("Worktree fix-build on worktree-fix-build")).is_some()
+        .wait_for("the worktree on the header", STEP, |d| {
+            d.a11y_node("Label", Some("Worktree fix-build on worktree-fix-build")).is_some()
         })
         .await
         .unwrap();
@@ -702,7 +701,7 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
         "a paused turn asks nothing of the person: {:#?}",
         dump.a11y
     );
-    golden(drv, &dir, "agent-waiting-pull-request").await;
+    golden(drv, &dir, "agent-waiting-worktree").await;
     stack.shutdown().await;
 }
 

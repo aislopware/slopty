@@ -19,10 +19,7 @@ Group │ The header clips its chips on a narrow window, as here.
 Heading │ Claude Code The header clips its chips on a narrow window, as here.
 Image │ Claude Code
 Label │ home
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: The header clips its chips on a narrow window, as here.

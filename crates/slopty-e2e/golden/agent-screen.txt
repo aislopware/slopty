@@ -21,7 +21,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
@@ -29,11 +28,9 @@ Group │ Check the editor
 Heading │ Claude Code Check the editor
 Image │ Claude Code
 Label │ home
+Status │ computer-use: app_click
 Image │ Working
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: Check the editor's page scrolls

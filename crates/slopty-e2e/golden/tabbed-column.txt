@@ -14,7 +14,6 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ Terminal 2
 Button │ Close tile
-Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell

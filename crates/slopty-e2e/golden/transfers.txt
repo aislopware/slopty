@@ -13,14 +13,12 @@ Button │ More
 Group │ drop-here
 Heading │ terminal drop-here
 Button │ Stop upload │ ↑ 0%
-Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~/drop-here %
 Group │ nc -l 47310
 Heading │ terminal nc -l 47310
 Label │ ~/drop-here
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell

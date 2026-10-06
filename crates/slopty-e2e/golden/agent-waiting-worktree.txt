@@ -12,14 +12,10 @@ Group │ Claude Code
 Heading │ Claude Code
 Image │ Claude Code
 Label │ home
-Link │ Pull request 1234, approved
 Label │ Worktree fix-build on worktree-fix-build
-Image │ Waiting
 Status │ Waiting on cargo test
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Image │ Waiting
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Status

@@ -28,18 +28,13 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Orchestrator
 Heading │ Claude Code Orchestrator
 Image │ Claude Code
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-RadioButton │ Board
-Button │ Fullscreen tile
+Button │ Show thread
 Button │ Close tile
 Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
 Heading
@@ -77,10 +72,7 @@ Button │ Send
 Group │ #1 Mirror the server's projects
 Heading │ Claude Code #1 Mirror the server's projects
 Image │ Claude Code
-RadioGroup │ Face
-RadioButton │ Thread
-RadioButton │ Terminal
-Button │ Fullscreen tile
+Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Status

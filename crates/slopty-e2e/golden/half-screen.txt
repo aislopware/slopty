@@ -9,13 +9,11 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
 Group │ Terminal 2
 Heading │ terminal Terminal 2
-Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell

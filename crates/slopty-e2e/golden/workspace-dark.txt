@@ -11,7 +11,6 @@ Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
@@ -20,7 +19,6 @@ Heading │ file RELEASE.md
 Button │ Drag the file out
 Label │ home
 Button │ Show source
-Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/home/RELEASE.md │ 5 lines, Markdown
 Document │ Preview of $SCRATCH/home/RELEASE.md │ # Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
@@ -29,7 +27,6 @@ CheckBox │ To do: notarise
 CheckBox │ To do: tag
 Group │ Terminal 2
 Heading │ terminal Terminal 2
-Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell

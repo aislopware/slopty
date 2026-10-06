@@ -5,6 +5,10 @@ Button │ Navigator
 Button │ Search
 Button │ New agent
 Heading │ Projects
+Button │ repo
+Button │ New shell in repo
+Button │ NOTES.md
+Button │ Close tile
 Button │ Ship the project board
 Button │ Board, 1 needs you · 1 of 6 merged
 Image │ Needs you
@@ -19,6 +23,10 @@ Button │ studio
 Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
+Button │ Close tile
+Button │ Terminal 2
+Button │ Close tile
+Button │ Terminal 3
 Button │ Close tile
 Group │ Where
 Button │ Ship the project board
@@ -36,7 +44,7 @@ Heading │ Claude Code Orchestrator
 Image │ Claude Code
 Button │ Show thread
 Button │ Close tile
-Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
+Group │ Project board │ Needs you 1, Failed 1, Working 1, Up next 1, Ready to merge 1, Merged 1
 Heading
 Button │ Verifier
 Button │ Push after each merge
@@ -46,16 +54,20 @@ List │ Needs you
 Heading │ Needs you
 ListItem │ Draw the lanes, Needs you, Which lanes come first?
 Image │ Needs you
+List │ Failed
+Heading │ Failed
+ListItem │ Hold it to goldens, Failed, reads only
+Image │ Failed
 List │ Working
 Heading │ Working
 ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts
 Image │ Waiting
 Label │ slopty/board/1
 Label │ Runs on studio, macOS. Branch slopty/board/1
+Button │ Stop its agent #1
+Button │ Cancel task #1
 List │ Up next
 Heading │ Up next
-ListItem │ Hold it to goldens, Up next, after #1 · reads only
-Image │ Up next
 ListItem │ Check the wire goldens, Up next
 Image │ Up next
 Log
@@ -69,15 +81,18 @@ List │ Merged
 Button │ Show Merged 1
 MultilineTextInput │ Message the orchestrator
 Button │ Send
-Group │ #1 Mirror the server's projects
-Heading │ Claude Code #1 Mirror the server's projects
+Group │ Terminal 3
+Heading │ terminal Terminal 3
+Tab │ #1 Mirror the server's projects
 Image │ Claude Code
-Button │ Show terminal
 Button │ Close tile
-Group │ Thread
-Status
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
-Button │ Send
+Tab │ NOTES.md
+Button │ Close tile
+Tab │ Terminal 2
+Button │ Close tile
+Tab │ Terminal 3
+Button │ Close tile
+Button │ Close tile
+Group (focused)
+Terminal │ shell
 Status │ Ship the project board: #5 Check the wire goldens: its verifier failed

@@ -9,7 +9,6 @@ Button │ Needs you
 Button │ More
 Heading │ terminal Terminal
 Label │ ~
-Button │ Fullscreen tile
 Button │ Close tile
 Heading │ Connect a phone or iPad
 Button │ Copy link

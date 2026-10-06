@@ -28,9 +28,10 @@ async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
 type Node<'a> = (&'a str, &'a str);
 
 /// [`golden`] with the pixels of the room each node `scrubbed` names may take left out (its role
-/// and label, up to where the node after it, named the same way, begins), its words still held:
-/// the words the text scrubs, such as the test server's port in a page's address, which the
-/// system picks anew each run, and whose figures are not all one width.
+/// and label, up to where the node after it, named the same way, begins; a node named as its
+/// own end, its own width), its words still held: the words the text scrubs, such as the test
+/// server's port in a page's address, which the system picks anew each run, and whose figures
+/// are not all one width.
 async fn golden_scrubbed(
     drv: &mut Driver,
     stack_dir: &std::path::Path,
@@ -64,7 +65,8 @@ async fn golden_scrubbed(
     let masks: Vec<PixelRect> = scrubbed
         .iter()
         .map(|&(node, after)| {
-            let ([x, y, _, h], [end, ..]) = (bounds(node), bounds(after));
+            let [x, y, w, h] = bounds(node);
+            let end = if node == after { x + w } else { bounds(after)[0] };
             [px(x), px(y), px(end).saturating_sub(px(x)), px(h)]
         })
         .collect();
@@ -382,7 +384,7 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
     assert!(local.starts_with("http://127.0.0.1:") && local != url, "served elsewhere: {local}");
     assert_eq!(page.page_url, url, "the web view's address, on the worker's port");
     assert!(page.failed.is_none(), "{page:?}");
-    golden_scrubbed(drv, &dir, "browser", &[(("Button", "Address"), ("Button", "Reload"))]).await;
+    golden_scrubbed(drv, &dir, "browser", &[(("Button", "Address"), ("Button", "Address"))]).await;
 
     drv.keys("cmd-shift-p").await.unwrap();
     drv.wait_for("the palette over the page, which stays", STEP, |d| {
