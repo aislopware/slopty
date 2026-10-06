@@ -474,38 +474,6 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
     assert_eq!(Recap::of(board, Looked { seq: 7, at_ms: AT }, &timeline, false), None);
 }
 
-/// The project's time at work is its tasks' with the orchestrator's share apart, and a stretch
-/// under way counts to the moment the board reads it.
-#[test]
-fn time_adds_up_with_the_orchestrator_apart() {
-    use slopty_proto::project::Spent;
-
-    use super::spend::worked;
-    let min = |m: u64| m * 60_000;
-    let at = |m: u64| WallMs::from_millis(AT.as_millis() + min(m));
-    let worker = WorkerId::new();
-    let spent = |c: slopty_proto::project::TaskCard, done: u64, since: Option<u64>| {
-        let mut c = c;
-        c.spent = Spent { active_ms: min(done), since_ms: since.map(at) };
-        c
-    };
-    let mut record = project("board", Some(TermRef { worker, session: SessionId::new() }));
-    record.orchestrator_spent = Spent { active_ms: min(8), since_ms: None };
-    let tasks = vec![
-        spent(on(card(1, "First", TaskState::Running), worker, SessionId::new()), 12, None),
-        spent(on(card(2, "Second", TaskState::Running), worker, SessionId::new()), 20, Some(0)),
-        spent(on(card(3, "Third", TaskState::Done), worker, SessionId::new()), 5, None),
-        spent(card(4, "Apart", TaskState::Planned), 0, None),
-    ];
-    let mut mirror = Projects::default();
-    mirror.apply_part(snapshot(10, vec![status(record, tasks, Vec::new())]));
-    let b = board(&mirror);
-    assert!(b.at_work(), "#2's clock runs");
-    let all = b.project_spend(at(10));
-    assert_eq!((all.orchestrator_ms, all.tasks_ms, all.total_ms()), (min(8), min(47), min(55)));
-    assert_eq!([worked(0), worked(min(12)), worked(min(64))], ["under 1m", "12m", "1h 4m"]);
-}
-
 /// While a task's agent runs, its next step is the person's word to it, first on its row: fix
 /// CI for a failed verifier, address the comments its pull request asked for,
 /// resolve the conflicts its rebase met. Checking it again unchanged would fail the same way,

@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px, relative,
+    Subscription, Window, div, px, relative,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
@@ -34,7 +34,6 @@ use super::model::{
     verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
-use super::spend::worked;
 use super::{
     AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, MergeTask, OpenNode, PushTask,
     ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowTerminal,
@@ -76,10 +75,6 @@ pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 const LANE_W: f32 = 280.0;
 /// How far a card that arrives travels up into its place, at zoom 1.
 const ARRIVE: f32 = 4.0;
-/// How often the board moves its time at work on while agents work: often enough that a
-/// minute's readout is never more than a moment late, sums of several stretches included,
-/// which cross their minutes at no one stretch's.
-const AT_WORK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 /// The most facts a row's or a card's second line holds: two separators.
 const META_PARTS: usize = 3;
 
@@ -223,8 +218,6 @@ pub struct ProjectView {
     focus: FocusHandle,
     scroll: ScrollHandle,
     plate: Plate,
-    /// Moves the time at work on while agents work.
-    tick: Option<Task<()>>,
     /// When "Delete the project" was asked once, waiting for the second ask that does it.
     delete_asked: Option<std::time::Instant>,
     /// The message to the orchestrator, made with the first frame (it needs the window), and
@@ -270,7 +263,6 @@ impl ProjectView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             plate: Plate::default(),
-            tick: None,
             delete_asked: None,
             composer: None,
             refused: None,
@@ -340,29 +332,6 @@ impl ProjectView {
             self.theme = theme;
             cx.notify();
         }
-    }
-
-    /// The clocks of agents at work move on while any works; nothing ticks otherwise.
-    fn keep_time(&mut self, cx: &Context<Self>) {
-        if !self.seen.board.as_ref().is_some_and(|b| b.at_work()) {
-            self.tick = None;
-            return;
-        }
-        if self.tick.is_some() {
-            return;
-        }
-        self.tick = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(AT_WORK_TICK).await;
-                let ticked = this.update(cx, |v, cx| {
-                    v.seen.now = crate::clock::now(cx);
-                    cx.notify();
-                });
-                if ticked.is_err() {
-                    break;
-                }
-            }
-        }));
     }
 
     /// Give the board the keyboard.
@@ -809,8 +778,7 @@ impl ProjectView {
             .child(
                 self.facts(
                     std::iter::once(readout("project-live", live))
-                        .chain(progress.map(|p| readout("project-progress", p)))
-                        .chain(self.spent_readout(board)),
+                        .chain(progress.map(|p| readout("project-progress", p))),
                 ),
             )
             .child(checks_toggle)
@@ -853,40 +821,6 @@ impl ProjectView {
             row = row.child(readout);
         }
         row
-    }
-
-    /// The project's time at work, in the header, once there is a minute of it. It says on
-    /// hover how the orchestrator's share and its tasks' make it up.
-    fn spent_readout(&self, board: &Board) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
-        let spend = board.project_spend(self.seen.now);
-        let total = spend.total_ms();
-        if total < SHOWN_FROM_MS {
-            return None;
-        }
-        let hint = format!(
-            "{} of work: tasks {}, orchestrator {}",
-            worked(total),
-            worked(spend.tasks_ms),
-            worked(spend.orchestrator_ms)
-        );
-        let hint_theme = Rc::clone(&self.hint_theme);
-        Some(
-            crate::kit::tabular(div())
-                .id("project-spent")
-                .debug_selector(|| "project-spent".to_owned())
-                .role(Role::Label)
-                .aria_label(SharedString::from(hint.clone()))
-                .flex_none()
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(theme.surfaces.text_secondary))
-                .child(SharedString::from(worked(total)))
-                .map(crate::kit::hint_timing)
-                .tooltip(move |_window, cx| {
-                    let theme = Rc::clone(&hint_theme);
-                    cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
-                }),
-        )
     }
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
@@ -2098,11 +2032,6 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
     }
 }
 
-/// A timeline entry's icon and tone.
-/// Time at work is shown from a minute: less than that on every row of a board just started
-/// would be noise.
-const SHOWN_FROM_MS: u64 = 60_000;
-
 /// The word a recap line's selector ends in.
 const fn recap_word(kind: RecapKind) -> &'static str {
     match kind {
@@ -2138,7 +2067,6 @@ impl Render for ProjectView {
         {
             self.renders = self.renders.saturating_add(1);
         }
-        self.keep_time(cx);
         self.composer_in(window, cx);
         let theme = &self.theme;
         // The board's bare keys hold only while the board has the keyboard: the line to the

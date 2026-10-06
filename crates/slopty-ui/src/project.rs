@@ -8,7 +8,6 @@
 //! * [`create`] — the sheet that makes a project from a terminal its agent orchestrates.
 //! * [`model`] — the server's projects mirrored, and what the board derives from one.
 //! * [`recap`] — what changed since this client last looked.
-//! * [`spend`] — the project's time at work, the orchestrator's share apart.
 //! * `view` — the board itself: the header and its bar, what needs the person, and the lanes each
 //!   task stands in by what it waits on.
 
@@ -17,7 +16,6 @@
 pub mod create;
 pub mod model;
 pub mod recap;
-pub mod spend;
 mod view;
 
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};

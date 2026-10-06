@@ -1174,11 +1174,11 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
     assert!(cx.debug_bounds("project-recap-partial").is_some(), "entries 31 to 40 are gone");
 }
 
-/// The board says what the project spent: its time at work in the header, with the
-/// orchestrator's share apart on hover. No context meter, plan window or dollar figure: the
-/// title bar says a plan's windows once one is far used.
+/// The board's header says no figure of what its agents spent, even with time at work on its
+/// tasks: no time at work, context meter, plan window or dollar figure. The title bar says a
+/// plan's windows once one is far used.
 #[gpui::test]
-fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
+fn the_board_says_nothing_of_what_its_agents_spent(cx: &mut TestAppContext) {
     use slopty_proto::project::Spent;
 
     let (view, cx) = still_workspace(cx);
@@ -1197,12 +1197,12 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("project-spent").is_some(), "the header says it");
-    for gone in ["project-limit-0", "project-cost", "project-card-1-context"] {
+    assert!(cx.debug_bounds("project-place").is_some(), "the header is drawn");
+    for gone in ["project-spent", "project-limit-0", "project-cost", "project-card-1-context"] {
         assert!(cx.debug_bounds(gone).is_none(), "{gone} is not the board's");
     }
     let said = labels(&view, cx);
-    assert!(said.iter().any(|l| l == "42m of work: tasks 42m, orchestrator under 1m"), "{said:?}");
+    assert!(!said.iter().any(|l| l.contains("of work")), "{said:?}");
 }
 
 /// A next step on a task's row is the person's word to its agent: "Fix CI" sends `TaskTell`

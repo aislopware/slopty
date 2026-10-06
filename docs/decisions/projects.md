@@ -84,8 +84,8 @@ timeline and machines lenses and the board's meters)
     The timeline stays on the server, for the recap and the orchestrator.
   - **The estimate of the time left**, and the machines lens's `WorkerFacts` polling every 5 s.
   - **The context meters and plan windows on the board.** The status bar shows the plan's
-    windows. The header keeps the project's time at work, with the orchestrator's share on
-    hover (`ProjectSpend`).
+    windows. The header kept the project's time at work until 2026-10-06 (see "Time at work
+    per task" below).
   - **Opening a subagent from the board.** A task's card opens its agent, and the thread view
     leads into the subagent.
 - **Run on…** stays. It is a control on the card stood on (key `o`), and the place chip moves
@@ -142,7 +142,7 @@ merging on the person's word since 2026-10-04
 **What the user sees.** ✅ 2026-09-30
 - A project opens as a tile. It shows:
   - its tasks, each with its worker (and OS), branch, state (working, waiting, blocked,
-    verifying, merged), time at work and last line;
+    verifying, merged) and last line;
   - a timeline of the events that matter (started, blocked on you, verifier passed or failed,
     merged, conflict);
   - at the top, anything waiting on the person, such as a permission or a question.
@@ -1136,7 +1136,14 @@ board reads in one direction**, below)
   `a_board_opens_onto_what_changed_since_you_last_looked` (`slopty-ui::workspace`, over
   `ServerCaller::queued`).
 
-**Time at work per task, the orchestrator's share apart.** ✅ 2026-10-02
+**Time at work per task, the orchestrator's share apart.** ✅ 2026-10-02. *The board's
+readout was deleted on 2026-10-06 (journeys audit, prune-critically): nothing acted on the
+minutes once dollar cost had gone, and the header keeps what needs the person. The server
+still keeps `Spent`, since its settling reads whether a task's agent is at work, and agents
+still read it through `project_status` and `task_get`. Gone: `slopty_ui::project::spend`
+(`ProjectSpend`, `Board::at_work`, `worked`), the header's readout and the board's tick that
+moved it. The test `the_board_says_nothing_of_what_its_agents_spent` holds that the header
+says no time, cost, context or plan figure.*
 - Before: the board had no notion of what a task cost. Wall time from the timeline counted
   every wait at the prompt or on the person as work.
 - The server already follows every agent's status for its task. It now also keeps `Spent {
