@@ -86,6 +86,9 @@ pub(super) const STOP_UPLOAD: &str = "Stop upload";
 
 /// How much faster a header's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
+/// The narrowest tile, in points at rest, whose header says an agent's pull request and
+/// worktree: under it they left the title no room (a thread beside a board, 312 pt).
+const HEADER_FACTS_MIN: f32 = 480.0;
 /// How much faster than the title a header's readouts give way: an agent's pill shortens to
 /// an ellipsis while the title still reads whole.
 const STRIP_SHRINK: f32 = 20.0;
@@ -1245,8 +1248,13 @@ impl WorkspaceView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
                 .into_any_element()
         });
-        let branch =
-            agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
+        // A narrow tile keeps its title: under [`HEADER_FACTS_MIN`] the pull request and the
+        // worktree, which the navigator and the board also say, leave the header rather than
+        // squeeze its name to nothing beside a board.
+        let roomy = placed.target.w >= HEADER_FACTS_MIN;
+        let branch = agent
+            .filter(|_| roomy)
+            .map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
         let silenced = self.silenced(tile, item, chrome, cx);
         let face = match agent {

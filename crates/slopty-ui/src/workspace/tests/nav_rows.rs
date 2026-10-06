@@ -25,9 +25,10 @@ fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
     cx.debug_bounds(selector).is_some()
 }
 
-/// Type `text` into the navigator's filter.
+/// Type `text` into the navigator's filter, shown by "Search" where it is hidden.
 fn filter(cx: &mut VisualTestContext, text: &str) {
-    click(cx, "nav-filter");
+    let shown = cx.debug_bounds("nav-filter").is_some();
+    click(cx, if shown { "nav-filter" } else { "nav-search" });
     cx.simulate_input(text);
     cx.run_until_parked();
 }
@@ -52,6 +53,100 @@ fn a_key_types_into_the_navigators_filter(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "site");
     let row = |t: TileRef| selector("nav-tile", t.item);
     assert!(shown(cx, row(site)) && !shown(cx, row(slopty)), "typed, it narrows");
+}
+
+/// Step the keyboard along the ring until a row of the navigator holds it, not its filter.
+fn focus_a_navigator_row(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
+    for _ in 0..64 {
+        let held = cx.update(|window, cx| {
+            let in_field = view.read(cx).navigator_filter_focused(window, cx);
+            let in_navigator = window.context_stack().iter().any(|c| c.contains(NAVIGATOR_CTX));
+            in_navigator && !in_field
+        });
+        if held {
+            return;
+        }
+        cx.update(Window::focus_next);
+        cx.run_until_parked();
+    }
+    panic!("no row of the navigator took the keyboard");
+}
+
+/// The navigator's top row ends in "Search" then "New agent", inside the panel, and its filter
+/// is hidden at rest. "Search" shows it with the keyboard in it, Esc hides it, and so does the
+/// keyboard leaving it empty. ⌘F with a row holding the keyboard shows it, and so does typing
+/// there, the key going on after what it holds. With the navigator hidden the bar's leading cluster
+/// takes the two, its "Search" opening the palette.
+#[gpui::test]
+fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let slopty =
+        opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/w/oss/slopty"));
+    let site = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/web/site"));
+    let bounds = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let (nav, lights) = (bounds(cx, "navigator"), bounds(cx, "nav-lights-row"));
+    let (toggle, search, new) =
+        (bounds(cx, "navigator-toggle"), bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
+    for b in [search, new] {
+        assert!(lights.contains(&b.center()), "in the lights row: {b:?}");
+        assert!(b.right() <= nav.right(), "inside the panel: {b:?}");
+        assert_eq!(b.size, toggle.size, "the toggle's size and target");
+    }
+    assert!(toggle.right() < search.left() && search.right() <= new.left(), "in order");
+    assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
+
+    click(cx, "nav-search");
+    assert!(shown(cx, "nav-filter-field"), "Search shows it");
+    let field = bounds(cx, "nav-filter-field");
+    assert!(field.top() >= lights.bottom(), "the first row under the lights: {field:?}");
+    cx.simulate_input("site");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "site", "typed in it");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shown(cx, "nav-filter-field"), "Esc hides it");
+
+    click(cx, "nav-search");
+    let workspace = view.read_with(cx, |v, _| v.focus.clone());
+    cx.update(|window, cx| window.focus(&workspace, cx));
+    cx.run_until_parked();
+    assert!(!shown(cx, "nav-filter-field"), "the keyboard gone, empty, it hides");
+
+    focus_a_navigator_row(&view, cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.run_until_parked();
+    assert!(shown(cx, "nav-filter-field"), "⌘F in the navigator shows it");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shown(cx, "nav-filter-field"));
+
+    focus_a_navigator_row(&view, cx);
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    assert!(shown(cx, "nav-filter-field"), "typing in the navigator shows it");
+    assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "s", "the key in it");
+    cx.simulate_input("ite");
+    cx.run_until_parked();
+    let row = |t: TileRef| selector("nav-tile", t.item);
+    assert!(shown(cx, row(site)) && !shown(cx, row(slopty)), "and it narrows");
+    focus_a_navigator_row(&view, cx);
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    let held = view.read_with(cx, |v, _| v.navigator_filter().to_owned());
+    assert_eq!(held, "sites", "typing on from a row adds to what it holds");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let bar_toggle = bounds(cx, "navigator-toggle");
+    let (search, new) = (bounds(cx, "bar-search"), bounds(cx, "bar-new-agent"));
+    assert!(bar_toggle.right() < search.left() && search.right() <= new.left(), "in order");
+    click(cx, "bar-search");
+    assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the bar's Search opens the palette");
 }
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every

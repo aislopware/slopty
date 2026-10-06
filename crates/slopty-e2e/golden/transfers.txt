@@ -1,6 +1,8 @@
 Window │ drop-here
 Group │ Workspace
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ drop-here
 Button │ New

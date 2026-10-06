@@ -142,6 +142,8 @@ symbols! {
     SidebarLeft => "sidebar.left",
     SpeakerSlash => "speaker.slash",
     SpeakerWave2 => "speaker.wave.2",
+    /// Something new to write: a new agent.
+    SquareAndPencil => "square.and.pencil",
     SquareGrid2x2 => "square.grid.2x2",
     StopFill => "stop.fill",
     Terminal => "terminal",

@@ -35,9 +35,11 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert_eq!(lights.bottom(), bar.bottom(), "the lights row is the bar's height");
     let docked = bounds(cx, "navigator-toggle");
     assert!(lights.contains(&docked.center()), "the toggle is in the lights row: {docked:?}");
+    click(cx, "nav-search");
     let field = bounds(cx, "nav-filter-field");
     assert!(field.top() >= lights.bottom(), "the filter is under the lights row: {field:?}");
     assert!(field.left() > nav.left() && field.right() < nav.right(), "in from the sides");
+    cx.simulate_keystrokes("escape");
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();

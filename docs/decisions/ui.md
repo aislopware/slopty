@@ -6875,6 +6875,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     This supersedes the navigator parts of "The field is a well" and of "The frame recedes"
     ("The navigator's filter is a well on the selection's fill").
   - Test: `workspace::tests::tab_strip::the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`.
+  - Amended 2026-10-06: the filter is hidden at rest and the top row ends in "Search" and
+    "New agent" (below).
 
 - ✅ **The title bar takes the content's tone** (2026-10-05, UX audit item 5). "The frame
   recedes" put the title bar in the navigator's tone, one frame round the strip. Beside the
@@ -7646,3 +7648,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     itself (`increase_contrast_raises_text_and_hairlines`,
     `the_chrome_follows_the_theme_s_contrast`, the hairline's point and the stage's black)
     went with it, as did the app's `increase_contrast_derives_the_chrome_for_it`.
+- ✅ **The navigator's top row ends in Search and New agent, and its filter waits hidden**
+  (2026-10-06, the person's review: the filter capsule under the lights still looked out of
+  place, where other apps keep icon-only buttons such as the sidebar toggle, new thread and
+  search). Amends "The navigator's top is the lights, and the filter is the first row under
+  them". Apple's Notes and Mail keep a sidebar's actions on its top row and show search when
+  asked; Zed's and Linear's sidebars open with their list.
+  - **The row.** The lights, the toggle where it always was, then at the row's trailing end
+    inside the panel "Search" (`magnifyingglass`) and "New agent" (`square.and.pencil`),
+    each the toggle's size and target, each with its hint and keys. "New agent" runs "New
+    agent…", the one way to start one; the bar's "+" keeps the rest.
+  - **The filter.** Hidden at rest, so the list is the panel's first row. "Search", ⌘F while
+    the navigator holds the keyboard (`filter_navigator_from_a_row`, in the `Navigator` key
+    context, so a tile's ⌘F keeps its find), ⌘⇧E, or typing while a row holds the keyboard
+    shows it with the keyboard in it. Typing goes on after what it already holds, as a
+    Finder list's type-select starts a search. It fades in over `Pace::Settle`, at once
+    under Reduce Motion. Only its opacity moves: a height animation made the first clicks
+    miss. Esc empties and hides it, and so does the keyboard leaving it empty. That is read
+    as the frame is drawn, because the field's blur does not always arrive when the app
+    moves the focus itself. A query or a scope keeps it shown. A phone's drawer keeps it
+    always, and its row has neither button.
+  - **The bar.** With the navigator hidden, the bar's leading cluster is the toggle,
+    "Search" (`bar-search`, which opens the palette, the one search left on screen) and
+    "New agent", so neither goes away with the navigator.
+  - Tests: `workspace::tests::nav_rows::the_filter_waits_hidden_until_search_its_keys_or_typing`,
+    `tab_strip::the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`, and
+    `keymap::tests::the_files_chord_wins_over_a_deeper_default`, which counts the navigator's ⌘F.

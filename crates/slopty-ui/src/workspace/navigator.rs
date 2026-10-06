@@ -69,10 +69,10 @@ use std::time::{Duration, SystemTime};
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _, IntoElement as _,
-    ListAlignment, ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, canvas, div, list, px,
+    AnimationExt as _, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
+    IntoElement as _, ListAlignment, ListOffset, ListState, MouseButton, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, canvas, div, list, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_client::groups::{self, GroupKey, fact};
@@ -429,6 +429,9 @@ impl NavList {
     }
 }
 
+/// The navigator's key context, where ⌘F shows its filter rather than a tile's find.
+pub const NAVIGATOR_CTX: &str = "Navigator";
+
 /// The navigator's filter: its field, made on the first frame that shows the navigator (it
 /// needs the window), what the field holds, and the field's events, held while it is.
 #[derive(Default)]
@@ -438,6 +441,15 @@ pub(super) struct Filter {
     events: Option<Subscription>,
     /// The field takes the keyboard once it is drawn: asked by key.
     focus_asked: bool,
+    /// Shown though it holds nothing: asked for by "Search", its keys or typing, until Esc
+    /// or the keyboard leaves it empty. At rest the panel's first row is the list.
+    shown: bool,
+    /// How many times it was shown, which names its arrival so each one plays.
+    reveals: u32,
+    /// What was typed while a row held the keyboard, for the field once it has it.
+    typed: Option<String>,
+    /// The field held the keyboard when the navigator was last drawn.
+    held: bool,
     /// The tile ↑↓ walked to among what the filter left, which ↩ goes to; none until an arrow
     /// is pressed, when ↩ goes to the first.
     chosen: Option<TileRef>,
@@ -1062,8 +1074,57 @@ impl WorkspaceView {
             }
             Mode::Overlay | Mode::Drawer => self.nav.open = true,
         }
+        self.reveal_navigator_filter(cx);
+    }
+
+    /// Show the filter and give it the keyboard: "Search" in the navigator's top row, its
+    /// keys, or typing while a row holds the keyboard.
+    pub(super) fn reveal_navigator_filter(&mut self, cx: &mut Context<Self>) {
+        if !self.nav.filter.shown {
+            self.nav.filter.shown = true;
+            self.nav.filter.reveals = self.nav.filter.reveals.wrapping_add(1);
+        }
         self.nav.filter.focus_asked = true;
         cx.notify();
+    }
+
+    /// Whether the navigator's filter holds the keyboard.
+    pub(super) fn navigator_filter_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.nav.filter.input.as_ref().is_some_and(|input| {
+            gpui::Focusable::focus_handle(input.read(cx), cx).contains_focused(window, cx)
+        })
+    }
+
+    /// Whether the filter's row shows: in a drawer always, else while asked for or while it
+    /// holds a query or a scope.
+    fn navigator_filter_shown(&self) -> bool {
+        self.nav.drawn == Some(Mode::Drawer)
+            || self.nav.filter.shown
+            || !self.nav.filter.query.is_empty()
+            || self.nav.scope.is_some()
+    }
+
+    /// A key while a row of the navigator holds the keyboard: a character shows the filter
+    /// and starts it, as typing in a Finder sidebar's list would find.
+    fn navigator_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let in_field = self.navigator_filter_focused(window, cx);
+        let modifiers = ev.keystroke.modifiers;
+        let bare =
+            !(modifiers.platform || modifiers.control || modifiers.alt || modifiers.function);
+        let typed = ev.keystroke.key_char.as_deref().filter(|text| {
+            !text.is_empty() && text.chars().all(|c| !c.is_control() && !c.is_whitespace())
+        });
+        if let Some(text) = typed.filter(|_| bare && !in_field) {
+            // After what the filter holds, as typing on in the field would.
+            self.nav.filter.typed = Some(format!("{}{text}", self.nav.filter.query));
+            self.reveal_navigator_filter(cx);
+            cx.stop_propagation();
+        }
     }
 
     /// ⌘⇧U, the bell's key: the navigator opens at Needs you.
@@ -1101,17 +1162,35 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Give the filter the keyboard when a key asked for it and the field is there.
+    /// Give the filter the keyboard when a key asked for it and the field is there; once the
+    /// keyboard has left a field with nothing in it, the field goes back to rest. Read as the
+    /// frame is drawn rather than from the field's blur, which a focus moved by the app
+    /// itself does not always send.
     pub(super) fn settle_navigator_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.nav.filter.focus_asked {
+            let held = self.navigator_filter_focused(window, cx);
+            if std::mem::replace(&mut self.nav.filter.held, held) && !held {
+                self.nav.filter.shown &= !self.nav.filter.query.is_empty();
+            }
             return;
         }
         if let Some(input) = self.nav.filter.input.clone() {
             self.nav.filter.focus_asked = false;
-            input.update(cx, |input, cx| {
+            let typed = self.nav.filter.typed.take();
+            let query = input.update(cx, |input, cx| {
                 input.focus(window, cx);
-                input.select_all(window, cx);
+                if let Some(text) = typed {
+                    input.set_value(text, window, cx);
+                    Some(input.value().to_string())
+                } else {
+                    input.select_all(window, cx);
+                    None
+                }
             });
+            if let Some(query) = query {
+                self.nav.filter.query = query;
+                self.nav.filter.chosen = None;
+            }
         }
     }
 
@@ -2139,9 +2218,10 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Empty the filter, and give the keyboard back to the workspace. With the filter empty
-    /// already, it lets go of the scope.
+    /// Empty the filter and hide it, and give the keyboard back to the workspace. With the
+    /// filter empty already, it lets go of the scope.
     fn clear_navigator_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav.filter.shown = false;
         if self.nav.filter.query.is_empty() {
             self.set_scope(None, cx);
         }
@@ -2168,19 +2248,22 @@ impl WorkspaceView {
         }
     }
 
-    /// The navigator's top: the lights row, then the filter.
+    /// The navigator's top: the lights row, then the filter while it shows.
     ///
-    /// The lights row is the title bar's height and holds only the traffic lights on a Mac and,
+    /// The lights row is the title bar's height and holds the traffic lights on a Mac and,
     /// past them at the far leading edge, the navigator's toggle, where the title bar keeps it
-    /// while the navigator is hidden: it never moves. Apple's sidebars, Things and zeron keep
-    /// that corner to the window's controls; a white field crammed beside the lights was the
-    /// brightest, hardest-edged thing there. A phone's drawer has neither, and its row names
-    /// the active workspace ([`Self::drawer_title`]).
+    /// while the navigator is hidden: it never moves. At its trailing end, inside the panel,
+    /// "Search" and "New agent", as Apple's Notes and Mail keep a sidebar's actions on its top
+    /// row. A phone's drawer has neither, and its row names the active workspace
+    /// ([`Self::drawer_title`]).
     ///
-    /// The filter is the panel's first row under it, as the HIG puts a sidebar's search at its
-    /// top: the kit's search capsule ([`kit::search_field`]) in the panel's own wash, a row
-    /// tall, the base unit in from the panel's sides. No hairline under either: the panel is one
-    /// surface from the top to the bottom, as T3 Code's and Linear's sidebars are.
+    /// The filter is hidden at rest, so the list is the panel's first row. "Search", ⌘F with
+    /// the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard shows it
+    /// as the first row under the lights: the kit's search capsule ([`kit::search_field`]) in
+    /// the panel's own wash, a row tall, the base unit in from the panel's sides. It settles in
+    /// over [`kit::Pace::Settle`], at once under Reduce Motion. Esc, or the keyboard leaving
+    /// it empty, hides it again. A drawer keeps it always. No hairline under either: the panel
+    /// is one surface from the top to the bottom, as T3 Code's and Linear's sidebars are.
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
         let theme = self.nav_theme();
         let s = &theme.surfaces;
@@ -2196,6 +2279,17 @@ impl WorkspaceView {
         // On a section heading's edge, so the name stands over *Workspaces* below it.
         let leading = if drawer { spacing.inset() } else { leading };
         let title = drawer.then(|| self.drawer_title(theme));
+        // Its actions, at the row's end inside the panel's width.
+        let actions = (!drawer && !self.workers.is_empty()).then(|| {
+            div()
+                .ml_auto()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xxs))
+                .child(self.search_button(true, cx))
+                .child(self.new_agent_button("nav-new-agent", cx))
+        });
         let filtering = !self.nav.filter.query.is_empty();
         let input = self.nav.filter.input.as_ref().map(|input| {
             div()
@@ -2258,6 +2352,18 @@ impl WorkspaceView {
             .children(scope)
             .children(input)
             .children(clear);
+        let row = div().flex_none().px(px(spacing.sm)).pb(px(spacing.xs)).child(field);
+        let reveals = self.nav.filter.reveals;
+        let filter = self.navigator_filter_shown().then(|| {
+            if drawer || reveals == 0 || !kit::motion(cx) {
+                return row.into_any_element();
+            }
+            // Only its opacity moves, so it takes the pointer and the keys from its first
+            // frame, as the kit's fades do.
+            let key = ElementId::Name(SharedString::from(format!("nav-filter-reveal-{reveals}")));
+            row.with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
+                .into_any_element()
+        });
         div()
             .flex_none()
             .flex()
@@ -2272,9 +2378,10 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .children(toggle)
-                    .children(title),
+                    .children(title)
+                    .children(actions),
             )
-            .child(div().px(px(spacing.sm)).pb(px(spacing.xs)).child(field))
+            .children(filter)
     }
 
     /// A phone's drawer's title: the active workspace's name, as the bar beside it names the
@@ -2573,17 +2680,19 @@ impl WorkspaceView {
             .when(mode != Mode::Docked, |panel| {
                 kit::elevate(panel, theme).border_0().border_r(kit::HAIR)
             })
-            // Esc in the filter empties it and hands the keyboard back; with it empty, Esc lets
-            // go of the scope.
+            // Esc in the filter empties it, hides it and hands the keyboard back; with it empty,
+            // Esc lets go of the scope.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 let composing =
                     this.nav.filter.input.as_ref().is_some_and(|i| i.read(cx).is_composing());
                 let held = !this.nav.filter.query.is_empty() || this.nav.scope.is_some();
-                if held && !composing {
+                if (held || this.nav.filter.shown) && !composing {
                     this.clear_navigator_filter(window, cx);
                     cx.stop_propagation();
                 }
             }))
+            .key_context(NAVIGATOR_CTX)
+            .on_key_down(cx.listener(Self::navigator_key))
             .child(self.navigator_header(window, cx))
             .child(rows)
             .into_any_element()

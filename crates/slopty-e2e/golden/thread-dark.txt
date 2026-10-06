@@ -2,7 +2,8 @@ Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
-TextInput │ Filter
+Button │ Search
+Button │ New agent
 Heading │ Needs you
 Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Run touch refused.txt, Needs you
 Button │ Deny
@@ -38,20 +39,15 @@ Button │ Worked 23 s: Edited notes.txt · Read 3 files
 Article │ done
 Button │ Copy message
 Dialog │ Allow Bash?
-Button │ Answer in the terminal
+Button │ Review the changes
+Group │ Grants that last
+Button │ Always allow · /work; accept edits mode
 Button │ Deny
 Button │ Other ways to deny
 Button │ Allow
-Group │ From now on
-Button │ Always allow · /work; accept edits mode
-Group │ Activity
-Group │ Edits · notes.txt
-Button │ Review
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
-Label │ Mode, Default
 Button │ Commit
-Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send

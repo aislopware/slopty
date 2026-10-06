@@ -424,6 +424,59 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "gone with the agent");
 }
 
+/// A narrow tile keeps its title: beside a board a thread is about 312 pt wide, and there its
+/// pull request and worktree leave the header rather than squeeze the name to nothing.
+#[gpui::test]
+fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 2);
+    let pr = PullRequest {
+        number: 42,
+        url: "https://github.com/o/r/pull/42".to_owned(),
+        review: None,
+        merge_request: false,
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_branch(AgentBranch { session, pr: Some(pr), worktree: None }, cx);
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+    });
+    cx.run_until_parked();
+    let width = |cx: &mut VisualTestContext| {
+        f32::from(cx.debug_bounds(selector("title", tile.item)).expect("the header").size.width)
+    };
+    let mut presets = 0_u32;
+    while width(cx) < 480.0 && presets < 6 {
+        view.update_in(cx, |v, _w, cx| {
+            v.layout.switch_preset_width(true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        presets = presets.saturating_add(1);
+    }
+    let wide = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    assert!(f32::from(wide.size.width) >= 480.0, "starts roomy: {wide:?}");
+    assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a roomy header says it");
+
+    for _ in 0..6 {
+        if width(cx) < 400.0 {
+            break;
+        }
+        view.update_in(cx, |v, _w, cx| {
+            v.layout.switch_preset_width(false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    assert!(f32::from(header.size.width) < 400.0, "narrowed: {header:?}");
+    assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "the request gives way");
+    let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
+    assert!(f32::from(name.size.width) > 40.0, "the title keeps its room: {name:?}");
+}
+
 /// A waiting tile closed while its save is refused is not left hanging: once it is closed for
 /// good the program hears it was given up, and the edit is still kept on this device.
 #[gpui::test]

@@ -2,7 +2,8 @@ Window │ src
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
-TextInput │ Filter
+Button │ Search
+Button │ New agent
 Heading │ Projects
 Button │ src
 Button │ New shell in src
@@ -45,9 +46,6 @@ Button │ Copy message
 Button │ Worked 31 s: Edited refresh.rs
 Article │ The refresh now retries three times with one key, and saves the token.
 Button │ Copy message
-Group │ Activity
-Group │ Edits · refresh.rs
-Button │ Review
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude

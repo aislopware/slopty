@@ -20,9 +20,10 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-/// Type `text` into the navigator's filter.
+/// Type `text` into the navigator's filter, shown by "Search" where it is hidden.
 fn filter(cx: &mut VisualTestContext, text: &str) {
-    click(cx, "nav-filter");
+    let shown = cx.debug_bounds("nav-filter").is_some();
+    click(cx, if shown { "nav-filter" } else { "nav-search" });
     cx.simulate_input(text);
     cx.run_until_parked();
 }

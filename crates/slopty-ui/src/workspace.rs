@@ -84,6 +84,7 @@ use gpui::{
     StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
 pub use machines::HostActions;
+pub use navigator::NAVIGATOR_CTX;
 pub use projects::worker_key;
 pub(crate) use rollup::META_SEPARATOR;
 use slopty_client::ItemDoc;

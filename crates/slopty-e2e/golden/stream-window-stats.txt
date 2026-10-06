@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace (focused)
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ e2e-worker
 Button │ New

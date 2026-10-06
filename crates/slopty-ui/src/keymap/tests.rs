@@ -185,7 +185,8 @@ fn the_files_chord_wins_over_a_deeper_default() {
     for scope in [Scope::Workspace, Scope::Terminal, Scope::File, Scope::Conversation] {
         assert!(chords_of(&keymap, scope, "find").is_empty(), "{scope:?} gave ⌘F up");
     }
-    assert_eq!(keymap.diagnostics().len(), 4, "{:?}", keymap.diagnostics());
+    // The four finds and the navigator's ⌘F for its filter.
+    assert_eq!(keymap.diagnostics().len(), 5, "{:?}", keymap.diagnostics());
 
     let keymap = Keymap::new(&keys("[keys.terminal]\nfind = \"cmd-t\"\n"), app());
     assert!(keymap.diagnostics().is_empty(), "the file's deeper chord takes nothing around it");

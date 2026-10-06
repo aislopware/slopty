@@ -250,6 +250,8 @@ const TERMINAL: Option<&str> = Some("Terminal");
 const TERMINAL_SEARCH: Option<&str> = Some("TerminalSearch");
 
 const W: &[Option<&str>] = &[CTX];
+/// The navigator holding the keyboard, a row or its filter: ⌘F there is its filter's.
+const NAVIGATOR: Option<&str> = Some(crate::workspace::NAVIGATOR_CTX);
 /// The workspace while a closed tile's notice is up ([`ws::CLOSING_CTX`]).
 const CLOSING: Option<&str> = Some("Workspace && ClosingOffered && !Screen");
 const APP: &[Option<&str>] = &[None];
@@ -295,6 +297,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "next_attention", ws::NextAttention, &["cmd-shift-a"], W),
         c(Workspace, "show_needs_you", ws::ShowNeedsYou, &["cmd-shift-u"], W),
         c(Workspace, "filter_navigator", ws::FilterNavigator, &["cmd-shift-e"], W),
+        c(Workspace, "filter_navigator_from_a_row", ws::FilterNavigator, &["cmd-f"], &[NAVIGATOR]),
         c(Workspace, "toggle_mute", ws::ToggleMute, &["cmd-shift-m"], W),
         c(Workspace, "toggle_stats", ws::ToggleStats, &["cmd-shift-i"], W),
         c(Workspace, "type_clipboard", ws::TypeClipboard, &[], W),

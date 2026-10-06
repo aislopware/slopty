@@ -2,7 +2,8 @@ Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
-TextInput │ Filter
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
@@ -31,9 +32,6 @@ Button │ Copy message
 Button │ Worked 35 s: Edited notes.md · Ran 3 commands · 9 more
 Article │ done
 Button │ Copy message
-Group │ Activity
-Group │ Edits · notes.md
-Button │ Review
 Status │ Attaching screen-recording.mov, 0%
 Button │ Remove screen-recording.mov
 MultilineTextInput │ Message (focused)

@@ -42,7 +42,8 @@ use slopty_client::layout::{Column, Tile, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
-    AddWindow, NewAgent, NewNote, NewTerminal, OpenPalette, ToggleNavigator, ToggleStats,
+    AddWindow, FilterNavigator, NewAgent, NewNote, NewTerminal, OpenPalette, ToggleNavigator,
+    ToggleStats,
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
@@ -74,6 +75,12 @@ const BELL: &str = "bell";
 
 /// What "+" is called: it opens a menu of things to open.
 pub(super) const NEW: &str = "New";
+
+/// What the magnifier beside the navigator's toggle is called.
+pub(super) const SEARCH: &str = "Search";
+
+/// What the pencil after it is called: it starts "New agent…".
+pub(super) const NEW_AGENT: &str = "New agent";
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
@@ -285,18 +292,63 @@ impl WorkspaceView {
     /// shows: in the bar while the navigator is hidden, in the navigator's top row while it is
     /// docked, so it never moves as the navigator opens or closes.
     pub(super) fn navigator_toggle(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
-        let theme = &self.theme;
-        let hint_theme = Rc::new(theme.clone());
-        kit::icon_button(theme, "navigator-toggle", Symbol::SidebarLeft, "Navigator")
-            .when(SHORTCUT_HINTS, |el| {
-                kit::hint_timing(el).tooltip(move |_window, cx| {
-                    let keys = crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
-                    cx.new(|_| kit::Hint::new("Navigator", keys, Rc::clone(&hint_theme))).into()
-                })
-            })
+        self.leading_button("navigator-toggle", Symbol::SidebarLeft, "Navigator", &ToggleNavigator)
             .on_click(cx.listener(|this, _ev, window, cx| {
                 this.toggle_navigator(&ToggleNavigator, window, cx);
             }))
+    }
+
+    /// A button of the leading cluster's: `icon` named `label`, with the system's hint naming
+    /// it and `action`'s keys on a Mac.
+    fn leading_button(
+        &self,
+        id: &'static str,
+        icon: Symbol,
+        label: &'static str,
+        action: &'static dyn gpui::Action,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let hint_theme = Rc::new(theme.clone());
+        kit::icon_button(theme, id, icon, label).when(SHORTCUT_HINTS, |el| {
+            kit::hint_timing(el).tooltip(move |_window, cx| {
+                let keys = crate::palette::keys_for(action, &super::key_bindings());
+                cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
+            })
+        })
+    }
+
+    /// "Search", beside the navigator's toggle: in the navigator's top row it shows the
+    /// navigator's filter and gives it the keyboard; in the bar, with the navigator hidden, it
+    /// opens the palette, the one search left on screen.
+    pub(super) fn search_button(
+        &self,
+        in_navigator: bool,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (id, action): (&'static str, &'static dyn gpui::Action) = if in_navigator {
+            ("nav-search", &FilterNavigator)
+        } else {
+            ("bar-search", &OpenPalette)
+        };
+        self.leading_button(id, Symbol::Magnifyingglass, SEARCH, action).on_click(cx.listener(
+            move |this, _ev, window, cx| {
+                if in_navigator {
+                    this.reveal_navigator_filter(cx);
+                } else {
+                    this.open_palette(&OpenPalette, window, cx);
+                }
+            },
+        ))
+    }
+
+    /// "New agent", after "Search": "New agent…", the one way to start an agent.
+    pub(super) fn new_agent_button(
+        &self,
+        id: &'static str,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        self.leading_button(id, Symbol::SquareAndPencil, NEW_AGENT, &NewAgent)
+            .on_click(cx.listener(|this, _ev, window, cx| this.new_agent(&NewAgent, window, cx)))
     }
 
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
@@ -318,8 +370,12 @@ impl WorkspaceView {
         let s = &theme.surfaces;
 
         // Left: the navigator's toggle (a docked navigator holds it in its own top row, at the
-        // same place beside the lights), then where the focused work is.
+        // same place beside the lights), "Search" and "New agent" while the navigator is
+        // hidden (a navigator holds them at its top row's end), then where the focused work is.
         let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
+        let hidden = has_workers && !phone && self.nav.drawn.is_none();
+        let search = hidden.then(|| self.search_button(false, cx));
+        let new_agent = hidden.then(|| self.new_agent_button("bar-new-agent", cx));
         // A phone's "+" is a row of "…": the bar keeps the name, the bell and the menu.
         let new = (has_workers && !phone).then(|| {
             let at = Rc::clone(&self.anchors.at);
@@ -455,6 +511,8 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(spacing.xs))
                     .children(toggle)
+                    .children(search)
+                    .children(new_agent)
                     .children(place)
                     .children(new),
             )

@@ -1,6 +1,8 @@
 Window │ New workspace
 Group │ Workspace (focused)
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ New workspace
 Button │ New

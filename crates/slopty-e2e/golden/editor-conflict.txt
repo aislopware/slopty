@@ -1,6 +1,8 @@
 Window │ project
 Group │ Workspace
 Button │ Navigator
+Button │ Search
+Button │ New agent
 Group │ Where
 Button │ project
 Button │ New

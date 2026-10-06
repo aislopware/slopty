@@ -2,7 +2,8 @@ Window │ atlas
 Group │ Workspace
 Navigation │ Navigator
 Button │ Navigator
-TextInput │ Filter
+Button │ Search
+Button │ New agent
 Heading │ Needs you
 Button │ Claude Code, Wants to run a command, Needs you
 Heading │ Projects
