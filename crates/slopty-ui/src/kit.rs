@@ -351,8 +351,8 @@ pub fn changes_text(added: u32, removed: u32) -> Option<String> {
 /// navigator row and the breadcrumb. A figure all in red read as an error, and a red "‒0" as
 /// an error about nothing. The caller sets the size and adds an identity and a spoken label.
 ///
-/// Its parts are text, the thin space between the sides included, so they take the chrome's
-/// zoom from the size the caller sets.
+/// Its parts are text, the thin space between the sides included, so they take the size the
+/// caller sets.
 #[must_use]
 pub fn changes(theme: &Theme, added: u32, removed: u32) -> Option<Div> {
     let s = &theme.surfaces;
@@ -385,42 +385,42 @@ pub fn separator(theme: &Theme) -> Div {
     div().flex_none().text_color(crate::palette::separator_ink(theme)).child("\u{b7}")
 }
 
-/// A pill's height at zoom 1, in points: T3's badge (`h-5`), a notch over Linear's 18.
+/// A pill's height in points: T3's badge (`h-5`), a notch over Linear's 18.
 ///
 /// Fixed rather than grown from a pad round the text, so it sits centred in a 27 pt header with
 /// room above and below. Padded, the agent's pill stood 23 pt tall and touched the hairline.
 pub const PILL_HEIGHT: f32 = 20.0;
 
-/// A pill's shape without its fill, at the chrome's zoom `k`.
+/// A pill's shape without its fill.
 ///
 /// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end, a chip
-/// at `radii.sm` (6 pt, at the zoom) as `MonoCode`'s state chips are: its glyph and its word.
+/// at `radii.sm` as `MonoCode`'s state chips are: its glyph and its word.
 /// Capsules are kept for the switch, count badges, dots and the scrollbar's thumb. A header's
 /// words that act (Take, Mute) wear it bare, so they stand as tall as the state's [`pill`]
 /// beside them and their hover takes the same chip. Key caps keep their 4 pt corners: they
 /// are keys.
 #[must_use]
-pub fn pill_frame(theme: &Theme, k: f32) -> Div {
+pub fn pill_frame(theme: &Theme) -> Div {
     div()
         .flex()
         .items_center()
-        .h(px(PILL_HEIGHT * k))
-        .gap(px(theme.spacing.xs * k))
-        .px(px(theme.spacing.sm * k))
-        .rounded(px(theme.radii.sm * k))
+        .h(px(PILL_HEIGHT))
+        .gap(px(theme.spacing.xs))
+        .px(px(theme.spacing.sm))
+        .rounded(px(theme.radii.sm))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(theme.typography.small() * k))
+        .text_size(px(theme.typography.small()))
 }
 
-/// A state's pill at the chrome's zoom `k`: [`pill_frame`] filled with `tone` at
+/// A state's pill: [`pill_frame`] filled with `tone` at
 /// [`pill_fill`], its words in `tone` at the medium weight.
 ///
 /// A header holds one of these at most, the state's (an agent waiting, working), so it is the
 /// one shape there that stands out. The caller adds the identity, the role and the words.
 #[must_use]
-pub fn pill(theme: &Theme, tone: Rgb, k: f32) -> Div {
-    pill_frame(theme, k)
+pub fn pill(theme: &Theme, tone: Rgb) -> Div {
+    pill_frame(theme)
         .bg(hsla_alpha(tone, pill_fill(theme)))
         .text_color(hsla(tone))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
@@ -797,9 +797,7 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
 /// has to stand out takes the medium weight.
 #[must_use]
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    typed(div(), theme.roles().panel_title, 1.0)
-        .text_color(hsla(theme.surfaces.text))
-        .child(text.into())
+    typed(div(), theme.roles().panel_title).text_color(hsla(theme.surfaces.text)).child(text.into())
 }
 
 /// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
@@ -977,7 +975,7 @@ pub fn button(
     crate::a11y::tab_stop(el, s.focus)
 }
 
-/// The side of an [`icon_button`] at zoom 1: the large icon size and a small pad round it.
+/// The side of an [`icon_button`]: the large icon size and a small pad round it.
 ///
 /// It is never under the density's hit target, so a finger gets 44 pt round the same icon.
 /// A strip that holds icon buttons in turn with something else sizes itself from it.
@@ -1109,12 +1107,10 @@ pub fn inset_x<E: Styled>(el: E, theme: &Theme) -> E {
     el.px(px(theme.spacing.inset()))
 }
 
-/// `el` set in a type role ([`Theme::roles`]): its size, its line and its weight, at zoom `k`.
+/// `el` set in a type role ([`Theme::roles`]): its size, its line and its weight.
 #[must_use]
-pub fn typed<E: Styled>(el: E, role: slopty_theme::TypeRole, k: f32) -> E {
-    el.text_size(px(role.size * k))
-        .line_height(px(role.line * k))
-        .font_weight(FontWeight(role.weight))
+pub fn typed<E: Styled>(el: E, role: slopty_theme::TypeRole) -> E {
+    el.text_size(px(role.size)).line_height(px(role.line)).font_weight(FontWeight(role.weight))
 }
 
 /// `el` set as meta text: a row's second line, a bar's readout, a status word. The meta size
@@ -1236,7 +1232,6 @@ fn square_icon(
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Lead)
-                .weight(crate::icons::Weight::Medium)
                 .slot(px(crate::icons::IconSize::Lead.slot(theme)), hsla(ink)),
         );
     crate::a11y::tab_stop(el, s.focus)
@@ -1280,7 +1275,6 @@ pub fn text_toggle(
     face: &'static str,
     label: &'static str,
     on: bool,
-    k: f32,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     let id: SharedString = id.into();
@@ -1297,14 +1291,14 @@ pub fn text_toggle(
             gpui::accesskit::Toggled::False
         })
         .flex_none()
-        .size(px(icon_button_side(theme) * k))
+        .size(px(icon_button_side(theme)))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.sm * k))
+        .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .font_family(theme.typography.ui_family.clone())
-        .text_size(px(theme.typography.caption() * k))
+        .text_size(px(theme.typography.caption()))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
@@ -1317,22 +1311,22 @@ pub fn text_toggle(
     }
 }
 
-/// A tick box at the chrome's zoom `k`, the size of an inline icon.
+/// A tick box the size of an inline icon.
 ///
 /// A sunk hairline square while off, the neutral [`solid`] with its tick while on, as macOS
 /// draws one. The caller makes it, or the row it leads, the thing pressed, with
 /// `Role::CheckBox` and `aria_toggled`.
 #[must_use]
-pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
+pub fn tick_box(theme: &Theme, on: bool) -> Div {
     let s = theme.surfaces;
-    let side = px(theme.typography.icon() * k);
+    let side = px(theme.typography.icon());
     let el = div()
         .flex_none()
         .size(side)
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.xs * k))
+        .rounded(px(theme.radii.xs))
         .border(HAIR);
     if on {
         solid(el, theme).border_color(hsla(s.solid)).child(
@@ -1342,14 +1336,14 @@ pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
                 crate::icons::IconSize::Inline,
                 hsla(s.solid_ink),
             )
-            .size(px(theme.typography.small() * k)),
+            .size(px(theme.typography.small())),
         )
     } else {
         sunk(el.border_color(hsla(s.border)), theme, stroke::LINE)
     }
 }
 
-/// The side of an empty state's mark, in points at zoom 1.
+/// The side of an empty state's mark, in points.
 ///
 /// It holds a symbol at the page heading's size (`roles().page_heading`) at the
 /// light weight and large scale, as the system's own empty states draw theirs.
@@ -1372,7 +1366,6 @@ pub const NOTICE_MARK: f32 = 28.0;
 #[must_use]
 pub fn notice(
     theme: &Theme,
-    k: f32,
     mark: impl IntoElement,
     title: impl Into<SharedString>,
     detail: Option<SharedString>,
@@ -1383,30 +1376,30 @@ pub fn notice(
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(theme.spacing.xs * k))
+        .gap(px(theme.spacing.xs))
         .max_w_full()
-        .px(px(theme.spacing.inset() * k))
+        .px(px(theme.spacing.inset()))
         .font_family(theme.typography.ui_family.clone())
         .text_center()
         .child(
             div()
                 .flex_none()
-                .min_h(px(NOTICE_MARK * k))
-                .mb(px(theme.spacing.xs * k))
+                .min_h(px(NOTICE_MARK))
+                .mb(px(theme.spacing.xs))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(mark),
         )
         .child(
-            typed(div(), roles.task_title, k)
-                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE * k))
+            typed(div(), roles.task_title)
+                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE))
                 .text_color(hsla(s.text))
                 .child(title.into()),
         )
         .children(detail.map(|detail| {
-            typed(div(), roles.chrome, k)
-                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE * k))
+            typed(div(), roles.chrome)
+                .max_w(px(theme.typography.ui_size * NOTICE_MEASURE))
                 .text_color(hsla(s.text_secondary))
                 .child(detail)
         }))
@@ -1422,12 +1415,11 @@ pub fn notice_action(theme: &Theme, id: &'static str, label: &'static str) -> gp
     button(theme, id, label, ButtonKind::Secondary).mt(px(theme.spacing.sm))
 }
 
-/// A [`notice`]'s mark: a kind's symbol, light and large at the page heading's size, in
-/// `text_muted`.
+/// A [`notice`]'s mark: a kind's glyph across [`NOTICE_MARK`], in `text_muted`.
 #[must_use]
-pub fn notice_mark(theme: &Theme, icon: impl Into<crate::icons::Mark>, k: f32) -> Div {
+pub fn notice_mark(theme: &Theme, icon: impl Into<crate::icons::Mark>) -> Div {
     let ink = hsla(theme.surfaces.text_muted);
-    crate::icons::Drawn::notice(theme, icon).slot(px(NOTICE_MARK * k), ink)
+    crate::icons::Drawn::notice(theme, icon).slot(px(NOTICE_MARK), ink)
 }
 
 /// What the app is called where it names itself.
@@ -2082,7 +2074,7 @@ mod tests {
         assert!(hand_rolled_pill(".bg(hsla_alpha(color, alpha::FAINT))").is_some());
         let hover = ".hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))";
         assert!(hand_rolled_pill(hover).is_none(), "a hover fill");
-        assert!(hand_rolled_pill("kit::pill(theme, s.warn, k)").is_none());
+        assert!(hand_rolled_pill("kit::pill(theme, s.warn)").is_none());
         assert!(hand_rolled_pill(".py(px(theme.spacing.xxs))").is_none(), "a hint, unzoomed");
         assert!(hand_rolled_pill("// .py(px(theme.spacing.xxs * k))").is_none(), "a comment");
     }
@@ -2096,26 +2088,24 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// A pill is its fixed height at any zoom and a 6 pt chip, and the state's pill is the frame
+    /// A pill is its fixed height and a chip at `radii.sm`, and the state's pill is the frame
     /// filled at the faint step, a notch fainter on white.
     #[test]
-    fn a_pill_is_a_twenty_point_chip_at_its_zoom() {
+    fn a_pill_is_a_twenty_point_chip() {
         for (variant, step) in
             [(Variant::Dark, alpha::FAINT), (Variant::Light, alpha::FAINT_ON_PAPER)]
         {
             let theme = Theme::new(variant);
-            for k in [1.0, 0.5] {
-                let mut frame = pill_frame(&theme, k);
-                let height = frame.style().size.height;
-                assert_eq!(height, Some(px(PILL_HEIGHT * k).into()), "zoom {k}");
-                let corner = frame.style().corner_radii.top_left;
-                assert_eq!(corner, Some(px(theme.radii.sm * k).into()), "a 6 pt chip");
-                let mut filled = pill(&theme, theme.surfaces.warn, k);
-                assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT * k).into()));
-                let fill = filled.style().background.clone();
-                let faint = gpui::Fill::from(hsla_alpha(theme.surfaces.warn, step));
-                assert_eq!(fill, Some(faint), "{variant:?}: the tone at the faint step");
-            }
+            let mut frame = pill_frame(&theme);
+            let height = frame.style().size.height;
+            assert_eq!(height, Some(px(PILL_HEIGHT).into()));
+            let corner = frame.style().corner_radii.top_left;
+            assert_eq!(corner, Some(px(theme.radii.sm).into()), "a chip");
+            let mut filled = pill(&theme, theme.surfaces.warn);
+            assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT).into()));
+            let fill = filled.style().background.clone();
+            let faint = gpui::Fill::from(hsla_alpha(theme.surfaces.warn, step));
+            assert_eq!(fill, Some(faint), "{variant:?}: the tone at the faint step");
         }
         let mut cap = key_cap(&Theme::default(), "K");
         let corner = cap.style().corner_radii.top_left;
@@ -2570,91 +2560,6 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// The methods chained straight after the call that closes at the start of `rest`, each as
-    /// its name and its arguments squeezed: `).flex_none().size(px(a))` is
-    /// `[("flex_none", ""), ("size", "px(a)")]`.
-    fn chained(rest: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let mut chars = rest.chars().filter(|c| !c.is_whitespace()).peekable();
-        while chars.next_if_eq(&'.').is_some() {
-            let name: String =
-                std::iter::from_fn(|| chars.next_if(|c| c.is_alphanumeric() || *c == '_'))
-                    .collect();
-            if chars.next_if_eq(&'(').is_none() {
-                break;
-            }
-            let (mut depth, mut args) = (1_u32, String::new());
-            for c in chars.by_ref() {
-                match c {
-                    '(' => depth = depth.saturating_add(1),
-                    ')' => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-                if depth == 0 {
-                    break;
-                }
-                args.push(c);
-            }
-            out.push((name, args));
-        }
-        out
-    }
-
-    /// An icon's slot sized to words smaller than its own (`small()`, `caption()`) draws its
-    /// symbol under [`crate::icons::SYMBOL_FLOOR`], in SF's smaller design. A check inside its
-    /// filled box (`solid_ink`) is the box's own mark, sized to it.
-    fn icon_under_the_floor(call: &str, after: &str) -> Option<&'static str> {
-        let boxed = call.contains("Symbol::Checkmark") && call.contains("solid_ink");
-        let small = chained(after).iter().any(|(name, args)| {
-            name == "size" && (args.contains("small()") || args.contains("caption()"))
-        });
-        (small && !boxed).then_some(
-            "an icon's slot sized to small words, under the 12.5 pt floor; leave it its slot \
-             (`IconSize::Inline`), or use `icons::beside` or `Drawn::disclosure`",
-        )
-    }
-
-    #[test]
-    fn the_floor_check_knows_a_small_slot() {
-        let call = "icon(theme,Symbol::Link,IconSize::Inline,hsla(s.text_muted))";
-        assert!(icon_under_the_floor(call, ".size(px(theme.typography.small()*k)),").is_some());
-        assert!(icon_under_the_floor(call, ".flex_none().size(self.z(ty.caption())))").is_some());
-        assert!(icon_under_the_floor(call, ".size(px(theme.typography.icon()*k)),").is_none());
-        assert!(icon_under_the_floor(call, ").child(div().size(px(ty.small())))").is_none());
-        let check = "icon(theme,Symbol::Checkmark,IconSize::Inline,hsla(s.solid_ink))";
-        assert!(icon_under_the_floor(check, ".size(px(ty.small()*k))").is_none(), "a box's");
-    }
-
-    /// No symbol is drawn under 12.5 pt (`docs/decisions/ui.md`, "An icon takes its words'
-    /// size, weight and tier"): an icon's slot is never sized down to small words.
-    #[test]
-    fn a_symbol_is_never_drawn_under_12_5() {
-        const AWAITING: [&str; 0] = [];
-        let mut wrong = Vec::new();
-        for (file, lines) in chrome_files() {
-            if AWAITING.iter().any(|f| file.ends_with(f)) {
-                continue;
-            }
-            for (ix, (line_no, line)) in lines.iter().enumerate() {
-                let whole = line.split_once("icon(").is_some_and(|(before, _)| {
-                    !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
-                });
-                if !whole {
-                    continue;
-                }
-                let call = call_at(&lines, ix, "icon(");
-                let text: String =
-                    lines.iter().skip(ix).take(16).map(|(_, l)| l.as_str()).collect();
-                let squeezed: String = text.split_whitespace().collect();
-                let after = squeezed.split_once(call.as_str()).map_or("", |(_, after)| after);
-                if let Some(why) = icon_under_the_floor(&call, after) {
-                    wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
-                }
-            }
-        }
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    }
-
     /// A machine's or a project's own colour goes on the navigator's head and nowhere else: the
     /// identity hues are read only through [`identity_ink`] and [`machine_ink`], and those are
     /// called only there.
@@ -2705,7 +2610,7 @@ mod tests {
                 continue;
             }
             for (ix, (line_no, line)) in lines.iter().enumerate() {
-                for needle in ["lead_slot(", "lead_slot_weighted(", "icon_slot("] {
+                for needle in ["lead_slot(", "icon_slot("] {
                     let whole = line.split_once(needle).is_some_and(|(before, _)| {
                         !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
                             && !before.trim_end().ends_with("fn")
@@ -3770,23 +3675,25 @@ mod tests {
         assert!(ew - lw >= 40.0 && eh - lh >= 40.0, "far enough apart to tell apart");
     }
 
-    /// The chrome draws its icons as the OS's symbols (`docs/decisions/ui.md`, "The chrome's
-    /// icons are SF Symbols"): no SVG is drawn in the app's own code but the app's mark, and
-    /// no icon name of another set is left.
+    /// The chrome draws its icons one way (`docs/decisions/ui.md`, "The chrome's icons are
+    /// Tabler's, and a file's are Material's"): no SVG is drawn in the app's own code but the
+    /// app's mark and the icon modules, and no icon name of another set is left.
     #[test]
-    fn the_chrome_draws_symbols() {
+    fn the_chrome_draws_its_own_icons() {
         let mut stray = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             for (file, line, text) in chrome_lines(dir) {
                 let code = text.split("//").next().unwrap_or_default();
                 // The app's mark is a drawing of ours (`brand`), `icons.rs` names the kit's
-                // drawings it stands symbols in for, and `icons/marks.rs` and `icons/git.rs`
-                // read the agents' owners' outlines and the Octicons into masks as the symbols
-                // are. A git glyph (`GitGlyph::`) is one of those masks.
+                // drawings it stands glyphs in for and draws the files' icons, `icons/glyphs.rs`
+                // and `icons/marks.rs` read Tabler's and the agents' owners' outlines into masks,
+                // and `file_types.rs` keeps Material's files. A git glyph (`GitGlyph::`) is one
+                // of the glyphs.
                 let mark = code.contains("assets/icon.svg")
                     || file.ends_with("icons.rs")
+                    || file.ends_with("icons/glyphs.rs")
                     || file.ends_with("icons/marks.rs")
-                    || file.ends_with("icons/git.rs");
+                    || file.ends_with("file_types.rs");
                 let code = code.replace("GitGlyph::", "");
                 if !mark
                     && ["svg()", ".svg\"", "IconName", "Glyph::"].iter().any(|b| code.contains(b))
@@ -3795,7 +3702,7 @@ mod tests {
                 }
             }
         }
-        assert!(stray.is_empty(), "an icon not drawn as a symbol:\n{}", stray.join("\n"));
+        assert!(stray.is_empty(), "an icon drawn another way:\n{}", stray.join("\n"));
     }
 
     /// An agent's mark wears no colour of its own (`docs/decisions/brand.md`, "Each agent
@@ -3808,7 +3715,7 @@ mod tests {
         let between = |from: &str, to: &str| {
             icons.split(from).nth(1).and_then(|rest| rest.split(to).next()).unwrap_or_default()
         };
-        let paint = between("fn paint_agent(", "fn paint_symbol(");
+        let paint = between("fn paint_agent(", "fn paint_file(");
         let centred = between("fn paint_centred(", "\n}\n");
         assert!(paint.contains("paint_centred("), "painted as a mask is");
         assert!(centred.contains("window.text_style().color"), "painted in the words' ink");

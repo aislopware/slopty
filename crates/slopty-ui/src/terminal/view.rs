@@ -360,7 +360,6 @@ pub struct TerminalView {
     font_family: Option<SharedString>,
     /// What the element built of each row last frame, for the next one to reuse.
     row_cache: RowCache,
-    zoom: f32,
     /// The grid's rows are painted under keys and drawn again from the last frame while
     /// unchanged (`Window::paint_keyed`); off, every row is painted afresh every frame.
     keyed_paint: bool,
@@ -565,7 +564,6 @@ impl TerminalView {
             pending_size: None,
             font_family: None,
             row_cache: RowCache::default(),
-            zoom: 1.0,
             keyed_paint: true,
             #[cfg(test)]
             #[cfg(test)]
@@ -1655,7 +1653,7 @@ impl TerminalView {
         let family = self.font_family.clone().unwrap_or_else(|| {
             theme.typography.mono_families.first().cloned().unwrap_or_default().into()
         });
-        let inset = px(theme.spacing.inset() * self.zoom);
+        let inset = px(theme.spacing.inset());
         // The block's duration at the right end, as its prompt row would show it.
         let right = if self.hovered_block() == Some(prompt) {
             Some(self.render_block_facts(prompt, cx).into_any_element())
@@ -1670,7 +1668,7 @@ impl TerminalView {
             })
         };
         let failed = block.exit.is_some_and(|code| code != 0).then(|| {
-            let look = FailedLook::new(theme, self.zoom);
+            let look = FailedLook::new(theme);
             [
                 div().absolute().inset_0().bg(look.wash),
                 div().absolute().top_0().bottom_0().left_0().w(look.bar_width).bg(look.bar),
@@ -1687,7 +1685,7 @@ impl TerminalView {
                 .top_0()
                 .left_0()
                 .w_full()
-                .h(Self::row_height(&metrics, self.zoom))
+                .h(metrics.line_height)
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1767,10 +1765,9 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let facts = self.block_facts(prompt);
-        let line = self.metrics.map_or_else(
-            || theme.typography.icon_large(),
-            |m| f32::from(Self::row_height(&m, self.zoom)),
-        );
+        let line = self
+            .metrics
+            .map_or_else(|| theme.typography.icon_large(), |m| f32::from(m.line_height));
         let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
         // No taller than the line it ends.
         let more = crate::kit::icon_button(
@@ -1822,7 +1819,7 @@ impl TerminalView {
         let theme = &self.theme;
         let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
         let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
-        let inset = px(theme.spacing.inset() * self.zoom);
+        let inset = px(theme.spacing.inset());
         // Over a failed block's head the facts sit on its wash itself: a chip of its own there
         // would be a lighter patch cut out of the one mark that says the command failed.
         let on_band = self.state.block_exit(prompt).is_some_and(|code| code != 0);
@@ -1830,9 +1827,9 @@ impl TerminalView {
             div()
                 .debug_selector(|| "block-chip".to_owned())
                 .absolute()
-                .top(inset + Self::row_height(&m, self.zoom) * f32::from(row))
+                .top(inset + m.line_height * f32::from(row))
                 .right(inset)
-                .h(Self::row_height(&m, self.zoom))
+                .h(m.line_height)
                 .flex()
                 .items_center()
                 .occlude()
@@ -2248,11 +2245,6 @@ impl TerminalView {
     /// The rows the element built this frame.
     pub(super) fn put_row_cache(&mut self, rows: RowCache) {
         self.row_cache = rows;
-    }
-
-    /// The overview's zoom, which the grid is drawn at (set by the workspace before each frame).
-    pub const fn set_zoom(&mut self, zoom: f32) {
-        self.zoom = zoom;
     }
 
     /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
@@ -2717,7 +2709,6 @@ impl TerminalView {
         }
         let theme = &self.theme;
         let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
-        let k = self.zoom;
         let run = self.restored_command().map(|command| {
             let label = SharedString::from(format!("Run again: {command}"));
             let button = div()
@@ -2728,8 +2719,8 @@ impl TerminalView {
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .px(px(spacing.xs * k))
-                .rounded(px(radii.xs * k))
+                .px(px(spacing.xs))
+                .rounded(px(radii.xs))
                 .cursor_pointer()
                 .text_color(hsla(s.accent))
                 .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
@@ -2743,22 +2734,22 @@ impl TerminalView {
             .role(gpui::accesskit::Role::Button)
             .aria_label("Dismiss")
             .flex_none()
-            .px(px(spacing.xs * k))
-            .rounded(px(radii.xs * k))
+            .px(px(spacing.xs))
+            .rounded(px(radii.xs))
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
             .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)).text_color(hsla(s.text)))
             .child("✕")
             .on_click(cx.listener(|this, _ev, _window, cx| this.dismiss_restored(cx)));
         Some(
-            crate::kit::pill_frame(theme, k)
+            crate::kit::pill_frame(theme)
                 .debug_selector(|| "terminal-restored".to_owned())
                 .absolute()
-                .top(px(spacing.xs * k))
-                .right(px(spacing.xs * k))
+                .top(px(spacing.xs))
+                .right(px(spacing.xs))
                 .max_w(relative(0.6))
                 .occlude()
-                .pr(px(spacing.xxs * k))
+                .pr(px(spacing.xxs))
                 .map(|el| crate::kit::elevate(el, theme))
                 .font_family(theme.typography.ui_family.clone())
                 .child(div().flex_none().text_color(hsla(s.text_secondary)).child("Restored"))
@@ -2819,7 +2810,6 @@ impl TerminalView {
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let k = self.zoom;
         let label = SharedString::from(format!("{} · {}", pill.words, pill.act));
         let small = px(theme.typography.small());
         let id = pill.id;
@@ -2831,12 +2821,12 @@ impl TerminalView {
             .occlude()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .px(px(theme.spacing.md * k))
-            .py(px(theme.spacing.xs * k))
-            .rounded(px(theme.radii.md * k))
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.xs))
+            .rounded(px(theme.radii.md))
             .map(|el| crate::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small() * k))
+            .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
@@ -2848,13 +2838,13 @@ impl TerminalView {
                     crate::icons::IconSize::Inline,
                     hsla(s.text_secondary),
                 )
-                .size(px(theme.typography.icon() * k)),
+                .size(px(theme.typography.icon())),
             )
-            .child(crate::chrome_text::ChromeText::new(pill.words, small, k))
+            .child(crate::chrome_text::ChromeText::new(pill.words, small))
             .child(
                 div()
                     .text_color(hsla(s.accent))
-                    .child(crate::chrome_text::ChromeText::new(pill.act, small, k)),
+                    .child(crate::chrome_text::ChromeText::new(pill.act, small)),
             )
             .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)));
         Some(
@@ -2862,7 +2852,7 @@ impl TerminalView {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(theme.spacing.lg * k))
+                .bottom(px(theme.spacing.lg))
                 .flex()
                 .justify_center()
                 .child(crate::a11y::tab_stop(element, s.focus)),
@@ -2990,32 +2980,15 @@ impl TerminalView {
         self.textures.len()
     }
 
-    /// The height of a row as this frame draws it: the zoom is this frame's, set before it,
-    /// while the metrics were measured in the last one.
-    fn row_height(m: &CellMetrics, zoom: f32) -> Pixels {
-        let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
-        if (zoom - 1.0).abs() < f32::EPSILON {
-            m.unzoomed_line_height
-        } else {
-            m.unzoomed_line_height * zoom
-        }
-    }
-
     /// The element measured the grid: `cols × rows` fit, with these metrics. Measured while
     /// the window draws: a change is drawn in the next frame.
     pub fn fitted(&mut self, size: TermSize, metrics: CellMetrics, cx: &mut Context<Self>) {
-        // The view lays itself out relative to the grid, at the zoom it is given before the
-        // frame (`Self::row_height`), so a grid that only moved or zoomed (a frame of a spring)
-        // is news for it only where a still pointer now hovers another block. Anything else
-        // would build every moving shell twice a frame.
+        // The view lays itself out relative to the grid, so a grid that only moved is news
+        // for it only where a still pointer now hovers another block. Anything else would
+        // build every moving shell twice a frame.
         let hovered = self.hovered_block();
-        let kept = self.metrics.replace(metrics).map(|was| CellMetrics {
-            origin: metrics.origin,
-            cell_width: metrics.cell_width,
-            line_height: metrics.line_height,
-            pixel_scale: metrics.pixel_scale,
-            ..was
-        });
+        let kept =
+            self.metrics.replace(metrics).map(|was| CellMetrics { origin: metrics.origin, ..was });
         let remeasured = kept != Some(metrics) || self.hovered_block() != hovered;
         if self.state.size() == size || self.pending_size == Some(size) {
             if remeasured {
@@ -3764,7 +3737,7 @@ impl TerminalView {
         if self.state.modes().contains(TermModes::ALT_SCREEN) {
             return None;
         }
-        let height = px(slopty_theme::stroke::MARK * self.zoom);
+        let height = px(slopty_theme::stroke::MARK);
         let slack = m.line_height / 2.0;
         let ticks = super::element::block_ticks(
             m,
@@ -4192,7 +4165,7 @@ impl Render for TerminalView {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .map(|el| {
                 let el = el.cursor(self.pointer());
-                let mut grid = TerminalElement::new(cx.entity(), focused).zoom(self.zoom);
+                let mut grid = TerminalElement::new(cx.entity(), focused);
                 if window.is_a11y_active() {
                     let label = self.title().unwrap_or("shell").to_owned();
                     grid = grid.a11y(label.into(), self.cursor_row_text().into());
@@ -4606,9 +4579,8 @@ mod tests {
     /// The bars, then the washes.
     fn failed_marks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> (Bands, Bands) {
         let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let (metrics, zoom) =
-            view.read_with(cx, |view, _| (view.metrics.expect("laid out"), view.zoom));
-        let look = FailedLook::new(&Theme::default(), zoom);
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let look = FailedLook::new(&Theme::default());
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
             f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
@@ -4701,7 +4673,7 @@ mod tests {
         let theme = Theme::default();
         let rule = separator_color(&theme);
         assert_eq!(rule, hsla(theme.surfaces.stroke), "the list's quiet hairline");
-        let look = FailedLook::new(&theme, 1.0);
+        let look = FailedLook::new(&theme);
         assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
         assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
         assert_eq!(look.bar_width, px(slopty_theme::stroke::BAR), "Warp's 3 pt bar");
@@ -6197,7 +6169,7 @@ mod tests {
                 v.state.block_marks(),
                 LineIndex(0),
                 v.state.history_len(),
-                px(slopty_theme::stroke::MARK * v.zoom),
+                px(slopty_theme::stroke::MARK),
             );
             ticks.iter().find(|t| t.prompt == LineIndex(3)).map(|t| (t.bounds.center(), t.failed))
         });
@@ -8150,28 +8122,20 @@ mod tests {
         assert!(underline > row * 0.75, "the underline is below the baseline: {strokes:?}");
     }
 
-    /// However far the overview has zoomed, the painted grid stays inside the tile: the columns
-    /// were counted with the unzoomed cell, so the zoomed cell is that one scaled, never one
-    /// derived again and rounded up (which clipped the last column at small zooms).
+    /// The painted grid stays inside the tile, its padding round it.
     #[gpui::test]
-    fn a_zoomed_grid_still_fits_the_item(cx: &mut TestAppContext) {
+    fn the_grid_fits_inside_the_item(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         let pad = px(Theme::default().spacing.inset());
-        for zoom in [0.3_f32, 0.5, 1.0, 2.0] {
-            view.update_in(cx, |view, _window, cx| {
-                view.set_zoom(zoom);
-                cx.notify();
-            });
-            cx.run_until_parked();
-            let item = cx.debug_bounds("terminal").expect("the terminal is drawn");
-            let m = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-            let content = item.size.width - pad * 2.0 * zoom;
-            let painted = m.cell_width * f32::from(m.cols);
-            assert!(painted <= content, "at zoom {zoom}: {painted:?} > {content:?}");
-            let rows = m.line_height * f32::from(m.rows);
-            let tall = item.size.height - pad * 2.0 * zoom;
-            assert!(rows <= tall, "at zoom {zoom}: {rows:?} > {tall:?}");
-        }
+        cx.run_until_parked();
+        let item = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let m = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let content = item.size.width - pad * 2.0;
+        let painted = m.cell_width * f32::from(m.cols);
+        assert!(painted <= content, "{painted:?} > {content:?}");
+        let rows = m.line_height * f32::from(m.rows);
+        let tall = item.size.height - pad * 2.0;
+        assert!(rows <= tall, "{rows:?} > {tall:?}");
     }
 
     /// The screen of [`with_command_blocks`] again, the cursor showing after the prompt.

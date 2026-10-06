@@ -26,7 +26,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, InteractiveElement as _,
     IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, div,
+    Styled as _, div, px,
 };
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AgentId, Cap, ItemBody, ItemId, ThreadMeta, ThreadState, TurnId};
@@ -224,11 +224,11 @@ impl ThreadView {
                     .aria_label("Branch from here")
                     .aria_expanded(open)
                     .flex_none()
-                    .size(self.z(theme.typography.icon_large()))
+                    .size(px(theme.typography.icon_large()))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(self.z(theme.radii.xs))
+                    .rounded(px(theme.radii.xs))
                     .cursor_pointer()
                     .map(kit::eased)
                     .when(open, |el| el.bg(hsla(s.hover)))
@@ -271,10 +271,10 @@ impl ThreadView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xxs))
-                .h(self.z(theme.density.control))
-                .px(self.z(theme.spacing.sm))
-                .rounded(self.z(theme.radii.sm))
+                .gap(px(theme.spacing.xxs))
+                .h(px(theme.density.control))
+                .px(px(theme.spacing.sm))
+                .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .text_color(hsla(if on { s.text } else { s.text_secondary }))
                 .map(|el| if on { kit::selected(el, theme, true) } else { el })
@@ -293,11 +293,11 @@ impl ThreadView {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .child(
                 div()
                     .flex_none()
-                    .w(self.z(theme.spacing.xxxl))
+                    .w(px(theme.spacing.xxxl))
                     .text_color(hsla(theme.surfaces.text_muted))
                     .child(name),
             )
@@ -417,12 +417,12 @@ impl ThreadView {
                 .aria_label("Branch from here")
                 .w_full()
                 .max_w(gpui::relative(super::BUBBLE))
-                .mt(self.z(theme.spacing.xs))
-                .p(self.z(theme.spacing.sm))
+                .mt(px(theme.spacing.xs))
+                .p(px(theme.spacing.sm))
                 .flex()
                 .flex_col()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
                 .children(as_row)
                 .children(agent_row)
                 .children(from_row)
@@ -432,8 +432,8 @@ impl ThreadView {
                         .w_full()
                         .flex()
                         .items_center()
-                        .gap(self.z(theme.spacing.xs))
-                        .pt(self.z(theme.spacing.xxs))
+                        .gap(px(theme.spacing.xs))
+                        .pt(px(theme.spacing.xxs))
                         .child(
                             div()
                                 .flex_1()

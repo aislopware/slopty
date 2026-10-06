@@ -237,7 +237,7 @@ fn two_turns(
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
     cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
-    view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+    view.update(cx, |v, cx| v.set_layout(width, cx));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
     (view, cx)
@@ -272,7 +272,7 @@ fn the_column_s_gutter_follows_the_tile_s_room(cx: &mut TestAppContext) {
     let (view, cx) = two_turns(cx, 800.0);
     for (width, gutter) in [(800.0, spacing.xxxl), (600.0, spacing.xl), (360.0, spacing.lg)] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
-        view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+        view.update(cx, |v, cx| v.set_layout(width, cx));
         cx.run_until_parked();
         let answer = cx.debug_bounds("item-a1").expect("the answer");
         let left = f32::from(answer.left());

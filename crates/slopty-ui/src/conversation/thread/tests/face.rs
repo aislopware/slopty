@@ -1124,7 +1124,7 @@ fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
     let theme = slopty_theme::Theme::default();
     let narrow = crate::kit::Room::narrow_below(&theme) - 40.0;
     for (width, bleeds) in [(800.0, false), (narrow, true)] {
-        view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+        view.update(cx, |v, cx| v.set_layout(width, cx));
         cx.run_until_parked();
         let pane = cx.debug_bounds("thread").expect("the thread");
         let composer = cx.debug_bounds("thread-composer").expect("the composer");

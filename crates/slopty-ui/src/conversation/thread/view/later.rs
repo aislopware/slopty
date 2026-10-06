@@ -10,7 +10,7 @@
 use gpui::accesskit::Role;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::Intent;
@@ -78,8 +78,8 @@ impl ThreadView {
                 .role(Role::Status)
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(self.icon(Symbol::Clock, s.text_muted))
                 .child(

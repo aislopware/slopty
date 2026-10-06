@@ -20,17 +20,11 @@ use crate::highlight;
 pub struct Ink<'a> {
     /// The theme.
     pub theme: &'a Theme,
-    /// The chrome's zoom.
-    pub zoom: f32,
     /// Digits the gutter holds: the widest line number's.
     pub digits: usize,
 }
 
 impl Ink<'_> {
-    fn z(&self, v: f32) -> gpui::Pixels {
-        px(v * self.zoom)
-    }
-
     fn mono(&self) -> SharedString {
         self.theme.typography.mono_families.first().cloned().unwrap_or_default().into()
     }
@@ -38,7 +32,7 @@ impl Ink<'_> {
     /// The code face at the diff's size, for lines inside a card of someone else's.
     #[must_use]
     pub fn code(&self) -> Div {
-        div().w_full().font_family(self.mono()).text_size(self.z(self.theme.typography.small()))
+        div().w_full().font_family(self.mono()).text_size(px(self.theme.typography.small()))
     }
 
     /// A diff as a card of its own: rounded, the hairline round it, no band.
@@ -46,7 +40,7 @@ impl Ink<'_> {
     pub fn frame(&self) -> Div {
         self.code()
             .overflow_hidden()
-            .rounded(self.z(self.theme.radii.sm))
+            .rounded(px(self.theme.radii.sm))
             .border(crate::kit::HAIR)
             .border_color(hsla(self.theme.surfaces.stroke))
     }
@@ -84,10 +78,10 @@ impl Ink<'_> {
         let width = self.theme.typography.small() * 0.62 * digits;
         crate::kit::tabular(div())
             .flex_none()
-            .w(self.z(width))
+            .w(px(width))
             .flex()
             .justify_end()
-            .text_size(self.z(self.theme.typography.small()))
+            .text_size(px(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .children(n.map(|n| SharedString::from(n.to_string())))
     }
@@ -130,8 +124,8 @@ impl Ink<'_> {
             .w_full()
             .flex()
             .items_start()
-            .gap(self.z(spacing.sm))
-            .px(self.z(spacing.sm))
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
             .when_some(wash, gpui::Styled::bg)
             .child(self.number(line.new))
             .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
@@ -150,14 +144,14 @@ impl Ink<'_> {
             .w_full()
             .flex()
             .items_start()
-            .gap(self.z(spacing.sm))
-            .px(self.z(spacing.sm))
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
             .when_some(wash, gpui::Styled::bg)
             .child(
                 div()
                     .flex_none()
                     .flex()
-                    .gap(self.z(spacing.xs))
+                    .gap(px(spacing.xs))
                     .child(self.number(old))
                     .child(self.number(new)),
             )
@@ -177,8 +171,8 @@ impl Ink<'_> {
                 .min_w_0()
                 .flex()
                 .items_start()
-                .gap(self.z(spacing.xs))
-                .px(self.z(spacing.sm))
+                .gap(px(spacing.xs))
+                .px(px(spacing.sm))
                 .when_some(
                     wash.filter(|_| line.is_some_and(|l| l.kind != Kind::Context)),
                     gpui::Styled::bg,
@@ -190,7 +184,7 @@ impl Ink<'_> {
         div()
             .w_full()
             .flex()
-            .gap(self.z(spacing.xxs))
+            .gap(px(spacing.xxs))
             .child(side(old, |l| l.old))
             .child(side(new, |l| l.new))
     }
@@ -202,11 +196,11 @@ impl Ink<'_> {
         let s = self.theme.surfaces;
         div()
             .w_full()
-            .px(self.z(self.theme.spacing.sm))
-            .py(self.z(self.theme.spacing.xxs))
+            .px(px(self.theme.spacing.sm))
+            .py(px(self.theme.spacing.xxs))
             .map(|el| crate::kit::inset(el, self.theme))
             .text_color(hsla(s.text_muted))
-            .text_size(self.z(self.theme.typography.small()))
+            .text_size(px(self.theme.typography.small()))
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()

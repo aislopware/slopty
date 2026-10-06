@@ -28,7 +28,7 @@ use crate::markdown::Segment;
 /// rows already sized.
 const OVERDRAW: f32 = 512.0;
 
-/// The longest line the preview sets, in points at zoom 1: the thread's reading column.
+/// The longest line the preview sets, in points: the thread's reading column.
 const MEASURE: f32 = crate::conversation::thread::view::COLUMN;
 
 /// What the header's toggle says while the preview shows.
@@ -95,7 +95,7 @@ impl Reading {
         self.settled = true;
     }
 
-    /// Lay the rows out again (the zoom, the theme or the run button changed).
+    /// Lay the rows out again (the theme or the run button changed).
     pub(super) fn remeasure(&self) {
         self.list.remeasure();
     }
@@ -186,7 +186,7 @@ impl FileView {
             cx.processor(|this, ix: usize, _window, cx| this.render_segment(ix, cx)),
         )
         .size_full();
-        let pad = px(self.pad * self.zoom);
+        let pad = px(self.pad);
         div()
             .id(SharedString::from(format!("file-preview-{id}")))
             .debug_selector(move || format!("file-preview-{id}"))
@@ -201,7 +201,7 @@ impl FileView {
             .p(pad)
             .overflow_hidden()
             .font_family(self.theme.typography.ui_family.clone())
-            .text_size(px(self.theme.typography.ui_size * self.zoom))
+            .text_size(px(self.theme.typography.ui_size))
             .line_height(gpui::relative(self.theme.typography.markdown_line_height))
             .child(rows)
             .into_any_element()
@@ -252,7 +252,7 @@ impl FileView {
                 )
             }
         };
-        let gap = if ix == 0 { 0.0 } else { self.theme.spacing.xs * self.zoom };
+        let gap = if ix == 0 { 0.0 } else { self.theme.spacing.xs };
         // Centred on the thread's reading measure, so a wide tile keeps lines a reader's eye
         // can follow back, and a long file reads as an agent's answer does.
         div()
@@ -263,7 +263,7 @@ impl FileView {
                 div()
                     .debug_selector(move || format!("file-measure-{id}-{ix}"))
                     .w_full()
-                    .max_w(px(MEASURE * self.zoom))
+                    .max_w(px(MEASURE))
                     .pt(px(gap))
                     .child(row),
             )

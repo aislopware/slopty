@@ -17,7 +17,7 @@ use gpui::accesskit::Role;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    relative,
+    px, relative,
 };
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, IntentId, ThreadId};
@@ -139,12 +139,12 @@ impl ThreadView {
         let made = aside.view.is_some();
         if let (Some(thread), false) = (aside.thread, made) {
             let (hub, theme) = (self.hub.clone(), self.theme.clone());
-            let (zoom, width) = (self.zoom, self.width);
+            let width = self.width;
             let asked = aside.question.is_none();
             let view = cx.new(|cx| {
                 let mut view = Self::new(hub, thread, theme, window, cx);
                 view.header = false;
-                view.set_layout(zoom, width, cx);
+                view.set_layout(width, cx);
                 view
             });
             // What the fork's composer asks the workspace for (an `@` path's matches) is
@@ -169,14 +169,14 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.xs))
             .child(self.icon(Symbol::QuestionmarkBubble, s.text_secondary))
             .child(
                 div()
                     .flex_1()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text_secondary))
                     .child("Aside"),
@@ -198,7 +198,7 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from("Forking the thread\u{2026}"))
                     .into_any_element()
@@ -213,11 +213,11 @@ impl ThreadView {
                 .aria_label("Aside")
                 .flex_none()
                 .h(relative(SHEET))
-                .mx(self.z(theme.spacing.sm))
+                .mx(px(theme.spacing.sm))
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .rounded(self.z(theme.radii.lg))
+                .rounded(px(theme.radii.lg))
                 .child(head)
                 .child(body)
                 .into_any_element(),

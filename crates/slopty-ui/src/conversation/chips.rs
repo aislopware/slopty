@@ -21,10 +21,10 @@ use crate::colors::hsla;
 use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
-/// The widest an attachment's chip grows, in points at zoom 1; a longer name is cut short.
+/// The widest an attachment's chip grows, in points; a longer name is cut short.
 const ATTACHMENT_WIDTH: f32 = 240.0;
 
-/// The side of a pasted picture's chip, in points at zoom 1: a two-line row's height.
+/// The side of a pasted picture's chip, in points: a two-line row's height.
 const THUMBNAIL: f32 = 40.0;
 
 /// What a click on a chip's ✕ does: takes that attachment off the draft.
@@ -36,7 +36,6 @@ pub type Remove = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// off the draft.
 pub fn row(
     theme: &Theme,
-    zoom: f32,
     chips: &[Attachment],
     picture: &dyn Fn(u64) -> Option<Arc<gpui::Image>>,
     remove: &dyn Fn(u64) -> Remove,
@@ -44,18 +43,17 @@ pub fn row(
     if chips.is_empty() {
         return None;
     }
-    let z = |v: f32| px(v * zoom);
     let row = div()
         .id("composer-attachments")
         .debug_selector(|| "composer-attachments".to_owned())
         .flex()
         .flex_wrap()
         .items_center()
-        .gap(z(theme.spacing.xs))
-        .pl(z(kit::FIELD_INSET))
+        .gap(px(theme.spacing.xs))
+        .pl(px(kit::FIELD_INSET))
         .children(chips.iter().map(|chip| match picture(chip.id) {
-            Some(image) => picture_chip(theme, zoom, chip, image, remove(chip.id)),
-            None => file_chip(theme, zoom, chip, remove(chip.id)),
+            Some(image) => picture_chip(theme, chip, image, remove(chip.id)),
+            None => file_chip(theme, chip, remove(chip.id)),
         }));
     Some(row.into_any_element())
 }
@@ -70,13 +68,7 @@ fn label(chip: &Attachment) -> SharedString {
 }
 
 /// The way to take `chip` off the draft, its ✕ `side` square.
-fn remove_button(
-    theme: &Theme,
-    chip: &Attachment,
-    side: Pixels,
-    zoom: f32,
-    remove: Remove,
-) -> AnyElement {
+fn remove_button(theme: &Theme, chip: &Attachment, side: Pixels, remove: Remove) -> AnyElement {
     let s = theme.surfaces;
     let id = chip.id;
     let button = div()
@@ -94,7 +86,7 @@ fn remove_button(
         .on_click(remove)
         .child(
             crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
-                .size(px(theme.typography.icon() * zoom)),
+                .size(px(theme.typography.icon())),
         );
     crate::a11y::tab_stop(button, s.focus).into_any_element()
 }
@@ -103,36 +95,34 @@ fn remove_button(
 /// small raised box in the top corner, and while it uploads a progress line along its foot.
 fn picture_chip(
     theme: &Theme,
-    zoom: f32,
     chip: &Attachment,
     picture: Arc<gpui::Image>,
     remove: Remove,
 ) -> AnyElement {
     let s = theme.surfaces;
-    let z = |v: f32| px(v * zoom);
     let disc = kit::elevate(div(), theme)
         .absolute()
-        .top(z(theme.spacing.xxs))
-        .right(z(theme.spacing.xxs))
-        .rounded(z(theme.radii.xs))
+        .top(px(theme.spacing.xxs))
+        .right(px(theme.spacing.xxs))
+        .rounded(px(theme.radii.xs))
         .overflow_hidden()
         .hover(move |el| el.bg(hsla(s.hover)))
-        .child(remove_button(theme, chip, z(theme.typography.icon_large()), zoom, remove));
+        .child(remove_button(theme, chip, px(theme.typography.icon_large()), remove));
     // How far it got, as the kit's capsule along the picture's foot, held in from its edges.
     let progress = (!chip.landed()).then(|| {
         div()
             .debug_selector(|| "composer-attachment-progress".to_owned())
             .absolute()
-            .left(z(theme.spacing.xs))
-            .right(z(theme.spacing.xs))
-            .bottom(z(theme.spacing.xs))
+            .left(px(theme.spacing.xs))
+            .right(px(theme.spacing.xs))
+            .bottom(px(theme.spacing.xs))
             .child(
                 kit::progress::Bar::new(
                     theme,
                     format!("attachment-bar-{}", chip.id),
                     kit::progress::Progress::Share(chip.fraction),
                 )
-                .height(z(theme.spacing.xs))
+                .height(px(theme.spacing.xs))
                 .label(format!("Uploading {}", chip.name)),
             )
     });
@@ -143,8 +133,8 @@ fn picture_chip(
         .aria_label(label(chip))
         .relative()
         .flex_none()
-        .size(z(THUMBNAIL))
-        .rounded(z(theme.radii.sm))
+        .size(px(THUMBNAIL))
+        .rounded(px(theme.radii.sm))
         .overflow_hidden()
         .border(kit::HAIR)
         .border_color(hsla(s.stroke))
@@ -157,14 +147,13 @@ fn picture_chip(
 
 /// A file's chip: how far it got as a ring while it uploads (the file's glyph once it landed),
 /// its name on the pill, and its ✕.
-fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> AnyElement {
+fn file_chip(theme: &Theme, chip: &Attachment, remove: Remove) -> AnyElement {
     let s = theme.surfaces;
-    let z = |v: f32| px(v * zoom);
     let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
     // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
     let mark = if chip.landed() {
         crate::icons::icon(theme, Symbol::Doc, IconSize::Inline, hsla(s.text_muted))
-            .size(z(theme.typography.icon()))
+            .size(px(theme.typography.icon()))
             .into_any_element()
     } else {
         div()
@@ -174,18 +163,18 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
                 SharedString::from(format!("attachment-ring-{}", chip.id)),
                 chip.fraction,
                 s.accent_fill,
-                z(theme.typography.icon()),
+                px(theme.typography.icon()),
             ))
             .into_any_element()
     };
-    kit::pill_frame(theme, zoom)
+    kit::pill_frame(theme)
         .id(SharedString::from(format!("attachment-{}", chip.id)))
         .debug_selector(|| "composer-attachment".to_owned())
         .role(Role::Status)
         .aria_label(label(chip))
-        .max_w(z(ATTACHMENT_WIDTH))
+        .max_w(px(ATTACHMENT_WIDTH))
         // The way off sits in the pill's own end, a pad's width from its edge.
-        .pr(z(theme.spacing.xxs))
+        .pr(px(theme.spacing.xxs))
         .map(|el| kit::inset(el, theme))
         .text_color(hsla(s.text_secondary))
         .child(mark)
@@ -198,9 +187,9 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
         )
         .child(
             div()
-                .rounded(z(theme.radii.xs))
+                .rounded(px(theme.radii.xs))
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(remove_button(theme, chip, z(side), zoom, remove)),
+                .child(remove_button(theme, chip, px(side), remove)),
         )
         .into_any_element()
 }

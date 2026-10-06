@@ -882,8 +882,10 @@ pub struct WorkspaceView {
     toast: Option<toast::Toast>,
     closed: Vec<ClosedTile>,
     closed_seq: u64,
-    /// A header or a tab pressed, and where it would land once it moves.
+    /// A header, a tab or a row pressed, and where it would land once it moves.
     drag: Option<area::Drag>,
+    /// Where the title strip and the navigator take a drop, as they were last drawn.
+    drop_spots: Rc<area::DropSpots>,
     /// How much narrower than the window the workspace was laid out in the last frame: none,
     /// unless the app gives it less (an iPad's Split View, as the self-test sets it).
     width_inset: f32,
@@ -1140,6 +1142,7 @@ impl WorkspaceView {
             closed: Vec::new(),
             closed_seq: 0,
             drag: None,
+            drop_spots: Rc::default(),
             width_inset: 0.0,
             park_pending: false,
             pending_focus: None,
@@ -1581,7 +1584,12 @@ impl WorkspaceView {
             Region::Titlebar => self.render_titlebar(window, cx),
             Region::TitleTabs => {
                 let tabs = self.title_tabs();
-                let drawn = title_tabs::render(&self.theme, &tabs, &self.title_scroll, cx);
+                let at = match self.landing() {
+                    Some(area::Landing::Strip(at)) => Some(*at),
+                    _ => None,
+                };
+                let drops = title_tabs::Drops { spots: &self.drop_spots, at };
+                let drawn = title_tabs::render(&self.theme, &tabs, &self.title_scroll, &drops, cx);
                 *self.title_tabs_drawn.borrow_mut() = tabs;
                 drawn
             }
@@ -2110,6 +2118,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_navigator))
             .on_action(cx.listener(Self::toggle_navigator_lens))
             .child(Self::measure_width(cx))
+            .child(Self::render_follow(cx))
             .child(self.render_frame(area, window, cx))
             .when_some(picker_leaving, gpui::ParentElement::child)
             .when_some(palette_leaving, gpui::ParentElement::child)
@@ -2178,6 +2187,10 @@ impl WorkspaceView {
             .flex()
             .child(self.chrome.titlebar.clone());
         let navigator = self.chrome.navigator.clone();
+        // The rail draws no project rows to drop on.
+        if self.nav.drawn.is_none() {
+            self.drop_spots.projects.borrow_mut().clear();
+        }
         let column = |width: Pixels| StyleRefinement::default().flex_none().h_full().w(width);
         let (docked, rail, over, handle) = match self.nav.drawn {
             Some(navigator::Mode::Docked) => {

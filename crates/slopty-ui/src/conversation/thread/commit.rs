@@ -434,7 +434,7 @@ impl CommitSheet {
                 .items_center()
                 .gap(px(self.theme.spacing.xs))
                 .cursor_pointer()
-                .child(kit::tick_box(&self.theme, on, 1.0)),
+                .child(kit::tick_box(&self.theme, on)),
             s.focus,
         )
     }
@@ -590,7 +590,7 @@ impl CommitSheet {
                     .child(SharedString::from(pull.title.clone())),
             )
             .child(
-                kit::pill(theme, tone, 1.0)
+                kit::pill(theme, tone)
                     .debug_selector(|| "commit-pull-standing".to_owned())
                     .child(SharedString::from(git::standing_words(pull))),
             )

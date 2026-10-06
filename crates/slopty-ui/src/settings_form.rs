@@ -1071,7 +1071,7 @@ impl SettingsForm {
     fn heading(&self, text: &'static str, n: usize, first: bool) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        crate::kit::typed(div(), theme.roles().section, 1.0)
+        crate::kit::typed(div(), theme.roles().section)
             .id(("settings-heading", n))
             .debug_selector(move || format!("settings-heading-{n}"))
             .role(gpui::accesskit::Role::Heading)
@@ -1091,7 +1091,7 @@ impl SettingsForm {
     /// tone, a step under the ring, at its leading inset.
     fn footer(&self, words: &'static str, n: usize) -> AnyElement {
         let theme = &self.theme;
-        crate::kit::typed(div(), theme.roles().metadata, 1.0)
+        crate::kit::typed(div(), theme.roles().metadata)
             .id(("settings-footer", n))
             .debug_selector(move || format!("settings-footer-{n}"))
             .aria_label(words)
@@ -1112,7 +1112,7 @@ impl SettingsForm {
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let searching = !self.query.trim().is_empty();
         let words = if self.narrow || searching { SETTINGS } else { self.section.label() };
-        let title = crate::kit::typed(div(), theme.roles().panel_title, 1.0)
+        let title = crate::kit::typed(div(), theme.roles().panel_title)
             .id("settings-title")
             .debug_selector(|| "settings-title".to_owned())
             .role(gpui::accesskit::Role::Heading)
@@ -1372,7 +1372,7 @@ impl SettingsForm {
                 cx.new(|_| crate::kit::Hint::new(name, "", theme).mono()).into()
             })
             .child(
-                crate::kit::typed(div(), theme.roles().action, 1.0)
+                crate::kit::typed(div(), theme.roles().action)
                     .min_w_0()
                     .truncate()
                     .text_color(hsla(s.text))
@@ -1635,7 +1635,7 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.md))
                     .child(
-                        crate::kit::typed(div(), theme.roles().action, 1.0)
+                        crate::kit::typed(div(), theme.roles().action)
                             .flex_1()
                             .min_w_0()
                             .truncate()

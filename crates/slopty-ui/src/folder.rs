@@ -123,9 +123,9 @@ pub const FILES_PICKER: bool = cfg!(target_os = "ios");
 const DRAG_SLOP: f32 = 4.0;
 /// The crumbs the path bar keeps after its first: deeper folders fold into one `…`.
 const CRUMBS: usize = 3;
-/// The width of a row's size column at zoom 1, room for "1023.9 KB".
+/// The width of a row's size column, room for "1023.9 KB".
 const SIZE_W: f32 = 64.0;
-/// The width of a row's age column at zoom 1, room for "59m".
+/// The width of a row's age column, room for "59m".
 const AGE_W: f32 = 32.0;
 
 /// What a folder tile tells the workspace.
@@ -190,7 +190,6 @@ pub struct FolderView {
     row_menu: Option<menu::RowMenu>,
     /// Where the list and its rows were drawn last, for [`Self::path_at`].
     drawn: Rc<RefCell<Drawn>>,
-    zoom: f32,
     theme: Theme,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -233,7 +232,6 @@ impl FolderView {
             dragged: false,
             row_menu: None,
             drawn: Rc::default(),
-            zoom: 1.0,
             theme,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
@@ -316,11 +314,6 @@ impl FolderView {
     /// The worker's home, for the path bar's `~`.
     pub fn set_home(&mut self, home: Option<String>) {
         self.home = home.filter(|h| !h.is_empty());
-    }
-
-    /// The zoom the tile is drawn at.
-    pub const fn set_zoom(&mut self, zoom: f32) {
-        self.zoom = zoom;
     }
 
     /// Draw by another theme (the workspace swapped it).
@@ -645,7 +638,7 @@ impl FolderView {
                 .child(
                     Input::new(&naming.field)
                         .with_size(Size::Small)
-                        .text_size(px(theme.typography.ui_size * self.zoom))
+                        .text_size(px(theme.typography.ui_size))
                         .aria_label(label),
                 )
                 .into_any_element(),
@@ -658,7 +651,6 @@ impl FolderView {
             return None;
         }
         let theme = &self.theme;
-        let k = self.zoom;
         let id = self.id.as_uuid();
         Some(
             div()
@@ -667,9 +659,9 @@ impl FolderView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(theme.spacing.sm * k))
-                .h(px(theme.density.row * k))
-                .px(px(theme.spacing.inset() * k))
+                .gap(px(theme.spacing.sm))
+                .h(px(theme.density.row))
+                .px(px(theme.spacing.inset()))
                 .border_b(crate::kit::HAIR)
                 .border_color(hsla(theme.surfaces.stroke))
                 .child(self.lead(Symbol::FolderBadgePlus, hsla(theme.surfaces.text_secondary)))
@@ -678,18 +670,17 @@ impl FolderView {
         )
     }
 
-    /// A row's lead: `symbol` beside the row's name at its size and weight, at the zoom.
-    fn lead(&self, symbol: Symbol, ink: gpui::Hsla) -> gpui::Div {
+    /// A row's lead: `symbol` beside the row's name at its size and weight.
+    fn lead(&self, mark: impl Into<crate::icons::Mark>, ink: gpui::Hsla) -> gpui::Div {
         let theme = &self.theme;
         let chrome = theme.roles().chrome;
-        crate::icons::beside(theme, symbol, chrome, ink)
-            .size(px(IconSize::beside_slot(theme, chrome) * self.zoom))
+        crate::icons::beside(theme, mark, chrome, ink)
+            .size(px(IconSize::beside_slot(theme, chrome)))
     }
 
     /// Over the rows, a folder asked for here and not yet listed, drawn as made.
     fn made_row(&self, n: usize, name: &str) -> AnyElement {
         let theme = &self.theme;
-        let k = self.zoom;
         let id = self.id.as_uuid();
         div()
             .id(numbered("folder-made", n))
@@ -699,9 +690,9 @@ impl FolderView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .h(px(theme.density.row * k))
-            .px(px(theme.spacing.inset() * k))
+            .gap(px(theme.spacing.sm))
+            .h(px(theme.density.row))
+            .px(px(theme.spacing.inset()))
             .opacity(ASKED)
             .child(self.lead(Symbol::Folder, hsla(theme.surfaces.text_secondary)))
             .child(
@@ -813,7 +804,6 @@ impl FolderView {
         next: Option<AnyElement>,
     ) -> AnyElement {
         let id = self.id.as_uuid();
-        let k = self.zoom;
         let theme = &self.theme;
         div()
             .debug_selector(move || format!("folder-notice-{id}"))
@@ -823,14 +813,8 @@ impl FolderView {
             .items_center()
             .justify_center()
             .child(
-                crate::kit::notice(
-                    theme,
-                    k,
-                    crate::kit::notice_mark(theme, icon, k),
-                    title,
-                    detail,
-                )
-                .children(next),
+                crate::kit::notice(theme, crate::kit::notice_mark(theme, icon), title, detail)
+                    .children(next),
             )
             .into_any_element()
     }
@@ -867,7 +851,6 @@ impl FolderView {
     fn path_bar(&self, dir: &str, total: u32, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let k = self.zoom;
         let crumbs = self.crumbs(dir);
         let last = crumbs.len().saturating_sub(1);
         let mut trail = div()
@@ -875,16 +858,15 @@ impl FolderView {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xxs * k))
+            .gap(px(theme.spacing.xxs))
             .overflow_hidden()
             .whitespace_nowrap();
         for (n, (label, path)) in crumbs.into_iter().enumerate() {
             if n > 0 {
-                trail =
-                    trail.child(crate::icons::Drawn::disclosure(theme, Symbol::ChevronRight).slot(
-                        px(theme.typography.icon() * k),
-                        crate::palette::separator_ink(theme),
-                    ));
+                trail = trail.child(
+                    crate::icons::Drawn::disclosure(theme, Symbol::ChevronRight)
+                        .slot(px(theme.typography.icon()), crate::palette::separator_ink(theme)),
+                );
             }
             let here = n == last;
             let crumb = div()
@@ -892,8 +874,8 @@ impl FolderView {
                 .debug_selector(move || format!("folder-crumb-{n}"))
                 .role(if here { Role::Label } else { Role::Link })
                 .aria_label(SharedString::from(label.clone()))
-                .px(px(theme.spacing.xxs * k))
-                .rounded(px(theme.radii.xs * k))
+                .px(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.xs))
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
@@ -921,20 +903,20 @@ impl FolderView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .h(px(theme.density.row * k))
+            .gap(px(theme.spacing.sm))
+            .h(px(theme.density.row))
             // A crumb's pad hangs out past the edge grid, so the first one's text stands on
             // the rows' icons and the header's glyph, not a pad's width right of them.
-            .pl(px((theme.spacing.inset() - theme.spacing.xxs) * k))
-            .pr(px(theme.spacing.inset() * k))
+            .pl(px(theme.spacing.inset() - theme.spacing.xxs))
+            .pr(px(theme.spacing.inset()))
             .border_b(crate::kit::HAIR)
             .border_color(hsla(s.stroke))
-            .text_size(px(theme.typography.small() * k))
+            .text_size(px(theme.typography.small()))
             .child(trail)
             .child(
                 crate::kit::meta(crate::kit::tabular(div()), theme)
                     .flex_none()
-                    .text_size(px(theme.typography.small() * k))
+                    .text_size(px(theme.typography.small()))
                     .child(count_label(total)),
             )
             .when_some(crate::workspace::worktree_root(dir), |bar, root| {
@@ -986,14 +968,13 @@ impl FolderView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let k = self.zoom;
         let chosen = self.selected == Some(ix);
         let folder = entry.kind == FileKind::Dir;
         let icon = match entry.kind {
-            FileKind::Dir => Symbol::Folder,
-            FileKind::Symlink => Symbol::Link,
-            FileKind::File => crate::icons::file_symbol(&entry.name),
-            FileKind::Other => Symbol::Doc,
+            FileKind::Dir => Symbol::Folder.into(),
+            FileKind::Symlink => Symbol::Link.into(),
+            FileKind::File => crate::icons::file_mark(&entry.name),
+            FileKind::Other => Symbol::Doc.into(),
         };
         let mut ink = RowInk::of(theme, entry, chosen);
         let fate = self.fate(&entry.name);
@@ -1019,8 +1000,8 @@ impl FolderView {
         let column = |text: String, width: f32| {
             crate::kit::meta(crate::kit::tabular(div()), theme)
                 .flex_none()
-                .w(px(width * k))
-                .text_size(px(theme.typography.small() * k))
+                .w(px(width))
+                .text_size(px(theme.typography.small()))
                 .text_right()
                 .whitespace_nowrap()
                 .overflow_hidden()
@@ -1050,10 +1031,10 @@ impl FolderView {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .h(px(theme.density.row * k))
-            .px(px((theme.spacing.inset() - pad) * k))
-            .rounded(px(theme.radii.sm * k))
+            .gap(px(theme.spacing.sm))
+            .h(px(theme.density.row))
+            .px(px(theme.spacing.inset() - pad))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(!chosen, |el| el.hover(move |st| st.bg(hsla(s.hover))))
             .opacity(ink.opacity)
@@ -1089,7 +1070,7 @@ impl FolderView {
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
                     crate::icons::icon(theme, Symbol::Link, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(IconSize::Inline.slot(theme) * k)),
+                        .size(px(IconSize::Inline.slot(theme))),
                 )
             })
             .child(column(detail, SIZE_W))
@@ -1118,7 +1099,7 @@ impl FolderView {
     fn list(&self, count: usize, cx: &Context<Self>) -> AnyElement {
         let id = self.id.as_uuid();
         let drawn = Rc::clone(&self.drawn);
-        let pad = crate::palette::list_pad(&self.theme) * self.zoom;
+        let pad = crate::palette::list_pad(&self.theme);
         let rows = uniform_list(
             "folder-rows",
             count,
@@ -1168,7 +1149,6 @@ impl FolderView {
             return None;
         }
         let theme = &self.theme;
-        let k = self.zoom;
         let id = self.id.as_uuid();
         Some(
             crate::kit::meta(crate::kit::tabular(div()), theme)
@@ -1178,11 +1158,11 @@ impl FolderView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .h(px(theme.density.row * k))
-                .px(px(theme.spacing.inset() * k))
+                .h(px(theme.density.row))
+                .px(px(theme.spacing.inset()))
                 .border_t(crate::kit::HAIR)
                 .border_color(hsla(theme.surfaces.stroke))
-                .text_size(px(theme.typography.small() * k))
+                .text_size(px(theme.typography.small()))
                 .child(format!("{shown} of {total} listed"))
                 .into_any_element(),
         )
@@ -1198,7 +1178,6 @@ impl Focusable for FolderView {
 impl Render for FolderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = *self.id.as_uuid();
-        let k = self.zoom;
         // A body without rows has none to be found under a touch.
         *self.drawn.borrow_mut() = Drawn::default();
         let body: Vec<AnyElement> = match self.listing() {
@@ -1291,7 +1270,7 @@ impl Render for FolderView {
             .flex_col()
             .overflow_hidden()
             .font_family(self.theme.typography.ui_family.clone())
-            .text_size(px(self.theme.typography.ui_size * k))
+            .text_size(px(self.theme.typography.ui_size))
             .children(body)
             .children(self.row_menu_panel(cx))
     }

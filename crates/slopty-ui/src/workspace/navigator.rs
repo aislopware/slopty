@@ -98,7 +98,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
-use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark, weight_beside};
+use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -2282,7 +2282,7 @@ impl WorkspaceView {
         // A scope leads the field as a token: what every row below is narrowed to.
         let scope = self.scope_name().map(|name| {
             let s = theme.surfaces;
-            kit::pill(theme, s.accent, 1.0)
+            kit::pill(theme, s.accent)
                 .id("nav-scope")
                 .debug_selector(|| "nav-scope".to_owned())
                 .role(Role::Label)
@@ -2612,6 +2612,8 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let rows = self.nav_rows(cx);
         self.nav.list.set_rows(rows);
+        // The rows drawn now say where each project takes a drop.
+        self.drop_spots.projects.borrow_mut().clear();
         let chosen = self.nav.filter.chosen.filter(|_| !self.nav.filter.query.is_empty());
         self.nav.list.selected.set(chosen.or_else(|| self.focused()));
         // A row chosen from the filter is where the keys go; the focused tile's row says only
@@ -2942,24 +2944,16 @@ impl WorkspaceView {
             if folded { ", folded" } else { "" }
         ));
         // A group's head: the name at the medium weight, a name and not a title, and the machine
-        // by its form beside it at the same weight, in its own colour; muted only while away.
+        // by its form beside it, in its own colour; muted only while away.
         let named = theme.roles().action.weight;
-        let machine = |ink: Rgb| {
-            crate::palette::lead_slot_weighted(
-                theme,
-                self.machine_glyph(key),
-                weight_beside(named),
-                hsla(ink),
-            )
-        };
+        let machine =
+            |ink: Rgb| crate::palette::lead_slot(theme, self.machine_glyph(key), hsla(ink));
         let lead = match worker.health {
             None => machine(kit::machine_ink(theme, key, false)).into_any_element(),
             Some((Status::Away, _)) => machine(kit::machine_ink(theme, key, true))
                 .child(div().id("away").role(Role::Image).aria_label(Status::Away.label()))
                 .into_any_element(),
-            Some((mark, _)) => {
-                lead_slot(theme, status_mark(theme, Some(mark), 1.0)).into_any_element()
-            }
+            Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark))).into_any_element(),
         };
         let name = div()
             .debug_selector(move || format!("nav-worker-name-{key}"))
@@ -3186,14 +3180,10 @@ impl WorkspaceView {
             group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        // The name at the medium weight, its glyph beside it at the same weight.
+        // The name at the medium weight, its glyph beside it.
         let named = theme.roles().action.weight;
-        let lead = crate::palette::lead_slot_weighted(
-            theme,
-            group.glyph,
-            weight_beside(named),
-            hsla(group_ink(theme, &group.key)),
-        );
+        let lead =
+            crate::palette::lead_slot(theme, group.glyph, hsla(group_ink(theme, &group.key)));
         let name_key = key.clone();
         let name = div()
             .debug_selector(move || format!("nav-group-name-{name_key}"))
@@ -3287,9 +3277,22 @@ impl WorkspaceView {
             .child(rest)
             .child(hover);
         let fold = key.clone();
+        let (spots, spot_key) = (Rc::clone(&self.drop_spots), key.clone());
+        let spot = super::area::spot(move |b| spots.put_project(&spot_key, b));
+        // Something carried over the row would go to this project.
+        let wash = matches!(self.landing(), Some(super::area::Landing::Project(k)) if *k == key)
+            .then(|| {
+                div()
+                    .debug_selector(|| "nav-group-drop".to_owned())
+                    .absolute()
+                    .inset_0()
+                    .bg(super::panes::drop_ink(theme))
+            });
         let row = row(theme, kit::Row::One, format!("nav-group-{key}"), label, false);
         Self::project_menu_press(row, key, group.new_shell.clone(), cx)
             .group(hover_group)
+            .child(spot)
+            .children(wash)
             .child(lead)
             .child(name)
             .child(trailing)
@@ -3334,7 +3337,7 @@ impl WorkspaceView {
                     .child(board.words.clone())
                     .debug_selector(move || format!("nav-board-words-{words_id}")),
             )
-            .children(state.map(|st| status_mark(theme, Some(st), 1.0)))
+            .children(state.map(|st| status_mark(theme, Some(st))))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
@@ -3371,7 +3374,7 @@ impl WorkspaceView {
             // One mark at the line's end: how it is doing, else how long it has rested.
             .children(match state {
                 Some(st) => Some(
-                    status_mark(theme, Some(st), 1.0)
+                    status_mark(theme, Some(st))
                         .debug_selector(move || format!("nav-thread-state-{id}"))
                         .into_any_element(),
                 ),
@@ -3489,7 +3492,7 @@ impl WorkspaceView {
                     .gap(px(theme.spacing.xxs))
                     .children(clock.filter(|_| matches!(state, Status::Working | Status::Running)))
                     .child(
-                        status_mark(theme, Some(state), 1.0)
+                        status_mark(theme, Some(state))
                             .debug_selector(move || format!("nav-state-{id}")),
                     )
                     .into_any_element(),
@@ -3497,7 +3500,7 @@ impl WorkspaceView {
             // Something ended there while the person was elsewhere: the finish's green check, in
             // the slot a state stands in, so a title keeps its length with or without it.
             None if t.unseen => Some(
-                status_mark(theme, Some(Status::Done), 1.0)
+                status_mark(theme, Some(Status::Done))
                     .debug_selector(move || format!("nav-unseen-{id}"))
                     .into_any_element(),
             ),
@@ -3629,7 +3632,16 @@ impl WorkspaceView {
                 .children(bar)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
-        let row = row(theme, lines, format!("nav-tile-{id}"), label.into(), selected);
+        let row = row(theme, lines, format!("nav-tile-{id}"), label.into(), selected)
+            // Pressed and moved, the row carries its tile; a finger's move scrolls the list.
+            .when(theme.density != slopty_theme::Density::TOUCH, |row| {
+                row.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, _cx| {
+                        this.begin_carry(super::area::Carried::Tile(tile), ev);
+                    }),
+                )
+            });
         Self::tile_menu_press(row, tile, super::context_menus::Pressed::Navigator, cx)
             .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
             .group(row_group)

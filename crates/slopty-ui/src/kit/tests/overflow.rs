@@ -112,19 +112,19 @@ fn the_overflow_checks_know_a_cut_from_an_ellipsis() {
     assert!(cut_mid_glyph(&own_chain(clipped), clipped).is_some());
     let ended = "div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(\"words\")";
     assert!(cut_mid_glyph(&own_chain(ended), ended).is_none());
-    let filled = "div().overflow_hidden().whitespace_nowrap().child(ChromeText::new(t,s,k).fill())";
+    let filled = "div().overflow_hidden().whitespace_nowrap().child(ChromeText::new(t,s).fill())";
     assert!(cut_mid_glyph(&own_chain(filled), filled).is_none(), "its own ellipsis");
     let row = "div().overflow_hidden().whitespace_nowrap().child(lead).child(name)";
     assert!(cut_mid_glyph(&own_chain(row), row).is_none(), "a row of things, not words");
 
-    let around = "div().truncate().child(ChromeText::new(t,s,k))";
+    let around = "div().truncate().child(ChromeText::new(t,s))";
     assert!(ellipsis_around_chrome_text(&own_chain(around), around).is_some());
     assert!(ellipsis_around_chrome_text(&own_chain(filled), filled).is_none());
 
-    let chip = "div().flex_none().child(icon).child(ChromeText::new(name,s,k))";
+    let chip = "div().flex_none().child(icon).child(ChromeText::new(name,s))";
     assert!(unbounded_chip(&own_chain(chip), chip).is_some());
-    let bounded = "div().flex_none().max_w(px(m)).child(ChromeText::new(name,s,k).fill())";
-    let fixed = "div().flex_none().child(ChromeText::new(EDITED,s,k))";
+    let bounded = "div().flex_none().max_w(px(m)).child(ChromeText::new(name,s).fill())";
+    let fixed = "div().flex_none().child(ChromeText::new(EDITED,s))";
     assert!(unbounded_chip(&own_chain(fixed), fixed).is_none(), "fixed words cannot grow");
     assert!(unbounded_chip(&own_chain(bounded), bounded).is_none());
 }

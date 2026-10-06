@@ -10,7 +10,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, relative,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    relative,
 };
 use slopty_proto::thread::{Clipped, ItemId, ToolCall, ToolState};
 use slopty_theme::{Rgb, Surfaces, Typography};
@@ -88,9 +89,9 @@ impl ThreadView {
         let eyebrow = div()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(theme.density.row))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(theme.density.row))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(div().flex_none().child("Plan"))
             .children(word.map(|w| {
@@ -109,7 +110,7 @@ impl ThreadView {
                     .child(copy),
             );
         let heading = div()
-            .text_size(self.z(theme.typography.prose()))
+            .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
@@ -127,7 +128,7 @@ impl ThreadView {
                     .debug_selector(move || selector)
                     .role(Role::Button)
                     .aria_label(label.clone())
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text)))
@@ -157,9 +158,9 @@ impl ThreadView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(self.z(theme.spacing.xs))
-                    .pt(self.z(theme.spacing.xs))
-                    .text_size(self.z(theme.typography.prose()))
+                    .gap(px(theme.spacing.xs))
+                    .pt(px(theme.spacing.xs))
+                    .text_size(px(theme.typography.prose()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))
                     .child(self.markdown(format!("plan-{}", id.0), &body_shown, false))

@@ -1958,3 +1958,37 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `tab_commands::{cmd_t_starts_an_agent_in_a_tab_of_its_own_where_the_focus_works,
     other_tabs_lists_the_tabs_and_close_other_tabs_keeps_the_one_on_show,
     move_to_project_takes_the_tile_to_a_tab_of_the_project_picked}`.
+- ✅ **Carrying a tile or a tab past the area** (2026-10-07, step 5 of the study's §4.2). A
+  pane's header or tab, a navigator tile row, or a title tab is pressed and then moved 4 pt.
+  From then on it carries its tile, or for a title tab the whole tab.
+  - Where it can land:
+    - On a pane (tiles only), as before: it splits the pane or joins its tabs.
+    - On the title strip, a tile becomes a tab of its own and a title tab moves. Either lands
+      before the tab whose middle lies past the pointer, and a 1.5 pt focus mark stands at
+      that edge.
+    - On another project's row in the navigator, either goes to that project and that project
+      shows it. Over its own project's row it lands nowhere.
+    - A tile alone in its tab, dropped on the strip in its own project, moves that tab rather
+      than making a new one.
+  - **One pointer follow for the whole window, on the capture phase.** The listeners left the
+    area's div for a canvas at the workspace's root. It registers capture-phase move and
+    release listeners in every frame, as the navigator's width handle does. So nothing under
+    the pointer can keep a move from the drag (a terminal, the title bar's window drag, a
+    list), and the first move after a press is followed without waiting for a frame. While
+    nothing is pressed, each move costs one read of the drag state.
+  - **The chrome says where it takes a drop as it lays out.** The title strip, each title tab
+    and each project row record their window bounds with a canvas prepaint. The records go
+    into shared `DropSpots`, so the drop logic stays out of the drawing code and reads no
+    layout of its own.
+    - The cached chrome views reuse their last paint, and with it the bounds they last wrote.
+    - A surface that stops drawing clears its own record: the title bar when it shows no tabs,
+      the frame when the navigator is not drawn. Records left behind can therefore never take
+      a drop.
+    - A finger's move in the navigator scrolls its list, so on touch density a tile row is not
+      carried.
+  - Tests: `workspace::tests::drag::{a_header_dropped_on_the_title_strip_is_a_tab_where_it_fell,
+    a_title_tab_carried_along_the_strip_moves,
+    a_tile_row_dropped_on_a_project_row_moves_the_tile_there,
+    a_title_tab_dropped_on_a_project_row_moves_there_whole}`, and
+    `slopty_client::layout::tiling::tests::{a_tile_dropped_on_the_strip_is_a_tab_where_it_fell,
+    a_title_tab_moves_along_the_strip, a_title_tab_moves_whole_to_another_project}`.

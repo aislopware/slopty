@@ -1,13 +1,10 @@
 //! `TerminalElement`: paints a `TermState` as cell-aligned text runs and quads.
 //!
-//! Per row: the words (a row split at its plain spaces), each shaped once at the base font
-//! size and painted glyph by glyph at the zoomed size, background quads for non-default
-//! backgrounds, underlines and strikethroughs where the font puts them, the cell-drawn sprites
-//! from the atlas, and the cursor. Shaping is cached across frames and views by the content
-//! hash of each word, least recently used first out under a glyph budget, and the cache is
-//! independent of the zoom: a zoom step re-shapes nothing, it repaints the same glyph ids at
-//! another size (positions come from the cell grid, and a fixed-pitch font's advances scale
-//! with the size).
+//! Per row: the words (a row split at its plain spaces), each shaped once and painted glyph by
+//! glyph on the cell grid, background quads for non-default backgrounds, underlines and
+//! strikethroughs where the font puts them, the cell-drawn sprites from the atlas, and the
+//! cursor. Shaping is cached across frames and views by the content hash of each word, least
+//! recently used first out under a glyph budget.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
@@ -46,20 +43,18 @@ pub struct CellMetrics {
     pub cell_width: Pixels,
     /// Height of one row.
     pub line_height: Pixels,
-    /// Height of one row before the overview's zoom: what a frame at another zoom scales.
-    pub unzoomed_line_height: Pixels,
     /// Grid size that fits.
     pub cols: u16,
     /// Grid size that fits.
     pub rows: u16,
-    /// Device pixels of the *fitted* grid per logical point painted: `scale / zoom`.
+    /// Device pixels of the fitted grid per logical point painted: the display's scale.
     ///
     /// [`Self::pixel_at`] reports in the units the worker measures in — the cell size in
-    /// `TermSize::metrics`, which is whole device pixels of the unzoomed grid — so a pixel
+    /// `TermSize::metrics`, which is whole device pixels of the grid — so a pixel
     /// mouse report lands on the cell the pointer is actually over.
     pub pixel_scale: f32,
-    /// The face the grid was derived from, in device pixels at `face_size` (the unzoomed font
-    /// size times the display scale): what the font said, `None` where it said nothing and
+    /// The face the grid was derived from, in device pixels at `face_size` (the font size times
+    /// the display scale): what the font said, `None` where it said nothing and
     /// ghostty's estimate stood in. For the self-test dump.
     pub face: metrics::Face,
     /// Device pixels per em the face was measured at.
@@ -147,15 +142,14 @@ pub struct Prepared {
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
     /// sequence number), for the keystroke → paint meter.
     shown: Vec<u64>,
-    /// Painted size over the shaped (base) size, and the font size to paint the words at.
-    zoom: f32,
+    /// The font size to paint the words at.
     font_size: Pixels,
     /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
     images: Vec<PreparedImage>,
-    /// What every row's stretch keys hold of the frame: the font, cell, palette, zoom, baseline
-    /// and scale. Not the element's size: a row paints nothing from it, so a tile resized in
+    /// What every row's stretch keys hold of the frame: the font, cell, palette, baseline and
+    /// scale. Not the element's size: a row paints nothing from it, so a tile resized in
     /// place draws its unchanged rows again. `None` while rows are not painted under keys.
     stretches: Option<u64>,
     /// Every edge the rows paint lies on a whole device pixel: the grid's origin, cell, line,
@@ -418,9 +412,8 @@ struct SpriteCell {
     col: u16,
     ch: char,
     fg: Hsla,
-    /// The atlas tile it paints from: its name and its mask. `None` while the zoom is in
-    /// motion, when the geometry is painted directly rather than filling the atlas with a tile
-    /// per intermediate size.
+    /// The atlas tile it paints from: its name and its mask. `None` where the sprite has no
+    /// mask, when its geometry is painted directly.
     tile: Option<Rc<SpriteTile>>,
 }
 
@@ -650,18 +643,18 @@ pub(super) struct FailedLook {
     pub wash: Hsla,
     /// Down the element's left edge, in the inset beside the text.
     pub bar: Hsla,
-    /// The bar's width, at the zoom it is drawn at.
+    /// The bar's width.
     pub bar_width: Pixels,
 }
 
 impl FailedLook {
-    /// The look at `zoom`.
+    /// The look by `theme`.
     #[must_use]
-    pub(super) fn new(theme: &Theme, zoom: f32) -> Self {
+    pub(super) fn new(theme: &Theme) -> Self {
         Self {
             wash: hsla_alpha(theme.surfaces.error_fill, alpha::FAINT),
             bar: hsla(theme.surfaces.error_fill),
-            bar_width: px(slopty_theme::stroke::BAR * zoom),
+            bar_width: px(slopty_theme::stroke::BAR),
         }
     }
 }
@@ -707,7 +700,6 @@ fn row_in_band(
 pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
-    zoom: f32,
     /// What a screen reader hears: the program's title and the cursor row's text. Filled by
     /// the view only while the accessibility tree is being built.
     a11y: Option<(SharedString, SharedString)>,
@@ -717,22 +709,13 @@ impl TerminalElement {
     /// Paint `view`.
     #[must_use]
     pub const fn new(view: Entity<TerminalView>, focused: bool) -> Self {
-        Self { view, focused, zoom: 1.0, a11y: None }
+        Self { view, focused, a11y: None }
     }
 
     /// The accessible label (the title) and value (the cursor row's text).
     #[must_use]
     pub fn a11y(mut self, label: SharedString, value: SharedString) -> Self {
         self.a11y = Some((label, value));
-        self
-    }
-
-    /// Scale everything (font, cells, padding) by `zoom` while keeping the grid size that the
-    /// unscaled bounds would give. Used by the workspace so a terminal keeps its columns while
-    /// the overview zooms.
-    #[must_use]
-    pub const fn zoom(mut self, zoom: f32) -> Self {
-        self.zoom = zoom;
         self
     }
 }
@@ -886,7 +869,7 @@ struct Probe {
 #[cfg(test)]
 impl gpui::Global for Probe {}
 
-/// Sprite tiles remembered before the table starts over (every settled zoom adds a cell size).
+/// Sprite tiles remembered before the table starts over (every cell size adds its own).
 const SPRITE_TILES: usize = 4096;
 
 impl ShapeCache {
@@ -1214,13 +1197,6 @@ fn color_at(colors: &[(usize, Hsla)], index: usize) -> Hsla {
         .map_or(gpui::black(), |(_, color)| *color)
 }
 
-/// Where a glyph shaped at the base size goes when the word is painted at `zoom` times it:
-/// its shaped position scales with the size (a fixed-pitch advance is linear in the size) from
-/// the word's origin on the baseline.
-fn glyph_origin(origin: Point<Pixels>, shaped: Point<Pixels>, zoom: f32) -> Point<Pixels> {
-    point(origin.x + shaped.x * zoom, origin.y + shaped.y * zoom)
-}
-
 /// Shape one word of `cells` and place its glyphs on the cell grid: each glyph goes at the
 /// column of the cell its byte belongs to, keeping its shaped offset from the cell's first
 /// glyph. A wide cluster (CJK, an emoji, a ZWJ sequence, a flag) so spans exactly two cells
@@ -1510,7 +1486,6 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, cx| view.set_font_family(picked.clone(), cx));
             picked
         });
-        let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
         let (base_size, height_mult, base_pad, cursor_blink, cursor_style, ligatures) = {
             let theme = self.view.read(cx).theme();
             (
@@ -1522,36 +1497,29 @@ impl Element for TerminalElement {
                 theme.typography.ligatures,
             )
         };
-        // Grid size comes from the unscaled geometry so zooming never resizes the PTY. The
-        // cell is derived once per family, size and scale, not once per frame.
-        let (base_grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
+        // The cell is derived once per family, size and scale, not once per frame.
+        let (grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
             cache.grid(window, &family, ligatures, base_size, height_mult)
         });
-        let (base_cell_width, base_line_height) = (base_grid.cell_width, base_grid.line_height);
-        let unscaled = size(bounds.size.width / zoom, bounds.size.height / zoom);
-        let inner = size(unscaled.width - base_pad * 2.0, unscaled.height - base_pad * 2.0);
+        let (base_cell_width, base_line_height) = (grid.cell_width, grid.line_height);
+        let inner = size(bounds.size.width - base_pad * 2.0, bounds.size.height - base_pad * 2.0);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≥ 1 clamped")]
         let (cols, rows) = (
             (f32::from(inner.width) / f32::from(base_cell_width)).floor().max(1.0) as u16,
             (f32::from(inner.height) / f32::from(base_line_height)).floor().max(1.0) as u16,
         );
-        // Paint geometry is the unzoomed one scaled: `cols` and `rows` were counted with the
-        // unzoomed cell, so scaling is what keeps `cols × cell_width` inside the item's content
-        // width. Re-deriving at the zoomed size would round the cell up and clip the last column.
-        let font_size = base_size * zoom;
-        let grid = base_grid.scaled(zoom);
+        let font_size = base_size;
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
-        let pad = base_pad * zoom;
+        let pad = base_pad;
         let origin = bounds.origin + point(pad, pad);
         let scale = window.scale_factor().max(1.0);
         let metrics = CellMetrics {
             origin,
             cell_width,
             line_height,
-            unzoomed_line_height: base_line_height,
             cols,
             rows,
-            pixel_scale: scale / zoom,
+            pixel_scale: scale,
             face,
             face_size: f32::from(base_size) * scale,
         };
@@ -1644,7 +1612,7 @@ impl Element for TerminalElement {
                     state.block_marks(),
                     state.scrollback().oldest(),
                     state.history_len(),
-                    px(slopty_theme::stroke::MARK * zoom),
+                    px(slopty_theme::stroke::MARK),
                 )
                 .into_iter()
                 .map(|tick| (tick.bounds, if tick.failed { failure } else { mark }))
@@ -1678,7 +1646,7 @@ impl Element for TerminalElement {
             let marks: Vec<Option<slopty_grid::SemanticMark>> =
                 rows_view.iter().map(|row| row.line.map(|line| line.mark)).collect();
             let failed_heads = head_runs(&runs, &marks).iter().map(band).collect();
-            let failed_look = FailedLook::new(theme, zoom);
+            let failed_look = FailedLook::new(theme);
             // The alternate screen has no blocks, whatever marks a program leaves on it. From
             // their own pass, not the row loop: deciding them there cost the dense screen's
             // frame about 100 µs (MEASUREMENTS, "the head band on its own step").
@@ -2038,7 +2006,6 @@ impl Element for TerminalElement {
             Prepared {
                 metrics,
                 grid,
-                zoom,
                 font_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
@@ -2077,7 +2044,7 @@ impl Element for TerminalElement {
                 stretches: keyed.then(|| {
                     let mut h = FxHasher::default();
                     row_frame.hash(&mut h);
-                    for v in [zoom, f32::from(font_size), f32::from(grid.baseline)] {
+                    for v in [f32::from(font_size), f32::from(grid.baseline)] {
                         v.to_bits().hash(&mut h);
                     }
                     h.finish()
@@ -2321,17 +2288,17 @@ impl Element for TerminalElement {
                 }
             });
         }
-        // The words: every glyph at the derived baseline, from the base-size shaping, at the
-        // zoomed size. Nothing is shaped here and the word cache never sees the zoom. One
-        // layer for all of them: a primitive outside a layer costs a bounds-tree insert of its
-        // own (GPUI gives each line it paints a layer for the same reason), and the glyphs
-        // still land above the quads painted before and below what is painted after.
-        let (zoom, font_size) = (prepared.zoom, prepared.font_size);
+        // The words: every glyph at the derived baseline, from the cached shaping. Nothing is
+        // shaped here. One layer for all of them: a primitive outside a layer costs a bounds-tree
+        // insert of its own (GPUI gives each line it paints a layer for the same reason),
+        // and the glyphs still land above the quads painted before and below what is
+        // painted after.
+        let font_size = prepared.font_size;
         window.paint_layer(bounds, |window| {
             for row in prepared.rows.iter().filter(|row| !row.parts.segments.is_empty()) {
                 let key = key_of(Pass::Glyphs, row, under_cursor(row));
                 stretch(window, key, at(row), |window| {
-                    paint_words(window, &m, row, grid.baseline, cursor_text, (zoom, font_size));
+                    paint_words(window, &m, row, grid.baseline, cursor_text, font_size);
                 });
             }
         });
@@ -2411,7 +2378,7 @@ fn paint_placed(window: &mut Window, image: &PreparedImage) {
 ///
 /// The rectangle its shown part fills, and the rectangle the whole image (`image` pixels
 /// wide and high) would fill at that scale, so the renderer samples the placement's source
-/// rectangle. The worker lays placements out in its cell pixels (device pixels of the unzoomed
+/// rectangle. The worker lays placements out in its cell pixels (device pixels of the
 /// grid, `pixel_scale` of them per point) at absolute lines, painted that many rows below
 /// `top`, the line at the view's top row, whether it shows the screen or its history.
 /// `None` when nothing would show (an empty source or size).
@@ -2519,21 +2486,21 @@ fn paint_sprite(
     }
 }
 
-/// Paint one row's words on the baseline `baseline` below its top, at `font_size`, the glyphs
-/// scaled by `zoom` from the base-size shaping; those under a block cursor in its text colour.
+/// Paint one row's words on the baseline `baseline` below its top, at `font_size`; those under
+/// a block cursor in its text colour.
 fn paint_words(
     window: &mut Window,
     m: &CellMetrics,
     row: &PreparedRow,
     baseline: Pixels,
     cursor_text: Option<CursorText>,
-    (zoom, font_size): (f32, Pixels),
+    font_size: Pixels,
 ) {
     let baseline = row.y + baseline;
     for (col, word) in &row.parts.segments {
         let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
         for glyph in &word.glyphs {
-            let at = glyph_origin(origin, glyph.position, zoom);
+            let at = origin + glyph.position;
             let cell = col.saturating_add(glyph.col);
             let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
             let painted = if glyph.emoji {
@@ -2764,17 +2731,16 @@ mod tests {
 
     use super::*;
 
-    /// The metrics of a grid laid out at `scale` and painted at `zoom`, `JetBrains Mono` 13 pt:
-    /// an 8 × 17 device-pixel cell, so 8/scale × 17/scale points, times the zoom.
-    fn metrics(scale: f32, zoom: f32) -> CellMetrics {
+    /// The metrics of a grid laid out at `scale`, `JetBrains Mono` 13 pt: an 8 × 17
+    /// device-pixel cell, so 8/scale × 17/scale points.
+    fn metrics(scale: f32) -> CellMetrics {
         CellMetrics {
             origin: point(px(10.0), px(20.0)),
-            cell_width: px(8.0 / scale * zoom),
-            line_height: px(17.0 / scale * zoom),
-            unzoomed_line_height: px(17.0 / scale),
+            cell_width: px(8.0 / scale),
+            line_height: px(17.0 / scale),
             cols: 80,
             rows: 24,
-            pixel_scale: scale / zoom,
+            pixel_scale: scale,
             face: metrics::Face::default(),
             face_size: 13.0 * scale,
         }
@@ -2786,7 +2752,7 @@ mod tests {
     #[test]
     fn a_placement_is_painted_at_its_cell_in_the_workers_pixels() {
         use slopty_proto::terminal::PixelRect;
-        let m = metrics(2.0, 1.0);
+        let m = metrics(2.0);
         let p = Placement {
             image: 1,
             generation: 1,
@@ -2833,7 +2799,7 @@ mod tests {
     /// counts rows past it.
     #[test]
     fn the_scrollbar_thumb_tracks_the_viewport_and_maps_back() {
-        let m = metrics(1.0, 1.0);
+        let m = metrics(1.0);
         assert_eq!(scrollbar_thumb(&m, 0, 0), None, "no history, no thumb");
         let track = f32::from(m.line_height) * 24.0;
         // 24 rows over 24 + 24: half the track, at its end while following output.
@@ -2868,7 +2834,7 @@ mod tests {
     /// marks closer than one share it, showing a failure among them; none without history.
     #[test]
     fn block_marks_sit_on_the_track_where_their_prompts_are() {
-        let m = metrics(1.0, 1.0);
+        let m = metrics(1.0);
         let track = f32::from(m.line_height) * 24.0;
         let h = px(2.0);
         let marks: BTreeMap<LineIndex, Option<u8>> =
@@ -2904,21 +2870,19 @@ mod tests {
     }
 
     /// A pixel mouse report is in the units the worker measures in: device pixels of the *fitted*
-    /// grid, whatever the display's scale and however far the overview has zoomed. The worker
+    /// grid, whatever the display's scale. The worker
     /// divides by the cell size it was told (8 × 17 here), so the column it reads back is the
     /// column the pointer is over.
     #[test]
     fn a_pixel_mouse_report_is_in_the_cell_size_the_worker_was_told() {
         for scale in [1.0, 2.0] {
-            for zoom in [0.5, 1.0, 2.0] {
-                let m = metrics(scale, zoom);
-                // The left edge of column 10, row 3.
-                let at = point(m.origin.x + m.cell_width * 10.0, m.origin.y + m.line_height * 3.0);
-                let (x, y) = m.pixel_at(at);
-                assert_eq!((x / 8, y / 17), (10, 3), "at scale {scale} zoom {zoom}");
-                assert_eq!(m.cell_at(at), Some((10, 3)), "at scale {scale} zoom {zoom}");
-                assert_eq!(m.pixel_at(m.origin), (0, 0));
-            }
+            let m = metrics(scale);
+            // The left edge of column 10, row 3.
+            let at = point(m.origin.x + m.cell_width * 10.0, m.origin.y + m.line_height * 3.0);
+            let (x, y) = m.pixel_at(at);
+            assert_eq!((x / 8, y / 17), (10, 3), "at scale {scale}");
+            assert_eq!(m.cell_at(at), Some((10, 3)), "at scale {scale}");
+            assert_eq!(m.pixel_at(m.origin), (0, 0));
         }
     }
 
@@ -2947,23 +2911,12 @@ mod tests {
         // The bottom edge: a row whose box starts at the clip's end still shows its overline.
         assert!(row_in_band(px(300.5), px(10.0), (above, below), top, bottom));
         assert!(!row_in_band(px(301.0), px(10.0), (above, below), top, bottom));
-        // Overhang scales with the zoom (device pixels over `pixel_scale`), never negative.
+        // Overhang is in device pixels over `pixel_scale`, never negative.
         let (a2, b2) = row_overhang(&grid, &face, 2.0);
         assert_eq!((a2, b2), (px(1.0), px(2.0)), "the strokes, not the face, reach furthest");
         let tight = metrics::Face { ascent: 5.0, descent: -0.5, ..metrics::Face::default() };
         let roomy = Grid { underline: metrics::Line { y: px(8.0), thickness: px(1.0) }, ..grid };
         assert_eq!(row_overhang(&roomy, &tight, 1.0), (px(1.0), px(0.0)));
-    }
-
-    /// A word shaped at 13 pt on an 8 pt cell paints at 26 pt with the glyphs 16 pt apart,
-    /// from the same shaping: the position scales, the origin is the cell grid's.
-    #[test]
-    fn a_glyph_shaped_at_the_base_size_lands_on_the_zoomed_cell() {
-        let origin = point(px(100.0), px(50.0));
-        assert_eq!(glyph_origin(origin, point(px(0.0), px(0.0)), 2.0), origin);
-        assert_eq!(glyph_origin(origin, point(px(8.0), px(0.0)), 2.0), point(px(116.0), px(50.0)));
-        assert_eq!(glyph_origin(origin, point(px(24.0), px(0.0)), 0.5), point(px(112.0), px(50.0)));
-        assert_eq!(glyph_origin(origin, point(px(8.0), px(0.0)), 1.0), point(px(108.0), px(50.0)));
     }
 
     /// The colour of a glyph is the colour of the style run its byte falls in.

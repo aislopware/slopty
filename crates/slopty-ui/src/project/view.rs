@@ -69,7 +69,7 @@ pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
 /// The "Run on" picker's close button.
 pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
-/// How far a card that arrives travels up into its place, at zoom 1.
+/// How far a card that arrives travels up into its place.
 const ARRIVE: f32 = 4.0;
 /// The least the board's name narrows to in its header, and a row's title in its row, in ems
 /// of the chrome's text, before its progress, or the row's facts, leave.
@@ -212,7 +212,6 @@ pub struct ProjectView {
     seen: Seen,
     /// The card the keyboard stands on.
     picked: Option<Node>,
-    zoom: f32,
     /// The person opened *Merged*, which otherwise folds to its head.
     merged_open: bool,
     theme: Theme,
@@ -259,7 +258,6 @@ impl ProjectView {
             id,
             seen: Seen::default(),
             picked: None,
-            zoom: 1.0,
             merged_open: false,
             hint_theme: Rc::new(theme.clone()),
             theme,
@@ -310,14 +308,6 @@ impl ProjectView {
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
                 self.picked = None;
             }
-            cx.notify();
-        }
-    }
-
-    /// The zoom it is drawn at. Its rows fit their own width as they are laid out.
-    pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        if (self.zoom - zoom).abs() > f32::EPSILON {
-            self.zoom = zoom;
             cx.notify();
         }
     }
@@ -483,16 +473,16 @@ impl ProjectView {
             .max_w_full()
             .flex()
             .items_center()
-            .gap(self.z(sp.xxs))
-            .px(self.z(sp.xxs))
-            .rounded(self.z(theme.radii.sm))
+            .gap(px(sp.xxs))
+            .px(px(sp.xxs))
+            .rounded(px(theme.radii.sm))
             .overflow_hidden()
-            .text_size(self.z(theme.roles().metadata.size))
+            .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(tone))
             .when(pinned, |el| {
                 el.child(
                     icon(theme, Symbol::Lock, IconSize::Inline, hsla(tone))
-                        .size(self.z(theme.typography.icon())),
+                        .size(px(theme.typography.icon())),
                 )
             })
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
@@ -572,15 +562,13 @@ fn place_line(project: &slopty_proto::project::Project) -> String {
     }
 }
 
-/// A switch at `zoom`: a track the solid fills while on, its knob at the far end.
+/// A switch: a track the solid fills while on, its knob at the far end.
 pub(super) fn switch(
     theme: &Theme,
-    zoom: f32,
     id: &'static str,
     label: &'static str,
     on: bool,
 ) -> Stateful<Div> {
-    let z = |v: f32| px(v * zoom);
     let (s, sp) = (theme.surfaces, theme.spacing);
     let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
     let width = sp.xl + sp.xs;
@@ -598,19 +586,19 @@ pub(super) fn switch(
             gpui::accesskit::Toggled::False
         })
         .flex_none()
-        .w(z(width))
-        .h(z(sp.lg))
+        .w(px(width))
+        .h(px(sp.lg))
         .flex()
         .items_center()
-        .px(z(sp.xxs))
+        .px(px(sp.xxs))
         .rounded_full()
         .bg(track)
         .cursor_pointer()
         .child(
             div()
                 .flex_none()
-                .size(z(knob))
-                .ml(z(if on { travel } else { 0.0 }))
+                .size(px(knob))
+                .ml(px(if on { travel } else { 0.0 }))
                 .rounded_full()
                 .bg(hsla(ink)),
         );
@@ -645,10 +633,6 @@ fn node_key(node: Node) -> String {
 }
 
 impl ProjectView {
-    fn z(&self, v: f32) -> gpui::Pixels {
-        px(v * self.zoom)
-    }
-
     /// The name, where the work lands and how it is checked, how far along it is and how
     /// many of its agents run, and its controls: how the work is checked, pushing, and the way
     /// back to the orchestrator's terminal. The readouts are columns,
@@ -671,7 +655,7 @@ impl ProjectView {
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .flex_none()
-                .text_size(self.z(theme.typography.small()))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(SharedString::from(text))
         };
@@ -707,7 +691,7 @@ impl ProjectView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .map(|el| crate::kit::typed(el, theme.roles().panel_title, self.zoom))
+            .map(|el| crate::kit::typed(el, theme.roles().panel_title))
             .text_color(hsla(s.text))
             .child(SharedString::from(project.title.clone()));
         // The name, then how far along it is and what runs, then its controls. Where the board
@@ -720,17 +704,17 @@ impl ProjectView {
             div()
                 .flex()
                 .items_center()
-                .gap(self.z(sp.xs))
-                .child(crate::kit::separator(theme).text_size(self.z(theme.typography.small())))
+                .gap(px(sp.xs))
+                .child(crate::kit::separator(theme).text_size(px(theme.typography.small())))
                 .child(live)
                 .into_any_element()
         } else {
             live.into_any_element()
         };
         let mut title = crate::kit::priority_row("project-header")
-            .h(self.z(crate::kit::icon_button_side(theme)))
-            .gap(self.z(sp.xs))
-            .title(name, self.z(theme.typography.ui_size * TITLE_FLOOR_EM))
+            .h(px(crate::kit::icon_button_side(theme)))
+            .gap(px(sp.xs))
+            .title(name, px(theme.typography.ui_size * TITLE_FLOOR_EM))
             .end();
         if let Some(progress) = progress {
             title = title.item("progress", Priority::MEDIUM, readout("project-progress", progress));
@@ -747,17 +731,17 @@ impl ProjectView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(place));
         div()
             .flex_none()
             .flex()
             .flex_col()
-            .gap(self.z(sp.xxs))
-            .px(self.z(sp.inset()))
-            .pt(self.z(sp.md))
-            .pb(self.z(sp.sm))
+            .gap(px(sp.xxs))
+            .px(px(sp.inset()))
+            .pt(px(sp.md))
+            .pb(px(sp.sm))
             .child(title)
             .child(meta)
             .child(self.bar(board))
@@ -811,10 +795,10 @@ impl ProjectView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .h(self.z(theme.density.hit))
-                .px(self.z(sp.sm))
-                .rounded(self.z(theme.radii.sm))
-                .text_size(self.z(theme.typography.small()))
+                .h(px(theme.density.hit))
+                .px(px(sp.sm))
+                .rounded(px(theme.radii.sm))
+                .text_size(px(theme.typography.small()))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(action.label());
@@ -835,7 +819,7 @@ impl ProjectView {
                 cx.emit(ProjectEvent::Act(task, action));
             }))
         });
-        Some(div().flex_none().flex().items_center().gap(self.z(sp.xxs)).children(buttons))
+        Some(div().flex_none().flex().items_center().gap(px(sp.xxs)).children(buttons))
     }
 
     /// How much of the work has merged: the merged tasks' share of them all, in the success
@@ -850,12 +834,12 @@ impl ProjectView {
             crate::kit::progress::Bar::new(theme, "project-bar-share", Progress::Share(share))
                 .label(SharedString::from(format!("{merged} of {total} merged")))
                 .tone(theme.surfaces.success_fill)
-                .height(self.z(theme.spacing.xs))
+                .height(px(theme.spacing.xs))
                 .at_once();
         div()
             .id("project-bar")
             .debug_selector(|| "project-bar".to_owned())
-            .mt(self.z(theme.spacing.xs))
+            .mt(px(theme.spacing.xs))
             .child(bar)
     }
 
@@ -868,7 +852,7 @@ impl ProjectView {
         let key = "project-needs-orchestrator";
         let line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
-            .gap(self.z(self.theme.spacing.sm))
+            .gap(px(self.theme.spacing.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(Some(Phase::NeedsYou)))
             .title(self.row_title(ORCHESTRATOR.to_owned()), self.title_floor());
         let el = self
@@ -902,7 +886,7 @@ impl ProjectView {
         let head = div()
             .flex()
             .items_center()
-            .pr(self.z(sp.xs))
+            .pr(px(sp.xs))
             .child(
                 div()
                     .id("project-recap-heading")
@@ -911,10 +895,10 @@ impl ProjectView {
                     .aria_label(SharedString::from(heading.clone()))
                     .flex_1()
                     .min_w_0()
-                    .px(self.z(sp.inset()))
-                    .pt(self.z(sp.xs))
-                    .pb(self.z(sp.xxs))
-                    .text_size(self.z(theme.typography.small()))
+                    .px(px(sp.inset()))
+                    .pt(px(sp.xs))
+                    .pb(px(sp.xxs))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(heading)),
             )
@@ -933,8 +917,8 @@ impl ProjectView {
                 .role(Role::Group)
                 .aria_label(RECAP)
                 .flex_none()
-                .mb(self.z(sp.xs))
-                .pb(self.z(sp.xs))
+                .mb(px(sp.xs))
+                .pb(px(sp.xs))
                 .map(|el| crate::kit::raised(el, theme))
                 .child(head)
                 .children(lines)
@@ -960,14 +944,14 @@ impl ProjectView {
             .aria_label(SharedString::from(text.clone()))
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.inset()))
-            .py(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.inset()))
+            .py(px(theme.spacing.xxs))
             .min_w_0()
             .child(
                 icon(theme, glyph, IconSize::Inline, hsla(tone))
                     .flex_none()
-                    .size(self.z(theme.typography.icon())),
+                    .size(px(theme.typography.icon())),
             )
             .child(
                 div()
@@ -976,19 +960,19 @@ impl ProjectView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_secondary))
                     .child(SharedString::from(text)),
             )
     }
 
-    /// A phase's glyph in its fixed slot at the board's zoom, named by the phase; with none,
+    /// A phase's glyph in its fixed slot, named by the phase; with none,
     /// the agent's neutral mark.
     fn mark(&self, phase: Option<Phase>) -> Div {
         let theme = &self.theme;
         let slot = div()
             .flex_none()
-            .size(self.z(theme.typography.icon_large()))
+            .size(px(theme.typography.icon_large()))
             .flex()
             .items_center()
             .justify_center();
@@ -998,7 +982,7 @@ impl ProjectView {
                     .id(phase.label())
                     .role(Role::Image)
                     .aria_label(phase.label())
-                    .child(phase.glyph(theme, self.z(theme.typography.icon()))),
+                    .child(phase.glyph(theme, px(theme.typography.icon()))),
             ),
             None => slot.child(
                 icon(
@@ -1007,7 +991,7 @@ impl ProjectView {
                     IconSize::Inline,
                     hsla(theme.surfaces.text_secondary),
                 )
-                .size(self.z(theme.typography.icon())),
+                .size(px(theme.typography.icon())),
             ),
         }
     }
@@ -1116,11 +1100,11 @@ impl ProjectView {
         let head = div()
             .flex()
             .items_center()
-            .gap(self.z(sp.xs))
+            .gap(px(sp.xs))
             .min_w_0()
             .child(
                 icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(s.error_fill))
-                    .size(self.z(theme.typography.icon())),
+                    .size(px(theme.typography.icon())),
             )
             .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
             .child(
@@ -1143,14 +1127,14 @@ impl ProjectView {
                 .role(Role::Log)
                 .flex()
                 .flex_col()
-                .px(self.z(sp.sm))
-                .py(self.z(sp.xs))
-                .rounded(self.z(theme.radii.sm))
+                .px(px(sp.sm))
+                .py(px(sp.xs))
+                .rounded(px(theme.radii.sm))
                 .map(|el| crate::kit::inset(el, theme))
                 // What the program printed, in the face a terminal and a tool's output use, at
                 // the facts' size and a reading line, so why it failed is read, not squinted at.
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
-                .text_size(self.z(theme.typography.small()))
+                .text_size(px(theme.typography.small()))
                 .line_height(relative(theme.typography.markdown_line_height))
                 .text_color(hsla(s.text_secondary))
                 .children(tail.into_iter().map(|line| {
@@ -1167,10 +1151,10 @@ impl ProjectView {
             .debug_selector(move || selector)
             .flex()
             .flex_col()
-            .gap(self.z(sp.xs))
-            .pt(self.z(sp.xxs))
+            .gap(px(sp.xs))
+            .pt(px(sp.xxs))
             .min_w_0()
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .child(head)
             .children(tail)
     }
@@ -1198,9 +1182,9 @@ impl ProjectView {
         let list = div()
             .flex()
             .flex_col()
-            .gap(self.z(sp.lg))
-            .px(self.z(sp.inset() - sp.xs))
-            .pt(self.z(sp.xs))
+            .gap(px(sp.lg))
+            .px(px(sp.inset() - sp.xs))
+            .pt(px(sp.xs))
             .children(groups);
         vec![list.into_any_element()]
     }
@@ -1246,34 +1230,32 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        let glyph =
-            Phase::of(lane).glyph(theme, self.z(IconSize::beside_slot(theme, roles.metadata)));
+        let glyph = Phase::of(lane).glyph(theme, px(IconSize::beside_slot(theme, roles.metadata)));
         let head = div()
             .id(SharedString::from(head_id.clone()))
             .debug_selector(move || selector)
             .flex_none()
-            .h(self.z(theme.density.row))
+            .h(px(theme.density.row))
             .flex()
             .items_center()
-            .gap(self.z(sp.sm))
-            .px(self.z(sp.xs))
-            .rounded(self.z(theme.radii.sm))
+            .gap(px(sp.sm))
+            .px(px(sp.xs))
+            .rounded(px(theme.radii.sm))
             .child(self.slot().child(glyph))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(self.z(sp.xs))
+                    .gap(px(sp.xs))
                     .child(
-                        crate::kit::label(theme, lane.title())
-                            .text_size(self.z(roles.metadata.size)),
+                        crate::kit::label(theme, lane.title()).text_size(px(roles.metadata.size)),
                     )
                     .when(folds, |el| {
                         el.child(crate::kit::Disclosure::new(
                             format!("{head_id}-fold"),
                             !folded,
                             theme,
-                            self.z(theme.typography.icon()),
+                            px(theme.typography.icon()),
                             hsla(s.text_muted),
                         ))
                     }),
@@ -1285,7 +1267,7 @@ impl ProjectView {
                         move || id
                     })
                     .ml_auto()
-                    .text_size(self.z(roles.metadata.size))
+                    .text_size(px(roles.metadata.size))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(count.to_string())),
             );
@@ -1330,8 +1312,8 @@ impl ProjectView {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .p(self.z(sp.xxs))
-                .rounded(self.z(theme.radii.md));
+                .p(px(sp.xxs))
+                .rounded(px(theme.radii.md));
             crate::kit::raised(group, theme).children(rows.into_iter().enumerate().map(
                 |(ix, row)| {
                     div()
@@ -1352,28 +1334,28 @@ impl ProjectView {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(self.z(sp.xxs))
+            .gap(px(sp.xxs))
             .child(head)
             .children(group)
             .into_any_element()
     }
 
     /// A row's height: Linear's 32 on the Mac, a finger's row on a touch screen.
-    fn row_height(&self) -> gpui::Pixels {
+    const fn row_height(&self) -> gpui::Pixels {
         let theme = &self.theme;
-        self.z(theme.spacing.xxl.max(theme.density.row))
+        px(theme.spacing.xxl.max(theme.density.row))
     }
 
     /// The least a row's title narrows to before its facts leave.
     fn title_floor(&self) -> gpui::Pixels {
-        self.z(self.theme.typography.ui_size * TITLE_FLOOR_EM)
+        px(self.theme.typography.ui_size * TITLE_FLOOR_EM)
     }
 
     /// The column a row's mark and a lane's glyph stand in.
     fn slot(&self) -> Div {
         div()
             .flex_none()
-            .size(self.z(self.theme.typography.icon_large()))
+            .size(px(self.theme.typography.icon_large()))
             .flex()
             .items_center()
             .justify_center()
@@ -1382,7 +1364,7 @@ impl ProjectView {
     /// A row's title: the action role (13, medium) in the text ink, on one line, ending in an
     /// ellipsis when its facts leave it less than its width.
     fn row_title(&self, text: String) -> Div {
-        crate::kit::typed(div(), self.theme.roles().action, self.zoom)
+        crate::kit::typed(div(), self.theme.roles().action)
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1405,8 +1387,8 @@ impl ProjectView {
             .min_w_0()
             .flex()
             .flex_col()
-            .px(self.z(theme.spacing.xs))
-            .rounded(self.z(theme.radii.sm))
+            .px(px(theme.spacing.xs))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(picked, |el| crate::kit::selected(el, theme, true))
             .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.hover))))
@@ -1421,10 +1403,10 @@ impl ProjectView {
             div()
                 .flex()
                 .flex_col()
-                .gap(self.z(sp.xs))
+                .gap(px(sp.xs))
                 .min_w_0()
-                .pl(self.z(theme.typography.icon_large() + sp.sm))
-                .pb(self.z(sp.sm))
+                .pl(px(theme.typography.icon_large() + sp.sm))
+                .pb(px(sp.sm))
                 .children(parts)
         })
     }
@@ -1432,7 +1414,7 @@ impl ProjectView {
     /// What an agent asks the person, as a row's second line in the secondary ink.
     fn asks_line(&self, key: &str, asks: String) -> AnyElement {
         let id = format!("{key}-asks");
-        crate::kit::typed(div(), self.theme.roles().metadata, self.zoom)
+        crate::kit::typed(div(), self.theme.roles().metadata)
             .debug_selector(move || id)
             .min_w_0()
             .line_clamp(2)
@@ -1455,13 +1437,13 @@ impl ProjectView {
             .aria_label(SharedString::from(words.clone()))
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .whitespace_nowrap()
-            .text_size(self.z(roles.metadata.size))
+            .text_size(px(roles.metadata.size))
             .text_color(hsla(s.text_muted))
             .children(glyph.map(|glyph| {
                 crate::icons::beside(theme, glyph, roles.metadata, hsla(s.text_secondary))
-                    .size(self.z(IconSize::beside_slot(theme, roles.metadata)))
+                    .size(px(IconSize::beside_slot(theme, roles.metadata)))
             }))
             .child(SharedString::from(words))
     }
@@ -1472,7 +1454,7 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let side = self.z(theme.typography.icon());
+        let side = px(theme.typography.icon());
         // A pass is its word alone: the row's own done glyph already marks it.
         let (glyph, word, label) = match check {
             Check::Running { line, .. } => (
@@ -1493,9 +1475,9 @@ impl ProjectView {
             .aria_label(SharedString::from(label))
             .flex()
             .items_center()
-            .gap(self.z(sp.xxs))
+            .gap(px(sp.xxs))
             .whitespace_nowrap()
-            .text_size(self.z(theme.roles().metadata.size))
+            .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(s.text_muted))
             .children(glyph)
             .child(word)
@@ -1516,15 +1498,15 @@ impl ProjectView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xxs))
-            .px(self.z(theme.spacing.xxs))
-            .rounded(self.z(theme.radii.sm))
+            .gap(px(theme.spacing.xxs))
+            .px(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
             .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
             .child(
                 icon(theme, Symbol::Terminal, IconSize::Inline, hsla(s.text_secondary))
-                    .size(self.z(theme.typography.icon())),
+                    .size(px(theme.typography.icon())),
             )
             .child("Output");
         tab_stop(link, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
@@ -1591,12 +1573,12 @@ impl ProjectView {
         let number = crate::kit::tabular(div())
             .flex_none()
             .whitespace_nowrap()
-            .text_size(self.z(theme.roles().metadata.size))
+            .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(format!("#{}", card.id)));
         let mut line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
-            .gap(self.z(sp.sm))
+            .gap(px(sp.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(phase))
             .item("number", Priority::ESSENTIAL, number)
             .title(self.row_title(card.title.clone()), self.title_floor())
@@ -1604,7 +1586,7 @@ impl ProjectView {
         if !meta.is_empty() {
             let meta = div()
                 .whitespace_nowrap()
-                .text_size(self.z(theme.roles().metadata.size))
+                .text_size(px(theme.roles().metadata.size))
                 .text_color(hsla(s.text_muted))
                 .child(dotted(theme, meta));
             line = line.item("meta", Priority::LOW, meta);
@@ -1772,10 +1754,7 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let label = |text: &'static str| {
-            div()
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .child(text)
+            div().text_size(px(theme.typography.small())).text_color(hsla(s.text_muted)).child(text)
         };
         // A command: what is typed is code.
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
@@ -1790,9 +1769,9 @@ impl ProjectView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .h(self.z(theme.density.control))
-                .px(self.z(sp.md))
-                .rounded(self.z(theme.radii.sm))
+                .h(px(theme.density.control))
+                .px(px(sp.md))
+                .rounded(px(theme.radii.sm))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(text)
@@ -1813,23 +1792,17 @@ impl ProjectView {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(self.z(sp.xs))
-            .mx(self.z(sp.inset()))
-            .mb(self.z(sp.sm))
-            .p(self.z(sp.md))
-            .rounded(self.z(theme.radii.md))
+            .gap(px(sp.xs))
+            .mx(px(sp.inset()))
+            .mb(px(sp.sm))
+            .p(px(sp.md))
+            .rounded(px(theme.radii.md))
             .bg(hsla(s.ground))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_checks(window, cx)))
             .child(label(VERIFIER))
             .child(field)
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(self.z(sp.xs))
-                    .pt(self.z(sp.xs))
-                    .child(cancel)
-                    .child(save),
+                div().flex().justify_end().gap(px(sp.xs)).pt(px(sp.xs)).child(cancel).child(save),
             );
         Some(panel)
     }
@@ -1848,33 +1821,26 @@ impl ProjectView {
         let theme = &self.theme;
         let sp = theme.spacing;
         let focused = input.read(cx).focus_handle(cx).contains_focused(window, cx);
-        let field = div().px(self.z(sp.md)).pt(self.z(sp.sm)).child(
+        let field = div().px(px(sp.md)).pt(px(sp.sm)).child(
             Textarea::new(input)
                 .with_size(Size::XSmall)
                 .appearance(false)
                 .bordered(false)
-                .text_size(self.z(theme.typography.prose()))
+                .text_size(px(theme.typography.prose()))
                 .line_height(relative(theme.typography.prose_line_height))
                 .aria_label(COMPOSE_LABEL),
         );
-        let send = crate::kit::message::send_control(
-            theme,
-            self.zoom,
-            "project-send",
-            Symbol::ArrowUp,
-            SEND,
-        )
-        .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
+        let send = crate::kit::message::send_control(theme, "project-send", Symbol::ArrowUp, SEND)
+            .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()
             .flex()
             .justify_end()
-            .px(self.z(sp.sm))
-            .pb(self.z(sp.sm))
+            .px(px(sp.sm))
+            .pb(px(sp.sm))
             .child(tab_stop(send, theme.surfaces.focus));
         let frame = crate::kit::message::shell(
-            div().flex().flex_col().gap(self.z(sp.xs)),
+            div().flex().flex_col().gap(px(sp.xs)),
             theme,
-            self.zoom,
             crate::kit::message::Frame { focused, ..Default::default() },
         )
         .child(field)
@@ -1883,9 +1849,9 @@ impl ProjectView {
             .id("project-composer")
             .debug_selector(|| "project-composer".to_owned())
             .flex_none()
-            .px(self.z(sp.inset() - sp.xs))
-            .pt(self.z(sp.xs))
-            .pb(self.z(sp.sm))
+            .px(px(sp.inset() - sp.xs))
+            .pt(px(sp.xs))
+            .pb(px(sp.sm))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 window.focus(&this.focus, cx);
                 cx.notify();
@@ -1907,9 +1873,9 @@ impl ProjectView {
         let sp = theme.spacing;
         // Wrapped between stages, never with a dot left at either end of a line.
         let mut row = crate::kit::facts_row(SharedString::from(format!("{key}-stages")), theme)
-            .gap_x(self.z(sp.xs))
-            .gap_y(self.z(sp.xxs))
-            .text_size(self.z(theme.typography.small()));
+            .gap_x(px(sp.xs))
+            .gap_y(px(sp.xxs))
+            .text_size(px(theme.typography.small()));
         for stage in stages {
             let id = format!("{key}-{}", stage.kind.word());
             let selector = id.clone();
@@ -1923,7 +1889,7 @@ impl ProjectView {
             let mark = stage.failed.then(|| {
                 icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(ink))
                     .flex_none()
-                    .size(self.z(theme.typography.icon()))
+                    .size(px(theme.typography.icon()))
             });
             row = row.fact(
                 div()
@@ -1934,7 +1900,7 @@ impl ProjectView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(self.z(sp.xxs))
+                    .gap(px(sp.xxs))
                     .text_color(hsla(ink))
                     .children(mark)
                     .child(
@@ -1980,19 +1946,19 @@ impl ProjectView {
                     })
                     .flex()
                     .items_baseline()
-                    .gap(self.z(sp.xs))
+                    .gap(px(sp.xs))
                     .min_w_0()
-                    .px(self.z(sp.xs))
-                    .py(self.z(sp.xxs))
-                    .rounded(self.z(theme.radii.sm))
+                    .px(px(sp.xs))
+                    .py(px(sp.xxs))
+                    .rounded(px(theme.radii.sm))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.selected)))
-                    .child(div().flex_none().size(self.z(theme.typography.icon())).children(
-                        on.then(|| {
+                    .child(div().flex_none().size(px(theme.typography.icon())).children(on.then(
+                        || {
                             icon(theme, Symbol::Checkmark, IconSize::Inline, hsla(s.text))
-                                .size(self.z(theme.typography.icon()))
-                        }),
-                    ))
+                                .size(px(theme.typography.icon()))
+                        },
+                    )))
                     .child(
                         div()
                             .flex_none()
@@ -2024,7 +1990,7 @@ impl ProjectView {
         let head = div()
             .flex()
             .items_center()
-            .gap(self.z(sp.xs))
+            .gap(px(sp.xs))
             .child(
                 div()
                     .flex_1()
@@ -2043,7 +2009,7 @@ impl ProjectView {
         let ranking = match &picker.workers {
             None => Some(
                 div()
-                    .px(self.z(sp.xs))
+                    .px(px(sp.xs))
                     .text_color(hsla(s.text_muted))
                     .child(RANKING)
                     .into_any_element(),
@@ -2072,13 +2038,13 @@ impl ProjectView {
                 .aria_label(SharedString::from(format!("Run #{task} on")))
                 .flex()
                 .flex_col()
-                .gap(self.z(sp.xxs))
-                .mt(self.z(sp.xs))
-                .px(self.z(sp.sm))
-                .py(self.z(sp.xs))
-                .rounded(self.z(theme.radii.sm))
+                .gap(px(sp.xxs))
+                .mt(px(sp.xs))
+                .px(px(sp.sm))
+                .py(px(sp.xs))
+                .rounded(px(theme.radii.sm))
                 .bg(hsla(s.ground))
-                .text_size(self.z(theme.typography.small()))
+                .text_size(px(theme.typography.small()))
                 .child(head)
                 .children(options)
                 .children(ranking),
@@ -2094,13 +2060,13 @@ impl ProjectView {
             .aria_label(line)
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xxs))
-            .px(self.z(theme.spacing.inset()))
-            .py(self.z(theme.spacing.md))
+            .gap(px(theme.spacing.xxs))
+            .px(px(theme.spacing.inset()))
+            .py(px(theme.spacing.md))
             .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(line))
             .child(
                 div()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(theme.surfaces.text_muted))
                     .child(hint),
             )
@@ -2228,7 +2194,7 @@ impl Render for ProjectView {
             .flex_col()
             .overflow_hidden()
             .font_family(theme.typography.ui_family.clone())
-            .text_size(self.z(theme.typography.ui_size))
+            .text_size(px(theme.typography.ui_size))
             .text_color(hsla(theme.surfaces.text));
         let Some(board) = self.seen.board.clone() else {
             return root.child(
@@ -2252,8 +2218,8 @@ impl Render for ProjectView {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll)
-                            .pt(self.z(theme.spacing.xs))
-                            .pb(self.z(theme.spacing.md))
+                            .pt(px(theme.spacing.xs))
+                            .pb(px(theme.spacing.md))
                             .children(body),
                     ),
             ),
@@ -2273,11 +2239,8 @@ impl ProjectView {
     /// the fade.
     fn scroll_fade(&self, body: impl IntoElement) -> gpui::EdgeFadeElement {
         let spacing = self.theme.spacing;
-        let edges = gpui::Edges {
-            top: self.z(spacing.md),
-            bottom: self.z(spacing.xl),
-            ..gpui::Edges::default()
-        };
+        let edges =
+            gpui::Edges { top: px(spacing.md), bottom: px(spacing.xl), ..gpui::Edges::default() };
         gpui::edge_fade(body, gpui::EdgeFade::new(edges)).hidden_by_scroll(&self.scroll)
     }
 }

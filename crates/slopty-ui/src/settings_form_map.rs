@@ -333,7 +333,7 @@ impl SettingsForm {
                 .aria_label(SharedString::from(name.clone()))
                 .pl_0()
                 .child(
-                    crate::kit::typed(div(), theme.roles().chrome, 1.0)
+                    crate::kit::typed(div(), theme.roles().chrome)
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()

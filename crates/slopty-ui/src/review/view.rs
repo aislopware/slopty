@@ -57,7 +57,7 @@ use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
 use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
-/// The file list's width, in points at zoom 1.
+/// The file list's width, in points.
 const LIST_WIDTH: f32 = 240.0;
 
 mod authors;
@@ -268,7 +268,6 @@ pub struct ReviewView {
     hub: Entity<ThreadHub>,
     reviewed: Reviewed,
     theme: Theme,
-    zoom: f32,
     width: f32,
     /// The tile's body at rest, under its header, in points.
     height: f32,
@@ -433,7 +432,6 @@ impl ReviewView {
             hub,
             reviewed,
             theme,
-            zoom: 1.0,
             width: 0.0,
             height: 0.0,
             scope: match (folder, &branch) {
@@ -514,11 +512,9 @@ impl ReviewView {
         self.scope
     }
 
-    /// Draw at the chrome's zoom `zoom`, in a tile `width` points wide at rest whose body is
-    /// `height` points tall.
-    pub fn set_layout(&mut self, zoom: f32, width: f32, height: f32, cx: &mut Context<Self>) {
+    /// Draw in a tile `width` points wide at rest whose body is `height` points tall.
+    pub fn set_layout(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
         let split = self.split();
-        self.zoom = zoom;
         self.width = width;
         self.height = height;
         if split != self.split() {
@@ -558,10 +554,6 @@ impl ReviewView {
     /// room of its own (960 pt of tile at the default chrome), so neither side is cramped.
     fn split(&self) -> bool {
         kit::Room::of(self.width - LIST_WIDTH, &self.theme).is_wide()
-    }
-
-    fn z(&self, v: f32) -> gpui::Pixels {
-        px(v * self.zoom)
     }
 
     // ----- what comes ------------------------------------------------------------------
@@ -1296,7 +1288,7 @@ impl ReviewView {
 
     fn ink(&self, at: usize) -> Ink<'_> {
         let digits = self.blocks.get(&at).map_or(1, |b| lines::digits(b));
-        Ink { theme: &self.theme, zoom: self.zoom, digits }
+        Ink { theme: &self.theme, digits }
     }
 
     /// The code's size: the terminal's, so code reads as it does where it was written; the
@@ -1307,11 +1299,11 @@ impl ReviewView {
 
     fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
-            .size(self.z(self.theme.typography.icon()))
+            .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
 
-    /// A small text button at the chrome's zoom.
+    /// A small text button.
     fn action(&self, id: String, label: &'static str, primary: bool) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -1322,11 +1314,11 @@ impl ReviewView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .px(self.z(theme.spacing.sm))
-            .py(self.z(theme.spacing.xxs))
+            .px(px(theme.spacing.sm))
+            .py(px(theme.spacing.xxs))
             .border(kit::HAIR)
-            .rounded(self.z(theme.radii.sm))
-            .text_size(self.z(theme.typography.small()))
+            .rounded(px(theme.radii.sm))
+            .text_size(px(theme.typography.small()))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer()
             .child(label);
@@ -1350,7 +1342,7 @@ impl ReviewView {
         let s = theme.surfaces;
         let mut row = kit::priority_row("review-scope-row")
             .h_full()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .dropped(&self.scopes_dropped);
         for scope in self.scopes().iter().copied() {
             let on = scope == self.scope;
@@ -1364,9 +1356,9 @@ impl ReviewView {
                 .aria_selected(on)
                 .flex_none()
                 .whitespace_nowrap()
-                .px(self.z(theme.spacing.sm))
-                .py(self.z(theme.spacing.xxs))
-                .rounded(self.z(theme.radii.sm))
+                .px(px(theme.spacing.sm))
+                .py(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .when(on, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .when(!on, |el| {
@@ -1396,9 +1388,9 @@ impl ReviewView {
             .role(Role::TabList)
             .flex_none()
             .w_full()
-            .h(self.z(theme.density.header))
-            .px(self.z(theme.spacing.md))
-            .text_size(self.z(theme.typography.small()))
+            .h(px(theme.density.header))
+            .px(px(theme.spacing.md))
+            .text_size(px(theme.typography.small()))
             .child(row.menu(self.scopes_more(cx)))
             .into_any_element()
     }
@@ -1516,14 +1508,14 @@ impl ReviewView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .px(self.z(theme.spacing.sm))
-                .py(self.z(theme.spacing.xxs))
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
+                .py(px(theme.spacing.xxs))
                 .text_color(hsla(s.text_secondary))
                 .child(crate::icons::status_icon(
                     theme,
                     crate::icons::Status::Working,
-                    self.z(theme.typography.icon()),
+                    px(theme.typography.icon()),
                     hsla(s.text_muted),
                 ));
             return Some(hinted(pill, words).into_any_element());
@@ -1539,10 +1531,10 @@ impl ReviewView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.sm))
-            .py(self.z(theme.spacing.xxs))
-            .rounded(self.z(theme.radii.sm))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .py(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.sm))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
@@ -1570,8 +1562,8 @@ impl ReviewView {
             div()
                 .flex_none()
                 .w_full()
-                .px(self.z(theme.spacing.md))
-                .pt(self.z(theme.spacing.sm))
+                .px(px(theme.spacing.md))
+                .pt(px(theme.spacing.sm))
                 .child(
                     kit::card(theme)
                         .id("review-findings")
@@ -1579,9 +1571,9 @@ impl ReviewView {
                         .role(Role::List)
                         .aria_label("The agent's review")
                         .w_full()
-                        .max_h(self.z(FINDINGS_HEIGHT))
+                        .max_h(px(FINDINGS_HEIGHT))
                         .overflow_y_scroll()
-                        .text_size(self.z(theme.typography.small()))
+                        .text_size(px(theme.typography.small()))
                         .line_height(gpui::relative(theme.typography.markdown_line_height))
                         .children(head)
                         .when(open, |el| el.children(notes)),
@@ -1655,7 +1647,7 @@ impl ReviewView {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
             .cursor_pointer()
             .child(
                 div()
@@ -1670,7 +1662,7 @@ impl ReviewView {
                 "review-findings-chevron",
                 open,
                 theme,
-                self.z(theme.typography.icon()),
+                px(theme.typography.icon()),
                 hsla(s.text_muted),
             ))
             .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -1682,9 +1674,9 @@ impl ReviewView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.sm))
-            .min_h(self.z(theme.density.row))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .min_h(px(theme.density.row))
             .hover(move |el| el.bg(hsla(s.hover)))
             .child(crate::a11y::tab_stop(toggle, s.focus))
             .children(self.came.as_ref().map(|_| {
@@ -1708,9 +1700,9 @@ impl ReviewView {
                 .w_full()
                 .flex()
                 .items_start()
-                .gap(self.z(theme.spacing.xs))
-                .px(self.z(theme.spacing.sm))
-                .py(self.z(theme.spacing.xs))
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
+                .py(px(theme.spacing.xs))
                 .child(
                     div()
                         .id("review-came-words")
@@ -1751,10 +1743,10 @@ impl ReviewView {
             .w_full()
             .flex()
             .items_start()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.sm))
-            .pt(self.z(theme.spacing.sm))
-            .pb(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .pt(px(theme.spacing.sm))
+            .pb(px(theme.spacing.xs))
             .child(self.icon(Symbol::TextBubble, s.text_secondary))
             .child(
                 div()
@@ -1762,7 +1754,7 @@ impl ReviewView {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(self.z(theme.spacing.xxs))
+                    .gap(px(theme.spacing.xxs))
                     .children(finding.place.as_ref().map(|place| {
                         div()
                             .font_family(self.mono())
@@ -1809,7 +1801,7 @@ impl ReviewView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .rounded(self.z(self.theme.radii.sm))
+            .rounded(px(self.theme.radii.sm))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)))
             .child(self.icon(Symbol::Xmark, s.text_muted))
@@ -1834,10 +1826,10 @@ impl ReviewView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xxs))
-                .px(self.z(theme.spacing.xs))
-                .py(self.z(theme.spacing.xxs))
-                .rounded(self.z(theme.radii.sm))
+                .gap(px(theme.spacing.xxs))
+                .px(px(theme.spacing.xs))
+                .py(px(theme.spacing.xxs))
+                .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)))
@@ -1868,12 +1860,12 @@ impl ReviewView {
             .role(Role::List)
             .aria_label("Files")
             .flex_none()
-            .w(self.z(LIST_WIDTH))
+            .w(px(LIST_WIDTH))
             .h_full()
             .overflow_y_scroll()
             .bg(hsla(s.ground))
-            .py(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.small()))
+            .py(px(theme.spacing.xs))
+            .text_size(px(theme.typography.small()))
             .children(self.model.listed().iter().filter_map(|listed| {
                 let file = self.model.file(listed.at)?;
                 let at = listed.at;
@@ -1888,9 +1880,9 @@ impl ReviewView {
                     .aria_label(SharedString::from(file.path.clone()))
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.xs))
-                    .px(self.z(theme.spacing.md))
-                    .min_h(self.z(kit::Row::One.height(theme)))
+                    .gap(px(theme.spacing.xs))
+                    .px(px(theme.spacing.md))
+                    .min_h(px(kit::Row::One.height(theme)))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
@@ -1928,12 +1920,12 @@ impl ReviewView {
         let theme = &self.theme;
         div()
             .w_full()
-            .px(self.z(theme.spacing.md))
+            .px(px(theme.spacing.md))
             .child(
                 div()
                     .w_full()
                     .overflow_hidden()
-                    .when(last, |el| el.pb(self.z(theme.spacing.xs)))
+                    .when(last, |el| el.pb(px(theme.spacing.xs)))
                     .child(inner),
             )
             .into_any_element()
@@ -1948,7 +1940,7 @@ impl ReviewView {
         if let Some(words) = self.picking(at, hunk, cx) {
             return div()
                 .flex_none()
-                .text_size(self.z(self.theme.typography.small()))
+                .text_size(px(self.theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(words)
                 .into_any_element();
@@ -1963,7 +1955,7 @@ impl ReviewView {
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_size(self.z(self.theme.typography.small()))
+                .text_size(px(self.theme.typography.small()))
                 .text_color(hsla(s.error))
                 .child(SharedString::from(words))
         });
@@ -1983,7 +1975,7 @@ impl ReviewView {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(self.z(self.theme.spacing.xxs))
+            .gap(px(self.theme.spacing.xxs))
             .children(refused)
             .child(quiet(
                 self.action(format!("review-revert-{what}-{tag}"), "Revert", false)
@@ -2008,18 +2000,18 @@ impl ReviewView {
             (Some(_), None) => Some("Removed"),
             _ => None,
         };
-        let radius = self.z(theme.radii.sm);
+        let radius = px(theme.radii.sm);
         let head = div()
             .debug_selector(move || format!("review-head-row-{at}"))
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .px(self.z(theme.spacing.sm))
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.sm))
             .rounded(radius)
             .map(|el| kit::inset(el, theme))
-            .min_h(self.z(kit::Row::One.height(theme)))
-            .text_size(self.z(theme.typography.small()))
+            .min_h(px(kit::Row::One.height(theme)))
+            .text_size(px(theme.typography.small()))
             .child(
                 div()
                     .flex_none()
@@ -2047,9 +2039,9 @@ impl ReviewView {
         div()
             .debug_selector(move || format!("review-head-{at}"))
             .w_full()
-            .px(self.z(theme.spacing.md))
-            .pt(self.z(theme.spacing.lg))
-            .pb(self.z(theme.spacing.xs))
+            .px(px(theme.spacing.md))
+            .pt(px(theme.spacing.lg))
+            .pb(px(theme.spacing.xs))
             .child(Self::file_menu_press(head, at, cx))
             .into_any_element()
     }
@@ -2061,9 +2053,9 @@ impl ReviewView {
             _ => "No lines to show",
         };
         div()
-            .px(self.z(self.theme.spacing.md))
-            .py(self.z(self.theme.spacing.sm))
-            .text_size(self.z(self.theme.typography.small()))
+            .px(px(self.theme.spacing.md))
+            .py(px(self.theme.spacing.sm))
+            .text_size(px(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(words)
             .into_any_element()
@@ -2158,8 +2150,8 @@ impl ReviewView {
             .w_full()
             .cursor_pointer()
             .font_family(self.mono())
-            .text_size(self.z(self.code_size()))
-            .line_height(self.z(self.code_size() * self.theme.typography.markdown_line_height))
+            .text_size(px(self.code_size()))
+            .line_height(px(self.code_size() * self.theme.typography.markdown_line_height))
             .child(lines)
             .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
             .children(tag)
@@ -2212,7 +2204,7 @@ impl ReviewView {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(self.z(theme.spacing.xxs))
+                    .gap(px(theme.spacing.xxs))
                     .whitespace_normal()
                     .child(
                         div()
@@ -2247,7 +2239,7 @@ impl ReviewView {
         let s = self.theme.surfaces;
         // A field to type in: raised off the diff, where the comments stand on the panel.
         kit::raised(self.note(), &self.theme)
-            .rounded(self.z(self.theme.radii.sm))
+            .rounded(px(self.theme.radii.sm))
             .debug_selector(|| "review-draft".to_owned())
             .child(self.icon(Symbol::TextBubble, s.text_secondary))
             .child(div().min_w_0().flex_1().child(Textarea::new(&self.draft).aria_label("Comment")))
@@ -2260,13 +2252,13 @@ impl ReviewView {
         let s = theme.surfaces;
         div()
             .w_full()
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.xs))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.xs))
             .flex()
             .items_start()
-            .gap(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
             .bg(hsla(s.ground))
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
     }
 
     fn mono(&self) -> SharedString {
@@ -2293,7 +2285,7 @@ impl ReviewView {
         let selector = if folder { "review-send-new" } else { "review-send" };
         let mut row = kit::priority_row("review-foot-row")
             .h_full()
-            .gap(self.z(theme.spacing.sm))
+            .gap(px(theme.spacing.sm))
             .dropped(&self.foot_dropped)
             .end();
         if n > 0 {
@@ -2304,9 +2296,9 @@ impl ReviewView {
                 .aria_label(SharedString::from(send_words.clone()))
                 .flex_none()
                 .whitespace_nowrap()
-                .px(self.z(theme.spacing.md))
-                .py(self.z(theme.spacing.xs))
-                .rounded(self.z(theme.radii.sm))
+                .px(px(theme.spacing.md))
+                .py(px(theme.spacing.xs))
+                .rounded(px(theme.radii.sm))
                 .map(|el| kit::solid_pressable(el, theme))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
@@ -2333,9 +2325,9 @@ impl ReviewView {
         div()
             .flex_none()
             .w_full()
-            .h(self.z(kit::Row::Two.height(theme)))
-            .px(self.z(theme.spacing.md))
-            .text_size(self.z(theme.typography.small()))
+            .h(px(kit::Row::Two.height(theme)))
+            .px(px(theme.spacing.md))
+            .text_size(px(theme.typography.small()))
             .child(row.menu(self.foot_more(cx)))
             .into_any_element()
     }
@@ -2383,7 +2375,6 @@ impl ReviewView {
     fn body(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let k = self.zoom;
         // What the tile says instead of a diff, one block in its middle (`kit::notice`), with
         // the one next step where there is one.
         let empty = |mark: AnyElement, words: String, next: Option<AnyElement>| {
@@ -2397,17 +2388,16 @@ impl ReviewView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(kit::notice(theme, k, mark, words, None).children(next))
+                .child(kit::notice(theme, mark, words, None).children(next))
                 .into_any_element()
         };
         let diff_mark =
-            || kit::notice_mark(theme, Symbol::PlusForwardslashMinus, k).into_any_element();
+            || kit::notice_mark(theme, Symbol::PlusForwardslashMinus).into_any_element();
         let Some(review) = self.model.review() else {
             let reading = crate::icons::notice_status(
                 theme,
                 crate::icons::Status::Running,
                 hsla(s.text_muted),
-                k,
             );
             return empty(reading.into_any_element(), READING.to_owned(), None);
         };
@@ -2441,7 +2431,7 @@ impl ReviewView {
                             cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
                         )
                         .size_full(),
-                        gpui::EdgeFade::y(self.z(theme.spacing.lg)),
+                        gpui::EdgeFade::y(px(theme.spacing.lg)),
                     )
                     .hidden_by_list(&self.list),
                 ),
@@ -2519,7 +2509,7 @@ impl Render for ReviewView {
             .overflow_hidden()
             .bg(hsla(theme.content()))
             .font_family(theme.typography.ui_family.clone())
-            .text_size(self.z(theme.typography.ui_size))
+            .text_size(px(theme.typography.ui_size))
             .text_color(hsla(s.text))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))

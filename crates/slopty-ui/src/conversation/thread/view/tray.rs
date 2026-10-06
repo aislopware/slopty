@@ -14,7 +14,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, FollowMode, InteractiveElement as _,
     IntoElement as _, LiveRegion as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, relative,
+    StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
@@ -171,13 +171,13 @@ impl ThreadView {
         let new = self.unseen_from.map_or(0, |from| {
             self.state(cx).map_or(0, |state| state.items.len()).saturating_sub(from)
         });
-        let control = self.z(theme.density.control);
+        let control = px(theme.density.control);
         // At the list's right edge, in the gutter beside the column where it has one: over the
         // text, it would sit on whatever the newest rows draw there.
         div()
             .absolute()
-            .bottom(self.z(theme.spacing.md))
-            .right(self.z(theme.spacing.sm))
+            .bottom(px(theme.spacing.md))
+            .right(px(theme.spacing.sm))
             .child(crate::a11y::tab_stop(
                 div()
                     .id("thread-down")
@@ -194,24 +194,22 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .gap(self.z(theme.spacing.xxs))
-                    .when(new > 0, |el| {
-                        el.pl(self.z(theme.spacing.sm)).pr(self.z(theme.spacing.xs))
-                    })
-                    .rounded(self.z(theme.radii.sm))
+                    .gap(px(theme.spacing.xxs))
+                    .when(new > 0, |el| el.pl(px(theme.spacing.sm)).pr(px(theme.spacing.xs)))
+                    .rounded(px(theme.radii.sm))
                     .border(kit::HAIR)
                     .border_color(hsla(s.border))
                     .bg(hsla(s.elevated))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .when(new > 0, |el| {
-                        let size = self.z(theme.typography.small());
+                        let size = px(theme.typography.small());
                         el.child(
                             div()
                                 .debug_selector(|| "thread-down-count".to_owned())
                                 .flex()
                                 .items_center()
-                                .gap(self.z(theme.spacing.xxs))
+                                .gap(px(theme.spacing.xxs))
                                 .text_size(size)
                                 .text_color(hsla(s.text_secondary))
                                 .child(kit::Rolling::new(
@@ -306,7 +304,7 @@ impl ThreadView {
         let mut sections: Vec<AnyElement> = Vec::new();
         for group in groups.into_iter().filter(|g| !g.is_empty()) {
             if !sections.is_empty() {
-                sections.push(div().flex_none().h(self.z(theme.spacing.xs)).into_any_element());
+                sections.push(div().flex_none().h(px(theme.spacing.xs)).into_any_element());
             }
             sections.extend(group);
         }
@@ -326,7 +324,7 @@ impl ThreadView {
                 .overflow_y_scroll()
                 .children(sections)
         });
-        let radius = self.z(theme.radii.md);
+        let radius = px(theme.radii.md);
         let request = request.map(|request| {
             // The request takes the keyboard by a press anywhere on it, or by Tab to one of
             // its answers; then, and only then, ⌘↵ and ⌘⌫ answer it. A press that a field or
@@ -355,7 +353,7 @@ impl ThreadView {
                 .border_color(hsla(s.border))
                 .bg(hsla(s.elevated))
                 .overflow_hidden()
-                .mb(self.z(theme.spacing.md))
+                .mb(px(theme.spacing.md))
                 .child(request)
         });
         // Over the composer the tray is the card's head: as wide, its corners the composer's,
@@ -363,7 +361,7 @@ impl ThreadView {
         // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
         // kinds of thing stand apart by the quieter hairline. It is raised as the composer is,
         // on the same surface: a wash would sink it into the page in light.
-        let radius = self.z(theme.radii.md);
+        let radius = px(theme.radii.md);
         // A composer that bleeds has no box for the tray to head: the tray stands as a card.
         let tucked = tucked && !self.bleeds();
         let rest = rest.map(|rest| {
@@ -384,7 +382,7 @@ impl ThreadView {
                     el.border_b(kit::HAIR)
                         .rounded_bl(radius)
                         .rounded_br(radius)
-                        .mb(self.z(theme.spacing.xs))
+                        .mb(px(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
                 // Tucked over the composer it is the card's head, on the band; the field under
@@ -415,10 +413,10 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(spacing.xs))
-            .px(self.z(spacing.sm))
-            .min_h(self.z(kit::Row::One.height(&self.theme)))
-            .text_size(self.z(self.theme.typography.small()))
+            .gap(px(spacing.xs))
+            .px(px(spacing.sm))
+            .min_h(px(kit::Row::One.height(&self.theme)))
+            .text_size(px(self.theme.typography.small()))
     }
 
     /// A tray row of two lines: `head` at a row's height, and under it, past the mark's slot,
@@ -432,14 +430,14 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .px(self.z(spacing.sm))
-            .text_size(self.z(theme.typography.small()))
-            .child(head.min_h(self.z(kit::Row::One.height(theme))))
+            .px(px(spacing.sm))
+            .text_size(px(theme.typography.small()))
+            .child(head.min_h(px(kit::Row::One.height(theme))))
             .children(under.map(|line| {
                 div()
                     .w_full()
-                    .pl(self.z(super::TOOL_ROW + spacing.xs))
-                    .pb(self.z(spacing.xs))
+                    .pl(px(super::TOOL_ROW + spacing.xs))
+                    .pb(px(spacing.xs))
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
@@ -463,7 +461,7 @@ impl ThreadView {
             .aria_expanded(true)
             .cursor_pointer()
             .text_color(hsla(s.text_secondary))
-            .child(self.slot())
+            .child(Self::slot())
             .child(div().flex_none().child("In the background"))
             .child(div().flex_1())
             .child(self.icon(Symbol::ChevronDown, s.text_muted))
@@ -485,7 +483,7 @@ impl ThreadView {
             .role(Role::Alert)
             .aria_label(SharedString::from(refusal.words.clone()))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(Symbol::ExclamationmarkTriangle, s.error)))
+            .child(Self::slot().child(self.icon(Symbol::ExclamationmarkTriangle, s.error)))
             .child(
                 div()
                     .min_w_0()
@@ -547,7 +545,7 @@ impl ThreadView {
         self.section()
             .debug_selector(move || format!("answered-{id}"))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.icon(Symbol::Checkmark, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::Checkmark, s.text_muted)))
             .child(
                 div()
                     .min_w_0()
@@ -614,7 +612,7 @@ impl ThreadView {
         let scope = scope.map(|scope| {
             div()
                 .min_w_0()
-                .max_w(self.z(theme.typography.small() * SCOPE_EMS))
+                .max_w(px(theme.typography.small() * SCOPE_EMS))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -625,8 +623,8 @@ impl ThreadView {
         // the person reads whole before choosing.
         self.button_frame(id, label, kind)
             .max_w_full()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.sm))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
             .child(div().min_w_0().text_center().child(SharedString::from(words)))
             .children(scope)
     }
@@ -699,7 +697,7 @@ impl ThreadView {
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xxs))
+                .gap(px(theme.spacing.xxs))
                 .child(
                     self.icon_button("asked-prev", Symbol::ChevronUp, "Previous request").on_click(
                         cx.listener(move |this, _ev, _w, cx| this.step_asked(-1, of, cx)),
@@ -707,7 +705,7 @@ impl ThreadView {
                 )
                 .child(
                     kit::tabular(div())
-                        .text_size(self.z(theme.typography.small()))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(format!("{} of {of}", at.saturating_add(1)))),
                 )
@@ -738,8 +736,8 @@ impl ThreadView {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .px(self.z(theme.spacing.md))
-                .pb(self.z(theme.spacing.md))
+                .px(px(theme.spacing.md))
+                .pb(px(theme.spacing.md))
                 .child(asking.questions().element(theme, answers))
                 .into_any_element();
             (None, Some(body))
@@ -751,8 +749,8 @@ impl ThreadView {
             let body = self.decision(request, cx).map(|decision| {
                 div()
                     .flex_none()
-                    .px(self.z(theme.spacing.md))
-                    .pb(self.z(theme.spacing.md))
+                    .px(px(theme.spacing.md))
+                    .pb(px(theme.spacing.md))
                     .child(decision)
                     .into_any_element()
             });
@@ -774,8 +772,8 @@ impl ThreadView {
             .child(
                 self.section()
                     .flex_none()
-                    .min_h(self.z(theme.density.header))
-                    .px(self.z(theme.spacing.md))
+                    .min_h(px(theme.density.header))
+                    .px(px(theme.spacing.md))
                     .child(self.needs_you())
                     .child(
                         div()
@@ -784,14 +782,14 @@ impl ThreadView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .map(|el| kit::typed(el, theme.roles().task_title, self.zoom))
+                            .map(|el| kit::typed(el, theme.roles().task_title))
                             .text_color(hsla(s.text))
                             .child(SharedString::from(title)),
                     )
                     .children(counter.map(|c| {
                         kit::tabular(div())
                             .flex_none()
-                            .text_size(self.z(theme.typography.small()))
+                            .text_size(px(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(c))
                     }))
@@ -807,14 +805,14 @@ impl ThreadView {
                     .id("request-text")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .mx(self.z(theme.spacing.md))
-                    .mb(self.z(theme.spacing.md))
+                    .mx(px(theme.spacing.md))
+                    .mb(px(theme.spacing.md))
                     .whitespace_normal()
-                    .map(|el| kit::typed(el, theme.roles().chrome, self.zoom));
+                    .map(|el| kit::typed(el, theme.roles().chrome));
                 if code {
-                    el.px(self.z(theme.spacing.sm))
-                        .py(self.z(theme.spacing.xs))
-                        .rounded(self.z(theme.radii.sm))
+                    el.px(px(theme.spacing.sm))
+                        .py(px(theme.spacing.xs))
+                        .rounded(px(theme.radii.sm))
                         .bg(hsla(s.ground))
                         .font_family(self.mono())
                         .text_color(hsla(s.text))
@@ -842,7 +840,7 @@ impl ThreadView {
             .aria_expanded(open)
             .cursor_pointer()
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(Symbol::Checklist, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::Checklist, s.text_muted)))
             .child(div().flex_none().child("Plan"))
             .child(
                 kit::tabular(div())
@@ -858,7 +856,7 @@ impl ThreadView {
                 cx.notify();
             }));
         let steps = open.then(|| {
-            div().w_full().flex().flex_col().pb(self.z(theme.spacing.xs)).children(
+            div().w_full().flex().flex_col().pb(px(theme.spacing.xs)).children(
                 plan.steps.iter().map(|step| {
                     let (icon, tone) = match step.status.as_str() {
                         STEP_DONE => (Symbol::CheckmarkCircle, s.text_muted),
@@ -867,7 +865,7 @@ impl ThreadView {
                     };
                     self.section()
                         .text_color(hsla(tone))
-                        .child(self.slot().child(self.icon(icon, tone)))
+                        .child(Self::slot().child(self.icon(icon, tone)))
                         .child(
                             div()
                                 .min_w_0()
@@ -895,7 +893,7 @@ impl ThreadView {
             .role(Role::Group)
             .aria_label(SharedString::from(words.clone()))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(Symbol::Pencil, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::Pencil, s.text_muted)))
             .child(
                 div()
                     .min_w_0()
@@ -924,9 +922,9 @@ impl ThreadView {
             .debug_selector(|| "thread-queue-paused".to_owned())
             .role(Role::Status)
             .aria_label(SharedString::from(words.replace('\u{b7}', ",")))
-            .text_size(self.z(self.theme.typography.small()))
+            .text_size(px(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.icon(Symbol::PauseCircle, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::PauseCircle, s.text_muted)))
             .child(SharedString::from(words))
             .into_any_element()
     }
@@ -980,7 +978,7 @@ impl ThreadView {
             .role(Role::ListItem)
             .aria_label(SharedString::from(said))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(Symbol::Clock, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::Clock, s.text_muted)))
             .child(kit::fit_label(format!("queued-words-{pending}"), first, &self.theme))
             .when(files > 0 && with_words, |el| {
                 el.child(
@@ -989,8 +987,8 @@ impl ThreadView {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(self.z(self.theme.spacing.xxs))
-                        .text_size(self.z(self.theme.typography.small()))
+                        .gap(px(self.theme.spacing.xxs))
+                        .text_size(px(self.theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(self.icon(Symbol::Paperclip, s.text_muted))
                         .child(SharedString::from(files.to_string())),
@@ -1003,7 +1001,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(self.theme.typography.small()))
+                    .text_size(px(self.theme.typography.small()))
                     .text_color(hsla(if refused.is_some() { s.warn } else { s.text_muted }))
                     .child(SharedString::from(st))
             }))
@@ -1067,8 +1065,8 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .child(self.slot().child(if running {
+                .gap(px(theme.spacing.xs))
+                .child(Self::slot().child(if running {
                     self.spinner(true)
                 } else {
                     self.icon(Symbol::Terminal, s.text_muted)
@@ -1085,7 +1083,7 @@ impl ThreadView {
                 .child(
                     kit::tabular(div())
                         .flex_none()
-                        .text_size(self.z(theme.typography.small()))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(state)),
                 );
@@ -1137,9 +1135,9 @@ impl ThreadView {
             .role(Role::Group)
             .aria_label(label)
             .items_start()
-            .py(self.z(self.theme.spacing.xs))
+            .py(px(self.theme.spacing.xs))
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.icon(Symbol::InfoCircle, s.text_muted)))
+            .child(Self::slot().child(self.icon(Symbol::InfoCircle, s.text_muted)))
             .child(
                 kit::tabular(div())
                     .flex_1()
@@ -1185,8 +1183,8 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .child(self.slot().child(mark))
+            .gap(px(theme.spacing.xs))
+            .child(Self::slot().child(mark))
             .child(
                 div()
                     .min_w_0()

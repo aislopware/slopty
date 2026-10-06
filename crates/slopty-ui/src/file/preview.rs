@@ -388,7 +388,7 @@ impl FileView {
     /// The page list was laid out `width` points wide at `scale` pixels a point: pages are
     /// drawn that wide, less the margins. Whether that is news.
     fn pages_width(&mut self, width: f32, scale: f32) -> bool {
-        let margin = self.pad * self.zoom * 2.0;
+        let margin = self.pad * 2.0;
         let Some(Preview { body: Body::Pdf(pages), .. }) = self.preview.as_mut() else {
             return false;
         };
@@ -544,7 +544,7 @@ impl FileView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p(px(self.pad * self.zoom))
+                    .p(px(self.pad))
                     .child(div().relative().size_full().child(measure).child(stage)),
             )
             .child(self.preview_foot(cx))
@@ -580,7 +580,7 @@ impl FileView {
     fn checker(&self) -> AnyElement {
         let theme = &self.theme;
         let (even, odd) = (hsla(theme.content()), hsla(theme.surfaces.hover));
-        let cell = px(theme.spacing.sm * self.zoom);
+        let cell = px(theme.spacing.sm);
         canvas(
             |_, _, _| {},
             move |bounds: Bounds<Pixels>, (), window, _| {
@@ -614,7 +614,6 @@ impl FileView {
     fn preview_foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let k = self.zoom;
         let facts = self.preview.as_ref().map(Preview::facts).unwrap_or_default();
         let zoom = (self.picture_outgrows() || self.picture_actual()).then(|| {
             let label = if self.picture_actual() { "Fit" } else { "Actual size" };
@@ -634,15 +633,15 @@ impl FileView {
             .id("file-preview-foot")
             .debug_selector(|| "file-preview-foot".to_owned())
             .flex_none()
-            .h(px(theme.density.row * k))
+            .h(px(theme.density.row))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(theme.spacing.sm * k))
-            .px(px(theme.spacing.inset() * k))
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.inset()))
             .whitespace_nowrap()
             .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.small() * k))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(
                 div()
@@ -710,15 +709,14 @@ impl FileView {
         };
         let theme = &self.theme;
         let s = theme.surfaces;
-        let k = self.zoom;
         let (w, h) = pages.sizes.get(ix).copied().unwrap_or((1.0, 1.0));
         let count = pages.sizes.len();
         let last = ix.saturating_add(1) == count;
         let image = pages.drawn.get(&ix).map(|d| Arc::clone(&d.image));
         div()
-            .px(px(self.pad * k))
-            .pt(px(if ix == 0 { self.pad } else { theme.spacing.sm } * k))
-            .when(last, |el| el.pb(px(self.pad * k)))
+            .px(px(self.pad))
+            .pt(px(if ix == 0 { self.pad } else { theme.spacing.sm }))
+            .when(last, |el| el.pb(px(self.pad)))
             .child(
                 div()
                     .id(("file-page", ix))

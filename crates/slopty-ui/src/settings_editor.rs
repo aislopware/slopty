@@ -446,7 +446,7 @@ impl Render for SettingsEditor {
                 .items_baseline()
                 .gap(px(spacing.sm))
                 .child(
-                    crate::kit::typed(div(), theme.roles().panel_title, 1.0)
+                    crate::kit::typed(div(), theme.roles().panel_title)
                         .flex_none()
                         .text_color(hsla(s.text))
                         .child(crate::settings_form::SETTINGS),

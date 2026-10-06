@@ -26,7 +26,16 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGContext, CGImageAlphaInfo, CGLineCap, CGLineJoin,
 };
 
-use crate::symbols::{MaskRect, SymbolMask};
+/// An outline drawn at one size and display scale: one coverage byte per device pixel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mask {
+    /// The width in device pixels.
+    pub width: u32,
+    /// The height in device pixels.
+    pub height: u32,
+    /// The coverage of each device pixel, a byte each, `width` to a row, the top row first.
+    pub alpha: Vec<u8>,
+}
 
 /// A point in the outline's own units, y down as SVG has it.
 type Point = (f64, f64);
@@ -96,11 +105,11 @@ pub enum Ink {
 }
 
 /// Draws `outline` with its ink box's longer side `ink_px` device pixels, into a mask the ink
-/// box's size, rounded to whole pixels; its alignment rectangle is the whole mask.
+/// box's size, rounded to whole pixels.
 ///
 /// `None` for an empty size or when Core Graphics makes no context.
 #[must_use]
-pub fn rasterize_outline(outline: &Outline, ink_px: u32) -> Option<SymbolMask> {
+pub fn rasterize_outline(outline: &Outline, ink_px: u32) -> Option<Mask> {
     let (ink_w, ink_h) = outline.ink_size();
     let longer = ink_w.max(ink_h);
     if ink_px == 0 || longer <= 0.0 {
@@ -115,19 +124,14 @@ pub fn rasterize_outline(outline: &Outline, ink_px: u32) -> Option<SymbolMask> {
 /// `side_px` device pixels, inked as `ink`, into a mask the grid's size.
 ///
 /// What the grid holds keeps its place on it, so glyphs drawn at one size line up as their
-/// designer set them, and the alignment rectangle is the whole mask. A stroke lands on whole
+/// designer set them, and a caller centres the whole mask. A stroke lands on whole
 /// device pixels where it can: its width rounds to a whole count of them (never under one),
 /// and an odd count is drawn half a pixel over, so a line on a pixel's edge fills the pixels
 /// beside it rather than half of two.
 ///
 /// `None` for an empty size or when Core Graphics makes no context.
 #[must_use]
-pub fn rasterize_on_grid(
-    outline: &Outline,
-    grid: f64,
-    side_px: u32,
-    ink: Ink,
-) -> Option<SymbolMask> {
+pub fn rasterize_on_grid(outline: &Outline, grid: f64, side_px: u32, ink: Ink) -> Option<Mask> {
     if side_px == 0 || grid <= 0.0 {
         return None;
     }
@@ -156,7 +160,7 @@ fn draw_mask(
     scale: f64,
     origin: Point,
     ink: Ink,
-) -> Option<SymbolMask> {
+) -> Option<Mask> {
     let mut alpha = vec![0_u8; width.checked_mul(height)?];
     // SAFETY: `CGBitmapContextCreate` (CGBitmapContext.h) draws into `data` for the context's
     // life: `alpha` holds `bytes_per_row × height` bytes (one byte a pixel) and outlives the
@@ -203,15 +207,7 @@ fn draw_mask(
         }
     }
     drop(context);
-    #[expect(clippy::cast_precision_loss, reason = "a mask is a few hundred pixels")]
-    let (w, h) = (width as f32, height as f32);
-    Some(SymbolMask {
-        width: u32::try_from(width).ok()?,
-        height: u32::try_from(height).ok()?,
-        alpha,
-        alignment: MaskRect { x: 0.0, y: 0.0, width: w, height: h },
-        baseline: h,
-    })
+    Some(Mask { width: u32::try_from(width).ok()?, height: u32::try_from(height).ok()?, alpha })
 }
 
 /// `pixels` rounded to a whole count of at least one; `None` when not finite.
@@ -621,7 +617,7 @@ mod tests {
     #[test]
     fn a_stroke_lands_on_whole_pixels() {
         let line = Outline::parse(&["M12 4V20"]).unwrap();
-        let row = |m: &SymbolMask, y: usize| -> Vec<u8> {
+        let row = |m: &Mask, y: usize| -> Vec<u8> {
             let w = m.width as usize;
             m.alpha[y * w..(y + 1) * w].to_vec()
         };
@@ -717,7 +713,7 @@ mod tests {
         for (name, data) in TABLER {
             let outline = Outline::parse(data).unwrap();
             for side in [14, 28] {
-                let unit = |m: &SymbolMask| -> Vec<f64> {
+                let unit = |m: &Mask| -> Vec<f64> {
                     m.alpha.iter().map(|a| f64::from(*a) / 255.0).collect()
                 };
                 let ours = rasterize_on_grid(&outline, 24.0, side, Ink::Stroke(1.75)).unwrap();

@@ -166,7 +166,7 @@ fn step_line(theme: &Theme, line: &StepLine) -> gpui::Stateful<Div> {
         .gap(px(theme.spacing.sm))
         .min_h(px(kit::Row::One.height(theme)))
         .py(px(theme.spacing.xxs))
-        .child(status_mark(theme, Some(status), 1.0))
+        .child(status_mark(theme, Some(status)))
         .child(
             div()
                 .flex_1()

@@ -8,7 +8,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn};
 
@@ -117,9 +117,9 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .child(self.slot().child(self.icon(icon, s.text_muted)))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .child(Self::slot().child(self.icon(icon, s.text_muted)))
             .child(div().min_w_0().whitespace_normal().child(SharedString::from(words)))
             .when(opens, |el| {
                 el.cursor_pointer()
@@ -129,12 +129,12 @@ impl ThreadView {
                         this.toggle_item(toggle.clone(), cx);
                     }))
             });
-        let indent = self.z(TOOL_ROW + theme.spacing.xs);
+        let indent = px(TOOL_ROW + theme.spacing.xs);
         div()
             .w_full()
             .flex()
             .flex_col()
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(line)
             .children(under.map(|u| {
@@ -142,7 +142,7 @@ impl ThreadView {
                 kit::tabular(div())
                     .debug_selector(move || format!("retry-{id}"))
                     .pl(indent)
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(u))
             }))
             .when(cut, |el| {
@@ -170,7 +170,7 @@ impl ThreadView {
                 div()
                     .debug_selector(move || format!("summary-{id}"))
                     .pl(indent)
-                    .pb(self.z(theme.spacing.xs))
+                    .pb(px(theme.spacing.xs))
                     .whitespace_normal()
                     .text_color(hsla(s.text_secondary))
                     .child(SharedString::from(summary))

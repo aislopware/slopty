@@ -1,21 +1,20 @@
-//! The icons the chrome draws: SF Symbols, drawn by the OS at the size of the words beside them
-//! (`slopty_platform::symbols`), painted at exact device pixels in the ink of those words.
+//! The icons the chrome draws: Tabler's glyphs ([`Symbol`]), drawn by us on whole device pixels
+//! in the ink of the words beside them, and a file's type in Material's own colours
+//! ([`FileType`]).
 //!
-//! A [`Symbol`] is one of a closed list. A file's type is one of nine of them
-//! ([`FileType::symbol`]). An agent wears its owner's mark ([`AgentMark`]), drawn by us from
-//! the owner's outline into the same kind of mask, and an agent with none the neutral
-//! [`AGENT`]. Git is GitHub's Octicons ([`GitGlyph`]), drawn the same way, since SF has no git
-//! vocabulary. Nothing else is drawn by us but the working mark's cell of dots and the rings
-//! of a state ([`Ring`]), which SF cannot draw crisp at 1x (`docs/decisions/ui.md`, "The
-//! chrome's icons are SF Symbols", "State is a glyph" and "An icon takes its words' size,
-//! weight and tier"; `docs/decisions/brand.md`, "Each agent wears its owner's mark").
+//! A [`Symbol`] is one of a closed list. Git is Tabler's git glyphs ([`GitGlyph`]). An agent
+//! wears its owner's mark ([`AgentMark`]), drawn by us from the owner's outline into the same
+//! kind of mask, and an agent with none the neutral [`AGENT`]. Nothing else is drawn by us but
+//! the working mark's cell of dots and the rings of a state ([`Ring`]) (`docs/decisions/ui.md`,
+//! "The chrome's icons are Tabler's, and a file's are Material's" and "State is a glyph";
+//! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
 //!
-//! An icon takes its words' type role ([`beside`]): [`IconSize::Lead`] leads a row or stands
-//! alone in [`slopty_theme::Typography::icon_large`] at the chrome's size; [`IconSize::Inline`]
-//! sits in [`slopty_theme::Typography::icon`] beside a row's facts, at their size but never
-//! under [`SYMBOL_FLOOR`], where SF draws a smaller design. Its weight is its words'. A slot
-//! sized larger or smaller (the chrome's zoom) draws its symbol larger or smaller by as much,
-//! so an icon never parts from its words' size.
+//! An icon fills its slot: Tabler's 24 grid and Material's view box span the slot's side, as
+//! Zed and `MonoCode` set their icons. [`IconSize::Lead`] leads a row or stands alone in
+//! [`slopty_theme::Typography::icon_large`] (16 pt); [`IconSize::Inline`] sits in
+//! [`slopty_theme::Typography::icon`] (14 pt) beside a row's facts and in bars and buttons. A
+//! slot sized again draws its icon larger or smaller with it, so an icon never parts from its
+//! words' size.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -25,23 +24,24 @@ use gpui::accesskit::Role;
 use gpui::{
     AnimationExt as _, AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId,
     Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ParentElement as _, Pixels, Point, ScaledPixels, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, TransformationMatrix, Window, canvas, div, point,
-    px, radians,
+    LayoutId, ParentElement as _, Pixels, RenderImage, ScaledPixels, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, SvgSize, TransformationMatrix, Window, canvas,
+    div, point, px, radians,
 };
 use parking_lot::RwLock;
-use slopty_platform::symbols::{Masks, SymbolMask};
-pub use slopty_platform::symbols::{Scale, Symbol, SymbolSize, Weight};
-use slopty_theme::{Rgb, Theme, TypeRole, Typography};
+use slopty_platform::outline::Mask;
+use slopty_theme::{Rgb, Theme, TypeRole};
 
 use crate::colors::hsla;
 pub use crate::file_types::FileType;
 
 mod git;
+mod glyphs;
 mod marks;
 mod ring;
 
 pub use git::GitGlyph;
+pub use glyphs::Symbol;
 pub use marks::AgentMark;
 pub use ring::Ring;
 
@@ -49,15 +49,18 @@ pub use ring::Ring;
 /// one neutral mark in the ink beside it, a conversation, its agent named in words.
 pub const AGENT: Symbol = Symbol::TextBubble;
 
-/// What leads a row: a symbol for what a thing is, or the mark of the agent it runs.
+/// What leads a row: a glyph for what a thing is, the mark of the agent it runs, or a file's
+/// type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
-    /// An SF Symbol.
+    /// A chrome glyph.
     Symbol(Symbol),
     /// An agent's own mark; [`AgentMark::Neutral`] is drawn as [`AGENT`].
     Agent(AgentMark),
-    /// A git glyph, an Octicon.
+    /// A git glyph.
     Git(GitGlyph),
+    /// A file's type, in its icon's own colours.
+    File(FileType),
 }
 
 impl From<GitGlyph> for Mark {
@@ -69,6 +72,12 @@ impl From<GitGlyph> for Mark {
 impl From<Symbol> for Mark {
     fn from(symbol: Symbol) -> Self {
         Self::Symbol(symbol)
+    }
+}
+
+impl From<FileType> for Mark {
+    fn from(file: FileType) -> Self {
+        Self::File(file)
     }
 }
 
@@ -90,23 +99,34 @@ impl Mark {
     }
 
     /// What a screen reader calls it: the agent an agent's mark names, else nothing, as a
-    /// symbol beside its words says nothing they do not.
+    /// glyph beside its words says nothing they do not.
     #[must_use]
     pub const fn label(self) -> Option<&'static str> {
         match self {
             Self::Agent(mark) => mark.label(),
-            Self::Symbol(_) | Self::Git(_) => None,
+            Self::Symbol(_) | Self::Git(_) | Self::File(_) => None,
         }
     }
 }
 
-/// The symbol for the file at `path`: its type's, or the plain document.
+/// The mark for the file at `path`: its type's icon; else the code glyph for code in a
+/// language with no icon, or the plain document.
 #[must_use]
-pub fn file_symbol(path: &str) -> Symbol {
-    FileType::of(path).map_or(Symbol::Doc, FileType::symbol)
+pub fn file_mark(path: &str) -> Mark {
+    FileType::of(path).map_or_else(
+        || {
+            let glyph = if crate::file_types::code(path) {
+                Symbol::ChevronLeftForwardslashChevronRight
+            } else {
+                Symbol::Doc
+            };
+            Mark::Symbol(glyph)
+        },
+        Mark::File,
+    )
 }
 
-/// The symbol a machine wears, by its form.
+/// The glyph a machine wears, by its form.
 ///
 /// As Finder and Find My show a device: a laptop, a desktop's display, a server's rack. A
 /// machine that has not said yet wears the rack, the form of one that does not say.
@@ -120,7 +140,7 @@ pub const fn machine(form: Option<slopty_proto::server::Form>) -> Symbol {
     }
 }
 
-/// The symbol for an icon gpui-kit's components name by its asset path (`icons/check.svg`),
+/// The glyph for an icon gpui-kit's components name by its asset path (`icons/check.svg`),
 /// where the chrome has one.
 #[must_use]
 pub fn kit_symbol(path: &str) -> Option<Symbol> {
@@ -146,23 +166,16 @@ pub fn kit_symbol(path: &str) -> Option<Symbol> {
     })
 }
 
-/// The least point size a symbol is drawn at, the disclosure chevrons aside.
-///
-/// Under about 12.25 pt SF Symbols draws a smaller design, a fifth narrower for the same stroke,
-/// which cost an icon a quarter of its ink beside 13 pt words (`docs/MEASUREMENTS.md`, "SF Symbols'
-/// smaller design").
-pub const SYMBOL_FLOOR: f32 = 12.5;
-
 /// How large an icon is drawn, by the words it sits beside.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconSize {
-    /// Beside a row's facts, the metadata role: their point size, never under
-    /// [`SYMBOL_FLOOR`], in [`slopty_theme::Typography::icon`]'s slot.
+    /// Beside a row's facts, in bars and in buttons: [`slopty_theme::Typography::icon`]'s slot,
+    /// the metadata role's size and the room round it.
     Inline,
-    /// A row's lead, an icon button, or standing beside a title: the chrome role's size, in a
-    /// slot as much past it as [`slopty_theme::Typography::icon_large`] is past the chrome
-    /// size. A finger's chrome is 17 pt, so on touch a lead is 17 pt in a 20 pt slot, as an iOS
-    /// row's symbol is its body text's size.
+    /// A row's lead, or standing alone or beside a title: the chrome role's size in a slot as
+    /// much past it as [`slopty_theme::Typography::icon_large`] is past the chrome size. A
+    /// finger's chrome is 17 pt, so on touch a lead's slot is 20 pt, as an iOS row's symbol is
+    /// its body text's size.
     Lead,
 }
 
@@ -190,119 +203,71 @@ impl IconSize {
     /// The slot's side in points.
     #[must_use]
     pub fn slot(self, theme: &Theme) -> f32 {
+        let ty = &theme.typography;
         match self {
-            Self::Inline => {
-                let ty = &theme.typography;
-                theme.roles().metadata.size + (ty.icon() - ty.small())
-            }
-            Self::Lead => {
-                let ty = &theme.typography;
-                theme.roles().chrome.size + (ty.icon_large() - ty.ui_size)
-            }
-        }
-    }
-
-    /// The point size the symbol is drawn at: its words', and never under [`SYMBOL_FLOOR`].
-    #[must_use]
-    pub fn point(self, theme: &Theme) -> f32 {
-        match self {
-            Self::Inline => theme.roles().metadata.size.max(SYMBOL_FLOOR),
-            Self::Lead => theme.roles().chrome.size.max(SYMBOL_FLOOR),
+            Self::Inline => theme.roles().metadata.size + (ty.icon() - ty.small()),
+            Self::Lead => theme.roles().chrome.size + (ty.icon_large() - ty.ui_size),
         }
     }
 }
 
-/// The symbol weight beside words of `weight` (400, 500 or 600): regular, medium or semibold,
-/// as the HIG matches a symbol's weight to its text's.
-#[must_use]
-pub fn weight_beside(weight: f32) -> Weight {
-    if weight > Typography::MEDIUM_WEIGHT {
-        Weight::Semibold
-    } else if weight >= Typography::MEDIUM_WEIGHT {
-        Weight::Medium
-    } else {
-        Weight::Regular
-    }
-}
-
-/// How a mark is drawn in a slot: a symbol at `ratio` of the slot's side in points, `weight`
-/// and `scale`, turned by `turn` radians; an agent's mark with its ink box `ink` of the side.
+/// How a mark is drawn in a slot.
+///
+/// A glyph or a file's icon spans `share` of the slot's side, a glyph turned by `turn` radians;
+/// an agent's mark has its ink box `ink` of the side; a file's icon is in its variant for a
+/// light ground or a dark one.
 #[derive(Clone, Copy, Debug)]
 pub struct Drawn {
     mark: Mark,
-    ratio: f32,
+    share: f32,
     ink: f32,
-    weight: Weight,
-    scale: Scale,
     turn: f32,
+    light: bool,
 }
 
 impl Drawn {
-    /// `mark` in a slot of `size`: a symbol regular and at the medium scale, an agent's mark
-    /// with its ink box [`slopty_theme::Spacing::xxs`] short of the slot.
+    /// `mark` in a slot of `size`: a glyph across the whole slot, an agent's mark with its ink
+    /// box [`slopty_theme::Spacing::xxs`] short of it.
     #[must_use]
     pub fn new(theme: &Theme, mark: impl Into<Mark>, size: IconSize) -> Self {
         let slot = size.slot(theme);
         Self {
             mark: mark.into(),
-            ratio: size.point(theme) / slot,
+            share: 1.0,
             ink: (slot - theme.spacing.xxs) / slot,
-            weight: Weight::Regular,
-            scale: Scale::Medium,
             turn: 0.0,
+            light: theme.surfaces.ground.is_light(),
         }
     }
 
-    /// `mark` beside words of `role`, in a slot [`IconSize::beside_slot`] square: at their point
-    /// size, never under [`SYMBOL_FLOOR`], and their weight ([`weight_beside`]).
+    /// `mark` beside words of `role`, in a slot [`IconSize::beside_slot`] square.
     #[must_use]
     pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole) -> Self {
         let slot = IconSize::beside_slot(theme, role);
         Self {
-            ratio: role.size.max(SYMBOL_FLOOR) / slot,
             ink: (slot - theme.spacing.xxs) / slot,
             ..Self::new(theme, mark, IconSize::beside(theme, role))
         }
-        .weight(weight_beside(role.weight))
     }
 
-    /// At `weight`, as the words beside it are.
-    #[must_use]
-    pub const fn weight(mut self, weight: Weight) -> Self {
-        self.weight = weight;
-        self
-    }
-
-    /// At `scale`.
-    #[must_use]
-    pub const fn scale(mut self, scale: Scale) -> Self {
-        self.scale = scale;
-        self
-    }
-
-    /// A disclosure chevron's drawing: Apple's semibold at the small scale, at the caption's
-    /// share of the inline slot.
+    /// A disclosure chevron's drawing: on the grid of the chrome's smaller size
+    /// ([`slopty_theme::Typography::small`], 12 pt) in the inline slot, the size Zed and the
+    /// references give a tree's chevron.
     #[must_use]
     pub fn disclosure(theme: &Theme, symbol: Symbol) -> Self {
         Self {
-            ratio: theme.typography.caption() / IconSize::Inline.slot(theme),
-            weight: Weight::Semibold,
-            scale: Scale::Small,
+            share: theme.typography.small() / IconSize::Inline.slot(theme),
             ..Self::new(theme, symbol, IconSize::Inline)
         }
     }
 
-    /// An empty state's mark: a symbol at the page heading's size in
-    /// [`crate::kit::NOTICE_MARK`], at the light weight and the large scale; an agent's mark
-    /// with its ink box two [`slopty_theme::Spacing::xxs`] short of the slot.
+    /// An empty state's mark, across [`crate::kit::NOTICE_MARK`]; an agent's mark with its ink
+    /// box two [`slopty_theme::Spacing::xxs`] short of the slot.
     #[must_use]
     pub fn notice(theme: &Theme, mark: impl Into<Mark>) -> Self {
         let slot = crate::kit::NOTICE_MARK;
         Self {
-            ratio: theme.roles().page_heading.size / slot,
             ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot,
-            weight: Weight::Light,
-            scale: Scale::Large,
             ..Self::new(theme, mark, IconSize::Lead)
         }
     }
@@ -313,109 +278,131 @@ impl Drawn {
         side * self.ink
     }
 
-    /// The size it is drawn at in a slot `side` points square.
+    /// The side in points of the grid a glyph is drawn on in a slot `side` points square.
     #[must_use]
-    pub fn size(self, side: f32) -> SymbolSize {
-        SymbolSize { point: side * self.ratio, weight: self.weight, scale: self.scale }
+    pub fn grid(self, side: f32) -> f32 {
+        side * self.share
     }
 
     /// Turned by `radians` about the slot's centre, while it moves; at rest it is upright, so
-    /// its pixels stay the screen's.
+    /// its pixels stay the screen's. Only a glyph turns.
     #[must_use]
     pub const fn turned(mut self, radians: f32) -> Self {
         self.turn = radians;
         self
     }
 
-    /// The slot, `side` square, its symbol in `color`. The slot can be sized again
-    /// (`.size(..)`), and the symbol is drawn larger or smaller by as much; its ink is the
-    /// slot's text colour, so `.text_color(..)` recolours it.
+    /// The slot, `side` square, its mark in `color`. The slot can be sized again
+    /// (`.size(..)`), and the mark is drawn larger or smaller by as much; a glyph's ink is the
+    /// slot's text colour, so `.text_color(..)` recolours it. A file's icon keeps its colours.
     #[must_use]
     pub fn slot(self, side: Pixels, color: Hsla) -> Div {
         div().flex_none().size(side).text_color(color).child(
-            canvas(|_, _, _| {}, move |bounds, (), window, _cx| self.paint(bounds, window))
+            canvas(|_, _, _| {}, move |bounds, (), window, cx| self.paint(bounds, window, cx))
                 .size_full(),
         )
     }
 
     /// Paints the mark centred in `bounds`.
-    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
+    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
         match self.mark {
-            Mark::Symbol(symbol) => self.paint_symbol(symbol, bounds, window),
-            Mark::Agent(AgentMark::Neutral) => self.paint_symbol(AGENT, bounds, window),
+            Mark::Symbol(symbol) => self.paint_glyph(symbol, bounds, window),
+            Mark::Agent(AgentMark::Neutral) => self.paint_glyph(AGENT, bounds, window),
             Mark::Agent(mark) => self.paint_agent(mark, bounds, window),
-            Mark::Git(glyph) => self.paint_git(glyph, bounds, window),
+            Mark::Git(glyph) => self.paint_glyph(glyph.symbol(), bounds, window),
+            Mark::File(file) => self.paint_file(file, bounds, window, cx),
         }
     }
 
-    /// Paints a git glyph centred on its ink in `bounds`, on the device's pixel grid, its
-    /// 16-unit grid [`git::EM`] of the symbol's point size. Never weighted: the Octicon's own
-    /// strokes, which sit between SF's regular and medium.
-    fn paint_git(self, glyph: GitGlyph, bounds: Bounds<Pixels>, window: &mut Window) {
+    /// How many device pixels a grid takes in `bounds` on this window's display.
+    fn pixels(self, bounds: Bounds<Pixels>, window: &Window) -> u32 {
         let side = f32::from(bounds.size.width.min(bounds.size.height));
-        let device = window.scale_factor();
-        let em = self.size(side).point * git::EM;
-        let Some((mask, key)) = git::mask(glyph, em, device) else {
+        whole_pixels(self.grid(side) * window.scale_factor())
+    }
+
+    /// Paints a glyph with its grid centred in `bounds`, on the device's pixel grid, turned
+    /// about the centre while it turns.
+    fn paint_glyph(self, symbol: Symbol, bounds: Bounds<Pixels>, window: &mut Window) {
+        let Some((mask, key)) = glyphs::mask(symbol, self.pixels(bounds, window)) else {
             return;
         };
-        paint_centred(&mask, key, bounds, window, || format!("{glyph:?}"));
+        let turn = if self.turn == 0.0 {
+            TransformationMatrix::unit()
+        } else {
+            let at = bounds.center().scale(window.scale_factor());
+            TransformationMatrix::unit()
+                .translate(at)
+                .rotate(radians(self.turn))
+                .translate(gpui::Point::new(ScaledPixels(-at.x.0), ScaledPixels(-at.y.0)))
+        };
+        paint_centred(&mask, key, bounds, turn, window, || symbol.name().to_owned());
     }
 
     /// Paints an agent's mark centred on its ink in `bounds`, on the device's pixel grid: its
     /// mask is its ink box, so the box is centred and its origin rounded to a whole pixel.
-    /// Never turned, never weighted: a filled silhouette, as the owner draws it.
+    /// Never weighted: a filled silhouette, as the owner draws it.
     fn paint_agent(self, mark: AgentMark, bounds: Bounds<Pixels>, window: &mut Window) {
         let side = f32::from(bounds.size.width.min(bounds.size.height));
         let device = window.scale_factor();
         let Some((mask, key)) = marks::mask(mark, self.ink(side), device) else {
             return;
         };
-        paint_centred(&mask, key, bounds, window, || format!("{mark:?}"));
+        let unit = TransformationMatrix::unit();
+        paint_centred(&mask, key, bounds, unit, window, || format!("{mark:?}"));
     }
 
-    /// Paints `symbol` centred in `bounds`: its box across, its alignment rectangle (the
-    /// baseline to the cap height) down, as the words beside it centre.
-    fn paint_symbol(self, symbol: Symbol, bounds: Bounds<Pixels>, window: &mut Window) {
-        let side = f32::from(bounds.size.width.min(bounds.size.height));
+    /// Paints a file's icon in its colours with its view box centred in `bounds`, drawn at the
+    /// device's size, its origin on a whole device pixel.
+    fn paint_file(self, file: FileType, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+        let pixels = self.pixels(bounds, window);
+        let Some(image) = file_image(file, self.light, pixels, cx) else {
+            return;
+        };
         let device = window.scale_factor();
-        let room = f32::from(bounds.size.width) * FIT_ROOM * device;
-        let Some((mask, key, _)) = fitted(symbol, self.size(side), room, device) else {
-            return;
-        };
-        let (Ok(width), Ok(height)) = (i32::try_from(mask.width), i32::try_from(mask.height))
-        else {
-            return;
-        };
-        let a = mask.alignment;
-        let centre = bounds.center();
-        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
-        let across = mask.width as f32 / device / 2.0;
-        let origin = point(centre.x - px(across), centre.y - px((a.y + a.height / 2.0) / device));
-        let transformation = if self.turn == 0.0 {
-            TransformationMatrix::unit()
-        } else {
-            let at = centre.scale(device);
-            TransformationMatrix::unit()
-                .translate(at)
-                .rotate(radians(self.turn))
-                .translate(Point::new(ScaledPixels(-at.x.0), ScaledPixels(-at.y.0)))
-        };
-        let devices = gpui::size(DevicePixels(width), DevicePixels(height));
-        let ink = window.text_style().color;
-        let painted = window
-            .paint_mask(origin, devices, key, transformation, ink, || Ok(Some(mask.alpha.clone())));
+        #[expect(clippy::cast_precision_loss, reason = "an icon is a few dozen pixels")]
+        let extent = pixels as f32;
+        let at = place(bounds, extent, extent, device);
+        let size = px(extent / device);
+        let image_bounds = Bounds { origin: at, size: gpui::size(size, size) };
+        let painted = window.paint_image(
+            image_bounds,
+            image_bounds,
+            gpui::Corners::default(),
+            image,
+            0,
+            false,
+        );
         if let Err(error) = painted {
-            tracing::warn!(%error, symbol = symbol.name(), "a symbol was not painted");
+            tracing::warn!(%error, file = file.name(), "a file's icon was not painted");
         }
     }
 }
 
+/// `points` (already in device pixels) rounded to a whole count of them; none for an empty
+/// or unreadable size.
+fn whole_pixels(points: f32) -> u32 {
+    let pixels = points.round();
+    #[expect(clippy::cast_possible_truncation, reason = "an icon is a few dozen pixels")]
+    #[expect(clippy::cast_sign_loss, reason = "a negative size is caught as no size")]
+    let pixels = if pixels.is_finite() && pixels > 0.0 { pixels as u32 } else { 0 };
+    pixels
+}
+
+/// The origin, in points, of a box `wide` × `high` device pixels centred in `bounds` with its
+/// origin on a whole device pixel.
+fn place(bounds: Bounds<Pixels>, wide: f32, high: f32, device: f32) -> gpui::Point<Pixels> {
+    let centre = bounds.center().scale(device);
+    let snap = |middle: f32, extent: f32| px((middle - extent / 2.0).round() / device);
+    point(snap(centre.x.0, wide), snap(centre.y.0, high))
+}
+
 /// Paints `mask` in the text's ink with its box centred in `bounds` and its origin on a whole
-/// device pixel, as an agent's mark and a git glyph are; `what` names it if it fails.
+/// device pixel, transformed by `turn`; `what` names it if it fails.
 fn paint_centred(
-    mask: &Arc<SymbolMask>,
+    mask: &Arc<Mask>,
     key: SharedString,
     bounds: Bounds<Pixels>,
+    turn: TransformationMatrix,
     window: &mut Window,
     what: impl FnOnce() -> String,
 ) {
@@ -423,176 +410,83 @@ fn paint_centred(
         return;
     };
     let device = window.scale_factor();
-    let centre = bounds.center().scale(device);
     #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
-    let (wide, high) = (mask.width as f32, mask.height as f32);
-    let snap = |middle: ScaledPixels, extent: f32| px((middle.0 - extent / 2.0).round() / device);
-    let origin = point(snap(centre.x, wide), snap(centre.y, high));
+    let origin = place(bounds, mask.width as f32, mask.height as f32, device);
     let devices = gpui::size(DevicePixels(width), DevicePixels(height));
     let ink = window.text_style().color;
     let painted =
-        window.paint_mask(origin, devices, key, TransformationMatrix::unit(), ink, || {
-            Ok(Some(mask.alpha.clone()))
-        });
+        window.paint_mask(origin, devices, key, turn, ink, || Ok(Some(mask.alpha.clone())));
     if let Err(error) = painted {
         tracing::warn!(%error, mark = what(), "a mark was not painted");
     }
 }
 
 /// A drawn mask with the key the atlas keeps it under.
-type Kept = Option<(Arc<SymbolMask>, SharedString)>;
+type Kept = Option<(Arc<Mask>, SharedString)>;
 
-/// The masks every window paints from, shared with the prewarm's thread, and each one's atlas
-/// key, made once. A symbol the OS lacks is kept as a miss.
-struct Symbols {
-    masks: Masks,
-    kept: RwLock<HashMap<(Symbol, SymbolSize, u32), Held>>,
-}
+/// A file's icon by type, ground and side in device pixels, drawn or a miss.
+type FileImages = HashMap<(FileType, bool, u32), Option<Arc<RenderImage>>>;
 
-/// A symbol's mask, its atlas key, and how many device pixels across its ink is: the OS pads
-/// a symbol's image a pixel or more each side, so a fit is judged on the ink.
-type Held = Option<(Arc<SymbolMask>, SharedString, u32)>;
+/// The file icons drawn so far; one that does not draw is kept as a miss, said once.
+static FILE_IMAGES: LazyLock<RwLock<FileImages>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
-/// How many columns of `mask` hold ink, from the first to the last.
-fn ink_width(mask: &SymbolMask) -> u32 {
-    let Ok(wide) = usize::try_from(mask.width) else { return mask.width };
-    if wide == 0 {
-        return 0;
+/// `file`'s icon for a `light` ground or a dark one, its view box `pixels` device pixels
+/// square: drawn by GPUI's SVG renderer at that size and no other, so nothing is resampled.
+fn file_image(file: FileType, light: bool, pixels: u32, cx: &App) -> Option<Arc<RenderImage>> {
+    if pixels == 0 {
+        return None;
     }
-    let inked = |x: &usize| mask.alpha.chunks(wide).any(|row| row.get(*x).is_some_and(|&a| a > 0));
-    let first = (0..wide).find(inked);
-    let last = (0..wide).rev().find(inked);
-    first
-        .zip(last)
-        .and_then(|(first, last)| last.checked_sub(first))
-        .and_then(|span| u32::try_from(span).ok())
-        .map_or(0, |span| span.saturating_add(1))
-}
-
-static SYMBOLS: LazyLock<Symbols> =
-    LazyLock::new(|| Symbols { masks: Masks::new(), kept: RwLock::new(HashMap::new()) });
-
-/// `symbol` at `size` for a display of `device` pixels to the point, its atlas key and its
-/// ink's width.
-fn mask(symbol: Symbol, size: SymbolSize, device: f32) -> Held {
-    let at = (symbol, size, device.to_bits());
-    if let Some(kept) = SYMBOLS.kept.read().get(&at) {
+    let at = (file, light, pixels);
+    if let Some(kept) = FILE_IMAGES.read().get(&at) {
         return kept.clone();
     }
-    let kept = SYMBOLS.masks.get(symbol, size, device).map(|mask| {
-        let key = format!(
-            "sf:{}:{:08x}:{:?}:{:?}@{:08x}",
-            symbol.name(),
-            size.point.to_bits(),
-            size.weight,
-            size.scale,
-            device.to_bits()
-        );
-        let ink = ink_width(&mask);
-        (mask, SharedString::from(key), ink)
-    });
-    SYMBOLS.kept.write().entry(at).or_insert(kept).clone()
+    let side = DevicePixels(i32::try_from(pixels).ok()?);
+    let renderer = cx.svg_renderer();
+    let drawn = renderer
+        .parse_svg(file.svg(light).as_bytes())
+        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::Size(gpui::size(side, side))))
+        .inspect_err(
+            |error| tracing::warn!(%error, file = file.name(), "a file's icon did not draw"),
+        )
+        .ok();
+    FILE_IMAGES.write().entry(at).or_insert(drawn).clone()
 }
 
-/// `symbol` at `size`, drawn smaller where its ink is wider than `room` device pixels: a wide
-/// symbol kept by its slot, so it never reaches the words beside it.
-///
-/// The point size is scaled by the overflow and stepped down a quarter point at a time while
-/// the OS's rounding still leaves it a pixel over, so it shrinks no more than it must.
-fn fitted(symbol: Symbol, size: SymbolSize, room: f32, device: f32) -> Held {
-    let room = room.ceil();
-    let mut kept = mask(symbol, size, device)?;
-    let mut point = size.point;
-    for _ in 0..FIT_STEPS {
-        #[expect(clippy::cast_precision_loss, reason = "a mask is a few dozen pixels")]
-        let wide = kept.2 as f32;
-        if wide <= room {
-            break;
-        }
-        point = (point * room / wide * 4.0).floor().min(point.mul_add(4.0, -1.0)) / 4.0;
-        if point < 1.0 {
-            break;
-        }
-        kept = mask(symbol, SymbolSize { point, ..size }, device)?;
-    }
-    Some(kept)
-}
-
-/// How wide a symbol's ink may be against its slot before [`fitted`] draws it smaller: an
-/// eighth over, into the gap beside it, so a wide symbol (a server rack, a folder, 15 pt of
-/// ink at 13 pt) keeps its words' size in a lead's 16 pt slot and gives way only past 18.
-const FIT_ROOM: f32 = 18.0 / 16.0;
-
-/// How many times [`fitted`] draws a symbol smaller before it keeps the last.
-const FIT_STEPS: usize = 4;
-
-/// The display scales a window of this platform is likely shown at, the likeliest first.
+/// The display scales a window of this platform is likely shown at.
 const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 2.0] };
 
-/// The scale the catalogue's first mask is drawn at when the display's is not known yet: any
-/// scale loads the catalogue.
-const CATALOGUE_SCALE: f32 = 2.0;
-
-/// Draws, on background threads, the masks the last launch's first frames drew, as
-/// [`remember`] wrote them to `remembered`, at the scale of the display the window opens on.
+/// Reads every glyph, and draws the glyphs at a row's and a lead's slot and the agents' marks
+/// at theirs, on a background thread while the first window is made. Start it before the first
+/// window.
 ///
-/// The first frame then finds them drawn. Start it before the first window: the first symbol
-/// of a process loads the system's catalogue, 40 to 70 ms (`docs/MEASUREMENTS.md`, "SF
-/// Symbols as masks"). The list is read on the prewarm's thread. With no list (a first launch,
-/// or one that does not read), only the catalogue is loaded, by drawing the navigator's
-/// disclosure, and the first frame draws the rest, a quarter to half a millisecond each.
-///
-/// Only what is drawn is warmed: each SF Symbol drawn holds its share of the OS's symbol data
-/// for the life of the process (`docs/MEASUREMENTS.md`, "the footprint at rest").
-pub fn prewarm(theme: &Theme, remembered: std::path::PathBuf) {
-    let scale = slopty_platform::symbols::main_display_scale();
-    let catalogue = (
-        Symbol::ChevronRight,
-        Drawn::disclosure(theme, Symbol::ChevronRight).size(IconSize::Inline.slot(theme)),
-        scale.unwrap_or(CATALOGUE_SCALE),
-    );
-    let wanted = move || {
-        let list = slopty_platform::symbols::remembered(&remembered, scale);
-        if list.is_empty() { vec![catalogue] } else { list }
-    };
-    if let Err(error) = SYMBOLS.masks.prewarm(wanted) {
-        tracing::warn!(%error, "the symbols' prewarm did not start");
-    }
-    // The agents' marks at the row's, the chip's and the empty state's ink: a dozen masks
-    // Core Graphics fills from their outlines, with nothing of the OS's held after.
-    let inline = IconSize::Inline.slot(theme);
+/// A glyph costs microseconds to draw, but the first frame would otherwise pay to read every
+/// glyph's file and Core Graphics' first context, about 6 ms together (`docs/MEASUREMENTS.md`,
+/// "Tabler glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
+pub fn prewarm(theme: &Theme) {
+    let sides: Vec<u32> = [IconSize::Inline, IconSize::Lead]
+        .iter()
+        .flat_map(|size| SCALES.iter().map(move |scale| (size.slot(theme), scale)))
+        .map(|(slot, scale)| whole_pixels(slot * scale))
+        .collect();
     let inks = [
         Drawn::new(theme, AGENT, IconSize::Lead).ink(IconSize::Lead.slot(theme)),
-        Drawn::new(theme, AGENT, IconSize::Inline).ink(inline),
+        Drawn::new(theme, AGENT, IconSize::Inline).ink(IconSize::Inline.slot(theme)),
         Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
     ];
-    // The git glyphs at a lead's and a fact's size, on the same thread: Core Graphics fills
-    // too, a couple of dozen microseconds each.
-    let ems = [IconSize::Lead, IconSize::Inline].map(|size| size.point(theme) * git::EM);
-    let scales: Vec<f32> = scale.map_or_else(|| SCALES.to_vec(), |scale| vec![scale]);
-    let marks = std::thread::Builder::new().name("agent-marks".into()).spawn(move || {
+    let warmed = std::thread::Builder::new().name("icons-prewarm".into()).spawn(move || {
+        for &symbol in Symbol::ALL {
+            for &side in &sides {
+                glyphs::mask(symbol, side);
+            }
+        }
         for mark in AgentMark::OWNED {
-            for (&ink, &scale) in inks.iter().flat_map(|ink| scales.iter().map(move |s| (ink, s))) {
+            for (&ink, &scale) in inks.iter().flat_map(|ink| SCALES.iter().map(move |s| (ink, s))) {
                 marks::mask(mark, ink, scale);
             }
         }
-        for glyph in GitGlyph::ALL {
-            for (&em, &scale) in ems.iter().flat_map(|em| scales.iter().map(move |s| (em, s))) {
-                git::mask(glyph, em, scale);
-            }
-        }
     });
-    if let Err(error) = marks {
-        tracing::warn!(%error, "the agents' marks' prewarm did not start");
-    }
-}
-
-/// Writes to `path` the masks painters asked for since launch, for the next launch's
-/// [`prewarm`], and stops noting them. Call it once, a few seconds after the first window
-/// opens, off the main thread.
-pub fn remember(path: &std::path::Path) {
-    if let Err(error) = SYMBOLS.masks.remember(path) {
-        tracing::warn!(%error, path = %path.display(), "the drawn symbols were not written down");
+    if let Err(error) = warmed {
+        tracing::warn!(%error, "the icons' prewarm did not start");
     }
 }
 
@@ -602,16 +496,14 @@ pub fn icon(theme: &Theme, symbol: impl Into<Mark>, size: IconSize, color: Hsla)
     Drawn::new(theme, symbol, size).slot(px(size.slot(theme)), color)
 }
 
-/// `mark` beside words of `role`, in `ink`: their size and weight ([`Drawn::beside`]) in a
-/// slot of [`IconSize::beside_slot`]. Size the slot again only by the chrome's zoom, and the
-/// mark follows it.
+/// `mark` beside words of `role`, in `ink`, in a slot of [`IconSize::beside_slot`]; a slot
+/// sized again draws the mark at its size.
 #[must_use]
 pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole, ink: Hsla) -> Div {
     Drawn::beside(theme, mark, role).slot(px(IconSize::beside_slot(theme, role)), ink)
 }
 
-/// `symbol` in a slot `side` square, in `ink`, drawn at the inline icon's share of the slot:
-/// a row's lead at whatever zoom.
+/// `symbol` in a slot `side` square, in `ink`: a row's lead at whatever size.
 #[must_use]
 pub fn symbol(theme: &Theme, symbol: impl Into<Mark>, side: Pixels, ink: Hsla) -> AnyElement {
     Drawn::new(theme, symbol, IconSize::Inline).slot(side, ink).into_any_element()
@@ -710,16 +602,16 @@ impl Status {
     }
 }
 
-/// `status` in a fixed square slot, the width of a large icon at the chrome's zoom `k`.
+/// `status` in a fixed square slot, the width of a large icon.
 ///
 /// Rows that carry a mark and rows that do not keep their titles on one edge. A mark is an
 /// image named by [`Status::label`]; an empty slot is nothing to a screen reader.
 #[must_use]
-pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Div> {
+pub fn status_mark(theme: &Theme, status: Option<Status>) -> Stateful<Div> {
     let slot = div()
         .id("status")
         .flex_shrink_0()
-        .size(px(theme.typography.icon_large() * k))
+        .size(px(theme.typography.icon_large()))
         .flex()
         .items_center()
         .justify_center();
@@ -729,7 +621,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
                 child: Some(div().flex_none().child(status_icon(
                     theme,
                     Status::Done,
-                    px(theme.typography.icon() * k),
+                    px(theme.typography.icon()),
                     hsla(Status::Done.ink(theme)),
                 ))),
                 inner: None,
@@ -738,7 +630,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
         Some(status) => slot.role(Role::Image).aria_label(status.label()).child(status_icon(
             theme,
             status,
-            px(theme.typography.icon() * k),
+            px(theme.typography.icon()),
             hsla(status.ink(theme)),
         )),
         None => slot,
@@ -825,17 +717,17 @@ impl Element for Arrive {
     }
 }
 
-/// `status` as an empty state's mark, in `color` at the chrome's zoom `k`.
+/// `status` as an empty state's mark, in `color`.
 ///
 /// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working cell or a
 /// ring at the heading's size, so a tile's state reads at the size of the notice it heads.
 #[must_use]
-pub fn notice_status(theme: &Theme, status: Status, color: Hsla, k: f32) -> AnyElement {
+pub fn notice_status(theme: &Theme, status: Status, color: Hsla) -> AnyElement {
     match status.symbol() {
-        Some(symbol) => Drawn::notice(theme, symbol)
-            .slot(px(crate::kit::NOTICE_MARK * k), color)
-            .into_any_element(),
-        None => status_icon(theme, status, px(theme.roles().page_heading.size * k), color),
+        Some(symbol) => {
+            Drawn::notice(theme, symbol).slot(px(crate::kit::NOTICE_MARK), color).into_any_element()
+        }
+        None => status_icon(theme, status, px(theme.roles().page_heading.size), color),
     }
 }
 
@@ -1374,130 +1266,60 @@ mod tests {
         assert_eq!(kit_symbol("elsewhere/check.svg"), None);
     }
 
-    /// A file's type is one of nine symbols, and a type it has none for is the plain
-    /// document; every agent's thread is the one neutral glyph.
+    /// A file leads with its type's icon; code with no icon kept leads with the code glyph,
+    /// and a type neither knows with the plain document. Every agent's thread is the one
+    /// neutral glyph.
     #[test]
-    fn a_file_leads_with_its_types_symbol() {
-        assert_eq!(file_symbol("/w/main.rs"), Symbol::ChevronLeftForwardslashChevronRight);
-        assert_eq!(file_symbol("/w/README.md"), Symbol::DocText);
-        assert_eq!(file_symbol("/w/notes"), Symbol::Doc);
+    fn a_file_leads_with_its_types_icon() {
+        assert_eq!(file_mark("/w/main.rs"), Mark::File(FileType::Rust));
+        assert_eq!(file_mark("/w/README.md"), Mark::File(FileType::Readme));
+        assert_eq!(file_mark("/w/q.graphql"), Symbol::ChevronLeftForwardslashChevronRight.into());
+        assert_eq!(file_mark("/w/notes"), Mark::Symbol(Symbol::Doc));
         assert_eq!(AGENT, Symbol::TextBubble, "a conversation, not the cliched sparkles");
     }
 
-    /// A symbol wider than its slot is drawn smaller until it fits, keeping its weight; one
-    /// that fits is drawn at the words' size.
+    /// An icon fills its slot, the ladder's 14 pt inline and 16 pt lead, a lead beside the
+    /// chrome's words and an inline one beside a fact's; a disclosure chevron is on the 12 pt
+    /// grid in the inline slot.
     #[test]
-    fn a_wide_symbol_fits_its_slot() {
-        let size = IconSize::Inline.point(&Theme::default());
-        let size = SymbolSize::new(size, Weight::Regular);
-        for device in [1.0, 2.0] {
-            let natural = mask(Symbol::ServerRack, size, device).unwrap();
-            let room = f32::from(u16::try_from(natural.2).unwrap()) - 3.0;
-            let fit = fitted(Symbol::ServerRack, size, room, device).unwrap();
-            assert!(f32::from(u16::try_from(fit.2).unwrap()) <= room, "{device}x: {}", fit.2);
-            // SF's smaller design under 12.25 pt is narrower by a step of its own.
-            assert!(fit.2 * 4 >= natural.2 * 3, "{device}x shrank too far: {}", fit.2);
-            assert!(natural.2 < natural.0.width, "{device}x: the ink is inside the OS's padding");
-            let roomy = fitted(Symbol::ServerRack, size, room + 3.0, device).unwrap().0;
-            assert_eq!(roomy.alpha, natural.0.alpha, "{device}x: one that fits is left alone");
-        }
-    }
-
-    /// Why the floor is 12.5 pt: SF draws a smaller design under about 12.25 pt, narrower for
-    /// the same stroke, so a symbol at 12 pt carried far less ink than at 12.5. Printed for
-    /// `docs/MEASUREMENTS.md` ("SF Symbols' smaller design"): each symbol's ink width at 2x and
-    /// its ink, the sum of its coverage.
-    #[test]
-    fn sf_draws_a_smaller_design_under_the_floor() {
-        let ink = |m: &SymbolMask| m.alpha.iter().map(|&a| u32::from(a)).sum::<u32>() / 255;
-        let symbols = [Symbol::Terminal, Symbol::Folder, Symbol::ServerRack, Symbol::DocText];
-        for symbol in symbols {
-            let mut row = Vec::new();
-            for point in [12.0, 12.25, 12.5, 13.0] {
-                let size = SymbolSize::new(point, Weight::Regular);
-                let (mask, _, wide) = mask(symbol, size, 2.0).expect("the OS draws it");
-                row.push((point, wide, ink(&mask)));
-            }
-            let said: Vec<String> =
-                row.iter().map(|(p, w, i)| format!("{p} pt {w} px wide, ink {i}")).collect();
-            eprintln!("{}: {}", symbol.name(), said.join("; "));
-            let (Some(small), Some(floor)) = (row.first(), row.get(2)) else { continue };
-            assert!(floor.1 * 10 >= small.1 * 11, "{}: 12.5 pt is a larger design", symbol.name());
-            assert!(floor.2 * 10 >= small.2 * 11, "{}: with more ink", symbol.name());
-        }
-    }
-
-    /// A lead's wide symbols keep their words' size in its slot: the machine, the folder and
-    /// the window are not drawn smaller, as they were when the fit was the slot itself.
-    #[test]
-    fn a_leads_wide_symbol_keeps_its_size() {
-        let theme = Theme::default();
-        let slot = IconSize::Lead.slot(&theme);
-        let size = Drawn::new(&theme, Symbol::ServerRack, IconSize::Lead).size(slot);
-        for symbol in [Symbol::ServerRack, Symbol::Folder, Symbol::Macwindow, Symbol::Terminal] {
-            for device in [1.0, 2.0] {
-                let natural = mask(symbol, size, device).unwrap().0;
-                let fit = fitted(symbol, size, slot * FIT_ROOM * device, device).unwrap().0;
-                assert_eq!(fit.alpha, natural.alpha, "{symbol:?} at {device}x was shrunk");
-            }
-        }
-    }
-
-    /// A lint as a test: no symbol is drawn under [`SYMBOL_FLOOR`], where SF's smaller design
-    /// starts, but the disclosure chevrons, which are Apple's own small drawing. The sizes
-    /// every icon is drawn at come from here, so the check is on them.
-    #[test]
-    fn no_icon_size_draws_a_symbol_under_12_5() {
-        let theme = Theme::default();
-        let drawn = [
-            (
-                "inline",
-                Drawn::new(&theme, Symbol::Doc, IconSize::Inline),
-                IconSize::Inline.slot(&theme),
-            ),
-            ("lead", Drawn::new(&theme, Symbol::Doc, IconSize::Lead), IconSize::Lead.slot(&theme)),
-            ("notice", Drawn::notice(&theme, Symbol::Doc), crate::kit::NOTICE_MARK),
-        ];
-        for (what, drawn, slot) in drawn {
-            let point = drawn.size(slot).point;
-            assert!(point >= SYMBOL_FLOOR - 1e-3, "{what} is drawn at {point}");
-        }
-        let roles = theme.typography.roles(false);
-        for role in [roles.caption, roles.metadata, roles.chrome, roles.action, roles.section] {
-            let slot = IconSize::beside_slot(&theme, role);
-            let point = Drawn::beside(&theme, Symbol::Doc, role).size(slot).point;
-            assert!(point >= SYMBOL_FLOOR - 1e-3, "beside {role:?}: {point}");
-        }
-        let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight);
-        assert!(chevron.size(IconSize::Inline.slot(&theme)).point < SYMBOL_FLOOR, "the exception");
-    }
-
-    /// An icon takes its words' weight: regular beside 400, medium beside 500, semibold beside
-    /// 600; and its words' size, the lead beside the chrome's and the inline beside a fact's.
-    #[test]
-    fn an_icon_takes_its_words_size_and_weight() {
+    fn an_icon_fills_its_slot_on_the_ladder() {
         let theme = Theme::default();
         let roles = theme.typography.roles(false);
-        let weight = |role: TypeRole| Drawn::beside(&theme, Symbol::Doc, role).weight;
-        assert_eq!(weight(roles.chrome), Weight::Regular);
-        assert_eq!(weight(roles.action), Weight::Medium);
-        assert_eq!(weight(roles.section), Weight::Medium);
-        assert_eq!(weight(roles.panel_title), Weight::Semibold);
+        let (inline, lead) = (IconSize::Inline.slot(&theme), IconSize::Lead.slot(&theme));
+        assert!((inline - 14.0).abs() < 1e-3 && (lead - 16.0).abs() < 1e-3, "{inline} {lead}");
+        let grid = Drawn::new(&theme, Symbol::Doc, IconSize::Lead).grid(lead);
+        assert!((grid - lead).abs() < 1e-3, "a glyph's grid is its slot");
         assert_eq!(IconSize::beside(&theme, roles.chrome), IconSize::Lead);
         assert_eq!(IconSize::beside(&theme, roles.metadata), IconSize::Inline);
-        let lead = IconSize::Lead;
-        assert_eq!(lead.point(&theme), theme.typography.ui_size, "a lead is its title's size");
-        let point = |role: TypeRole| {
-            Drawn::beside(&theme, Symbol::Doc, role).size(IconSize::beside_slot(&theme, role)).point
-        };
-        assert!((point(roles.chrome) - lead.point(&theme)).abs() < 1e-3, "the lead, by role");
-        assert!((IconSize::beside_slot(&theme, roles.chrome) - lead.slot(&theme)).abs() < 1e-3);
-        let finger = theme.typography.roles(true).chrome;
-        assert!((point(finger) - finger.size).abs() < 1e-3, "a finger's row: {}", point(finger));
+        let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(inline);
+        assert!((chevron - 12.0).abs() < 1e-3, "the chevron's grid: {chevron}");
+        assert_eq!(whole_pixels(14.0 * 2.0), 28);
+        assert_eq!(whole_pixels(f32::NAN), 0);
     }
 
-    /// Each status the OS draws has its own symbol, and the three that carry colour are
-    /// filled; working's dots and the idle and waiting rings are ours.
+    /// A file's icon draws at the size it is painted at and no other, in its own colours, and
+    /// a light ground takes the light variant where there is one.
+    #[gpui::test]
+    fn a_file_icon_is_drawn_at_its_size_in_colour(cx: &gpui::TestAppContext) {
+        cx.update(|cx| {
+            for file in FileType::ALL {
+                let image = file_image(*file, false, 28, cx);
+                let image = image.unwrap_or_else(|| panic!("{file:?} draws"));
+                assert_eq!(image.size(0), gpui::size(DevicePixels(28), DevicePixels(28)));
+                let bytes = image.as_bytes(0).unwrap_or_default();
+                let coloured =
+                    bytes.chunks(4).any(|p| p.iter().take(3).any(|c| Some(c) != p.first()));
+                assert!(coloured, "{file:?} is drawn in colour");
+            }
+            let dark = file_image(FileType::Toml, false, 16, cx);
+            let light = file_image(FileType::Toml, true, 16, cx);
+            let (Some(dark), Some(light)) = (dark, light) else { panic!("toml draws") };
+            assert_ne!(dark.as_bytes(0), light.as_bytes(0), "toml's light variant");
+        });
+    }
+
+    /// Each status a glyph marks has its own, and the three that carry colour are filled;
+    /// working's dots and the idle and waiting rings are drawn as marks of their own.
     #[test]
     fn each_status_has_its_own_mark() {
         let all = [Status::NeedsYou, Status::Done, Status::Failed, Status::Away];
@@ -1606,7 +1428,7 @@ mod tests {
         }
     }
 
-    /// A mark is an image named by its status at any zoom; an empty slot is nothing to a
+    /// A mark is an image named by its status; an empty slot is nothing to a
     /// screen reader, and takes the same room.
     #[gpui::test]
     fn a_status_mark_is_an_image_named_by_its_status(cx: &mut gpui::TestAppContext) {
@@ -1620,9 +1442,9 @@ mod tests {
                 let theme = Theme::default();
                 div()
                     .id("marks")
-                    .child(div().id("a").child(status_mark(&theme, Some(Status::NeedsYou), 1.0)))
-                    .child(div().id("b").child(status_mark(&theme, Some(Status::Working), 0.5)))
-                    .child(div().id("c").child(status_mark(&theme, None, 1.0)))
+                    .child(div().id("a").child(status_mark(&theme, Some(Status::NeedsYou))))
+                    .child(div().id("b").child(status_mark(&theme, Some(Status::Working))))
+                    .child(div().id("c").child(status_mark(&theme, None)))
             }
         }
         let (view, cx) = cx.add_window_view(|_, _| Marks);
@@ -1650,7 +1472,7 @@ mod tests {
         ) -> impl IntoElement {
             self.renders = self.renders.saturating_add(1);
             let theme = Theme::default();
-            div().children(self.shown.then(|| status_mark(&theme, Some(self.status), 1.0)))
+            div().children(self.shown.then(|| status_mark(&theme, Some(self.status))))
         }
     }
 

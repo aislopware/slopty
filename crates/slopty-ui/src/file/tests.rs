@@ -701,7 +701,7 @@ fn settle(cx: &mut VisualTestContext) {
 
 /// The body's size in points (the window less the tile's padding) and pixels per point.
 fn body(view: &Entity<FileView>, cx: &mut VisualTestContext) -> (f32, f32, f32) {
-    let pad = view.read_with(cx, |v, _| v.pad * v.zoom);
+    let pad = view.read_with(cx, |v, _| v.pad);
     cx.update(|window, _cx| {
         let size = window.viewport_size();
         let s = window.scale_factor();

@@ -1,13 +1,12 @@
-//! Chrome text: a label shaped once at its base size and painted at its view's zoom `k`.
+//! Chrome text: a label shaped once at its size and painted from that shaping.
 //!
-//! GPUI's text element shapes at the painted size and measures itself through taffy, so a
-//! label redrawn every frame (a tile's title, a pill, a badge) is shaped and laid out again
-//! each time. This element shapes the label at its base size once (a global cache swept per
-//! frame, like the terminal's words), sizes itself by arithmetic (`shaped width × k`) instead
-//! of a measure callback, and paints each glyph at `base × k` through `Window::paint_glyph`.
-//! At `k = 1` it paints what GPUI's text element paints: the same shaping, the same baseline,
-//! the same glyph origins. It fills its parent and ends in an ellipsis at either end where a
-//! title needs it.
+//! GPUI's text element shapes its text and measures itself through taffy, so a label redrawn
+//! every frame (a tile's title, a pill, a badge) is shaped and laid out again each time. This
+//! element shapes the label once (a global cache swept per frame, like the terminal's words),
+//! sizes itself by its shaped width instead of a measure callback, and paints each glyph
+//! through `Window::paint_glyph`. It paints what GPUI's text element paints: the same shaping,
+//! the same baseline, the same glyph origins. It fills its parent and ends in an ellipsis at either
+//! end where a title needs it.
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -19,23 +18,21 @@ use gpui::{
     ShapedRun, SharedString, Style, TextRun, Window, point, px, relative,
 };
 
-/// A label of the item chrome (title, pill, badge, heading), shaped at `base` and painted at
-/// `base × k`.
+/// A label of the item chrome (title, pill, badge, heading), shaped and painted at `base`.
 #[derive(Debug)]
 pub struct ChromeText {
     text: SharedString,
     base: Pixels,
-    k: f32,
     fill: bool,
     /// Where a filled label gives way: its start rather than its end.
     from_start: bool,
 }
 
 impl ChromeText {
-    /// `text` at `base × k` points, in the font and colour of the enclosing text style.
+    /// `text` at `base` points, in the font and colour of the enclosing text style.
     #[must_use]
-    pub fn new(text: impl Into<SharedString>, base: Pixels, k: f32) -> Self {
-        Self { text: text.into(), base, k, fill: false, from_start: false }
+    pub fn new(text: impl Into<SharedString>, base: Pixels) -> Self {
+        Self { text: text.into(), base, fill: false, from_start: false }
     }
 
     /// Take the parent's width and end the text with an ellipsis where it does not fit
@@ -143,54 +140,39 @@ const SUBPIXEL: Pixels = px(0.5);
 
 /// The cut that fits `text` and the ellipsis into `available`, or `None` when the whole text
 /// fits: over the glyph boundaries `xs`, the line's `width` and the `ellipsis` width, all in
-/// shaped (base) units; `k` scales them to the painted size.
-fn cut_at(
-    xs: &[Pixels],
-    width: Pixels,
-    ellipsis: Pixels,
-    k: f32,
-    available: Pixels,
-) -> Option<Cut> {
-    if width * k <= available + SUBPIXEL {
+/// shaped units.
+fn cut_at(xs: &[Pixels], width: Pixels, ellipsis: Pixels, available: Pixels) -> Option<Cut> {
+    if width <= available + SUBPIXEL {
         return None;
     }
-    let ellipsis = ellipsis * k;
-    let keep = xs.iter().rposition(|x| *x * k + ellipsis <= available).unwrap_or(0);
+    let keep = xs.iter().rposition(|x| *x + ellipsis <= available).unwrap_or(0);
     xs.get(keep).map(|at| Cut { keep, at: *at })
 }
 
 /// The cut that fits the end of `text` behind a leading ellipsis into `available`, or `None`
 /// when the whole text fits; [`cut_at`]'s numbers, cut from the other end.
-fn cut_start_at(
-    xs: &[Pixels],
-    width: Pixels,
-    ellipsis: Pixels,
-    k: f32,
-    available: Pixels,
-) -> Option<Cut> {
-    if width * k <= available + SUBPIXEL {
+fn cut_start_at(xs: &[Pixels], width: Pixels, ellipsis: Pixels, available: Pixels) -> Option<Cut> {
+    if width <= available + SUBPIXEL {
         return None;
     }
-    let ellipsis = ellipsis * k;
     let last = xs.len().saturating_sub(1);
-    let keep = xs.iter().position(|x| (width - *x) * k + ellipsis <= available).unwrap_or(last);
+    let keep = xs.iter().position(|x| width - *x + ellipsis <= available).unwrap_or(last);
     xs.get(keep).map(|at| Cut { keep, at: *at })
 }
 
 /// How the glyphs are painted: the size and the colour.
 #[derive(Clone, Copy)]
 struct Paint {
-    /// The painted font size (`base × k`).
+    /// The painted font size.
     size: Pixels,
     color: Hsla,
 }
 
-/// Where a line goes: its left edge, its baseline and the scale from shaped to painted units.
+/// Where a line goes: its left edge and its baseline.
 #[derive(Clone, Copy)]
 struct Place {
     x: Pixels,
     baseline: Pixels,
-    k: f32,
 }
 
 /// Paint one glyph at the painted size.
@@ -213,9 +195,9 @@ fn paint_glyph(
 }
 
 /// Where each of `layout`'s glyphs from `from` up to `keep` lands at `place`. The x advances by the
-/// shaped deltas times `k` and the y is the baseline plus the glyph's own vertical offset times `k`
-/// (a combining mark, a vertically positioned glyph), as GPUI's own line paint places them, so
-/// at `k = 1` every glyph lands where the text element would put it.
+/// shaped deltas and the y is the baseline plus the glyph's own vertical offset (a combining
+/// mark, a vertically positioned glyph), as GPUI's own line paint places them, so every glyph
+/// lands where the text element would put it.
 fn glyph_origins(
     layout: &LineLayout,
     place: Place,
@@ -230,10 +212,10 @@ fn glyph_origins(
         if keep.is_some_and(|keep| index >= keep) {
             break;
         }
-        x += (glyph.position.x - prev) * place.k;
+        x += glyph.position.x - prev;
         prev = glyph.position.x;
         if index >= from {
-            out.push((run, glyph, point(x, place.baseline + glyph.position.y * place.k)));
+            out.push((run, glyph, point(x, place.baseline + glyph.position.y)));
         }
     }
     out
@@ -282,10 +264,10 @@ impl Element for ChromeText {
         let style = window.text_style();
         let font = style.font();
         let color = style.color;
-        // The parent set its text size to `base × k`; the line height follows that, as it
-        // does for GPUI's text element.
+        // The parent set its text size to `base`; the line height follows that, as it does
+        // for GPUI's text element.
         let line_height = style.line_height_in_pixels(window.rem_size());
-        let font_size = self.base * self.k;
+        let font_size = self.base;
 
         if !cx.has_global::<ChromeCache>() {
             cx.set_global(ChromeCache::default());
@@ -321,7 +303,7 @@ impl Element for ChromeText {
         // The element's own width is always its text's: an auto-sized parent (a pill) grows
         // to fit it. `fill` caps it at the parent's width, so a title in a bar of definite
         // width is cut to an ellipsis where it does not fit.
-        let width: gpui::DefiniteLength = (shaped.line.width * self.k).into();
+        let width: gpui::DefiniteLength = shaped.line.width.into();
         let max_width: gpui::Length =
             if self.fill { relative(1.0).into() } else { gpui::Length::Auto };
         let layout_style = Style {
@@ -346,8 +328,7 @@ impl Element for ChromeText {
         let shaped = &request_layout.shaped;
         let (line, ellipsis) = (&shaped.line, shaped.ellipsis.width);
         let give = if self.from_start { cut_start_at } else { cut_at };
-        self.fill
-            .then(|| give(&boundaries(line), line.width, ellipsis, self.k, bounds.size.width))?
+        self.fill.then(|| give(&boundaries(line), line.width, ellipsis, bounds.size.width))?
     }
 
     fn paint(
@@ -360,34 +341,33 @@ impl Element for ChromeText {
         window: &mut Window,
         _cx: &mut App,
     ) {
-        let (k, size) = (self.k, request_layout.font_size);
-        let paint = Paint { size, color: request_layout.color };
+        let paint = Paint { size: request_layout.font_size, color: request_layout.color };
         let layout = request_layout.shaped.line.layout();
         // GPUI centres the line in its line height: the same padding, the same baseline.
-        let padding_top = (bounds.size.height - (layout.ascent + layout.descent) * k) / 2.0;
-        let baseline = bounds.origin.y + padding_top + layout.ascent * k;
+        let padding_top = (bounds.size.height - (layout.ascent + layout.descent)) / 2.0;
+        let baseline = bounds.origin.y + padding_top + layout.ascent;
         let cut = *prepaint;
         let shaped = Rc::clone(&request_layout.shaped);
         window.paint_layer(bounds, |window| {
             let origin = bounds.origin.x;
             match cut {
                 Some(cut) if self.from_start => {
-                    let dots = Place { x: origin, baseline, k };
+                    let dots = Place { x: origin, baseline };
                     paint_line(window, &shaped.ellipsis, dots, (0, None), paint);
-                    let x = origin + shaped.ellipsis.width * k - cut.at * k;
+                    let x = origin + shaped.ellipsis.width - cut.at;
                     paint_line(
                         window,
                         &shaped.line,
-                        Place { x, baseline, k },
+                        Place { x, baseline },
                         (cut.keep, None),
                         paint,
                     );
                 }
                 cut => {
-                    let place = Place { x: origin, baseline, k };
+                    let place = Place { x: origin, baseline };
                     paint_line(window, &shaped.line, place, (0, cut.map(|c| c.keep)), paint);
                     if let Some(cut) = cut {
-                        let place = Place { x: origin + cut.at * k, baseline, k };
+                        let place = Place { x: origin + cut.at, baseline };
                         paint_line(window, &shaped.ellipsis, place, (0, None), paint);
                     }
                 }
@@ -423,22 +403,18 @@ mod tests {
         }
     }
 
-    /// A glyph's vertical offset rides on the baseline, scaled with the zoom, at `k = 1` too.
+    /// A glyph's vertical offset rides on the baseline.
     #[test]
     fn a_glyphs_vertical_offset_is_added_to_the_baseline() {
         let layout = layout();
-        let at_rest = Place { x: px(100.0), baseline: px(50.0), k: 1.0 };
+        let at = Place { x: px(100.0), baseline: px(50.0) };
         let origins: Vec<Point<Pixels>> =
-            glyph_origins(&layout, at_rest, 0, None).into_iter().map(|(_, _, at)| at).collect();
+            glyph_origins(&layout, at, 0, None).into_iter().map(|(_, _, at)| at).collect();
         assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(110.0), px(52.0))]);
-        let zoomed = Place { x: px(100.0), baseline: px(50.0), k: 2.0 };
-        let origins: Vec<Point<Pixels>> =
-            glyph_origins(&layout, zoomed, 0, None).into_iter().map(|(_, _, at)| at).collect();
-        assert_eq!(origins, [point(px(100.0), px(50.0)), point(px(120.0), px(54.0))]);
-        assert_eq!(glyph_origins(&layout, zoomed, 0, Some(1)).len(), 1, "cut after one glyph");
+        assert_eq!(glyph_origins(&layout, at, 0, Some(1)).len(), 1, "cut after one glyph");
         let tail: Vec<Point<Pixels>> =
-            glyph_origins(&layout, zoomed, 1, None).into_iter().map(|(_, _, at)| at).collect();
-        assert_eq!(tail, [point(px(120.0), px(54.0))], "from the second glyph, where it was");
+            glyph_origins(&layout, at, 1, None).into_iter().map(|(_, _, at)| at).collect();
+        assert_eq!(tail, [point(px(110.0), px(52.0))], "from the second glyph, where it was");
     }
 
     /// "shell", shaped at 26.27 and handed a 26 pt box: the numbers the workspace actually had.
@@ -450,7 +426,7 @@ mod tests {
     fn a_label_a_fraction_of_a_pixel_over_its_box_is_kept_whole() {
         let (xs, width) = shell();
         assert!(
-            cut_at(&xs, width, px(8.0), 1.0, px(26.0)).is_none(),
+            cut_at(&xs, width, px(8.0), px(26.0)).is_none(),
             "a quarter of a pixel is rounding, not an overflow"
         );
     }
@@ -458,7 +434,7 @@ mod tests {
     #[test]
     fn a_label_wider_than_its_box_is_cut_where_the_ellipsis_still_fits() {
         let (xs, width) = shell();
-        let cut = cut_at(&xs, width, px(8.0), 1.0, px(20.0)).expect("six pixels over is a cut");
+        let cut = cut_at(&xs, width, px(8.0), px(20.0)).expect("six pixels over is a cut");
         assert_eq!(cut.at, px(12.0), "the last boundary leaving room for the ellipsis");
         assert_eq!(cut.keep, 2);
     }
@@ -468,18 +444,8 @@ mod tests {
     #[test]
     fn a_label_cut_from_the_start_keeps_its_end() {
         let (xs, width) = shell();
-        let cut = cut_start_at(&xs, width, px(8.0), 1.0, px(20.0)).expect("six pixels over");
+        let cut = cut_start_at(&xs, width, px(8.0), px(20.0)).expect("six pixels over");
         assert_eq!((cut.keep, cut.at), (3, px(18.0)));
-        assert!(cut_start_at(&xs, width, px(8.0), 1.0, px(26.0)).is_none(), "it fits");
-    }
-
-    /// Zoom scales the text but not the box, so the tolerance must not grow with it.
-    #[test]
-    fn the_subpixel_tolerance_does_not_scale_with_the_zoom() {
-        let (xs, width) = shell();
-        assert!(
-            cut_at(&xs, width, px(8.0), 2.0, px(26.0)).is_some(),
-            "at 2x the line is 52 wide in a 26 box: a real overflow"
-        );
+        assert!(cut_start_at(&xs, width, px(8.0), px(26.0)).is_none(), "it fits");
     }
 }

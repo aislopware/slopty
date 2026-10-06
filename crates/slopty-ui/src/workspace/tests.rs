@@ -1625,6 +1625,7 @@ mod bodies;
 mod context_menus;
 mod cwd;
 mod desktop;
+mod drag;
 mod faces;
 mod facts;
 mod focus;

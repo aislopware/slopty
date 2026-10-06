@@ -13,6 +13,7 @@ use gpui::accesskit::Role;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
@@ -107,12 +108,12 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_end()
-                .gap(self.z(theme.spacing.xs))
+                .gap(px(theme.spacing.xs))
                 .child(
                     div().min_w_0().flex_1().text_color(hsla(s.text)).child(
                         Textarea::new(&denying.field)
                             .with_size(Size::Small)
-                            .text_size(self.z(theme.typography.small()))
+                            .text_size(px(theme.typography.small()))
                             .aria_label("Why"),
                     ),
                 )

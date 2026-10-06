@@ -868,15 +868,9 @@ impl PaletteItem {
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
         let path = format!("{}/{relative}", root.trim_end_matches('/'));
-        let glyph = icons::file_symbol(&path);
+        let glyph = icons::file_mark(&path);
         let run = PaletteRun::OpenFile { path, line: None, found: true };
-        Self::line(
-            format!("Open {relative}"),
-            String::new(),
-            run,
-            Some(Mark::Symbol(glyph)),
-            Section::Files,
-        )
+        Self::line(format!("Open {relative}"), String::new(), run, Some(glyph), Section::Files)
     }
 
     /// A directory the worker found under `root`: a shell and a conversation in it.
@@ -896,13 +890,7 @@ impl PaletteItem {
     pub fn open_file(path: &str, line: Option<u32>) -> Self {
         let keys = line.map(|n| format!("line {n}")).unwrap_or_default();
         let run = PaletteRun::OpenFile { path: path.to_owned(), line, found: false };
-        Self::line(
-            format!("Open {path}"),
-            keys,
-            run,
-            Some(Mark::Symbol(icons::file_symbol(path))),
-            Section::Files,
-        )
+        Self::line(format!("Open {path}"), keys, run, Some(icons::file_mark(path)), Section::Files)
     }
 
     /// `Open folder <dir>` for a directory typed into the field: a folder tile there.
@@ -1127,8 +1115,7 @@ pub(crate) fn section_heading(
 ) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
     let above = if first { theme.spacing.sm } else { theme.spacing.lg };
-    let label =
-        crate::kit::typed(crate::kit::label(theme, text.clone()), theme.roles().section, 1.0);
+    let label = crate::kit::typed(crate::kit::label(theme, text.clone()), theme.roles().section);
     crate::kit::inset_x(label, theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
@@ -1155,28 +1142,17 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
 /// ([`icons::status_mark`]), never on the mark (`docs/decisions/brand.md`, "Each agent wears
 /// its owner's mark").
 ///
-/// Every mark is drawn at the row title's size in the whole slot ([`IconSize::Lead`]), at the
-/// regular weight beside a regular title ([`lead_slot_weighted`] for the others). An agent's
-/// mark names its agent to a screen reader.
+/// Every mark is drawn across the whole slot ([`IconSize::Lead`]) at the one stroke, whatever
+/// the title's weight, as Zed and `MonoCode` draw theirs. An agent's mark names its agent to a
+/// screen reader.
 pub(crate) fn lead_slot(
     theme: &Theme,
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    lead_slot_weighted(theme, mark, icons::Weight::Regular, ink)
-}
-
-/// [`lead_slot`] beside a title of another weight: a symbol at `weight`, the title's
-/// ([`icons::weight_beside`]), as a group's semibold name or a tile's medium title.
-pub(crate) fn lead_slot_weighted(
-    theme: &Theme,
-    mark: impl Into<Mark>,
-    weight: icons::Weight,
-    ink: gpui::Hsla,
-) -> gpui::Stateful<gpui::Div> {
     let mark = mark.into();
     let large = px(IconSize::Lead.slot(theme));
-    let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).weight(weight).slot(large, ink);
+    let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).slot(large, ink);
     div()
         .id("lead")
         .flex_none()
@@ -1980,7 +1956,7 @@ impl CommandPalette {
                 }
             }))
             .children(state.map(|status| {
-                icons::status_mark(theme, Some(status), 1.0)
+                icons::status_mark(theme, Some(status))
                     .debug_selector(move || format!("palette-status-{ix}"))
             }));
         if chosen { self.plate.mark(row, ix) } else { row }
@@ -2931,7 +2907,7 @@ mod tests {
         assert_eq!(worker.icon, Some(Mark::Symbol(Symbol::ServerRack)));
         assert_eq!(
             PaletteItem::open_file("/w/a.rs", None).icon,
-            Some(Mark::Symbol(icons::FileType::Code.symbol())),
+            Some(Mark::File(icons::FileType::Rust)),
             "a file line shows its kind"
         );
         assert_eq!(PaletteItem::open_file("/w/notes", None).icon, Some(Mark::Symbol(Symbol::Doc)));

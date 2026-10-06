@@ -1290,8 +1290,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   that chrome carries no decorative glyph. An icon is not decoration when it names a kind, a
   state or an action. No emoji, and still no glyph without a meaning.
 
-  *Icons.* SF Symbols, drawn by the OS at the size of the words beside them (amended
-  2026-10-05, "The chrome's icons are SF Symbols"; before, Hugeicons at 1.75). Sizes
+  *Icons.* Tabler's glyphs drawn by us on whole pixels, and Material's icons for files (amended
+  2026-10-07, "The chrome's icons are Tabler's, and a file's are Material's"; before, SF
+  Symbols, and before that Hugeicons at 1.75). Sizes
   come from the type scale: `Typography::icon()` is base + 1 beside text and `icon_large()` is
   base + 3 standing alone. An icon takes the colour of the text it sits beside. Zed's icon crate
   is GPL, so none of its files are used.
@@ -6974,7 +6975,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The chrome's icons are SF Symbols, drawn by the OS at device pixels** (2026-10-05,
   `.research/icons-2026-10-05.md` §4.3–4.4 and §5, steps 3 to 5 of its plan). Supersedes "One
-  icon set at one weight" above. (Amended 2026-10-06 by "State is a glyph": the empty and
+  icon set at one weight" above. (Superseded 2026-10-07 by "The chrome's icons are Tabler's,
+  and a file's are Material's": the platform's `symbols` and its prewarm are deleted.) (Amended 2026-10-06 by "State is a glyph": the empty and
   dashed rings are painted by `icons::Ring`, since SF's `circle.dashed` lost its gaps at 1x.
   Amended 2026-10-06 by "An icon takes its words' size, weight and tier": git is Octicons, and
   no symbol is drawn under 12.5 pt.) At 1x, the person's view, only 14 % of the Hugeicons ink
@@ -7042,7 +7044,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The kit's components draw the same symbols.** gpui-kit's `IconPainter` (our fork)
     hands an icon a component names by path to the app, which draws its symbol; a name with
     no symbol keeps the kit's SVG.
-  - Lints: `kit::tests::the_chrome_draws_symbols` (no SVG, `IconName` or `Glyph` in the
+  - Lints: `kit::tests::the_chrome_draws_symbols` (since 2026-10-07 `the_chrome_draws_its_own_icons`; no SVG, `IconName` or `Glyph` in the
     chrome but the app's mark) and `kit::tests::an_icon_takes_its_words_size` (a symbol is
     sized and painted only in `icons.rs`, from the type scale).
   - Tests: `slopty-platform/tests/symbols.rs`, including
@@ -7890,7 +7892,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `empty-workspace` and the wide-reading golden.
 
 - ✅ **An icon takes its words' size, weight and tier, and git is drawn in Octicons**
-  (2026-10-06, `.research/elegance-icons-2026-10-06.md` §3.1–3.4, build step 2). SF Symbols
+  (2026-10-06, `.research/elegance-icons-2026-10-06.md` §3.1–3.4, build step 2). (Superseded
+  2026-10-07 by "The chrome's icons are Tabler's, and a file's are Material's": the tier
+  stays, the weights, the 12.5 pt floor and the Octicons go.) SF Symbols
   was never the weak part; how it was configured was. Ninety of the chrome's icons were drawn
   at 12 pt beside 13 pt words, in `text_muted` beside titles in `text`, always at the regular
   weight, and the wide ones shrunk to fit a 14 pt slot. Together that cost an icon about a
@@ -8689,7 +8693,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       push the last rows out of view. Warp can do it because it draws each block as a view of
       its own, not as one grid. A selected block is its text selection, on the terminal's
       selection colour.
-  - **Still to land:** the palette with no scrim (lane A) and the icons.
+  - **Still to land:** the palette with no scrim (lane A). The icons landed after it, as their
+    own entry below.
   - Tests:
     - `slopty_theme::tests`: `the_work_lies_deepest_under_the_chrome`,
       `the_line_weighs_the_same_at_every_scale`, `the_ladder_is_monotonic`,
@@ -8699,7 +8704,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - `kit::tests`: `the_elevation_is_layers_of_the_shade`, `a_card_rests_on_its_edge`,
       `a_button_is_neutral_and_one_height`, `the_destructive_button_reads_in_every_state`,
       `a_floating_surface_is_rounded_lg`, `a_painted_line_is_one_point_in_whole_device_pixels`,
-      `a_pill_is_a_twenty_point_chip_at_its_zoom`;
+      `a_pill_is_a_twenty_point_chip`;
     - `kit::pane::tests`; `a11y::tests::the_keyboard_rings_a_stop_and_the_pointer_does_not`;
     - `workspace::tests::frame::the_window_is_one_opaque_ground`,
       `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`,
@@ -8708,3 +8713,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `workspace::tab_look::tests`, `kit::message::tests`,
       `conversation::thread::tests::face::the_composer_bleeds_in_a_narrow_pane`,
       `conversation::thread::tests::face::the_one_solid_stops_a_turn_or_sends_the_draft`.
+
+- ✅ **The chrome's icons are Tabler's, and a file's are Material's** (2026-10-07, the person's
+  pick in `.research/tabler-palette-2026-10-06.md`, the stroke and the ladder from
+  `.research/monocode-system-2026-10-06.md` §(f) and `.research/zed-warp-system-2026-10-06.md`
+  item 15). Supersedes "The chrome's icons are SF Symbols" and the Octicons of "An icon takes
+  its words' size, weight and tier". One icon family on every platform, in place of the OS's
+  catalogue and a second set for git.
+  - **Tabler, drawn by us on whole pixels.** Each glyph is a vendored Tabler file
+    (`assets/icons/tabler/`, v3.49.0, MIT, stroked at 1.75 in place of 2), read into an outline
+    and drawn on its 24 grid by `slopty_platform::outline::rasterize_on_grid`: the grid scaled
+    to a whole number of device pixels and the stroke rounded to whole pixels, so at 1x a row's
+    glyph has a one-pixel line where `svg()` lands a softer 1.02 px (`docs/MEASUREMENTS.md`,
+    "Tabler glyphs at 1x and 2x"). It is an alpha mask in the words' ink, as before. A filled
+    glyph (`-filled`) is filled. `icons::Symbol` keeps the names the chrome knew its glyphs by,
+    and the files' `NOTICE` pairs each name with its file.
+  - **An icon fills its slot.** The grid spans the slot: 14 pt inline (in bars, buttons and
+    beside a row's facts), 16 pt as a row's lead, `kit::NOTICE_MARK` in an empty state, the
+    ladder Zed and `MonoCode` use. A disclosure chevron is on the 12 pt grid in the inline slot,
+    and turns while it opens. There is one stroke whatever the words' weight, as in both
+    references. A slot's weight, the 12.5 pt floor and the fitting of wide symbols were SF's
+    and are gone.
+  - **Git is Tabler's git glyphs** (`git-branch`, `git-pull-request` and its draft and closed,
+    `git-merge`, `git-commit`, and `book-2` for a repository), with the states' inks as before.
+    The Octicons are deleted.
+  - **A file wears its type's Material icon in its own colours** (`assets/icons/files/`,
+    Material Icon Theme v5.39.0, MIT): in trees, tabs, the palette and tool rows, as `MonoCode`
+    shows them beside Tabler. A file is known by Material's own names first, then its
+    extension (`FileType::of`). Code in a language with no icon kept leads with the code glyph,
+    and an unknown type with the plain document, so an unknown type never reads as a known one.
+    GPUI's SVG renderer draws an icon at the device size it is painted at, so nothing is
+    resampled. Where Material draws an icon for a dark ground and keeps a variant for a light
+    one (bun, deno, toml), a light theme takes the variant. This reverses "no type is drawn in
+    colour": the reference that set the bar uses the colour to tell a file's kind at a glance.
+  - **Nothing is drawn ahead but cheaply.** A glyph draws in about 8 µs, so the first frame
+    draws its own. What it would pay is reading the files and Core Graphics' first context,
+    about 6 ms, so `icons::prewarm` does that on a thread while the window is made
+    (`docs/MEASUREMENTS.md`, "Tabler glyphs drawn on demand"). The SF list written down for the
+    next launch is gone with SF.
+  - **Deleted with it:** `slopty_platform::symbols` and its pool test, the objc2 features only
+    it used, `icons::{Weight, Scale, SymbolSize, SYMBOL_FLOOR, weight_beside, remember}`,
+    `palette::lead_slot_weighted`, the floor's lint `kit::tests::a_symbol_is_never_drawn_under_12_5`,
+    `assets/git/` and five Tabler files nothing drew. The kit's
+    and the icons' last zoom arguments went in the same change (`kit::{notice, notice_mark,
+    pill, pill_frame, typed, text_toggle, tick_box}`, `icons::{status_mark, notice_status}`,
+    `ChromeText::new` and `FindBar::zoom`), since the chrome no longer zooms.
+  - Lints: `icons::glyphs::tests::every_glyph_reads` (every glyph reads on its grid, filled or
+    stroked as its name says, and every file kept is drawn and listed),
+    `file_types::tests::every_file_icon_is_drawn_and_none_is_left_over`,
+    `kit::tests::the_chrome_draws_its_own_icons` (no SVG drawn outside the icon modules but the
+    app's mark) and `kit::tests::an_agents_mark_wears_no_colour_of_its_own`.
+  - Tests: `icons::glyphs::tests::a_glyph_is_drawn_on_whole_pixels`,
+    `icons::tests::{an_icon_fills_its_slot_on_the_ladder, a_file_leads_with_its_types_icon,
+    a_file_icon_is_drawn_at_its_size_in_colour}`, `icons::git::tests::each_git_glyph_is_tablers`,
+    `file_types::tests::a_file_is_known_by_its_name_then_its_extension`.

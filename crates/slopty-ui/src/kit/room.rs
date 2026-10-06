@@ -32,7 +32,7 @@ pub enum Room {
 }
 
 impl Room {
-    /// The room of a surface `width` points wide at zoom 1, for `theme`'s chrome size.
+    /// The room of a surface `width` points wide for `theme`'s chrome size.
     #[must_use]
     pub fn of(width: f32, theme: &Theme) -> Self {
         if width < Self::narrow_below(theme) {
@@ -44,13 +44,13 @@ impl Room {
         }
     }
 
-    /// The width, in points at zoom 1, under which a surface is [`Room::Narrow`].
+    /// The width, in points, under which a surface is [`Room::Narrow`].
     #[must_use]
     pub fn narrow_below(theme: &Theme) -> f32 {
         NARROW_BELOW * scale(theme)
     }
 
-    /// The width, in points at zoom 1, from which a surface is [`Room::Wide`].
+    /// The width, in points, from which a surface is [`Room::Wide`].
     #[must_use]
     pub fn wide_from(theme: &Theme) -> f32 {
         WIDE_FROM * scale(theme)

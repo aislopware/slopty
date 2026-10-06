@@ -7,7 +7,7 @@
 use gpui::accesskit::Role;
 use gpui::{
     AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::AgentScreen;
 
@@ -16,7 +16,7 @@ use crate::colors::hsla;
 use crate::icons::{IconSize, Symbol};
 use crate::kit;
 
-/// The widest a screen's name stands in the toolbar, in points at zoom 1.
+/// The widest a screen's name stands in the toolbar, in points.
 const WORDS_MAX: f32 = 160.0;
 
 /// The words a screen goes by in the toolbar: the window's title alone (the device, the page),
@@ -67,9 +67,9 @@ impl ThreadView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.xs))
-            .rounded(self.z(theme.radii.xs))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.xs))
+            .rounded(px(theme.radii.xs))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
             .active(move |el| el.bg(hsla(s.pressed)))
@@ -80,7 +80,7 @@ impl ThreadView {
                     IconSize::Inline,
                     hsla(s.text_secondary),
                 )
-                .size(self.z(theme.typography.icon())),
+                .size(px(theme.typography.icon())),
             )
             .on_click(cx.listener(|this, _ev, _w, cx| this.watch_screen(cx)));
         let chip = if self.room().is_narrow() {
@@ -90,7 +90,7 @@ impl ThreadView {
                 cx.new(|_| kit::Hint::new(label.clone(), "", theme)).into()
             })
         } else {
-            chip.child(div().min_w_0().max_w(self.z(WORDS_MAX)).child(kit::fit_label(
+            chip.child(div().min_w_0().max_w(px(WORDS_MAX)).child(kit::fit_label(
                 "thread-screen-words",
                 words,
                 theme,

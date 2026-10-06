@@ -58,7 +58,7 @@ fn message_group(id: &ItemId) -> SharedString {
 /// How long a copy button says it copied.
 const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
-/// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
+/// The widest the reading column's text runs, in points (`design.md` §3).
 pub const COLUMN: f32 = 736.0;
 
 /// The most of the window's height what else waits in the tray (the plan, the edits, the
@@ -208,7 +208,6 @@ pub struct ThreadView {
     theme: Theme,
     /// The theme, shared with what outlives a frame (a code block's corner).
     shared: Arc<Theme>,
-    zoom: f32,
     /// The tile's width at rest, in points: whether a diff splits.
     width: f32,
     /// The view draws its own header; off where the tile's says the same.
@@ -435,7 +434,6 @@ impl ThreadView {
             runs: 1,
             heroed: false,
             docks: None,
-            zoom: 1.0,
             width: 0.0,
             header: true,
             rows: Rc::from([]),
@@ -585,18 +583,16 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// Draw at the chrome's zoom `zoom`, in a tile `width` points wide at rest.
-    pub fn set_layout(&mut self, zoom: f32, width: f32, cx: &mut Context<Self>) {
-        let zoomed = (self.zoom - zoom).abs() > f32::EPSILON;
+    /// Draw in a tile `width` points wide at rest.
+    pub fn set_layout(&mut self, width: f32, cx: &mut Context<Self>) {
         let resized = (self.width - width).abs() > f32::EPSILON;
-        self.zoom = zoom;
         self.width = width;
-        if zoomed || resized {
+        if resized {
             self.list.remeasure();
             cx.notify();
         }
         if let Some(view) = self.aside.as_ref().and_then(aside::Aside::view) {
-            view.update(cx, |v, cx| v.set_layout(zoom, width, cx));
+            view.update(cx, |v, cx| v.set_layout(width, cx));
         }
     }
 
@@ -643,10 +639,6 @@ impl ThreadView {
         {
             self.focus(window, cx);
         }
-    }
-
-    fn z(&self, v: f32) -> gpui::Pixels {
-        px(v * self.zoom)
     }
 
     fn mono(&self) -> SharedString {
@@ -1116,20 +1108,20 @@ impl ThreadView {
 
     /// A row's disclosure chevron under `id`, turning a quarter as the row opens or folds.
     fn chevron(&self, id: impl Into<SharedString>, open: bool) -> AnyElement {
-        let side = self.z(self.theme.typography.icon());
+        let side = px(self.theme.typography.icon());
         let tone = hsla(self.theme.surfaces.text_muted);
         kit::Disclosure::new(id, open, &self.theme, side, tone).into_any_element()
     }
 
     fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
-            .size(self.z(self.theme.typography.icon()))
+            .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
 
     /// The square every mark sits in.
-    fn slot(&self) -> Div {
-        div().flex_none().size(self.z(TOOL_ROW)).flex().items_center().justify_center()
+    fn slot() -> Div {
+        div().flex_none().size(px(TOOL_ROW)).flex().items_center().justify_center()
     }
 
     /// The mark of what waits on the person: [`Status::NeedsYou`] in its amber fill, the mark
@@ -1139,7 +1131,7 @@ impl ThreadView {
         crate::icons::status_icon(
             &self.theme,
             Status::NeedsYou,
-            self.z(self.theme.typography.icon()),
+            px(self.theme.typography.icon()),
             hsla(Status::NeedsYou.ink(&self.theme)),
         )
     }
@@ -1149,12 +1141,12 @@ impl ThreadView {
         crate::icons::status_icon(
             &self.theme,
             status,
-            self.z(self.theme.typography.icon()),
+            px(self.theme.typography.icon()),
             hsla(self.theme.surfaces.text_muted),
         )
     }
 
-    /// A text button at the chrome's zoom, for words that come from the agent.
+    /// A text button, for words that come from the agent.
     fn button(
         &self,
         id: impl Into<SharedString>,
@@ -1185,12 +1177,12 @@ impl ThreadView {
             .flex()
             .items_center()
             .justify_center()
-            .min_h(self.z(theme.density.control))
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.xs))
+            .min_h(px(theme.density.control))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.xs))
             .border(kit::HAIR)
-            .rounded(self.z(theme.radii.sm))
-            .text_size(self.z(theme.typography.small()))
+            .rounded(px(theme.radii.sm))
+            .text_size(px(theme.typography.small()))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer();
         // The kinds as `kit::button` draws them; the hairline is the solid's own or none, so a
@@ -1229,17 +1221,17 @@ impl ThreadView {
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .size(self.z(kit::icon_button_side(&self.theme)))
+                .size(px(kit::icon_button_side(&self.theme)))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(self.z(self.theme.radii.sm))
+                .rounded(px(self.theme.radii.sm))
                 .cursor_pointer()
                 .text_color(hsla(s.text_muted))
                 .hover(move |el| el.text_color(hsla(s.text)))
                 .child(
                     crate::icons::icon(&self.theme, icon, IconSize::Inline, hsla(s.text_muted))
-                        .size(self.z(self.theme.typography.icon())),
+                        .size(px(self.theme.typography.icon())),
                 ),
             s.focus,
         )
@@ -1249,39 +1241,37 @@ impl ThreadView {
     /// prose size at the strong weight, paragraphs 10 apart, code in the mono face.
     fn prose_style(&self) -> TextViewStyle {
         let theme = &self.theme;
-        let z = self.zoom;
         let base = theme.typography.prose();
         let mono = self.mono();
         let mut style = crate::markdown::style(theme, &mono);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
-        style.heading_base_font_size = px(base * z);
+        style.heading_base_font_size = px(base);
         style.heading_font_size = Some(Arc::new(move |level: u8, _base| {
             let size = match level {
                 1 => base + HEADINGS[0],
                 2 => base + HEADINGS[1],
                 _ => base,
             };
-            px(size * z)
+            px(size)
         }));
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
-            .text_size(px(theme.typography.small() * z))
+            .text_size(px(theme.typography.small()))
             .bg(hsla(theme.surfaces.card))
-            .rounded(px(theme.radii.sm * z))
-            .px(px(theme.spacing.md * z))
-            .py(px(theme.spacing.sm * z));
+            .rounded(px(theme.radii.sm))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.sm));
         style
     }
 
     /// `text` as prose; `streams` lifts the words it gains in as they arrive.
     fn markdown(&self, id: String, text: &str, streams: bool) -> AnyElement {
         let theme = Arc::clone(&self.shared);
-        let zoom = self.zoom;
         TextView::markdown(ElementId::Name(id.into()), SharedString::from(text.to_owned()))
             .style(self.prose_style())
             .selectable(true)
             .motion(if streams { kit::stream_motion() } else { TextViewMotion::default() })
-            .code_block_actions(move |block, _window, _cx| code_actions(&theme, zoom, block))
+            .code_block_actions(move |block, _window, _cx| code_actions(&theme, block))
             .into_any_element()
     }
 
@@ -1306,7 +1296,7 @@ impl ThreadView {
         div()
             .id(ElementId::Name(format!("whole-{}", item.0).into()))
             .role(Role::Button)
-            .text_size(self.z(self.theme.typography.small()))
+            .text_size(px(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text)))
@@ -1354,11 +1344,7 @@ impl ThreadView {
     fn column(&self, child: impl IntoElement) -> Div {
         let gutter = self.gutter();
         div().w_full().flex().justify_center().child(
-            div()
-                .w_full()
-                .max_w(self.z(2.0_f32.mul_add(gutter, COLUMN)))
-                .px(self.z(gutter))
-                .child(child),
+            div().w_full().max_w(px(2.0_f32.mul_add(gutter, COLUMN))).px(px(gutter)).child(child),
         )
     }
 
@@ -1416,14 +1402,14 @@ impl ThreadView {
             let wash = crate::colors::hsla_alpha(self.theme.surfaces.accent_fill, alpha::FAINT);
             div()
                 .debug_selector(|| "thread-found".to_owned())
-                .rounded(self.z(self.theme.radii.sm))
+                .rounded(px(self.theme.radii.sm))
                 .bg(wash)
                 .child(inner)
                 .into_any_element()
         } else {
             inner
         };
-        self.column(inner).pt(self.z(if first { spacing.lg } else { gap })).into_any_element()
+        self.column(inner).pt(px(if first { spacing.lg } else { gap })).into_any_element()
     }
 
     fn user_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
@@ -1444,7 +1430,7 @@ impl ThreadView {
                 .id(ElementId::Name(format!("more-{}", id.0).into()))
                 .role(Role::Button)
                 .aria_label("Show more")
-                .text_size(self.z(self.theme.typography.small()))
+                .text_size(px(self.theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .cursor_pointer()
                 .hover(move |el| el.text_color(hsla(s.text)))
@@ -1457,7 +1443,7 @@ impl ThreadView {
         let actions = div()
             .flex()
             .items_center()
-            .gap(self.z(self.theme.spacing.xs))
+            .gap(px(self.theme.spacing.xs))
             .children(branch)
             .child(actions);
         // Under a pointer the actions wait at the bubble's foot, beside it, so a line kept for
@@ -1520,11 +1506,11 @@ impl ThreadView {
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .size(self.z(theme.typography.icon_large()))
+                .size(px(theme.typography.icon_large()))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(self.z(theme.radii.xs))
+                .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .map(kit::eased)
                 .hover(move |el| el.bg(hsla(s.hover)))
@@ -1544,8 +1530,8 @@ impl ThreadView {
             .flex()
             .items_center()
             .when(end, gpui::Styled::justify_end)
-            .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .when(!touch && !copied, |el| {
                 el.invisible().group_hover(message_group(id), gpui::Styled::visible)
@@ -1584,11 +1570,11 @@ impl ThreadView {
         let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
         let words = div()
             .max_w(relative(BUBBLE))
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.md))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.sm))
+            .rounded(px(theme.radii.md))
             .map(|el| kit::inset(el, theme))
-            .text_size(self.z(theme.typography.prose()))
+            .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
             .whitespace_normal()
@@ -1600,7 +1586,7 @@ impl ThreadView {
                 .flex()
                 .justify_end()
                 .items_end()
-                .gap(self.z(theme.spacing.xs))
+                .gap(px(theme.spacing.xs))
                 .child(div().flex_none().child(beside))
                 .child(words)
                 .into_any_element(),
@@ -1615,7 +1601,7 @@ impl ThreadView {
             .flex()
             .flex_col()
             .items_end()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .children(pictures)
             .child(line)
             .children(around.under)
@@ -1645,8 +1631,8 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.prose()))
+            .gap(px(theme.spacing.xs))
+            .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .group(message_group(id))
@@ -1684,15 +1670,15 @@ impl ThreadView {
                     .aria_expanded(open)
                     .flex()
                     .items_center()
-                    .gap(self.z(self.theme.spacing.xs))
-                    .min_h(self.z(TOOL_ROW))
-                    .text_size(self.z(self.theme.typography.small()))
+                    .gap(px(self.theme.spacing.xs))
+                    .min_h(px(TOOL_ROW))
+                    .text_size(px(self.theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text_secondary)))
                     // Its words say what it is: the slot holds nothing, so the words keep the
                     // calls' edge.
-                    .child(self.slot())
+                    .child(Self::slot())
                     .child(div().flex_none().debug_selector(move || head_id).child(head))
                     .when(!open, |el| {
                         el.child(
@@ -1716,12 +1702,12 @@ impl ThreadView {
                 // thought reads as the same kind of aside.
                 el.child(
                     div()
-                        .ml(self.z(TOOL_ROW / 2.0))
-                        .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
-                        .py(self.z(theme.spacing.xxs))
+                        .ml(px(TOOL_ROW / 2.0))
+                        .pl(px(TOOL_ROW / 2.0 + theme.spacing.xs))
+                        .py(px(theme.spacing.xxs))
                         .border_l(kit::HAIR)
                         .border_color(hsla(s.stroke))
-                        .text_size(self.z(theme.typography.small()))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()
                         .child(
@@ -1812,13 +1798,13 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(self.slot().child(self.chevron(format!("fold-{}-chevron", turn.0), open)))
+            .child(Self::slot().child(self.chevron(format!("fold-{}-chevron", turn.0), open)))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -1833,14 +1819,14 @@ impl ThreadView {
                 div()
                     .debug_selector(move || format!("turn-model-{}", turn.0))
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(m))
             }))
             .children(when.map(|w| {
                 kit::tabular(div())
                     .id(ElementId::Name(format!("turn-when-{}", turn.0).into()))
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(w))
                     .when_some(spent, |el, spent| {
                         kit::hint_timing(el).tooltip(move |_window, cx| {
@@ -1879,13 +1865,15 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(self.slot().child(self.chevron(format!("fold-{}-{part}-chevron", turn.0), open)))
+            .child(
+                Self::slot().child(self.chevron(format!("fold-{}-{part}-chevron", turn.0), open)),
+            )
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -1919,13 +1907,13 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(self.slot().child(self.chevron(format!("group-{}-chevron", first.0), open)))
+            .child(Self::slot().child(self.chevron(format!("group-{}-chevron", first.0), open)))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -1969,11 +1957,11 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(self.theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(self.theme.typography.small()))
+            .gap(px(self.theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .text_size(px(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(if asks && !stopping {
+            .child(Self::slot().child(if asks && !stopping {
                 self.needs_you()
             } else {
                 self.spinner(stopping)
@@ -1999,7 +1987,7 @@ impl ThreadView {
             .children(elapsed.map(|e| {
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(self.theme.typography.small()))
+                    .text_size(px(self.theme.typography.small()))
                     .child(SharedString::from(e))
             }))
             .into_any_element()
@@ -2019,8 +2007,8 @@ impl ThreadView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(self.z(self.theme.spacing.sm))
-                    .text_size(self.z(self.theme.typography.small()))
+                    .gap(px(self.theme.spacing.sm))
+                    .text_size(px(self.theme.typography.small()))
                     .child(div().text_color(hsla(s.error)).child(SharedString::from(why)))
                     .child(
                         self.button(format!("retry-{intent}"), "Try again", ButtonKind::Ghost)
@@ -2037,7 +2025,7 @@ impl ThreadView {
                     .into_any_element()
             }
             None => div()
-                .text_size(self.z(self.theme.typography.small()))
+                .text_size(px(self.theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(if hub.threads().linked() {
                     "Sending"
@@ -2085,7 +2073,6 @@ impl ThreadView {
             .and_then(|p| p.wait.as_ref())
             .map(wait_words);
         let used = state.and_then(|st| context_used(&st.meters)).filter(|u| *u >= RING_FROM);
-        let k = self.zoom;
         Some(
             div()
                 .id("thread-header")
@@ -2096,9 +2083,9 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.sm))
-                .px(self.z(theme.spacing.lg))
-                .min_h(self.z(kit::Row::Two.height(theme)))
+                .gap(px(theme.spacing.sm))
+                .px(px(theme.spacing.lg))
+                .min_h(px(kit::Row::Two.height(theme)))
                 .child(
                     div()
                         .min_w_0()
@@ -2111,7 +2098,7 @@ impl ThreadView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_size(self.z(theme.typography.small()))
+                                .text_size(px(theme.typography.small()))
                                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                                 .text_color(hsla(s.text))
                                 .child(SharedString::from(title)),
@@ -2122,7 +2109,7 @@ impl ThreadView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_size(self.z(theme.typography.small()))
+                                .text_size(px(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(w))
                         })),
@@ -2132,14 +2119,14 @@ impl ThreadView {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(self.z(theme.spacing.xxs))
-                        .text_size(self.z(theme.typography.small()))
+                        .gap(px(theme.spacing.xxs))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(st.word(theme)))
-                        .child(crate::icons::status_mark(theme, Some(st), k))
+                        .child(crate::icons::status_mark(theme, Some(st)))
                         .child(st.label())
                 }))
                 .child(
-                    kit::pill(theme, s.text_secondary, k)
+                    kit::pill(theme, s.text_secondary)
                         .child(SharedString::from(hub.worker().to_owned())),
                 )
                 .children(used.map(|u| {
@@ -2147,14 +2134,14 @@ impl ThreadView {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(self.z(theme.spacing.xxs))
-                        .text_size(self.z(theme.typography.small()))
+                        .gap(px(theme.spacing.xxs))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(context_ring(
                             theme,
                             "thread-header-ring",
                             u,
-                            theme.typography.small() * k,
+                            theme.typography.small(),
                         ))
                         .child(SharedString::from(composer::share(u)))
                 }))
@@ -2171,7 +2158,6 @@ impl ThreadView {
     fn empty_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let hub = self.hub.read(cx);
-        let k = self.zoom;
         let notice = match self.state(cx) {
             Some(state) if let Some(draft) = &self.draft => {
                 let draft = draft.read(cx);
@@ -2183,11 +2169,10 @@ impl ThreadView {
                     theme,
                     Status::Working,
                     hsla(theme.surfaces.text_secondary),
-                    k,
                 );
                 let place = draft.place().said();
                 let said = format!("Starting {agent} {place}\u{2026}");
-                kit::notice(theme, k, mark, format!("Starting {agent}"), Some(place.into()))
+                kit::notice(theme, mark, format!("Starting {agent}"), Some(place.into()))
                     .id("thread-starting")
                     .debug_selector(|| "thread-starting".to_owned())
                     .role(Role::Status)
@@ -2198,12 +2183,10 @@ impl ThreadView {
                 SharedString::from(format!("thread-reading-{}", self.thread.as_uuid())),
                 kit::notice(
                     theme,
-                    k,
                     crate::icons::notice_status(
                         theme,
                         Status::Running,
                         hsla(theme.surfaces.text_muted),
-                        k,
                     ),
                     READING,
                     None,
@@ -2276,12 +2259,12 @@ impl ThreadView {
                     .role(Role::Heading)
                     .aria_label(SharedString::from(words.clone()))
                     .w_full()
-                    .max_w(self.z(2.0_f32.mul_add(gutter, COLUMN)))
-                    .px(self.z(gutter))
-                    .pb(self.z(theme.spacing.lg))
+                    .max_w(px(2.0_f32.mul_add(gutter, COLUMN)))
+                    .px(px(gutter))
+                    .pb(px(theme.spacing.lg))
                     .text_center()
-                    .text_size(self.z(role.size))
-                    .line_height(self.z(role.line))
+                    .text_size(px(role.size))
+                    .line_height(px(role.line))
                     .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
                     .text_color(hsla(theme.surfaces.text_secondary))
                     .child(SharedString::from(words)),
@@ -2297,7 +2280,7 @@ impl ThreadView {
         // No rule under the header or the trail over it: the turns fade where they slide under
         // the top edge, and only while some lie above it, as macOS 26's soft scroll edge does.
         let fade = gpui::EdgeFade::new(gpui::Edges {
-            top: self.z(self.theme.spacing.lg),
+            top: px(self.theme.spacing.lg),
             ..gpui::Edges::default()
         });
         region
@@ -2458,7 +2441,7 @@ impl Render for ThreadView {
             .overflow_hidden()
             .bg(hsla(theme.content()))
             .font_family(theme.typography.ui_family.clone())
-            .text_size(self.z(theme.typography.ui_size))
+            .text_size(px(theme.typography.ui_size))
             .text_color(hsla(s.text))
             .children(header)
             .children(trail)
@@ -2518,12 +2501,12 @@ impl ThreadView {
             .child(
                 div()
                     .w_full()
-                    .max_w(self.z(2.0_f32.mul_add(gutter, COLUMN)))
-                    .px(self.z(gutter))
+                    .max_w(px(2.0_f32.mul_add(gutter, COLUMN)))
+                    .px(px(gutter))
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .when(!bleeds, |el| el.pb(self.z(spacing.md)))
+                    .when(!bleeds, |el| el.pb(px(spacing.md)))
                     .children(bar)
                     .children(boxed),
             )
@@ -2737,17 +2720,17 @@ fn tokens(n: u64) -> String {
 }
 
 /// A fenced block's corner: its language and a copy, at the meta size.
-fn code_actions(theme: &Theme, zoom: f32, block: &gpui_kit::base::text::CodeBlock) -> AnyElement {
+fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyElement {
     let s = theme.surfaces;
     let code = block.code().to_string();
     let lang = block.lang().filter(|l| !l.is_empty());
     div()
         .flex()
         .items_center()
-        .gap(px(theme.spacing.xs * zoom))
-        .px(px(theme.spacing.xs * zoom))
+        .gap(px(theme.spacing.xs))
+        .px(px(theme.spacing.xs))
         .font_family(theme.typography.ui_family.clone())
-        .text_size(px(theme.typography.small() * zoom))
+        .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_muted))
         .children(lang.map(|lang| div().child(lang)))
         .child(
@@ -2755,11 +2738,11 @@ fn code_actions(theme: &Theme, zoom: f32, block: &gpui_kit::base::text::CodeBloc
                 .id("copy")
                 .role(Role::Button)
                 .aria_label("Copy code")
-                .size(px(theme.typography.icon_large() * zoom))
+                .size(px(theme.typography.icon_large()))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(theme.radii.xs * zoom))
+                .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
@@ -2769,7 +2752,7 @@ fn code_actions(theme: &Theme, zoom: f32, block: &gpui_kit::base::text::CodeBloc
                         IconSize::Inline,
                         hsla(s.text_muted),
                     )
-                    .size(px(theme.typography.icon() * zoom)),
+                    .size(px(theme.typography.icon())),
                 )
                 .on_click(move |_ev, _window, cx| {
                     cx.stop_propagation();

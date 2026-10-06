@@ -5,7 +5,7 @@
 //! A mark is drawn by us, not by the OS: the spark's and the Blossom's published outlines
 //! (`assets/agents/`, credited in its `NOTICE`) through Core Graphics
 //! ([`slopty_platform::outline`]), pi's cells straight onto whole device pixels. Each becomes
-//! the same alpha mask an SF Symbol is, painted in the ink of the words beside it and never in
+//! the same alpha mask a chrome glyph is, painted in the ink of the words beside it and never in
 //! a brand's colour.
 //!
 //! A mark is sized by its ink, not its box. A radial mark's ink box takes its slot less
@@ -18,8 +18,7 @@ use std::sync::{Arc, LazyLock};
 
 use gpui::SharedString;
 use parking_lot::RwLock;
-use slopty_platform::outline::{Outline, rasterize_outline};
-use slopty_platform::symbols::{MaskRect, SymbolMask};
+use slopty_platform::outline::{Mask, Outline, rasterize_outline};
 use slopty_proto::thread::AgentId;
 
 use super::Kept;
@@ -139,7 +138,7 @@ pub(super) fn pixels(mark: AgentMark, ink: f32, device: f32) -> u32 {
 }
 
 /// `mark` with a radial ink box `ink` points across, for a display of `device` pixels to the
-/// point, and its atlas key; `None` for the neutral glyph, which is a symbol.
+/// point, and its atlas key; `None` for the neutral glyph, which is a glyph.
 pub(super) fn mask(mark: AgentMark, ink: f32, device: f32) -> Kept {
     let pixels = pixels(mark, ink, device);
     if mark == AgentMark::Neutral || pixels == 0 {
@@ -162,7 +161,7 @@ pub(super) fn mask(mark: AgentMark, ink: f32, device: f32) -> Kept {
 }
 
 /// pi's mark on cells `cell` device pixels square: every pixel wholly ink or wholly clear.
-fn pi(cell: u32) -> Option<SymbolMask> {
+fn pi(cell: u32) -> Option<Mask> {
     let cell = usize::try_from(cell).ok()?;
     let side = cell.checked_mul(PI_GRID)?;
     let inked = |x: usize, y: usize| {
@@ -172,15 +171,7 @@ fn pi(cell: u32) -> Option<SymbolMask> {
         .flat_map(|y| (0..side).map(move |x| if inked(x, y) { u8::MAX } else { 0 }))
         .collect();
     let width = u32::try_from(side).ok()?;
-    #[expect(clippy::cast_precision_loss, reason = "a mark is a few dozen pixels")]
-    let edge = side as f32;
-    Some(SymbolMask {
-        width,
-        height: width,
-        alpha,
-        alignment: MaskRect { x: 0.0, y: 0.0, width: edge, height: edge },
-        baseline: edge,
-    })
+    Some(Mask { width, height: width, alpha })
 }
 
 #[cfg(test)]
@@ -222,7 +213,10 @@ mod tests {
                 assert!(m.alpha.iter().any(|a| *a > 0), "{mark:?} at {device}x has ink");
             }
         }
-        assert!(mask(AgentMark::Neutral, 14.0, 1.0).is_none(), "the neutral glyph is a symbol");
+        assert!(
+            mask(AgentMark::Neutral, 14.0, 1.0).is_none(),
+            "the neutral glyph is a chrome glyph"
+        );
     }
 
     /// The study's sizes at 1x and 2x: spark and Blossom 14 px in a row's 16 pt slot, pi 12 px
@@ -241,7 +235,7 @@ mod tests {
     }
 
     /// The centroid of `m`'s ink, from its top left, in pixels.
-    fn centroid(m: &SymbolMask) -> (f64, f64) {
+    fn centroid(m: &Mask) -> (f64, f64) {
         let width = usize::try_from(m.width).unwrap();
         let (mut sum, mut x, mut y) = (0.0, 0.0, 0.0);
         for (row, line) in m.alpha.chunks(width).enumerate() {
@@ -302,12 +296,12 @@ mod tests {
 
     /// The marks are crisp at 1x through Core Graphics: crisp (Σα²/Σα, 1 when every inked
     /// pixel is whole) and solid (the share of inked pixels at α ≥ 0.9) at the sizes they are
-    /// drawn at, printed for `docs/MEASUREMENTS.md`. The spark at its row size is as crisp as
-    /// the SF Symbols beside it (about 0.73 at 13 pt), the Blossom's thin inner strokes a little
-    /// softer, and pi whole.
+    /// drawn at, printed for `docs/MEASUREMENTS.md`. The spark at its row size is about as crisp
+    /// as the Tabler glyphs beside it (0.73 to 0.77 at 14 px), the Blossom's thin inner strokes
+    /// a little softer, and pi whole.
     #[test]
     fn the_marks_are_crisp_at_1x() {
-        let measure = |m: &SymbolMask| {
+        let measure = |m: &Mask| {
             let (mut a2, mut a1, mut inked, mut solid) = (0.0, 0.0, 0_u32, 0_u32);
             for a in &m.alpha {
                 let a = f64::from(*a) / 255.0;

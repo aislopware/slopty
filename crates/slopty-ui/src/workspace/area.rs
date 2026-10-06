@@ -3,10 +3,13 @@
 //! body), and the pointer that carries a tile by its header or its tab. With no tab on show,
 //! the start page.
 //!
-//! A header or a tab pressed and moved past [`DRAG_SLOP`] carries its tile. Over a pane, within
-//! a fifth of the pane's shorter side from an edge, it splits there; elsewhere it joins the
-//! pane's tabs ([`slopty_client::layout::Tiling::drop_target`]). The wash shows the pane the
-//! tile would become.
+//! A pane's header or tab, a navigator's tile row, or a title tab pressed and moved past
+//! [`DRAG_SLOP`] carries what it stands for ([`Carried`]). A tile over a pane, within a fifth of
+//! the pane's shorter side from an edge, splits it there; elsewhere it joins the pane's tabs
+//! ([`slopty_client::layout::Tiling::drop_target`]), and the wash shows the pane the tile would
+//! become. Over the title strip, a tile becomes a tab of its own and a title tab moves, where a
+//! mark between two tabs says. Over a project's row in the navigator, either goes to that
+//! project, the row washed ([`Landing`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +21,8 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, SharedString,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, canvas, div, px,
 };
-use slopty_client::layout::{Drop, Laid, PaneId, Rect, Sash, TileRef, WorkerKey};
+use slopty_client::layout::tiling::TabId;
+use slopty_client::layout::{Drop, GroupKey, Laid, PaneId, Rect, Sash, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::ItemKind;
 use slopty_proto::thread::{AgentId, ThreadId};
@@ -33,10 +37,78 @@ use crate::kit;
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
 
-/// The pointer in progress over the area: a header or a tab pressed, a move once it travels
-/// [`DRAG_SLOP`], and where it would land.
+/// The pointer in progress: something pressed, a move once it travels [`DRAG_SLOP`], and
+/// where it would land.
 pub(super) enum Drag {
-    Move { tile: TileRef, grab: Point<Pixels>, moving: bool, target: Option<Drop> },
+    Move { carried: Carried, grab: Point<Pixels>, moving: bool, target: Option<Landing> },
+}
+
+/// What a drag carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Carried {
+    /// A tile: from its pane's header or tab, or its navigator row.
+    Tile(TileRef),
+    /// A title tab, its layout whole.
+    Tab(TabId),
+}
+
+/// Where what a drag carries would land.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum Landing {
+    /// On a pane of the tab on show: a tile alone lands there.
+    Pane(Drop),
+    /// On the title strip, before the tab at this index (past the last, after it).
+    Strip(usize),
+    /// On a project's row in the navigator.
+    Project(GroupKey),
+}
+
+/// Where the chrome outside the area takes a drop, as it was last drawn, in window
+/// coordinates: the title strip and its tabs, and the navigator's project rows. Each surface
+/// writes its own as it lays out ([`spot`]).
+#[derive(Default)]
+pub(super) struct DropSpots {
+    /// The title strip.
+    pub strip: Cell<Option<Bounds<Pixels>>>,
+    /// Each title tab.
+    pub tabs: RefCell<Vec<(TabId, Bounds<Pixels>)>>,
+    /// Each project row the navigator drew.
+    pub projects: RefCell<Vec<(GroupKey, Bounds<Pixels>)>>,
+}
+
+impl DropSpots {
+    /// Title tab `id` lies at `bounds`: in place of where it lay, should it be laid out twice.
+    pub fn put_tab(&self, id: TabId, bounds: Bounds<Pixels>) {
+        let mut tabs = self.tabs.borrow_mut();
+        tabs.retain(|(t, _)| *t != id);
+        tabs.push((id, bounds));
+    }
+
+    /// The row of project `home` lies at `bounds`.
+    pub fn put_project(&self, home: &GroupKey, bounds: Bounds<Pixels>) {
+        let mut projects = self.projects.borrow_mut();
+        projects.retain(|(k, _)| k != home);
+        projects.push((home.clone(), bounds));
+    }
+
+    /// The title strip is not drawn.
+    pub fn no_strip(&self) {
+        self.strip.set(None);
+        self.tabs.borrow_mut().clear();
+    }
+}
+
+/// Whether the workspace behind `view` has something pressed that a move would carry.
+fn dragging(view: &WeakEntity<WorkspaceView>, cx: &App) -> bool {
+    view.read_with(cx, |this, _| this.drag.is_some()).unwrap_or(false)
+}
+
+/// A canvas over its parent that hands `put` the parent's bounds each time it is laid out:
+/// how a drop spot is known where it was drawn.
+pub(super) fn spot(put: impl Fn(Bounds<Pixels>) + 'static) -> impl gpui::IntoElement {
+    canvas(move |bounds, _window, _cx| put(bounds), |_bounds, (), _window, _cx| {})
+        .absolute()
+        .inset_0()
 }
 
 /// One tile as its pane shows it.
@@ -82,16 +154,14 @@ pub(super) struct Drawn {
     pub tab_rows: RefCell<HashMap<PaneId, (gpui::ScrollHandle, ItemId, f32)>>,
 }
 
-/// What a body takes from its tile: its zoom, and what else its kind is laid out by.
+/// What a body takes from its tile: what its kind is laid out by.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Handed {
-    Shell { zoom: f32, covered: bool },
-    Face { zoom: f32, width: f32 },
-    Board { zoom: f32 },
-    Review { zoom: f32, width: f32, height: f32 },
+    Shell { covered: bool },
+    Face { width: f32 },
+    Review { width: f32, height: f32 },
     Stream { painted: f32 },
-    Text { zoom: f32, pad: f32, size: f32 },
-    Folder { zoom: f32 },
+    Text { pad: f32, size: f32 },
 }
 
 impl WorkspaceView {
@@ -136,7 +206,58 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.click_tile(tile, cx);
-        self.drag = Some(Drag::Move { tile, grab: ev.position, moving: false, target: None });
+        self.begin_carry(Carried::Tile(tile), ev);
+    }
+
+    /// Something pressed that a move would carry, from a surface that does not focus it on the
+    /// press: a navigator row, a title tab.
+    pub(super) fn begin_carry(&mut self, carried: Carried, ev: &MouseDownEvent) {
+        self.drag = Some(Drag::Move { carried, grab: ev.position, moving: false, target: None });
+    }
+
+    /// Where `carried` would land with the pointer at `p`: the title strip, then a project's
+    /// row other than its own, then for a tile a pane of the tab on show.
+    fn landing_at(&self, carried: Carried, p: Point<Pixels>) -> Option<Landing> {
+        let spots = &self.drop_spots;
+        if spots.strip.get().is_some_and(|b| b.contains(&p)) {
+            let mut tabs = spots.tabs.borrow().clone();
+            tabs.sort_by(|a, b| f32::from(a.1.origin.x).total_cmp(&f32::from(b.1.origin.x)));
+            let index = tabs.iter().position(|(_, b)| p.x < b.center().x).unwrap_or(tabs.len());
+            return Some(Landing::Strip(index));
+        }
+        let row =
+            spots.projects.borrow().iter().find(|(_, b)| b.contains(&p)).map(|(k, _)| k.clone());
+        if let Some(home) = row {
+            let own = match carried {
+                Carried::Tile(tile) => self.layout.position(tile).map(|pos| pos.project),
+                Carried::Tab(id) => self.layout.tab_place(id).map(|(p, _)| p),
+            };
+            let own = own
+                .and_then(|p| self.layout.projects().get(p))
+                .map(slopty_client::layout::Project::home);
+            return (own != Some(&home)).then_some(Landing::Project(home));
+        }
+        let Carried::Tile(_) = carried else { return None };
+        if !self.drawn.viewport.get().contains(&p) {
+            return None;
+        }
+        let (x, y) = self.local(p);
+        self.layout.drop_target(x, y).map(Landing::Pane)
+    }
+
+    /// Where the drag in progress would land, while it moves.
+    pub(super) const fn landing(&self) -> Option<&Landing> {
+        match &self.drag {
+            Some(Drag::Move { moving: true, target, .. }) => target.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The views that draw a landing: the area's wash, the strip's mark, a row's wash.
+    fn landing_moved(&self, cx: &mut Context<Self>) {
+        App::notify(cx, self.area_host.entity_id());
+        App::notify(cx, self.chrome.title_tabs.entity_id());
+        App::notify(cx, self.chrome.nav_rows.entity_id());
     }
 
     /// `p` in the area's own coordinates.
@@ -145,8 +266,38 @@ impl WorkspaceView {
         (f32::from(d.x), f32::from(d.y))
     }
 
-    fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let Some(Drag::Move { grab, moving, target, .. }) = &self.drag else { return };
+    /// What follows a drag wherever the pointer goes in the window, over the title bar and the
+    /// navigator as over the area: listeners on the capture phase, so nothing under the pointer
+    /// keeps a move or a release from it. They are there in every frame, so the first move after
+    /// a press is followed without waiting for one.
+    pub(super) fn render_follow(cx: &Context<Self>) -> gpui::AnyElement {
+        let entity = cx.entity().downgrade();
+        canvas(
+            |_bounds, _window, _cx| (),
+            move |_bounds, (), window, _cx| {
+                let moved = entity.clone();
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _window, cx| {
+                    if phase != gpui::DispatchPhase::Capture || !dragging(&moved, cx) {
+                        return;
+                    }
+                    let _gone = moved.update(cx, |this, cx| this.drag_moved(ev, cx));
+                });
+                let released = entity;
+                window.on_mouse_event(move |_ev: &MouseUpEvent, phase, _window, cx| {
+                    if phase == gpui::DispatchPhase::Capture && dragging(&released, cx) {
+                        let _gone = released.update(cx, Self::end_drag);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
+    }
+
+    /// The pointer moved while something is pressed.
+    fn drag_moved(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(Drag::Move { carried, grab, moving, target }) = &self.drag else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             self.end_drag(cx);
             return;
@@ -155,32 +306,46 @@ impl WorkspaceView {
         if !*moving && f32::from(d.x).hypot(f32::from(d.y)) < DRAG_SLOP {
             return;
         }
-        let (x, y) = self.local(ev.position);
-        let now = self.layout.drop_target(x, y);
-        let was = (*moving, *target);
+        let now = self.landing_at(*carried, ev.position);
+        let changed = !*moving || *target != now;
         if let Some(Drag::Move { moving, target, .. }) = &mut self.drag {
             *moving = true;
             *target = now;
         }
-        if was != (true, now) {
-            App::notify(cx, self.area_host.entity_id());
+        if changed {
+            self.landing_moved(cx);
         }
-    }
-
-    fn mouse_up(&mut self, _ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        self.end_drag(cx);
     }
 
     fn end_drag(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
-        let Drag::Move { tile, moving, target, .. } = drag;
+        let Drag::Move { carried, moving, target, .. } = drag;
         if let (true, Some(target)) = (moving, target) {
-            self.layout_action(cx, |l| {
-                l.place(tile, target);
-                l.focus(tile);
+            let home = self.layout.shown_project().map(|p| p.home().clone());
+            self.layout_action(cx, |l| match (carried, target) {
+                (Carried::Tile(tile), Landing::Pane(drop)) => {
+                    l.place(tile, drop);
+                    l.focus(tile);
+                }
+                (Carried::Tile(tile), Landing::Strip(index)) => {
+                    if let Some(home) = &home {
+                        l.new_tab_at(tile, home, index);
+                    }
+                }
+                (Carried::Tile(tile), Landing::Project(home)) => l.move_to_project(tile, &home),
+                (Carried::Tab(id), Landing::Strip(index)) => {
+                    l.move_tab(id, index);
+                }
+                (Carried::Tab(id), Landing::Project(home)) => {
+                    l.move_tab_to_project(id, &home);
+                }
+                (Carried::Tab(_), Landing::Pane(_)) => {}
             });
         }
-        App::notify(cx, self.area_host.entity_id());
+        // A press let go where it was is a click: nothing was drawn for it.
+        if moving {
+            self.landing_moved(cx);
+        }
     }
 
     /// Where a press or a drop lands: the tile under it and whether it is on the body (not the
@@ -269,15 +434,15 @@ impl WorkspaceView {
 
     /// Where a dragged tile would land, while it moves over a pane.
     const fn drop_shown(&self) -> Option<Drop> {
-        match &self.drag {
-            Some(Drag::Move { moving: true, target, .. }) => *target,
+        match self.landing() {
+            Some(Landing::Pane(drop)) => Some(*drop),
             _ => None,
         }
     }
 
     /// The tab on show, drawn from the tiling by the area's own view `host`: read here, never
     /// written. What the area drew goes to [`Drawn`]; what a tile's body takes from its tile (a
-    /// zoom, a width) goes to it after the read (`Draw::later`), and only where it changed.
+    /// width, a cover) goes to it after the read (`Draw::later`), and only where it changed.
     pub(super) fn render_area(
         &self,
         _host: EntityId,
@@ -329,9 +494,6 @@ impl WorkspaceView {
             .flex_1()
             .w_full()
             .overflow_hidden()
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(measure)
             .child(panes)
             .children(empty)
@@ -385,7 +547,7 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let muted = hsla(s.text_muted);
         let title = |text: &'static str| {
-            kit::typed(kit::inset_x(div(), theme), theme.roles().panel_title, 1.0)
+            kit::typed(kit::inset_x(div(), theme), theme.roles().panel_title)
                 .pb(px(spacing.xs))
                 .text_color(hsla(s.text))
                 .child(text)
@@ -479,7 +641,7 @@ impl WorkspaceView {
                 // A worker on another build opens nothing until it is updated: its row offers
                 // the update, as its navigator row does.
                 let update = self.update_run(key, cx).map(|run| {
-                    let el = kit::pill_frame(theme, 1.0)
+                    let el = kit::pill_frame(theme)
                         .id(("empty-update", ix))
                         .debug_selector(move || format!("empty-update-{ix}"))
                         .role(gpui::accesskit::Role::Button)
@@ -539,7 +701,7 @@ impl WorkspaceView {
                             .child(word)
                     }))
                     .children(update)
-                    .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark), 1.0));
+                    .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark)));
                 crate::a11y::tab_stop(row, s.focus)
                     .on_click(
                         cx.listener(move |this, _ev, _window, cx| this.new_terminal_on(key, cx)),

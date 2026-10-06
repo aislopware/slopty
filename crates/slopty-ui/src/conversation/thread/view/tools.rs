@@ -15,7 +15,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
 use slopty_theme::{Rgb, Surfaces};
@@ -25,7 +25,7 @@ use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
-use crate::icons::{FileType, Symbol};
+use crate::icons::Symbol;
 use crate::kit;
 
 /// `text` with the paths in it as a person reads them: under the agent's folder `cwd` relative
@@ -113,7 +113,7 @@ impl ThreadView {
             self.answered_inline(ix).then(|| self.shown_waiting(cx).cloned()).flatten().and_then(
                 |request| {
                     self.decision(&request, cx)
-                        .map(|d| div().w_full().py(self.z(self.theme.spacing.xs)).child(d))
+                        .map(|d| div().w_full().py(px(self.theme.spacing.xs)).child(d))
                 },
             );
         if let Some(ToolDetail::Plan { text }) = &call.detail {
@@ -123,8 +123,7 @@ impl ThreadView {
         let theme = &self.theme;
         // Under the line, indented to its words: the body in its well, the pictures, the
         // answers.
-        let under =
-            |el: AnyElement| div().w_full().pl(self.z(TOOL_ROW + theme.spacing.xs)).child(el);
+        let under = |el: AnyElement| div().w_full().pl(px(TOOL_ROW + theme.spacing.xs)).child(el);
         div()
             .debug_selector({
                 let id = id.0.clone();
@@ -133,7 +132,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .child(line)
             .children(body.map(under))
             .children(pictures.map(|p| under(p.into_any_element())))
@@ -160,9 +159,9 @@ impl ThreadView {
             ToolState::Pending { .. } => self.needs_you(),
             _ => {
                 let kind = tool_icon(&call.kind);
-                let glyph = call_path(call).and_then(FileType::of).map_or(kind, FileType::symbol);
+                let glyph = call_path(call).map_or_else(|| kind.into(), crate::icons::file_mark);
                 let tone = if failed(&call.state) { s.error } else { s.text_muted };
-                crate::icons::symbol(theme, glyph, self.z(theme.typography.icon()), hsla(tone))
+                crate::icons::symbol(theme, glyph, px(theme.typography.icon()), hsla(tone))
             }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
@@ -203,7 +202,7 @@ impl ThreadView {
                 .min_w_0()
                 .flex()
                 .items_baseline()
-                .gap(self.z(theme.spacing.xs))
+                .gap(px(theme.spacing.xs))
                 .child(
                     div()
                         .flex_none()
@@ -254,11 +253,11 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .min_h(px(TOOL_ROW))
+            .text_size(px(theme.typography.small()))
             .cursor_pointer()
-            .child(self.slot().child(mark))
+            .child(Self::slot().child(mark))
             .child(what)
             .children(found.map(|words| {
                 div()
@@ -287,7 +286,7 @@ impl ThreadView {
             .children(took.map(|t| {
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(t))
             }))
@@ -310,7 +309,7 @@ impl ThreadView {
                     .entry(id.clone())
                     .or_insert_with(|| diff::thread_blocks(path, patch)),
             );
-            let ink = Ink { theme, zoom: self.zoom, digits: lines::digits(&blocks) };
+            let ink = Ink { theme, digits: lines::digits(&blocks) };
             let mut shown = 0_usize;
             let mut children: Vec<AnyElement> = Vec::new();
             for (ix, block) in blocks.iter().enumerate() {
@@ -325,7 +324,7 @@ impl ThreadView {
                     shown = shown.saturating_add(1);
                 }
             }
-            let code = ink.code().py(self.z(theme.spacing.xxs)).children(children);
+            let code = ink.code().py(px(theme.spacing.xxs)).children(children);
             return Some(self.well(code).into_any_element());
         }
         let command = match &call.detail {
@@ -340,9 +339,9 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
             .font_family(self.mono())
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .children(command.map(|c| {
                 div().text_color(hsla(s.text)).child(SharedString::from(format!("$ {c}")))
             }))
@@ -352,10 +351,7 @@ impl ThreadView {
                     .whitespace_normal()
                     .child(SharedString::from(o))
             }));
-        Some(
-            self.well(text.px(self.z(theme.spacing.sm)).py(self.z(theme.spacing.xs)))
-                .into_any_element(),
-        )
+        Some(self.well(text.px(px(theme.spacing.sm)).py(px(theme.spacing.xs))).into_any_element())
     }
 
     /// What a web search came back with, opened: its links numbered, each its title and its
@@ -382,10 +378,10 @@ impl ThreadView {
                     .w_full()
                     .flex()
                     .items_baseline()
-                    .gap(self.z(theme.spacing.xs))
-                    .min_h(self.z(TOOL_ROW))
-                    .px(self.z(theme.spacing.xxs))
-                    .rounded(self.z(theme.radii.xs))
+                    .gap(px(theme.spacing.xs))
+                    .min_h(px(TOOL_ROW))
+                    .px(px(theme.spacing.xxs))
+                    .rounded(px(theme.radii.xs))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
@@ -425,9 +421,9 @@ impl ThreadView {
             .flex_col()
             .role(Role::List)
             .aria_label("Sources")
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .children(rows);
-        Some(self.well(list.p(self.z(theme.spacing.xs))).into_any_element())
+        Some(self.well(list.p(px(theme.spacing.xs))).into_any_element())
     }
 
     /// An opened call's well: set into the thread's plane ([`kit::inset`]) at a code shell's
@@ -437,7 +433,7 @@ impl ThreadView {
         kit::inset(div(), theme)
             .w_full()
             .overflow_hidden()
-            .rounded(self.z(theme.radii.sm))
+            .rounded(px(theme.radii.sm))
             .child(content)
     }
 }

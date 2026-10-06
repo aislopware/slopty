@@ -1,9 +1,0 @@
-Git glyphs
-
-The seven files here are GitHub's Octicons at their 16 px size, unmodified, from
-primer/octicons (icons/*-16.svg, retrieved 2026-10-06). Octicons are MIT licensed, copyright
-GitHub Inc.; see LICENSE-octicons.
-
-They draw the chrome's git vocabulary (a branch, a pull request open, draft or closed, a
-merge, a commit, a repository), which SF Symbols lacks. Each is filled from its outline into
-an alpha mask and painted in the ink of the words beside it, as an SF Symbol is.

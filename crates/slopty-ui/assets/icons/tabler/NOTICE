@@ -15,7 +15,6 @@ ArrowTriangleMerge                   git-merge.svg
 ArrowTrianglePull                    git-pull-request.svg
 ArrowUp                              arrow-up.svg
 ArrowUpAndDown                       arrows-vertical.svg
-ArrowUpLeftAndArrowDownRight         arrows-diagonal.svg
 ArrowUpRight                         arrow-up-right.svg
 ArrowUpToLine                        arrow-bar-to-up.svg
 ArrowUturnBackward                   arrow-back-up.svg
@@ -35,7 +34,6 @@ Circle                               circle.svg
 CircleDashed                         circle-dashed.svg
 CircleInsetFilled                    circle-dot.svg
 Clock                                clock.svg
-ClockArrowCirclepath                 history.svg
 Command                              command.svg
 Curlybraces                          braces.svg
 Cursorarrow                          pointer.svg
@@ -61,14 +59,12 @@ Globe                                world.svg
 InfoCircle                           info-circle.svg
 Iphone                               device-mobile.svg
 Laptopcomputer                       device-laptop.svg
-Line3HorizontalDecrease              filter.svg
 Link                                 link.svg
 Lock                                 lock.svg
 LockDoc                              file-certificate.svg
 Macwindow                            app-window.svg
 Magnifyingglass                      search.svg
 Minus                                minus.svg
-NoteText                             note.svg
 Paperclip                            paperclip.svg
 PauseCircle                          player-pause.svg
 Pencil                               pencil.svg
@@ -79,7 +75,6 @@ Power                                power.svg
 PuzzlepieceExtension                 puzzle.svg
 QuestionmarkBubble                   message-question.svg
 RectangleSplit3x1                    layout-columns.svg
-RectangleStack                       stack-2.svg
 Scissors                             scissors.svg
 ServerRack                           server.svg
 SidebarLeft                          layout-sidebar.svg
@@ -98,10 +93,6 @@ WrenchAndScrewdriver                 tool.svg
 Xmark                                x.svg
 XmarkCircle                          circle-x.svg
 XmarkCircleFill                      circle-x-filled.svg
-StateUpNext                          circle-dashed.svg
-StateNeedsYou                        alert-circle.svg
-StateToReview                        circle-half-2.svg
-StateDone                            circle-check-filled.svg
 GitCommit                            git-commit.svg
 GitPullRequestDraft                  git-pull-request-draft.svg
 GitPullRequestClosed                 git-pull-request-closed.svg

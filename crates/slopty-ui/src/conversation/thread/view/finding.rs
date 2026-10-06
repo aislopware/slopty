@@ -257,7 +257,6 @@ impl ThreadView {
         let this = cx.entity().downgrade();
         let closing = this.clone();
         let bar = FindBar::new("thread-find", "Find in the thread", &find.field, tally, theme)
-            .zoom(self.zoom)
             // Up is back in time: the older match.
             .on_step(move |delta, _window, cx| {
                 let _gone = this.update(cx, |v, cx| v.step_find(delta.saturating_neg(), cx));
@@ -268,12 +267,12 @@ impl ThreadView {
         Some(
             div()
                 .absolute()
-                .top(self.z(theme.spacing.sm))
-                .right(self.z(theme.spacing.lg))
+                .top(px(theme.spacing.sm))
+                .right(px(theme.spacing.lg))
                 .child(kit::slide_fade(
                     div().child(bar),
                     "thread-find",
-                    -theme.spacing.xs * self.zoom,
+                    -theme.spacing.xs,
                     kit::Pace::Fade,
                     cx,
                 ))

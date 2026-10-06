@@ -1,4 +1,4 @@
-//! The circle glyphs drawn by us, where an SF Symbol cannot be crisp at 1x: an empty ring, a
+//! The circle glyphs drawn by us, where a drawn glyph cannot be crisp at 1x: an empty ring, a
 //! dashed ring and a ring with a pie of its share (`.research/status-color-2026-10-06.md` §3.1).
 //!
 //! One silhouette for every state, as Linear's statuses are, so the eye compares fill and hue

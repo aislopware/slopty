@@ -280,7 +280,7 @@ impl ProjectSearch {
                     .child(SharedString::from(hit.title.clone())),
             )
             .child(
-                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary, 1.0))
+                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary))
                     .flex_none()
                     .child(SharedString::from(hit.total.to_string())),
             );

@@ -2410,15 +2410,15 @@ impl Workspace {
             .aria_label(title)
             .map(|el| {
                 if welcome {
-                    kit::typed(el, roles.first_run, 1.0)
+                    kit::typed(el, roles.first_run)
                 } else {
-                    kit::typed(el, roles.panel_title, 1.0)
+                    kit::typed(el, roles.panel_title)
                 }
             })
             .text_color(hsla(s.text))
             .child(title);
         let intro = div().flex().flex_col().gap(px(spacing.xs)).child(heading).child(
-            kit::typed(div(), roles.chrome, 1.0)
+            kit::typed(div(), roles.chrome)
                 .id("add-worker-blurb")
                 .debug_selector(|| "add-worker-blurb".to_owned())
                 .text_color(hsla(s.text_secondary))
@@ -2600,7 +2600,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .child(
-                    kit::typed(div(), roles.action, 1.0)
+                    kit::typed(div(), roles.action)
                         .id("add-worker-connect-title")
                         .role(Role::Heading)
                         .aria_label(CONNECT_TITLE)
@@ -2608,7 +2608,7 @@ impl Workspace {
                         .child(CONNECT_TITLE),
                 )
                 .child(
-                    kit::typed(div(), roles.chrome, 1.0)
+                    kit::typed(div(), roles.chrome)
                         .text_color(hsla(s.text_secondary))
                         .child(CONNECT_LINE),
                 );
@@ -2983,7 +2983,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .children(held.chain(std::iter::once(app)).map(|fact| {
-                    kit::typed(kit::meta(div(), theme), theme.roles().metadata, 1.0)
+                    kit::typed(kit::meta(div(), theme), theme.roles().metadata)
                         .child(SharedString::from(fact))
                 }))
         });
@@ -3022,7 +3022,7 @@ impl Workspace {
             .min_h(px(if holds { kit::Row::One } else { kit::Row::Two }.height(theme)))
             .py(px(theme.spacing.xs))
             .when(holds, gpui::Styled::items_center)
-            .child(status_mark(theme, Some(status), 1.0))
+            .child(status_mark(theme, Some(status)))
             .child(
                 div()
                     .flex_1()
@@ -3797,7 +3797,7 @@ fn this_mac_row(theme: &Theme, listed: bool, choosing: bool) -> gpui::Stateful<g
     use slopty_ui::icons::Symbol;
     if choosing {
         // The first run's choice says what it does in a line at the body's size.
-        let line = kit::typed(div(), theme.roles().chrome, 1.0)
+        let line = kit::typed(div(), theme.roles().chrome)
             .text_color(hsla(theme.surfaces.text_secondary))
             .child(this_mac::CHOICE);
         return entry_row_saying(theme, "use-this-mac", Symbol::Display, this_mac::TITLE, line);
@@ -4018,10 +4018,6 @@ pub const fn self_test() -> bool {
     false
 }
 
-/// How long after the window opens the symbols drawn so far are written down for the next
-/// launch's prewarm: the first frames, and the tiles that draw once their workers link.
-const SYMBOLS_DRAWN_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
-
 /// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
 /// Call once from inside the GPUI application callback, after `gpui_kit::init`.
 ///
@@ -4041,12 +4037,10 @@ pub fn open_workspace(
         let kept = slopty_platform::asked_size::keep_asked_sizes(c"GPUIWindow");
         tracing::info!(kept, "the self-test's windows keep the size they ask for");
     }
-    // The chrome's symbols, drawn on background threads while the window is made: the first
-    // symbol of a process loads the system's catalogue, 40–70 ms the first frame must not wait
-    // for (docs/MEASUREMENTS.md, "SF Symbols as masks"). Those the last launch's first frames
-    // drew, and no more, written down a few seconds after its window opened (below).
-    let symbols = slopty_platform::dirs::data_dir().join("symbols");
-    slopty_ui::icons::prewarm(&Theme::default(), symbols.clone());
+    // The chrome's glyphs read and drawn on a background thread while the window is made, so
+    // the first frame does not pay for Core Graphics' first context (docs/MEASUREMENTS.md,
+    // "Tabler glyphs drawn on demand").
+    slopty_ui::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
@@ -4141,12 +4135,6 @@ pub fn open_workspace(
     .detach();
     let window = window::open(&workspace, options(cx), Some(loaded), cx)?;
     window::install(&workspace, options, cx);
-    let drawn = cx.background_executor().timer(SYMBOLS_DRAWN_WITHIN);
-    cx.background_spawn(async move {
-        drawn.await;
-        slopty_ui::icons::remember(&symbols);
-    })
-    .detach();
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());

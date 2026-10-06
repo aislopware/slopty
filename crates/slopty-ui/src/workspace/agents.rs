@@ -448,7 +448,7 @@ impl WorkspaceView {
         let quiet = theme.surfaces.text_secondary;
         let label = done.label();
         let item = tile.item;
-        let pill = crate::kit::pill_frame(theme, 1.0)
+        let pill = crate::kit::pill_frame(theme)
             .id("finished")
             .debug_selector(move || format!("finished-{}", item.as_uuid()))
             .role(Role::Button)
@@ -457,7 +457,7 @@ impl WorkspaceView {
             .text_color(hsla(quiet))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))
-            .child(ChromeText::new(label, px(theme.typography.small()), 1.0).fill());
+            .child(ChromeText::new(label, px(theme.typography.small())).fill());
         tab_stop(pill, theme.surfaces.focus)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()

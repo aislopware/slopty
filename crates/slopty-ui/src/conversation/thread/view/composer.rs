@@ -150,11 +150,11 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.md))
-            .py(self.z(theme.spacing.sm))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.md))
+            .py(px(theme.spacing.sm))
             .map(|el| self.shell(el, capped, false))
-            .text_size(self.z(theme.typography.small()))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(self.icon(Symbol::Terminal, s.text_muted))
             .child(
@@ -233,7 +233,7 @@ impl ThreadView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.xs))
+                    .gap(px(theme.spacing.xs))
                     .text_color(hsla(s.text_secondary))
                     .child(
                         crate::icons::icon(
@@ -242,7 +242,7 @@ impl ThreadView {
                             IconSize::Inline,
                             hsla(s.text_secondary),
                         )
-                        .size(self.z(theme.typography.icon())),
+                        .size(px(theme.typography.icon())),
                     )
                     .child(
                         div()
@@ -266,10 +266,10 @@ impl ThreadView {
                     .when(named, |el| el.flex_shrink_1().min_w_0())
                     .flex()
                     .items_center()
-                    .px(self.z(theme.spacing.xs))
-                    .rounded(self.z(theme.radii.xs))
+                    .px(px(theme.spacing.xs))
+                    .rounded(px(theme.radii.xs))
                     .cursor_pointer()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .active(move |el| el.bg(hsla(s.pressed)))
                     .child(counts)
@@ -307,14 +307,14 @@ impl ThreadView {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.xxs))
-                    .px(self.z(theme.spacing.xs))
-                    .rounded(self.z(theme.radii.xs))
+                    .gap(px(theme.spacing.xxs))
+                    .px(px(theme.spacing.xs))
+                    .rounded(px(theme.radii.xs))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
                         crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
-                            .size(self.z(theme.typography.icon())),
+                            .size(px(theme.typography.icon())),
                     )
                     .child(
                         kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))),
@@ -335,13 +335,13 @@ impl ThreadView {
             .debug_selector(move || id.to_owned())
             .aria_label(SharedString::from(label))
             .flex_none()
-            .h(self.z(theme.density.control))
+            .h(px(theme.density.control))
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .px(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.sm))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .rounded(px(theme.radii.sm))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
     }
 
@@ -392,7 +392,7 @@ impl ThreadView {
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
                         crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                            .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                            .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
                 s.focus,
@@ -442,7 +442,7 @@ impl ThreadView {
                         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                         .child(
                             crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                                .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                                .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
                     s.focus,
@@ -496,7 +496,7 @@ impl ThreadView {
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
                         crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                            .slot(self.z(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                            .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_efforts(cx))),
                 s.focus,
@@ -537,7 +537,7 @@ impl ThreadView {
                     .child(kit::Rolling::new(
                         "thread-tasks-chip-figure",
                         words,
-                        self.z(theme.typography.small()),
+                        px(theme.typography.small()),
                     ))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.tasks_open = !this.tasks_open;
@@ -573,15 +573,10 @@ impl ThreadView {
                         this.meter_open = !this.meter_open;
                         cx.notify();
                     }))
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .children(used.map(|u| {
-                        context_ring(
-                            theme,
-                            "thread-meter-ring",
-                            u,
-                            theme.typography.small() * self.zoom,
-                        )
+                        context_ring(theme, "thread-meter-ring", u, theme.typography.small())
                     }))
                     // The ring alone says a context well within its window; from half full its
                     // share is read too, and from 80 % it takes the warning tone.
@@ -590,7 +585,7 @@ impl ThreadView {
                             kit::Rolling::new(
                                 "thread-meter-figure",
                                 share(u),
-                                self.z(theme.typography.small()),
+                                px(theme.typography.small()),
                             ),
                         )
                     }))
@@ -650,11 +645,11 @@ impl ThreadView {
         } else {
             label.into()
         };
-        let el = kit::message::send_control(theme, self.zoom, id, icon, label)
-            .map(kit::hint_timing)
-            .tooltip(move |_window, cx| {
+        let el = kit::message::send_control(theme, id, icon, label).map(kit::hint_timing).tooltip(
+            move |_window, cx| {
                 cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
-            });
+            },
+        );
         let el = el.on_click(cx.listener(move |this, _ev, window, cx| {
             if stop {
                 this.interrupt(cx);
@@ -680,7 +675,7 @@ impl ThreadView {
     /// pane ([`Self::bleeds`]). `focused`: the field has the keyboard, and the wash says so.
     pub(super) fn shell<E: Styled>(&self, el: E, capped: bool, focused: bool) -> E {
         let frame = kit::message::Frame { capped, focused, bleeds: self.bleeds() };
-        kit::message::shell(el, &self.theme, self.zoom, frame)
+        kit::message::shell(el, &self.theme, frame)
     }
 
     /// The composer runs edge to edge under a sash line, as a pane's own bar does, in a pane
@@ -724,11 +719,11 @@ impl ThreadView {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(self.z(theme.spacing.xs))
-                    .px(self.z(theme.spacing.md))
-                    .pt(self.z(theme.spacing.sm))
+                    .gap(px(theme.spacing.xs))
+                    .px(px(theme.spacing.md))
+                    .pt(px(theme.spacing.sm))
                     // The strips over the field are a row's words.
-                    .text_size(self.z(theme.roles().chrome.size))
+                    .text_size(px(theme.roles().chrome.size))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.limit_strip(cx))
@@ -738,13 +733,13 @@ impl ThreadView {
                     .children(self.attachment_chips(cx))
                     .child(
                         // The kit's least field, its pads and line fixed in points, the words
-                        // and lines at the prose's size and the view's zoom.
-                        div().py(self.z(theme.spacing.xs)).child(
+                        // and lines at the prose's size.
+                        div().py(px(theme.spacing.xs)).child(
                             Textarea::new(&self.composer)
                                 .with_size(Size::XSmall)
                                 .appearance(false)
                                 .bordered(false)
-                                .text_size(self.z(theme.typography.prose()))
+                                .text_size(px(theme.typography.prose()))
                                 .line_height(gpui::relative(theme.typography.prose_line_height))
                                 .aria_label("Message")
                                 .on_paste(move |item, _window, cx| {
@@ -757,9 +752,9 @@ impl ThreadView {
             .child(
                 div()
                     .w_full()
-                    .px(self.z(theme.spacing.sm))
-                    .pb(self.z(theme.spacing.sm))
-                    .pt(self.z(theme.spacing.xs))
+                    .px(px(theme.spacing.sm))
+                    .pb(px(theme.spacing.sm))
+                    .pt(px(theme.spacing.xs))
                     .child(self.composer_foot(editing, cx)),
             )
             .into_any_element()
@@ -773,8 +768,8 @@ impl ThreadView {
     fn composer_foot(&self, editing: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let row = kit::priority_row("thread-foot")
-            .h(self.z(theme.density.control))
-            .gap(self.z(theme.spacing.xxs))
+            .h(px(theme.density.control))
+            .gap(px(theme.spacing.xxs))
             .dropped(&self.foot_dropped);
         let item =
             |row: kit::PriorityRow, (key, priority): (&'static str, kit::Priority), el| match el {

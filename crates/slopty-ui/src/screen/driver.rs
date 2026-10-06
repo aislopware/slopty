@@ -124,7 +124,7 @@ impl ScreenView {
                     this.take_control(cx);
                 }
             }));
-        let pill = kit::elevate(kit::pill_frame(theme, 1.0), theme)
+        let pill = kit::elevate(kit::pill_frame(theme), theme)
             .id("screen-driver")
             .debug_selector(|| "screen-driver".to_owned())
             .flex()

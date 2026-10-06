@@ -6,6 +6,12 @@
 //! ([`super::tab_look`]): the one on show opens into the layout under the bar, the rest are
 //! bare words that take the hover wash. Tabs that do not fit scroll, and chevrons at the row's
 //! ends step it a tab's width at a time while there is more past them.
+//!
+//! A tab pressed and moved is carried ([`super::area`]): along the row it moves, onto a
+//! project's row in the navigator it goes to that project. While something carried is over
+//! the row, a mark stands where it would land ([`render`]'s `drop_at`).
+
+use std::rc::Rc;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -15,8 +21,9 @@ use gpui::{
     Window, div, px,
 };
 use slopty_client::layout::tiling::TabId;
-use slopty_theme::{Theme, Typography};
+use slopty_theme::{Theme, Typography, stroke};
 
+use super::area::{self, DropSpots};
 use super::tab_look::{self, Look};
 use crate::colors::hsla;
 use crate::draw::Draw;
@@ -51,22 +58,50 @@ pub(super) trait TitleTabsHost: Sized + 'static {
     /// Show tab `id`.
     fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>);
 
+    /// Tab `id` was pressed at `ev`: a move from here carries it.
+    fn carry_title_tab(&mut self, id: TabId, ev: &MouseDownEvent);
+
     /// Close tab `id`, and what is in it.
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>);
 }
 
-/// The row of `tabs`, scrolled by `scroll`.
+/// What [`render`] draws besides the tabs: where the row takes a drop, and where a drop
+/// would land, before the tab at that index (past the last, after it).
+pub(super) struct Drops<'a> {
+    pub spots: &'a Rc<DropSpots>,
+    pub at: Option<usize>,
+}
+
+/// The row of `tabs`, scrolled by `scroll`, writing where it and each tab lie to `drops`.
 pub(super) fn render<V: TitleTabsHost>(
     theme: &Theme,
     tabs: &[TitleTab],
     scroll: &ScrollHandle,
+    drops: &Drops<'_>,
     cx: &Draw<'_, V>,
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
+    drops.spots.tabs.borrow_mut().clear();
+    let last = tabs.len().saturating_sub(1);
     let items: Vec<gpui::AnyElement> =
         tabs.iter()
-            .map(|tab| {
+            .enumerate()
+            .map(|(i, tab)| {
                 let id = tab.id;
+                let spots = Rc::clone(drops.spots);
+                let spot = area::spot(move |b| spots.put_tab(id, b));
+                // The mark of a drop: at the tab's leading edge, or the last one's trailing.
+                let mark = (drops.at == Some(i) || (i == last && drops.at == Some(tabs.len())))
+                    .then(|| {
+                        let bar = div()
+                            .debug_selector(|| "title-tabs-drop".to_owned())
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(stroke::MARK))
+                            .bg(hsla(s.focus));
+                        if drops.at == Some(i) { bar.left_0() } else { bar.right_0() }
+                    });
                 let n = id.get();
                 let ink = if tab.shown { s.text } else { s.text_secondary };
                 // Each mark under an id of its own: every one is a "status" image to the a11y tree.
@@ -75,7 +110,7 @@ pub(super) fn render<V: TitleTabsHost>(
                         .id(("title-tab-mark", i))
                         .flex_none()
                         .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
-                        .child(crate::icons::status_mark(theme, Some(*st), 1.0))
+                        .child(crate::icons::status_mark(theme, Some(*st)))
                         .into_any_element()
                 });
                 let id_close = format!("title-tab-close-{n}");
@@ -100,8 +135,9 @@ pub(super) fn render<V: TitleTabsHost>(
                     .when(tab.shown, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this: &mut V, _ev: &MouseDownEvent, _window, cx| {
+                        cx.listener(move |this: &mut V, ev: &MouseDownEvent, _window, cx| {
                             this.show_title_tab(id, cx);
+                            this.carry_title_tab(id, ev);
                             cx.stop_propagation();
                         }),
                     )
@@ -116,6 +152,8 @@ pub(super) fn render<V: TitleTabsHost>(
                     )
                     .children(marks)
                     .child(close)
+                    .child(spot)
+                    .children(mark)
                     .into_any_element()
             })
             .collect();
@@ -144,8 +182,11 @@ pub(super) fn render<V: TitleTabsHost>(
         .overflow_x_scroll()
         .track_scroll(scroll)
         .children(items);
+    let spots = Rc::clone(drops.spots);
+    let spot = area::spot(move |b| spots.strip.set(Some(b)));
     // As wide as its tabs and no wider, so what is left of the bar stays its empty span.
     div()
+        .relative()
         .flex_initial()
         .min_w_0()
         .h_full()
@@ -158,5 +199,6 @@ pub(super) fn render<V: TitleTabsHost>(
         .when(on, |el| {
             el.child(chevron("title-tabs-on", Symbol::ChevronRight, "Later tabs", -step))
         })
+        .child(spot)
         .into_any_element()
 }

@@ -8,6 +8,7 @@ use gpui::accesskit::Role;
 use gpui::{
     AnyElement, App, Context, FontWeight, InteractiveElement as _, IntoElement as _, ListOffset,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
 use slopty_proto::thread::{ItemId, ThreadId, TurnId};
 use slopty_theme::Typography;
@@ -118,9 +119,9 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .px(self.z(theme.spacing.sm))
-                .min_h(self.z(kit::Row::One.height(theme)))
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
+                .min_h(px(kit::Row::One.height(theme)))
                 .child(self.icon_button("thread-back", Symbol::ChevronLeft, "Back").on_click(
                     cx.listener(|this, _ev, window, cx| {
                         let _was = this.leave_subagent(window, cx);
@@ -134,7 +135,7 @@ impl ThreadView {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .text_size(self.z(theme.typography.small()))
+                        .text_size(px(theme.typography.small()))
                         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .child(SharedString::from(title)),

@@ -60,7 +60,7 @@ impl FileView {
 
     /// The height of a line of the tile's text, as an arrow scrolls by.
     fn line_height(&self) -> f32 {
-        self.text_size * self.zoom * 1.3
+        self.text_size * 1.3
     }
 
     fn scroll_lines(&self, lines: f32, cx: &mut Context<Self>) {

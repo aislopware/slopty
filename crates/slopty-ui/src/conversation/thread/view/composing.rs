@@ -34,7 +34,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Focusable as _, InteractiveElement as _,
     IntoElement as _, ParentElement as _, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
@@ -559,12 +559,12 @@ impl ThreadView {
                 .debug_selector(|| "thread-menu".to_owned())
                 .role(Role::ListBox)
                 .aria_label(label)
-                .max_h(self.z(MENU_ROWS * theme.density.row))
+                .max_h(px(MENU_ROWS * theme.density.row))
                 .overflow_y_scroll()
                 .track_scroll(&self.composing.scroll)
                 .flex()
                 .flex_col()
-                .pb(self.z(theme.spacing.xs))
+                .pb(px(theme.spacing.xs))
                 .text_color(hsla(theme.surfaces.text))
                 .children(body)
                 .into_any_element(),
@@ -576,11 +576,11 @@ impl ThreadView {
         let theme = &self.theme;
         div()
             .debug_selector(|| "thread-menu-note".to_owned())
-            .h(self.z(theme.density.row))
+            .h(px(theme.density.row))
             .flex()
             .items_center()
-            .px(self.z(theme.spacing.sm))
-            .text_size(self.z(theme.typography.small()))
+            .px(px(theme.spacing.sm))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(theme.surfaces.text_muted))
             .child(text)
             .into_any_element()
@@ -603,12 +603,12 @@ impl ThreadView {
             .aria_label(SharedString::from(label))
             .aria_selected(selected)
             .flex_none()
-            .h(self.z(theme.density.row))
+            .h(px(theme.density.row))
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .px(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.sm))
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.sm))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(selected, |el| el.bg(hsla(s.selected)))
             .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))))
@@ -625,14 +625,14 @@ impl ThreadView {
                 div()
                     .flex_none()
                     .font_family(self.mono())
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(name)),
             )
             .children(hint.map(|hint| {
                 div()
                     .flex_none()
                     .font_family(self.mono())
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(hint))
             }))
@@ -643,14 +643,14 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(command.description.clone())),
             )
             .children(menu::source_label(command).map(|source| {
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(source))
             }))
@@ -706,7 +706,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(label.clone())),
             )
             .child(
@@ -716,7 +716,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .children(description.map(|d| SharedString::from(d.to_owned()))),
             )
@@ -754,7 +754,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(name)),
             )
             .child(
@@ -764,7 +764,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .children(provider.map(SharedString::from)),
             )
@@ -788,7 +788,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .child(SharedString::from(name)),
             )
             .child(
@@ -798,7 +798,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
+                    .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(dir.to_owned())),
             )
@@ -940,8 +940,8 @@ impl ThreadView {
                 .aria_label(SharedString::from(words.clone()))
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(if waiting {
                     self.spinner(true)
@@ -980,7 +980,6 @@ impl ThreadView {
         }
         crate::conversation::chips::row(
             &self.theme,
-            self.zoom,
             self.attachments(),
             &|id| self.composing.pictures.get(&id).cloned(),
             &|id| Box::new(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx))),
@@ -1085,8 +1084,8 @@ impl ThreadView {
                 .aria_label("Editing a queued message")
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(self.icon(Symbol::Pencil, s.text_muted))
                 .child(div().flex_1().child("Editing a queued message"))

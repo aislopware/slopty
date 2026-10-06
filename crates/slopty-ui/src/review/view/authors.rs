@@ -12,7 +12,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::threads::Stamp;
 use slopty_proto::thread::ThreadId;
@@ -146,12 +146,7 @@ impl ReviewView {
                 }))
             });
         Some(
-            div()
-                .absolute()
-                .top_0()
-                .right(self.z(self.theme.spacing.sm))
-                .child(tag)
-                .into_any_element(),
+            div().absolute().top_0().right(px(self.theme.spacing.sm)).child(tag).into_any_element(),
         )
     }
 }

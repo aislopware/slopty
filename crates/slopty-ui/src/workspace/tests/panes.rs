@@ -12,6 +12,7 @@ use slopty_client::layout::tiling::{Drop, TabId, Tiling, TilingConfig};
 use slopty_client::layout::tree::{PANE_MIN_W, Sash, Side};
 use slopty_client::layout::{GroupKey, Rect};
 
+use super::super::area::DropSpots;
 use super::super::panes::{self, PaneHost, Panes};
 use super::super::title_tabs::{self, TitleTab, TitleTabsHost};
 use super::*;
@@ -25,6 +26,7 @@ struct Harness {
     released: usize,
     tabs_scroll: ScrollHandle,
     closed: Vec<TabId>,
+    spots: Rc<DropSpots>,
 }
 
 impl PaneHost for Harness {
@@ -58,6 +60,8 @@ impl TitleTabsHost for Harness {
         self.tiling.show_tab(id);
         cx.notify();
     }
+
+    fn carry_title_tab(&mut self, _id: TabId, _ev: &gpui::MouseDownEvent) {}
 
     fn close_title_tab(&mut self, id: TabId, _window: &mut Window, cx: &mut Context<Self>) {
         self.closed.push(id);
@@ -106,6 +110,7 @@ impl Render for Shown {
                     &this.theme,
                     &tabs,
                     &this.tabs_scroll,
+                    &title_tabs::Drops { spots: &this.spots, at: None },
                     cx,
                 )))
                 .child(div().flex_1().w_full().child(panes::render(
@@ -153,6 +158,7 @@ fn harness(cx: &mut TestAppContext, tiling: Tiling) -> (Entity<Harness>, &mut Vi
             released: 0,
             tabs_scroll: ScrollHandle::new(),
             closed: Vec::new(),
+            spots: Rc::default(),
         });
         let heard = cx.observe(&harness, |_, _, cx| cx.notify());
         Shown { harness, _heard: heard }

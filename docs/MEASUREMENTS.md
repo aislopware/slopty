@@ -15612,6 +15612,30 @@ width. Crisp is Σα²/Σα (1 when every inked pixel is whole), solid the share
 cargo test -p slopty-platform --lib a_glyph_on_its_grid_is_crisper_than_one_halved -- --nocapture
 ```
 
+## 2026-10-07 — Tabler glyphs drawn on demand
+
+Every chrome glyph (91 Tabler files) read from its markup and drawn uncached by
+`rasterize_on_grid` at 14, 16, 28 and 32 device pixels, in the `slopty-ui` lib test binary (the
+dev profile, opt-level 1), three runs in a row.
+
+| run | read all 91 | 364 draws, total | p50 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 6.81 ms | 17.8 ms | 16.9 µs | 103 µs | 8.76 ms |
+| 2 | 1.54 ms | 8.84 ms | 7.7 µs | 45.5 µs | 4.40 ms |
+| 3 | 1.53 ms | 9.15 ms | 8.0 µs | 45.5 µs | 4.68 ms |
+
+- The first run is a cold process on a cold disk cache; the next two agree.
+- The maximum is the process's first draw, which makes Core Graphics' first bitmap context.
+  Every other draw is a few microseconds, so a screen of chrome draws its few dozen glyphs in
+  well under a millisecond.
+- What a first frame would pay is the reading and that first context, about 6 ms together.
+  `icons::prewarm` pays it on a thread while the window is made, and draws a row's and a lead's
+  glyphs at 1x and 2x as it goes. The SF list the last launch wrote down is gone with SF.
+
+```sh
+cargo test -p slopty-ui --lib a_glyph_is_cheap_to_draw_on_demand -- --nocapture
+```
+
 ## 2026-10-07 — panes in place of the strip: a sash drag and the frames beside the chrome
 
 The release `slopty-ui` test binaries of `af3acb14` (before, a `git archive` in

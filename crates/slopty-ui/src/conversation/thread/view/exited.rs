@@ -18,7 +18,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::wire::Start;
 use slopty_proto::thread::{AgentId, Drive, Liveness, ThreadState};
@@ -128,8 +128,8 @@ impl ThreadView {
                 .aria_label(SharedString::from(words.clone()))
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(self.icon(Symbol::Power, s.text_muted))
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
@@ -176,11 +176,11 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .px(self.z(theme.spacing.md))
-                .py(self.z(theme.spacing.sm))
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.md))
+                .py(px(theme.spacing.sm))
                 .map(|el| self.shell(el, capped, false))
-                .text_size(self.z(theme.typography.small()))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(if resuming {
                     self.spinner(true)

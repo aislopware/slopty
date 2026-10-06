@@ -1,3 +1,5 @@
 Material Icon Theme v5.39.0 (https://github.com/material-extensions/vscode-material-icon-theme,
-tag v5.39.0), MIT, LICENSE beside this file. Only the file-type glyphs the chrome draws are kept,
-each as published, unchanged, under its own name.
+tag v5.39.0), MIT, LICENSE beside this file. Only the file-type icons the chrome draws are kept,
+each as published, unchanged, under its own name. Where Material draws an icon for a dark ground
+and keeps a variant for a light one, the variant is kept beside it as `<name>_light.svg`
+(bun, deno, toml).

@@ -103,6 +103,11 @@ pub(super) fn wash(rect: Rect, drop: Drop) -> Rect {
     }
 }
 
+/// The wash over where a drop would land: a pane here, a project's row in the navigator.
+pub(super) fn drop_ink(theme: &Theme) -> gpui::Hsla {
+    hsla_alpha(theme.surfaces.accent_fill, alpha::FAINT)
+}
+
 /// The panes of `frame`, each drawn by `body` at its rectangle in the layer's own
 /// coordinates, the sashes over their edges, and `drop`'s wash over the pane it lands in. Built
 /// from `host` as it is, read and never written ([`Draw`]).
@@ -181,7 +186,7 @@ pub(super) fn render<V: PaneHost>(
     let washed = drop.and_then(|d| {
         let rect = frame.rect(d.pane)?;
         let w = wash(rect, d);
-        let ink = hsla_alpha(theme.surfaces.accent_fill, alpha::FAINT);
+        let ink = drop_ink(theme);
         Some(
             div()
                 .debug_selector(|| "drop-wash".to_owned())

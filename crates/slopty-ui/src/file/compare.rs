@@ -199,7 +199,7 @@ impl FileView {
         if shown.blocks.is_empty() {
             return self.notice(Symbol::PlusForwardslashMinus, SAME_TEXT, None, None);
         }
-        let ink = Ink { theme: &self.theme, zoom: self.zoom, digits: lines::digits(&shown.blocks) };
+        let ink = Ink { theme: &self.theme, digits: lines::digits(&shown.blocks) };
         let mut left = SHOWN_LINES;
         let mut column = div().w_full().flex().flex_col();
         for block in shown.blocks.iter() {
@@ -215,11 +215,10 @@ impl FileView {
         let total: usize = shown.blocks.iter().map(|b| b.lines.len()).sum();
         let more = total.saturating_sub(SHOWN_LINES);
         let s = &self.theme.surfaces;
-        let k = self.zoom;
         let more = (more > 0).then(|| {
             div()
-                .px(px(self.theme.spacing.inset() * k))
-                .py(px(self.theme.spacing.xs * k))
+                .px(px(self.theme.spacing.inset()))
+                .py(px(self.theme.spacing.xs))
                 .text_color(crate::colors::hsla(s.text_muted))
                 .font_family(self.theme.typography.ui_family.clone())
                 .child(SharedString::from(format!("{more} more lines not shown")))

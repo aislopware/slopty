@@ -169,7 +169,7 @@ impl Render for ProjectSheet {
                     .child(Input::new(input).aria_label(name)),
             )
         };
-        let push = switch(theme, 1.0, "project-sheet-push", PUSH, self.push)
+        let push = switch(theme, "project-sheet-push", PUSH, self.push)
             .on_click(cx.listener(|this, _ev, _w, cx| this.flip_push(cx)));
         let cancel = kit::button(theme, "project-sheet-cancel", "Cancel", ButtonKind::Ghost)
             .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(SheetEvent::Cancel)));

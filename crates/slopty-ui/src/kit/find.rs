@@ -53,7 +53,7 @@ pub const BAD_PATTERN: &str = "Not a valid pattern";
 /// What the tally says while matches are still being looked for elsewhere.
 pub const FINDING: &str = "Finding\u{2026}";
 
-/// The bar's width at zoom 1: room for a word or two, the toggles, the tally and the steps.
+/// The bar's width: room for a word or two, the toggles, the tally and the steps.
 pub const WIDTH: f32 = 360.0;
 
 /// The compiled program a pattern may grow to: a pathological one says it is too large instead
@@ -195,7 +195,6 @@ pub struct FindBar {
     on_step: Option<OnStep>,
     on_close: Option<OnClose>,
     theme: Theme,
-    k: f32,
 }
 
 impl std::fmt::Debug for FindBar {
@@ -227,15 +226,7 @@ impl FindBar {
             on_step: None,
             on_close: None,
             theme: theme.clone(),
-            k: 1.0,
         }
-    }
-
-    /// Drawn at the owner's zoom `k`.
-    #[must_use]
-    pub const fn zoom(mut self, k: f32) -> Self {
-        self.k = k;
-        self
     }
 
     /// Show the query's toggles as `query` has them; a press says which flipped.
@@ -277,7 +268,7 @@ impl FindBar {
 
 impl RenderOnce for FindBar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let Self { id, label, field, tally, query, replace, on_step, on_close, theme, k } = self;
+        let Self { id, label, field, tally, query, replace, on_step, on_close, theme } = self;
         let s = theme.surfaces;
         let part = |name: &str| SharedString::from(format!("{id}-{name}"));
         let words = tally.words();
@@ -289,7 +280,7 @@ impl RenderOnce for FindBar {
         let toggles = query.map(|(query, on_toggle)| {
             let toggle = |name: &str, face, label, on, which| {
                 let on_toggle = Rc::clone(&on_toggle);
-                super::text_toggle(&theme, part(name), face, label, on, k)
+                super::text_toggle(&theme, part(name), face, label, on)
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(move |_ev, window, cx| on_toggle(which, window, cx))
             };
@@ -312,12 +303,12 @@ impl RenderOnce for FindBar {
         let lead = |icon| {
             crate::icons::icon(&theme, icon, IconSize::Inline, hsla(s.text_muted))
                 .flex_none()
-                .size(px(theme.typography.icon() * k))
+                .size(px(theme.typography.icon()))
         };
         let find_row = div()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs * k))
+            .gap(px(theme.spacing.xs))
             .child(lead(Symbol::Magnifyingglass))
             .child(
                 div()
@@ -361,12 +352,12 @@ impl RenderOnce for FindBar {
                         .role(Role::Button)
                         .aria_label(label)
                         .flex_none()
-                        .h(px(super::icon_button_side(&theme) * k))
-                        .px(px(theme.spacing.sm * k))
+                        .h(px(super::icon_button_side(&theme)))
+                        .px(px(theme.spacing.sm))
                         .flex()
                         .items_center()
-                        .rounded(px(theme.radii.sm * k))
-                        .text_size(px(theme.typography.small() * k))
+                        .rounded(px(theme.radii.sm))
+                        .text_size(px(theme.typography.small()))
                         .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text_secondary))
                         .cursor_pointer()
@@ -380,10 +371,10 @@ impl RenderOnce for FindBar {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(theme.spacing.xs * k))
+                    .gap(px(theme.spacing.xs))
                     // The replacement lines up under the query, past an empty lead: a word says
                     // what the row does, and no symbol says replace.
-                    .child(div().flex_none().size(px(theme.typography.icon() * k)))
+                    .child(div().flex_none().size(px(theme.typography.icon())))
                     .child(div().flex_1().min_w_0().child(
                         Input::new(&field).appearance(false).aria_label(REPLACE_PLACEHOLDER),
                     ))
@@ -392,22 +383,22 @@ impl RenderOnce for FindBar {
             });
         let selector = id.to_string();
         // The bar's own hairline of room round its buttons, which sit flush to its edge.
-        let rim = theme.spacing.xxs * k;
+        let rim = theme.spacing.xxs;
         super::elevate(div(), &theme)
             .id(id)
             .debug_selector(move || selector)
             .role(Role::Search)
             .aria_label(label)
-            .w(px(WIDTH * k))
+            .w(px(WIDTH))
             .max_w_full()
             .flex()
             .flex_col()
             .gap(px(rim))
-            .pl(px(theme.spacing.sm * k))
+            .pl(px(theme.spacing.sm))
             .pr(px(rim))
             .py(px(rim))
-            .rounded(px(theme.radii.lg * k))
-            .text_size(px(theme.typography.small() * k))
+            .rounded(px(theme.radii.lg))
+            .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text))
             // Over what it finds in: the pointer there is the bar's, not the text's.

@@ -383,6 +383,9 @@ impl WorkspaceView {
         let where_ = (has_workers && !phone).then(|| self.render_breadcrumb(cx));
         let tabs =
             (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
+        if tabs.is_none() {
+            self.drop_spots.no_strip();
+        }
 
         // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
         // left to review; it opens the navigator at them.
@@ -538,7 +541,7 @@ impl WorkspaceView {
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
         // Renamed, the field takes the title's place, as it does in a header.
         if let Some(field) = self.rename_field(tile, id) {
-            return kit::typed(div(), phone_title_role(theme), 1.0)
+            return kit::typed(div(), phone_title_role(theme))
                 .id("phone-renaming")
                 .flex_1()
                 .min_w_0()
@@ -562,7 +565,7 @@ impl WorkspaceView {
                     .text_ellipsis()
                     .child(SharedString::from(title)),
             )
-            .children(state.map(|st| crate::icons::status_mark(theme, Some(st), 1.0)))
+            .children(state.map(|st| crate::icons::status_mark(theme, Some(st))))
             .into_any_element()
     }
 
@@ -851,7 +854,7 @@ pub(super) fn phone_title_role(theme: &slopty_theme::Theme) -> slopty_theme::Typ
 
 /// A phone bar's heading: one line as an inline navigation title, giving way at its end.
 fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stateful<gpui::Div> {
-    kit::typed(div(), phone_title_role(theme), 1.0)
+    kit::typed(div(), phone_title_role(theme))
         .id("phone-title")
         .debug_selector(|| "phone-title".to_owned())
         .role(Role::Heading)
@@ -880,6 +883,10 @@ const fn menu_name(which: MenuKind) -> &'static str {
 impl super::title_tabs::TitleTabsHost for WorkspaceView {
     fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.layout_action(cx, |l| l.show_tab(id));
+    }
+
+    fn carry_title_tab(&mut self, id: TabId, ev: &gpui::MouseDownEvent) {
+        self.begin_carry(super::area::Carried::Tab(id), ev);
     }
 
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {

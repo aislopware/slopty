@@ -405,8 +405,7 @@ impl WorkspaceView {
                             cx.notify();
                         }
                     }));
-                mark =
-                    Some(crate::icons::status_mark(theme, Some(crate::icons::Status::Failed), 1.0));
+                mark = Some(crate::icons::status_mark(theme, Some(crate::icons::Status::Failed)));
                 ("failed", None, vec![copy, dismiss])
             }
             ToastKind::Offered(offer) => {
@@ -459,7 +458,7 @@ impl WorkspaceView {
                         this.dismiss_attention(tile);
                         this.focus_tile(tile, cx);
                     }));
-                mark = Some(crate::icons::status_mark(theme, Some(*status), 1.0));
+                mark = Some(crate::icons::status_mark(theme, Some(*status)));
                 ("attention", None, vec![go])
             }
         };

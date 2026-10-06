@@ -498,7 +498,7 @@ impl WindowPicker {
             }))
             // How it is doing ends the line, never on its mark.
             .children(mark.filter(|m| *m != Status::Idle).map(|status| {
-                crate::icons::status_mark(theme, Some(status), 1.0)
+                crate::icons::status_mark(theme, Some(status))
                     .debug_selector(move || format!("picker-status-{}-{}", id.0, id.1))
             }));
         let row = if chosen { self.plate.mark(row, ix) } else { row };

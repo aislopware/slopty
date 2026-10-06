@@ -38,27 +38,26 @@ pub struct Frame {
     pub bleeds: bool,
 }
 
-/// `el` as a message's frame at `zoom`, standing as `frame` says.
-pub fn shell<E: Styled>(el: E, theme: &Theme, zoom: f32, frame: Frame) -> E {
+/// `el` as a message's frame, standing as `frame` says.
+pub fn shell<E: Styled>(el: E, theme: &Theme, frame: Frame) -> E {
     let s = theme.surfaces;
     let fill = if frame.focused { s.card.over(s.elevated) } else { s.elevated };
     let el = el.bg(hsla(fill));
     if frame.bleeds {
         return el.border_t(super::HAIR).border_color(hsla(s.sash));
     }
-    let r = px(theme.radii.md * zoom);
+    let r = px(theme.radii.md);
     let el = if frame.capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
     el.border(super::HAIR).border_color(hsla(s.border))
 }
 
-/// The send control at `zoom`, under `id`, named `label` and drawn as `glyph`.
+/// The send control under `id`, named `label` and drawn as `glyph`.
 ///
 /// A [`SEND`] square at `radii.sm` in the neutral solid with its ink, whether it sends work on
 /// or stops a turn; the glyph says which. The caller says what a click does.
 #[must_use]
 pub fn send_control(
     theme: &Theme,
-    zoom: f32,
     id: &'static str,
     glyph: Symbol,
     label: &'static str,
@@ -71,15 +70,15 @@ pub fn send_control(
         .role(Role::Button)
         .aria_label(label)
         .flex_none()
-        .size(px(side * zoom))
+        .size(px(side))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.sm * zoom))
+        .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .child(
             crate::icons::icon(theme, glyph, IconSize::Inline, hsla(s.solid_ink))
-                .size(px(theme.typography.icon() * zoom)),
+                .size(px(theme.typography.icon())),
         );
     super::solid_pressable(el, theme)
 }
@@ -100,20 +99,20 @@ mod tests {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
-            let mut rest = shell(div(), &theme, 1.0, Frame::default());
+            let mut rest = shell(div(), &theme, Frame::default());
             let style = rest.style().clone();
             let r = Some(gpui::px(theme.radii.md).into());
             assert_eq!(style.corner_radii.top_left, r, "{variant:?}: a card's radius");
             assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: the ring");
             assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.elevated))));
             let focus = Frame { focused: true, ..Frame::default() };
-            let mut held = shell(div(), &theme, 1.0, focus);
+            let mut held = shell(div(), &theme, focus);
             let held = held.style().clone();
             assert_eq!(held.border_color, style.border_color, "{variant:?}: the ring stays");
             let washed = gpui::Fill::from(hsla(s.card.over(s.elevated)));
             assert_eq!(held.background, Some(washed), "{variant:?}: the wash");
             assert_ne!(held.background, style.background, "{variant:?}: focus shows");
-            let mut bled = shell(div(), &theme, 1.0, Frame { bleeds: true, ..Frame::default() });
+            let mut bled = shell(div(), &theme, Frame { bleeds: true, ..Frame::default() });
             let bled = bled.style();
             assert!(bled.corner_radii.top_left.is_none(), "{variant:?}: square");
             assert!(bled.border_widths.left.is_none(), "{variant:?}: edge to edge");
@@ -128,7 +127,7 @@ mod tests {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             for glyph in [Symbol::ArrowUp, Symbol::StopFill] {
-                let mut send = send_control(&theme, 1.0, "s", glyph, "Send");
+                let mut send = send_control(&theme, "s", glyph, "Send");
                 let style = send.style();
                 assert_eq!(style.size.width, Some(gpui::px(SEND).into()), "{variant:?}");
                 let r = Some(gpui::px(theme.radii.sm).into());

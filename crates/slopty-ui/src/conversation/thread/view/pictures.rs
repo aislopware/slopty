@@ -12,7 +12,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px,
 };
 use slopty_proto::thread::Image;
 use slopty_proto::thread::wire::Expanded;
@@ -22,7 +22,7 @@ use crate::colors::hsla;
 use crate::icons::Symbol;
 use crate::kit;
 
-/// The tallest a picture is drawn, in points at zoom 1.
+/// The tallest a picture is drawn, in points.
 const PICTURE_HEIGHT: f32 = 120.0;
 
 /// The widest, as a multiple of its height: a panorama is cut, not shrunk to a sliver.
@@ -95,9 +95,9 @@ impl ThreadView {
                         .aria_label(SharedString::from(picture_label(image)))
                         .cursor_pointer()
                         .flex_none()
-                        .h(self.z(PICTURE_HEIGHT))
-                        .w(self.z(PICTURE_HEIGHT * aspect))
-                        .rounded(self.z(theme.radii.md))
+                        .h(px(PICTURE_HEIGHT))
+                        .w(px(PICTURE_HEIGHT * aspect))
+                        .rounded(px(theme.radii.md))
                         .overflow_hidden()
                         .border(kit::HAIR)
                         .border_color(hsla(s.stroke))
@@ -117,7 +117,7 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .flex_wrap()
-                .gap(self.z(theme.spacing.xs))
+                .gap(px(theme.spacing.xs))
                 .when(end, gpui::Styled::justify_end)
                 .children(tiles)
                 .into_any_element(),
@@ -145,9 +145,9 @@ impl ThreadView {
         let image = self.viewing.clone()?;
         let theme = self.theme.clone();
         let s = theme.surfaces;
-        let picture = self.picture(&image, cx).map(|p| {
-            img(p).size_full().object_fit(ObjectFit::Contain).rounded(self.z(theme.radii.md))
-        });
+        let picture = self
+            .picture(&image, cx)
+            .map(|p| img(p).size_full().object_fit(ObjectFit::Contain).rounded(px(theme.radii.md)));
         let close = kit::icon_button(&theme, "picture-close", Symbol::Xmark, "Close").on_click(
             cx.listener(|this, _ev, _w, cx| {
                 cx.stop_propagation();
@@ -159,12 +159,12 @@ impl ThreadView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .pl(self.z(theme.spacing.sm))
-            .pr(self.z(theme.spacing.xxs))
-            .py(self.z(theme.spacing.xxs))
-            .rounded(self.z(theme.radii.md))
-            .text_size(self.z(theme.typography.small()))
+            .gap(px(theme.spacing.sm))
+            .pl(px(theme.spacing.sm))
+            .pr(px(theme.spacing.xxs))
+            .py(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.md))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(kit::tabular(div()).child(SharedString::from(words.clone())))
             .child(close);
@@ -178,8 +178,8 @@ impl ThreadView {
             .flex()
             .flex_col()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .p(self.z(theme.spacing.lg))
+            .gap(px(theme.spacing.sm))
+            .p(px(theme.spacing.lg))
             .bg(kit::scrim(&theme))
             .occlude()
             .cursor_pointer()

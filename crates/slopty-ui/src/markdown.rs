@@ -238,7 +238,7 @@ pub fn code_block(
 /// A task box's side, as a share of the prose size.
 const TASK_BOX: f32 = 0.95;
 
-/// How much narrower than its box a done task's check is drawn, in points at zoom 1.
+/// How much narrower than its box a done task's check is drawn, in points.
 const TASK_CHECK_INSET: f32 = 4.0;
 
 /// What a task row's box does with the row's index (the surface's owner has the text).

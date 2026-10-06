@@ -37,7 +37,7 @@ use crate::icons::{IconSize, Symbol};
 /// Letters typed within this pause of each other make one prefix.
 pub const TYPING: Duration = Duration::from_millis(800);
 
-/// A menu's width at zoom 1: room for a row's words and its keys.
+/// A menu's width: room for a row's words and its keys.
 pub const WIDTH: f32 = 260.0;
 
 /// What a row does when chosen.

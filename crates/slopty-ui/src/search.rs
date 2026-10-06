@@ -86,7 +86,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(120);
 /// The lines shown before and after each match while context is on.
 pub const CONTEXT: u32 = 2;
 
-/// The width of a line row's number column at zoom 1, room for five figures.
+/// The width of a line row's number column, room for five figures.
 const NUMBER_W: f32 = 40.0;
 
 /// The most of the window's height the surface takes, under its ceiling.
@@ -625,7 +625,7 @@ impl ProjectSearch {
                     .child(SharedString::from(dir.to_owned())),
             )
             .child(
-                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary, 1.0))
+                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary))
                     .flex_none()
                     .child(SharedString::from(hits.lines.len().to_string())),
             )
@@ -711,7 +711,7 @@ impl ProjectSearch {
         let theme = &self.theme;
         let s = theme.surfaces;
         let toggle = |id: &'static str, face, label, on, act: fn(&mut Self) -> &mut bool| {
-            crate::kit::text_toggle(theme, id, face, label, on, 1.0)
+            crate::kit::text_toggle(theme, id, face, label, on)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(act, cx)))
         };

@@ -3377,7 +3377,7 @@ impl Render for ScreenView {
             let theme = &self.theme;
             // A pill over a picture floats: over a remote desktop's own white or black a
             // veil of the chrome's grey could vanish, and the lifted surface cannot.
-            let pill = kit::tabular(kit::elevate(kit::pill_frame(theme, 1.0), theme))
+            let pill = kit::tabular(kit::elevate(kit::pill_frame(theme), theme))
                 .id("zoom-readout")
                 .role(gpui::accesskit::Role::Status)
                 .aria_label(SharedString::from(text.clone()))
@@ -3502,8 +3502,7 @@ impl ScreenView {
             .child(
                 kit::notice(
                     theme,
-                    1.0,
-                    kit::notice_mark(theme, icon, 1.0),
+                    kit::notice_mark(theme, icon),
                     title,
                     Some(SharedString::new_static(detail)),
                 )
@@ -3548,7 +3547,7 @@ impl ScreenView {
     /// on a lifted pill at the top, the rest of the body the stream's.
     fn unlock_line(&self) -> gpui::AnyElement {
         let theme = &self.theme;
-        let pill = kit::elevate(kit::pill_frame(theme, 1.0), theme)
+        let pill = kit::elevate(kit::pill_frame(theme), theme)
             .child(
                 crate::icons::icon(
                     theme,

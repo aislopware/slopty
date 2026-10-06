@@ -111,7 +111,7 @@ fn tile_in<'a>(
     let held = hub.clone();
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = ReviewView::new(held, thread, Theme::default(), window, cx);
-        view.set_layout(1.0, width, HEIGHT, cx);
+        view.set_layout(width, HEIGHT, cx);
         view
     });
     cx.simulate_resize(size(px(width), px(HEIGHT)));

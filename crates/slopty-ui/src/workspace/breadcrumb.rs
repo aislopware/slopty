@@ -162,7 +162,7 @@ impl WorkspaceView {
                     .max_w(px(theme.typography.ui_size * PROJECT_NAME_EM))
                     .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
-                    .child(ChromeText::new(name.clone(), px(theme.typography.ui_size), 1.0).fill()),
+                    .child(ChromeText::new(name.clone(), px(theme.typography.ui_size)).fill()),
             )
             .child(self.chevron())
             .when(elsewhere.shown().is_some(), |el| {
@@ -232,7 +232,7 @@ impl WorkspaceView {
                 .child(
                     div()
                         .min_w_0()
-                        .child(ChromeText::new(branch, px(theme.typography.ui_size), 1.0).fill()),
+                        .child(ChromeText::new(branch, px(theme.typography.ui_size)).fill()),
                 )
                 .when_some(changes, |el, size| {
                     el.child(

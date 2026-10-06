@@ -4,7 +4,7 @@
 //! draws a stretch whose key it painted last frame again from that frame, in place or moved.
 //! Two windows here take the same random history of output, edits, scrolls, selections, search
 //! hits, cursor moves and blinks, input-method text, links, themes (colours, font size, line
-//! height, ligatures, minimum contrast, bold as bright), zooms, focus, resizes and scale factors
+//! height, ligatures, minimum contrast, bold as bright), focus, resizes and scale factors
 //! (1.5 among them, where a row's move is often not whole device pixels): one draws with
 //! retention on, so keyed stretches are drawn again, and one with it off, so every stretch is
 //! painted afresh. Every frame the two paint must match, primitive for primitive and in the
@@ -584,16 +584,6 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
                     theme.terminal.minimum_contrast = contrast;
                     theme.terminal.bold_is_bright = bright;
                     view.set_theme(theme, cx);
-                }),
-            )
-        }
-        14 => {
-            let zoom = [1.0, 1.0, 0.5, 0.75, 1.25][rng.below(5)];
-            (
-                format!("zoom {zoom}"),
-                Box::new(move |view, _window, cx| {
-                    view.set_zoom(zoom);
-                    cx.notify();
                 }),
             )
         }

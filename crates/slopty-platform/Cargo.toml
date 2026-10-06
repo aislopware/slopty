@@ -36,15 +36,10 @@ block2.workspace = true
 dispatch2.workspace = true
 # A drop's landing, shared by the callbacks its files arrive on (`file_drop`).
 parking_lot.workspace = true
-# A thread's QoS class (`user_interactive_thread`, and the symbols' prewarm): pthread/qos.h,
-# which rustix does not wrap.
+# A thread's QoS class (`user_interactive_thread`): pthread/qos.h, which rustix does not wrap.
 libc.workspace = true
-# The chrome's SF Symbols, drawn into bitmaps of our own (`symbols`).
-objc2-core-graphics = { workspace = true, features = [
-    "CGBitmapContext",
-    "CGColorSpace",
-    "CGContext",
-] }
+# Outlines drawn into alpha masks of our own (`outline`).
+objc2-core-graphics = { workspace = true, features = [ "CGBitmapContext", "CGContext" ] }
 objc2-foundation = { workspace = true, features = [
     "NSURL",
     "NSURLRequest",
@@ -127,8 +122,6 @@ objc2-app-kit = { workspace = true, features = [
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",
     "objc2-core-foundation",
-    # The chrome's SF Symbols at the text's weight (`symbols`).
-    "NSFontDescriptor",
     # The Mac waking, its screens and its session (`resume`).
     "NSWorkspace",
     # The Dock tile's progress bar (`dock`).
@@ -216,12 +209,6 @@ objc2-ui-kit = { workspace = true, features = [
     "UIScreen",
     "UIImage",
     "objc2-core-foundation",
-    # The chrome's SF Symbols (`symbols`).
-    "UIGeometry",
-    "UIGraphics",
-    "UIImageConfiguration",
-    "UIImageSymbolConfiguration",
-    "objc2-core-graphics",
     # The system's paste button, which pastes without the prompt (`paste_control`).
     "UIControl",
     "UIPasteControl",
@@ -243,8 +230,6 @@ objc2-web-kit = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-# This process's footprint, for the symbols' pool test (`tests/symbols.rs`).
-slopty-testkit.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
 # The install plan's JSON, as the CLI prints it for a deploy (`service::Ptyd`).

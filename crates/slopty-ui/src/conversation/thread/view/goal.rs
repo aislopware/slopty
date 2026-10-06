@@ -13,7 +13,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::Goal;
 
@@ -79,7 +79,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.xs))
+            .gap(px(theme.spacing.xs))
             .child(self.icon(Symbol::Flag, s.text_muted))
             .child(kit::fit_label("thread-goal-objective", goal.objective.clone(), theme))
             .children(
@@ -102,7 +102,7 @@ impl ThreadView {
                     kit::progress::Progress::Share(share),
                 )
                 .tone(context_tone(theme, pct))
-                .height(self.z(theme.spacing.xs))
+                .height(px(theme.spacing.xs))
                 .label("Budget used")
                 .at_once(),
             )
@@ -115,8 +115,8 @@ impl ThreadView {
                 .aria_label(SharedString::from(format!("Goal: {said}")))
                 .flex()
                 .flex_col()
-                .gap(self.z(theme.spacing.xxs))
-                .text_size(self.z(theme.typography.small()))
+                .gap(px(theme.spacing.xxs))
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(line)
                 .children(bar)

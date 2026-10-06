@@ -409,10 +409,9 @@ pub struct FileView {
     marks: Option<RangeDecorationCollection>,
     /// The line the tile was opened at: an edit's place in the file.
     focus: Option<usize>,
-    zoom: f32,
-    /// Inner padding at zoom 1 (the theme's base spacing).
+    /// Inner padding (the theme's base spacing).
     pad: f32,
-    /// Text size at zoom 1 (the theme's mono size).
+    /// Text size (the theme's mono size).
     text_size: f32,
     theme: Theme,
     /// The find bar, while open.
@@ -513,7 +512,6 @@ impl FileView {
             changed: Vec::new(),
             marks: None,
             focus: None,
-            zoom: 1.0,
             pad: 8.0,
             text_size: 13.0,
             theme,
@@ -579,7 +577,7 @@ impl FileView {
                 cx.emit(FileViewEvent::OpenThread(opens));
             }));
         }
-        let pill = crate::kit::elevate(crate::kit::pill_frame(theme, 1.0), theme)
+        let pill = crate::kit::elevate(crate::kit::pill_frame(theme), theme)
             .debug_selector(|| "file-author".to_owned())
             .px(px(theme.spacing.xxs))
             .child(tag);
@@ -601,11 +599,11 @@ impl FileView {
         self.shows_text() && !self.previewing() && self.comparing.is_none()
     }
 
-    /// The foot line's height at the tile's zoom: the meta text's size with a base unit over
+    /// The foot line's height: the meta text's size with a base unit over
     /// and under it.
     fn foot_height(&self) -> f32 {
         let theme = &self.theme;
-        theme.spacing.xs.mul_add(2.0, theme.typography.small()) * self.zoom
+        theme.spacing.xs.mul_add(2.0, theme.typography.small())
     }
 
     /// The foot line: what the file is coloured as, its indent and line endings, and where the
@@ -639,12 +637,12 @@ impl FileView {
             .flex()
             .items_center()
             .justify_end()
-            .gap(px(theme.spacing.xs * self.zoom))
-            .px(px(theme.spacing.inset() * self.zoom))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.inset()))
             .overflow_hidden()
             .whitespace_nowrap()
             .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.small() * self.zoom))
+            .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted));
         for (i, part) in parts.into_iter().enumerate() {
             if i > 0 {
@@ -1304,9 +1302,8 @@ impl FileView {
         }
     }
 
-    /// Paint scale (the workspace's zoom) and the theme's inset and type size at scale 1.
-    pub const fn set_layout(&mut self, zoom: f32, pad: f32, text_size: f32) {
-        self.zoom = zoom;
+    /// The theme's inset and type size, as the tile hands them.
+    pub const fn set_layout(&mut self, pad: f32, text_size: f32) {
         self.pad = pad;
         self.text_size = text_size;
     }
@@ -1418,14 +1415,13 @@ impl FileView {
     /// a terminal on its worker instead ($EDITOR at the tile's line, or $PAGER).
     fn too_large(&self, size: u64, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
-        let k = self.zoom;
         let editor = crate::terminal::url::editor_command(&self.path, self.focus_line_number());
         let pager = pager_command(&self.path);
         let ways = div()
-            .mt(px(theme.spacing.sm * k))
+            .mt(px(theme.spacing.sm))
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
+            .gap(px(theme.spacing.sm))
             .child(self.bar_button(
                 "file-open-editor",
                 OPEN_IN_EDITOR,
@@ -1460,7 +1456,7 @@ impl FileView {
         ways: Option<gpui::Div>,
     ) -> AnyElement {
         let id = self.id.as_uuid();
-        let (theme, k) = (&self.theme, self.zoom);
+        let theme = &self.theme;
         let said = match &detail {
             Some(detail) => format!("{title}: {detail}"),
             None => title.to_owned(),
@@ -1474,12 +1470,11 @@ impl FileView {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(self.pad * k))
+            .p(px(self.pad))
             .child(
                 crate::kit::notice(
                     theme,
-                    k,
-                    crate::kit::notice_mark(theme, icon, k),
+                    crate::kit::notice_mark(theme, icon),
                     title,
                     detail.map(SharedString::from),
                 )
@@ -1576,7 +1571,6 @@ impl FileView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let k = self.zoom;
         let id = self.id.as_uuid();
         let wash = hsla_alpha(fill, alpha::FAINT);
         div()
@@ -1587,15 +1581,15 @@ impl FileView {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm * k))
-            .px(px(theme.spacing.inset() * k))
-            .py(px(theme.spacing.xs * k))
+            .gap(px(theme.spacing.sm))
+            .px(px(theme.spacing.inset()))
+            .py(px(theme.spacing.xs))
             .bg(wash)
-            .text_size(px(theme.typography.small() * k))
+            .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .child(
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
-                    .size(px(theme.typography.icon() * k)),
+                    .size(px(theme.typography.icon())),
             )
             .child(div().flex_1().min_w_0().overflow_hidden().text_color(hsla(s.text)).child(text))
             .children(actions)
@@ -1603,8 +1597,7 @@ impl FileView {
     }
 
     /// One of the bar's ways out on the kit's pill frame, as tall as a header's words that act:
-    /// secondary (the panel with a hairline) or ghost (text until the pointer is on it), scaled
-    /// with the zoom.
+    /// secondary (the panel with a hairline) or ghost (text until the pointer is on it).
     fn bar_button(
         &self,
         part: &'static str,
@@ -1614,9 +1607,8 @@ impl FileView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let k = self.zoom;
         let id = self.id.as_uuid();
-        let button = crate::kit::pill_frame(theme, k)
+        let button = crate::kit::pill_frame(theme)
             .id(part)
             .debug_selector(move || format!("{part}-{id}"))
             .role(Role::Button)
@@ -1714,7 +1706,7 @@ impl Render for FileView {
         let foot = self.render_foot(cx);
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
-        let text_size = self.text_size * self.zoom;
+        let text_size = self.text_size;
         let compared = self.comparing.as_ref().filter(|_| self.read.is_some());
         let body = match &self.read {
             _ if let Some(comparing) = compared => self.render_compare(comparing),

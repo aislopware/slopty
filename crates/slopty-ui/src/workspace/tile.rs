@@ -60,7 +60,7 @@ struct HeaderPlace {
 /// A pull request's place in a header: it outlasts the checkout and the branch beside it.
 const PR_PRIORITY: kit::Priority = kit::Priority(kit::Priority::MEDIUM.0 + 16);
 
-/// The widest a page's address gets beside its title, in points at zoom 1: the title is what
+/// The widest a page's address gets beside its title, in points: the title is what
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
 
@@ -77,11 +77,11 @@ const TILE_GROUP: &str = "tile";
 /// The group a tab's close button hovers with.
 const TAB_GROUP: &str = "tab";
 
-/// The widest a tab grows in a tabbed column's tab row, in points at zoom 1: past it the tabs
+/// The widest a tab grows in a tabbed column's tab row, in points: past it the tabs
 /// read as one long bar rather than as tabs.
 const TAB_MAX: f32 = 200.0;
 
-/// The narrowest a tab is, in points at zoom 1: a four-letter title still makes a tab a
+/// The narrowest a tab is, in points: a four-letter title still makes a tab a
 /// pointer can find, not a sliver.
 const TAB_MIN: f32 = 120.0;
 
@@ -535,11 +535,11 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Mark {
         return Mark::agent(agent);
     }
     let symbol = match &item.kind {
+        ItemKind::File { path } => return crate::icons::file_mark(path),
         ItemKind::Terminal { .. } => Symbol::Terminal,
         ItemKind::Thread { .. } => crate::icons::AGENT,
         ItemKind::Window { .. } => Symbol::Macwindow,
         ItemKind::Display { .. } => Symbol::Display,
-        ItemKind::File { path } => crate::icons::file_symbol(path),
         ItemKind::Folder { .. } => Symbol::Folder,
         ItemKind::Browser { .. } => Symbol::Globe,
         ItemKind::Review { .. } | ItemKind::Changes { .. } => Symbol::PlusForwardslashMinus,
@@ -1270,9 +1270,9 @@ impl WorkspaceView {
                 .overflow_hidden()
                 .text_color(hsla(s.text_muted))
                 .child(if path {
-                    ChromeText::new(text, px(theme.typography.small()), 1.0).fill_from_start()
+                    ChromeText::new(text, px(theme.typography.small())).fill_from_start()
                 } else {
-                    ChromeText::new(text, px(theme.typography.small()), 1.0).fill()
+                    ChromeText::new(text, px(theme.typography.small())).fill()
                 })
                 .into_any_element()
         });
@@ -1301,7 +1301,7 @@ impl WorkspaceView {
                     crate::icons::icon(theme, machine, IconSize::Inline, tint)
                         .size(px(IconSize::Inline.slot(theme))),
                 )
-                .child(ChromeText::new(name, px(theme.typography.small()), 1.0).fill())
+                .child(ChromeText::new(name, px(theme.typography.small())).fill())
         });
         // A file with an edit not yet on disk says so in a word after its name, as macOS's
         // "Edited" follows a document's title; saving keeps it until the worker has written it.
@@ -1315,7 +1315,7 @@ impl WorkspaceView {
                 .flex_none()
                 .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
                 .text_color(hsla(s.text_muted))
-                .child(ChromeText::new(EDITED, px(theme.typography.small()), 1.0))
+                .child(ChromeText::new(EDITED, px(theme.typography.small())))
         });
         let tabbed = placed.tabs;
         let header = if tabbed {
@@ -1382,10 +1382,8 @@ impl WorkspaceView {
         // The lead wears its title's tier and weight: the focused title's text at the medium
         // weight, any other's secondary tone at the regular.
         let ink = title_ink(&self.theme, focused);
-        let weight =
-            if focused { crate::icons::Weight::Medium } else { crate::icons::Weight::Regular };
         let glyph = self.kind_glyph(item);
-        let slot = crate::palette::lead_slot_weighted(&self.theme, glyph, weight, hsla(ink))
+        let slot = crate::palette::lead_slot(&self.theme, glyph, hsla(ink))
             .debug_selector(move || format!("kind-{}", id.as_uuid()))
             .into_any_element();
         self.file_proxy(item, tile, slot, cx)
@@ -1414,7 +1412,7 @@ impl WorkspaceView {
             .filter(|st| *st != Status::Idle)
             .filter(|st| !(opening && *st == Status::Working))?;
         let theme = &self.theme;
-        let mark = crate::icons::status_mark(theme, Some(status), 1.0)
+        let mark = crate::icons::status_mark(theme, Some(status))
             .debug_selector(move || format!("status-{}", id.as_uuid()));
         let (session, agent) = match item.kind {
             ItemKind::Terminal { session } => (Some(session), self.agent_state(session)),
@@ -1487,7 +1485,7 @@ impl WorkspaceView {
                 .debug_selector(move || format!("name-{}", id.as_uuid()))
                 .min_w_0()
                 .overflow_hidden()
-                .child(ChromeText::new(title, px(self.theme.typography.ui_size), 1.0).fill())
+                .child(ChromeText::new(title, px(self.theme.typography.ui_size)).fill())
                 .into_any_element(),
         }
     }
@@ -1513,7 +1511,7 @@ impl WorkspaceView {
             part.min_w_0()
                 .overflow_hidden()
                 .text_color(hsla(color))
-                .child(ChromeText::new(text.to_owned(), px(theme.typography.small()), 1.0).fill())
+                .child(ChromeText::new(text.to_owned(), px(theme.typography.small())).fill())
         };
         let mut place = div();
         place.style().flex_shrink = Some(PLACE_SHRINK);
@@ -1583,15 +1581,13 @@ impl WorkspaceView {
                 let floor = if shown { shown_min } else { tab_min };
                 let on = shown && placed.focused;
                 let ink = title_ink(theme, on);
-                let weight =
-                    if on { crate::icons::Weight::Medium } else { crate::icons::Weight::Regular };
                 let glyph = self.kind_glyph(item);
-                let slot = crate::palette::lead_slot_weighted(theme, glyph, weight, hsla(ink))
+                let slot = crate::palette::lead_slot(theme, glyph, hsla(ink))
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
                 // How it is doing ends the tab, before its close button.
                 let state =
                     self.tile_status(tab, item).filter(|st| *st != Status::Idle).map(|st| {
-                        crate::icons::status_mark(theme, Some(st), 1.0)
+                        crate::icons::status_mark(theme, Some(st))
                             .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
                     });
                 let title = self.tile_title(item);
@@ -1833,7 +1829,7 @@ impl WorkspaceView {
                     crate::icons::icon(theme, glyph, IconSize::Inline, muted)
                         .size(px(IconSize::Inline.slot(theme)))
                 }))
-                .child(ChromeText::new(words, px(theme.typography.small()), 1.0).fill());
+                .child(ChromeText::new(words, px(theme.typography.small())).fill());
             if !at.commits {
                 return el.role(Role::Label).aria_label(said).into_any_element();
             }
@@ -1906,7 +1902,7 @@ impl WorkspaceView {
                 crate::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
                     .size(px(IconSize::Inline.slot(theme))),
             )
-            .child(ChromeText::new(tree.name.clone(), px(theme.typography.small()), 1.0).fill())
+            .child(ChromeText::new(tree.name.clone(), px(theme.typography.small())).fill())
             .into_any_element();
         vec![("worktree", kit::Priority::LOW, worktree)]
     }
@@ -1941,7 +1937,7 @@ impl WorkspaceView {
         let title = SharedString::from(pull.title.clone());
         let url = pull.url.clone();
         let hint_theme = std::rc::Rc::new(theme.clone());
-        let chip = kit::pill_frame(theme, 1.0)
+        let chip = kit::pill_frame(theme)
             .id("pr")
             .debug_selector(move || format!("pr-{}", id.as_uuid()))
             .role(Role::Link)
@@ -1964,7 +1960,7 @@ impl WorkspaceView {
                 crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
                     .size(px(IconSize::Inline.slot(theme))),
             )
-            .child(ChromeText::new(format!("#{}", pull.number), px(theme.typography.small()), 1.0));
+            .child(ChromeText::new(format!("#{}", pull.number), px(theme.typography.small())));
         let chip = tab_stop(chip, s.focus).on_click(move |_ev, _window, cx| cx.open_url(&url));
         Some(("pr", PR_PRIORITY, chip.into_any_element()))
     }
@@ -2240,7 +2236,7 @@ impl WorkspaceView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(hover)))
-            .child(ChromeText::new(took, px(theme.typography.small()), 1.0));
+            .child(ChromeText::new(took, px(theme.typography.small())));
         tab_stop(el, s.focus)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()
@@ -2585,7 +2581,7 @@ impl WorkspaceView {
         let quiet = update.as_ref().is_some_and(|u| u.offered);
         let button = |part: &'static str, label: &'static str| {
             let tone = if quiet && part == "copy-command" { s.text_secondary } else { s.accent };
-            let el = kit::pill_frame(theme, 1.0)
+            let el = kit::pill_frame(theme)
                 .id(part)
                 .debug_selector(move || format!("{part}-{}", id.as_uuid()))
                 .role(Role::Button)
@@ -2595,7 +2591,7 @@ impl WorkspaceView {
                 .text_color(hsla(tone))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(ChromeText::new(label, px(theme.typography.small()), 1.0).fill());
+                .child(ChromeText::new(label, px(theme.typography.small())).fill());
             tab_stop(el, s.focus)
         };
         let restart = match (state, session) {
@@ -2624,7 +2620,7 @@ impl WorkspaceView {
                     div()
                         .min_w_0()
                         .text_color(hsla(s.text_muted))
-                        .child(ChromeText::new(said, px(theme.typography.small()), 1.0).fill())
+                        .child(ChromeText::new(said, px(theme.typography.small())).fill())
                 });
                 (detail, copy)
             }
@@ -2638,7 +2634,7 @@ impl WorkspaceView {
                         .debug_selector(move || format!("away-why-{}", id.as_uuid()))
                         .min_w_0()
                         .text_color(hsla(s.text_muted))
-                        .child(ChromeText::new(said, px(theme.typography.small()), 1.0).fill())
+                        .child(ChromeText::new(said, px(theme.typography.small())).fill())
                 });
                 (detail, None)
             }
@@ -2680,7 +2676,7 @@ impl WorkspaceView {
             })
         });
         if centred {
-            let mark = crate::icons::notice_status(theme, status, hsla(status.ink(theme)), 1.0);
+            let mark = crate::icons::notice_status(theme, status, hsla(status.ink(theme)));
             let buttons = div()
                 .flex()
                 .flex_wrap()
@@ -2695,7 +2691,7 @@ impl WorkspaceView {
                 .when_some(grant, gpui::ParentElement::child)
                 .when_some(wake, gpui::ParentElement::child)
                 .when_some(retry, gpui::ParentElement::child);
-            let notice = kit::notice(theme, 1.0, mark, text.clone(), None)
+            let notice = kit::notice(theme, mark, text.clone(), None)
                 .id("state")
                 .debug_selector(move || format!("state-{}", id.as_uuid()))
                 .role(Role::Status)
@@ -2739,7 +2735,7 @@ impl WorkspaceView {
                 div()
                     .flex_none()
                     .max_w_full()
-                    .child(ChromeText::new(text.clone(), px(theme.typography.small()), 1.0).fill()),
+                    .child(ChromeText::new(text.clone(), px(theme.typography.small())).fill()),
             )
             .when_some(detail, gpui::ParentElement::child);
         let pill = div()
@@ -2940,18 +2936,13 @@ impl WorkspaceView {
             None => format!("Opening {what}…"),
         });
         let block = Some({
-            let mark = crate::icons::notice_status(theme, Status::Running, hsla(s.text_muted), 1.0);
-            let block = kit::notice(
-                theme,
-                1.0,
-                mark,
-                format!("Opening {what}"),
-                worker.map(SharedString::from),
-            )
-            .debug_selector(move || format!("waiting-{}", id.as_uuid()))
-            .id("opening")
-            .role(Role::Status)
-            .aria_label(said);
+            let mark = crate::icons::notice_status(theme, Status::Running, hsla(s.text_muted));
+            let block =
+                kit::notice(theme, mark, format!("Opening {what}"), worker.map(SharedString::from))
+                    .debug_selector(move || format!("waiting-{}", id.as_uuid()))
+                    .id("opening")
+                    .role(Role::Status)
+                    .aria_label(said);
             let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
             crate::screen::AfterGrace::new(grace, block)
         });
@@ -3015,11 +3006,9 @@ impl WorkspaceView {
                     )
                     .size(px(ty.icon_large())),
                 )
+                .child(kit::typed(div(), roles.task_title).text_color(hsla(s.text)).child(title))
                 .child(
-                    kit::typed(div(), roles.task_title, 1.0).text_color(hsla(s.text)).child(title),
-                )
-                .child(
-                    kit::typed(div(), roles.chrome, 1.0)
+                    kit::typed(div(), roles.chrome)
                         .text_color(hsla(s.text_secondary))
                         .child(detail),
                 )
@@ -3071,8 +3060,6 @@ impl WorkspaceView {
                 _ if self.board_shown(*session)
                     && let Some(board) = self.board_view(*session).cloned() =>
                 {
-                    let handed = Handed::Board { zoom: 1.0 };
-                    self.hand_over(cx, &board, handed, move |v, cx| v.set_zoom(1.0, cx));
                     let body = self.body_view(&board, placed, cx);
                     fixed(body)
                 }
@@ -3081,21 +3068,20 @@ impl WorkspaceView {
                     && self.body_state(placed.tile, item).is_none() =>
                 {
                     let width = placed.rect.w;
-                    let handed = Handed::Face { zoom: 1.0, width };
+                    let handed = Handed::Face { width };
                     // The tile's header already says the title, the agent and its state, so the
                     // thread view draws none. Its view is made in the frame after it is wanted.
                     let Some(thread) = self.thread_face(*session) else { return well() };
                     self.hand_over(cx, thread, handed, move |v, cx| {
-                        v.set_layout(1.0, width, cx);
+                        v.set_layout(width, cx);
                         v.set_header(false, cx);
                     });
                     fixed(self.body_view(thread, placed, cx))
                 }
                 Some(view) => {
                     let covered = self.body_state(placed.tile, item).is_some();
-                    let handed = Handed::Shell { zoom: 1.0, covered };
+                    let handed = Handed::Shell { covered };
                     self.hand_over(cx, view, handed, move |v, _| {
-                        v.set_zoom(1.0);
                         v.set_covered(covered);
                     });
                     let body = self.body_view(view, placed, cx);
@@ -3162,8 +3148,8 @@ impl WorkspaceView {
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
                     let (pad, text_size) = (theme.spacing.inset(), theme.typography.mono_size);
-                    let handed = Handed::Text { zoom: 1.0, pad, size: text_size };
-                    self.hand_over(cx, view, handed, move |v, _| v.set_layout(1.0, pad, text_size));
+                    let handed = Handed::Text { pad, size: text_size };
+                    self.hand_over(cx, view, handed, move |v, _| v.set_layout(pad, text_size));
                     let body = self.body_view(view, placed, cx);
                     div()
                         .flex_1()
@@ -3178,9 +3164,6 @@ impl WorkspaceView {
             },
             ItemKind::Folder { .. } => match self.folders.get(&item.id) {
                 Some(view) => {
-                    self.hand_over(cx, view, Handed::Folder { zoom: 1.0 }, move |v, _| {
-                        v.set_zoom(1.0);
-                    });
                     let body = self.body_view(view, placed, cx);
                     div()
                         .flex_1()
@@ -3196,9 +3179,9 @@ impl WorkspaceView {
             ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
                 Some(view) => {
                     let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
-                    let handed = Handed::Review { zoom: 1.0, width, height };
+                    let handed = Handed::Review { width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
-                        v.set_layout(1.0, width, height, cx);
+                        v.set_layout(width, height, cx);
                     });
                     fixed(self.body_view(&view, placed, cx))
                 }
@@ -3208,9 +3191,9 @@ impl WorkspaceView {
             ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
                 Some(view) => {
                     let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
-                    let handed = Handed::Review { zoom: 1.0, width, height };
+                    let handed = Handed::Review { width, height };
                     self.hand_over(cx, &view, handed, move |v, cx| {
-                        v.set_layout(1.0, width, height, cx);
+                        v.set_layout(width, height, cx);
                     });
                     fixed(self.body_view(&view, placed, cx))
                 }
@@ -3221,9 +3204,9 @@ impl WorkspaceView {
             ItemKind::Thread { .. } => match self.thread_item(item.id).cloned() {
                 Some(view) => {
                     let width = placed.rect.w;
-                    let handed = Handed::Face { zoom: 1.0, width };
+                    let handed = Handed::Face { width };
                     self.hand_over(cx, &view, handed, move |v, cx| {
-                        v.set_layout(1.0, width, cx);
+                        v.set_layout(width, cx);
                         v.set_header(false, cx);
                     });
                     fixed(self.body_view(&view, placed, cx))
@@ -3260,7 +3243,7 @@ fn pill(
     let (hover, pressed) = (theme.surfaces.hover, theme.surfaces.pressed);
     let part: SharedString = part.into();
     let selector = format!("{part}-{}", item.as_uuid());
-    kit::pill_frame(theme, 1.0)
+    kit::pill_frame(theme)
         .id(part)
         .debug_selector(move || selector)
         .flex_none()
@@ -3270,7 +3253,7 @@ fn pill(
         .active(move |el| el.bg(hsla(pressed)))
         .when(mark.is_some(), |el| el.gap(px(theme.spacing.xs)))
         .children(mark)
-        .child(ChromeText::new(label, px(theme.typography.small()), 1.0))
+        .child(ChromeText::new(label, px(theme.typography.small())))
 }
 
 /// A header's title tone: focus is said by tone as well as weight. The focused tile's title

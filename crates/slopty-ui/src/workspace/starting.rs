@@ -732,39 +732,40 @@ impl WorkspaceView {
         let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);
         // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`).
-        let header = super::tab_look::row(theme, div().id("title"))
-            .debug_selector(move || format!("title-{}", id.as_uuid()))
-            .role(Role::Heading)
-            .aria_label(title.clone())
-            .h(px(theme.density.header))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .pr(px(theme.spacing.inset()))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_size(px(theme.typography.ui_size))
-            .text_color(ink)
-            .font_family(theme.typography.ui_family.clone())
-            .map(|el| {
-                let lead = crate::icons::Mark::agent(&starting.agent.0);
-                let look = super::tab_look::Look {
-                    shown: true,
-                    first: true,
-                    marked: placed.focused && placed.shared,
-                };
-                let tab = super::tab_look::tab(theme, div().id("lone-tab"), look)
-                    .min_w_0()
-                    .gap(px(theme.spacing.sm))
-                    .pl(px(theme.spacing.inset()))
-                    .pr(px(theme.spacing.md))
-                    .child(crate::palette::lead_slot(theme, lead, ink))
-                    .child(div().min_w_0().overflow_hidden().child(title.clone()));
-                el.child(tab).children(status.map(|st| {
-                    div().ml_auto().child(crate::icons::status_mark(theme, Some(st), 1.0))
-                }))
-            });
+        let header =
+            super::tab_look::row(theme, div().id("title"))
+                .debug_selector(move || format!("title-{}", id.as_uuid()))
+                .role(Role::Heading)
+                .aria_label(title.clone())
+                .h(px(theme.density.header))
+                .w_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .pr(px(theme.spacing.inset()))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.ui_size))
+                .text_color(ink)
+                .font_family(theme.typography.ui_family.clone())
+                .map(|el| {
+                    let lead = crate::icons::Mark::agent(&starting.agent.0);
+                    let look = super::tab_look::Look {
+                        shown: true,
+                        first: true,
+                        marked: placed.focused && placed.shared,
+                    };
+                    let tab = super::tab_look::tab(theme, div().id("lone-tab"), look)
+                        .min_w_0()
+                        .gap(px(theme.spacing.sm))
+                        .pl(px(theme.spacing.inset()))
+                        .pr(px(theme.spacing.md))
+                        .child(crate::palette::lead_slot(theme, lead, ink))
+                        .child(div().min_w_0().overflow_hidden().child(title.clone()));
+                    el.child(tab).children(status.map(|st| {
+                        div().ml_auto().child(crate::icons::status_mark(theme, Some(st)))
+                    }))
+                });
         // The new worktree's setup, while it runs in place of the rest, and once it failed over
         // the draft given back.
         let setup = starting.setup.as_ref().map(|seen| {
@@ -792,11 +793,11 @@ impl WorkspaceView {
             } else if let Some(drafting) = &starting.draft {
                 let view = &drafting.view;
                 let width = placed.rect.w;
-                let handed = Handed::Face { zoom: 1.0, width };
+                let handed = Handed::Face { width };
                 let theme = self.theme.clone();
                 let stale = view.read(cx).theme() != &theme;
                 self.hand_over(cx, view, handed, move |v, cx| {
-                    v.set_layout(1.0, width, cx);
+                    v.set_layout(width, cx);
                     v.set_header(false, cx);
                 });
                 if stale {
@@ -807,15 +808,11 @@ impl WorkspaceView {
             } else {
                 let place =
                     self.start_place(starting.worker, &starting.cwd, starting.worktree).said();
-                let mark = crate::icons::notice_status(
-                    theme,
-                    Status::Working,
-                    hsla(s.text_secondary),
-                    1.0,
-                );
+                let mark =
+                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary));
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));
                 let notice =
-                    kit::notice(theme, 1.0, mark, format!("Starting {label}"), Some(place.into()))
+                    kit::notice(theme, mark, format!("Starting {label}"), Some(place.into()))
                         .id("starting")
                         .debug_selector(move || format!("starting-{}", id.as_uuid()))
                         .role(Role::Status)
@@ -876,12 +873,8 @@ impl WorkspaceView {
         };
         match seen {
             SetupSeen::Running(setup) => {
-                let mark = crate::icons::notice_status(
-                    theme,
-                    Status::Working,
-                    hsla(s.text_secondary),
-                    1.0,
-                );
+                let mark =
+                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary));
                 let title = format!("Setting up from {}", setup.from);
                 let newest = setup.tail.last().map(|l| {
                     line(l)
@@ -904,12 +897,12 @@ impl WorkspaceView {
                     .flex_col()
                     .items_center()
                     .gap(px(theme.spacing.sm))
-                    .child(kit::notice(theme, 1.0, mark, title, None))
+                    .child(kit::notice(theme, mark, title, None))
                     .children(newest)
                     .into_any_element()
             }
             SetupSeen::Failed { setup, code } => {
-                let mark = crate::icons::notice_status(theme, Status::Failed, hsla(s.error), 1.0);
+                let mark = crate::icons::notice_status(theme, Status::Failed, hsla(s.error));
                 let title = format!("Setup from {} failed", setup.from);
                 let detail = code.map(|c| SharedString::from(format!("exit {c}")));
                 let tail = (!setup.tail.is_empty()).then(|| {
@@ -955,7 +948,7 @@ impl WorkspaceView {
                     .gap(px(theme.spacing.sm))
                     .px(px(theme.spacing.inset()))
                     .py(px(theme.spacing.md))
-                    .child(kit::notice(theme, 1.0, mark, title, detail))
+                    .child(kit::notice(theme, mark, title, detail))
                     .children(tail)
                     .child(
                         div()

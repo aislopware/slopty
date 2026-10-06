@@ -18,7 +18,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::{Choice, Effect, Request};
 
@@ -133,8 +133,8 @@ impl ThreadView {
                 .flex_wrap()
                 .items_center()
                 .justify_end()
-                .gap_x(self.z(theme.spacing.md))
-                .gap_y(self.z(theme.spacing.sm))
+                .gap_x(px(theme.spacing.md))
+                .gap_y(px(theme.spacing.sm))
                 .children(leading)
                 .child(div().flex_1().min_w_0().children(standing))
                 .child(
@@ -145,7 +145,7 @@ impl ThreadView {
                         .flex_wrap()
                         .items_center()
                         .justify_end()
-                        .gap(self.z(theme.spacing.sm))
+                        .gap(px(theme.spacing.sm))
                         .children(row),
                 )
                 .into_any_element(),
@@ -202,8 +202,8 @@ impl ThreadView {
                 .self_stretch()
                 .flex()
                 .items_center()
-                .px(self.z(theme.spacing.xs))
-                .rounded_r(self.z(theme.radii.sm))
+                .px(px(theme.spacing.xs))
+                .rounded_r(px(theme.radii.sm))
                 .cursor_pointer();
             crate::a11y::tab_stop(kit::secondary(el, theme), s.focus)
                 .child(self.icon(Symbol::ChevronDown, s.text_secondary))
@@ -225,7 +225,7 @@ impl ThreadView {
             .items_stretch()
             .gap(kit::HAIR)
             // A long deny gives way to its chevron, wrapping its words.
-            .child(deny.flex_shrink_1().min_w_0().rounded_r(self.z(0.0)))
+            .child(deny.flex_shrink_1().min_w_0().rounded_r(px(0.0)))
             .child(chevron)
             .children(menu)
             .into_any_element()
@@ -310,7 +310,7 @@ impl ThreadView {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(px(theme.spacing.xxs))
             .children(standing.iter().map(|choice| {
                 let reach = choice.scope.as_deref().map(str::trim).filter(|r| !r.is_empty());
                 let (ask, id) = (request.id.clone(), choice.id.clone());
@@ -331,14 +331,14 @@ impl ThreadView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.xs))
+                    .gap(px(theme.spacing.xs))
                     .child(button)
                     .children(reach.map(|reach| {
                         div()
                             .min_w_0()
                             .flex_1()
                             .whitespace_normal()
-                            .map(|el| kit::typed(el, theme.roles().metadata, self.zoom))
+                            .map(|el| kit::typed(el, theme.roles().metadata))
                             .text_color(hsla(s.text_secondary))
                             .child(SharedString::from(reach.to_owned()))
                     }))
