@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use slopty_proto::project::{Fact, Facts};
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
-use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
+use slopty_proto::server::{Form, InstalledAgent, Os, WorkerCaps};
 use slopty_proto::thread::AgentId;
 use tokio::sync::watch;
 
@@ -115,6 +115,7 @@ pub fn probe(agents: &[InstalledAgent], seldom: &Seldom) -> WorkerCaps {
         os: if cfg!(target_os = "linux") { Os::Linux } else { Os::MacOs },
         os_version: os_version(),
         arch: std::env::consts::ARCH.to_owned(),
+        form: form(),
         cpus: std::thread::available_parallelism()
             .map_or(1, |n| u16::try_from(n.get()).unwrap_or(u16::MAX)),
         memory: memory(),
@@ -129,6 +130,35 @@ pub fn probe(agents: &[InstalledAgent], seldom: &Seldom) -> WorkerCaps {
         wake_on_lan: seldom.wake_on_lan,
         writes_failing: writes_failing(),
         stops_at_logout: seldom.stops_at_logout.clone(),
+    }
+}
+
+/// Laptop, desktop or server. A Mac with a battery of its own is a laptop and any other a
+/// desktop: model identifiers such as "Mac15,6" no longer say. Elsewhere the firmware's
+/// chassis type says, as `hostnamectl` reads it.
+fn form() -> Form {
+    #[cfg(target_os = "macos")]
+    {
+        if slopty_platform::power::has_battery() { Form::Laptop } else { Form::Desktop }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        chassis_form(std::fs::read_to_string("/sys/class/dmi/id/chassis_type").ok().as_deref())
+    }
+}
+
+/// The form an SMBIOS chassis type names (DMTF DSP0134, "System Enclosure or Chassis Types"),
+/// grouped as systemd's `hostnamectl` groups them. A virtual machine says "Other" (1) or
+/// nothing, and is a server.
+#[cfg(any(test, not(target_os = "macos")))]
+fn chassis_form(chassis: Option<&str>) -> Form {
+    match chassis.and_then(|c| c.trim().parse::<u8>().ok()) {
+        // Portable, Laptop, Notebook, Sub Notebook, Tablet, Convertible, Detachable.
+        Some(8 | 9 | 10 | 14 | 30 | 31 | 32) => Form::Laptop,
+        // Desktop, Low Profile Desktop, Mini Tower, Tower, All in One, Space-saving,
+        // Lunch Box, Sealed-case PC, Mini PC, Stick PC.
+        Some(3 | 4 | 6 | 7 | 13 | 15 | 16 | 24 | 35 | 36) => Form::Desktop,
+        _ => Form::Server,
     }
 }
 
@@ -362,6 +392,28 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine says its form by its chassis: a laptop, a desktop, and a server or a virtual
+    /// machine, which says "Other" or nothing.
+    #[test]
+    fn the_chassis_type_names_the_form() {
+        assert_eq!(chassis_form(Some("10\n")), Form::Laptop);
+        assert_eq!(chassis_form(Some("31")), Form::Laptop);
+        assert_eq!(chassis_form(Some("3\n")), Form::Desktop);
+        assert_eq!(chassis_form(Some("35")), Form::Desktop);
+        assert_eq!(chassis_form(Some("23\n")), Form::Server);
+        assert_eq!(chassis_form(Some("1")), Form::Server);
+        assert_eq!(chassis_form(Some("garbage")), Form::Server);
+        assert_eq!(chassis_form(None), Form::Server);
+    }
+
+    /// A Mac is a laptop exactly when it has a battery of its own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_is_a_laptop_when_it_has_a_battery() {
+        let laptop = slopty_platform::power::has_battery();
+        assert_eq!(probe(&[], &Seldom::default()).form == Form::Laptop, laptop);
+    }
 
     /// A write that fails is said in the caps until the same kind of write goes through
     /// again; another kind failing beside it is said once the first is fixed.

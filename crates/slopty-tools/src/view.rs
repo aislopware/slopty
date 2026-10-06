@@ -1302,6 +1302,7 @@ mod tests {
             os: Os::MacOs,
             os_version: version.to_owned(),
             arch: "aarch64".to_owned(),
+            form: slopty_proto::server::Form::Desktop,
             cpus: 24,
             memory: 64 << 30,
             encoders: Vec::new(),

@@ -1208,3 +1208,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (the ready page, Done, the row kept, the phone's row), `ssh::tests` open the sheet from
     the panel's row.
 
+
+- ✅ **A worker says its form: laptop, desktop or server** (2026-10-06, the icons study
+  `.research/elegance-icons-2026-10-06.md` §3.3). The navigator and the palette showed every
+  machine as a server rack, though most are Macs on a desk or in a bag. Finder and Find My
+  tell devices apart by their form, and so does Slopty now. `WorkerCaps::form` is a `Form`.
+  - **On a Mac,** a battery of its own means a laptop (`slopty_platform::power::has_battery`),
+    and anything else is a desktop. Model identifiers such as "Mac15,6" no longer say the form.
+  - **On Linux,** the firmware's SMBIOS chassis type says it
+    (`/sys/class/dmi/id/chassis_type`), grouped as systemd's `hostnamectl` groups them. A
+    virtual machine reports "Other" or nothing, and is a server.
+  - `Form::of(os)` is the guess for a worker that says nothing more (`WorkerCaps::bare`).
+  - Tests: `slopty-worker` `caps::tests::{the_chassis_type_names_the_form,
+    a_mac_is_a_laptop_when_it_has_a_battery}`, the `worker_caps` golden.

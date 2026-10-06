@@ -38,6 +38,7 @@ mod golden_machine {
             os: Os::Linux,
             os_version: "Ubuntu 26.04".to_owned(),
             arch: "x86_64".to_owned(),
+            form: slopty_proto::server::Form::Desktop,
             cpus: 16,
             memory: 64 << 30,
             encoders: Vec::new(),

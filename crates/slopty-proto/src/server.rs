@@ -88,6 +88,28 @@ pub enum Os {
     Linux,
 }
 
+/// What a worker's machine is, as a person tells machines apart: the glyph it wears.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Form {
+    /// It runs on a battery of its own and closes its lid.
+    Laptop,
+    /// A desktop computer on a desk: a Mac mini, a Mac Studio, a tower.
+    Desktop,
+    /// A machine in a rack or a cloud, or one that does not say.
+    Server,
+}
+
+impl Form {
+    /// What a machine on `os` most likely is when it says nothing more.
+    #[must_use]
+    pub const fn of(os: Os) -> Self {
+        match os {
+            Os::MacOs => Self::Desktop,
+            Os::Linux => Self::Server,
+        }
+    }
+}
+
 /// An agent installed on a worker, which a thread can be started of there.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct InstalledAgent {
@@ -111,6 +133,8 @@ pub struct WorkerCaps {
     pub os_version: String,
     /// CPU architecture (`aarch64`, `x86_64`).
     pub arch: String,
+    /// Laptop, desktop or server.
+    pub form: Form,
     /// Logical CPUs.
     pub cpus: u16,
     /// Physical memory, bytes.
@@ -152,6 +176,7 @@ impl WorkerCaps {
             os,
             os_version: String::new(),
             arch: String::new(),
+            form: Form::of(os),
             cpus: 0,
             memory: 0,
             encoders: Vec::new(),
