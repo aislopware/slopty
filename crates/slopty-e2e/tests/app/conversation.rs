@@ -1408,11 +1408,21 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
         .wait_for("the findings", STEP, |d| any_label(d, "Claude Code raised 2 findings"))
         .await
         .unwrap();
+    // The review shares its pane's column with the agent's terminal, so the band, which would
+    // take more than its share of the diff's room drawn whole, comes folded to its one line;
+    // a click opens it.
     assert!(
-        any_label(&dump, "The README still says refresh never retries"),
-        "a note above the diff: {:#?}",
+        !any_label(&dump, "The README still says refresh never retries"),
+        "folded at first: {:#?}",
         dump.a11y
     );
+    click(drv, "Button", "Claude Code raised 2 findings").await;
+    let dump = drv
+        .wait_for("the findings open", STEP, |d| {
+            any_label(d, "The README still says refresh never retries")
+        })
+        .await
+        .unwrap();
     assert!(has(&dump, "Button", "Send 2 comments"), "{:#?}", labels(&dump, "Button"));
     drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
     golden(drv, &dir, "review-agent").await;
