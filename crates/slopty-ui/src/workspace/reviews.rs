@@ -83,7 +83,7 @@ impl WorkspaceView {
         runs.insert(0, thread);
         self.faces_dirty = true;
         for run in runs {
-            self.ask_review(key, run);
+            self.ask_review(key, run, None);
         }
         cx.notify();
     }

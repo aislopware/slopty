@@ -175,6 +175,11 @@ impl Starts {
         self.tiles.get(&item)
     }
 
+    /// The thread on its way in `item`'s tile, to change before it goes.
+    pub(super) fn get_mut(&mut self, item: ItemId) -> Option<&mut Starting> {
+        self.tiles.get_mut(&item)
+    }
+
     /// `item`'s start went as `start`: kept to send again as it was, and its last setup's
     /// words gone with the start they were for.
     pub(super) fn kept_start(&mut self, item: ItemId, start: Start) {
@@ -226,6 +231,9 @@ pub(super) struct Starting {
     pub args: Vec<String>,
     /// It starts in a new worktree of its own, made from the clone `cwd` is in.
     pub worktree: bool,
+    /// The pull request that worktree checks out, by number: its review opens beside the
+    /// thread once it lands ([`super::pull_review`]).
+    pub pull: Option<u32>,
     /// What its draft chose, with the first message: the model, the mode and the effort by
     /// the agent's ids (its defaults when `None`), and the files attached.
     pub chosen: Chosen,
@@ -286,6 +294,7 @@ impl Starting {
             cwd,
             args: Vec::new(),
             worktree: false,
+            pull: None,
             chosen: Chosen { model: None, mode: None, effort: None, attachments: Vec::new() },
             draft,
             sent: false,
@@ -340,6 +349,24 @@ impl WorkspaceView {
         item
     }
 
+    /// `item`'s start checks pull request `number` out in its new worktree: its composer says
+    /// so, holding `words` to send as they are or add to.
+    pub(super) fn start_on_pull(
+        &mut self,
+        item: ItemId,
+        number: u32,
+        words: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(starting) = self.starting.get_mut(item) else { return };
+        starting.pull = Some(number);
+        if let Some(drafting) = &starting.draft {
+            drafting.draft.update(cx, |d, cx| d.set_pull(number, cx));
+            drafting.view.update(cx, |v, cx| v.restore_draft(words, window, cx));
+        }
+    }
+
     /// What a new thread of `agent` can start with on `worker`, as its link said.
     fn offers(&self, worker: WorkerKey, agent: &AgentId) -> slopty_proto::thread::Offers {
         let caps = self.workers.get(&worker).and_then(|w| w.caps.as_ref());
@@ -352,7 +379,7 @@ impl WorkspaceView {
     fn start_place(&self, worker: WorkerKey, cwd: &str, worktree: bool) -> Place {
         let folder = super::tile::place_name(cwd, None, self.home_of(worker))
             .unwrap_or_else(|| "~".to_owned());
-        Place { folder: Some(folder), machine: self.worker_name(worker), worktree }
+        Place { folder: Some(folder), machine: self.worker_name(worker), worktree, pull: None }
     }
 
     /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
@@ -407,7 +434,7 @@ impl WorkspaceView {
             return;
         }
         let DraftSent { text, attachments, model, mode, effort, also } = sent;
-        let (cwd, worktree) = (starting.cwd.clone(), starting.worktree);
+        let (cwd, worktree, pull) = (starting.cwd.clone(), starting.worktree, starting.pull);
         starting.chosen = Chosen { model, mode, effort, attachments: attachments.clone() };
         let prompt = (!text.is_empty()).then_some(text);
         if let Some(words) = &prompt {
@@ -419,7 +446,8 @@ impl WorkspaceView {
         self.send_start(item, prompt.clone(), cx);
         // The same message on each other agent chosen, each in a new worktree of its own and a
         // column of its own, opened right of the one before, at its agent's defaults: the runs
-        // to compare. The keyboard stays with the run the person wrote.
+        // to compare, each on its own checkout of the pull request where the start is one's. The
+        // keyboard stays with the run the person wrote.
         let runs: Vec<AgentId> = also.into_iter().filter(|_| worktree).collect();
         if runs.is_empty() {
             return;
@@ -427,6 +455,7 @@ impl WorkspaceView {
         for agent in runs {
             let run = ItemId::new();
             let mut starting = Starting::new(worker, agent, cwd.clone(), None).in_worktree(true);
+            starting.pull = pull;
             starting.chosen.attachments.clone_from(&attachments);
             self.open_starting(run, starting, cx);
             self.send_start(run, prompt.clone(), cx);
@@ -496,10 +525,13 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let tile = TileRef { worker: key, item };
-        if self.starting.tiles.remove(&item).is_none() {
+        let Some(starting) = self.starting.tiles.remove(&item) else {
             let text = format!("{} started on {}", agent_label(agent), self.worker_name(key));
             self.show_notice(text, cx);
             return;
+        };
+        if starting.pull.is_some() {
+            self.review_pull_thread(key, thread, cx);
         }
         if self.tile_of_thread(thread).is_some() {
             self.drop_starting_tile(tile, cx);

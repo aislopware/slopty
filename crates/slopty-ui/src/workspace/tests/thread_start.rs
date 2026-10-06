@@ -1296,3 +1296,149 @@ fn a_folders_comments_stay_when_no_agent_can_take_them(cx: &mut TestAppContext) 
         .any(|m| matches!(m, ClientMsg::Thread(ThreadRequest::Start { .. })));
     assert!(!started, "nothing started");
 }
+
+/// "Review a pull request…": which repository, each clone once (a thread in one of its
+/// worktrees names the clone), then which pull request, by its number or its page. The
+/// machine's agent starts in a new worktree that checks it out, named for it, its composer
+/// asking for the review, and once the thread is there its review opens beside it on the
+/// whole branch, against the branch the pull request merges into once the worker says which.
+#[gpui::test]
+fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{
+        Against, PullSeen, PullStands, ReviewScope, TableFrame, ThreadFrame,
+    };
+
+    use super::super::actions::ReviewPull;
+    use super::super::pull_review::pull_number;
+
+    assert_eq!(pull_number(" #123 "), Some(123));
+    assert_eq!(pull_number("123"), Some(123));
+    assert_eq!(pull_number("https://github.com/o/atlas/pull/123/files"), Some(123));
+    assert_eq!(pull_number("https://github.com/o/atlas/pull/9#discussion"), Some(9));
+    for not in ["", "#", "0", "#-1", "fix 12", "https://github.com/o/atlas/issues/4"] {
+        assert_eq!(pull_number(not), None, "{not:?}");
+    }
+
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let key = studio.key;
+    for (version, cwd, repo) in [
+        (2, "/w/atlas", "/w/atlas"),
+        (3, "/w/atlas/.claude/worktrees/fix-1a2b", "/w/atlas/.claude/worktrees/fix-1a2b"),
+        (4, "/w/blog", "/w/blog"),
+    ] {
+        let session = SessionId::new();
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            name: None,
+            facts: BTreeMap::new(),
+        };
+        let summary = SessionSummary { repo: Some(repo.to_owned()), ..summary(session, Some(cwd)) };
+        let by = studio.me;
+        view.update_in(cx, |v, _window, cx| {
+            v.session_opened(key, summary, cx);
+            v.apply_sync(key, ItemSync::Delta { version, by, op: ItemOp::Add(item) }, cx);
+        });
+    }
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    cx.run_until_parked();
+    studio.drain();
+
+    view.update_in(cx, |v, window, cx| v.review_pull(&ReviewPull, window, cx));
+    settle(cx);
+    let mut lines = step_lines(&view, cx);
+    lines.sort();
+    assert_eq!(lines, ["atlas", "blog"], "each clone once, on the one machine with them");
+    cx.simulate_input("atlas");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert!(step_lines(&view, cx).is_empty(), "nothing until a number");
+    cx.simulate_input("https://github.com/o/atlas/pull/123/files");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Review #123 in atlas"]);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.update(|window, _| window.set_a11y_active(true));
+    settle(cx);
+    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let asked = "What should Claude Code do with #123 in a new worktree of atlas?";
+    let heads: Vec<_> =
+        tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();
+    assert!(tree.iter().any(|n| n.is("Heading", Some(asked))), "which, asked: {heads:?}");
+
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent: Vec<(slopty_proto::thread::IntentId, Start)> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { id, start }) => Some((id, *start)),
+            _ => None,
+        })
+        .collect();
+    let [(intent, start)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!(start.prompt.as_deref(), Some("Review pull request #123"), "the composer's ask");
+    assert_eq!(start.cwd, "/w/atlas", "from the clone");
+    let worktree = start.worktree.as_ref().expect("a worktree");
+    assert_eq!(worktree.pull, Some(123), "checking the pull request out");
+    let suffix = worktree.name.strip_prefix("pr-123-").expect("named for it");
+    assert!(suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{suffix}");
+
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    let thread = state.meta.id;
+    state.meta.cwd = format!("/w/atlas/.claude/worktrees/{}", worktree.name);
+    let started = IntentDone { id: *intent, outcome: Outcome::Started { thread } };
+    view.update_in(cx, |v, _w, cx| {
+        let table = TableFrame::Snapshot {
+            cursor: Cursor { epoch: 1, seq: 1 },
+            rows: vec![state.row(WallMs::ZERO)],
+        };
+        v.thread_table(key, &table, cx);
+        v.thread_done(key, &started, cx);
+    });
+    settle(cx);
+    let reviewed = studio.drain().into_iter().any(|m| {
+        matches!(m, ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::Review { thread: t }, .. }))
+            if t == thread)
+    });
+    assert!(reviewed, "its review opens beside it");
+    let scope = view.read_with(cx, |v, cx| v.review_of(thread).map(|r| r.read(cx).scope()));
+    assert_eq!(scope, Some(crate::review::Scope::WholeBranch), "on the whole branch");
+
+    let asks = |studio: &mut Fake| -> Vec<ReviewScope> {
+        studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Review { thread: t, scope }) if t == thread => {
+                    Some(scope)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let frame = |pull: Option<PullSeen>, seq: u64| {
+        let mut state = state.clone();
+        state.pull = pull;
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, state: Box::new(state) }
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame(None, 1), cx));
+    settle(cx);
+    assert_eq!(asks(&mut studio), [ReviewScope::WorkingTree(Against::Base)], "a guessed base");
+    let pull = PullSeen {
+        number: 123,
+        url: "https://github.com/o/atlas/pull/123".to_owned(),
+        title: "Fix the build".to_owned(),
+        base: "release".to_owned(),
+        stands: PullStands::Waiting,
+        failed: 0,
+        failed_first: None,
+        running: 0,
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame(Some(pull), 2), cx));
+    settle(cx);
+    let against = ReviewScope::WorkingTree(Against::Branch("release".to_owned()));
+    assert_eq!(asks(&mut studio), [against], "the branch it merges into, as the forge says");
+}

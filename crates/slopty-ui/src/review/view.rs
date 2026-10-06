@@ -586,7 +586,10 @@ impl ReviewView {
         };
         let held = self.reviewing.is_some() || self.model.has_findings();
         let pinned = self.pinned.clone().filter(|_| held);
-        let Some(scope) = pinned.or_else(|| self.scope.wire(state)) else {
+        // A thread on a pull request's branch reads its whole change against the branch that
+        // pull request merges into, as the forge names it, not a guessed base.
+        let base = state.pull.as_ref().map(|pull| pull.base.as_str());
+        let Some(scope) = pinned.or_else(|| self.scope.wire(state, base)) else {
             return;
         };
         if self.asked.as_ref() == Some(&scope) {

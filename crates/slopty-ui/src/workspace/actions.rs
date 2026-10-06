@@ -33,6 +33,9 @@ actions!(
         /// Review the changes of the focused folder's repository, or of the focused shell's,
         /// with no thread: what is not committed, and the whole branch.
         ReviewChanges,
+        /// "Review a pull request…": which repository, then which pull request by number; an
+        /// agent starts on it in a new worktree that checks it out, its whole change beside it.
+        ReviewPull,
         /// Free the worktree the focused work is in: a folder's, or a thread's whose agent
         /// has exited.
         RemoveWorktree,
@@ -193,6 +196,29 @@ pub struct StartThread {
     pub cwd: String,
     /// In a new worktree of its own, made from the clone the folder is in.
     pub worktree: bool,
+}
+
+/// A repository picked in "Review a pull request…": which pull request of it is asked next.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ReviewPullIn {
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// The repository, as the worker spells it.
+    pub repo: String,
+}
+
+/// The last step of "Review a pull request…": the agent starts on pull request `number` of
+/// `repo` on `worker`, in a new worktree checking it out.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ReviewPullNumber {
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// The repository, as the worker spells it.
+    pub repo: String,
+    /// The pull request's number.
+    pub number: u32,
 }
 
 /// "Resume a past session…", the last line of "New agent…"'s folder step: `agent`'s past
@@ -368,6 +394,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Open file…", Box::new(OpenFile)),
         w("Open folder…", Box::new(OpenFolder)),
         w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
+        w(super::pull_review::REVIEW_PULL, Box::new(ReviewPull)),
         w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
         w("Enclosing folder", Box::new(crate::folder::OpenParent)),
         w("Save file", Box::new(crate::file::SaveFile)),

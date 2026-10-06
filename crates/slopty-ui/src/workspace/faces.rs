@@ -136,8 +136,9 @@ pub(super) struct ThreadFaces {
     /// The review tile of each thread whose review was asked for, kept while it is open.
     reviews: HashMap<ThreadId, Entity<ReviewView>>,
     /// The reviews thread views asked for, in order: made in the next sync, for the strip to
-    /// open ([`WorkspaceView::take_review`]). Several at once are a message's runs.
-    review_asked: Vec<(WorkerKey, ThreadId)>,
+    /// open ([`WorkspaceView::take_review`]), each on the scope named where one is. Several at
+    /// once are a message's runs.
+    review_asked: Vec<(WorkerKey, ThreadId, Option<crate::review::Scope>)>,
     /// The review tiles made and not yet opened, and the worker whose agent runs each thread.
     review_made: Vec<(WorkerKey, ThreadId)>,
     /// The thread view of each thread tile, kept while its tile is there.
@@ -333,9 +334,15 @@ impl WorkspaceView {
         view
     }
 
-    /// Ask for `thread`'s review on `key`, after those asked already: made in the next sync.
-    pub(super) fn ask_review(&mut self, key: WorkerKey, thread: ThreadId) {
-        self.faces.threads.review_asked.push((key, thread));
+    /// Ask for `thread`'s review on `key`, after those asked already, showing `scope` where
+    /// one is named: made in the next sync.
+    pub(super) fn ask_review(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        scope: Option<crate::review::Scope>,
+    ) {
+        self.faces.threads.review_asked.push((key, thread, scope));
     }
 
     /// The thread view of each agent tile turned to its thread, by its session.
@@ -423,9 +430,16 @@ impl WorkspaceView {
             agent: starting.agent.clone(),
             cwd: starting.cwd.clone(),
             drive: None,
-            worktree: starting.worktree.then(|| {
-                let name = super::starting::worktree_name(prompt.as_deref(), &starting.agent, item);
-                NewWorktree::named(name)
+            worktree: starting.worktree.then(|| match starting.pull {
+                Some(number) => NewWorktree {
+                    pull: Some(number),
+                    ..NewWorktree::named(super::pull_review::worktree_of(number, item))
+                },
+                None => NewWorktree::named(super::starting::worktree_name(
+                    prompt.as_deref(),
+                    &starting.agent,
+                    item,
+                )),
             }),
             prompt,
             model: starting.chosen.model.clone(),
@@ -1246,8 +1260,11 @@ impl WorkspaceView {
             self.faces.threads.asks.insert(session, asks);
             self.faces.threads.views.insert(session, view);
         }
-        for (key, thread) in std::mem::take(&mut self.faces.threads.review_asked) {
-            let _view = self.open_review(key, thread, window, cx);
+        for (key, thread, scope) in std::mem::take(&mut self.faces.threads.review_asked) {
+            let view = self.open_review(key, thread, window, cx);
+            if let Some(scope) = scope {
+                view.update(cx, |v, cx| v.set_scope(scope, cx));
+            }
             self.faces.threads.review_made.push((key, thread));
             cx.notify();
         }
@@ -1355,7 +1372,7 @@ impl WorkspaceView {
                 None => self.show_notice("The agent's terminal has ended".to_owned(), cx),
             },
             ThreadViewEvent::Review { thread } => {
-                self.faces.threads.review_asked.push((key, thread));
+                self.ask_review(key, thread, None);
                 cx.notify();
             }
             ThreadViewEvent::ReviewRuns { thread } => self.review_runs(key, thread, cx),
@@ -1425,7 +1442,7 @@ impl WorkspaceView {
             ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
             ThreadViewEvent::Review { thread } => {
                 if let Some(key) = self.worker_of_session(session) {
-                    self.faces.threads.review_asked.push((key, thread));
+                    self.ask_review(key, thread, None);
                     cx.notify();
                 }
             }

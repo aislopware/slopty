@@ -60,15 +60,16 @@ impl Scope {
         }
     }
 
-    /// What to ask the worker for, over `state`; `None` before the thread has a turn.
+    /// What to ask the worker for, over `state`, the whole branch since it left `branch` where
+    /// one is named (its pull request's base); `None` before the thread has a turn.
     #[must_use]
-    pub fn wire(self, state: &ThreadState) -> Option<ReviewScope> {
+    pub fn wire(self, state: &ThreadState, branch: Option<&str>) -> Option<ReviewScope> {
         let first = state.turns.iter().map(|t| t.id).find(|t| *t != TurnId::BEFORE);
         match self {
             Self::LastTurn => state.last_turn().map(|t| ReviewScope::Turn(t.id)),
             Self::SinceReviewed => Some(ReviewScope::Kept),
             Self::AllTurns => first.map(ReviewScope::Since),
-            Self::Uncommitted | Self::WholeBranch => self.wire_alone(None),
+            Self::Uncommitted | Self::WholeBranch => self.wire_alone(branch),
         }
     }
 

@@ -58,6 +58,7 @@ mod presence;
 mod project_lines;
 mod project_search;
 mod projects;
+mod pull_review;
 mod readouts;
 pub mod remote;
 mod restore;
@@ -1983,6 +1984,9 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::start_orchestrator))
             .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::resume_session))
+            .on_action(cx.listener(Self::review_pull))
+            .on_action(cx.listener(Self::review_pull_in))
+            .on_action(cx.listener(Self::review_pull_number))
             .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))

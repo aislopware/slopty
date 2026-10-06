@@ -8394,3 +8394,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   not be shown". The Mac has no such row; its open panel reaches the Photos library itself.
   Tests: `conversation::thread::tests::face::the_add_menu_offers_photos_where_they_live` and
   `workspace::tests::remote::a_picture_pasted_into_the_composer_stays_a_chip_until_sent`.
+
+- ✅ **Review a pull request by its number** (2026-10-06, readiness rank 18's UI, on the wire
+  in `docs/decisions/projects.md` "A worktree can check out a pull request").
+  - **The steps.** The palette's "Review a pull request…" asks which repository, then which
+    pull request. The repositories are the focused tile's, then every one a shell or a thread
+    stands in, on each machine that can start an agent. Each clone is listed once, since a
+    thread in one of its worktrees names the clone, and a line names its machine only when
+    several machines have one. With a single repository the number step comes at once. The
+    number is typed as `123`, `#123` or the pull request's page, and the step's one line says
+    "Review #123 in atlas". No list of open pull requests is fetched: the person comes with a
+    number from a link or a notification, and asking the forge first would only add a wait.
+  - **The start.** The machine's usual agent starts in a new worktree that checks the pull
+    request out, named `pr-123-` and four hex digits, so several agents on one pull request
+    are found as runs. Its composer holds "Review pull request #123", to send as it is or add
+    to, and the question over it says "What should Claude Code do with #123 in a new worktree
+    of atlas?". Other agents ticked in the "+" menu check out the same pull request in
+    worktrees of their own.
+  - **The review.** Once the thread is there, its review opens beside it on the whole branch.
+    A thread's whole branch is now read against the branch its pull request merges into, as
+    the forge names it (`PullSeen::base`, `Against::Branch`), for every thread with a pull
+    request and not only these. Until the worker has said which, it reads against the guessed
+    base.
+  - Test: `workspace::tests::thread_start::a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out`.

@@ -41,6 +41,8 @@ pub struct Place {
     pub machine: String,
     /// In a new worktree of the folder's repository.
     pub worktree: bool,
+    /// The pull request that worktree checks out, by number.
+    pub pull: Option<u32>,
 }
 
 impl Place {
@@ -49,8 +51,9 @@ impl Place {
     #[must_use]
     pub fn within(&self) -> Option<String> {
         let folder = self.folder.as_deref()?;
+        let with = self.pull.map(|n| format!("with #{n} ")).unwrap_or_default();
         Some(if self.worktree {
-            format!("in a new worktree of {folder}")
+            format!("{with}in a new worktree of {folder}")
         } else {
             format!("in {folder}")
         })
@@ -230,6 +233,12 @@ impl Draft {
     /// The start was refused: the draft can go again.
     pub fn unsent(&mut self, cx: &mut Context<Self>) {
         self.sent = false;
+        cx.notify();
+    }
+
+    /// It checks out pull request `number` in its new worktree, as its place says.
+    pub fn set_pull(&mut self, number: u32, cx: &mut Context<Self>) {
+        self.place.pull = Some(number);
         cx.notify();
     }
 

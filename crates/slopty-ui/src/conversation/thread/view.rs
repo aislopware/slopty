@@ -2253,7 +2253,8 @@ impl ThreadView {
         let row = hub.threads().rows().rows.get(&self.thread);
         let repo = row.and_then(|r| r.repo.as_deref());
         let folder = folder_name(&state.meta.cwd, repo);
-        Some((vec![agent], Place { folder, machine: hub.worker().to_owned(), worktree: false }))
+        let machine = hub.worker().to_owned();
+        Some((vec![agent], Place { folder, machine, worktree: false, pull: None }))
     }
 
     /// The question over an empty thread's composer, at the reading column's width.
@@ -2797,6 +2798,7 @@ mod tests {
             folder: folder.map(str::to_owned),
             machine: "studio".to_owned(),
             worktree,
+            pull: None,
         };
         let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(
@@ -2811,6 +2813,11 @@ mod tests {
         assert_eq!(
             hero_words(&names(&["Claude Code", "Codex", "pi"]), &place(Some("app"), true)),
             "What should Claude Code, Codex and pi each do in a new worktree of app?"
+        );
+        let pull = Place { pull: Some(123), ..place(Some("atlas"), true) };
+        assert_eq!(
+            hero_words(&names(&["Claude Code"]), &pull),
+            "What should Claude Code do with #123 in a new worktree of atlas?"
         );
         assert_eq!(place(Some("slopty"), false).said(), "in slopty on studio");
     }
