@@ -8,7 +8,10 @@
 //! running, as a Mac app's document outlives its window, and the next window shows them as
 //! they are.
 
-use gpui::{App, AppContext as _, Entity, Focusable as _, WeakEntity, WindowOptions};
+use gpui::{
+    App, AppContext as _, Bounds, Entity, Focusable as _, Pixels, Size, WeakEntity, WindowBounds,
+    WindowOptions, px,
+};
 use gpui_kit::component::Root;
 use slopty_settings::Loaded;
 use slopty_ui::workspace::WorkspaceView;
@@ -40,6 +43,26 @@ pub mod actions {
 
 /// Where the project's documentation lives.
 pub const HELP_URL: &str = "https://github.com/aislopware/slopty#readme";
+
+/// The smallest the main window can be made: the narrowest phone the layout is drawn for.
+///
+/// It is 375 pt wide, and tall enough for its bar, a tile's header and a composer. Every size
+/// a Mac window can take is then a size the layout was drawn for; below it the phone bar's
+/// lights, title, bell and "…" ran into each other (`.research/responsive-2026-10-06.md`,
+/// finding 13).
+pub const MIN_SIZE: Size<Pixels> = Size { width: px(375.0), height: px(480.0) };
+
+/// `options` held to [`MIN_SIZE`]: the window can't be made smaller, and a frame kept from
+/// before the floor opens at least that large, where it stood.
+fn floored(options: WindowOptions) -> WindowOptions {
+    let floor = |b: Bounds<Pixels>| Bounds { origin: b.origin, size: b.size.max(&MIN_SIZE) };
+    let window_bounds = options.window_bounds.map(|bounds| match bounds {
+        WindowBounds::Windowed(b) => WindowBounds::Windowed(floor(b)),
+        WindowBounds::Maximized(b) => WindowBounds::Maximized(floor(b)),
+        WindowBounds::Fullscreen(b) => WindowBounds::Fullscreen(floor(b)),
+    });
+    WindowOptions { window_bounds, window_min_size: Some(MIN_SIZE), ..options }
+}
 
 /// The main window's options, made afresh for each window ([`WindowOptions`] is made once).
 pub type MakeOptions = std::rc::Rc<dyn Fn(&App) -> WindowOptions>;
@@ -119,13 +142,13 @@ pub(crate) fn open(
     // second display is watched while typing elsewhere.
     // The self-test's window comes up in front but takes no keyboard: its keys arrive over the
     // socket, and the machine's keyboard belongs to whoever is using it.
-    let options = WindowOptions {
+    let options = floored(WindowOptions {
         window_bounds,
         display_id,
         inactive_frame_interval: None,
         focus: options.focus && !self_test(),
         ..options
-    };
+    });
     let root_view = workspace.clone();
     let window = cx.open_window(options, move |window, cx| {
         // The theme follows the window's appearance while `theme.appearance = "system"`.
@@ -171,4 +194,43 @@ pub(crate) fn open(
         });
     })?;
     Ok(window)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Bounds, WindowBounds, WindowOptions, point, px, size};
+
+    use super::{MIN_SIZE, floored};
+
+    /// The main window can't be made narrower than the narrowest phone, and a frame kept from
+    /// a smaller window opens at the floor where it stood; a larger one is left as it was.
+    #[test]
+    fn the_window_is_never_narrower_than_a_phone() {
+        let at =
+            |w: f32, h: f32| Bounds { origin: point(px(40.0), px(60.0)), size: size(px(w), px(h)) };
+        let open = |bounds| {
+            floored(WindowOptions { window_bounds: Some(bounds), ..WindowOptions::default() })
+        };
+        let small = open(WindowBounds::Windowed(at(300.0, 900.0)));
+        assert_eq!(small.window_min_size, Some(MIN_SIZE));
+        assert_eq!(
+            small.window_bounds,
+            Some(WindowBounds::Windowed(at(375.0, 900.0))),
+            "where it stood"
+        );
+        let short = open(WindowBounds::Maximized(at(800.0, 300.0)));
+        assert_eq!(short.window_bounds, Some(WindowBounds::Maximized(at(800.0, 480.0))));
+        let roomy = open(WindowBounds::Windowed(at(1280.0, 800.0)));
+        assert_eq!(
+            roomy.window_bounds,
+            Some(WindowBounds::Windowed(at(1280.0, 800.0))),
+            "left alone"
+        );
+        assert_eq!(
+            floored(WindowOptions::default()).window_min_size,
+            Some(MIN_SIZE),
+            "a new window too"
+        );
+        assert_eq!(MIN_SIZE.width, px(375.0), "the narrowest phone");
+    }
 }
