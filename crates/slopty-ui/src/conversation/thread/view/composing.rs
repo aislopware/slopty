@@ -147,6 +147,11 @@ impl Composing {
         self.attachments.uploading()
     }
 
+    /// Where the attachments landed on the worker, kept on the draft.
+    pub(super) fn landed(&self) -> Vec<String> {
+        self.attachments.paths()
+    }
+
     /// What answers `query`: the worker's answer to it, else the last answer for a shorter
     /// word it starts with, filtered here; `None` while nothing does.
     fn paths_for(&self, query: &str) -> Option<Vec<String>> {
@@ -358,6 +363,8 @@ impl ThreadView {
                 let Some(model) = models.get(ix) else { return };
                 self.composing.models = false;
                 let _id = self.intent(Intent::SetModel { model: model.id.clone() }, cx);
+                // The keyboard goes back to the field, to write on or send.
+                self.focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -365,6 +372,8 @@ impl ThreadView {
                 let Some(mode) = modes.get(ix) else { return };
                 self.composing.modes = false;
                 let _id = self.intent(Intent::SetMode { mode: mode.id.clone() }, cx);
+                // The keyboard goes back to the field, to write on or send.
+                self.focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -372,6 +381,8 @@ impl ThreadView {
                 let Some(effort) = efforts.get(ix) else { return };
                 self.composing.efforts = false;
                 let _id = self.intent(Intent::SetEffort { effort: effort.id.clone() }, cx);
+                // The keyboard goes back to the field, to write on or send.
+                self.focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -408,6 +419,10 @@ impl ThreadView {
     /// The messages sent in this thread, newest first, each once where it was sent twice running.
     /// One the agent cut short is left out: its head is not what was typed.
     fn sent_messages(&self, cx: &App) -> Vec<String> {
+        // A draft has sent nothing yet: ↑ brings back the first messages of earlier starts.
+        if let Some(draft) = &self.draft {
+            return draft.read(cx).recall().to_vec();
+        }
         let Some(state) = self.state(cx) else { return Vec::new() };
         let mut sent: Vec<String> = state
             .items

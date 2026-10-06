@@ -800,8 +800,12 @@ impl ThreadView {
             .relative()
             .flex_none()
             .child(self.icon_button(ADD_BUTTON, Symbol::Plus, ADD_LABEL).on_click(cx.listener(
-                |this, _ev, _w, cx| {
+                |this, _ev, window, cx| {
                     this.add_open = !this.add_open;
+                    // Closed by its button as by Esc: the keyboard goes back to the field.
+                    if !this.add_open {
+                        this.focus(window, cx);
+                    }
                     cx.notify();
                 },
             )))
@@ -876,19 +880,34 @@ impl ThreadView {
             }));
         }
         self.left_out(&mut menu, cx);
+        // A row chosen closes it before it runs, so the row may take the keyboard elsewhere
+        // (the commit sheet does).
+        let closed = this.clone();
         let panel = kit::MenuPanel::new(
             ADD_MENU,
             ADD_LABEL,
             std::rc::Rc::new(menu),
             &self.theme,
             move |window, cx| {
-                let _gone = this.update(cx, |this, cx| {
+                let _gone = closed.update(cx, |this, cx| {
                     this.add_open = false;
                     this.focus(window, cx);
                     cx.notify();
                 });
             },
-        );
+        )
+        .on_dismiss(move |window, cx| {
+            let _gone = this.update(cx, |this, cx| {
+                this.add_open = false;
+                cx.notify();
+            });
+            // Once the press that dismissed it is done with: a press outside lands on what it
+            // pressed, which would take the keyboard after a focus given here.
+            let to = this.clone();
+            window.defer(cx, move |window, cx| {
+                let _gone = to.update(cx, |this, cx| this.focus(window, cx));
+            });
+        });
         gpui::deferred(gpui::anchored().anchor(gpui::Anchor::BottomLeft).child(panel))
             .with_priority(crate::palette::Layer::Submenu.priority())
             .into_any_element()

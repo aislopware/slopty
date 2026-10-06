@@ -43,7 +43,7 @@ pub const CODEX_RESUME: &str = "resume";
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Gone {
     /// By this start of the agent's own session.
-    Resume(Start),
+    Resume(Box<Start>),
     /// With the next message.
     ByMessage,
     /// It does not: the agent cannot take the session up again.
@@ -72,15 +72,18 @@ pub fn gone(state: &ThreadState) -> Option<Gone> {
         let model = state.meters.model_id.clone().filter(|m| !m.trim().is_empty());
         (model, vec![RESUME_FLAG.to_owned(), meta.native.clone()])
     };
-    Some(Gone::Resume(Start {
+    Some(Gone::Resume(Box::new(Start {
         agent: meta.agent.clone(),
         cwd: meta.cwd.clone(),
         drive: Some(meta.drive.clone()),
         prompt: None,
         model,
+        mode: None,
+        effort: None,
+        attachments: Vec::new(),
         args,
         worktree: None,
-    }))
+    })))
 }
 
 impl ThreadView {
@@ -157,7 +160,9 @@ impl ThreadView {
         let button = match gone {
             Gone::Resume(start) if !resuming => Some(
                 self.button("thread-resume", "Resume", ButtonKind::Secondary)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.resume(start.clone(), cx)))
+                    .on_click(
+                        cx.listener(move |this, _ev, _w, cx| this.resume((*start).clone(), cx)),
+                    )
                     .into_any_element(),
             ),
             _ => None,

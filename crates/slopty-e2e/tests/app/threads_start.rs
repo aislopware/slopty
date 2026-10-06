@@ -1,6 +1,6 @@
 //! An agent's thread started from the palette in the real app: the machine's facts say which
 //! agents it can start, the palette offers "New … agent" for each, the folder step offers the
-//! shell's folder first, the new thread's field takes the first message (here none), and the
+//! shell's folder first, the new thread's own composer takes the first message (here none), and the
 //! agent the machine starts opens in its terminal's tile, on the thread face. Claude Code is
 //! `slopty-stub-claude`, first on the worker's `PATH`; no real agent runs.
 
@@ -12,8 +12,8 @@ use slopty_e2e::{Driver, Dump};
 /// A server round trip, the agent's terminal opening, the app hearing of it.
 const STEP: Duration = Duration::from_secs(30);
 const LINE: &str = "New Claude Code agent";
-/// The new thread's field for its first message.
-const FIELD: &str = "What should Claude Code do?";
+/// The new thread's composer, which writes its first message.
+const FIELD: &str = "Message";
 
 /// Wait until the server says the worker has Claude Code: the palette offers what the
 /// worker's facts list, and a worker lists it once its facts are gathered.
@@ -59,7 +59,7 @@ async fn palette_offering(drv: &mut Driver) {
 }
 
 /// "New Claude Code agent" from the palette asks the folder (one machine, so no machine step),
-/// and ↩ there opens the new thread's tile with a field for its first message; ↩ on the field
+/// and ↩ there opens the new thread's tile on its composer, for its first message; ↩ on it
 /// left empty starts Claude Code bare in the focused shell's folder. The agent's terminal takes
 /// that tile, on its thread face with the keyboard in the composer, and no thread tile opens;
 /// the shell's tile is still there.
@@ -81,9 +81,9 @@ async fn a_palette_start_opens_the_agents_terminal_on_its_thread() {
     drv.keys("enter").await.unwrap();
     drv.wait_for("the palette closed", STEP, |d| !palette_up(d)).await.unwrap();
     drv.wait_for("the first message's field", STEP, |d| {
-        d.a11y
-            .iter()
-            .any(|n| n.role == "TextInput" && n.focused && n.label.as_deref() == Some(FIELD))
+        d.a11y.iter().any(|n| {
+            n.role == "MultilineTextInput" && n.focused && n.label.as_deref() == Some(FIELD)
+        })
     })
     .await
     .unwrap();

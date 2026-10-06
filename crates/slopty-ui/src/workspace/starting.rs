@@ -1,16 +1,18 @@
 //! A thread on its way: the tile an agent's thread will fill, there from the moment the person
-//! chose it. A start from the palette opens it with a field for the first message, which goes
-//! as the start's prompt (`Start::prompt`), so the agent's first turn begins as it boots; ↵ on
-//! an empty field starts it bare. Once sent it says "Starting Codex" and where, until the
-//! machine answers with the thread, which takes the tile's place and keyboard, or says why not
-//! and leaves.
+//! chose it. A start from the palette opens it on the thread's own composer, in its draft mode
+//! (`crate::conversation::thread::draft`): the first message is written as every later one is,
+//! several lines kept as pasted, pictures and files attached, `/` and `@`, ↑ for the first
+//! messages of earlier starts, and the model, mode and effort chosen on its chips. ↵ sends the
+//! start with all of it (`Start::prompt`, `model`, `mode`, `effort`, `attachments`), so the
+//! agent's first turn begins as it boots; ↵ on an empty composer starts it bare. Once sent it
+//! says "Starting Codex" and where, until the machine answers with the thread, which takes the
+//! tile's place and keyboard, or says why not and gives the draft back.
 //!
 //! The tile is the layout's alone: the item comes with the thread, under the tile's own id, so
 //! nothing moves when it lands.
 //!
-//! Under the field, "Plan first" starts an agent that can plan before it changes anything in
-//! that mode: Claude Code with `--permission-mode plan`, its published flag. The mode is the
-//! start's alone; the thread's mode chip then says the mode the agent reports.
+//! A start in a new worktree names it, and its branch, from the first message's words
+//! ([`worktree_name`]), so the branch says what the work is.
 
 use std::collections::HashMap;
 
@@ -21,7 +23,6 @@ use gpui::{
     MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::layout::{Placed, Placement, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::thread::{AgentId, ThreadId};
@@ -29,39 +30,62 @@ use slopty_proto::thread::{AgentId, ThreadId};
 use super::WorkspaceView;
 use super::actions::StartThread;
 use super::projects::agent_label;
+use super::strip::Handed;
 use super::tile::{Chrome, SHAPES_BELOW, title_ink};
 use crate::colors::hsla;
+use crate::conversation::attach::Target;
+use crate::conversation::thread::{Draft, DraftSent, ThreadView, ThreadViewEvent};
 use crate::draw::Draw;
 use crate::icons::Status;
 use crate::kit;
 
-/// The tick under the first message's field.
-pub(super) const PLAN_FIRST: &str = "Plan first";
+/// How many first messages ↑ can bring back in a new start's composer.
+const RECALLED: usize = 50;
 
-/// The palette's line for the same, while a start's field has the keyboard.
-pub(super) const PLAN_FIRST_LINE: &str = "Start in plan mode";
+/// The most words of the first message a worktree's name takes.
+const NAME_WORDS: usize = 6;
 
-/// What `claude` takes to start in a permission mode, and the mode that plans
-/// (`slopty_agent::resume`, which the app does not link).
-const PERMISSION_MODE: [&str; 2] = ["--permission-mode", "plan"];
+/// The longest a worktree's name grows from those words, in bytes, before its tail.
+const NAME_LEN: usize = 40;
 
-/// The "Plan first" tick's selector on start `item`'s tile.
-#[cfg(test)]
-pub(super) fn plan_first_selector(item: ItemId) -> &'static str {
-    Box::leak(format!("plan-first-{}", item.as_uuid()).into_boxed_str())
-}
-
-/// Whether a start of `agent` can begin in plan mode.
-fn plans_first(agent: &AgentId) -> bool {
-    agent.is(AgentId::CLAUDE_CODE)
+/// The name of the worktree a start makes for `agent` in tile `item`: the first message's
+/// words, lower case and joined by hyphens, as a branch reads ("fix-the-login-redirect"), then
+/// the end of the tile's id, so two starts with the same words make two worktrees. With no
+/// words to take, the agent's name stands in for them.
+pub(super) fn worktree_name(prompt: Option<&str>, agent: &AgentId, item: ItemId) -> String {
+    let words: Vec<String> = prompt
+        .unwrap_or_default()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(NAME_WORDS)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut name = String::new();
+    for word in &words {
+        if !name.is_empty() && name.len().saturating_add(word.len()) >= NAME_LEN {
+            break;
+        }
+        if !name.is_empty() {
+            name.push('-');
+        }
+        name.push_str(word.get(..NAME_LEN).unwrap_or(word));
+    }
+    if name.is_empty() {
+        name = agent.0.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    }
+    // The id's end: its start is the clock, the same for starts close together.
+    let id = item.as_uuid().simple().to_string();
+    format!("{name}-{}", id.get(id.len().saturating_sub(4)..).unwrap_or(&id))
 }
 
 /// The tiles of threads on their way, by the id their item will have.
 #[derive(Default)]
 pub(super) struct Starts {
     tiles: HashMap<ItemId, Starting>,
-    /// The tile whose field takes the keyboard in the next frame.
+    /// The tile whose composer takes the keyboard in the next frame.
     focus: Option<ItemId>,
+    /// The first messages of earlier starts, newest first: what ↑ brings back in a new one.
+    sent: Vec<String>,
 }
 
 impl Starts {
@@ -75,10 +99,33 @@ impl Starts {
         self.tiles.get(&item)
     }
 
-    /// Whether `item` is a start whose first message is still asked and whose agent can
-    /// start in plan mode.
-    pub(super) fn plans(&self, item: ItemId) -> bool {
-        self.tiles.get(&item).is_some_and(|s| s.field.is_some() && plans_first(&s.agent))
+    /// The composer writing start `item`'s first message, while it is written: what a drop on
+    /// its tile or files picked for it attach to.
+    pub(super) fn composer(&self, item: ItemId) -> Option<Target> {
+        let drafting = self.tiles.get(&item)?.draft.as_ref()?;
+        Some(Target(drafting.view.downgrade()))
+    }
+
+    /// The thread view writing start `item`'s first message, while it is written.
+    pub(super) fn draft_view(&self, item: ItemId) -> Option<Entity<ThreadView>> {
+        Some(self.tiles.get(&item)?.draft.as_ref()?.view.clone())
+    }
+
+    /// `key` found `paths` under `root` for `query`: the composers of its starts that asked
+    /// list them in their `@` menus.
+    pub(super) fn found(
+        &self,
+        key: WorkerKey,
+        root: &str,
+        query: &str,
+        paths: &[String],
+        cx: &mut gpui::App,
+    ) {
+        for starting in self.tiles.values().filter(|s| s.worker == key) {
+            if let Some(drafting) = &starting.draft {
+                drafting.view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
+            }
+        }
     }
 }
 
@@ -92,86 +139,69 @@ pub(super) struct Starting {
     pub cwd: String,
     /// More words for its agent: those that take a past session up again.
     pub args: Vec<String>,
-    /// It starts in plan mode.
-    pub plan: bool,
-    /// The worktree of its own it starts in, by name, made from the clone `cwd` is in.
-    pub worktree: Option<String>,
-    /// The first message's field, until the start is sent.
-    pub field: Option<StartField>,
+    /// It starts in a new worktree of its own, made from the clone `cwd` is in.
+    pub worktree: bool,
+    /// What its draft chose, with the first message: the model, the mode and the effort by
+    /// the agent's ids (its defaults when `None`), and the files attached.
+    pub chosen: Chosen,
+    /// The composer writing its first message, from a start that asks for one.
+    pub draft: Option<Drafting>,
     /// Whether the start went to the machine.
     pub sent: bool,
 }
 
+/// What a draft chose for its start ([`Starting::chosen`]).
+#[derive(Default)]
+pub(super) struct Chosen {
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub effort: Option<String>,
+    pub attachments: Vec<String>,
+}
+
+/// A start's first message being written: its draft, the thread view that writes it, and
+/// what the workspace hears from both.
+pub(super) struct Drafting {
+    draft: Entity<Draft>,
+    view: Entity<ThreadView>,
+    _heard: [Subscription; 2],
+}
+
 impl Starting {
-    /// A thread of `agent` on `worker` in `cwd` on its way, with `field` for its first message
-    /// or none when the start goes at once.
+    /// A thread of `agent` on `worker` in `cwd` on its way, with `draft` writing its first
+    /// message or none when the start goes at once.
     pub(super) const fn new(
         worker: WorkerKey,
         agent: AgentId,
         cwd: String,
-        field: Option<StartField>,
+        draft: Option<Drafting>,
     ) -> Self {
         Self {
             worker,
             agent,
             cwd,
             args: Vec::new(),
-            plan: false,
-            worktree: None,
-            field,
+            worktree: false,
+            chosen: Chosen { model: None, mode: None, effort: None, attachments: Vec::new() },
+            draft,
             sent: false,
         }
     }
 
-    /// The same start, in a new worktree of its own when `worktree`, named after its agent and
-    /// `item`, the tile it opens in.
-    pub(super) fn in_worktree(self, worktree: bool, item: ItemId) -> Self {
-        let name = worktree.then(|| {
-            // The id's end: its start is the clock, the same for starts close together.
-            let id = item.as_uuid().simple().to_string();
-            format!("{}-{}", self.agent.0, id.get(id.len().saturating_sub(6)..).unwrap_or(&id))
-        });
-        Self { worktree: name, ..self }
+    /// The same start, in a new worktree of its own when `worktree`.
+    pub(super) fn in_worktree(self, worktree: bool) -> Self {
+        Self { worktree, ..self }
     }
 
     /// The same start, with `args` for its agent.
     pub(super) fn with_args(self, args: Vec<String>) -> Self {
         Self { args, ..self }
     }
-
-    /// What its agent is started with: the words it was given, then plan mode where asked.
-    pub(super) fn agent_args(&self) -> Vec<String> {
-        let plan = (self.plan && plans_first(&self.agent)).then_some(PERMISSION_MODE);
-        self.args.iter().cloned().chain(plan.into_iter().flatten().map(str::to_owned)).collect()
-    }
-}
-
-/// The first message's field, a view of its own so its caret's blink draws it alone.
-pub(super) struct StartField {
-    input: Entity<InputState>,
-    view: Entity<FieldView>,
-    _events: Subscription,
-}
-
-struct FieldView {
-    input: Entity<InputState>,
-    label: SharedString,
-}
-
-impl gpui::Render for FieldView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        Input::new(&self.input).appearance(false).aria_label(self.label.clone())
-    }
-}
-
-/// What the first message's field asks, for `agent`.
-pub(crate) fn asks(agent: &AgentId) -> String {
-    format!("What should {} do?", agent_label(agent))
 }
 
 impl WorkspaceView {
-    /// Open the tile of the thread `start` asks for, focused, its field for the first message
-    /// taking the keyboard: nothing goes to the machine until ↵.
+    /// Open the tile of the thread `start` asks for, focused, the thread's composer writing
+    /// its first message taking the keyboard: nothing goes to the machine until ↵.
     pub(super) fn begin_start(
         &mut self,
         start: StartThread,
@@ -180,18 +210,42 @@ impl WorkspaceView {
     ) {
         let StartThread { worker, agent, cwd, worktree } = start;
         let item = ItemId::new();
-        let label = SharedString::from(asks(&agent));
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(label.clone()));
-        let events = cx.subscribe_in(&input, window, move |this, _input, event, _window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = event {
-                this.send_first_message(item, cx);
-            }
+        let hub = self.thread_hub(worker, cx);
+        let place = self.start_place(worker, &cwd, worktree);
+        let recall = self.starting.sent.clone();
+        let offers = self.offers(worker, &agent);
+        let draft = cx.new(|_| Draft::new(agent.clone(), cwd.clone(), offers, place, recall));
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| ThreadView::drafting(hub, draft.clone(), theme, window, cx));
+        let sending = cx.subscribe(&draft, move |this, _draft, sent: &DraftSent, cx| {
+            this.draft_sent(item, sent.clone(), cx);
         });
-        let view = cx.new(|_| FieldView { input: input.clone(), label });
-        let field = StartField { input, view, _events: events };
-        let starting = Starting::new(worker, agent, cwd, Some(field)).in_worktree(worktree, item);
+        let asking = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
+            this.draft_asks(item, &view, event.clone(), cx);
+        });
+        let drafting = Drafting { draft, view, _heard: [sending, asking] };
+        let starting = Starting::new(worker, agent, cwd, Some(drafting)).in_worktree(worktree);
         self.open_starting(item, starting, cx);
         self.starting.focus = Some(item);
+    }
+
+    /// What a new thread of `agent` can start with on `worker`, as its link said.
+    fn offers(&self, worker: WorkerKey, agent: &AgentId) -> slopty_proto::thread::Offers {
+        let caps = self.workers.get(&worker).and_then(|w| w.caps.as_ref());
+        let installed = caps.and_then(|c| c.agents.iter().find(|a| &a.agent == agent));
+        installed.map(|a| a.offers.clone()).unwrap_or_default()
+    }
+
+    /// Where a start on `worker` in `cwd` works, as its empty thread says it: "in slopty on
+    /// studio", or "in a new worktree of slopty on studio".
+    fn start_place(&self, worker: WorkerKey, cwd: &str, worktree: bool) -> String {
+        let folder = super::tile::cwd_tail(cwd, self.home_of(worker));
+        let name = self.worker_name(worker);
+        if worktree {
+            format!("in a new worktree of {folder} on {name}")
+        } else {
+            format!("in {folder} on {name}")
+        }
     }
 
     /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
@@ -232,48 +286,71 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// ↵ in a thread's first-message field: the start goes with what was typed as its prompt,
-    /// or bare. A machine out of reach keeps the field and says so.
-    fn send_first_message(&mut self, item: ItemId, cx: &mut Context<Self>) {
-        let Some(starting) = self.starting.tiles.get(&item) else { return };
-        if let Some(w) = self.workers.get(&starting.worker).filter(|w| w.link.is_none()) {
+    /// ↵ in a start's composer: the start goes with the first message and what was chosen
+    /// with it. A machine out of reach sends nothing, and the draft stays as it was.
+    fn draft_sent(&mut self, item: ItemId, sent: DraftSent, cx: &mut Context<Self>) {
+        let Some(starting) = self.starting.tiles.get_mut(&item) else { return };
+        let worker = starting.worker;
+        if let Some(w) = self.workers.get(&worker).filter(|w| w.link.is_none()) {
             let text = format!("{} is {}: nothing was sent", w.name, w.status.text());
+            if let Some(drafting) = &starting.draft {
+                drafting.draft.update(cx, Draft::unsent);
+            }
             self.show_notice(text, cx);
             return;
         }
-        let prompt = starting.field.as_ref().map(|f| f.input.read(cx).value().trim().to_owned());
-        let prompt = prompt.filter(|p| !p.is_empty());
+        let DraftSent { text, attachments, model, mode, effort } = sent;
+        starting.chosen = Chosen { model, mode, effort, attachments };
+        let prompt = (!text.is_empty()).then_some(text);
+        if let Some(words) = &prompt {
+            let kept = &mut self.starting.sent;
+            kept.retain(|w| w != words);
+            kept.insert(0, words.clone());
+            kept.truncate(RECALLED);
+        }
         self.send_start(item, prompt, cx);
     }
 
-    /// "Plan first" on the focused start, or off.
-    pub(super) fn toggle_plan_first(
+    /// What start `item`'s composer asks of the workspace: files attached go up to its
+    /// machine, picked files are asked for, and `@` asks the machine for paths.
+    fn draft_asks(
         &mut self,
-        _: &super::actions::TogglePlanFirst,
-        _window: &mut Window,
+        item: ItemId,
+        view: &Entity<ThreadView>,
+        event: ThreadViewEvent,
         cx: &mut Context<Self>,
     ) {
-        if let Some(item) = self.focused().map(|t| t.item) {
-            self.flip_plan(item, cx);
+        let Some(worker) = self.starting.get(item).map(|s| s.worker) else { return };
+        let tile = TileRef { worker, item };
+        match event {
+            ThreadViewEvent::Attach { id, what } => {
+                self.attach_to_composer(Some(tile), Target(view.downgrade()), id, what, cx);
+            }
+            ThreadViewEvent::Detach { id } => {
+                self.detach_from_composer(&Target(view.downgrade()), id, cx);
+            }
+            ThreadViewEvent::PickFiles => {
+                self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+            }
+            ThreadViewEvent::FindFiles { root, query } => {
+                self.send(worker, slopty_proto::ClientMsg::FindFiles { root, query });
+            }
+            // A draft has no thread to review, watch or show the terminal of yet.
+            ThreadViewEvent::ShowTerminal
+            | ThreadViewEvent::Review { .. }
+            | ThreadViewEvent::Watch { .. }
+            | ThreadViewEvent::RemoveWorktree(_) => {}
         }
     }
 
-    fn flip_plan(&mut self, item: ItemId, cx: &mut Context<Self>) {
-        if let Some(starting) = self.starting.tiles.get_mut(&item).filter(|s| s.field.is_some()) {
-            starting.plan = !starting.plan;
-            cx.notify();
-        }
-    }
-
-    /// The start of `item`'s thread goes to its machine; the tile says it is starting.
+    /// The start of `item`'s thread goes to its machine; the tile says it is starting, and a
+    /// draft's composer keeps the keyboard until the thread's takes it.
     pub(super) fn starting_sent(&mut self, item: ItemId, cx: &mut Context<Self>) {
-        if let Some(starting) = self.starting.tiles.get_mut(&item) {
-            starting.field = None;
+        let drafted = self.starting.tiles.get_mut(&item).is_some_and(|starting| {
             starting.sent = true;
-        }
-        // The keyboard leaves the field it was in for the workspace, until the thread's own
-        // composer is there to take it.
-        if self.focused().is_some_and(|t| t.item == item) {
+            starting.draft.is_some()
+        });
+        if !drafted && self.focused().is_some_and(|t| t.item == item) {
             self.pending_focus_self = true;
         }
         cx.notify();
@@ -310,7 +387,9 @@ impl WorkspaceView {
         }
     }
 
-    /// The machine would not start `item`'s thread: its tile goes, and `why` is said.
+    /// The machine would not start `item`'s thread, and `why` is said. A start written in its
+    /// composer gives the draft back, its words and files as they were, to change or send
+    /// again; any other start's tile goes.
     pub(super) fn start_failed(
         &mut self,
         key: WorkerKey,
@@ -318,7 +397,12 @@ impl WorkspaceView {
         why: String,
         cx: &mut Context<Self>,
     ) {
-        if self.starting.tiles.remove(&item).is_some() {
+        if let Some(starting) = self.starting.tiles.get_mut(&item)
+            && let Some(drafting) = &starting.draft
+        {
+            starting.sent = false;
+            drafting.draft.update(cx, Draft::unsent);
+        } else if self.starting.tiles.remove(&item).is_some() {
             self.drop_starting_tile(TileRef { worker: key, item }, cx);
         }
         self.show_notice(why, cx);
@@ -360,11 +444,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Give the keyboard to the field of the start that asked for it.
+    /// Start `item`'s composer takes the keyboard in the next frame.
+    pub(super) const fn focus_start(&mut self, item: ItemId) {
+        self.starting.focus = Some(item);
+    }
+
+    /// Give the keyboard to the composer of the start that asked for it.
     pub(super) fn settle_starting_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.starting.focus.take() else { return };
-        if let Some(field) = self.starting.tiles.get(&item).and_then(|s| s.field.as_ref()) {
-            field.input.update(cx, |input, cx| input.focus(window, cx));
+        if let Some(drafting) = self.starting.tiles.get(&item).and_then(|s| s.draft.as_ref()) {
+            drafting.view.update(cx, |view, cx| view.focus(window, cx));
         }
     }
 
@@ -384,13 +473,6 @@ impl WorkspaceView {
         let id = tile.item;
         let label = agent_label(&starting.agent);
         let title = SharedString::from(format!("New {label} thread"));
-        let folder = super::tile::cwd_tail(&starting.cwd, self.home_of(starting.worker));
-        let place = match starting.worktree {
-            Some(_) => {
-                format!("on {} in a new worktree of {folder}", self.worker_name(starting.worker))
-            }
-            None => format!("on {} in {folder}", self.worker_name(starting.worker)),
-        };
         let shapes = k < SHAPES_BELOW;
         let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);
@@ -418,18 +500,43 @@ impl WorkspaceView {
                     .child(div().flex_1().min_w_0().overflow_hidden().child(title.clone()))
                     .children(status.map(|st| crate::icons::status_mark(theme, Some(st), k)))
             });
+        // The thread's own composer under the tile's header, which names the agent.
         let body = (!shapes).then(|| {
-            if let Some(asked) = self.first_message(id, starting, &place, k, cx) {
-                asked.into_any_element()
+            if let Some(drafting) = &starting.draft {
+                let view = &drafting.view;
+                let width = placed.target.w;
+                let handed = Handed::Face { zoom: k, width };
+                let theme = self.theme.clone();
+                let stale = view.read(cx).theme() != &theme;
+                self.hand_over(cx, view, handed, move |v, cx| {
+                    v.set_layout(k, width, cx);
+                    v.set_header(false, cx);
+                });
+                if stale {
+                    let view = view.clone();
+                    cx.later(move |_window, cx| view.update(cx, |v, cx| v.set_theme(theme, cx)));
+                }
+                div().flex_1().min_h_0().w_full().child(view.clone()).into_any_element()
             } else {
+                let place = self.start_place(starting.worker, &starting.cwd, starting.worktree);
                 let mark =
                     crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary), k);
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));
-                kit::notice(theme, k, mark, format!("Starting {label}"), Some(place.into()))
-                    .id("starting")
-                    .debug_selector(move || format!("starting-{}", id.as_uuid()))
-                    .role(Role::Status)
-                    .aria_label(said)
+                let notice =
+                    kit::notice(theme, k, mark, format!("Starting {label}"), Some(place.into()))
+                        .id("starting")
+                        .debug_selector(move || format!("starting-{}", id.as_uuid()))
+                        .role(Role::Status)
+                        .aria_label(said);
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(theme.spacing.lg * k))
+                    .child(notice)
                     .into_any_element()
             }
         });
@@ -456,95 +563,15 @@ impl WorkspaceView {
                     MouseButton::Left,
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
                 )
+                // Files dropped on a start go to its composer, as on a thread's tile.
+                .when(starting.draft.is_some() && !starting.sent, |el| {
+                    el.on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, _w, cx| {
+                        this.drop_files(tile, paths.paths(), cx);
+                    }))
+                })
                 .child(header)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .p(px(theme.spacing.lg * k))
-                        .children(body),
-                )
+                .children(body)
                 .into_any_element(),
         )
-    }
-
-    /// The first message's field, while `starting` asks for it, with where the thread will
-    /// start under it and, where the agent can plan first, the "Plan first" tick.
-    fn first_message(
-        &self,
-        id: ItemId,
-        starting: &Starting,
-        place: &str,
-        k: f32,
-        cx: &Draw<'_, Self>,
-    ) -> Option<gpui::Div> {
-        let field = starting.field.as_ref()?;
-        let plan = plans_first(&starting.agent).then_some(starting.plan);
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let asked = kit::elevate(div(), theme)
-            .debug_selector(move || format!("first-message-{}", id.as_uuid()))
-            .w_full()
-            .max_w(px(super::strip::EMPTY_W * k))
-            .flex()
-            .flex_col()
-            .gap(px(theme.spacing.sm * k))
-            .p(px(theme.spacing.md * k))
-            .rounded(px(theme.radii.lg * k))
-            .child(div().text_size(px(theme.typography.title() * k)).child(field.view.clone()))
-            .child(
-                div()
-                    .ml(px(kit::FIELD_INSET))
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.sm * k))
-                    .text_size(px(theme.typography.small() * k))
-                    .text_color(hsla(s.text_muted))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(SharedString::from(crate::palette::sentence_case(place))),
-                    )
-                    .children(plan.map(|on| self.plan_tick(id, on, k, cx))),
-            );
-        Some(asked)
-    }
-
-    /// "Plan first": a tick and its words, pressed as one.
-    fn plan_tick(&self, id: ItemId, on: bool, k: f32, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let ink = if on { s.text_secondary } else { s.text_muted };
-        let hover = hsla(s.text);
-        div()
-            .id("plan-first")
-            .debug_selector(move || format!("plan-first-{}", id.as_uuid()))
-            .role(Role::CheckBox)
-            .aria_label(PLAN_FIRST)
-            .aria_toggled(if on {
-                gpui::accesskit::Toggled::True
-            } else {
-                gpui::accesskit::Toggled::False
-            })
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs * k))
-            .cursor_pointer()
-            .text_color(hsla(ink))
-            .hover(move |st| st.text_color(hover))
-            .child(kit::tick_box(theme, on, k))
-            .child(PLAN_FIRST)
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.flip_plan(id, cx)))
-            .into_any_element()
     }
 }

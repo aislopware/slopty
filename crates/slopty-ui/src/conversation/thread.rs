@@ -3,6 +3,7 @@
 //! `slopty_client::threads`.
 //!
 //! * [`commit`] — the commit sheet over a thread's or a review's tile.
+//! * [`draft`] — a thread not started yet, whose composer writes its first message.
 //! * [`git`] — a repository's git as a tile works it: the commit sheet's and the pull request's
 //!   state, numbered ops and their answers.
 //! * [`hub`] — one worker's threads as an entity: fed by the link, kept on disk, and the one way a
@@ -14,6 +15,7 @@
 
 pub mod activity;
 pub mod commit;
+pub mod draft;
 pub mod find;
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -23,6 +25,7 @@ pub mod questions;
 pub mod rows;
 pub mod view;
 
+pub use draft::{Draft, DraftSent};
 pub use hub::{HubEvent, ThreadHub};
 pub use view::{ThreadView, ThreadViewEvent};
 

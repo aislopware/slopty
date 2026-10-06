@@ -101,8 +101,8 @@ use slopty_theme::Theme;
 pub(crate) use strip::{ADD_WORKER, NEW_AGENT, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
-    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING,
-    SESSION_ENDED, TAKE, TAKE_OVER,
+    ATTACHING, CLOSE_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING, SESSION_ENDED, TAKE,
+    TAKE_OVER,
 };
 pub use tile::{COPY_COMMAND, cwd_tail, file_title};
 pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
@@ -2001,7 +2001,6 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::make_orchestrator))
             })
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
-            .when(applies.plan, |el| el.on_action(cx.listener(Self::toggle_plan_first)))
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
             .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))

@@ -113,6 +113,8 @@ pub(super) struct ThreadPlace {
     pub repo: Option<String>,
     /// Which repository that is on every machine.
     pub repo_id: Option<slopty_proto::terminal::RepoId>,
+    /// Its branch's pull request, as its worker last read it.
+    pub pull: Option<thread::wire::PullSeen>,
 }
 
 /// Each worker's threads, and the thread view of each agent tile that shows one.
@@ -392,7 +394,8 @@ impl WorkspaceView {
     }
 
     /// Send the start of the thread on its way in `item`'s tile, with `prompt` as its first
-    /// message.
+    /// message and what its draft chose with it. A new worktree is named from `prompt`'s words
+    /// ([`super::starting::worktree_name`]).
     pub(super) fn send_start(
         &mut self,
         item: ItemId,
@@ -406,10 +409,16 @@ impl WorkspaceView {
             agent: starting.agent.clone(),
             cwd: starting.cwd.clone(),
             drive: None,
+            worktree: starting.worktree.then(|| {
+                let name = super::starting::worktree_name(prompt.as_deref(), &starting.agent, item);
+                NewWorktree::named(name)
+            }),
             prompt,
-            model: None,
-            args: starting.agent_args(),
-            worktree: starting.worktree.clone().map(NewWorktree::named),
+            model: starting.chosen.model.clone(),
+            mode: starting.chosen.mode.clone(),
+            effort: starting.chosen.effort.clone(),
+            attachments: starting.chosen.attachments.clone(),
+            args: starting.args.clone(),
         };
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));
@@ -1109,6 +1118,7 @@ impl WorkspaceView {
                 cwd: row.cwd.clone(),
                 repo: row.repo.clone(),
                 repo_id: row.repo_id.clone(),
+                pull: row.pull.clone(),
             };
             self.faces.threads.places.insert(row.id, place);
             self.faces.threads.meters.hear(key, &row.agent.0, &row.meters.limits, row.updated_ms);
@@ -1414,6 +1424,7 @@ impl WorkspaceView {
                 view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
             }
         }
+        self.starting.found(key, root, query, paths, cx);
     }
 
     /// A composer of `thread` on show: its own tile's, or its terminal's while that shows the

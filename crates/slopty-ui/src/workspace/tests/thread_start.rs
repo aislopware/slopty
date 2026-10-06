@@ -20,6 +20,7 @@ fn with_agents(agents: &[AgentId]) -> WorkerCaps {
         .map(|agent| slopty_proto::server::InstalledAgent {
             agent: agent.clone(),
             version: "1.0".to_owned(),
+            offers: slopty_proto::thread::Offers::default(),
         })
         .collect();
     WorkerCaps { agents: installed, ..healthy() }
@@ -422,8 +423,11 @@ fn a_workers_hub_knows_the_agents_it_can_start(cx: &mut TestAppContext) {
     assert_eq!(agents(cx), Some(vec![claude.clone()]), "from the link's caps");
 
     let mut caps = healthy();
-    caps.agents
-        .push(InstalledAgent { agent: AgentId::named(AgentId::CODEX), version: "0.50".into() });
+    caps.agents.push(InstalledAgent {
+        agent: AgentId::named(AgentId::CODEX),
+        version: "0.50".into(),
+        offers: slopty_proto::thread::Offers::default(),
+    });
     view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, caps, cx));
     assert_eq!(agents(cx), Some(vec![claude, AgentId::named(AgentId::CODEX)]), "caps moved");
 
@@ -669,25 +673,50 @@ fn a_past_session_is_found_by_what_was_asked_in_it(cx: &mut TestAppContext) {
     assert_eq!(asked(&mut studio), Vec::<String>::new(), "out of reach, it is not asked");
 }
 
-/// "Plan first" under a Claude Code start's field starts it in plan mode, its published
-/// `--permission-mode plan`, by a click or the palette's "Start in plan mode"; a Codex start
-/// has no such tick.
+/// A start's first message is written in the thread's own composer: it keeps several lines,
+/// pasted or broken by ⇧↵, and its chips choose what the machine offers a new thread of the
+/// agent: the model and the mode go with the prompt in the start, and the hand-built plan-mode
+/// flag is gone. An agent the machine offers nothing for shows no mode to choose, and the
+/// palette has no "Start in plan mode" line.
 #[gpui::test]
-fn a_claude_code_start_can_plan_first(cx: &mut TestAppContext) {
-    use super::super::starting::{PLAN_FIRST_LINE, plan_first_selector};
+fn a_start_is_written_in_the_threads_composer(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Mode, Model, Offers};
 
     let (view, cx) = still_workspace(cx);
     let Two { mut studio, .. } = two_machines(&view, cx);
+    let agents = [AgentId::named(AgentId::CLAUDE_CODE), AgentId::named(AgentId::CODEX)];
+    let offers = Offers {
+        models: ["opus", "sonnet"]
+            .map(|id| Model { id: id.to_owned(), label: id.to_uppercase() })
+            .to_vec(),
+        modes: [("default", "Default"), ("plan", "Plan")]
+            .map(|(id, label)| Mode {
+                id: id.to_owned(),
+                label: label.to_owned(),
+                description: None,
+            })
+            .to_vec(),
+        ..Offers::default()
+    };
+    let mut caps = with_agents(&agents);
+    caps.agents[0].offers = offers;
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(studio.key, caps, cx));
+    cx.run_until_parked();
     studio.drain();
-    let args = |studio: &mut Fake| -> Vec<Vec<String>> {
+    let sent = |studio: &mut Fake| -> Vec<Start> {
         studio
             .drain()
             .into_iter()
             .filter_map(|m| match m {
-                ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start.args),
+                ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(*start),
                 _ => None,
             })
             .collect()
+    };
+    let click = |id: &'static str, cx: &mut VisualTestContext| {
+        let at = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id}")).center();
+        cx.simulate_click(at, Modifiers::none());
+        settle(cx);
     };
     // The agent, then (Claude Code is on both machines) the machine, then the folder.
     let begin = |agent: &str, steps: usize, cx: &mut VisualTestContext| {
@@ -698,33 +727,75 @@ fn a_claude_code_start_can_plan_first(cx: &mut TestAppContext) {
             cx.simulate_keystrokes("enter");
             settle(cx);
         }
-        let asking = |v: &WorkspaceView| {
-            v.layout().tiles().find(|t| v.starting.get(t.item).is_some_and(|s| !s.sent))
-        };
-        view.read_with(cx, |v, _| asking(v)).expect("its tile, asking")
     };
 
-    let codex = begin("codex", 2, cx);
-    assert!(cx.debug_bounds(plan_first_selector(codex.item)).is_none(), "Codex: no tick");
+    begin("codex", 2, cx);
+    assert!(cx.debug_bounds("thread-empty").is_some(), "the new thread says where it starts");
+    click("thread-attach", cx);
+    assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the + menu is open");
+    assert!(cx.debug_bounds("thread-add-menu-modes").is_none(), "Codex: no mode offered");
+    // A press outside the menu closes it, and the keyboard is the composer's again.
+    let tile = view.read_with(cx, |v, _| v.focused()).expect("the start's tile");
+    let title: &'static str = format!("title-{}", tile.item.as_uuid()).leak();
+    click(title, cx);
+    assert!(cx.debug_bounds("thread-add-menu-files").is_none(), "and closed");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(args(&mut studio), [Vec::<String>::new()]);
+    let codex_start = sent(&mut studio);
+    let [bare] = codex_start.as_slice() else { panic!("one start: {codex_start:?}") };
+    assert_eq!((bare.prompt.as_deref(), bare.mode.as_deref()), (None, None), "started bare");
 
-    let claude = begin("claude", 3, cx);
-    let tick = cx.debug_bounds(plan_first_selector(claude.item)).expect("the tick");
-    cx.simulate_click(tick.center(), Modifiers::none());
-    settle(cx);
+    begin("claude", 3, cx);
     let offered = view.update(cx, |v, cx| v.palette_lines(cx));
-    assert!(offered.iter().any(|l| l.label == PLAN_FIRST_LINE), "and in the palette");
-    cx.simulate_input("make a plan");
+    assert!(!offered.iter().any(|l| l.label == "Start in plan mode"), "no plan line");
+    cx.simulate_input("Plan the parser.\nKeep the lexer.");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("Then stop.");
+    click("thread-model", cx);
+    click("thread-menu-0", cx);
+    click("thread-attach", cx);
+    click("thread-add-menu-modes", cx);
+    click("thread-menu-1", cx);
+    assert!(sent(&mut studio).is_empty(), "nothing goes before ↵");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(args(&mut studio), [vec!["--permission-mode".to_owned(), "plan".to_owned()]]);
+    let claude_start = sent(&mut studio);
+    let [start] = claude_start.as_slice() else { panic!("one start: {claude_start:?}") };
+    assert_eq!(start.prompt.as_deref(), Some("Plan the parser.\nKeep the lexer.\nThen stop."));
+    assert_eq!((start.model.as_deref(), start.mode.as_deref()), (Some("opus"), Some("plan")));
+    assert!(start.args.is_empty(), "the mode is the start's, not a flag built here");
+    assert!(cx.debug_bounds("thread-starting").is_some(), "it says it is starting");
+}
+
+/// A worktree's name is its first message's words, as a branch reads, with the tile's id's
+/// end; with no words, its agent's name.
+#[test]
+fn a_worktree_is_named_by_its_first_message() {
+    use super::super::starting::worktree_name;
+
+    let item = ItemId::new();
+    let id = item.as_uuid().simple().to_string();
+    let tail = id.get(id.len() - 4..).unwrap_or_default().to_owned();
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    let named = |prompt: Option<&str>| worktree_name(prompt, &claude, item);
+    assert_eq!(
+        named(Some("Fix the login redirect, please!")),
+        format!("fix-the-login-redirect-please-{tail}")
+    );
+    assert_eq!(
+        named(Some("Add caching to the API layer for the slow endpoints today")),
+        format!("add-caching-to-the-api-layer-{tail}"),
+        "six words at most"
+    );
+    assert_eq!(named(Some("   ")), format!("claude-code-{tail}"));
+    assert_eq!(named(None), format!("claude-code-{tail}"));
+    let long = named(Some("supercalifragilisticexpialidocious antidisestablishmentarianism"));
+    assert!(long.len() <= 40 + 5, "{long}");
 }
 
 /// The folder step offers a new worktree of each repository its folders are in, once each,
 /// after the folders; picking it starts the agent in that folder with a worktree of its own,
-/// named after the agent, which the machine makes from the folder's clone.
+/// named by the first message, which the machine makes from the folder's clone.
 #[gpui::test]
 fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
     use super::super::agent_start::NEW_WORKTREE;
@@ -779,8 +850,8 @@ fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
     let worktree = start.worktree.as_ref().expect("a worktree");
     assert_eq!(worktree.base, None, "from the branch the clone has checked out");
     let name = worktree.name.as_str();
-    let suffix = name.strip_prefix("codex-").expect("named after its agent");
-    assert!(suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+    let suffix = name.strip_prefix("try-the-other-layout-").expect("named by its first words");
+    assert!(suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
     assert_eq!(start.cwd, "/w/atlas", "the first folder in it, the most recent shell's");
 }
 

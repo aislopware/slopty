@@ -74,6 +74,8 @@ impl WorkspaceView {
             Some(ItemKind::Review { thread }) => self.pending_focus_review = Some(thread),
             // A thread's keyboard is its composer's.
             Some(ItemKind::Thread { .. }) => self.focus_thread_item(tile.item, cx),
+            // A thread on its way: the composer writing its first message.
+            None if self.starting.has(tile.item) => self.focus_start(tile.item),
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the strip must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -114,6 +116,11 @@ impl WorkspaceView {
             }
             Some((tile, ItemKind::Thread { .. }))
                 if let Some(view) = self.thread_item(tile.item).cloned() =>
+            {
+                view.update(cx, |v, cx| v.focus(window, cx));
+            }
+            None if let Some(tile) = self.focused()
+                && let Some(view) = self.starting.draft_view(tile.item) =>
             {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
@@ -626,7 +633,7 @@ impl WorkspaceView {
             ItemKind::File { path } if path.starts_with('/') => path
                 .rsplit_once('/')
                 .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned()),
-            ItemKind::Folder { path } | ItemKind::Changes { path } if path.starts_with('/') => {
+            ItemKind::Folder { path } | ItemKind::Changes { path, .. } if path.starts_with('/') => {
                 Some(path.clone())
             }
             ItemKind::Thread { thread } | ItemKind::Review { thread } => {

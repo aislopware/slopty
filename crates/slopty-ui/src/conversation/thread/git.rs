@@ -279,7 +279,7 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             }
         }
         GitDone::Changes(review) => {
-            if let ReviewScope::WorkingTree(against) = review.scope {
+            if let ReviewScope::WorkingTree(against) = review.scope.clone() {
                 repo.changes.insert(against, Arc::from(review));
             }
         }
@@ -313,13 +313,13 @@ fn missed(
         GitOp::PullStatus => repo.pull_unread = Some(words),
         GitOp::Changes { against } => {
             let review = Review {
-                scope: ReviewScope::WorkingTree(*against),
+                scope: ReviewScope::WorkingTree(against.clone()),
                 from: None,
                 to: None,
                 files: Vec::new(),
                 absent: Some(words),
             };
-            repo.changes.insert(*against, Arc::new(review));
+            repo.changes.insert(against.clone(), Arc::new(review));
         }
         _ => repo.said = Some((request, said(words))),
     }

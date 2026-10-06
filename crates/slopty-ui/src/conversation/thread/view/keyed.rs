@@ -61,7 +61,7 @@ impl ThreadView {
     /// How the exited agent is taken up again, while the exited line offers "Resume".
     fn resume_start(&self, cx: &Context<Self>) -> Option<slopty_proto::thread::wire::Start> {
         match self.gone(cx)? {
-            Gone::Resume(start) if !self.hub.read(cx).resuming(self.thread) => Some(start),
+            Gone::Resume(start) if !self.hub.read(cx).resuming(self.thread) => Some(*start),
             _ => None,
         }
     }

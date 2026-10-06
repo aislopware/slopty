@@ -36,6 +36,7 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use self::composing::Composing;
 use super::commit::{CommitEvent, CommitSheet};
+use super::draft::Draft;
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
@@ -177,6 +178,9 @@ pub enum ThreadViewEvent {
 pub struct ThreadView {
     hub: Entity<ThreadHub>,
     thread: ThreadId,
+    /// The thread not started yet that this view writes the first message of, drawn on its
+    /// own state rather than the hub's ([`super::draft`]).
+    draft: Option<Entity<Draft>>,
     theme: Theme,
     /// The theme, shared with what outlives a frame (a code block's corner).
     shared: Arc<Theme>,
@@ -303,6 +307,40 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut view = Self::made(hub, thread, None, theme, window, cx);
+        view.hub.update(cx, |hub, cx| hub.open(thread, cx));
+        if let Some(seed) = view.hub.update(cx, |hub, _cx| hub.take_seed(thread)) {
+            view.set_draft(&seed, seed.len(), window, cx);
+        }
+        view.rebuild(cx);
+        view
+    }
+
+    /// The composer of `draft`, a thread not started yet on `hub`'s worker: nothing is asked
+    /// of the worker, and ↵ hands the draft its first message
+    /// ([`DraftSent`](super::draft::DraftSent)).
+    pub fn drafting(
+        hub: Entity<ThreadHub>,
+        draft: Entity<Draft>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let thread = draft.read(cx).state().meta.id;
+        let mut view = Self::made(hub, thread, Some(draft), theme, window, cx);
+        view.settle_placeholder(window, cx);
+        view.rebuild(cx);
+        view
+    }
+
+    fn made(
+        hub: Entity<ThreadHub>,
+        thread: ThreadId,
+        draft: Option<Entity<Draft>>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(composer::PLACEHOLDER)
@@ -332,6 +370,13 @@ impl ThreadView {
             _ => {}
         });
         let watching = cx.observe(&composer, |_, _, cx| cx.notify());
+        // A draft's chips and its sending are its own state, not the hub's.
+        let drafted = draft.as_ref().map(|draft| {
+            cx.observe(draft, |this, _, cx| {
+                this.rebuild(cx);
+                cx.notify();
+            })
+        });
         let list = ListState::new(0, ListAlignment::Top, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         let weak = cx.weak_entity();
@@ -355,11 +400,12 @@ impl ThreadView {
             });
         })
         .detach();
-        let mut view = Self {
+        Self {
             shared: Arc::new(theme.clone()),
             theme,
             hub,
             thread,
+            draft,
             zoom: 1.0,
             width: 0.0,
             header: true,
@@ -408,14 +454,8 @@ impl ThreadView {
             focus: cx.focus_handle(),
             request_focus: cx.focus_handle(),
             kept_keyboard: false,
-            _subscriptions: vec![composing, hearing, watching],
-        };
-        view.hub.update(cx, |hub, cx| hub.open(thread, cx));
-        if let Some(seed) = view.hub.update(cx, |hub, _cx| hub.take_seed(thread)) {
-            view.set_draft(&seed, seed.len(), window, cx);
+            _subscriptions: [composing, hearing, watching].into_iter().chain(drafted).collect(),
         }
-        view.rebuild(cx);
-        view
     }
 
     // ----- reading -----------------------------------------------------------------------
@@ -561,6 +601,9 @@ impl ThreadView {
     }
 
     fn state<'a>(&self, cx: &'a App) -> Option<&'a ThreadState> {
+        if let Some(draft) = &self.draft {
+            return Some(draft.read(cx).state());
+        }
         self.hub.read(cx).threads().mirror(self.thread).and_then(Mirror::state)
     }
 
@@ -719,6 +762,10 @@ impl ThreadView {
     // ----- what the person does --------------------------------------------------------
 
     fn intent(&self, intent: Intent, cx: &mut Context<Self>) -> IntentId {
+        if let Some(draft) = &self.draft {
+            draft.update(cx, |d, cx| d.take(intent, cx));
+            return IntentId::new();
+        }
         let thread = self.thread;
         self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
     }
@@ -760,6 +807,10 @@ impl ThreadView {
     /// Send the draft, led by what was attached: now, into the turn under way (↵), or once it
     /// ends (⌘↵). While a waiting message is being changed, either sends the change.
     fn submit(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
+        if self.draft.is_some() {
+            self.start_draft(delivery, window, cx);
+            return;
+        }
         if self.composing.editing() {
             self.save_edit(window, cx);
             return;
@@ -777,6 +828,20 @@ impl ThreadView {
         let _id = self.intent(Intent::Send { text, delivery, attachments }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
+    }
+
+    /// ↵ on a draft: its first message goes with what is attached, once nothing is still on
+    /// its way up, and an empty one starts the agent bare. The words and chips stay until the
+    /// thread lands, so a start that is refused keeps them.
+    fn start_draft(&mut self, delivery: Delivery, window: &Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.draft.clone() else { return };
+        if self.composing.uploading() {
+            self.arm(delivery, window, cx);
+            return;
+        }
+        let text = self.draft(cx).trim().to_owned();
+        let attachments = self.composing.landed();
+        draft.update(cx, |d, cx| d.take(Intent::Send { text, delivery, attachments }, cx));
     }
 
     /// A key the composer's field would take: `take` has it first, while the field has the
@@ -2051,6 +2116,36 @@ impl ThreadView {
         let hub = self.hub.read(cx);
         let k = self.zoom;
         let notice = match self.state(cx) {
+            Some(state) if let Some(draft) = &self.draft => {
+                let draft = draft.read(cx);
+                let agent = agent_label(&state.meta.agent);
+                if draft.sent() {
+                    let mark = crate::icons::notice_status(
+                        theme,
+                        Status::Working,
+                        hsla(theme.surfaces.text_secondary),
+                        k,
+                    );
+                    let said = format!("Starting {agent} {}\u{2026}", draft.place());
+                    let place = SharedString::from(draft.place().to_owned());
+                    kit::notice(theme, k, mark, format!("Starting {agent}"), Some(place))
+                        .id("thread-starting")
+                        .debug_selector(|| "thread-starting".to_owned())
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(said))
+                        .into_any_element()
+                } else {
+                    let mark = kit::notice_mark(theme, crate::icons::AGENT, k);
+                    let model = composer::model_said(&state.meters);
+                    let mut place = draft.place().to_owned();
+                    if let Some(model) = model {
+                        place.push_str(crate::workspace::META_SEPARATOR);
+                        place.push_str(&model);
+                    }
+                    let title = format!("New {agent} thread");
+                    kit::notice(theme, k, mark, title, Some(place.into())).into_any_element()
+                }
+            }
             Some(state) => {
                 let bar = crate::conversation::thread::activity::Activity::of(
                     hub.threads(),
@@ -2155,7 +2250,9 @@ impl Render for ThreadView {
         let aside = self.aside_sheet(window, cx);
         let viewer = self.picture_viewer(cx);
         // A subagent takes no messages: its thread is read, and answered from the bar.
-        let composes = !self.in_subagent();
+        // Nor does a draft once its start went: the thread says it is starting.
+        let sent = self.draft.as_ref().is_some_and(|d| d.read(cx).sent());
+        let composes = !self.in_subagent() && !sent;
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
         let tucked = bar.as_ref().is_some_and(|(_, tucked)| *tucked);
         let bar = bar.map(|(bar, _)| bar);

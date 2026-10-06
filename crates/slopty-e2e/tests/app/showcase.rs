@@ -2701,12 +2701,11 @@ pub async fn start_thread(t: &mut Threads, agent: &str) -> Option<String> {
     // with the way to a past session.
     wait(drv, "the folder step", |d| offering(d, "Resume a past session")).await;
     drv.keys("enter").await.unwrap();
-    // The new thread's tile asks for its first message; ↩ on it empty starts the agent bare.
-    wait(drv, "the first message's field", |d| {
+    // The new thread's tile opens on its composer for the first message; ↩ on it empty starts
+    // the agent bare.
+    wait(drv, "the first message's composer", |d| {
         d.a11y.iter().any(|n| {
-            n.role == "TextInput"
-                && n.focused
-                && n.label.as_deref().is_some_and(|l| l.starts_with("What should"))
+            n.role == "MultilineTextInput" && n.focused && n.label.as_deref() == Some("Message")
         })
     })
     .await;

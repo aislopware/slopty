@@ -19,9 +19,6 @@ actions!(
         /// "New project…": New agent's steps for the agent that will orchestrate it (one that
         /// runs in a terminal), then the "New project" sheet over its tile.
         NewProject,
-        /// Start the thread on its way in plan mode, or not: its agent plans before it
-        /// changes anything (Claude Code's `--permission-mode plan`).
-        TogglePlanFirst,
         /// Put an empty note beside the focused column.
         NewNote,
         /// Put a worker's window or display in the workspace.
@@ -366,7 +363,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("New terminal", Box::new(NewTerminal)),
         w("New agent\u{2026}", Box::new(NewAgent)),
         w(super::agent_start::NEW_PROJECT, Box::new(NewProject)),
-        w(super::starting::PLAN_FIRST_LINE, Box::new(TogglePlanFirst)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
         w("Open file…", Box::new(OpenFile)),
@@ -497,8 +493,6 @@ pub(super) struct Applies {
     pub undo: bool,
     /// A page was held back in a notice.
     pub offer: bool,
-    /// A thread on its way whose agent can start in plan mode, its first message not sent.
-    pub plan: bool,
     /// A folder, or a shell in a repository: its changes can be reviewed.
     pub changes: bool,
     /// Work in an agent's worktree, which can be removed.
@@ -536,7 +530,6 @@ impl super::WorkspaceView {
             streams: !self.screens.is_empty(),
             undo: !self.closed.is_empty(),
             offer: self.has_offer(),
-            plan: focused.is_some_and(|t| self.starting.plans(t.item)),
             changes: self.changes_here().is_some(),
             worktree: self.worktree_here().is_some(),
         }

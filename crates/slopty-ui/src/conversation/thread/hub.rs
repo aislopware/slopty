@@ -505,7 +505,7 @@ impl ThreadHub {
         if let Some(crate::conversation::thread::view::exited::Gone::Resume(start)) = gone
             && !self.resuming(thread)
         {
-            let _id = self.resume(thread, start, cx);
+            let _id = self.resume(thread, *start, cx);
         }
     }
 

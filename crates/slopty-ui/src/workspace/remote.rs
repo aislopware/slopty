@@ -670,6 +670,12 @@ impl WorkspaceView {
             {
                 Upload::to_face(tile, composer, id)
             }
+            // A thread on its way: to the composer writing its first message.
+            None if let Some(composer) = self.starting.composer(tile.item)
+                && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
+            {
+                Upload::to_face(tile, composer, id)
+            }
             Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
             Some(ItemKind::Folder { path }) => Upload::to_folder(tile, path.clone()),
             Some(

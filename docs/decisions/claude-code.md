@@ -2194,7 +2194,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_mod_is_off_for_its_first_reason`, `the_doctor_says_why_the_mod_is_off`,
     `a_provisional_mod_is_dropped_at_its_first_unreadable_event` and
     `a_provisional_mod_is_dropped_with_its_blocks`.
-- ✅ **A Claude Code start can plan first** (2026-10-05, readiness 10-05 G13). The thread's
+- ✅ **A Claude Code start can plan first** (2026-10-05, readiness 10-05 G13; superseded
+  2026-10-06 by `ui.md`, "The first message is written in the thread's composer": the tick and
+  the palette line are gone, the draft's mode chip chooses the mode, and the adapter turns
+  `Start::mode` into `--permission-mode`). The thread's
   mode chip already reads the permission mode every hook reports (`permission_mode`, to
   `Meters::mode` in the observed adapter), read-only, with the hint that the mode is changed in
   Claude Code's own terminal: Slopty never cycles its mode key. What was missing was a start in
