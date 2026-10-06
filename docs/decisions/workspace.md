@@ -1865,3 +1865,37 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     Codex task still runs `codex --worktree`.
   - Tests: `repo::worktrees::tests::a_new_worktree_starts_current_and_carries_the_ignored_files_it_names`,
     and the project task spawn test in `hub::project_tests` for the Claude Code task's worktree.
+
+- ✅ **Tiling replaces the scrolling strip: projects hold tabs, each tab holds a split layout**
+  (2026-10-06, the person's ruling; `.research/tiling-2026-10-06.md`). After long work on the
+  strip, the person ruled it out in favour of tiling, the way the leading tools of the day arrange
+  their work. The study weighed Zed's and VS Code's shape (splits whose panes are tab groups)
+  against the shape MonoCode, Warp, iTerm2, Ghostty and cmux share (tabs of layouts). It took
+  tabs of layouts: an agent's work is one tab, the title bar's tab strip says which agents work
+  and which are done, and a tile that arrives from elsewhere becomes a background tab rather than
+  reshaping a layout.
+  - **The tree.** Each tab holds an n-ary split tree whose leaves are panes. A pane holds one
+    tile, or several as its own tabs. Shares sum to 1. The tree is normalised after every edit:
+    no single-child split, no split directly in a split of its axis, and no empty pane. It is a
+    pure model in `slopty-client::layout`.
+  - **Projects own their tabs.** Switching a project brings back the tab it was left on. The
+    stacked workspaces, the overview, its miniatures, the column thumb, the preset widths,
+    centring, fullscreen tile, consume and expel, and every swipe and wheel step are deleted.
+  - **Panes meet edge to edge** on one ground, at a 1 pt sash, as MonoCode's do
+    (`.research/monocode-system-2026-10-06.md`, geometry). The study's "panels and gutters
+    kept" is overruled: panels on a canvas were the strip's look.
+  - **The navigator is the only dock.** Review, diff, terminal and page are panes.
+  - **Where new work opens.** ⌘T opens an agent's draft in a new tab and ⌘⇧T a terminal. ⌘D and
+    ⌘⇧D split a terminal off. ⌘⌥T shows or hides the tab's terminal pane, which is a pane in the
+    tree, not the drop-down deleted on 2026-09-30. What opens from a tile goes beside its source
+    by the room rule (right while panes keep 520 pt, else down while halves keep 300 pt, else a
+    tab).
+  - **Zoom** (⇧⌘↩) replaces Focus mode. ⌘⌥ and an arrow move the focus, ⌘⌥⇧ and an arrow move
+    the tile, ⌘1–9 pick a tab, and ⌘[ and ⌘] go back and forward. A drop within a fifth of a
+    pane's side splits it; one in the middle joins its tabs.
+  - **iPhone** shows one pane at a time. **iPad** splits by the touch minimum (480 pt).
+  - An old `layout.json` is set aside unread (pre-release). The per-worker item cache is
+    unchanged. No wire type changes.
+  - Before it lands, a sash drag beside five flooding shells is measured against today's
+    divider drag, with a budget of no frame over 8.3 ms. The ten-step migration is in the study,
+    §4.2.

@@ -2,10 +2,10 @@
 
 One app on macOS, iPhone and iPad that reaches many remote hosts at once. It runs coding agents
 (Claude Code, Codex, pi and any ACP agent) and terminals, streams windows and whole desktops at
-Parsec quality or better, shares the clipboard and moves files either way. Everything sits on a
-niri-style scrolling workspace. Hosts are reached over Tailscale or a VPN, so the wire adds no
-encryption or pairing of its own. The aim is that working on many remote machines feels like
-working on one local one. Pure Rust on GPUI.
+Parsec quality or better, shares the clipboard and moves files either way. Everything sits in
+tiled panes: each project holds tabs, and each tab a split layout. Hosts are reached over
+Tailscale or a VPN, so the wire adds no encryption or pairing of its own. The aim is that
+working on many remote machines feels like working on one local one. Pure Rust on GPUI.
 
 Maps: `docs/ARCHITECTURE.md` (how it is built), `docs/decisions/` (rulings with their evidence;
 `docs/DECISIONS.md` is the index), `docs/MEASUREMENTS.md` (numbers and the commands behind them),
@@ -55,7 +55,8 @@ in it until checked here.
   the screen to control an agent, never types menu digits or cycles mode keys, and never
   answers for the person. It launches the user's own unmodified binary and never offers a login
   or touches a credential.
-- **Design.** Minimal and modern, in the Warp and Zed school. Every colour, size and spacing
+- **Design.** Minimal and modern, in MonoCode's school: one ground, panes meeting at hairlines,
+  square where it is structure, rounding that grows with size. Every colour, size and spacing
   comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/kit.rs` enforce
   it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on
   buttons.
