@@ -886,19 +886,49 @@ more full-window layer.
     every Mac binary arm64 (`lipo`), every Linux binary's ELF machine for its CPU, no
     `GLIBC_` version past 2.28 in a worker, none at all in the static server, and every archive
     listing something.
-  - **Notarisation when it can.** With a real identity and `notarytool` credentials
-    (`SLOPTY_NOTARY_PROFILE`, or an App Store Connect key in `APPLE_API_KEY_PATH`,
-    `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`) it submits, waits, staples and asks Gatekeeper
-    (`spctl --assess`). Otherwise it says which is missing and goes on: an un-notarised app runs
-    after the person confirms its first open in System Settings.
-  - **CI.** The `release` job runs `cargo xtask dist --out dist` for a gated tag, with a keychain
-    of its own holding the Developer ID from the `MACOS_CERTIFICATE` secrets and the notary key
-    from the `APPLE_API_KEY` secrets; without them it builds ad hoc and the run's summary says
-    so. It installs the Linux targets, zig and cargo-zigbuild for the cross-builds. Publishing
-    stays a tag's: nothing is uploaded otherwise.
+  - **Notarisation when it can.** A build signed from the Better Update vault is submitted,
+    waited on, stapled and checked by Gatekeeper (`spctl --assess`). Otherwise it says why and
+    goes on: an un-notarised app runs after the person confirms its first open in System
+    Settings. Where the signature and the notary key come from is the next entry's.
+  - **CI.** The `release` job runs `cargo xtask dist --out dist` for a gated tag. It installs the
+    Linux targets, zig and cargo-zigbuild for the cross-builds. Publishing stays a tag's:
+    nothing is uploaded otherwise.
   - Tests: `dist::tests` (when notarisation runs, where its credentials come from, and reading a
     binary's CPU and newest glibc). Run here on 2026-10-01 with `--no-notarize`: see the
     workers entry of the same day for the Linux builds' smoke runs.
+
+- ✅ **A release signs and notarises from the Better Update vault** (2026-10-06, the person's
+  ask: the organisation's Better Update now signs and notarises macOS apps, which is safer than
+  a `.p12` in CI). The release job held the Developer ID as a base64 `.p12` and its password,
+  and the App Store Connect key as a base64 `.p8`, in five repository secrets.
+  - **Where they are now.** Both sit in the Better Update vault, encrypted to its recipients and
+    bound to the Slopty project (`b435f9a9…`, its Apple team bound too). The release job's only
+    secret is `BETTER_UPDATE_ROBOT`, the project's robot `slopty-release` (role developer,
+    granted the vault). Revoking it there cuts CI off without touching any Apple credential,
+    and a leaked robot reaches one project, not a team's signing key outright.
+  - **How a build uses them** (`xtask/src/vault.rs`). `better-update credentials download`
+    writes the `.p12` and names its password; it is imported into a keychain of the build's
+    own (random password, `codesign` alone on its partition list, put first on the search list
+    so the chain resolves), the `.p12` is deleted at once, and the keychain is deleted when the
+    build ends, whatever happened. `codesign --keychain` then signs each binary as before, by
+    the identity's SHA-1, so the per-binary identifiers that TCC grants hang on are unchanged.
+    `better-update macos notarize --wait --staple` submits with the vault's key, which never
+    leaves the vault.
+  - **Rejected: `better-update build` with a custom profile.** It builds from a staged copy and
+    re-signs what it audits, which would sign over our per-binary identifiers and leave the
+    Linux archives and dSYMs outside its output.
+  - **A tag must.** `dist` fetches the identity before the long build, so a tag the vault cannot
+    sign fails in seconds; `--sign` and `--ad-hoc` are refused for a tag, and only a
+    vault-signed build is notarised (`dist::plan_notary`, `dist::publishable`). A local `dist`
+    signed in to Better Update gets the same signature and notarisation as a release.
+  - **The installer is pinned.** CI fetches `install.sh` from the commit of `@better-update/cli`
+    0.81.0, which checks the binary's SHA-256, and installs that version.
+  - Tests: `vault::tests` (the identity's hash, the `.p12` password, the search list) and
+    `dist::tests::only_a_build_signed_from_the_vault_is_notarised`,
+    `a_tag_is_published_only_signed_from_the_vault_and_notarised`. Live, ignored:
+    `vault::tests::the_vault_signs_and_the_notary_accepts` signs a probe with the vault's
+    Developer ID and has the notary accept it. Run here on 2026-10-06 twice: Accepted both
+    times, and the search list was the login keychain alone afterwards.
 
 - ✅ **Tests build the workspace's own crates at opt-level 0** (2026-10-02). The tests lane
   bounded every CI run (27–48 minutes over 22 runs), and 27 minutes of it was the build. That

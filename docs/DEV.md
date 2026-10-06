@@ -167,17 +167,18 @@ What a person installs, and how this tree makes it.
   server install` there needs no `--bin-dir`), `slopty-server-<v>-linux-<cpu>.tar.gz`,
   `slopty-<v>-dSYMs.tar.gz` and `SHA256SUMS`. It checks what it made: the app's signature, every
   Mac binary arm64, every Linux one for its CPU, no worker symbol past glibc 2.28, a static
-  server, and each worker archive holding its binaries and the server. It notarises and staples the app when it is signed with a real identity and
-  `notarytool` credentials are set: `SLOPTY_NOTARY_PROFILE` (a `xcrun notarytool
-  store-credentials` profile), or `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID` and
-  `APPLE_API_ISSUER` (an App Store Connect key). Otherwise, or with `--no-notarize`, it says why
-  it skipped, and Gatekeeper asks the person to confirm the app's first open.
+  server, and each worker archive holding its binaries and the server. It signs with the Developer ID and
+  notarises (then staples) with the App Store Connect key that the Better Update vault holds,
+  when `better-update` can reach it: signed in here with the vault unlocked, or as the CI robot
+  (`BETTER_UPDATE_ROBOT`). The certificate comes into a keychain of the build's own, deleted
+  after it. `--sign <identity>` or `--ad-hoc` sign otherwise and are never notarised; with the
+  vault out of reach, or with `--no-notarize`, it says why it skipped, and Gatekeeper asks the
+  person to confirm the app's first open.
 - **Publishing is a tag's.** `cargo xtask release` makes the version commit and the tag. Pushing
   the tag runs CI's gate on it, then the `release` job: `cargo xtask dist --out dist` on a
-  hosted Mac, signed with the Developer ID in the `MACOS_CERTIFICATE` (base64 `.p12`) and
-  `MACOS_CERTIFICATE_PASSWORD` secrets and notarised with the key in `APPLE_API_KEY` (base64
-  `.p8`), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Without them it publishes ad hoc and
-  un-notarised, and the run's summary says so. The archives and `SHA256SUMS` go on the GitHub
+  hosted Mac, signed and notarised from the Better Update vault as the Slopty project's robot,
+  whose `BETTER_UPDATE_ROBOT` is the job's only secret. A tag the vault cannot sign fails before
+  the build instead of publishing an ad hoc app. The archives and `SHA256SUMS` go on the GitHub
   release with the changelog's latest entry.
 - **Installing.** On a Mac: unzip `Slopty.app` into `/Applications` and open it. Its first run
   offers this Mac as a worker or as the server, and a machine over SSH (a Mac, or Linux on

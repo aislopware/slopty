@@ -84,13 +84,22 @@ pub struct BundleOpts {
     /// Output directory (default: `target/bundle`).
     #[arg(long)]
     pub out: Option<Utf8PathBuf>,
+    /// The keychain the identity is in, when it is one of its own (the release's, from the
+    /// vault: [`crate::vault::developer_id`]) rather than the person's.
+    #[arg(skip)]
+    pub keychain: Option<Utf8PathBuf>,
 }
 
 /// How a bundle is signed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Signing {
     /// With this identity: grants survive updates, and it can be notarised.
-    Identity(String),
+    Identity {
+        /// Its name or SHA-1.
+        name: String,
+        /// The keychain it is in, when not the person's own.
+        keychain: Option<Utf8PathBuf>,
+    },
     /// Ad hoc: every update is a new program to TCC.
     AdHoc,
 }
@@ -114,9 +123,12 @@ impl Signing {
             args.extend(["--entitlements".to_owned(), entitlements.to_string()]);
         }
         let identity = match self {
-            Self::Identity(identity) => {
+            Self::Identity { name, keychain } => {
                 args.push("--timestamp".to_owned());
-                identity.as_str()
+                if let Some(keychain) = keychain {
+                    args.extend(["--keychain".to_owned(), keychain.to_string()]);
+                }
+                name.as_str()
             }
             Self::AdHoc => {
                 args.push("--timestamp=none".to_owned());
@@ -138,7 +150,7 @@ pub fn signing(sh: &Shell, opts: &BundleOpts) -> Signing {
         return Signing::AdHoc;
     }
     match crate::sign::resolve_identity(sh, opts.sign.as_deref()) {
-        Ok(identity) => Signing::Identity(identity),
+        Ok(name) => Signing::Identity { name, keychain: opts.keychain.clone() },
         Err(why) => {
             println!("  ! signing ad hoc: {why}");
             println!(
@@ -248,7 +260,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     let args = signing.codesign_with(None, Some(&app_rights), &app);
     step("codesign bundle", &cmd!(sh, "codesign {args...}"))?;
     step("codesign verify", &cmd!(sh, "codesign --verify --strict --deep {app}"))?;
-    if let Signing::Identity(identity) = &signing {
+    if let Signing::Identity { name: identity, .. } = &signing {
         let worker = macos.join("slopty-worker");
         let requirement = cmd!(sh, "codesign --display --requirements - {worker}")
             .quiet()
@@ -470,14 +482,21 @@ mod tests {
     }
 
     /// A real identity signs under the identifier with a secure timestamp (notarisation wants
-    /// one), ad hoc with none.
+    /// one), from its own keychain when it has one; ad hoc with none.
     #[test]
     fn each_binary_is_signed_under_its_identifier() {
         let path = Utf8Path::new("/b/Slopty.app/Contents/MacOS/slopty-worker");
-        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
+        let name = "Developer ID Application: A (UK58J62H8L)".to_owned();
+        let id = Signing::Identity { name: name.clone(), keychain: None };
         assert_eq!(
             id.codesign(Some("dev.aislopware.slopty.worker"), path).join(" "),
             "--force --options runtime --timestamp --identifier dev.aislopware.slopty.worker \
+             --sign Developer ID Application: A (UK58J62H8L) /b/Slopty.app/Contents/MacOS/slopty-worker"
+        );
+        let vault = Signing::Identity { name, keychain: Some("/t/signing.keychain-db".into()) };
+        assert_eq!(
+            vault.codesign(None, path).join(" "),
+            "--force --options runtime --timestamp --keychain /t/signing.keychain-db \
              --sign Developer ID Application: A (UK58J62H8L) /b/Slopty.app/Contents/MacOS/slopty-worker"
         );
         assert_eq!(

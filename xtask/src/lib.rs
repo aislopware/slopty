@@ -42,6 +42,7 @@ mod symbolicate;
 mod tailnet;
 mod tools;
 mod upstream;
+mod vault;
 mod vm;
 mod watchdog;
 

@@ -12,10 +12,12 @@
 //! - `slopty-<v>-dSYMs.tar.gz`: the Mac binaries' dSYMs, under their UUIDs.
 //! - `SHA256SUMS` over all of them.
 //!
-//! Notarisation runs when there is an identity to sign with and credentials for `notarytool`
-//! ([`Notary::from_env`]); otherwise it is skipped with a note of why, and Gatekeeper then asks
-//! the person to confirm the first open. Publishing is not this command's: the release job of
-//! CI uploads what it leaves in `--out` for a tag.
+//! It signs with the Developer ID and notarises with the App Store Connect key that the Better
+//! Update vault holds ([`crate::vault`]), whenever `better-update` can reach it: as the person
+//! signed in here, or as the CI robot. A tag's build must; any other is signed with the
+//! keychain's identity or ad hoc and left unnotarised when the vault is out of reach, with a
+//! note of why, and Gatekeeper then asks the person to confirm the first open. Publishing is
+//! not this command's: the release job of CI uploads what it leaves in `--out` for a tag.
 
 use std::io::Read as _;
 
@@ -34,62 +36,17 @@ pub struct DistOpts {
     /// Where the archives go (default: `target/dist-out`).
     #[arg(long)]
     out: Option<Utf8PathBuf>,
-    /// Code-signing identity; default `$SLOPTY_SIGN_IDENTITY`, else the keychain's Developer ID
-    /// Application certificate, else ad hoc.
+    /// Code-signing identity in the person's keychain, in place of the vault's; default
+    /// `$SLOPTY_SIGN_IDENTITY`, else the keychain's Developer ID Application certificate, else
+    /// ad hoc. Such a build is not notarised.
     #[arg(long, conflicts_with = "ad_hoc")]
     sign: Option<String>,
     /// Sign ad hoc, which also means no notarisation.
     #[arg(long)]
     ad_hoc: bool,
-    /// Do not notarise, even with credentials at hand.
+    /// Do not notarise, even with the vault at hand.
     #[arg(long)]
     no_notarize: bool,
-}
-
-/// How `notarytool` signs in: a keychain profile (`notarytool store-credentials`), or an App
-/// Store Connect API key, which is what CI holds.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Notary {
-    /// `--keychain-profile <name>`, from `SLOPTY_NOTARY_PROFILE`.
-    Profile(String),
-    /// `--key <p8> --key-id <id> --issuer <uuid>`, from `APPLE_API_KEY_PATH`,
-    /// `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`.
-    ApiKey {
-        /// The `.p8` file.
-        key: String,
-        /// Its id.
-        id: String,
-        /// The issuer.
-        issuer: String,
-    },
-}
-
-/// The environment variable naming a `notarytool` keychain profile.
-const PROFILE_ENV: &str = "SLOPTY_NOTARY_PROFILE";
-/// The environment variables of an App Store Connect API key.
-const KEY_ENV: [&str; 3] = ["APPLE_API_KEY_PATH", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"];
-
-impl Notary {
-    /// The credentials `var` holds, if any: a keychain profile first, then an API key whose
-    /// three parts are all set.
-    pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        let set = |name: &str| var(name).filter(|v| !v.trim().is_empty());
-        if let Some(profile) = set(PROFILE_ENV) {
-            return Some(Self::Profile(profile));
-        }
-        let [key, id, issuer] = KEY_ENV.map(set);
-        Some(Self::ApiKey { key: key?, id: id?, issuer: issuer? })
-    }
-
-    /// `notarytool`'s arguments that sign in.
-    fn args(&self) -> Vec<String> {
-        match self {
-            Self::Profile(name) => vec!["--keychain-profile".to_owned(), name.clone()],
-            Self::ApiKey { key, id, issuer } => {
-                ["--key", key, "--key-id", id, "--issuer", issuer].map(str::to_owned).into()
-            }
-        }
-    }
 }
 
 /// Why a build was or was not notarised.
@@ -114,8 +71,9 @@ pub fn publishable(tag: bool, signing: &Signing, notarised: &Notarised) -> Resul
         return Ok(());
     }
     ensure!(
-        *signing != Signing::AdHoc,
-        "a release is signed with a Developer ID: set SLOPTY_SIGN_IDENTITY and the certificate"
+        matches!(signing, Signing::Identity { keychain: Some(_), .. }),
+        "a release is signed with the vault's Developer ID: install better-update and set \
+         BETTER_UPDATE_ROBOT, or sign in here with the vault unlocked"
     );
     if let Notarised::Skipped(why) = notarised {
         bail!("a release is notarised, and this one was not: {why}");
@@ -123,27 +81,50 @@ pub fn publishable(tag: bool, signing: &Signing, notarised: &Notarised) -> Resul
     Ok(())
 }
 
-/// Whether to notarise a bundle signed so, with these credentials: only a real identity can be,
-/// and only with credentials; the reason when not.
-pub fn plan_notary(
-    signing: &Signing,
-    notary: Option<&Notary>,
-    refused: bool,
-) -> Result<(), String> {
+/// Whether to notarise a bundle signed so: only one signed from the vault is, whose key the
+/// notary is reached with; the reason when not.
+pub fn plan_notary(signing: &Signing, refused: bool) -> Result<(), String> {
     if refused {
         return Err("--no-notarize".to_owned());
     }
-    if *signing == Signing::AdHoc {
-        return Err("an ad hoc signature cannot be notarised".to_owned());
+    match signing {
+        Signing::AdHoc => Err("an ad hoc signature cannot be notarised".to_owned()),
+        Signing::Identity { keychain: None, .. } => {
+            Err("signed from the keychain, not the vault, whose key notarises".to_owned())
+        }
+        Signing::Identity { keychain: Some(_), .. } => Ok(()),
     }
-    if notary.is_none() {
-        return Err(format!(
-            "no notary credentials: set {PROFILE_ENV} (a `notarytool store-credentials` profile) \
-             or {}",
-            KEY_ENV.join(", ")
-        ));
+}
+
+/// The vault's Developer ID in a keychain of this build's own, unless the build signs otherwise
+/// (`--sign`, `--ad-hoc`); `None`, said, when the vault is out of reach of a build that may be
+/// unsigned by it.
+///
+/// # Errors
+///
+/// For a tag, when the vault is out of reach.
+fn vault_identity(
+    sh: &Shell,
+    opts: &DistOpts,
+    tag: bool,
+    dir: &Utf8Path,
+) -> Result<Option<crate::vault::Keychain>> {
+    if opts.ad_hoc || opts.sign.is_some() {
+        ensure!(!tag, "a release signs with the vault's Developer ID, not --sign or --ad-hoc");
+        return Ok(None);
     }
-    Ok(())
+    let fetched = match crate::vault::unavailable(sh) {
+        Some(why) => Err(anyhow::anyhow!(why)),
+        None => crate::vault::developer_id(sh, dir),
+    };
+    match fetched {
+        Ok(keychain) => Ok(Some(keychain)),
+        Err(why) if tag => Err(why.context("a release signs with the vault's Developer ID")),
+        Err(why) => {
+            println!("  ! not signing from the vault: {why:#}");
+            Ok(None)
+        }
+    }
 }
 
 pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
@@ -156,23 +137,22 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
         sh.remove_path(&out)?;
     }
     sh.create_dir(&out)?;
+    // Before the long build: a tag the vault cannot sign fails now, not after it. The keychain
+    // goes when the build is done, whatever happened.
+    let keychain = vault_identity(sh, opts, tag, &root.join("target").join("dist-keychain"))?;
     let bundle_opts = BundleOpts {
         debug: false,
-        sign: opts.sign.clone(),
+        sign: keychain.as_ref().map(|k| k.identity.clone()).or_else(|| opts.sign.clone()),
         ad_hoc: opts.ad_hoc,
         no_linux: false,
         out: Some(root.join("target").join("dist-bundle")),
+        keychain: keychain.as_ref().map(|k| k.path.clone()),
     };
-    if tag {
-        // Before the long build: a tag without its identity fails now, not after it.
-        publishable(tag, &bundle::signing(sh, &bundle_opts), &Notarised::Done)?;
-    }
     let built = bundle::run(sh, &bundle_opts)?;
-    let notary = Notary::from_env(|name| std::env::var(name).ok());
-    let notarised = match plan_notary(&built.signing, notary.as_ref(), opts.no_notarize) {
+    drop(keychain);
+    let notarised = match plan_notary(&built.signing, opts.no_notarize) {
         Ok(()) => {
-            let notary = notary.context("notary credentials")?;
-            notarise(sh, &built.app, &notary, &out)?;
+            notarise(sh, &built.app)?;
             Notarised::Done
         }
         Err(why) => Notarised::Skipped(why),
@@ -210,7 +190,10 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
         println!("    {archive}");
     }
     match &built.signing {
-        Signing::Identity(identity) => println!("  signed by {identity}"),
+        Signing::Identity { name, keychain: Some(_) } => {
+            println!("  signed by {name}, the vault's Developer ID");
+        }
+        Signing::Identity { name, keychain: None } => println!("  signed by {name}"),
         Signing::AdHoc => {
             println!(
                 "  ! signed ad hoc: every update asks again for Screen Recording and Accessibility"
@@ -226,17 +209,10 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
     Ok(())
 }
 
-/// Submit the app to the notary service, wait for its verdict, and staple the ticket.
-fn notarise(sh: &Shell, app: &Utf8Path, notary: &Notary, out: &Utf8Path) -> Result<()> {
-    let upload = out.join("notarize.zip");
-    step("zip for the notary", &cmd!(sh, "ditto -c -k --keepParent {app} {upload}"))?;
-    let creds = notary.args();
-    step(
-        "notarytool submit --wait",
-        &cmd!(sh, "xcrun notarytool submit {upload} {creds...} --wait"),
-    )?;
-    sh.remove_path(&upload)?;
-    step("staple", &cmd!(sh, "xcrun stapler staple {app}"))?;
+/// Submit the app to the notary service with the vault's key, wait for its verdict, staple
+/// the ticket, and have Gatekeeper judge it.
+fn notarise(sh: &Shell, app: &Utf8Path) -> Result<()> {
+    crate::vault::notarise(sh, app)?;
     step("gatekeeper", &cmd!(sh, "spctl --assess --type execute --verbose {app}"))?;
     Ok(())
 }
@@ -387,53 +363,38 @@ fn preflight(sh: &Shell) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Notarisation runs only for a real identity with credentials, and says why not otherwise.
-    #[test]
-    fn notarisation_needs_an_identity_and_credentials() {
-        let profile = Notary::Profile("slopty".to_owned());
-        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
-        assert_eq!(plan_notary(&id, Some(&profile), false), Ok(()));
-        assert!(plan_notary(&id, None, false).unwrap_err().contains(PROFILE_ENV));
-        assert!(
-            plan_notary(&Signing::AdHoc, Some(&profile), false).unwrap_err().contains("ad hoc")
-        );
-        assert_eq!(plan_notary(&id, Some(&profile), true), Err("--no-notarize".to_owned()));
+    /// The vault's Developer ID and the person's.
+    fn identities() -> (Signing, Signing) {
+        let name = "Developer ID Application: A (UK58J62H8L)".to_owned();
+        let vault = Signing::Identity { name: name.clone(), keychain: Some("/t/k".into()) };
+        (vault, Signing::Identity { name, keychain: None })
     }
 
-    /// A tag's build fails unless it is signed with a Developer ID and notarised; any other
-    /// build passes as it is.
+    /// Only a build signed from the vault is notarised, whose key reaches the notary; any other
+    /// says why not.
     #[test]
-    fn a_tag_is_published_only_signed_and_notarised() {
-        let id = Signing::Identity("Developer ID Application: A (UK58J62H8L)".to_owned());
+    fn only_a_build_signed_from_the_vault_is_notarised() {
+        let (vault, own) = identities();
+        assert_eq!(plan_notary(&vault, false), Ok(()));
+        assert!(plan_notary(&own, false).unwrap_err().contains("vault"));
+        assert!(plan_notary(&Signing::AdHoc, false).unwrap_err().contains("ad hoc"));
+        assert_eq!(plan_notary(&vault, true), Err("--no-notarize".to_owned()));
+    }
+
+    /// A tag's build fails unless the vault's Developer ID signed it and it was notarised; any
+    /// other build passes as it is.
+    #[test]
+    fn a_tag_is_published_only_signed_from_the_vault_and_notarised() {
+        let (vault, own) = identities();
         let skipped = Notarised::Skipped("no credentials".to_owned());
-        publishable(true, &id, &Notarised::Done).unwrap();
+        publishable(true, &vault, &Notarised::Done).unwrap();
         let ad_hoc = publishable(true, &Signing::AdHoc, &skipped).unwrap_err().to_string();
-        assert!(ad_hoc.contains("Developer ID"), "{ad_hoc}");
-        let unnotarised = publishable(true, &id, &skipped).unwrap_err().to_string();
+        assert!(ad_hoc.contains("vault"), "{ad_hoc}");
+        let keychain = publishable(true, &own, &Notarised::Done).unwrap_err().to_string();
+        assert!(keychain.contains("vault"), "{keychain}");
+        let unnotarised = publishable(true, &vault, &skipped).unwrap_err().to_string();
         assert!(unnotarised.contains("no credentials"), "{unnotarised}");
         publishable(false, &Signing::AdHoc, &skipped).unwrap();
-    }
-
-    /// An API key's three parts, as the environment would hold them.
-    static KEY: [(&str, &str); 3] =
-        [("APPLE_API_KEY_PATH", "/k.p8"), ("APPLE_API_KEY_ID", "K"), ("APPLE_API_ISSUER", "I")];
-
-    /// A keychain profile wins; an API key needs all three of its parts.
-    #[test]
-    fn credentials_come_from_the_environment() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| {
-            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned())
-        };
-        assert_eq!(Notary::from_env(env(&[])), None);
-        assert_eq!(
-            Notary::from_env(env(&[(PROFILE_ENV, "slopty"), ("APPLE_API_KEY_ID", "K")])),
-            Some(Notary::Profile("slopty".to_owned()))
-        );
-        let key = &KEY;
-        let notary = Notary::from_env(env(key)).unwrap();
-        assert_eq!(notary.args().join(" "), "--key /k.p8 --key-id K --issuer I");
-        assert_eq!(Notary::from_env(env(&key[..2])), None, "a key with no issuer");
-        assert_eq!(Notary::from_env(env(&[(PROFILE_ENV, " ")])), None, "blank is unset");
     }
 
     #[test]

@@ -326,10 +326,10 @@ jobs:
 
   # A tag, gated, is built into a release by `cargo xtask dist`: the app, the Mac CLI and
   # daemons, the Linux workers and servers, the dSYMs and SHA256SUMS, each checked. It signs with
-  # the Developer ID the MACOS_CERTIFICATE secrets hold and notarises with the App Store Connect
-  # key the APPLE_API_KEY secrets hold. Without them `dist` fails for a tag rather than publish an
-  # ad hoc build (`dist::publishable`; docs/decisions/tooling.md, "A release is what `cargo xtask
-  # dist` builds").
+  # the Developer ID and notarises with the App Store Connect key that the Better Update vault
+  # holds, reached as the Slopty project's robot (BETTER_UPDATE_ROBOT, the job's only secret).
+  # Without it `dist` fails for a tag rather than publish an ad hoc build (`dist::publishable`;
+  # docs/decisions/tooling.md, "A release signs and notarises from the Better Update vault").
   release:
     name: release ${{ github.ref_name }}
     needs: gate
@@ -338,11 +338,7 @@ jobs:
     permissions:
       contents: write
     env:
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      BETTER_UPDATE_ROBOT: ${{ secrets.BETTER_UPDATE_ROBOT }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -373,24 +369,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      # A keychain of the run's own, holding only the Developer ID, so codesign finds it.
-      - if: env.MACOS_CERTIFICATE != ''
-        run: |
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          password="$(uuidgen)"
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -f pkcs12 \
-            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/certificate.p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
-          security list-keychains -d user -s "$keychain" login.keychain-db
-      - if: env.APPLE_API_KEY != ''
-        run: |
-          printf '%s' "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+      # The vault's client, the version `xtask/src/vault.rs` was proven against, by the installer
+      # of that release's commit, which checks the download's SHA-256.
+      - run: |
+          curl -fsSL https://raw.githubusercontent.com/aislopware/better-update/84d3f253a039729e2a6c7c792ad620cec13897e8/install.sh \
+            | BETTER_UPDATE_VERSION=0.81.0 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: cargo xtask dist --out dist 2>&1 | tee dist.log
       # Whether it was signed and notarised, and anything else it warned of, on the run's page.
       - if: always()
