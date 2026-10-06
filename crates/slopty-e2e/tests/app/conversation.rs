@@ -153,6 +153,56 @@ async fn an_agent_tile_opens_on_its_thread() {
     stack.shutdown().await;
 }
 
+/// What a long read says: headings, paragraphs much longer than a line and a list, so the
+/// measure a wide screen holds them to shows.
+const LONG_READ: &str = "# The board as a grouped list\n\nLanes in a grid of bordered cards read \
+as a dashboard of boxes. The board is now one column, as Linear's grouped issues are, and each \
+task is a row that says only what moves it on; what needs reading waits under it until it is \
+needed, and nothing else is boxed.\n\n## What a row holds\n\nIts mark, its number and its \
+title, then at the trailing end the facts a glance needs: what moves it on, its check, its \
+branch and the machine it runs on. The least needed leave first as the column narrows, so a \
+row fits a narrow column with no wrapping, and the title keeps a floor of eight ems.\n\n\
+- One column, the lanes in their order\n- Rows, not cards\n- Merged folds to its head\n";
+
+/// Reading at length on a wide screen keeps its measure: a 2560 × 1440 window holding one
+/// thread in focus mode, its turns in the thread's column, then one Markdown file the same way,
+/// its preview held to the thread's measure rather than run across the screen.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_wide_screen_reads_at_its_measure() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: 2560.0, height: 1440.0 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    start_recorded(&stack, &session, "edit").await;
+    let drv = &mut stack.driver;
+    drv.wait_for("the thread, face-first", STEP, |d| thread_shows(d) && any_label(d, "Worked"))
+        .await
+        .unwrap();
+    drv.keys("cmd-shift-enter").await.unwrap();
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    golden(drv, &dir, "wide-reading-thread").await;
+
+    // In a folder of a fixed name, which names the workspace the file opens in.
+    let project = stack.path("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let notes = project.join("NOTES.md");
+    std::fs::write(&notes, LONG_READ).unwrap();
+    let drv = &mut stack.driver;
+    drv.open_file(&notes.display().to_string(), None).await.unwrap();
+    drv.wait_for("the notes, previewed", STEP, |d| {
+        d.item("file").and_then(|i| i.file.as_ref()).is_some_and(|f| f.previewing)
+            && d.item("file").is_some_and(|i| i.active)
+    })
+    .await
+    .unwrap();
+    drv.keys("cmd-shift-enter").await.unwrap();
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    golden(drv, &dir, "wide-reading").await;
+    stack.shutdown().await;
+}
+
 /// Claude Code asks two questions through `AskUserQuestion`: the request opens over the
 /// composer as a questionnaire, one question at a time under its header, each answer with
 /// what it means, a field for one's own. A pick and a word of one's own answer them, and the

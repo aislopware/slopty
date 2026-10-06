@@ -1,0 +1,12 @@
+Window │ e2e-worker
+Group │ Workspace
+Button │ Navigator
+Heading │ terminal Terminal 2
+Button │ Needs you
+Button │ More
+Group │ Terminal
+Group
+Terminal │ shell │ ~ %
+Group │ Terminal 2
+Group (focused)
+Terminal │ shell

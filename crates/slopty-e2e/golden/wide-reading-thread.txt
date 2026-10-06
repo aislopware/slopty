@@ -1,0 +1,33 @@
+Window │ e2e-worker
+Group │ Workspace
+Button │ Navigator
+Button │ Search
+Button │ New agent
+Group │ Where
+Button │ e2e-worker
+Button │ New
+Button │ Needs you
+Button │ More
+Navigation │ Projects
+Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
+Image │ Claude Code
+Label │ home
+RadioGroup │ Face
+RadioButton │ Thread
+RadioButton │ Terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Article │ You: Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
+Button │ Branch from here
+Button │ Copy message
+Button │ Worked 23 s: Edited notes.txt · Read 3 files
+Article │ done
+Button │ Copy message
+MultilineTextInput │ Message (focused)
+Button │ Add to the message
+Button │ Model, Opus 5.5
+Button │ Review the changes
+Button │ Context 34% of 200k
+Button │ Send

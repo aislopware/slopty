@@ -895,6 +895,50 @@ async fn a_tabbed_column_draws_its_tab_row() {
     stack.shutdown().await;
 }
 
+/// A window as macOS 26 tiles it to half a screen, 756 × 900, holds two columns, the second
+/// stepped twice through the width presets (⌘R), with the navigator opened over them, since
+/// docked it would leave the strip a phone's width. Then the window at the least size it takes,
+/// 375 × 480, its one column a phone's. Nothing in either may run past its edges
+/// (`docs/decisions/ui.md`, "How surfaces adapt to their room").
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_half_screen_and_the_least_window_keep_their_chrome_whole() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: 756.0, height: 900.0 }).await.unwrap();
+    first_shell(drv).await;
+    drv.open(&["cat"], 1).await.unwrap();
+    drv.wait_for("a second column", STEP, |d| d.items.len() == 2).await.unwrap();
+    drv.keys("cmd-r").await.unwrap();
+    drv.keys("cmd-r").await.unwrap();
+    at_rest(drv).await;
+    drv.keys("cmd-b").await.unwrap();
+    drv.wait_for("the navigator over the strip", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_some()
+    })
+    .await
+    .unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "half-screen").await;
+
+    drv.keys("cmd-b").await.unwrap();
+    drv.wait_for("the navigator put away", STEP, |d| {
+        d.a11y_node("Navigation", Some("Navigator")).is_none()
+    })
+    .await
+    .unwrap();
+    drv.ok(&Command::Resize { width: 375.0, height: 480.0 }).await.unwrap();
+    let dump = drv
+        .wait_for("the least window", STEP, |d| (d.window.width - 375.0).abs() < 1.0)
+        .await
+        .unwrap();
+    assert!((dump.window.height - 480.0).abs() < 1.0, "{:?}", dump.window);
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "window-minimum").await;
+    stack.shutdown().await;
+}
+
 /// This Mac on the tailnet as its Tailscale would describe it, with no peer to list.
 const TAILNET_NAMING_THIS_MAC: &str = r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac-studio","DNSName":"mac-studio.tail1234.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.7"]},"Peer":null}"#;
 

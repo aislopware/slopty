@@ -275,7 +275,113 @@ async fn a_project_board_follows_its_orchestration() {
         .unwrap();
     assert_eq!(project(&d).and_then(|p| p.picked.clone()).as_deref(), Some("1"));
 
+    narrow_column_beside_the_board(&mut stack, &agent_session).await;
     stack.shutdown().await;
+}
+
+/// What a narrow column's file says: a heading, a paragraph longer than the column and a list.
+const NOTES: &str = "# Notes on the board\n\nEach lane is a group of rows, and a row says only \
+what moves its task on; the rest waits under it until it needs reading.\n\n- Draw the lanes\n\
+- Hold it to goldens\n- Write the decision\n";
+
+/// The column at the board's side, 312 pt, holding every kind of tile a person puts there:
+/// task 1's agent, a Markdown file and a terminal (`cat`, so no run's path shows) stacked,
+/// light and dark; then the same column with a fourth tile, tabbed, the last tab active.
+/// Nothing in it may run past its edges (`docs/decisions/ui.md`, "How surfaces adapt to their
+/// room").
+async fn narrow_column_beside_the_board(stack: &mut ProjectStack, agent: &str) {
+    let column =
+        |d: &Dump| d.items.iter().find(|i| i.session.as_deref() == Some(agent)).map(|i| i.pos[1]);
+    let notes = stack.path("repo").join("NOTES.md");
+    std::fs::write(&notes, NOTES).unwrap();
+    let notes = notes.to_string_lossy().into_owned();
+    stack.driver.open_file(&notes, None).await.unwrap();
+    stack
+        .driver
+        .wait_for("the notes in a tile", STEP, |d| {
+            d.item("file").is_some_and(|f| f.active && f.file.as_ref().is_some_and(|f| f.lines > 0))
+        })
+        .await
+        .unwrap();
+    stack.driver.keys("cmd-[").await.unwrap();
+    stack
+        .driver
+        .wait_for("the notes under the agent", STEP, |d| {
+            d.item("file").is_some_and(|f| Some(f.pos[1]) == column(d))
+        })
+        .await
+        .unwrap();
+    let shells = |d: &Dump| d.items.iter().filter(|i| i.kind == "terminal").count();
+    let before = shells(&stack.driver.dump().await.unwrap());
+    stack.driver.open(&["cat"], 1).await.unwrap();
+    stack
+        .driver
+        .wait_for("a shell of its own", STEP, |d| {
+            shells(d) > before && d.items.iter().any(|i| i.active && i.kind == "terminal")
+        })
+        .await
+        .unwrap();
+    stack.driver.keys("cmd-[").await.unwrap();
+    let d = stack
+        .driver
+        .wait_for("three tiles in the narrow column", STEP, |d| {
+            column(d).is_some_and(|c| d.items.iter().filter(|i| i.pos[1] == c).count() == 3)
+        })
+        .await
+        .unwrap();
+    let narrow = d.items.iter().find(|i| i.session.as_deref() == Some(agent)).unwrap();
+    assert!((narrow.bounds[2] - 312.0).abs() < 1.0, "the column beside a board: {narrow:?}");
+    stack.driver.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    rested(&mut stack.driver).await;
+    golden(stack, "narrow-columns").await;
+    stack.set_appearance("dark").unwrap();
+    stack.driver.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    rested(&mut stack.driver).await;
+    golden(stack, "narrow-columns-dark").await;
+    stack.set_appearance("light").unwrap();
+    stack.driver.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
+
+    let before = shells(&stack.driver.dump().await.unwrap());
+    stack.driver.open(&["cat"], 1).await.unwrap();
+    stack
+        .driver
+        .wait_for("a fourth tile", STEP, |d| {
+            shells(d) > before && d.items.iter().any(|i| i.active && i.kind == "terminal")
+        })
+        .await
+        .unwrap();
+    stack.driver.keys("cmd-[").await.unwrap();
+    stack.driver.keys("cmd-alt-t").await.unwrap();
+    let d = stack
+        .driver
+        .wait_for("four tabs in the narrow column", STEP, |d| {
+            let tabs = d.a11y.iter().filter(|n| n.role == "Tab").count();
+            column(d).is_some_and(|c| d.items.iter().filter(|i| i.pos[1] == c).count() == 4)
+                && tabs >= 4
+        })
+        .await
+        .unwrap();
+    let last = d.items.iter().filter(|i| Some(i.pos[1]) == column(&d)).max_by_key(|i| i.pos[2]);
+    assert!(last.is_some_and(|i| i.active), "the last tab is the active one: {:?}", d.items);
+    stack.driver.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    rested(&mut stack.driver).await;
+    golden(stack, "tabbed-column-narrow").await;
+}
+
+/// Wait until nothing moves: two dumps a frame apart place every tile alike.
+async fn rested(drv: &mut Driver) {
+    let mut last = drv.dump().await.unwrap();
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let next = drv.dump().await.unwrap();
+        let still = |a: &[f32; 4], b: &[f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.5);
+        let same = next.items.len() == last.items.len()
+            && next.items.iter().zip(&last.items).all(|(a, b)| still(&a.bounds, &b.bounds));
+        if same {
+            return;
+        }
+        last = next;
+    }
 }
 
 /// How long the live task's agent works before the renders: past a minute, which is when its
