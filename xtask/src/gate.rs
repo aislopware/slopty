@@ -456,17 +456,18 @@ const NEXTEST_LAND_PROFILE: &str = "land";
 /// Before `cargo xtask land` pushes: the checks a red CI run most often names, on the packages
 /// its commits change since `base` and every package that depends on them, on HEAD's tree
 /// (`target/gate/tree`), side by side under `nice`:
-/// - their tests, in the tests lane's target dir;
+/// - host clippy on every target with warnings denied, in the host clippy lane's target dir;
 /// - rustdoc with warnings denied, in the rustdoc lane's;
-/// - clippy on both iOS triples and on Linux, in the iOS clippy lane's.
+/// - clippy on both iOS triples, in the iOS clippy lane's;
+/// - with `full`, their tests too, and clippy on Linux.
 ///
-/// A red CI run costs the better part of an hour, and most were a test or a lint a few minutes
-/// here would have failed (`docs/decisions/tooling.md`, "land checks the changed packages
-/// first"). It is a net, not the gate: the tests that time themselves against the machine's load
-/// are CI's alone (nextest's `land` profile), and a change outside every package (the manifests'
-/// root, the lockfile, cargo's config) leaves all of it to CI, since it reaches every package.
-/// Skipped when it last passed on the same inputs.
-pub fn land_checks(base: &str) -> Result<()> {
+/// The static checks are deterministic and scoped, and with nothing compiled here they named 13
+/// of 29 red CI runs in two days, each red holding every later land behind it
+/// (`docs/decisions/tooling.md`, "land lints the changed packages first, by default"). Tests
+/// stay CI's unless asked for: they are the costly part and the part a busy Mac makes flaky.
+/// A change outside every package (the manifests' root, the lockfile, cargo's config) leaves all
+/// of it to CI, since it reaches every package. Skipped when it last passed on the same inputs.
+pub fn land_checks(base: &str, full: bool) -> Result<()> {
     let started = Instant::now();
     let root = repo_root()?;
     let sh = Shell::new()?;
@@ -510,19 +511,45 @@ pub fn land_checks(base: &str) -> Result<()> {
         let names: Vec<&str> = packages.iter().map(String::as_str).collect();
         let shell = |name| lane_shell(&tree, &gate_dir, name, false);
         std::thread::scope(|scope| {
-            let tests = scope.spawn(|| affected_lane(&shell("tests")?, &packages));
+            let host = scope.spawn(|| {
+                let lint = clippy_affected(&shell("clippy host")?, &names);
+                if full { both(lint, affected_lane(&shell("tests")?, &packages)) } else { lint }
+            });
             let docs = scope.spawn(|| crate::check::rustdoc(&shell("rustdoc")?, &names));
             let cross = scope.spawn(|| {
                 let sh = shell("clippy ios")?;
+                let ios = crate::check::clippy_ios(&sh, &names);
+                if !full {
+                    return ios;
+                }
                 let linux = crate::tools::lint_linux(&sh, &names);
                 let xtask = if names.contains(&"xtask") { lint_linux_xtask(&sh) } else { Ok(()) };
-                both(both(crate::check::clippy_ios(&sh, &names), linux), xtask)
+                both(both(ios, linux), xtask)
             });
-            both(both(join(tests), join(docs)), join(cross))
+            both(both(join(host), join(docs)), join(cross))
         })
     })?;
     println!("✔ checks before the push ({:.1?})", started.elapsed());
     Ok(())
+}
+
+/// [`land_checks`]'s host clippy of `names` with every target, `-D warnings`, the live
+/// `slopty-e2e` targets among them when it is one, as CI's host clippy lane lints them.
+fn clippy_affected(sh: &Shell, names: &[&str]) -> Result<()> {
+    let host = TRIPLES[0];
+    let built = &selected(names.iter().copied().chain([WORKSPACE_HACK]));
+    let live: &[&str] = if names.contains(&crate::e2e::LIVE_PACKAGE) {
+        &["--features", crate::e2e::LIVE]
+    } else {
+        &[]
+    };
+    quiet_step(
+        &format!("clippy {host}"),
+        cmd!(
+            sh,
+            "cargo clippy --locked --keep-going {built...} --all-targets {live...} --target {host} -- -D warnings"
+        ),
+    )
 }
 
 /// [`land_checks`]'s build and run of `packages`' tests.
@@ -716,6 +743,7 @@ fn tools_lane(
             scope.spawn(move || hakari(&on_tree()?, false)),
             scope.spawn(move || shear(&on_tree()?, false)),
             scope.spawn(move || typos(&on_tree()?, false)),
+            scope.spawn(move || repo_invariants(&tree_root(&on_tree()?)?)),
         ];
         // `committed` reads the history, which only the checkout has.
         let mut results = vec![commits(checkout, message)];
@@ -725,6 +753,94 @@ fn tools_lane(
     let errors: Vec<String> =
         results.into_iter().filter_map(Result::err).map(|e| format!("{e:#}")).collect();
     if errors.is_empty() { Ok(()) } else { bail!("{}", errors.join("; ")) }
+}
+
+/// The directory a tools-lane shell stands in: the snapshot.
+fn tree_root(sh: &Shell) -> Result<Utf8PathBuf> {
+    Utf8PathBuf::from_path_buf(sh.current_dir())
+        .map_err(|dir| anyhow::anyhow!("{} is not UTF-8", dir.display()))
+}
+
+/// What the repository's text must keep in step, read with nothing compiled, so the quick gate
+/// fails on it in seconds: CI's tests ran these after a seven-minute build, and they named four
+/// red runs in two days (`.research/dev-speed-2026-10-06.md` item 3).
+/// - Every member is in exactly one test shard, and every shard names only members.
+/// - `ci.yml`'s matrix runs every shard.
+/// - Every package whose tests spawn a binary through `slopty_testkit::bins::bin` is in
+///   [`SPAWNING`], so its shard builds them.
+fn repo_invariants(root: &Utf8Path) -> Result<()> {
+    use clap::ValueEnum as _;
+    let members = crate::tools::packages_in(root)?;
+    let mut errors = Vec::new();
+    for member in &members {
+        let shards: Vec<&str> = Shard::value_variants()
+            .iter()
+            .filter(|s| s.packages().contains(&member.name.as_str()))
+            .map(|s| s.name())
+            .collect();
+        if shards.len() != 1 {
+            errors.push(format!("{} is in the test shards {shards:?}, not in one", member.name));
+        }
+    }
+    for shard in Shard::value_variants() {
+        for package in shard.packages() {
+            if !members.iter().any(|m| m.name == *package) {
+                errors.push(format!("shard {} names {package}, which is no member", shard.name()));
+            }
+            if *package == WORKSPACE_HACK {
+                errors.push(format!(
+                    "shard {} names {WORKSPACE_HACK}, which every shard builds",
+                    shard.name()
+                ));
+            }
+        }
+    }
+    let path = root.join(".github/workflows/ci.yml");
+    let workflow = std::fs::read_to_string(&path).with_context(|| format!("read {path}"))?;
+    if workflow.matches("shard: ").count() != Shard::value_variants().len() {
+        errors.push("ci.yml's matrix lists a shard that is not one, or one twice".to_owned());
+    }
+    for shard in Shard::value_variants() {
+        let entry = format!("lane: tests, shard: {}, ", shard.name());
+        if !workflow.contains(&entry) {
+            errors.push(format!("ci.yml's matrix has no `{entry}`"));
+        }
+    }
+    let mut spawning = std::collections::BTreeSet::new();
+    for package in &members {
+        let mut sources = Vec::new();
+        for dir in ["src", "tests"] {
+            rust_sources(package.dir.join(dir).as_std_path(), &mut sources);
+        }
+        let spawns = sources.iter().any(|file| {
+            std::fs::read_to_string(file).is_ok_and(|text| text.contains("bins::bin("))
+        });
+        // The one defines it, and this one names it.
+        if spawns && !["slopty-testkit", "xtask"].contains(&package.name.as_str()) {
+            spawning.insert(package.name.as_str());
+        }
+    }
+    let listed: std::collections::BTreeSet<&str> = SPAWNING.into_iter().collect();
+    if spawning != listed {
+        errors.push(format!(
+            "SPAWNING in xtask/src/gate.rs lists {listed:?}, but the packages whose tests call \
+             `slopty_testkit::bins::bin` are {spawning:?}"
+        ));
+    }
+    if errors.is_empty() { Ok(()) } else { bail!("repository invariants: {}", errors.join("; ")) }
+}
+
+/// Every `.rs` file under `dir`, into `out`.
+fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
 }
 
 /// `slopty_testkit::bins::FRESH`: set once every binary a test spawns is built.
@@ -1471,13 +1587,11 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::ValueEnum as _;
-
     use super::{
         BINS_BUILT, BINS_FRESH, SPAWNED_BINS, Shard, Source, failed_tests, list, next_step,
         one_gpui, spawned_selection, summary_of,
     };
-    use crate::tools::{WORKSPACE_HACK, repo_root, workspace_packages};
+    use crate::tools::repo_root;
 
     /// The gate builds what the tests look for, under the variables they read.
     #[test]
@@ -1493,41 +1607,12 @@ mod tests {
         }
     }
 
-    /// A member in no shard would have its tests run by no CI job; one in two, by both.
+    /// The repository's invariants hold on this checkout: a member in no shard would have its
+    /// tests run by no CI job, one in two by both; a shard missing from `ci.yml` would run no
+    /// tests; a package spawning binaries missing from `SPAWNING` would run them unbuilt.
     #[test]
-    fn every_member_is_in_exactly_one_shard() {
-        let members = workspace_packages().expect("the workspace's packages");
-        for member in &members {
-            let shards: Vec<&str> = Shard::value_variants()
-                .iter()
-                .filter(|s| s.packages().contains(&member.name.as_str()))
-                .map(|s| s.name())
-                .collect();
-            assert_eq!(shards.len(), 1, "{} is in the shards {shards:?}", member.name);
-        }
-        for shard in Shard::value_variants() {
-            for package in shard.packages() {
-                assert!(
-                    members.iter().any(|m| m.name == *package),
-                    "shard {} names {package}, which is no member",
-                    shard.name()
-                );
-                assert_ne!(*package, WORKSPACE_HACK, "every shard builds it already");
-            }
-        }
-    }
-
-    /// CI runs one job per shard: a shard missing from its matrix would run no tests at all.
-    #[test]
-    fn ci_runs_every_shard() {
-        let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
-        let workflow = std::fs::read_to_string(&path).expect("ci.yml");
-        let listed = workflow.matches("shard: ").count();
-        assert_eq!(listed, Shard::value_variants().len(), "one matrix entry a shard");
-        for shard in Shard::value_variants() {
-            let entry = format!("lane: tests, shard: {}, ", shard.name());
-            assert!(workflow.contains(&entry), "ci.yml's matrix has no `{entry}`");
-        }
+    fn the_repository_s_invariants_hold() {
+        super::repo_invariants(&repo_root().expect("repo root")).expect("they hold");
     }
 
     /// CI runs the Linux lane on a Linux runner, apart from the gate's matrix until it is
@@ -1561,9 +1646,8 @@ mod tests {
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
     }
 
-    /// Nothing that compiles runs here before a land: the quick gate is the tools lane, and
-    /// CI carries host clippy and the app's live tests, which ran on this Mac before; the
-    /// latter in a workflow of their own, which holds no gate run back.
+    /// Nothing that compiles runs in the quick gate, which is the tools lane; CI carries the
+    /// app's live tests in a workflow of their own, on a schedule, which holds no gate run back.
     #[test]
     fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
@@ -1572,6 +1656,10 @@ mod tests {
         assert!(workflow.contains("{ lane: clippy-host, os: macos-26 }"), "host clippy on CI");
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
         assert!(e2e.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
+        assert!(
+            e2e.contains("schedule:\n    - cron: ") && !e2e.contains("push:"),
+            "on a schedule, never holding a macOS slot beside every land's run"
+        );
         assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));
         assert!(!workflow.contains("e2e app"), "in a workflow of its own, off the gate's queue");
     }
@@ -1597,41 +1685,6 @@ mod tests {
             ["--workspace", "--tests"],
             "the whole lane builds them as before"
         );
-    }
-
-    /// A package whose tests spawn a binary and is missing from [`SPAWNING`] would run them where
-    /// nothing built it.
-    #[test]
-    fn the_packages_whose_tests_spawn_binaries_are_listed() {
-        let packages = workspace_packages().expect("the workspace's packages");
-        let mut spawning = std::collections::BTreeSet::new();
-        for package in &packages {
-            let mut sources = Vec::new();
-            for dir in ["src", "tests"] {
-                rust_sources(&package.dir.join(dir).into_std_path_buf(), &mut sources);
-            }
-            let spawns = sources.iter().any(|file| {
-                std::fs::read_to_string(file).is_ok_and(|text| text.contains("bins::bin("))
-            });
-            // The one defines it, and this one names it.
-            if spawns && !["slopty-testkit", "xtask"].contains(&package.name.as_str()) {
-                spawning.insert(package.name.as_str());
-            }
-        }
-        let listed: std::collections::BTreeSet<&str> = super::SPAWNING.into_iter().collect();
-        assert_eq!(spawning, listed, "the packages whose tests call `slopty_testkit::bins::bin`");
-    }
-
-    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                rust_sources(&path, out);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                out.push(path);
-            }
-        }
     }
 
     /// `land` snapshots HEAD as the gate snapshots the index: the same entries, in the same form,

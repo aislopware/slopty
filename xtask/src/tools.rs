@@ -1,7 +1,7 @@
 //! Shared helpers: repo root discovery, tool presence, target triples.
 
 use anyhow::{Context as _, Result, ensure};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use xshell::{Shell, cmd};
 
 /// Every triple we build for. Host first.
@@ -164,6 +164,11 @@ pub struct Package {
 /// Every package under `crates/`, `apps/` and `xtask`. A package's name need not match its
 /// directory (`apps/slopty-server` is `slopty-serverd`), so this reads the manifests.
 pub fn workspace_packages() -> Result<Vec<Package>> {
+    packages_in(&repo_root()?)
+}
+
+/// [`workspace_packages`] of the tree at `root`: a gate's snapshot, or the checkout.
+pub fn packages_in(root: &Utf8Path) -> Result<Vec<Package>> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         package: Named,
@@ -173,7 +178,6 @@ pub fn workspace_packages() -> Result<Vec<Package>> {
     struct Named {
         name: String,
     }
-    let root = repo_root()?;
     let mut dirs = vec![root.join("xtask")];
     for group in ["crates", "apps"] {
         for entry in root.join(group).read_dir_utf8().with_context(|| format!("listing {group}"))? {

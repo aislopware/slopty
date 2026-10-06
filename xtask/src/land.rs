@@ -6,10 +6,11 @@
 //! gate at a time on that branch; a newer push waits behind the run in progress, and only the
 //! newest waits, since its green covers every commit under it.
 //!
-//! Nothing compiles here first: CI's lanes are the checks, and this Mac's cores stay on the work
-//! (`docs/decisions/tooling.md`, "Nothing heavy runs here before a land"). `--check` runs the
-//! tests, rustdoc and the iOS and Linux clippy of the packages the commits change, and of their
-//! dependents, before the push ([`crate::gate::land_checks`]), for a change likely to go red.
+//! Before the push, the packages the commits change and their dependents are linted here under
+//! `nice`: host and iOS clippy and rustdoc, the checks that most often turned a run red
+//! ([`crate::gate::land_checks`]; `docs/decisions/tooling.md`, "land lints the changed packages
+//! first, by default"). The tests stay CI's; `--full` adds them and Linux clippy, and
+//! `--no-check` pushes with no check at all.
 
 use std::time::{Duration, Instant};
 
@@ -37,10 +38,12 @@ pub struct LandOpts {
     /// Block until CI promoted the commit to main, or failed, and report which.
     #[arg(long)]
     pub wait: bool,
-    /// Check the packages the commits change here before the push (tests, rustdoc, iOS and
-    /// Linux clippy), as CI will.
+    /// Also run the changed packages' tests and Linux clippy before the push.
+    #[arg(long, conflicts_with = "no_check")]
+    pub full: bool,
+    /// Push without linting the changed packages first.
     #[arg(long)]
-    pub check: bool,
+    pub no_check: bool,
 }
 
 /// A run as `promote` reads it from `gh run list`.
@@ -145,14 +148,16 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         .quiet()
         .read()
         .unwrap_or_default();
-    if opts.check {
+    if opts.no_check {
+        println!("  no checks before the push: CI alone decides");
+    } else {
         // What `gate` already holds is CI's to check, so a land on top of one still running is
         // checked for its own commits alone: from main, a lockfile change in the earlier land
         // left every later one unchecked.
         let pushed = !leased.is_empty()
             && cmd!(sh, "git merge-base --is-ancestor origin/main {leased}").quiet().run().is_ok()
             && cmd!(sh, "git merge-base --is-ancestor {leased} HEAD").quiet().run().is_ok();
-        crate::gate::land_checks(if pushed { &leased } else { "origin/main" })?;
+        crate::gate::land_checks(if pushed { &leased } else { "origin/main" }, opts.full)?;
     }
     let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{leased}");
     cmd!(sh, "git push --quiet {lease} origin HEAD:refs/heads/{BRANCH}").run()?;

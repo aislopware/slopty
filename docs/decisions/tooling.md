@@ -1056,7 +1056,8 @@ more full-window layer.
   - Track the share of red runs whose failed step is rustdoc or clippy-ios. The target is near
     zero.
 
-- ✅ **Nothing heavy runs here before a land** (2026-10-05). The user wants this Mac's cores
+- ✅ **Nothing heavy runs here before a land** (2026-10-05; amended 2026-10-06 above: `land`
+  lints the changed packages again, and the app's e2e runs on a schedule). The user wants this Mac's cores
   on the work, and the heavy checks on GitHub Actions. Before, each land compiled for minutes
   here, beside two agents' builds: host clippy in the quick gate, the changed packages' tests,
   rustdoc and iOS and Linux clippy in `land`, and the app's e2e by hand.
@@ -1080,6 +1081,43 @@ more full-window layer.
     above), while the agents keep working, against minutes of every core here per land. Agents
     still run clippy and their own crate's tests as they code.
   - Test: `gate::tests::the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e`.
+
+- ✅ **land lints the changed packages first, by default; the app's e2e runs on a schedule**
+  (2026-10-06, `.research/dev-speed-2026-10-06.md`, items 1, 2, 3 and 6). This amends "Nothing
+  heavy runs here before a land" below. With nothing compiled here, the time from a push to main
+  went from a median 18 minutes to 92 (mean 119, p90 277) over the next day:
+  - 13 of 29 runs went red on a deterministic, scoped check (rustdoc 10, host clippy or compile
+    4, xtask's shard test 4), against 1 of 20 while the local checks ran. One rustdoc chain held
+    main for five hours with 18 lands behind it. A red run cost 15–25 minutes per land, not the
+    5.7 the ruling priced.
+  - e2e on every push held a sixth macOS slot almost all the time (running when 133 of 138 gate
+    Mac jobs were created), so the gate's fifth lane waited a median 8.8 minutes, against 0.2.
+    It was red in 12 of 14 runs, every one for runner reasons, while it passes 63 of 63 here.
+  The rulings:
+  - `land` runs host clippy (every target, `-D warnings`), rustdoc and iOS clippy on the packages
+    its commits change and their dependents, under `nice` (`gate::land_checks`). That is about
+    a minute of background CPU per land at p50 and 2–5 minutes after a dependency bump: about an
+    hour a day against about 14 hours of landed work waiting. The tests stay CI's: they are the
+    costly part and the part a busy Mac makes flaky, and they named none of the 13. `--full`
+    adds them and Linux clippy (no Linux red since it moved to its runner); `--no-check` pushes
+    with no check.
+  - The app's e2e (`e2e.yml`) runs every four hours on main and by hand, at most one macOS slot,
+    until it is green on a runner and a slot is spare. The lanes run the suites they touch here
+    before they report, as they did.
+  - On CI, rustdoc runs first on iOS clippy's runner (it reports by about minute 8 instead of
+    13), and iOS clippy runs after it even when it failed.
+  - The repository's invariants (every member in exactly one test shard, `ci.yml` running every
+    shard, `SPAWNING` naming every package whose tests spawn a binary) are read in the tools
+    lane (`gate::repo_invariants`), so the quick gate fails on them in seconds, not CI after a
+    seven-minute build.
+  - A red lane cancels its run once a newer push waits on `gate`: a red run never promotes, and
+    the newer run, which holds its commits, reports the rest. 13 red runs held a newer push a
+    median 12 minutes in two days.
+  - Left to the person: a token that lets CI's promote push workflow changes (7 green runs
+    needed a hand `xtask promote`), and more macOS slots (every plan short of Enterprise stops
+    at 5).
+  - Tests: `gate::tests::the_repository_s_invariants_hold`,
+    `the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e`.
 
 - ✅ **binstall gets the job's token on CI** (2026-10-05). In 33 of 111 test-lane setups,
   binstall's unauthenticated GitHub API calls hit the runner's shared rate limit and timed out,

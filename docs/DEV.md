@@ -26,10 +26,10 @@ zed itself so it is never behind zed while longbridge lags.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes
-  the commit at once to the `gate` branch, where CI runs every lane and the app's e2e, and main
-  moves to that commit only once every lane passes (below, "Gate"). `land --check` first runs,
-  under `nice`, the tests, rustdoc and iOS and Linux clippy of the packages the commits change
-  and of their dependents, for a change likely to go red. A red run names the failed lane and tests in its
+  the commit to the `gate` branch, where CI runs every lane, and main moves to that commit only
+  once every lane passes (below, "Gate"). Before the push it runs, under `nice`, host clippy,
+  rustdoc and iOS clippy of the packages the commits change and of their dependents; `--full`
+  adds their tests and Linux clippy, `--no-check` skips it all. A red run names the failed lane and tests in its
   summary: fix it in a new commit and land again; that push's run, which waits for any run in
   progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
@@ -203,12 +203,12 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
   makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs
   as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
-  `xtask/src/gate.rs`), rustdoc runs after iOS clippy on its runner, and the tools lane and Linux
+  `xtask/src/gate.rs`), rustdoc runs before iOS clippy on its runner, and the tools lane and Linux
   clippy (`clippy-linux`, its build scripts' C compiled by zig) run on Linux, which keeps the
-  run within five Macs. The app's e2e runs on a sixth, in `e2e.yml`, not yet a gate lane. Nothing
-  compiles here before the push; `land --check` runs the tests, rustdoc and the iOS and Linux
-  clippy of the packages the commits change and of their dependents, side by side at a low
-  priority (`gate::land_checks`). Runs on that branch
+  run within five Macs. The app's e2e runs every four hours on main and by hand, in `e2e.yml`,
+  not yet a gate lane. Before the push, `land` runs host clippy, rustdoc and iOS clippy of the
+  packages the commits change and of their dependents, side by side at a low priority
+  (`gate::land_checks`); `--full` adds their tests and Linux clippy. Runs on that branch
   form one concurrency group. A newer push waits behind the run in progress rather than
   cancelling it, and GitHub keeps only the newest push pending, whose green covers every commit
   under it; a pull request's run is still cancelled by its next push. When every lane passed,

@@ -31,7 +31,7 @@ jobs:
   # target dir while swapping. Here each lane takes the whole runner (docs/decisions/tooling.md).
   # The tests lane, whose CPU-bound build bounded every run, runs as three shards of packages
   # (`xtask gate --shard`, whose test checks that this matrix lists each). That keeps the Free
-  # plan's five concurrent macOS jobs: rustdoc runs after iOS clippy on its runner, and what
+  # plan's five concurrent macOS jobs: rustdoc runs before iOS clippy on its runner, and what
   # needs no Mac runs on Linux, where twenty jobs run at once: the tools lane, which reads only
   # text, and clippy for Linux, which had made iOS clippy the last job in 7 of 18 runs
   # (.research/dev-speed-2026-10-05.md).
@@ -41,6 +41,10 @@ jobs:
     # The longest lane takes about 20 min; a hung one held the queue for an hour (run
     # 37134085979), and runs on `gate` wait for each other.
     timeout-minutes: 45
+    # `actions: write` lets a red lane cancel its run once a newer push waits (the last step).
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -156,17 +160,19 @@ jobs:
       - run: cargo xtask setup --lane ${{ matrix.lane }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # rustdoc on iOS clippy's runner, before it: it named 10 red runs in two days and iOS
+      # clippy none, so it reports first (.research/dev-speed-2026-10-06.md item 3). Host
+      # clippy's runner carries the fuzz crate's clippy and was the longer of the two.
+      - if: matrix.lane == 'clippy-ios'
+        run: cargo xtask gate --ci --lane rustdoc
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
-      # and fails on a leak, on more than its budget, or on running out.
-      - run: >-
+      # and fails on a leak, on more than its budget, or on running out. iOS clippy runs even
+      # when rustdoc failed, so one run names both.
+      - if: ${{ !cancelled() }}
+        run: >-
           cargo xtask gate --ci --lane ${{ matrix.lane }}
           ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
-      # rustdoc on iOS clippy's runner, after it, and even when clippy failed, so one run names
-      # both. Host clippy's runner carries the fuzz crate's clippy and was the longer of the two
-      # once Linux clippy left.
-      - if: ${{ !cancelled() && matrix.lane == 'clippy-ios' }}
-        run: cargo xtask gate --ci --lane rustdoc
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
@@ -180,6 +186,18 @@ jobs:
           if-no-files-found: ignore
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
+      # A red run never promotes, so once a newer push to `gate` waits behind it, its lanes
+      # still running only hold the queue: in two days 13 red runs held a newer push a median
+      # 12 minutes that way (.research/dev-speed-2026-10-06.md item 6). The newer run, which
+      # holds this commit, reports what those lanes would have.
+      - if: failure() && github.ref == 'refs/heads/gate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(git ls-remote origin refs/heads/gate | cut -f1)
+          if [ -n "$newest" ] && [ "$newest" != "$GITHUB_SHA" ]; then
+            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          fi
 
   # The Linux worker on Linux: its ptyd, the CLI and the server built natively, and the tests of
   # every crate of theirs that builds there (`cargo xtask gate --lane linux`), beside the gate on
@@ -190,6 +208,9 @@ jobs:
     name: gate (linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
     env:
       SCCACHE_GHA_ENABLED: "false"
       SLOPTY_DISK_FLOOR_GB: 5
@@ -259,6 +280,18 @@ jobs:
             target/**/nextest/ci/junit.xml
             target/**/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
+      # A red run never promotes, so once a newer push to `gate` waits behind it, its lanes
+      # still running only hold the queue: in two days 13 red runs held a newer push a median
+      # 12 minutes that way (.research/dev-speed-2026-10-06.md item 6). The newer run, which
+      # holds this commit, reports what those lanes would have.
+      - if: failure() && github.ref == 'refs/heads/gate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(git ls-remote origin refs/heads/gate | cut -f1)
+          if [ -n "$newest" ] && [ "$newest" != "$GITHUB_SHA" ]; then
+            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          fi
 
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
