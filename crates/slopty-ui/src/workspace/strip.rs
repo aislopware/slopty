@@ -28,6 +28,7 @@ use slopty_client::layout::{
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::ItemKind;
+use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Typography, alpha};
 
 use super::WorkspaceView;
@@ -1229,7 +1230,7 @@ impl WorkspaceView {
                 );
             let several = self.workers.len() > 1;
             let places: Vec<gpui::AnyElement> = self
-                .recent_places()
+                .recent_places(None, cx)
                 .into_iter()
                 .take(RECENT_PLACES)
                 .enumerate()
@@ -1239,17 +1240,22 @@ impl WorkspaceView {
                         place.branch.as_deref(),
                         several.then_some(worker.as_str()),
                     ]);
+                    // A place starts the machine's usual agent there, else a shell.
+                    let what = self.agent_for(place.worker).map_or_else(
+                        || "New terminal".to_owned(),
+                        |agent| format!("New {} agent", super::projects::agent_label(&agent)),
+                    );
                     let label = if several {
-                        format!("New terminal in {} on {worker}", place.name)
+                        format!("{what} in {} on {worker}", place.name)
                     } else {
-                        format!("New terminal in {}", place.name)
+                        format!("{what} in {}", place.name)
                     };
                     let (key, cwd) = (place.worker, place.cwd);
                     self.place_row(("empty-place", ix), Symbol::Folder, place.name, meta)
                         .debug_selector(move || format!("empty-place-{ix}"))
                         .aria_label(SharedString::from(label))
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.open_session_on(key, Some(cwd.clone()), Vec::new(), None, cx);
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.start_in(key, cwd.clone(), window, cx);
                         }))
                         .into_any_element()
                 })
@@ -1365,39 +1371,74 @@ impl WorkspaceView {
         self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty())
     }
 
-    /// Where shells stand across the workers that are up, one entry per directory on each: the
-    /// most recently used tile's first (the tile recency), then the latest started. What the
-    /// empty workspace offers as a way back to the work in progress.
-    pub(super) fn recent_places(&self) -> Vec<RecentPlace> {
-        let rank = |item: ItemId| self.recency.iter().rposition(|i| *i == item);
-        let mut places: Vec<(Option<usize>, u64, RecentPlace)> = Vec::new();
+    /// Where work stands or stood across the workers that are up, one entry per directory on
+    /// each: where shells stand, where threads work, the last start's folder and where the
+    /// agents' past sessions ran there; of the threads, the start and the past sessions only
+    /// `agent`'s, when given. The most recently used tile's first (the tile recency), then the
+    /// newest. What the empty workspace offers as a way back to the work in progress, and what
+    /// a start's folder step lists.
+    pub(super) fn recent_places(&self, agent: Option<&AgentId>, cx: &App) -> Vec<RecentPlace> {
+        // (tile recency, when, worker, folder, repository, branch)
+        type Seen = (Option<usize>, u64, WorkerKey, String, Option<String>, Option<String>);
+        let rank =
+            |item: Option<ItemId>| item.and_then(|i| self.recency.iter().rposition(|r| *r == i));
+        let ours = |a: &AgentId| agent.is_none_or(|want| want == a);
+        let mut seen: Vec<Seen> = Vec::new();
         for (key, w) in self.workers.iter().filter(|(_, w)| w.link.is_some()) {
-            let home = w.home.as_deref();
-            let items: Vec<(SessionId, ItemId)> = w
-                .doc
-                .items()
-                .filter_map(|i| match i.kind {
-                    ItemKind::Terminal { session } => Some((session, i.id)),
-                    _ => None,
-                })
-                .collect();
+            let mut shells: HashMap<SessionId, ItemId> = HashMap::new();
+            let mut threads: HashMap<ThreadId, ItemId> = HashMap::new();
+            for item in w.doc.items() {
+                match item.kind {
+                    ItemKind::Terminal { session } => {
+                        shells.insert(session, item.id);
+                    }
+                    ItemKind::Thread { thread } => {
+                        threads.insert(thread, item.id);
+                    }
+                    _ => {}
+                }
+            }
             for summary in w.sessions.values() {
                 let Some(cwd) = summary.cwd.clone() else { continue };
-                if places.iter().any(|(.., p)| p.worker == *key && p.cwd == cwd) {
-                    continue;
-                }
-                let item = items.iter().find(|(s, _)| *s == summary.id).map(|(_, i)| *i);
-                let place = RecentPlace {
-                    worker: *key,
-                    name: super::tile::repo_place(&cwd, summary.repo.as_deref(), home),
-                    branch: summary.branch.clone(),
-                    cwd,
-                };
-                places.push((item.and_then(rank), summary.started_ms.as_millis(), place));
+                let tile = rank(shells.get(&summary.id).copied());
+                let (repo, branch) = (summary.repo.clone(), summary.branch.clone());
+                seen.push((tile, summary.started_ms.as_millis(), *key, cwd, repo, branch));
+            }
+            for t in self.thread_folders(*key, cx).into_iter().filter(|t| ours(&t.agent)) {
+                let tile = rank(threads.get(&t.thread).copied())
+                    .max(rank(t.terminal.and_then(|s| shells.get(&s).copied())));
+                seen.push((tile, t.updated.as_millis(), *key, t.cwd, t.repo, None));
+            }
+            let last = self.last_start.as_ref().filter(|l| l.worker == *key && ours(&l.agent));
+            if let Some(last) = last {
+                seen.push((None, last.at.as_millis(), *key, last.cwd.clone(), None, None));
+            }
+            let past = self.past_places.get(key).into_iter().flatten().filter(|p| ours(&p.agent));
+            for p in past {
+                let at = p.at.map_or(0, slopty_core::WallMs::as_millis);
+                seen.push((None, at, *key, p.cwd.clone(), None, None));
             }
         }
-        places.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        places.into_iter().map(|(.., place)| place).collect()
+        seen.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        // Each directory once, where it ranks best, with what any of its sightings knew of it.
+        let mut places: Vec<(WorkerKey, String, Option<String>, Option<String>)> = Vec::new();
+        for (.., worker, cwd, repo, branch) in seen {
+            match places.iter_mut().find(|p| p.0 == worker && p.1 == cwd) {
+                Some(place) => {
+                    place.2 = place.2.take().or(repo);
+                    place.3 = place.3.take().or(branch);
+                }
+                None => places.push((worker, cwd, repo, branch)),
+            }
+        }
+        places
+            .into_iter()
+            .map(|(worker, cwd, repo, branch)| {
+                let home = self.home_of(worker);
+                let name = super::tile::repo_place(&cwd, repo.as_deref(), home);
+                RecentPlace { worker, cwd, name, branch }
+            })
+            .collect()
     }
 
     /// A row of the empty workspace that goes somewhere: its glyph, its name and, after it,
@@ -1513,14 +1554,15 @@ pub(super) const EMPTY_W: f32 = 400.0;
 /// How many directories the empty workspace offers.
 const RECENT_PLACES: usize = 5;
 
-/// The empty workspace's section of directories shells stand in.
+/// The empty workspace's section of the places work stands or stood in.
 pub(super) const RECENT: &str = "Recent";
 
-/// A directory a shell stands in on a worker: where the empty workspace offers another shell.
+/// A directory work stands or stood in on a worker: where the empty workspace starts the
+/// usual agent again, and where a start's folder step offers to start one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct RecentPlace {
     pub worker: WorkerKey,
-    /// Its full path on the worker, where the new shell starts.
+    /// Its full path on the worker, where the start goes.
     pub cwd: String,
     /// What it is called: the repository and the path within it, else the path's tail.
     pub name: String,

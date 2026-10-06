@@ -333,14 +333,16 @@ fn a_healthy_worker_shows_no_word_in_the_empty_workspace(cx: &mut TestAppContext
 }
 
 /// The empty workspace offers the directories shells already stand in on the workers, one row
-/// each whatever number of shells stand there, under the ways to begin; a press opens another
-/// shell in that directory on that worker.
+/// each whatever number of shells stand there, under the ways to begin; on a worker with no
+/// agent to start, a press opens another shell in that directory there.
 #[gpui::test]
 fn the_empty_workspace_offers_where_shells_stand(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
     let key = fake.key;
+    let no_agent = WorkerCaps { agents: Vec::new(), ..healthy() };
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, no_agent, cx));
     let dirs = ["/Users/me/oss/slopty", "/Users/me/src", "/Users/me/oss/slopty"];
     for ((session, _), dir) in shells.iter().zip(dirs) {
         view.update_in(cx, |v, _w, cx| v.session_opened(key, summary(*session, Some(dir)), cx));
@@ -350,7 +352,7 @@ fn the_empty_workspace_offers_where_shells_stand(cx: &mut TestAppContext) {
         v.go_to_workspace(last, cx);
     });
     cx.run_until_parked();
-    let places = view.read_with(cx, |v, _| v.recent_places());
+    let places = view.read_with(cx, |v, cx| v.recent_places(None, cx));
     let mut names: Vec<&str> = places.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, ["oss/slopty", "~/src"], "one row per directory");

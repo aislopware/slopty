@@ -54,6 +54,8 @@ fn thread_requests(fake: &mut Fake) -> Vec<ThreadRequest> {
     fake.drain()
         .into_iter()
         .filter_map(|m| match m {
+            // The starts' own ask, as the link comes up, for the folders past sessions ran in.
+            ClientMsg::Thread(ThreadRequest::Sessions { .. }) => None,
             ClientMsg::Thread(req) => Some(req),
             _ => None,
         })

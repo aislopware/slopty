@@ -439,6 +439,7 @@ impl WorkspaceView {
         self.disconnect_worker(key, WorkerStatus::Connecting, cx);
         let Some(w) = self.workers.remove(&key) else { return };
         self.faces.threads.forget_meters(key);
+        self.past_places.remove(&key);
         for item in w.doc.items() {
             self.drop_item_views(item.id, cx);
             if let ItemKind::Terminal { session } = item.kind {

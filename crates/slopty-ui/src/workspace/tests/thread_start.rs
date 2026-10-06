@@ -496,7 +496,8 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
             _ => None,
         })
         .collect();
-    assert_eq!(asked, [(Some(codex.clone()), None, String::new())], "the machine is asked");
+    let ask = (Some(codex.clone()), None, String::new());
+    assert_eq!(asked, [ask.clone(), ask], "the folder step asks for the folders, then the step");
     assert_eq!(step_lines(&view, cx), Vec::<String>::new());
     assert!(cx.debug_bounds("palette-empty").is_some(), "{READING_SESSIONS}");
 
@@ -613,7 +614,7 @@ fn a_past_session_is_found_by_what_was_asked_in_it(cx: &mut TestAppContext) {
     cx.simulate_input("resume");
     cx.simulate_keystrokes("enter");
     settle(cx);
-    assert_eq!(asked(&mut studio), [""], "the list, with no words");
+    assert_eq!(asked(&mut studio), ["", ""], "the folder step's list, then the session step's");
     view.update_in(cx, |v, _w, cx| {
         let listed = vec![
             session("019a", "the parser drops a token"),
@@ -1149,6 +1150,110 @@ fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAp
     let lines = step_lines(&view, cx);
     assert_eq!(lines.first().map(String::as_str), Some("w/atlas"), "its folder first: {lines:?}");
     assert!(lines.contains(&format!("{NEW_WORKTREE} atlas")), "{lines:?}");
+}
+
+/// Every start lists the places work stood, newest first, with no shell open: a thread's
+/// folder, and the folders the machine lists of the agent's past sessions, as its link comes up
+/// and again as the folder step opens, joining the step that is up. The empty workspace offers
+/// the same places, and one pressed starts the machine's usual agent there.
+#[gpui::test]
+fn every_start_offers_where_threads_and_past_sessions_worked(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{PastSession, PastSessions};
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, worker_key(WorkerId::new()).value(), "studio");
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    let key = studio.key;
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.agent = claude.clone();
+    state.meta.cwd = "/w/atlas".to_owned();
+    let row = state.row(WallMs::from_millis(2_000));
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, with_agents(std::slice::from_ref(&claude)), cx);
+        v.threads_linked(key, cx);
+        let table = slopty_proto::thread::wire::TableFrame::Snapshot {
+            cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
+            rows: vec![row],
+        };
+        v.thread_table(key, &table, cx);
+    });
+    settle(cx);
+    let asks =
+        |fake: &mut Fake| -> Vec<Option<AgentId>> {
+            fake.drain()
+                .into_iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Thread(ThreadRequest::Sessions {
+                        agent, cwd: None, query, ..
+                    }) if query.is_empty() => Some(agent),
+                    _ => None,
+                })
+                .collect()
+        };
+    assert_eq!(asks(&mut studio), [None], "the link up asks for every agent's sessions");
+    let past = |agent: Option<AgentId>, at: &[(&str, u64)]| PastSessions {
+        agent,
+        cwd: None,
+        query: String::new(),
+        sessions: at
+            .iter()
+            .map(|(cwd, ms)| PastSession {
+                agent: claude.clone(),
+                native: format!("s-{ms}"),
+                cwd: Some((*cwd).to_owned()),
+                title: None,
+                updated_ms: Some(WallMs::from_millis(*ms)),
+                thread: None,
+                resume: Vec::new(),
+                facts: BTreeMap::new(),
+                prompts: Vec::new(),
+            })
+            .collect(),
+        absent: None,
+        cut: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.past_sessions(key, past(None, &[("/w/old", 1_000)]), cx));
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    assert_eq!(
+        step_lines(&view, cx),
+        ["w/atlas", "w/old", "~", RESUME_PAST],
+        "no shell: the thread's folder, then the past session's, the newest first"
+    );
+    assert_eq!(asks(&mut studio), [Some(claude.clone())], "the step asks again");
+    let newer = past(Some(claude.clone()), &[("/w/old", 1_000), ("/w/new", 3_000)]);
+    view.update_in(cx, |v, _w, cx| v.past_sessions(key, newer, cx));
+    settle(cx);
+    assert_eq!(
+        step_lines(&view, cx),
+        ["w/new", "w/atlas", "w/old", "~", RESUME_PAST],
+        "what the machine lists joins the step that is up"
+    );
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+
+    let places = view.read_with(cx, |v, cx| v.recent_places(None, cx));
+    let cwds: Vec<&str> = places.iter().map(|p| p.cwd.as_str()).collect();
+    assert_eq!(cwds, ["/w/new", "/w/atlas", "/w/old"], "the empty workspace's places");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    settle(cx);
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let says =
+        |label: &str| tree.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some(label));
+    let labels: Vec<_> =
+        tree.iter().filter(|n| n.role == "Button").map(|n| n.label.clone()).collect();
+    assert!(says("New Claude Code agent in w/atlas"), "a place says what it starts: {labels:?}");
+    let row = cx.debug_bounds("empty-place-1").expect("the second place is drawn");
+    cx.simulate_click(row.center(), Modifiers::default());
+    settle(cx);
+    cx.simulate_input("carry on");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut studio);
+    let [(_, agent, cwd, _)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!((agent, cwd.as_str()), (&claude, "/w/atlas"), "the usual agent, there");
 }
 
 /// A folder's changes tile on `/w/atlas`, on a studio with `agents` where a Codex thread last

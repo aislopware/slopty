@@ -104,6 +104,19 @@ struct Retile {
     from: Option<SessionId>,
 }
 
+/// A thread's folder and when the thread last changed, as its row says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ThreadFolder {
+    pub thread: ThreadId,
+    pub agent: AgentId,
+    pub cwd: String,
+    /// The repository that folder is in, once the worker has looked.
+    pub repo: Option<String>,
+    /// The terminal its TUI runs in.
+    pub terminal: Option<SessionId>,
+    pub updated: slopty_core::WallMs,
+}
+
 /// Where a thread works, as its row says.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ThreadPlace {
@@ -552,6 +565,26 @@ impl WorkspaceView {
         hub.read(cx).threads().rows().rows.keys().filter_map(|t| places.get(t).cloned()).collect()
     }
 
+    /// Where each of `worker`'s threads works and when it last changed, as its table last
+    /// said; a subagent's is its parent's, so it is left out.
+    pub(super) fn thread_folders(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadFolder> {
+        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
+        let rows = &hub.read(cx).threads().rows().rows;
+        rows.values()
+            .filter(|row| row.parent.is_none())
+            .filter_map(|row| {
+                Some(ThreadFolder {
+                    thread: row.id,
+                    agent: row.agent.clone(),
+                    cwd: row.cwd.clone()?,
+                    repo: row.repo.clone(),
+                    terminal: row.terminal,
+                    updated: row.updated_ms,
+                })
+            })
+            .collect()
+    }
+
     /// `thread`'s title as its worker's table last said, while it has one.
     pub(super) fn thread_named(&self, thread: ThreadId) -> Option<String> {
         self.faces.threads.titles.get(&thread).filter(|t| !t.trim().is_empty()).cloned()
@@ -770,10 +803,12 @@ impl WorkspaceView {
         hub.update(cx, |hub, cx| hub.git_done(request, outcome, cx));
     }
 
-    /// The link to `key` is up: its threads catch up from where they stand.
+    /// The link to `key` is up: its threads catch up from where they stand, and the folders
+    /// its agents' past sessions ran in are asked for, for the starts to offer.
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+        self.ask_past_places(key, None);
     }
 
     /// Tell `key`'s thread hub what that machine can start now ("Continue in…"), if it has

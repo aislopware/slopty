@@ -5,9 +5,12 @@
 //!
 //! What a machine can start comes from its own link: the agents its capabilities found
 //! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
-//! offers all it has. The folders are the focused shell's on that machine, then the last start's
-//! there, then where its shells stand, most recent first, then its home; after them, a new
-//! worktree of each repository they are in, so agents can work one repository side by side.
+//! offers all it has. The folders are the focused tile's on that machine, then every place work
+//! stands or stood there, newest first ([`WorkspaceView::recent_places`]): where its shells
+//! stand, where the agent's threads work, the last start's folder, and where the agent's past
+//! sessions ran, as the machine lists them when its link comes up and again as the step opens.
+//! Its home ends them; after them comes a new worktree of each repository they are in, so
+//! agents can work one repository side by side.
 //!
 //! The folder step ends with "Resume a past session…": the machine lists the agent's sessions
 //! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
@@ -26,6 +29,7 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Entity, Task, Window};
 use slopty_client::layout::WorkerKey;
+use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::{PastSession, PastSessions, ThreadRequest};
@@ -124,6 +128,28 @@ pub(super) struct LastStart {
     pub agent: AgentId,
     pub worker: WorkerKey,
     pub cwd: String,
+    /// When it was made.
+    pub at: WallMs,
+}
+
+/// A folder one of an agent's past sessions ran in on a machine, as the machine listed them
+/// with no words: one of the places a start offers.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct PastPlace {
+    pub agent: AgentId,
+    pub cwd: String,
+    /// When the session there last changed, when the agent said.
+    pub at: Option<WallMs>,
+}
+
+/// The folder step that is up: what it starts, where, and its palette, so the folders the
+/// machine lists after it opened join it.
+#[derive(Clone, Debug)]
+pub(super) struct FolderStep {
+    worker: WorkerKey,
+    agent: AgentId,
+    purpose: For,
+    step: gpui::EntityId,
 }
 
 impl WorkspaceView {
@@ -360,10 +386,8 @@ impl WorkspaceView {
         cloned.then(|| cwd.to_owned())
     }
 
-    /// The folders `agent` may start in on `worker`, each once: the focused shell's there, the
-    /// last start's there, where its shells stand (the most recent first), then its home. A new
-    /// worktree of each repository among them follows, then, for an agent of its own, "Resume a
-    /// past session…".
+    /// The folder step for `agent` on `worker`; the machine is asked again where the agent's
+    /// past sessions ran, and the folders it lists join the step that is still up.
     fn pick_folder(
         &mut self,
         agent: &AgentId,
@@ -372,11 +396,34 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let lines = self.folder_lines(agent, worker, purpose, cx);
+        self.open_step(lines, PICK_FOLDER, window, cx);
+        if let Some(palette) = self.palette.clone() {
+            let typed = agent.clone();
+            palette.update(cx, |p, cx| {
+                p.set_typed(move |text| typed_folder(text, worker, &typed, purpose), cx);
+            });
+            let step = palette.entity_id();
+            self.folder_step = Some(FolderStep { worker, agent: agent.clone(), purpose, step });
+        }
+        self.ask_past_places(worker, Some(agent));
+    }
+
+    /// The folders `agent` may start in on `worker`, each once: the focused tile's there, then
+    /// every place work stands or stood there, newest first ([`Self::recent_places`]), then its
+    /// home. A new worktree of each repository among them follows, then, for an agent of its
+    /// own, "Resume a past session…".
+    fn folder_lines(
+        &self,
+        agent: &AgentId,
+        worker: WorkerKey,
+        purpose: For,
+        cx: &gpui::App,
+    ) -> Vec<PaletteItem> {
         let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
-        let last = self.last_start.as_ref().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
-        let recent = self.recent_places().into_iter().filter(|p| p.worker == worker);
+        let recent = self.recent_places(Some(agent), cx).into_iter().filter(|p| p.worker == worker);
         let mut folders: Vec<String> = Vec::new();
-        for cwd in here.into_iter().chain(last).chain(recent.map(|p| p.cwd)) {
+        for cwd in here.into_iter().chain(recent.map(|p| p.cwd)) {
             if !folders.contains(&cwd) {
                 folders.push(cwd);
             }
@@ -415,13 +462,55 @@ impl WorkspaceView {
             let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
             lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
         }
-        let agent = agent.clone();
-        self.open_step(lines, PICK_FOLDER, window, cx);
-        if let Some(palette) = self.palette.clone() {
-            palette.update(cx, |p, cx| {
-                p.set_typed(move |text| typed_folder(text, worker, &agent, purpose), cx);
-            });
+        lines
+    }
+
+    /// Ask `key` for its agents' past sessions with no words, `agent`'s alone when given: the
+    /// folders they ran in are places a start offers. A machine out of reach is not asked.
+    pub(super) fn ask_past_places(&self, key: WorkerKey, agent: Option<&AgentId>) {
+        if !self.workers.get(&key).is_some_and(super::Worker::is_linked) {
+            return;
         }
+        self.send(
+            key,
+            ClientMsg::Thread(ThreadRequest::Sessions {
+                agent: agent.cloned(),
+                cwd: None,
+                query: String::new(),
+                limit: SESSIONS_LISTED,
+            }),
+        );
+    }
+
+    /// `key` listed past sessions with no words, `agent`'s alone or every agent's: the folders
+    /// they ran in replace those kept of them, and join the folder step still up there.
+    fn keep_past_places(
+        &mut self,
+        key: WorkerKey,
+        agent: Option<&AgentId>,
+        sessions: &[PastSession],
+        cx: &mut Context<Self>,
+    ) {
+        let kept = self.past_places.entry(key).or_default();
+        kept.retain(|p| agent.is_some_and(|a| *a != p.agent));
+        for session in sessions {
+            let Some(cwd) = session.cwd.clone() else { continue };
+            let at = session.updated_ms;
+            match kept.iter_mut().find(|p| p.agent == session.agent && p.cwd == cwd) {
+                Some(place) => place.at = place.at.max(at),
+                None => kept.push(PastPlace { agent: session.agent.clone(), cwd, at }),
+            }
+        }
+        let Some(step) = self.folder_step.clone() else { return };
+        if step.worker != key || agent.is_some_and(|a| *a != step.agent) {
+            return;
+        }
+        let Some(palette) = self.palette.clone().filter(|p| p.entity_id() == step.step) else {
+            self.folder_step = None;
+            return;
+        };
+        let lines = self.folder_lines(&step.agent, step.worker, step.purpose, cx);
+        palette.update(cx, |p, cx| p.set_items(lines, cx));
     }
 
     /// "Resume a past session…": the machine is asked for the agent's sessions, and the step
@@ -514,9 +603,13 @@ impl WorkspaceView {
     }
 
     /// `key` listed an agent's past sessions, with no words or for the field's: the step
-    /// waiting on them lists them, or says why there are none. An answer nothing waits on, for
-    /// another step, or for words the field no longer says, is dropped.
+    /// waiting on them lists them, or says why there are none; a list with no words anywhere
+    /// is also where the starts' places learn the folders they ran in. An answer nothing waits on,
+    /// for another step, or for words the field no longer says, is dropped.
     pub fn past_sessions(&mut self, key: WorkerKey, past: PastSessions, cx: &mut Context<Self>) {
+        if past.cwd.is_none() && past.query.is_empty() && past.absent.is_none() {
+            self.keep_past_places(key, past.agent.as_ref(), &past.sessions, cx);
+        }
         let Some(asked) = self.sessions_asked.as_mut() else {
             return;
         };

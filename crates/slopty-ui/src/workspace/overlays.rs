@@ -194,7 +194,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let StartThread { worker, agent, cwd, .. } = start.clone();
-        self.last_start = Some(super::agent_start::LastStart { agent, worker, cwd });
+        let at = crate::clock::now(cx);
+        self.last_start = Some(super::agent_start::LastStart { agent, worker, cwd, at });
         self.begin_start(start.clone(), window, cx);
     }
 

@@ -399,9 +399,26 @@ impl WorkspaceView {
             self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
             return;
         };
-        let latest = self.recent_places().into_iter().find(|p| p.worker == key);
+        let latest = self.recent_places(Some(&agent), cx).into_iter().find(|p| p.worker == key);
         let cwd = latest.map_or_else(|| "~".to_owned(), |p| p.cwd);
         self.begin_start(StartThread { worker: key, agent, cwd, worktree: false }, window, cx);
+    }
+
+    /// A place the empty workspace offers, pressed: a thread of `worker`'s usual agent in
+    /// `cwd`, its first message asked in its own tile; a shell there when it has no agent.
+    pub(super) fn start_in(
+        &mut self,
+        worker: WorkerKey,
+        cwd: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.agent_for(worker) {
+            Some(agent) => {
+                self.begin_start(StartThread { worker, agent, cwd, worktree: false }, window, cx);
+            }
+            None => self.open_session_on(worker, Some(cwd), Vec::new(), None, cx),
+        }
     }
 
     /// Open the tile of `starting`, focused.

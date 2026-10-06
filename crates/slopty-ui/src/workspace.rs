@@ -720,6 +720,10 @@ pub struct WorkspaceView {
     last_start: Option<agent_start::LastStart>,
     /// The session step that is up: its agent and machine, and what the machine said for it.
     sessions_asked: Option<agent_start::SessionsAsked>,
+    /// The folders each machine's agents' past sessions ran in, as it last listed them.
+    past_places: HashMap<WorkerKey, Vec<agent_start::PastPlace>>,
+    /// The folder step that is up.
+    folder_step: Option<agent_start::FolderStep>,
     /// The tiles of threads on their way.
     starting: starting::Starts,
     /// Each worker's items kept on this device.
@@ -1027,6 +1031,8 @@ impl WorkspaceView {
             attention_at: None,
             last_start: None,
             sessions_asked: None,
+            past_places: HashMap::new(),
+            folder_step: None,
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
             faces_dirty: true,

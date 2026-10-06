@@ -921,7 +921,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let StartOrchestrator { worker, agent, cwd, worktree } = start.clone();
-        let last = super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone() };
+        let at = crate::clock::now(cx);
+        let last =
+            super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone(), at };
         self.last_start = Some(last);
         let item = ItemId::new();
         let starting = super::starting::Starting::new(worker, agent, cwd, None);

@@ -8452,3 +8452,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     opens it. Focusing its tile clears it, and a thread its worker's table no longer holds is
     not counted.
   - Test: `workspace::tests::thread_waits::a_threads_finished_turn_without_a_terminal_is_to_review`.
+
+- ✅ **Every start offers one list of places, newest first** (2026-10-06, readiness 2026-10-08
+  R5). A start offered only where shells stood, so with no shell open the folder step had just
+  `~`, and "New agent" on the empty workspace started there.
+  - One list (`WorkspaceView::recent_places`) holds, per machine and folder once: where its
+    shells stand, where its threads work (subagents are their parent's), the last start's
+    folder, and where the agents' past sessions ran. The machine lists those past sessions with
+    no words as its link comes up (every agent's) and again as a folder step opens (that
+    agent's); the folders it lists replace those kept and join the step still up. The most
+    recently used tile's place leads, then the newest by when it last changed.
+  - The folder step lists the focused tile's folder, then that list for its agent, then home.
+    "New agent" on the empty workspace starts in the list's first place for the usual agent.
+  - A place on the empty workspace starts the machine's usual agent there, and opens a shell
+    only where the machine has no agent. "New terminal" as a second way into each place needs
+    a control on the row, which waits for the tiling and MonoCode design pass.
+  - Test: `workspace::tests::thread_start::every_start_offers_where_threads_and_past_sessions_worked`.
