@@ -468,11 +468,7 @@ impl WorkspaceView {
     /// Put `tile`, opened here, by the room rule beside the focused one in the project on
     /// show; with nothing on show, in a tab of its own project.
     pub(super) fn open_here(&mut self, tile: TileRef) {
-        let home = match self.layout.shown_project() {
-            Some(project) => project.home().clone(),
-            None => self.home_for(tile),
-        };
-        self.layout.open_beside(tile, &home);
+        self.open_as(tile, super::tabs::Opening::Beside);
     }
 
     /// Each project takes the project its tiles turned out to share, once all of them share

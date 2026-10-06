@@ -70,6 +70,7 @@ mod rollup;
 mod secure;
 mod starting;
 mod tab_look;
+mod tabs;
 mod tile;
 mod title_tabs;
 mod titlebar;
@@ -439,6 +440,9 @@ struct Worker {
     display_wanted: bool,
     /// Streams requested but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// The shells asked of it on this link and not come yet, and where each goes
+    /// ([`tabs::Opening`]).
+    openings: tabs::Openings,
     /// Remote tiles whose open the worker refused on this link, and why: not asked again
     /// until the next link or a retry.
     failed_opens: HashMap<ItemId, slopty_proto::screen::ScreenFailure>,
@@ -489,6 +493,7 @@ impl Worker {
             picker_wanted: false,
             display_wanted: false,
             pending_opens: HashMap::new(),
+            openings: tabs::Openings::new(),
             failed_opens: HashMap::new(),
             stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
@@ -1628,6 +1633,7 @@ impl WorkspaceView {
             ("workers.watched", per_worker(|w| w.watched.len())),
             ("workers.watched_folders", per_worker(|w| w.watched_folders.len())),
             ("workers.pending_opens", per_worker(|w| w.pending_opens.len())),
+            ("workers.openings", per_worker(|w| w.openings.len())),
             ("workers.queued", per_worker(|w| w.queued.len())),
             ("terminals", self.terminals.len()),
             ("screens", self.screens.len()),
@@ -2005,6 +2011,10 @@ impl gpui::Render for WorkspaceView {
         let root = root
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent))
+            .on_action(cx.listener(Self::start_agent))
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(|this, a: &ShowTab, _w, cx| this.show_tab(a.id, cx)))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
@@ -2048,6 +2058,14 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::make_orchestrator))
             })
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
+            .when(applies.tabs, |el| {
+                el.on_action(cx.listener(Self::other_tabs))
+                    .on_action(cx.listener(Self::close_other_tabs))
+            })
+            .when(applies.projects, |el| {
+                el.on_action(cx.listener(Self::move_to_project))
+                    .on_action(cx.listener(Self::move_to_project_of))
+            })
             .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))

@@ -2213,14 +2213,13 @@ impl ScreenView {
         view: &gpui::Entity<Self>,
         header: StreamHeader,
         theme: &Theme,
-        k: f32,
     ) -> Option<gpui::AnyElement> {
         if !header.touch {
             return None;
         }
         let id = format!("trackpad-{}", header.stream);
         let icon = crate::icons::Symbol::Cursorarrow;
-        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad, k);
+        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad);
         let view = view.clone();
         Some(
             button

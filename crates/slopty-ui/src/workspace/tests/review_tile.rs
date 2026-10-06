@@ -474,7 +474,7 @@ fn added_comments_no_composer_takes_stay(cx: &mut TestAppContext) {
     assert_eq!(said.as_deref(), Some("The agent's composer did not open"));
 }
 
-/// ⌘T from a thread's own tile, or from its review, opens the shell where its agent works, as
+/// ⌘⇧T from a thread's own tile, or from its review, opens the shell where its agent works, as
 /// its worker's table says, not in the machine's home.
 #[gpui::test]
 fn a_shell_opened_from_a_thread_or_its_review_starts_where_the_agent_works(

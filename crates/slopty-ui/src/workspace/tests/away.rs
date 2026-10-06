@@ -457,7 +457,7 @@ fn a_dropped_window_keeps_its_picture_until_the_new_stream_has_one(cx: &mut Test
     assert_eq!(waiting, Some(0));
 }
 
-/// ⌘T and ⌘O on a worker out of reach make nothing and say so, rather than dropping the ask
+/// ⌘⇧T and ⌘O on a worker out of reach make nothing and say so, rather than dropping the ask
 /// unseen: the only worker, or the one "+" chose with another up. ⌘O asks for no list, so no
 /// picker turns up once the worker is back. A machine "+" was pointed at is let go when the
 /// menu closes with nothing chosen.
@@ -469,7 +469,7 @@ fn opens_on_a_worker_out_of_reach_are_said_and_not_kept(cx: &mut TestAppContext)
     goes_away(&view, cx, &fake);
     fake.drain();
 
-    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-shift-t");
     cx.run_until_parked();
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),

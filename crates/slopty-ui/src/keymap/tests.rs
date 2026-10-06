@@ -72,7 +72,7 @@ fn the_file_is_told_what_it_named_wrong() {
         ["alt-cmd-n"],
         "the chord that reads"
     );
-    assert_eq!(chords_of(&keymap, Scope::Workspace, "new_terminal"), ["cmd-t", "cmd-n"]);
+    assert_eq!(chords_of(&keymap, Scope::Workspace, "new_terminal"), ["cmd-shift-t"]);
 }
 
 /// The file's chord replaces the default's, none unbinds, and a chord the file gives one
@@ -87,7 +87,8 @@ fn the_file_overrides_unbinds_and_wins_a_clash() {
         Vec::new(),
     );
     assert_eq!(chords_of(&keymap, Scope::Workspace, "new_note"), ["cmd-t"]);
-    assert_eq!(chords_of(&keymap, Scope::Workspace, "new_terminal"), ["cmd-n"], "⌘T went");
+    assert!(chords_of(&keymap, Scope::Workspace, "start_agent").is_empty(), "⌘T went");
+    assert_eq!(chords_of(&keymap, Scope::Workspace, "new_terminal"), ["cmd-shift-t"]);
     assert!(chords_of(&keymap, Scope::Workspace, "close_tile").is_empty(), "unbound");
     let close = keymap.bindings(|_| true);
     assert!(!close.iter().any(|b| b.action().partial_eq(&ws::CloseItem)), "no ⌘W at all");
@@ -97,7 +98,7 @@ fn the_file_overrides_unbinds_and_wins_a_clash() {
     let said = keymap.diagnostics();
     assert!(
         said.contains(
-            &"⌘T runs `workspace.new_note` now, no longer `workspace.new_terminal`".to_owned()
+            &"⌘T runs `workspace.new_note` now, no longer `workspace.start_agent`".to_owned()
         ),
         "{said:?}"
     );
@@ -159,7 +160,7 @@ fn the_palette_shows_the_chord_in_effect(cx: &TestAppContext) {
             .find(|item| item.label == label)
             .map_or_else(|| panic!("{label}"), |item| item.keys)
     };
-    assert_eq!(keys_of("New terminal"), "⌘T");
+    assert_eq!(keys_of("New terminal"), "⇧⌘T");
     let text = "[keys.workspace]\nnew_terminal = \"cmd-alt-t\"\nclose_tile = \"\"\n[keys.terminal]\ncopy_last_output = \"ctrl-cmd-c\"\n";
     cx.update(|cx| install(Keymap::new(&keys(text), Vec::new()), cx));
     assert_eq!(keys_of("New terminal"), "⌥⌘T");
@@ -190,7 +191,7 @@ fn the_files_chord_wins_over_a_deeper_default() {
 
     let keymap = Keymap::new(&keys("[keys.terminal]\nfind = \"cmd-t\"\n"), app());
     assert!(keymap.diagnostics().is_empty(), "the file's deeper chord takes nothing around it");
-    assert_eq!(chords_of(&keymap, Scope::Workspace, "new_terminal"), ["cmd-t", "cmd-n"]);
+    assert_eq!(chords_of(&keymap, Scope::Workspace, "start_agent"), ["cmd-t"]);
 }
 
 /// The palette's words for an action's chord are the keymap's, worked out as it is made: the
@@ -198,7 +199,8 @@ fn the_files_chord_wins_over_a_deeper_default() {
 #[test]
 fn a_chords_words_come_with_the_keymap() {
     let keymap = Keymap::default();
-    assert_eq!(keymap.label_of(&ws::NewTerminal), "⌘T");
+    assert_eq!(keymap.label_of(&ws::NewTerminal), "⇧⌘T");
+    assert_eq!(keymap.label_of(&ws::StartAgent), "⌘T");
     assert_eq!(keymap.label_of(&ws::OpenFile), "⌘P", "quick open");
     assert_eq!(keymap.label_of(&ws::OpenFolder), "", "no chord");
     let keymap = Keymap::new(

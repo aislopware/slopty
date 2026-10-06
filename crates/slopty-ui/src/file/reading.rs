@@ -219,7 +219,7 @@ impl FileView {
                 SharedString::from(format!("file-md-{id}-{ix}")),
                 SharedString::from(prose.clone()),
             )
-            .style(crate::markdown::style(&self.theme, &mono, self.zoom))
+            .style(crate::markdown::style(&self.theme, &mono))
             .selectable(true)
             .into_any_element(),
             Segment::Task(task) => {
@@ -233,7 +233,6 @@ impl FileView {
                     task,
                     &self.theme,
                     &mono,
-                    self.zoom,
                     Some(toggle),
                 )
             }
@@ -249,7 +248,6 @@ impl FileView {
                     lang,
                     body,
                     &self.theme,
-                    self.zoom,
                     run,
                 )
             }

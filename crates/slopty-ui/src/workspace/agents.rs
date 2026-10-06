@@ -17,7 +17,6 @@ use slopty_theme::alpha;
 use super::actions::NextAttention;
 use super::attention::About;
 use super::faces::{ThreadStand, ThreadWait};
-use super::tile::Chrome;
 use super::{Finished, WorkspaceEvent, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
@@ -441,17 +440,15 @@ impl WorkspaceView {
         tile: TileRef,
         session: SessionId,
         done: &Finished,
-        chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
-        let k = chrome.k;
         // The status slot beside it already says done or failed in its tone, and the unseen
         // dot that it went unwatched: this is only the readout, quiet, still a button to it.
         let quiet = theme.surfaces.text_secondary;
         let label = done.label();
         let item = tile.item;
-        let pill = crate::kit::pill_frame(theme, k)
+        let pill = crate::kit::pill_frame(theme, 1.0)
             .id("finished")
             .debug_selector(move || format!("finished-{}", item.as_uuid()))
             .role(Role::Button)
@@ -460,11 +457,7 @@ impl WorkspaceView {
             .text_color(hsla(quiet))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))
-            .child(
-                ChromeText::new(label, px(theme.typography.small()), k)
-                    .fill()
-                    .zooming(chrome.zooming),
-            );
+            .child(ChromeText::new(label, px(theme.typography.small()), 1.0).fill());
         tab_stop(pill, theme.surfaces.focus)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()

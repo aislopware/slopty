@@ -326,7 +326,7 @@ impl ThreadView {
                 .overflow_y_scroll()
                 .children(sections)
         });
-        let radius = self.z(theme.radii.lg);
+        let radius = self.z(theme.radii.md);
         let request = request.map(|request| {
             // The request takes the keyboard by a press anywhere on it, or by Tab to one of
             // its answers; then, and only then, ⌘↵ and ⌘⌫ answer it. A press that a field or
@@ -363,7 +363,9 @@ impl ThreadView {
         // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
         // kinds of thing stand apart by the quieter hairline. It is raised as the composer is,
         // on the same surface: a wash would sink it into the page in light.
-        let radius = self.z(if tucked { theme.radii.lg } else { theme.radii.md });
+        let radius = self.z(theme.radii.md);
+        // A composer that bleeds has no box for the tray to head: the tray stands as a card.
+        let tucked = tucked && !self.bleeds();
         let rest = rest.map(|rest| {
             div()
                 .id("thread-activity")

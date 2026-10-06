@@ -1636,7 +1636,6 @@ impl FileView {
                 .hover(move |st| st.bg(hsla(s.hover)))
                 .active(move |st| st.bg(hsla(s.pressed))),
             ButtonKind::Primary
-            | ButtonKind::Go
             | ButtonKind::Destructive
             | ButtonKind::Ghost
             | ButtonKind::Link => button

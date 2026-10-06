@@ -12,10 +12,25 @@ use crate::palette::PaletteItem;
 actions!(
     workspace,
     [
-        /// Open a new shell on the focused tile's worker.
+        /// ⌘⇧T: a new shell on the focused tile's worker, in a tab of its own.
         NewTerminal,
-        /// Open a new Claude Code agent on the focused tile's worker.
+        /// ⌘T: an agent's composer in a tab of its own, on the focused tile's machine and in
+        /// its folder: the agent last started there, else the first it offers.
+        StartAgent,
+        /// "New agent…": which agent, on which machine, in which folder, as steps.
         NewAgent,
+        /// ⌘D: a new shell in a pane of its own right of the focused one.
+        SplitRight,
+        /// ⌘⇧D: a new shell in a pane of its own below the focused one.
+        SplitDown,
+        /// "Close other tabs": every tab of the project on show but the one on show, and what
+        /// is in them.
+        CloseOtherTabs,
+        /// "Other tabs…": the tabs of the project on show, as a step.
+        OtherTabs,
+        /// "Move to project…": the other projects, as a step; the focused tile goes to a tab of
+        /// its own in the one picked.
+        MoveToProject,
         /// "New project…": New agent's steps for the agent that will orchestrate it (one that
         /// runs in a terminal), then the "New project" sheet over its tile.
         NewProject,
@@ -161,6 +176,15 @@ actions!(
     ]
 );
 
+/// The palette's name for [`StartAgent`].
+pub const NEW_AGENT_HERE: &str = "New agent";
+
+/// The palette's name for [`OtherTabs`], and what its step's field says.
+pub const OTHER_TABS: &str = "Other tabs\u{2026}";
+
+/// The palette's name for [`MoveToProject`].
+pub const MOVE_TO_PROJECT: &str = "Move to project\u{2026}";
+
 /// The palette's name for [`SaveCopy`].
 pub const SAVE_A_COPY: &str = "Save a copy\u{2026}";
 
@@ -176,6 +200,22 @@ pub const UNMUTE_SOUND: &str = "Unmute sound";
 pub struct SelectTab {
     /// 0-based.
     pub index: usize,
+}
+
+/// "Other tabs…"'s line for a tab: show it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ShowTab {
+    /// Which.
+    pub id: slopty_client::layout::tiling::TabId,
+}
+
+/// "Move to project…"'s line for a project: the focused tile goes to a tab of its own there.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct MoveToProjectOf {
+    /// The project's home.
+    pub home: slopty_client::layout::GroupKey,
 }
 
 /// Start a thread of `agent` on `worker`, in `cwd`: the last step of "New agent…", a line for
@@ -382,7 +422,10 @@ pub fn palette_items() -> Vec<PaletteItem> {
     let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
     let mut items = vec![
         w("New terminal", Box::new(NewTerminal)),
+        w(NEW_AGENT_HERE, Box::new(StartAgent)),
         w("New agent\u{2026}", Box::new(NewAgent)),
+        w("Split right with a terminal", Box::new(SplitRight)),
+        w("Split down with a terminal", Box::new(SplitDown)),
         w(super::agent_start::NEW_PROJECT, Box::new(NewProject)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
@@ -432,6 +475,9 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Back", Box::new(GoBack)),
         w("Forward", Box::new(GoForward)),
         w("Previous tab in the pane", Box::new(PreviousPaneTab)),
+        w(OTHER_TABS, Box::new(OtherTabs)),
+        w("Close other tabs", Box::new(CloseOtherTabs)),
+        w(MOVE_TO_PROJECT, Box::new(MoveToProject)),
         w("Next tab in the pane", Box::new(NextPaneTab)),
         w("Switch thread, terminal or board", Box::new(SwitchFace)),
         w("Thread density", Box::new(CycleDensity)),
@@ -515,6 +561,10 @@ pub(super) struct Applies {
     pub changes: bool,
     /// Work in an agent's worktree, which can be removed.
     pub worktree: bool,
+    /// The project on show has more than one tab.
+    pub tabs: bool,
+    /// The focused tile has another project to go to.
+    pub projects: bool,
 }
 
 impl super::WorkspaceView {
@@ -549,6 +599,8 @@ impl super::WorkspaceView {
             undo: !self.closed.is_empty(),
             changes: self.changes_here().is_some(),
             worktree: self.worktree_here().is_some(),
+            tabs: self.layout.shown_project().is_some_and(|p| p.tabs().len() > 1),
+            projects: focused.is_some() && self.layout.projects().len() > 1,
         }
     }
 }

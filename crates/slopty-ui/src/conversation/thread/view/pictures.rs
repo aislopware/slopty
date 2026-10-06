@@ -148,11 +148,12 @@ impl ThreadView {
         let picture = self.picture(&image, cx).map(|p| {
             img(p).size_full().object_fit(ObjectFit::Contain).rounded(self.z(theme.radii.md))
         });
-        let close = kit::icon_button_at(&theme, "picture-close", Symbol::Xmark, "Close", self.zoom)
-            .on_click(cx.listener(|this, _ev, _w, cx| {
+        let close = kit::icon_button(&theme, "picture-close", Symbol::Xmark, "Close").on_click(
+            cx.listener(|this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.view_picture(None, cx);
-            }));
+            }),
+        );
         let words = picture_words(image.width, image.height, &image.media_type, image.bytes);
         let caption = kit::elevate(div(), &theme)
             .flex_none()

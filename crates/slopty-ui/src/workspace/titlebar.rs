@@ -534,7 +534,7 @@ impl WorkspaceView {
             Some(said) => format!("{named}, {said}"),
             None => named,
         };
-        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text), 1.0)
+        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text))
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
         // Renamed, the field takes the title's place, as it does in a header.
         if let Some(field) = self.rename_field(tile, id) {

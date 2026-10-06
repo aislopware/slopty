@@ -92,7 +92,7 @@ pub(crate) fn install(workspace: &Entity<Workspace>, options: MakeOptions, cx: &
     });
     cx.on_action(|_: &actions::OpenHelp, cx| cx.open_url(HELP_URL));
     // A binding with no context outranks every other (GPUI ranks it as deep as the focus), so
-    // each names where it stands aside: ⌘N in the workspace is a new shell, and only with no
+    // each names where it stands aside: ⌘N is the workspace's to bind, and only with no
     // workspace window (none at all, through the menu bar, or a popped-out tile's) does it
     // bring the workspace back; ⌘M in a remote picture is the worker's.
     #[cfg(target_os = "macos")]

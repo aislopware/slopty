@@ -25,7 +25,6 @@ use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
 use super::panes::{PaneHost, Panes};
-use super::tile::Chrome;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::Symbol;
@@ -86,14 +85,13 @@ pub(super) struct Drawn {
 /// What a body takes from its tile: its zoom, and what else its kind is laid out by.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Handed {
-    Shell { zoom: f32, covered: bool, zooming: bool },
+    Shell { zoom: f32, covered: bool },
     Face { zoom: f32, width: f32 },
     Board { zoom: f32 },
     Review { zoom: f32, width: f32, height: f32 },
     Stream { painted: f32 },
     Text { zoom: f32, pad: f32, size: f32 },
     Folder { zoom: f32 },
-    Page { live: bool },
 }
 
 impl WorkspaceView {
@@ -301,13 +299,12 @@ impl WorkspaceView {
                 (p.tile, Bounds::new(at, gpui::size(px(r.w), px(r.h))))
             })
             .collect();
-        let chrome = Chrome { k: 1.0, zooming: false };
         let frame = self.layout.frame();
         let body = |laid: &Laid| -> gpui::AnyElement {
             let Some(p) = placed.iter().find(|p| p.pane == laid.pane) else {
                 return div().into_any_element();
             };
-            let tile = self.render_tile(p, chrome, window, cx);
+            let tile = self.render_tile(p, window, cx);
             let notices = self.tile_notices(p, cx);
             div().relative().size_full().children(tile).children(notices).into_any_element()
         };
@@ -523,7 +520,6 @@ impl WorkspaceView {
                         theme,
                         crate::icons::machine(w.caps.as_ref().map(|c| c.form)),
                         hsla(ink),
-                        1.0,
                     ))
                     .child(
                         div()
@@ -797,7 +793,7 @@ const ADD_WINDOW: &str = "Add a window or display";
 pub(super) fn begin_keys() -> [String; 3] {
     let keymap = crate::keymap::current();
     [
-        keymap.label_of(&super::actions::NewAgent).to_owned(),
+        keymap.label_of(&super::actions::StartAgent).to_owned(),
         keymap.label_of(&super::actions::NewTerminal).to_owned(),
         keymap.label_of(&super::actions::AddWindow).to_owned(),
     ]

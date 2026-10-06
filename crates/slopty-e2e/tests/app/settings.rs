@@ -75,7 +75,7 @@ async fn the_settings_form_edits_the_file() {
         .unwrap();
     let bound = |label: &str| keys.a11y_node("ListItem", Some(label)).and_then(|n| n.value.clone());
     assert_eq!(bound("Open settings").as_deref(), Some("⌘,"), "{:#?}", keys.a11y);
-    assert_eq!(bound("New terminal").as_deref(), Some("⌘T, ⌘N"), "{:#?}", keys.a11y);
+    assert_eq!(bound("New terminal").as_deref(), Some("⇧⌘T"), "{:#?}", keys.a11y);
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "settings-keyboard").await;
     press(drv, &keys, "Tab", "About").await;

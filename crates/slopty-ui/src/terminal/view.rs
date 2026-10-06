@@ -361,14 +361,9 @@ pub struct TerminalView {
     /// What the element built of each row last frame, for the next one to reuse.
     row_cache: RowCache,
     zoom: f32,
-    /// The overview's zoom is in motion this frame (set by the workspace before each frame).
-    zooming: bool,
     /// The grid's rows are painted under keys and drawn again from the last frame while
     /// unchanged (`Window::paint_keyed`); off, every row is painted afresh every frame.
     keyed_paint: bool,
-    /// Frames drawn while zooming (tests).
-    #[cfg(test)]
-    motion_frames: u32,
     /// Times this view was rendered rather than replayed from the view cache (tests).
     #[cfg(test)]
     renders: u32,
@@ -571,10 +566,8 @@ impl TerminalView {
             font_family: None,
             row_cache: RowCache::default(),
             zoom: 1.0,
-            zooming: false,
             keyed_paint: true,
             #[cfg(test)]
-            motion_frames: 0,
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -1779,13 +1772,14 @@ impl TerminalView {
             |m| f32::from(Self::row_height(&m, self.zoom)),
         );
         let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
-        let more = crate::kit::icon_button_at(
+        // No taller than the line it ends.
+        let more = crate::kit::icon_button(
             theme,
             "block-more",
             crate::icons::Symbol::Ellipsis,
             "Block actions",
-            (line / button).min(1.0),
         )
+        .size(px(button.min(line)))
         .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
             cx.stop_propagation();
@@ -2271,22 +2265,6 @@ impl TerminalView {
     #[must_use]
     pub const fn keyed_paint(&self) -> bool {
         self.keyed_paint
-    }
-
-    /// Whether the zoom is in motion this frame (set by the workspace before each frame): the
-    /// grid paints from the raster ladder instead of rasterising every glyph at a new size.
-    /// Returns whether that changed: the grid then paints differently at the same bounds, so a
-    /// cached drawing of it is stale.
-    pub const fn set_zooming(&mut self, on: bool) -> bool {
-        let changed = self.zooming != on;
-        self.zooming = on;
-        changed
-    }
-
-    /// How many frames this view drew while the zoom was in motion.
-    #[cfg(test)]
-    pub const fn motion_frames(&self) -> u32 {
-        self.motion_frames
     }
 
     /// Times this view was rendered rather than replayed from the view cache.
@@ -2872,10 +2850,12 @@ impl TerminalView {
                 )
                 .size(px(theme.typography.icon() * k)),
             )
-            .child(crate::chrome_text::ChromeText::new(pill.words, small, k).zooming(self.zooming))
-            .child(div().text_color(hsla(s.accent)).child(
-                crate::chrome_text::ChromeText::new(pill.act, small, k).zooming(self.zooming),
-            ))
+            .child(crate::chrome_text::ChromeText::new(pill.words, small, k))
+            .child(
+                div()
+                    .text_color(hsla(s.accent))
+                    .child(crate::chrome_text::ChromeText::new(pill.act, small, k)),
+            )
             .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)));
         Some(
             div()
@@ -4136,14 +4116,10 @@ impl Render for TerminalView {
             self.file_drag_left(cx);
         }
         let focused = self.focus.is_focused(window);
-        let zooming = self.zooming;
         #[cfg(test)]
         {
             self.renders = self.renders.saturating_add(1);
             self.drawn_focused = Some(focused);
-            if zooming {
-                self.motion_frames = self.motion_frames.saturating_add(1);
-            }
         }
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let block = self.block_header();
@@ -4216,8 +4192,7 @@ impl Render for TerminalView {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .map(|el| {
                 let el = el.cursor(self.pointer());
-                let mut grid =
-                    TerminalElement::new(cx.entity(), focused).zoom(self.zoom).zooming(zooming);
+                let mut grid = TerminalElement::new(cx.entity(), focused).zoom(self.zoom);
                 if window.is_a11y_active() {
                     let label = self.title().unwrap_or("shell").to_owned();
                     grid = grid.a11y(label.into(), self.cursor_row_text().into());
@@ -4729,7 +4704,7 @@ mod tests {
         let look = FailedLook::new(&theme, 1.0);
         assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
         assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
-        assert_eq!(look.bar_width, px(theme.spacing.xxs), "a 2 pt bar");
+        assert_eq!(look.bar_width, px(slopty_theme::stroke::BAR), "Warp's 3 pt bar");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
         assert_eq!(separators(&view, cx), vec![(2, rule)], "over the newest prompt");
@@ -8689,9 +8664,9 @@ mod tests {
     }
 
     /// Box drawing is masked once per character and cell size and painted from the atlas on
-    /// every later frame; while the zoom is in motion no mask is written for the passing sizes.
+    /// every later frame.
     #[gpui::test]
-    fn a_sprite_is_masked_once_and_not_while_zooming(cx: &mut TestAppContext) {
+    fn a_sprite_is_masked_once(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         let masks = |cx: &mut VisualTestContext| {
             cx.update(|_window, cx| crate::terminal::element::sprite_masks(cx))
@@ -8705,15 +8680,6 @@ mod tests {
         view.update_in(cx, |view, _window, cx| view.apply(screen_of(2, 10, &again), cx));
         cx.run_until_parked();
         assert_eq!(masks(cx), first, "the same characters in the same cell: no new mask");
-        for (seq, zoom) in [(3, 1.3), (4, 1.7)] {
-            view.update_in(cx, |view, _window, cx| {
-                view.set_zoom(zoom);
-                view.set_zooming(true);
-                view.apply(screen_of(seq, 10, &boxed), cx);
-            });
-            cx.run_until_parked();
-        }
-        assert_eq!(masks(cx), first, "in motion the geometry is painted instead");
     }
 
     /// `rows` rows of lowercase words, about `width` columns each, from `seed`.

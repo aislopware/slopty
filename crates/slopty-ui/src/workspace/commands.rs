@@ -22,6 +22,7 @@ use super::actions::{
 };
 use super::attention::About;
 use super::navigator::Mode;
+use super::tabs::Opening;
 use super::toast::ToastKind;
 use super::{
     CLOSED_KEPT, ClosedTile, Field, IDLE_SHELL_KEPT, KeyTarget, Rename, Reshell, UNDO_CLOSE,
@@ -511,16 +512,15 @@ impl WorkspaceView {
 
     // ----- opening -----------------------------------------------------------------------------
 
-    /// ⌘T: a shell on the focused tile's worker (or the one "+" chose), in the focused shell's
-    /// directory when it is on that worker.
+    /// ⌘⇧T: a shell in a tab of its own, on the focused tile's worker (or the one "+" chose),
+    /// in the focused shell's directory when it is on that worker.
     pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some((key, cwd)) = self.new_tile_target() else { return };
-        self.open_session_on(key, cwd, Vec::new(), None, cx);
+        self.new_terminal_as(Opening::Tab, cx);
     }
 
     /// Where a new tile goes, taking the choice "+" made: the worker, and the focused shell's
     /// directory when it is on that worker.
-    fn new_tile_target(&mut self) -> Option<(WorkerKey, Option<String>)> {
+    pub(super) fn new_tile_target(&mut self) -> Option<(WorkerKey, Option<String>)> {
         let chosen = self.new_on.take().filter(|k| self.workers.contains_key(k));
         let key = chosen.or_else(|| self.context_worker())?;
         let here = self.focused().is_some_and(|t| t.worker == key);
@@ -570,13 +570,6 @@ impl WorkspaceView {
         title: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let what = if command.is_empty() { "the terminal" } else { "the command" };
-        if !self.reachable_for(key, what, cx) {
-            return;
-        }
-        let request = self.next_open.get();
-        self.next_open.set(request.wrapping_add(1));
-        tracing::debug!(?command, ?cwd, %key, request, "open session");
         let spec = OpenSession {
             size: TermSize::default(),
             cwd,
@@ -585,6 +578,46 @@ impl WorkspaceView {
             title,
             attach: false,
         };
+        self.ask_session(key, spec, Opening::Beside, cx);
+    }
+
+    /// A shell on `key` in `cwd`, its item going where `opening` says once it comes.
+    pub(super) fn open_session_as(
+        &mut self,
+        key: WorkerKey,
+        cwd: Option<String>,
+        opening: Opening,
+        cx: &mut Context<Self>,
+    ) {
+        let spec = OpenSession {
+            size: TermSize::default(),
+            cwd,
+            command: Vec::new(),
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        self.ask_session(key, spec, opening, cx);
+    }
+
+    /// Ask `key` for the session `spec` says, its item to go where `opening` says.
+    fn ask_session(
+        &mut self,
+        key: WorkerKey,
+        spec: OpenSession,
+        opening: Opening,
+        cx: &mut Context<Self>,
+    ) {
+        let what = if spec.command.is_empty() { "the terminal" } else { "the command" };
+        if !self.reachable_for(key, what, cx) {
+            return;
+        }
+        let request = self.next_open.get();
+        self.next_open.set(request.wrapping_add(1));
+        if let Some(w) = self.workers.get_mut(&key) {
+            w.openings.push_back((request, opening));
+        }
+        tracing::debug!(command = ?spec.command, cwd = ?spec.cwd, %key, request, "open session");
         self.send(key, ClientMsg::OpenSession { request, spec });
         cx.notify();
     }

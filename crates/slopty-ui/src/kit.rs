@@ -26,7 +26,6 @@ mod disclosure;
 mod facts;
 pub mod find;
 mod fit;
-mod go;
 mod identity;
 pub mod menu;
 pub mod message;
@@ -42,7 +41,6 @@ pub use disclosure::Disclosure;
 pub use facts::{FactAt, FactsRow, MeasuredFacts, facts_row, wrap_facts};
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
-pub use go::{go, go_ink, go_pressable};
 pub use identity::{identity_ink, machine_ink, wears_identity};
 pub use menu::{Menu, MenuItem, MenuPanel};
 pub use pane::{pane_surface, sash};
@@ -811,9 +809,6 @@ pub enum ButtonKind {
     /// The one action the surface is for: the neutral [`solid`], white on dark and near-black
     /// on light, as `MonoCode`'s stop and Commit buttons are.
     Primary,
-    /// The answer that sets an agent's work going (the plain allow of its ask): the brand's
-    /// green ([`go()`]), as the composer's send is. The one green control a surface holds.
-    Go,
     /// The press that removes or ends something for good (Remove a machine): the
     /// [`destructive`] red under the solid's ink, behind a confirm. Never a surface's only way
     /// on, and never beside a [`Self::Primary`].
@@ -971,7 +966,6 @@ pub fn button(
         .child(label);
     let el = match kind {
         ButtonKind::Primary => solid_pressable(el, theme),
-        ButtonKind::Go => go_pressable(el, theme),
         ButtonKind::Destructive => destructive_pressable(el, theme),
         ButtonKind::Secondary => secondary(el, theme),
         ButtonKind::Ghost => eased(el)
@@ -1157,21 +1151,8 @@ pub fn icon_button(
     icon: crate::icons::Symbol,
     label: &'static str,
 ) -> gpui::Stateful<Div> {
-    icon_button_at(theme, id, icon, label, 1.0)
-}
-
-/// [`icon_button`] at the chrome's zoom `k`: a tile's header shrinks with the overview, and a
-/// button drawn at full size there would outgrow the bar it sits in.
-#[must_use]
-pub fn icon_button_at(
-    theme: &Theme,
-    id: impl Into<SharedString>,
-    icon: crate::icons::Symbol,
-    label: &'static str,
-    k: f32,
-) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, k, s.text_secondary))
+    eased(square_icon(theme, id.into(), icon, label, s.text_secondary))
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
@@ -1182,14 +1163,12 @@ pub fn close_box(
     theme: &Theme,
     id: impl Into<SharedString>,
     label: &'static str,
-    k: f32,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     let id: SharedString = id.into();
     let selector = id.to_string();
     let side =
-        if theme.density == slopty_theme::Density::TOUCH { theme.density.hit } else { CLOSE_BOX }
-            * k;
+        if theme.density == slopty_theme::Density::TOUCH { theme.density.hit } else { CLOSE_BOX };
     let icon = crate::icons::IconSize::Inline;
     let el = div()
         .id(gpui::ElementId::Name(id))
@@ -1201,13 +1180,13 @@ pub fn close_box(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.xs * k))
+        .rounded(px(theme.radii.xs))
         .cursor_pointer()
         .text_color(hsla(s.text_secondary))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::Drawn::new(theme, crate::icons::Symbol::Xmark, icon)
-                .slot(px(icon.slot(theme) * k), hsla(s.text_secondary)),
+                .slot(px(icon.slot(theme)), hsla(s.text_secondary)),
         );
     eased(crate::a11y::tab_stop(el, s.focus))
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
@@ -1227,8 +1206,7 @@ pub fn icon_button_inked(
     ink: Rgb,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, 1.0, ink))
-        .hover(move |el| el.bg(hsla(s.hover)))
+    eased(square_icon(theme, id.into(), icon, label, ink)).hover(move |el| el.bg(hsla(s.hover)))
 }
 
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
@@ -1237,12 +1215,11 @@ fn square_icon(
     id: SharedString,
     icon: crate::icons::Symbol,
     label: &'static str,
-    k: f32,
     ink: Rgb,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     let selector = id.to_string();
-    let side = icon_button_side(theme) * k;
+    let side = icon_button_side(theme);
     let el = div()
         .id(gpui::ElementId::Name(id))
         .debug_selector(move || selector)
@@ -1253,19 +1230,19 @@ fn square_icon(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.sm * k))
+        .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Lead)
                 .weight(crate::icons::Weight::Medium)
-                .slot(px(crate::icons::IconSize::Lead.slot(theme) * k), hsla(ink)),
+                .slot(px(crate::icons::IconSize::Lead.slot(theme)), hsla(ink)),
         );
     crate::a11y::tab_stop(el, s.focus)
 }
 
-/// [`icon_button_at`] that stays on until pressed again: a tile's trackpad mode.
+/// [`icon_button`] that stays on until pressed again: a tile's trackpad mode.
 ///
 /// One name whatever its state, said as pressed or not (`aria_toggled`), the way iOS and
 /// Zed say a toggle. A label that flipped with the state ("Use as a trackpad", then "Touch the
@@ -1279,14 +1256,12 @@ pub fn icon_toggle(
     icon: crate::icons::Symbol,
     label: &'static str,
     on: bool,
-    k: f32,
 ) -> gpui::Stateful<Div> {
     if !on {
-        return icon_button_at(theme, id, icon, label, k)
-            .aria_toggled(gpui::accesskit::Toggled::False);
+        return icon_button(theme, id, icon, label).aria_toggled(gpui::accesskit::Toggled::False);
     }
     let s = theme.surfaces;
-    square_icon(theme, id.into(), icon, label, k, s.text)
+    square_icon(theme, id.into(), icon, label, s.text)
         .aria_toggled(gpui::accesskit::Toggled::True)
         .bg(hsla(s.selected))
 }
@@ -2183,8 +2158,8 @@ mod tests {
     fn a_toggle_rests_on_the_selected_fill_only_while_on() {
         let theme = Theme::default();
         let icon = crate::icons::Symbol::Cursorarrow;
-        let mut off = icon_toggle(&theme, "t", icon, "Trackpad mode", false, 1.0);
-        let mut on = icon_toggle(&theme, "t", icon, "Trackpad mode", true, 1.0);
+        let mut off = icon_toggle(&theme, "t", icon, "Trackpad mode", false);
+        let mut on = icon_toggle(&theme, "t", icon, "Trackpad mode", true);
         assert_eq!(off.style().background, None, "off is bare");
         let selected = Some(gpui::Fill::from(hsla(theme.surfaces.selected)));
         assert_eq!(on.style().background, selected, "on rests on the selected wash");
@@ -2412,8 +2387,7 @@ mod tests {
     /// what finished).
     #[test]
     fn the_accent_is_never_a_control() {
-        // `kit::go` draws the one green control, the way on (the send, an ask's plain allow).
-        const RULED: [&str; 2] = ["slopty-ui/src/workspace/titlebar.rs", "slopty-ui/src/kit/go.rs"];
+        const RULED: [&str; 1] = ["slopty-ui/src/workspace/titlebar.rs"];
         // Call sites whose owners move them onto `kit::solid` in their next change.
         const AWAITING: [&str; 0] = [];
         let waived: Vec<&str> = RULED.iter().chain(&AWAITING).copied().collect();
@@ -2990,9 +2964,8 @@ mod tests {
     /// their control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
-        const SHEETS: [(&str, &str); 5] = [
+        const SHEETS: [(&str, &str); 4] = [
             ("slopty-ui/src/kit.rs", "pub fn modal<"),
-            ("slopty-ui/src/kit/message.rs", "pub fn shell<"),
             ("slopty-ui/src/kit/find.rs", "super::elevate(div(), &theme)"),
             ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
             ("slopty-ui/src/kit/menu.rs", "super::elevate(div(), &theme)"),

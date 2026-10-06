@@ -600,16 +600,20 @@ fn a_banner_is_led_by_the_tiles_name() {
 
 // ----- opening and placing -----------------------------------------------------------------
 
-/// ⌘T asks the focused tile's worker for a shell; the echo of that item opens a column right
-/// of the focused one, focuses it, and the terminal takes the keyboard. A second ⌘T starts in
-/// the focused shell's directory.
+/// ⌘⇧T asks the focused tile's worker for a shell, and the echo of that item opens in a tab
+/// of its own, focused, the terminal taking the keyboard. A second ⌘⇧T starts in the focused
+/// shell's directory. ⌘D's shell splits off right of the focused pane and ⌘⇧D's below it,
+/// each in the tab on show; a shell opened from a tile (a run's) goes beside by the room rule.
 #[gpui::test]
-fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mut TestAppContext) {
+fn new_shells_open_in_a_tab_or_split_off_the_focused_pane(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     assert!(cx.debug_bounds("workspace").is_some(), "the workspace is drawn");
+    // The shell an empty worker is given comes first, as it was asked first.
+    let given = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    fake.drain();
 
-    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-shift-t");
     let sent = fake.drain();
     assert!(
         matches!(
@@ -619,7 +623,8 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
         "no shell to inherit from: {sent:?}"
     );
     let session = SessionId::new();
-    let tile = opens_in(&view, cx, &fake, session, fake.me, 1, Some("/tmp/work"));
+    let tile = opens_in(&view, cx, &fake, session, fake.me, 2, Some("/tmp/work"));
+    assert_ne!(pos_of(&view, cx, tile).tab, pos_of(&view, cx, given).tab, "a tab of its own");
     assert_eq!(focused(&view, cx), Some(tile));
     assert!(terminal_focused(&view, cx, session), "the terminal has the keyboard");
     assert!(cx.debug_bounds(selector("item", tile.item)).is_some(), "drawn");
@@ -632,7 +637,7 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
         "it attached: {sent:?}"
     );
 
-    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-shift-t");
     let sent = fake.drain();
     assert!(
         matches!(
@@ -642,25 +647,65 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
         ),
         "{sent:?}"
     );
-    // ⌘⇧T with one machine and one agent goes straight to the folder, the shell's first.
+    let tabbed = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
+    assert_ne!(pos_of(&view, cx, tabbed).tab, pos_of(&view, cx, tile).tab, "a tab of its own");
+    assert_eq!(focused(&view, cx), Some(tabbed));
+    let tabs = view.read_with(cx, |v, _| v.layout().shown_project().map(|p| p.tabs().len()));
+    assert_eq!(tabs, Some(3), "every tab in the one project");
+
+    let rect = |cx: &mut VisualTestContext, t: TileRef| {
+        view.read_with(cx, |v, _| {
+            let pane = v.layout().position(t).expect("placed").pane;
+            v.layout().frame().panes.iter().find(|l| l.pane == pane).map(|l| l.rect)
+        })
+        .expect("on show")
+    };
+    cx.simulate_keystrokes("cmd-d");
+    let right = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
+    assert_eq!(pos_of(&view, cx, right).tab, pos_of(&view, cx, tabbed).tab, "in the tab on show");
+    let (from, to) = (rect(cx, tabbed), rect(cx, right));
+    assert!(to.x >= from.right() - 0.5 && (to.y - from.y).abs() < 0.5, "{from:?} {to:?}");
+    assert_eq!(focused(&view, cx), Some(right));
+
+    cx.simulate_keystrokes("cmd-shift-d");
+    let below = opens(&view, cx, &fake, SessionId::new(), fake.me, 5);
+    let (from, to) = (rect(cx, right), rect(cx, below));
+    assert!(to.y >= from.bottom() - 0.5 && (to.x - from.x).abs() < 0.5, "{from:?} {to:?}");
+    assert_eq!(focused(&view, cx), Some(below));
+
+    // A shell the worker makes for anything else (the self-test's) goes beside.
+    view.update(cx, |v, cx| v.open_command(vec!["top".to_owned()], cx));
+    let run = opens(&view, cx, &fake, SessionId::new(), fake.me, 6);
+    assert_eq!(pos_of(&view, cx, run).tab, pos_of(&view, cx, below).tab, "beside, in its tab");
+    let left = view.read_with(cx, |v, _| v.workers.get(&fake.key).map(|w| w.openings.len()));
+    assert_eq!(left, Some(0), "nothing left waiting");
+}
+
+/// A shell that never comes takes its place in the queue with it: after a ⌘⇧T the worker
+/// refused, ⌘D's shell still splits, rather than taking the refused one's tab.
+#[gpui::test]
+fn a_refused_shell_leaves_the_next_one_its_own_place(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    fake.drain();
     cx.simulate_keystrokes("cmd-shift-t");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    // The start's tile takes the first message; ↵ on nothing starts it bare.
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    let sent = thread_starts(&mut fake);
-    let claude = slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned();
-    assert_eq!(sent, [(claude, "/tmp/work".to_owned(), None)], "a Claude Code thread there");
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(tile), "the start's tile closed: back to the shell");
-    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    let (beside, shell) = (pos_of(&view, cx, second), pos_of(&view, cx, tile));
-    assert_eq!(beside.tab, shell.tab, "beside it, in its tab");
-    assert_ne!(beside.pane, shell.pane, "a pane of its own");
-    assert_eq!(focused(&view, cx), Some(second));
+    cx.simulate_keystrokes("cmd-d");
+    let requests: Vec<u64> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::OpenSession { request, .. } => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| v.open_failed(key, requests[0], "no such directory", cx));
+    let split = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let (a, b) = (pos_of(&view, cx, first), pos_of(&view, cx, split));
+    assert_eq!(a.tab, b.tab, "split off in the tab on show, not a tab of its own");
+    assert_ne!(a.pane, b.pane);
 }
 
 /// Keys typed into a program that stopped reading are refused on the worker, and the person
@@ -681,8 +726,8 @@ fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
         "{notices:?}"
     );
 
-    cx.simulate_keystrokes("cmd-t");
-    cx.simulate_keystrokes("cmd-t");
+    cx.simulate_keystrokes("cmd-shift-t");
+    cx.simulate_keystrokes("cmd-shift-t");
     let requests: Vec<u64> = fake
         .drain()
         .into_iter()
@@ -693,7 +738,7 @@ fn a_refused_input_and_a_failed_open_are_notices(cx: &mut TestAppContext) {
         .collect();
     assert!(requests.len() == 2 && requests[0] != requests[1], "{requests:?}");
     let key = fake.key;
-    view.update_in(cx, |v, _window, cx| v.open_failed(key, "no such directory", cx));
+    view.update_in(cx, |v, _window, cx| v.open_failed(key, requests[0], "no such directory", cx));
     cx.run_until_parked();
     let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(
@@ -941,8 +986,7 @@ fn tiles_not_shown_are_not_drawn(cx: &mut TestAppContext) {
 }
 
 /// A shell's output redraws that shell's tile only: its neighbours are replayed from the view
-/// cache. A neighbour whose zoom stopped moving is drawn afresh at the same bounds, since its
-/// paint changed.
+/// cache.
 #[gpui::test]
 fn output_redraws_its_own_tile_only(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -965,15 +1009,6 @@ fn output_redraws_its_own_tile_only(cx: &mut TestAppContext) {
     let (quiet_after, loud_after) = renders(cx);
     assert_eq!(quiet_after, quiet_before, "the quiet neighbour was replayed, not rendered");
     assert!(loud_after >= loud_before.saturating_add(3), "{loud_before} → {loud_after}");
-
-    quiet.update(cx, |t, _| t.set_zooming(true));
-    view.update_in(cx, |_v, _w, cx| cx.notify());
-    cx.run_until_parked();
-    assert_eq!(
-        renders(cx).0,
-        quiet_after.saturating_add(1),
-        "the zoom settled: drawn afresh at the same bounds"
-    );
 }
 
 /// A remote window on a tab not shown lets its stream go after the grace, and asks for it
@@ -1235,7 +1270,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
     // The empty field lists a few commands; typing reaches the rest.
     cx.simulate_keystrokes("p r e v i o u s space p r o");
     cx.run_until_parked();
@@ -1245,7 +1280,7 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.palette_open()), "Esc empties the field first");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.palette_open()), "then Esc closes it");
@@ -1626,6 +1661,7 @@ mod save_copy;
 mod search;
 mod shell_drag;
 mod soak;
+mod tab_commands;
 mod tab_strip;
 mod thread_face;
 mod thread_start;

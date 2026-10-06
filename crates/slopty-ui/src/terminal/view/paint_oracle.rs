@@ -589,12 +589,10 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
         }
         14 => {
             let zoom = [1.0, 1.0, 0.5, 0.75, 1.25][rng.below(5)];
-            let zooming = rng.chance(30);
             (
-                format!("zoom {zoom}, in motion {zooming}"),
+                format!("zoom {zoom}"),
                 Box::new(move |view, _window, cx| {
                     view.set_zoom(zoom);
-                    view.set_zooming(zooming);
                     cx.notify();
                 }),
             )

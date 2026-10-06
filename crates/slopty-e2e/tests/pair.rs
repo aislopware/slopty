@@ -100,7 +100,7 @@ mod tests {
     async fn open_on_a(a: &mut Driver, b: &mut Driver) -> (String, Duration) {
         let known = sessions(&a.dump().await.unwrap());
         let start = Instant::now();
-        a.keys("cmd-n").await.unwrap();
+        a.keys("cmd-shift-t").await.unwrap();
         let (mut on_a, mut on_b): (Shown, Shown) = (None, None);
         while on_a.is_none() || on_b.is_none() {
             assert!(

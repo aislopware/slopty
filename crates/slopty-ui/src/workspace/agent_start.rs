@@ -1,7 +1,8 @@
-//! "New agent…" (⌘⇧T), the one way to start an agent: the palette asks which agent, then on
-//! which machine, then in which folder, and the agent's thread opens in a tile of its own. Each
-//! step lists the last choice first, so ↩ ↩ ↩ starts the last combination again, and a step
-//! with one choice is passed over. The palette's "New `agent` agent" lines start at the machine.
+//! "New agent…", the start by steps (⌘T starts at once, [`super::tabs`]): the palette asks which
+//! agent, then on which machine, then in which folder, and the agent's thread opens in a tile of
+//! its own. Each step lists the last choice first, so ↩ ↩ ↩ starts the last combination again, and
+//! a step with one choice is passed over. The palette's "New `agent` agent" lines start at the
+//! machine.
 //!
 //! What a machine can start comes from its own link: the agents its capabilities found
 //! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
@@ -193,8 +194,8 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// ⌘⇧T: which agent, the last one first; with one, straight to the machine. A machine the
-    /// "+" menu chose first is not asked again: its agents, then its folders.
+    /// "New agent…": which agent, the last one first; with one, straight to the machine. A machine
+    /// the "+" menu chose first is not asked again: its agents, then its folders.
     pub fn new_agent(&mut self, _: &NewAgent, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = self.new_on.take().filter(|k| self.workers.contains_key(k));
         let mut agents = match chosen {
@@ -727,7 +728,7 @@ impl WorkspaceView {
     }
 
     /// One step of the choice, as the palette.
-    fn open_step(
+    pub(super) fn open_step(
         &mut self,
         lines: Vec<PaletteItem>,
         placeholder: &'static str,

@@ -8438,7 +8438,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     their lit rim. `the_chrome_sits_one_notch_from_the_content` now holds light's canvas at 4 to
     6 L* under the content and dark's at 2.5 to 4. At the extreme light end (a `#cccccc`
     terminal background) secondary text on glass goes as far as black.
-  - **One green way on.** The composer's send and the plain allow of an agent's ask take the
+  - **One green way on** (superseded 2026-10-07 by "The design system starts from `MonoCode`'s":
+    the send and the plain allow are the neutral solid, and `kit::go` is deleted). The composer's
+    send and the plain allow of an agent's ask take the
     brand's green with its near-black ink (`kit::go`, `ButtonKind::Go`), as the mockups and the
     Codex Astra direction draw them. Overrules "The primary is the neutral solid" for these two
     alone: they are the presses that set work going. Every other primary (Commit, Create, Done,
@@ -8446,7 +8448,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and pressed the green lightens, away from its ink, which reads AA in every state in both
     variants. The lint `the_accent_is_never_a_control` still holds every other file; `kit/go.rs`
     is where the one is drawn.
-  - **The composer's foot.** The send is a disc (`radii.full`). The "+" is an outlined disc
+  - **The composer's foot.** (The send's disc is superseded 2026-10-07: a 26 pt square at
+    `radii.sm`.) The send is a disc (`radii.full`). The "+" is an outlined disc
     and the model an outlined pill, the ordinary hairline at the full radius, as the two
     things set before writing. The other chips stay quiet words.
   - **The composer card** wears the quiet hairline at rest and the ordinary one with the
@@ -8663,8 +8666,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       on the chrome step, and the transient `Surfaces::sidebar` is deleted. Cards, settings
       groups and the thread's own messages are at `radii.md`, the search field at `radii.sm`.
       A tab's close is `kit::close_box`, 16 pt at `radii.xs`. The dead `kit::panel` is deleted.
-  - **Still to land:** the palette with no scrim (lane A), the terminal's blocks, the composer
-    and the icons.
+    - **The composer is squared down.** Boxed in the reading column it is `radii.md` (6) inside
+      the control's ring (`border`, 10 %) on the raised step. Focus adds the card's 3 % wash
+      and leaves the ring alone, where it used to step the ring up. In a narrow pane it bleeds:
+      edge to edge at the pane's foot, square, under a sash line, with the tray over it a card
+      of its own, not its head. Centred under an empty thread's question it stays boxed, and
+      so does a view whose tile has not yet said its width. The tray's cards and its head are at
+      `radii.md` with it (`kit::message::Frame`, `ThreadView::bleeds`).
+    - **No green control is left.** Send is `kit::message::SEND`, a 26 pt square at `radii.sm`
+      in the neutral solid whether it sends or stops (a finger's is its hit square). An
+      ask's plain allow is `ButtonKind::Primary`, the solid, still last in its row and still
+      what ⌘↵ answers. `ButtonKind::Go` and `kit::go` are deleted, and the lint
+      `the_accent_is_never_a_control` now waives only the title bar. This is audit item 2,
+      landed with the composer.
+    - **Terminal blocks.** Warp's blocks were mostly there: a 7 % rule over each prompt below
+      a row, edge to edge, square, and a failed block's `error_fill` wash over its head with a
+      bar down its left edge. The bar is now `stroke::BAR`, Warp's 3 pt. The wash stays on the
+      head and not the whole block, as ruled before: a long failure washed whole was one pink
+      slab with red text on red. **Not taken: the line of air above and below a block.** The
+      grid's rows are the program's rows. Air between blocks would take rows from the program
+      (the PTY's height would move with the prompts on screen, a resize at every prompt) or
+      push the last rows out of view. Warp can do it because it draws each block as a view of
+      its own, not as one grid. A selected block is its text selection, on the terminal's
+      selection colour.
+  - **Still to land:** the palette with no scrim (lane A) and the icons.
   - Tests:
     - `slopty_theme::tests`: `the_work_lies_deepest_under_the_chrome`,
       `the_line_weighs_the_same_at_every_scale`, `the_ladder_is_monotonic`,
@@ -8680,4 +8705,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `workspace::tests::nav_rows::a_selection_is_the_wash_docked_or_drawn`,
       `workspace::tests::focus::the_focused_tile_is_said_by_its_titles_tone_and_weight`,
       `workspace::tests::tiles::a_tile_fills_its_pane_and_its_header_lies_on_it`,
-      `workspace::tab_look::tests`.
+      `workspace::tab_look::tests`, `kit::message::tests`,
+      `conversation::thread::tests::face::the_composer_bleeds_in_a_narrow_pane`,
+      `conversation::thread::tests::face::the_one_solid_stops_a_turn_or_sends_the_draft`.

@@ -1014,7 +1014,7 @@ mod tests {
         let keys = |label: &str| {
             tree.iter().find(|n| n.is("ListItem", Some(label))).and_then(|n| n.value.clone())
         };
-        assert_eq!(keys("New terminal").as_deref(), Some("⌘T, ⌘N"), "{tree:#?}");
+        assert_eq!(keys("New terminal").as_deref(), Some("⇧⌘T"), "{tree:#?}");
         assert_eq!(keys("Select tab 3").as_deref(), Some("⌘3"));
         assert_eq!(keys("Open URL…").as_deref(), Some(""), "a command with no chord, listed");
         assert_eq!(keys("Copy last output").as_deref(), Some("⇧⌘C"));
@@ -1072,12 +1072,12 @@ mod tests {
         assert!(!*ran.borrow(), "recorded, not run");
         assert_eq!(applied(&events), "[keys.workspace]\nnew_note = \"cmd-t\"\n");
         assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⌘T"));
-        assert_eq!(value_of(cx, "ListItem", "New terminal").as_deref(), Some("⌘N"), "⌘T went");
+        assert_eq!(value_of(cx, "ListItem", "New agent").as_deref(), Some(""), "⌘T went");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let said = tree.iter().find(|n| n.role == "Alert").and_then(|n| n.label.clone());
         assert_eq!(
             said.as_deref(),
-            Some("⌘T runs `workspace.new_note` now, no longer `workspace.new_terminal`"),
+            Some("⌘T runs `workspace.new_note` now, no longer `workspace.start_agent`"),
             "{tree:#?}"
         );
 

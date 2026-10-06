@@ -210,7 +210,7 @@ pub struct BrowserView {
     /// The address the open page was last given.
     loaded: Option<String>,
     page: PageState,
-    /// The page's last picture, shown where the tile is drawn scaled and in a render.
+    /// The page's last picture, shown in a render of the window.
     snapshot: Option<Arc<RenderImage>>,
     theme: Theme,
     native: native::Native,
@@ -220,8 +220,6 @@ pub struct BrowserView {
     page_focus: FocusHandle,
     /// Hears the page take the keyboard and give it back, once the view is in a window.
     focus_watch: Vec<Subscription>,
-    /// The page itself shows. Off, the tile draws its snapshot instead, taken as it goes.
-    live: bool,
     /// When Esc last went to the page, for a second one soon after to give the keyboard back.
     last_escape: Option<Instant>,
     /// The page's messages, and the poll for its title while it is open.
@@ -271,7 +269,6 @@ impl BrowserView {
             host: None,
             page_focus: cx.focus_handle(),
             focus_watch: Vec::new(),
-            live: true,
             last_escape: None,
             tasks: Vec::new(),
             zoom: 1.0,
@@ -379,7 +376,7 @@ impl BrowserView {
         self.page_focus.is_focused(window)
     }
 
-    /// Whether a picture of the page is ready for when the tile is drawn without it.
+    /// Whether a picture of the page is ready for a render of the window.
     #[must_use]
     pub const fn has_snapshot(&self) -> bool {
         self.snapshot.is_some()
@@ -410,18 +407,6 @@ impl BrowserView {
     #[must_use]
     pub fn native_host(&self) -> Option<&NativeHost> {
         self.host.as_ref().map(|h| &h.host)
-    }
-
-    /// Whether the page itself shows; off, the tile draws its snapshot, taken again as it
-    /// goes.
-    pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
-        if self.live != live {
-            self.live = live;
-            if !live {
-                self.native.snapshot();
-            }
-            cx.notify();
-        }
     }
 
     /// Draw by another theme.
@@ -1101,7 +1086,7 @@ impl Render for BrowserView {
             self.open(&address, window, cx);
         }
         // A render cannot see a native view, so it draws the page's picture instead.
-        let live = self.live && self.page.failed.is_none() && !crate::screen::capturing(cx);
+        let live = self.page.failed.is_none() && !crate::screen::capturing(cx);
         let host = if live && self.native.open() && self.compose_in(window, cx) {
             self.native_host().cloned()
         } else {

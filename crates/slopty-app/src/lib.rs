@@ -3577,8 +3577,8 @@ fn apply_link_event(
         ) => {
             view.update(cx, |v, cx| v.session_opened(key, summary, cx));
         }
-        LinkEvent::Control(WorkerMsg::Failed { message, .. }) => {
-            view.update(cx, |v, cx| v.open_failed(key, &message, cx));
+        LinkEvent::Control(WorkerMsg::Failed { request, message, .. }) => {
+            view.update(cx, |v, cx| v.open_failed(key, request, &message, cx));
         }
         LinkEvent::Control(WorkerMsg::Load(load)) => {
             view.update(cx, |v, cx| v.set_worker_load(key, load, cx));
@@ -5847,7 +5847,7 @@ mod tests {
 
     /// The menu bar is built again whenever the keys are rebound, from the keys bound then:
     /// AppKit runs a menu item's key equivalent itself, so a menu built once would keep running
-    /// New Shell on ⌘T after the file moved it to ⌘Y.
+    /// New Shell on ⇧⌘T after the file moved it to ⌘Y.
     #[gpui::test]
     fn the_menu_bar_follows_a_rebinding(cx: &mut TestAppContext) {
         use slopty_ui::workspace::NewTerminal;
@@ -5869,7 +5869,7 @@ mod tests {
         let file = "[keys.workspace]\nnew_terminal = \"cmd-y\"\n";
         ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
         ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
-        assert_eq!(*built.borrow(), ["⌘T", "⌘Y"], "built at first, then once for the change");
+        assert_eq!(*built.borrow(), ["⇧⌘T", "⌘Y"], "built at first, then once for the change");
         let menus = cx.update(|cx| cx.get_menus()).unwrap_or_default();
         assert_eq!(menus.iter().map(|m| m.name.to_string()).collect::<Vec<_>>(), ["File"]);
         // The item's key equivalent as AppKit's menu takes it: the action's first binding
@@ -5884,7 +5884,7 @@ mod tests {
                 .find(|b| b.predicate().is_none_or(|p| p.eval(std::slice::from_ref(&context))))
                 .map(|b| b.keystrokes().iter().map(|k| k.inner().unparse()).collect::<String>())
         });
-        assert_eq!(equivalent.as_deref(), Some("cmd-y"), "no ⌘T left for the menu to take");
+        assert_eq!(equivalent.as_deref(), Some("cmd-y"), "no ⇧⌘T left for the menu to take");
     }
 
     /// A settings file that does not parse changes no key: the keymap stays as last applied,

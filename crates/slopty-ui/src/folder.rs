@@ -939,12 +939,11 @@ impl FolderView {
             )
             .when_some(crate::workspace::worktree_root(dir), |bar, root| {
                 bar.child(
-                    crate::kit::icon_button_at(
+                    crate::kit::icon_button(
                         theme,
                         format!("folder-remove-worktree-{id}"),
                         Symbol::Trash,
                         crate::workspace::REMOVE_WORKTREE,
-                        k,
                     )
                     .map(|el| {
                         let theme = Rc::new(theme.clone());
@@ -961,12 +960,11 @@ impl FolderView {
             })
             .when(FILES_PICKER, |bar| {
                 bar.child(
-                    crate::kit::icon_button_at(
+                    crate::kit::icon_button(
                         theme,
                         format!("folder-upload-{id}"),
                         Symbol::ArrowUpToLine,
                         UPLOAD_FROM_FILES,
-                        k,
                     )
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         cx.stop_propagation();
@@ -1031,12 +1029,11 @@ impl FolderView {
         let pad = crate::palette::list_pad(theme);
         let drawn = Rc::clone(&self.drawn);
         let save = (FILES_PICKER && chosen).then(|| {
-            crate::kit::icon_button_at(
+            crate::kit::icon_button(
                 theme,
                 format!("folder-save-{}", self.id.as_uuid()),
                 Symbol::ArrowDownToLine,
                 SAVE_TO_FILES,
-                k,
             )
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _ev, _window, cx| {

@@ -803,6 +803,8 @@ pub mod stroke {
     /// it was the loudest stroke on screen; every reference's "current" marker is the quietest
     /// that still reads.
     pub const MARK: f32 = 1.5;
+    /// A terminal block's state down its left edge (a failed command's): Warp's 3 pt bar.
+    pub const BAR: f32 = 3.0;
 }
 
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome

@@ -676,25 +676,14 @@ impl ProjectView {
                 .child(SharedString::from(text))
         };
         let push = project.push;
-        let push_toggle = crate::kit::icon_toggle(
-            theme,
-            "project-push",
-            Symbol::ArrowUpToLine,
-            PUSH,
-            push,
-            self.zoom,
-        )
-        .on_click(cx.listener(move |_this, _ev, _w, cx| {
-            cx.emit(ProjectEvent::SetPush(!push));
-        }));
-        let terminal = crate::kit::icon_button_at(
-            theme,
-            "project-terminal",
-            Symbol::Terminal,
-            SHOW_TERMINAL,
-            self.zoom,
-        )
-        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
+        let push_toggle =
+            crate::kit::icon_toggle(theme, "project-push", Symbol::ArrowUpToLine, PUSH, push)
+                .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(ProjectEvent::SetPush(!push));
+                }));
+        let terminal =
+            crate::kit::icon_button(theme, "project-terminal", Symbol::Terminal, SHOW_TERMINAL)
+                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
         let checks_open = self.checks.is_some();
         let checks_toggle = crate::kit::icon_toggle(
             theme,
@@ -702,7 +691,6 @@ impl ProjectView {
             Symbol::Checklist,
             CHECKS,
             checks_open,
-            self.zoom,
         )
         .on_click(cx.listener(|this, _ev, window, cx| {
             if this.checks.is_some() {
@@ -908,14 +896,9 @@ impl ProjectView {
             "now" => RECAP.to_owned(),
             age => format!("Since you looked, {age} ago"),
         };
-        let close = crate::kit::icon_button_at(
-            theme,
-            "project-recap-close",
-            Symbol::Xmark,
-            CLOSE_RECAP,
-            self.zoom,
-        )
-        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::CloseRecap)));
+        let close =
+            crate::kit::icon_button(theme, "project-recap-close", Symbol::Xmark, CLOSE_RECAP)
+                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::CloseRecap)));
         let head = div()
             .flex()
             .items_center()
@@ -1880,7 +1863,6 @@ impl ProjectView {
             "project-send",
             Symbol::ArrowUp,
             SEND,
-            true,
         )
         .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()
@@ -1893,8 +1875,7 @@ impl ProjectView {
             div().flex().flex_col().gap(self.z(sp.xs)),
             theme,
             self.zoom,
-            false,
-            focused,
+            crate::kit::message::Frame { focused, ..Default::default() },
         )
         .child(field)
         .child(foot);
@@ -2034,12 +2015,12 @@ impl ProjectView {
                 }))
             };
         let close_id = format!("{key}-close");
-        let close =
-            crate::kit::icon_button_at(theme, close_id, Symbol::Xmark, CLOSE_RUN_ON, self.zoom)
-                .on_click(cx.listener(|_this, _ev, _w, cx| {
-                    cx.stop_propagation();
-                    cx.emit(ProjectEvent::CloseRunOn);
-                }));
+        let close = crate::kit::icon_button(theme, close_id, Symbol::Xmark, CLOSE_RUN_ON).on_click(
+            cx.listener(|_this, _ev, _w, cx| {
+                cx.stop_propagation();
+                cx.emit(ProjectEvent::CloseRunOn);
+            }),
+        );
         let head = div()
             .flex()
             .items_center()

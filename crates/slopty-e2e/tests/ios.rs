@@ -172,10 +172,10 @@ mod tests {
         let name = format!("ios-{}-terminal", device(vw));
         assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
-        // ⌘N from a hardware keyboard (the same keystroke the socket dispatches) opens a second
-        // shell, focused; ⌘W closes the focused tile, that second shell, and gives the focus
-        // back to the first with its echo.
-        drv.keys("cmd-n").await.unwrap();
+        // ⌘⇧T from a hardware keyboard (the same keystroke the socket dispatches) opens a second
+        // shell in a tab of its own, focused; ⌘W closes the focused tile, that second shell, and
+        // gives the focus back to the first with its echo.
+        drv.keys("cmd-shift-t").await.unwrap();
         let dump = drv.wait_for("a second shell", STEP, |d| d.items.len() == 2).await.unwrap();
         assert!(dump.items.iter().any(|i| i.id != term.id && i.active), "{dump:#?}");
         drv.keys("cmd-w").await.unwrap();

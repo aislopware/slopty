@@ -64,9 +64,8 @@ pub(super) fn close(
     label: &'static str,
     shown: bool,
     group: &'static str,
-    k: f32,
 ) -> Stateful<Div> {
-    let close = kit::close_box(theme, id, label, k);
+    let close = kit::close_box(theme, id, label);
     if shown { close } else { close.invisible().group_hover(group, gpui::Styled::visible) }
 }
 

@@ -949,14 +949,14 @@ impl ThreadView {
     }
 
     /// The answer ⌘↵ (`allow`) or ⌘⌫ gives the request on show: its plain allow, the
-    /// decision's green way on, or its plain deny; `None` for a request with no such answer.
+    /// decision's one primary, or its plain deny; `None` for a request with no such answer.
     fn key_answer(&self, allow: bool, cx: &App) -> Option<(AskId, String)> {
         self.on_show(cx, |request| {
             let choice = if allow {
                 decision::arrange(&request.options)
                     .front
                     .into_iter()
-                    .find(|(_, kind)| *kind == ButtonKind::Go)
+                    .find(|(_, kind)| *kind == ButtonKind::Primary)
                     .map(|(choice, _)| choice.id.clone())
             } else {
                 denying::plain_deny(&request.options).map(|c| c.id.clone())
@@ -1197,7 +1197,6 @@ impl ThreadView {
         // row of them keeps one height.
         let el = match kind {
             ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
-            ButtonKind::Go => kit::go_pressable(el.border_color(hsla(s.accent_fill)), theme),
             ButtonKind::Destructive => {
                 kit::destructive_pressable(el.border_color(gpui::transparent_black()), theme)
             }
@@ -1253,7 +1252,7 @@ impl ThreadView {
         let z = self.zoom;
         let base = theme.typography.prose();
         let mono = self.mono();
-        let mut style = crate::markdown::style(theme, &mono, z);
+        let mut style = crate::markdown::style(theme, &mono);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
         style.heading_base_font_size = px(base * z);
         style.heading_font_size = Some(Arc::new(move |level: u8, _base| {
@@ -1711,7 +1710,7 @@ impl ThreadView {
             )
             .when(open, |el| {
                 let theme = &self.theme;
-                let mut style = crate::markdown::style(theme, &self.mono(), self.zoom);
+                let mut style = crate::markdown::style(theme, &self.mono());
                 style.paragraph_gap = gpui::rems(theme.spacing.xs / theme.typography.ui_size);
                 // Under its mark, past the hairline rule a quiet call's output hangs from, so a
                 // thought reads as the same kind of aside.
@@ -2348,9 +2347,6 @@ impl Render for ThreadView {
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
         let tucked = bar.as_ref().is_some_and(|(_, tucked)| *tucked);
         let bar = bar.map(|(bar, _)| bar);
-        let typing = self.composer.focus_handle(cx).contains_focused(window, cx);
-        let composer = composes.then(|| self.composer_box(tucked, typing, cx));
-        self.keep_keyboard(composes, window, cx);
         // An empty thread is its composer, centred under its question; the first message docks
         // it at the foot, moving there unless motion is reduced.
         let hero = self.hero(cx).filter(|_| composes);
@@ -2358,6 +2354,9 @@ impl Render for ThreadView {
             self.docks = Some(self.docks.map_or(0, |n| n.wrapping_add(1)));
         }
         self.heroed = hero.is_some();
+        let typing = self.composer.focus_handle(cx).contains_focused(window, cx);
+        let composer = composes.then(|| self.composer_box(tucked, typing, cx));
+        self.keep_keyboard(composes, window, cx);
         let dock = self.docks.map(|n| {
             div()
                 .debug_selector(|| "thread-dock".to_owned())
@@ -2505,6 +2504,11 @@ impl ThreadView {
                 .overflow_y_scroll()
                 .child(bar)
         });
+        // Boxed, the composer stands in the column over the gutter's foot; bleeding, it runs
+        // the pane's width to its foot, under the tray's column.
+        let bleeds = self.bleeds();
+        let composer = composer.map(|c| div().w_full().flex_none().child(c));
+        let (boxed, bled) = if bleeds { (None, composer) } else { (composer, None) };
         div()
             .w_full()
             .min_h_0()
@@ -2519,10 +2523,11 @@ impl ThreadView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .pb(self.z(spacing.md))
+                    .when(!bleeds, |el| el.pb(self.z(spacing.md)))
                     .children(bar)
-                    .children(composer.map(|c| div().w_full().flex_none().child(c))),
+                    .children(boxed),
             )
+            .children(bled)
             .into_any_element()
     }
 }

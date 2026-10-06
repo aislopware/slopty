@@ -89,7 +89,7 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     );
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Heading", Some("Machines"))), "{tree:#?}");
-    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
 
     // "lap" names the laptop and its own commands, and no tile: none runs there.
     cx.simulate_keystrokes("l a p");
@@ -244,7 +244,7 @@ fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
     for label in ["New agent", "New terminal", "Add a window or display", "studio"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
-    assert_eq!(area::begin_keys(), ["⇧⌘T".to_owned(), "⌘T".to_owned(), "⌘O".to_owned()]);
+    assert_eq!(area::begin_keys(), ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();

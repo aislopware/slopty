@@ -740,7 +740,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
 
     let port = steady_port();
     let listen = port.to_string();
-    drv.keys("cmd-t").await.unwrap();
+    drv.keys("cmd-shift-t").await.unwrap();
     drv.wait_for("a second shell with a prompt", STEP, |d| {
         d.terminals.len() == 2 && d.terminals.iter().all(|t| t.rows.iter().any(|r| !r.is_empty()))
     })
@@ -753,7 +753,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
     })
     .await
     .unwrap();
-    // ⌘T put the second on a tab of its own: back to the first's.
+    // ⌘⇧T put the second on a tab of its own: back to the first's.
     drv.keys("cmd-[").await.unwrap();
     let dump = drv
         .wait_for("the shell focused", STEP, |d| {

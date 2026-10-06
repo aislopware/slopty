@@ -226,10 +226,8 @@ mod tests {
         };
         drv.wait_for("the sleep counted on its tile", STEP, counting).await.unwrap();
 
-        // ⌘N opens a second shell beside the first and takes the keyboard. At this window's
-        // size there is no room for a pane of its own, so it is a tab of the first's pane,
-        // shown.
-        drv.keys("cmd-n").await.unwrap();
+        // ⌘⇧T opens a second shell in a title tab of its own and takes the keyboard.
+        drv.keys("cmd-shift-t").await.unwrap();
         let dump = drv
             .wait_for("a second shell", STEP, |d| {
                 d.items.len() == 2 && d.items.iter().any(|i| i.id != term.id && i.active)
@@ -238,9 +236,9 @@ mod tests {
             .unwrap();
         assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
 
-        // ⌥⌘[ shows the first again, whose terminal takes the keyboard; the second waits
+        // ⇧⌘[ shows the first's tab again, whose terminal takes the keyboard; the second waits
         // undrawn behind it. The sleep ends on the first's header.
-        drv.keys("cmd-alt-[").await.unwrap();
+        drv.keys("cmd-shift-[").await.unwrap();
         let session = term.session.clone().unwrap();
         let dump = drv
             .wait_for("the first shell focused again", STEP, |d| {
@@ -361,7 +359,7 @@ mod tests {
             .unwrap();
 
         // A terminal running `claude`, as one typed into a shell: here the fake, which prints
-        // where it runs and waits. (⌘⇧T starts the agent's thread, not a bare terminal.)
+        // where it runs and waits. (⌘T starts the agent's thread, not a bare terminal.)
         let open = Command::Open { command: vec!["claude".to_owned()], count: 1 };
         stack.driver.ok(&open).await.unwrap();
         stack

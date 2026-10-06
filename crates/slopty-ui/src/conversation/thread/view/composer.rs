@@ -1,4 +1,5 @@
-//! The composer: a card at the foot of the column.
+//! The composer: a card at the foot of the column, full-bleed at the pane's foot when the pane
+//! is narrow.
 //!
 //! Its top row says where the agent works (the checkout, its branch, what the thread changed
 //! there, which opens the review); then the menu, the chips, the
@@ -621,10 +622,10 @@ impl ThreadView {
         })
     }
 
-    /// The disc at the foot's end: stop the turn while one runs and nothing is typed, in the
-    /// neutral solid; otherwise what ↵ will do with the draft, in its glyph and its name and
-    /// in the green that sends work on: Update a waiting message being changed, Steer into the
-    /// turn under way, Queue after it (an agent that takes no steer), or Send.
+    /// The square at the foot's end, in the neutral solid: stop the turn while one runs and
+    /// nothing is typed; otherwise what ↵ will do with the draft, in its glyph and its name:
+    /// Update a waiting message being changed, Steer into the turn under way, Queue after it
+    /// (an agent that takes no steer), or Send.
     fn send_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -649,7 +650,7 @@ impl ThreadView {
         } else {
             label.into()
         };
-        let el = kit::message::send_control(theme, self.zoom, id, icon, label, !stop)
+        let el = kit::message::send_control(theme, self.zoom, id, icon, label)
             .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
                 cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
@@ -675,10 +676,18 @@ impl ThreadView {
 
     /// The composer's shell, which what stands in its place shares: a message's frame
     /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, all
-    /// its corners round, or with the tray as its head only the foot's. `focused`: the field
-    /// has the keyboard, and the hairline says so.
+    /// its corners round, or with the tray as its head only the foot's; full-bleed in a narrow
+    /// pane ([`Self::bleeds`]). `focused`: the field has the keyboard, and the wash says so.
     pub(super) fn shell<E: Styled>(&self, el: E, capped: bool, focused: bool) -> E {
-        kit::message::shell(el, &self.theme, self.zoom, capped, focused)
+        let frame = kit::message::Frame { capped, focused, bleeds: self.bleeds() };
+        kit::message::shell(el, &self.theme, self.zoom, frame)
+    }
+
+    /// The composer runs edge to edge under a sash line, as a pane's own bar does, in a pane
+    /// too narrow for a box with gutters round it to leave the field its room. Centred under an
+    /// empty thread's question it stands boxed, as it does until its tile has said its width.
+    pub(super) fn bleeds(&self) -> bool {
+        self.width > 0.0 && self.room().is_narrow() && !self.heroed
     }
 
     /// The composer card. While the agent's own TUI holds the session, where it is instead.
@@ -728,9 +737,8 @@ impl ThreadView {
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
                     .child(
-                        // The kit sizes a field in fixed points (its pads, its line): the
-                        // least of them, and the words and lines at the zoom, so a miniature
-                        // in the overview draws the field as small as the rest.
+                        // The kit's least field, its pads and line fixed in points, the words
+                        // and lines at the prose's size and the view's zoom.
                         div().py(self.z(theme.spacing.xs)).child(
                             Textarea::new(&self.composer)
                                 .with_size(Size::XSmall)

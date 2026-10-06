@@ -1479,15 +1479,9 @@ impl ReviewView {
     /// follow its turns.
     fn refresh_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         self.own().is_none().then(|| {
-            kit::icon_button_at(
-                &self.theme,
-                "review-refresh",
-                Symbol::ArrowClockwise,
-                "Refresh",
-                self.zoom,
-            )
-            .on_click(cx.listener(|this, _ev, _w, cx| this.refresh(cx)))
-            .into_any_element()
+            kit::icon_button(&self.theme, "review-refresh", Symbol::ArrowClockwise, "Refresh")
+                .on_click(cx.listener(|this, _ev, _w, cx| this.refresh(cx)))
+                .into_any_element()
         })
     }
 

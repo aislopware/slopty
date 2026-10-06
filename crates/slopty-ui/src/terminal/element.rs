@@ -150,17 +150,13 @@ pub struct Prepared {
     /// Painted size over the shaped (base) size, and the font size to paint the words at.
     zoom: f32,
     font_size: Pixels,
-    /// The size the glyphs are rasterised at: `font_size`, or the nearest rung of the size
-    /// ladder while the zoom is in motion (the raster is stretched to `font_size`).
-    raster_size: Pixels,
     /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
     images: Vec<PreparedImage>,
-    /// What every row's stretch keys hold of the frame: the font, cell, palette, zoom, raster
-    /// size, baseline and scale. Not the element's size: a row paints nothing from it, so a
-    /// tile resized in place draws its unchanged rows again. `None` while the zoom is in
-    /// motion, when every frame paints another size and a key would only cost.
+    /// What every row's stretch keys hold of the frame: the font, cell, palette, zoom, baseline
+    /// and scale. Not the element's size: a row paints nothing from it, so a tile resized in
+    /// place draws its unchanged rows again. `None` while rows are not painted under keys.
     stretches: Option<u64>,
     /// Every edge the rows paint lies on a whole device pixel: the grid's origin, cell, line,
     /// baseline and strokes. GPUI rounds a quad's edges to the nearest device pixel and a
@@ -346,12 +342,11 @@ struct RowKey {
 }
 
 /// What the device-pixel size of a row's sprite tiles comes from: the grid's left edge (each
-/// cell's width is snapped from it), the row's snapped height and whether tiles are used at all.
+/// cell's width is snapped from it) and the row's snapped height.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct SpriteGeometry {
     origin_x: u32,
     height: u16,
-    tiles: bool,
 }
 
 impl RowKey {
@@ -666,7 +661,7 @@ impl FailedLook {
         Self {
             wash: hsla_alpha(theme.surfaces.error_fill, alpha::FAINT),
             bar: hsla(theme.surfaces.error_fill),
-            bar_width: px(theme.spacing.xxs * zoom),
+            bar_width: px(slopty_theme::stroke::BAR * zoom),
         }
     }
 }
@@ -713,9 +708,6 @@ pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
     zoom: f32,
-    /// The zoom is changing frame to frame (the overview opening or closing): glyphs come from the
-    /// raster ladder, stretched, instead of a fresh raster per size.
-    zooming: bool,
     /// What a screen reader hears: the program's title and the cursor row's text. Filled by
     /// the view only while the accessibility tree is being built.
     a11y: Option<(SharedString, SharedString)>,
@@ -725,7 +717,7 @@ impl TerminalElement {
     /// Paint `view`.
     #[must_use]
     pub const fn new(view: Entity<TerminalView>, focused: bool) -> Self {
-        Self { view, focused, zoom: 1.0, zooming: false, a11y: None }
+        Self { view, focused, zoom: 1.0, a11y: None }
     }
 
     /// The accessible label (the title) and value (the cursor row's text).
@@ -741,14 +733,6 @@ impl TerminalElement {
     #[must_use]
     pub const fn zoom(mut self, zoom: f32) -> Self {
         self.zoom = zoom;
-        self
-    }
-
-    /// The zoom is in motion this frame: paint from the raster ladder (see
-    /// [`fonts::raster_rung`]); the settled frame paints at the exact size again.
-    #[must_use]
-    pub const fn zooming(mut self, on: bool) -> Self {
-        self.zooming = on;
         self
     }
 }
@@ -1555,7 +1539,6 @@ impl Element for TerminalElement {
         // unzoomed cell, so scaling is what keeps `cols × cell_width` inside the item's content
         // width. Re-deriving at the zoomed size would round the cell up and clip the last column.
         let font_size = base_size * zoom;
-        let raster_size = if self.zooming { fonts::raster_rung(font_size) } else { font_size };
         let grid = base_grid.scaled(zoom);
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad * zoom;
@@ -1610,9 +1593,6 @@ impl Element for TerminalElement {
         let mut rows_after = RowCache::with_capacity(rows_before.0.len());
         let text_system = Arc::clone(window.text_system());
         let focused = self.focused;
-        // A sprite is painted from its atlas tile once the zoom settles; in motion, from its
-        // geometry, so the atlas does not fill with a tile per intermediate size.
-        let sprite_tiles = !self.zooming;
         let sprite_thickness = (f32::from(grid.underline.thickness) * scale).round().max(1.0);
         // Textures for the placed images are made (and stale ones dropped) before the read.
         let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
@@ -1752,7 +1732,6 @@ impl Element for TerminalElement {
                     sprites: SpriteGeometry {
                         origin_x: f32::from(origin.x).to_bits(),
                         height: device_span(y, line_height, scale),
-                        tiles: sprite_tiles,
                     },
                 };
                 let address = Arc::as_ptr(line).addr();
@@ -1816,16 +1795,12 @@ impl Element for TerminalElement {
                         blinks |= cell.style.flags.contains(StyleFlags::BLINK);
                         let text = cell_color(&cell.style, palette, blink_off, &mut cache.contrast);
                         if let Some(ch) = drawn {
-                            let tile = if sprite_tiles {
-                                let x = origin.x + cell_width * f32::from(col);
-                                let (w, h) = (
-                                    device_span(x, cell_width, scale),
-                                    device_span(y, line_height, scale),
-                                );
-                                cache.sprite(ch, w, h, sprite_thickness)
-                            } else {
-                                None
-                            };
+                            let x = origin.x + cell_width * f32::from(col);
+                            let (w, h) = (
+                                device_span(x, cell_width, scale),
+                                device_span(y, line_height, scale),
+                            );
+                            let tile = cache.sprite(ch, w, h, sprite_thickness);
                             sprites.push(SpriteCell { col, ch, fg: text, tile });
                         }
                         // Underline and strikethrough go where the font says, not where GPUI
@@ -2065,7 +2040,6 @@ impl Element for TerminalElement {
                 grid,
                 zoom,
                 font_size,
-                raster_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
                 cursor_text,
@@ -2100,15 +2074,10 @@ impl Element for TerminalElement {
                 ]
                 .into_iter()
                 .all(|v| on_device_pixel(v, window.scale_factor())),
-                stretches: (keyed && !self.zooming).then(|| {
+                stretches: keyed.then(|| {
                     let mut h = FxHasher::default();
                     row_frame.hash(&mut h);
-                    for v in [
-                        zoom,
-                        f32::from(font_size),
-                        f32::from(raster_size),
-                        f32::from(grid.baseline),
-                    ] {
+                    for v in [zoom, f32::from(font_size), f32::from(grid.baseline)] {
                         v.to_bits().hash(&mut h);
                     }
                     h.finish()
@@ -2309,8 +2278,7 @@ impl Element for TerminalElement {
         }
         // Box drawing, blocks, Braille and Powerline: drawn from the cell in its colours, so a
         // border never seams between rows and a heavy line keeps its weight. Settled, each is
-        // its atlas tile, rasterised once and tinted here (one sprite, like a glyph); in motion,
-        // its geometry.
+        // its atlas tile, rasterised once and tinted here (one sprite, like a glyph).
         let cell = sprite::Cell {
             w: f32::from(m.cell_width),
             h: f32::from(m.line_height),
@@ -2358,19 +2326,12 @@ impl Element for TerminalElement {
         // layer for all of them: a primitive outside a layer costs a bounds-tree insert of its
         // own (GPUI gives each line it paints a layer for the same reason), and the glyphs
         // still land above the quads painted before and below what is painted after.
-        let (zoom, font_size, raster) = (prepared.zoom, prepared.font_size, prepared.raster_size);
+        let (zoom, font_size) = (prepared.zoom, prepared.font_size);
         window.paint_layer(bounds, |window| {
             for row in prepared.rows.iter().filter(|row| !row.parts.segments.is_empty()) {
                 let key = key_of(Pass::Glyphs, row, under_cursor(row));
                 stretch(window, key, at(row), |window| {
-                    paint_words(
-                        window,
-                        &m,
-                        row,
-                        grid.baseline,
-                        cursor_text,
-                        (zoom, font_size, raster),
-                    );
+                    paint_words(window, &m, row, grid.baseline, cursor_text, (zoom, font_size));
                 });
             }
         });
@@ -2558,16 +2519,15 @@ fn paint_sprite(
     }
 }
 
-/// Paint one row's words on the baseline `baseline` below its top, at `font_size` from the
-/// raster at `raster` (the same but while the zoom is in motion), the glyphs scaled by `zoom`
-/// from the base-size shaping; those under a block cursor in its text colour.
+/// Paint one row's words on the baseline `baseline` below its top, at `font_size`, the glyphs
+/// scaled by `zoom` from the base-size shaping; those under a block cursor in its text colour.
 fn paint_words(
     window: &mut Window,
     m: &CellMetrics,
     row: &PreparedRow,
     baseline: Pixels,
     cursor_text: Option<CursorText>,
-    (zoom, font_size, raster): (f32, Pixels, Pixels),
+    (zoom, font_size): (f32, Pixels),
 ) {
     let baseline = row.y + baseline;
     for (col, word) in &row.parts.segments {
@@ -2578,12 +2538,8 @@ fn paint_words(
             let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
             let painted = if glyph.emoji {
                 window.paint_emoji(at, glyph.font, glyph.id, font_size)
-            } else if raster == font_size {
-                window.paint_glyph(at, glyph.font, glyph.id, font_size, color)
             } else {
-                // In motion: the nearest rung's raster, stretched (the fork).
-                let (f, g) = (glyph.font, glyph.id);
-                window.paint_glyph_scaled(at, f, g, raster, font_size, color)
+                window.paint_glyph(at, glyph.font, glyph.id, font_size, color)
             };
             if let Err(e) = painted {
                 tracing::debug!(error = %e, "paint glyph");

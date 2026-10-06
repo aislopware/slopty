@@ -21,7 +21,7 @@ use slopty_client::layout::WorkerKey;
 
 use super::WorkspaceView;
 use super::area::Placed;
-use super::tile::{Chrome, SHAPES_BELOW, title_ink};
+use super::tile::title_ink;
 use crate::colors::hsla;
 use crate::draw::Draw;
 
@@ -86,33 +86,30 @@ impl WorkspaceView {
     pub(super) fn render_missing(
         &self,
         placed: &Placed,
-        chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let state = self.away_state(tile.worker)?;
         let theme = &self.theme;
-        let k = chrome.k;
         let id = tile.item;
         let name = SharedString::from(self.worker_name(tile.worker));
-        let shapes = k < SHAPES_BELOW;
         let ink = hsla(title_ink(theme, placed.focused));
         // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`).
         let header = super::tab_look::row(theme, div().id("title"))
             .debug_selector(move || format!("title-{}", id.as_uuid()))
             .role(Role::Heading)
             .aria_label(name.clone())
-            .h(px(theme.density.header * k))
+            .h(px(theme.density.header))
             .w_full()
             .flex_none()
             .flex()
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(theme.typography.ui_size * k))
+            .text_size(px(theme.typography.ui_size))
             .text_color(ink)
             .font_family(theme.typography.ui_family.clone())
-            .when(!shapes, |el| {
+            .map(|el| {
                 let look = super::tab_look::Look {
                     shown: true,
                     first: true,
@@ -122,14 +119,14 @@ impl WorkspaceView {
                 el.child(
                     super::tab_look::tab(theme, div().id("lone-tab"), look)
                         .min_w_0()
-                        .gap(px(theme.spacing.sm * k))
-                        .pl(px(theme.spacing.inset() * k))
-                        .pr(px(theme.spacing.md * k))
-                        .child(crate::palette::lead_slot(theme, glyph, ink, k))
+                        .gap(px(theme.spacing.sm))
+                        .pl(px(theme.spacing.inset()))
+                        .pr(px(theme.spacing.md))
+                        .child(crate::palette::lead_slot(theme, glyph, ink))
                         .child(name.clone()),
                 )
             });
-        let pill = (!shapes).then(|| self.render_state_pill(tile, &state, true, chrome, cx));
+        let pill = Some(self.render_state_pill(tile, &state, true, cx));
         Some(
             div()
                 .id(ElementId::Uuid(*id.as_uuid()))

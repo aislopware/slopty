@@ -1,0 +1,202 @@
+//! The tabs' commands: new work in a tab of its own or in a pane split off the focused one
+//! (⌘T, ⌘⇧T, ⌘D, ⌘⇧D), the steps that list the project's tabs and the other projects, and
+//! closing the other tabs.
+//!
+//! A shell is the worker's to make, so where it goes is decided when its item comes, not when
+//! it is asked for: each ask is queued with where it goes ([`Opening`]), and the shells this
+//! client asked a worker for come back in the order they were asked. An ask the worker
+//! refused leaves the queue, and a link that drops takes its asks with it.
+
+use std::collections::VecDeque;
+
+use gpui::{Context, Window};
+use slopty_client::layout::tiling::TabId;
+use slopty_client::layout::{GroupKey, Side, Tab, TileRef, WorkerKey};
+use slopty_core::ItemId;
+use slopty_proto::RequestId;
+use slopty_proto::items::ItemKind;
+
+use super::WorkspaceView;
+use super::actions::{
+    CloseOtherTabs, MOVE_TO_PROJECT, MoveToProject, MoveToProjectOf, OTHER_TABS, OtherTabs,
+    ShowTab, SplitDown, SplitRight, StartAgent, StartThread,
+};
+use super::title_tabs::TitleTabsHost as _;
+use crate::palette::PaletteItem;
+
+/// Where a shell this client asked for goes once its item comes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Opening {
+    /// By the room rule beside the focused tile: what a tile opens.
+    Beside,
+    /// In a tab of its own (⌘⇧T).
+    Tab,
+    /// In a pane of its own on this side of the focused one (⌘D, ⌘⇧D).
+    Split(Side),
+}
+
+/// The shells asked of one worker and not come yet, the first asked first.
+pub(super) type Openings = VecDeque<(RequestId, Opening)>;
+
+impl WorkspaceView {
+    /// ⌘T: an agent's composer in a tab of its own, on the focused tile's machine (or the one
+    /// "+" chose) and in its folder, else where that machine last worked. The agent is the
+    /// one last started there, else the first it offers.
+    pub(super) fn start_agent(
+        &mut self,
+        _: &StartAgent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((worker, cwd)) = self.new_tile_target() else { return };
+        if !self.reachable_for(worker, "the agent", cx) {
+            return;
+        }
+        let Some(agent) = self.agent_for(worker) else {
+            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
+            return;
+        };
+        let cwd = cwd.unwrap_or_else(|| {
+            let latest =
+                self.recent_places(Some(&agent), cx).into_iter().find(|p| p.worker == worker);
+            latest.map_or_else(|| "~".to_owned(), |p| p.cwd)
+        });
+        self.begin_start(StartThread { worker, agent, cwd, worktree: false }, window, cx);
+    }
+
+    /// ⌘D: a shell in a pane of its own right of the focused one, in its folder.
+    pub(super) fn split_right(&mut self, _: &SplitRight, _w: &mut Window, cx: &mut Context<Self>) {
+        self.new_terminal_as(Opening::Split(Side::Right), cx);
+    }
+
+    /// ⌘⇧D: a shell in a pane of its own below the focused one, in its folder.
+    pub(super) fn split_down(&mut self, _: &SplitDown, _w: &mut Window, cx: &mut Context<Self>) {
+        self.new_terminal_as(Opening::Split(Side::Bottom), cx);
+    }
+
+    /// A shell on the focused tile's worker (or the one "+" chose), in the focused shell's
+    /// directory when it is on that worker, going where `opening` says.
+    pub(super) fn new_terminal_as(&mut self, opening: Opening, cx: &mut Context<Self>) {
+        let Some((key, cwd)) = self.new_tile_target() else { return };
+        self.open_session_as(key, cwd, opening, cx);
+    }
+
+    /// Where `id`, which this client caused on `key`, goes: a shell where its ask said, the
+    /// first one not come yet; anything else beside the focus.
+    pub(super) fn opening_of(&mut self, key: WorkerKey, id: ItemId) -> Opening {
+        let Some(w) = self.workers.get_mut(&key) else { return Opening::Beside };
+        let shell =
+            w.doc.get(id).is_some_and(|item| matches!(item.kind, ItemKind::Terminal { .. }));
+        let queued = if shell { w.openings.pop_front() } else { None };
+        queued.map_or(Opening::Beside, |(_, opening)| opening)
+    }
+
+    /// The ask under `request` on `key` failed: its shell never comes.
+    pub(super) fn opening_failed(&mut self, key: WorkerKey, request: RequestId) {
+        if let Some(w) = self.workers.get_mut(&key) {
+            w.openings.retain(|(r, _)| *r != request);
+        }
+    }
+
+    /// Put `tile`, opened here, where `opening` says, in the project on show; with nothing on
+    /// show, in a tab of its own project.
+    pub(super) fn open_as(&mut self, tile: TileRef, opening: Opening) {
+        let home = self.home_here(tile);
+        match opening {
+            Opening::Beside => self.layout.open_beside(tile, &home),
+            Opening::Tab => {
+                self.layout.new_tab(tile, &home);
+            }
+            Opening::Split(side) => self.layout.split_focused(tile, side, &home),
+        }
+    }
+
+    /// The project what is opened here goes to: the one on show, else `tile`'s own.
+    pub(super) fn home_here(&self, tile: TileRef) -> GroupKey {
+        match self.layout.shown_project() {
+            Some(project) => project.home().clone(),
+            None => self.home_for(tile),
+        }
+    }
+
+    /// "Close other tabs": every tab of the project on show but the one on show, and what is in
+    /// them, then back to the one kept. A shell whose command runs asks first, in its tab.
+    pub(super) fn close_other_tabs(
+        &mut self,
+        _: &CloseOtherTabs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.layout.shown_project() else { return };
+        let Some(kept) = project.shown().map(Tab::id) else { return };
+        let others: Vec<_> = project.tabs().iter().map(Tab::id).filter(|id| *id != kept).collect();
+        let back = self.focused();
+        for id in others {
+            self.close_title_tab(id, window, cx);
+        }
+        match back {
+            Some(tile) if self.layout.contains(tile) => self.focus_tile(tile, cx),
+            _ => self.layout_action(cx, |l| l.show_tab(kept)),
+        }
+    }
+
+    /// "Other tabs…": a line for each tab of the project on show, by its focused work, the one
+    /// on show ticked.
+    pub(super) fn other_tabs(
+        &mut self,
+        _: &OtherTabs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let lines = self
+            .title_tabs()
+            .into_iter()
+            .map(|tab| {
+                let mut line = PaletteItem::new(&tab.title, Box::new(ShowTab { id: tab.id }), &[]);
+                if tab.shown {
+                    "\u{2713}".clone_into(&mut line.keys);
+                }
+                line
+            })
+            .collect();
+        self.open_step(lines, OTHER_TABS, window, cx);
+    }
+
+    /// A tab picked in "Other tabs…".
+    pub(super) fn show_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        self.layout_action(cx, |l| l.show_tab(id));
+    }
+
+    /// "Move to project…": a line for each project but the focused tile's, by name.
+    pub(super) fn move_to_project(
+        &mut self,
+        _: &MoveToProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tile) = self.focused() else { return };
+        let here = self.layout.position(tile).map(|p| p.project);
+        let lines = (0..self.layout.projects().len())
+            .filter(|ix| Some(*ix) != here)
+            .filter_map(|ix| {
+                let home = self.layout.projects().get(ix)?.home().clone();
+                let name = self.project_name_at(ix);
+                Some(PaletteItem::new(&name, Box::new(MoveToProjectOf { home }), &[]))
+            })
+            .collect();
+        self.open_step(lines, MOVE_TO_PROJECT, window, cx);
+    }
+
+    /// A project picked in "Move to project…": the focused tile goes to a tab of its own
+    /// there, and the focus with it.
+    pub(super) fn move_to_project_of(
+        &mut self,
+        to: &MoveToProjectOf,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tile) = self.focused() else { return };
+        let home = to.home.clone();
+        self.layout_action(cx, |l| l.move_to_project(tile, &home));
+    }
+}

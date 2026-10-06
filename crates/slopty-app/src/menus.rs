@@ -30,10 +30,11 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     use slopty_ui::folder::{SAVE_TO_FILES, SaveToFiles, UPLOAD_FROM_FILES, UploadFromFiles};
     use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
-        AddWindow, CloseItem, EqualizePanes, FocusDown, FocusLeft, FocusRight, FocusUp, FontLarger,
-        FontReset, FontSmaller, GoBack, GoForward, MoveDown, MoveLeft, MoveRight, MoveUp, NewAgent,
-        NewNote, NewTerminal, NextAttention, NextProject, NextTab, OpenFile, OpenFolder,
-        OpenPalette, OpenUrl, PreviousProject, PreviousTab, SaveCopy, ToggleMute, ToggleStats,
+        AddWindow, CloseItem, CloseOtherTabs, EqualizePanes, FocusDown, FocusLeft, FocusRight,
+        FocusUp, FontLarger, FontReset, FontSmaller, GoBack, GoForward, MoveDown, MoveLeft,
+        MoveRight, MoveToProject, MoveUp, NewAgent, NewNote, NewTerminal, NextAttention,
+        NextProject, NextTab, OpenFile, OpenFolder, OpenPalette, OpenUrl, PreviousProject,
+        PreviousTab, SaveCopy, SplitDown, SplitRight, StartAgent, ToggleMute, ToggleStats,
         UndoClose, ZoomPane,
     };
 
@@ -52,8 +53,9 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     let mut menus = vec![
         Menu::new("Slopty").items(app),
         Menu::new("File").items([
+            MenuItem::action("New Agent", StartAgent),
+            MenuItem::action("New Agent…", NewAgent),
             MenuItem::action("New Shell", NewTerminal),
-            MenuItem::action("New Agent", NewAgent),
             MenuItem::action("New Note", NewNote),
             MenuItem::action("Add Window…", AddWindow),
             MenuItem::separator(),
@@ -94,6 +96,9 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
             MenuItem::action("Mute Sound", ToggleMute),
         ]),
         Menu::new("Layout").items([
+            MenuItem::action("Split Right", SplitRight),
+            MenuItem::action("Split Down", SplitDown),
+            MenuItem::separator(),
             MenuItem::action("Pane to the Left", FocusLeft),
             MenuItem::action("Pane to the Right", FocusRight),
             MenuItem::action("Pane Above", FocusUp),
@@ -104,11 +109,14 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
             MenuItem::action("Move Tile Up", MoveUp),
             MenuItem::action("Move Tile Down", MoveDown),
             MenuItem::separator(),
+            MenuItem::action("Move to Project…", MoveToProject),
+            MenuItem::separator(),
             MenuItem::action("Zoom Pane", ZoomPane),
             MenuItem::action("Equalize Panes", EqualizePanes),
             MenuItem::separator(),
             MenuItem::action("Previous Tab", PreviousTab),
             MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Close Other Tabs", CloseOtherTabs),
             MenuItem::action("Previous Project", PreviousProject),
             MenuItem::action("Next Project", NextProject),
             MenuItem::action("Back", GoBack),

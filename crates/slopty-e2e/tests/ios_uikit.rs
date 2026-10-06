@@ -196,7 +196,7 @@ mod tests {
     }
 
     /// Fingers through `touchesBegan:` / `touchesMoved:` / `touchesEnded:` and the pinch
-    /// recognizer's target. With two shells (⌘N): on an iPad they stand in two panes and a tap
+    /// recognizer's target. With two shells (⌘D): on an iPad they stand in two panes and a tap
     /// on the first gives it the keyboard; a horizontal two-finger swipe and a pinch over a
     /// shell move no pane; taps reach the titlebar's "…" menu and its "Command palette" row.
     #[tokio::test]
@@ -207,7 +207,7 @@ mod tests {
         let dump = shell(&mut stack).await;
         let first = dump.item("terminal").unwrap().clone();
         let drv = &mut stack.driver;
-        drv.keys("cmd-n").await.unwrap();
+        drv.keys("cmd-d").await.unwrap();
         let item_by = |d: &Dump, id: &str| d.items.iter().find(|i| i.id == id).unwrap().clone();
         let two = drv
             .wait_for("a second shell, focused", STEP, |d| {

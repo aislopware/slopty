@@ -303,7 +303,7 @@ impl RenderOnce for FindBar {
         });
         let step = |name: &str, icon, label, delta: i8| {
             let on_step = on_step.clone();
-            super::icon_button_at(&theme, part(name), icon, label, k)
+            super::icon_button(&theme, part(name), icon, label)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .when_some(on_step, move |el, on_step| {
                     el.on_click(move |_ev, window, cx| on_step(delta, window, cx))
@@ -343,7 +343,7 @@ impl RenderOnce for FindBar {
             .child(step("previous", Symbol::ChevronUp, "Previous match", -1))
             .child(step("next", Symbol::ChevronDown, "Next match", 1))
             .children(on_close.map(|on_close| {
-                super::icon_button_at(&theme, part("close"), Symbol::Xmark, "Close find", k)
+                super::icon_button(&theme, part("close"), Symbol::Xmark, "Close find")
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(move |_ev, window, cx| on_close(window, cx))
             }));

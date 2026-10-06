@@ -1938,3 +1938,23 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `bodies::a_double_click_on_a_sash_makes_its_panes_equal`,
     `tiles::a_pane_of_tabs_draws_a_tab_per_tile`, and `rooms::nothing_escapes_its_tile_at_any_room`
     at every pane width. The cost of a sash drag is in `MEASUREMENTS.md` (2026-10-07).
+
+- ✅ **The tab and pane keys** (2026-10-07, step 4 of the study's §4.2). ⌘T opens an agent's
+  composer in a tab of its own. It starts on the focused tile's machine, in its folder, else
+  where that machine last worked, with the agent last started there. "New agent…" keeps its
+  steps for a pick across machines and has no key of its own. ⌘⇧T opens a terminal in a tab of
+  its own. ⌘D and ⌘⇧D split a terminal off the focused pane, right and down. ⌘N is no longer a
+  second "new shell". An editor's ⌘D (the next occurrence) is bound deeper and wins in its
+  text. The palette adds "Other tabs…", "Close other tabs" and "Move to project…", each
+  offered only while it would do something.
+  - **A shell goes where its ask said once its item comes.** The worker makes a shell's item,
+    so its place is decided when the item arrives, not when it is asked for. Each ask is queued
+    on its worker with where it goes, and the shells this client asked a worker for come back
+    in the order they were asked. An ask the worker refuses (`WorkerMsg::Failed` under its
+    request) leaves the queue, and a link that drops takes its asks with it, so one lost answer
+    never shifts every later shell into the wrong place.
+  - Tests: `workspace::tests::new_shells_open_in_a_tab_or_split_off_the_focused_pane`,
+    `a_refused_shell_leaves_the_next_one_its_own_place`, and
+    `tab_commands::{cmd_t_starts_an_agent_in_a_tab_of_its_own_where_the_focus_works,
+    other_tabs_lists_the_tabs_and_close_other_tabs_keeps_the_one_on_show,
+    move_to_project_takes_the_tile_to_a_tab_of_the_project_picked}`.

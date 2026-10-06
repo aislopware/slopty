@@ -468,7 +468,7 @@ impl WindowPicker {
             .cursor_pointer()
             .active(move |st| st.bg(hsla(pressed)))
             .on_mouse_move(cx.listener(move |this, _ev, _w, cx| this.point_at(ix, cx)))
-            .child(lead_slot(theme, icon, hsla(icon_ink), 1.0))
+            .child(lead_slot(theme, icon, hsla(icon_ink)))
             .child(
                 div()
                     .flex_none()

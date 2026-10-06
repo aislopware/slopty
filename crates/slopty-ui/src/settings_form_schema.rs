@@ -424,6 +424,11 @@ fn key_group(command: &Command) -> &'static str {
                         | "go_forward"
                         | "previous_pane_tab"
                         | "next_pane_tab"
+                        | "split_right"
+                        | "split_down"
+                        | "other_tabs"
+                        | "close_other_tabs"
+                        | "move_to_project"
                 );
             if layout { "Layout" } else { "General" }
         }
@@ -671,7 +676,7 @@ mod tests {
             |key: &str| listed.iter().find(|r| r.key == key).unwrap_or_else(|| panic!("{key}"));
         let new = line("workspace.new_terminal");
         assert_eq!((new.group, new.label.as_str()), ("General", "New terminal"));
-        assert_eq!((new.keys.clone(), new.set), (vec!["⌘T".into(), "⌘N".into()], false));
+        assert_eq!((new.keys.clone(), new.set), (vec!["⇧⌘T".into()], false));
         let note = line("workspace.new_note");
         assert_eq!(
             (note.keys.clone(), note.defaults.clone()),

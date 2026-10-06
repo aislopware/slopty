@@ -273,6 +273,7 @@ impl WorkspaceView {
         w.watched.clear();
         w.watched_folders.clear();
         w.pending_opens.clear();
+        w.openings.clear();
         w.failed_opens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
@@ -322,6 +323,8 @@ impl WorkspaceView {
         w.relay.reset();
         w.relay_due = None;
         w.pending_opens.clear();
+        // A shell asked for on it never comes.
+        w.openings.clear();
         // A stream opened on the link that dropped has nothing more coming.
         w.fresh_screens.clear();
         if let Some(sized) = w.sized.as_mut() {
@@ -567,7 +570,14 @@ impl WorkspaceView {
 
     /// An open this client asked of `key` failed: the tile it would have made never comes, so
     /// the person hears why.
-    pub fn open_failed(&mut self, key: WorkerKey, message: &str, cx: &mut Context<Self>) {
+    pub fn open_failed(
+        &mut self,
+        key: WorkerKey,
+        request: slopty_proto::RequestId,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.opening_failed(key, request);
         let name = self.workers.get(&key).map_or("the machine", |w| w.name.as_str());
         let text = format!("Could not open a terminal on {name}: {message}");
         self.show_notice(text, cx);
@@ -661,7 +671,8 @@ impl WorkspaceView {
             ItemChange::Added { id, by_me } => {
                 let tile = TileRef { worker: key, item: id };
                 if by_me {
-                    self.open_here(tile);
+                    let opening = self.opening_of(key, id);
+                    self.open_as(tile, opening);
                 } else {
                     self.place_from_elsewhere(&[tile]);
                 }

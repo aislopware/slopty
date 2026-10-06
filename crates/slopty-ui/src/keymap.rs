@@ -281,8 +281,12 @@ pub fn defaults() -> Vec<Command> {
         Command::new(scope, name, action, defaults, contexts)
     }
     let mut out = vec![
-        c(Workspace, "new_terminal", ws::NewTerminal, &["cmd-t", "cmd-n"], W),
-        c(Workspace, "new_agent", ws::NewAgent, &["cmd-shift-t"], W),
+        c(Workspace, "start_agent", ws::StartAgent, &["cmd-t"], W),
+        c(Workspace, "new_terminal", ws::NewTerminal, &["cmd-shift-t"], W),
+        c(Workspace, "new_agent", ws::NewAgent, &[], W),
+        // An editor's ⌘D, the next occurrence, is deeper and wins in its text.
+        c(Workspace, "split_right", ws::SplitRight, &["cmd-d"], W),
+        c(Workspace, "split_down", ws::SplitDown, &["cmd-shift-d"], W),
         c(Workspace, "new_note", ws::NewNote, &["cmd-shift-n"], W),
         c(Workspace, "add_window", ws::AddWindow, &["cmd-o"], W),
         c(Workspace, "open_file", ws::OpenFile, &["cmd-p"], W),
@@ -354,6 +358,9 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "go_forward", ws::GoForward, &["cmd-]"], W),
         c(Workspace, "previous_pane_tab", ws::PreviousPaneTab, &["cmd-alt-["], W),
         c(Workspace, "next_pane_tab", ws::NextPaneTab, &["cmd-alt-]"], W),
+        c(Workspace, "other_tabs", ws::OtherTabs, &[], W),
+        c(Workspace, "close_other_tabs", ws::CloseOtherTabs, &[], W),
+        c(Workspace, "move_to_project", ws::MoveToProject, &[], W),
         c(Workspace, "font_larger", ws::FontLarger, &["cmd-=", "cmd-shift-="], W),
         c(Workspace, "font_smaller", ws::FontSmaller, &["cmd--"], W),
         c(Workspace, "font_reset", ws::FontReset, &["cmd-0"], W),

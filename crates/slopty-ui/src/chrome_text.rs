@@ -1,15 +1,13 @@
-//! Tile chrome text: a label shaped once at its base size and painted at the overview's zoom.
+//! Chrome text: a label shaped once at its base size and painted at its view's zoom `k`.
 //!
-//! GPUI's text element shapes at the painted size and measures itself through taffy, so a zoom
-//! step re-shapes every title and pill in the workspace and lays each out again; and since every
-//! step of a zoom is a new font size, the glyph atlas rasterises every glyph again too. This
-//! element shapes the label at its base size once (a global cache swept per frame, like the
-//! terminal's words), sizes itself by arithmetic (`shaped width × k`) instead of a measure
-//! callback, paints each glyph at `base × k` through `Window::paint_glyph`, and while the
-//! workspace says the zoom is in motion draws from a raster on the size ladder stretched to the
-//! painted size (`Window::paint_glyph_scaled`, the fork), exact again on the frame the motion
-//! settles. At `k = 1` and at rest it paints what GPUI's text element paints: the same
-//! shaping, the same baseline, the same glyph origins.
+//! GPUI's text element shapes at the painted size and measures itself through taffy, so a
+//! label redrawn every frame (a tile's title, a pill, a badge) is shaped and laid out again
+//! each time. This element shapes the label at its base size once (a global cache swept per
+//! frame, like the terminal's words), sizes itself by arithmetic (`shaped width × k`) instead
+//! of a measure callback, and paints each glyph at `base × k` through `Window::paint_glyph`.
+//! At `k = 1` it paints what GPUI's text element paints: the same shaping, the same baseline,
+//! the same glyph origins. It fills its parent and ends in an ellipsis at either end where a
+//! title needs it.
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -21,8 +19,6 @@ use gpui::{
     ShapedRun, SharedString, Style, TextRun, Window, point, px, relative,
 };
 
-use crate::fonts;
-
 /// A label of the item chrome (title, pill, badge, heading), shaped at `base` and painted at
 /// `base × k`.
 #[derive(Debug)]
@@ -30,7 +26,6 @@ pub struct ChromeText {
     text: SharedString,
     base: Pixels,
     k: f32,
-    zooming: bool,
     fill: bool,
     /// Where a filled label gives way: its start rather than its end.
     from_start: bool,
@@ -40,14 +35,7 @@ impl ChromeText {
     /// `text` at `base × k` points, in the font and colour of the enclosing text style.
     #[must_use]
     pub fn new(text: impl Into<SharedString>, base: Pixels, k: f32) -> Self {
-        Self { text: text.into(), base, k, zooming: false, fill: false, from_start: false }
-    }
-
-    /// The zoom is in motion: paint from a raster on the size ladder, stretched.
-    #[must_use]
-    pub const fn zooming(mut self, on: bool) -> Self {
-        self.zooming = on;
-        self
+        Self { text: text.into(), base, k, fill: false, from_start: false }
     }
 
     /// Take the parent's width and end the text with an ellipsis where it does not fit
@@ -189,13 +177,11 @@ fn cut_start_at(
     xs.get(keep).map(|at| Cut { keep, at: *at })
 }
 
-/// How the glyphs are painted: the size, the raster size they come from and the colour.
+/// How the glyphs are painted: the size and the colour.
 #[derive(Clone, Copy)]
 struct Paint {
     /// The painted font size (`base × k`).
     size: Pixels,
-    /// The size the raster comes from: `size`, or a rung of the ladder while zooming.
-    raster: Pixels,
     color: Hsla,
 }
 
@@ -207,7 +193,7 @@ struct Place {
     k: f32,
 }
 
-/// Paint one glyph: exact at the painted size, or a stretched ladder raster while zooming.
+/// Paint one glyph at the painted size.
 fn paint_glyph(
     window: &mut Window,
     at: Point<Pixels>,
@@ -215,13 +201,11 @@ fn paint_glyph(
     glyph: &ShapedGlyph,
     paint: Paint,
 ) {
-    let Paint { size, raster, color } = paint;
+    let Paint { size, color } = paint;
     let painted = if glyph.is_emoji {
         window.paint_emoji(at, run.font_id, glyph.id, size)
-    } else if raster == size {
-        window.paint_glyph(at, run.font_id, glyph.id, size, color)
     } else {
-        window.paint_glyph_scaled(at, run.font_id, glyph.id, raster, size, color)
+        window.paint_glyph(at, run.font_id, glyph.id, size, color)
     };
     if let Err(e) = painted {
         tracing::debug!(error = %e, "paint chrome glyph");
@@ -377,8 +361,7 @@ impl Element for ChromeText {
         _cx: &mut App,
     ) {
         let (k, size) = (self.k, request_layout.font_size);
-        let raster = if self.zooming { fonts::raster_rung(size) } else { size };
-        let paint = Paint { size, raster, color: request_layout.color };
+        let paint = Paint { size, color: request_layout.color };
         let layout = request_layout.shaped.line.layout();
         // GPUI centres the line in its line height: the same padding, the same baseline.
         let padding_top = (bounds.size.height - (layout.ascent + layout.descent) * k) / 2.0;

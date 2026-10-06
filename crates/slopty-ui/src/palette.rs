@@ -1153,8 +1153,7 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
 /// It never changes while the row lives, so every title starts on one edge and the eye finds
 /// the same agent in the same column; how the row is doing is said at its line's end
 /// ([`icons::status_mark`]), never on the mark (`docs/decisions/brand.md`, "Each agent wears
-/// its owner's mark"). `k` is the chrome's zoom (a tile header's in the overview); a list
-/// passes 1.
+/// its owner's mark").
 ///
 /// Every mark is drawn at the row title's size in the whole slot ([`IconSize::Lead`]), at the
 /// regular weight beside a regular title ([`lead_slot_weighted`] for the others). An agent's
@@ -1163,9 +1162,8 @@ pub(crate) fn lead_slot(
     theme: &Theme,
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
-    k: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    lead_slot_weighted(theme, mark, icons::Weight::Regular, ink, k)
+    lead_slot_weighted(theme, mark, icons::Weight::Regular, ink)
 }
 
 /// [`lead_slot`] beside a title of another weight: a symbol at `weight`, the title's
@@ -1175,10 +1173,9 @@ pub(crate) fn lead_slot_weighted(
     mark: impl Into<Mark>,
     weight: icons::Weight,
     ink: gpui::Hsla,
-    k: f32,
 ) -> gpui::Stateful<gpui::Div> {
     let mark = mark.into();
-    let large = px(IconSize::Lead.slot(theme) * k);
+    let large = px(IconSize::Lead.slot(theme));
     let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).weight(weight).slot(large, ink);
     div()
         .id("lead")
@@ -1947,7 +1944,7 @@ impl CommandPalette {
             // edge.
             .children(match item.icon {
                 None => self.marked.then(|| empty_slot(theme).into_any_element()),
-                Some(icon) => Some(lead_slot(theme, icon, hsla(icon_ink), 1.0).into_any_element()),
+                Some(icon) => Some(lead_slot(theme, icon, hsla(icon_ink)).into_any_element()),
             })
             .child(
                 div()

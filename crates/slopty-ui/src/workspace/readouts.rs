@@ -533,7 +533,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .map(kit::eased)
             .hover(move |el| el.bg(hsla(s.hover)))
-            .child(crate::palette::lead_slot(theme, mark, hsla(s.text_secondary), 1.0))
+            .child(crate::palette::lead_slot(theme, mark, hsla(s.text_secondary)))
             .child(
                 div()
                     .flex_1()

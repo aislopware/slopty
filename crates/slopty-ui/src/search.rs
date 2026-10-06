@@ -746,7 +746,6 @@ impl ProjectSearch {
                         Symbol::ArrowUpAndDown,
                         CONTEXT_LINES,
                         self.context,
-                        1.0,
                     )
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _ev, _window, cx| {

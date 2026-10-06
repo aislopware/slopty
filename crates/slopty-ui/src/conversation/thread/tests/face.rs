@@ -289,8 +289,9 @@ fn disc(
     })
 }
 
-/// The composer's disc stops the turn while it runs and nothing is typed, in the neutral solid,
-/// and sends what is typed, in the green that sets work going. It is round either way.
+/// The composer's square stops the turn while it runs and nothing is typed and sends what is
+/// typed, in the neutral solid either way: 26 pt at a control's radius, never a disc, never
+/// the green.
 #[gpui::test]
 fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -308,14 +309,16 @@ fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     let fill = |c| gpui::Background::from(crate::colors::hsla(c));
     let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
-    let (painted, round) = disc(cx, stop).expect("the stop's disc");
+    let square = theme.radii.sm / crate::kit::message::SEND;
+    assert!((f32::from(stop.size.width) - crate::kit::message::SEND).abs() < 0.5, "{stop:?}");
+    let (painted, round) = disc(cx, stop).expect("the stop's square");
     assert_eq!(painted, fill(theme.surfaces.solid), "stopping is the solid");
-    assert!(round >= 0.49, "a disc: {round}");
+    assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     cx.simulate_input("And the docs");
     let send = cx.debug_bounds("thread-send").expect("typed: send");
-    let (painted, round) = disc(cx, send).expect("the send's disc");
-    assert_eq!(painted, fill(theme.surfaces.accent_fill), "sending is the green");
-    assert!(round >= 0.49, "a disc: {round}");
+    let (painted, round) = disc(cx, send).expect("the send's square");
+    assert_eq!(painted, fill(theme.surfaces.solid), "sending is the solid too");
+    assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     let send = send.center();
     cx.simulate_click(send, Modifiers::none());
     assert!(
@@ -432,24 +435,6 @@ fn a_long_open_thread_survives_hard_scrolling(cx: &mut TestAppContext) {
     }
     let at_end = view.read_with(cx, |v, _| v.following());
     assert_eq!(cx.debug_bounds("thread-down").is_some(), !at_end, "the way down tells the truth");
-}
-
-/// At the overview's small zoom the composer, its field's words included, shrinks with the
-/// rest of the thread rather than keeping its full size.
-#[gpui::test]
-fn the_composer_shrinks_with_the_zoom(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let state = fixtures::empty();
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    let tall = cx.debug_bounds("thread-composer").expect("the composer").size.height;
-    view.update(cx, |v, cx| v.set_layout(0.25, 800.0, cx));
-    cx.run_until_parked();
-    let small = cx.debug_bounds("thread-composer").expect("the composer").size.height;
-    assert!(small <= tall * 0.3, "{small:?} against {tall:?} at a quarter");
 }
 
 /// The agent's background work stays out of the way: a chip says how much runs, and opens
@@ -1124,4 +1109,28 @@ fn the_add_menu_offers_photos_where_they_live(cx: &mut TestAppContext) {
         "it asks for the Photos picker"
     );
     assert!(cx.debug_bounds("thread-add-menu").is_none(), "and the menu closes");
+}
+
+/// Boxed in a roomy pane, the composer stands inside the column's gutters at a card's radius;
+/// in a narrow one it runs the pane's whole width to its foot, under a sash line.
+#[gpui::test]
+fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::thread("edit");
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    let theme = slopty_theme::Theme::default();
+    let narrow = crate::kit::Room::narrow_below(&theme) - 40.0;
+    for (width, bleeds) in [(800.0, false), (narrow, true)] {
+        view.update(cx, |v, cx| v.set_layout(1.0, width, cx));
+        cx.run_until_parked();
+        let pane = cx.debug_bounds("thread").expect("the thread");
+        let composer = cx.debug_bounds("thread-composer").expect("the composer");
+        let whole = (composer.size.width - pane.size.width).abs() < px(0.5);
+        assert_eq!(whole, bleeds, "{width}: {composer:?} in {pane:?}");
+        let at_foot = (composer.bottom() - pane.bottom()).abs() < px(0.5);
+        assert_eq!(at_foot, bleeds, "{width}: at the foot only when it bleeds");
+    }
 }

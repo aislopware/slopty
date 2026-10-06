@@ -2950,7 +2950,6 @@ impl WorkspaceView {
                 self.machine_glyph(key),
                 weight_beside(named),
                 hsla(ink),
-                1.0,
             )
         };
         let lead = match worker.health {
@@ -3194,7 +3193,6 @@ impl WorkspaceView {
             group.glyph,
             weight_beside(named),
             hsla(group_ink(theme, &group.key)),
-            1.0,
         );
         let name_key = key.clone();
         let name = div()
@@ -3316,7 +3314,7 @@ impl WorkspaceView {
         // The board wears its project's own colour, as the project's head above it does.
         let project_key = GroupKey::new(fact::PROJECT, board.project.as_str());
         let ink = kit::identity_ink(theme, &project_key);
-        let lead = crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(ink), 1.0);
+        let lead = crate::palette::lead_slot(theme, Symbol::RectangleSplit3x1, hsla(ink));
         let words_id = id.clone();
         let project = board.project.clone();
         row(theme, kit::Row::One, format!("nav-board-{id}"), label, false)
@@ -3355,7 +3353,7 @@ impl WorkspaceView {
         let strength = row_strength(t.status.or(Some(Status::Working)), false);
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         let state = t.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_secondary), 1.0)
+        let lead = crate::palette::lead_slot(theme, t.glyph, faded(s.text_secondary))
             .debug_selector(move || format!("nav-thread-kind-{id}"));
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
@@ -3471,7 +3469,7 @@ impl WorkspaceView {
         let faded = move |tone: Rgb| hsla_alpha(tone, strength);
         // What the row is leads it, and never changes while it lives: its kind, or its agent's
         // own mark, so the eye finds the same agent in the same column.
-        let lead = crate::palette::lead_slot(theme, t.kind, faded(ink), 1.0)
+        let lead = crate::palette::lead_slot(theme, t.kind, faded(ink))
             .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end, by precedence: needs you, failed, at work (a running
         // command's clock beside it), away; else the unseen dot, else the age. The state is a
@@ -3514,12 +3512,11 @@ impl WorkspaceView {
         // Under the pointer the line's end gives way to the row's action, in the same place, so
         // nothing on the line moves.
         let tile = t.tile;
-        let close = kit::icon_button_at(
+        let close = kit::icon_button(
             theme,
             format!("nav-close-{id}"),
             Symbol::Xmark,
             super::tile::CLOSE_TILE,
-            1.0,
         )
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _ev, window, cx| {

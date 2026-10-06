@@ -1,4 +1,4 @@
-//! "New agent…" (⌘⇧T), the one start: the agent, then the machine, then the folder, each step
+//! "New agent…", the start by steps: the agent, then the machine, then the folder, each step
 //! listing the last choice first and passed over with one choice; the palette's "New `agent`
 //! agent" lines starting at the machine; the start sent to that machine, and the thread it
 //! answers with opened as a tile of its own.
@@ -89,16 +89,16 @@ fn two_machines(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Two
     Two { studio, laptop }
 }
 
-/// ⌘⇧T asks which agent, then (where several can start it) which machine, then which folder,
-/// the focused shell's first; ↩ on each starts it. The next ⌘⇧T lists that agent, machine and
-/// folder first, so ↩ ↩ starts the same again.
+/// "New agent…" asks which agent, then (where several can start it) which machine, then which
+/// folder, the focused shell's first; ↩ on each starts it. The next "New agent…" lists that agent,
+/// machine and folder first, so ↩ ↩ starts the same again.
 #[gpui::test]
 fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let Two { mut studio, .. } = two_machines(&view, cx);
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["Claude Code", "Codex"], "which agent");
     // Each agent's line carries its own mark beside its name: the name is the choice.
@@ -126,7 +126,7 @@ fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     assert_eq!((agent, cwd.as_str()), (&AgentId::named(AgentId::CODEX), "/src/app"));
     assert_eq!(prompt, "fix the flaky test", "the first message goes as the start's prompt");
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["Codex", "Claude Code"], "the last agent first");
     cx.simulate_keystrokes("enter");
@@ -170,8 +170,8 @@ fn per_agent_lines_skip_the_agent_step(cx: &mut TestAppContext) {
 }
 
 /// With no server, each machine's own link says what it can start: Claude Code on both, so
-/// ⌘⇧T passes the agent step and asks which machine. A machine whose link found nothing offers
-/// nothing, and with none at all ⌘⇧T says so.
+/// "New agent…" passes the agent step and asks which machine. A machine whose link found nothing
+/// offers nothing, and with none at all "New agent…" says so.
 #[gpui::test]
 fn a_start_with_no_server_lists_each_machines_agents(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -181,14 +181,14 @@ fn a_start_with_no_server_lists_each_machines_agents(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
     assert_eq!(agent_labels(&view, cx), ["New Claude Code agent"]);
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["studio", "laptop"], "one agent: which machine");
     cx.simulate_keystrokes("escape");
     settle(cx);
 }
 
-/// A machine whose link found no agent offers none, and with none anywhere ⌘⇧T says so.
+/// A machine whose link found no agent offers none, and with none anywhere "New agent…" says so.
 #[gpui::test]
 fn with_no_agent_anywhere_new_agent_says_so(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -197,7 +197,7 @@ fn with_no_agent_anywhere_new_agent_says_so(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.set_worker_caps(studio.key, caps, cx));
     cx.run_until_parked();
     assert_eq!(agent_labels(&view, cx), Vec::<String>::new());
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some(agent_start::NO_AGENT));
 }
@@ -478,7 +478,7 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.past_sessions(key, answer(Vec::new()), cx));
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -606,7 +606,7 @@ fn a_past_session_is_found_by_what_was_asked_in_it(cx: &mut TestAppContext) {
         })
     };
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -721,7 +721,7 @@ fn a_start_is_written_in_the_threads_composer(cx: &mut TestAppContext) {
     };
     // The agent, then (Claude Code is on both machines) the machine, then the folder.
     let begin = |agent: &str, steps: usize, cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes("cmd-shift-t");
+        cx.dispatch_action(NewAgent);
         settle(cx);
         cx.simulate_input(agent);
         for _ in 0..steps {
@@ -841,7 +841,7 @@ fn a_start_can_take_a_new_worktree_of_a_repository(cx: &mut TestAppContext) {
     cx.run_until_parked();
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -900,7 +900,7 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     cx.run_until_parked();
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -983,7 +983,7 @@ fn a_start_tile_says_its_worktrees_setup_and_takes_it_again(cx: &mut TestAppCont
     });
     cx.run_until_parked();
     studio.drain();
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1081,7 +1081,7 @@ fn a_start_in_the_folder_runs_on_one_agent(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let Two { mut studio, .. } = two_machines(&view, cx);
     studio.drain();
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1105,7 +1105,7 @@ fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAp
     let (view, cx) = still_workspace(cx);
     let Two { mut studio, .. } = two_machines(&view, cx);
     studio.drain();
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1143,7 +1143,7 @@ fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAp
     let tile = view.read_with(cx, |v, _| v.tile_of_thread(thread)).expect("the thread's tile");
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     settle(cx);
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1215,7 +1215,7 @@ fn every_start_offers_where_threads_and_past_sessions_worked(cx: &mut TestAppCon
     };
     view.update_in(cx, |v, _w, cx| v.past_sessions(key, past(None, &[("/w/old", 1_000)]), cx));
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(
         step_lines(&view, cx),
@@ -1278,7 +1278,7 @@ fn one_ask_for_past_sessions_feeds_the_folder_and_session_steps(cx: &mut TestApp
             .count()
     };
     studio.drain();
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1315,7 +1315,7 @@ fn one_ask_for_past_sessions_feeds_the_folder_and_session_steps(cx: &mut TestApp
 
     cx.simulate_keystrokes("escape");
     settle(cx);
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -1395,7 +1395,7 @@ fn a_relaunch_starts_where_the_last_run_left_off(cx: &mut TestAppContext) {
     settle(cx);
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-shift-t");
+    cx.dispatch_action(NewAgent);
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["Codex", "Claude Code"], "the last run's agent first");
     cx.simulate_keystrokes("enter");

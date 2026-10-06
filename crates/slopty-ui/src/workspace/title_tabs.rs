@@ -63,62 +63,62 @@ pub(super) fn render<V: TitleTabsHost>(
     cx: &Draw<'_, V>,
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
-    let items: Vec<gpui::AnyElement> = tabs
-        .iter()
-        .map(|tab| {
-            let id = tab.id;
-            let n = id.get();
-            let ink = if tab.shown { s.text } else { s.text_secondary };
-            // Each mark under an id of its own: every one is a "status" image to the a11y tree.
-            let marks = tab.marks.iter().enumerate().map(|(i, st)| {
-                div()
-                    .id(("title-tab-mark", i))
-                    .flex_none()
-                    .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
-                    .child(crate::icons::status_mark(theme, Some(*st), 1.0))
-                    .into_any_element()
-            });
-            let id_close = format!("title-tab-close-{n}");
-            let close = tab_look::close(theme, id_close, CLOSE_TAB, tab.shown, TAB_GROUP, 1.0)
-                .on_click(cx.listener(move |this: &mut V, _ev, window, cx| {
-                    this.close_title_tab(id, window, cx);
-                }));
-            let look = Look { shown: tab.shown, ..Look::default() };
-            tab_look::tab(theme, div().id(("title-tab", n)), look)
-                .debug_selector(move || format!("title-tab-{n}"))
-                .group(TAB_GROUP)
-                .role(Role::Tab)
-                .aria_label(tab.title.clone())
-                .aria_selected(tab.shown)
-                .flex_initial()
-                .min_w(px(TAB_MIN))
-                .max_w(px(TAB_MAX))
-                .gap(px(theme.spacing.xs))
-                .pl(px(theme.spacing.sm))
-                .pr(px(theme.spacing.xs))
-                .text_color(hsla(ink))
-                .when(tab.shown, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this: &mut V, _ev: &MouseDownEvent, _window, cx| {
-                        this.show_title_tab(id, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(
+    let items: Vec<gpui::AnyElement> =
+        tabs.iter()
+            .map(|tab| {
+                let id = tab.id;
+                let n = id.get();
+                let ink = if tab.shown { s.text } else { s.text_secondary };
+                // Each mark under an id of its own: every one is a "status" image to the a11y tree.
+                let marks = tab.marks.iter().enumerate().map(|(i, st)| {
                     div()
-                        .flex_auto()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(tab.title.clone()),
-                )
-                .children(marks)
-                .child(close)
-                .into_any_element()
-        })
-        .collect();
+                        .id(("title-tab-mark", i))
+                        .flex_none()
+                        .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
+                        .child(crate::icons::status_mark(theme, Some(*st), 1.0))
+                        .into_any_element()
+                });
+                let id_close = format!("title-tab-close-{n}");
+                let close = tab_look::close(theme, id_close, CLOSE_TAB, tab.shown, TAB_GROUP)
+                    .on_click(cx.listener(move |this: &mut V, _ev, window, cx| {
+                        this.close_title_tab(id, window, cx);
+                    }));
+                let look = Look { shown: tab.shown, ..Look::default() };
+                tab_look::tab(theme, div().id(("title-tab", n)), look)
+                    .debug_selector(move || format!("title-tab-{n}"))
+                    .group(TAB_GROUP)
+                    .role(Role::Tab)
+                    .aria_label(tab.title.clone())
+                    .aria_selected(tab.shown)
+                    .flex_initial()
+                    .min_w(px(TAB_MIN))
+                    .max_w(px(TAB_MAX))
+                    .gap(px(theme.spacing.xs))
+                    .pl(px(theme.spacing.sm))
+                    .pr(px(theme.spacing.xs))
+                    .text_color(hsla(ink))
+                    .when(tab.shown, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut V, _ev: &MouseDownEvent, _window, cx| {
+                            this.show_title_tab(id, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_auto()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(tab.title.clone()),
+                    )
+                    .children(marks)
+                    .child(close)
+                    .into_any_element()
+            })
+            .collect();
     // The chevrons show only while tabs lie past that end.
     let (offset, most) = (scroll.offset().x, scroll.max_offset().x);
     let back = offset < px(0.0);

@@ -168,14 +168,13 @@ pub type Run = Rc<dyn Fn(String, &mut App)>;
 ///
 /// Its language, a "Copy" button and — with `run` — a "Run" button, over the code in the
 /// mono face on the raised surface. `ids` are the copy and run buttons' element ids and
-/// debug selectors; `scale` as for [`style`].
+/// debug selectors.
 #[must_use]
 pub fn code_block(
     ids: (String, String),
     lang: &str,
     body: &str,
     theme: &Theme,
-    scale: f32,
     run: Option<Run>,
 ) -> AnyElement {
     let s = &theme.surfaces;
@@ -187,7 +186,7 @@ pub fn code_block(
             .debug_selector(move || id)
             .role(Role::Button)
             .aria_label(label)
-            .px(px(spacing.xs * scale))
+            .px(px(spacing.xs))
             .rounded(px(theme.radii.xs))
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
@@ -214,10 +213,10 @@ pub fn code_block(
         .flex_col()
         .rounded(px(theme.radii.sm))
         .map(|el| crate::kit::inset(el, theme))
-        .px(px(spacing.sm * scale))
-        .py(px(spacing.xs * scale))
+        .px(px(spacing.sm))
+        .py(px(spacing.xs))
         .font_family(mono)
-        .text_size(px(theme.typography.small() * scale))
+        .text_size(px(theme.typography.small()))
         .child(
             div()
                 .flex()
@@ -225,14 +224,7 @@ pub fn code_block(
                 .items_center()
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(lang.to_owned()))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(spacing.xs * scale))
-                        .children(run)
-                        .child(copy),
-                ),
+                .child(div().flex().items_center().gap(px(spacing.xs)).children(run).child(copy)),
         )
         .child(
             div()
@@ -256,14 +248,13 @@ pub type Toggle = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 ///
 /// With `toggle` the box is a button that flips the line (a Markdown file's
 /// preview); without, it only shows
-/// (an answer). `id` names the box's element id and debug selector; `scale` as for [`style`].
+/// (an answer). `id` names the box's element id and debug selector.
 #[must_use]
 pub fn task_row(
     id: String,
     task: &Task,
     theme: &Theme,
     mono: &str,
-    scale: f32,
     toggle: Option<Toggle>,
 ) -> AnyElement {
     let Task { ix, done, text } = task;
@@ -273,8 +264,8 @@ pub fn task_row(
     // Linear's and Things' box: a notch under an icon's size beside the text, the small
     // radius and an outline, on the first line's middle. The font's tick at caption size, in
     // a 12 pt box with a sharp corner, read as an unstyled browser form.
-    let side = theme.typography.icon() * TASK_BOX * scale;
-    let line = theme.typography.ui_size * theme.typography.markdown_line_height * scale;
+    let side = theme.typography.icon() * TASK_BOX;
+    let line = theme.typography.ui_size * theme.typography.markdown_line_height;
     let toggled = if done { Toggled::True } else { Toggled::False };
     let mut label = String::from(if done { "Done: " } else { "To do: " });
     label.push_str(text);
@@ -288,7 +279,7 @@ pub fn task_row(
         .flex_none()
         .size(px(side))
         .mt(px(((line - side) / 2.0).max(0.0)))
-        .rounded(px(theme.radii.xs * scale))
+        .rounded(px(theme.radii.xs))
         .flex()
         .items_center()
         .justify_center()
@@ -304,7 +295,7 @@ pub fn task_row(
         });
     // The box is drawn at the text's size, but a finger or a pointer gets the density's
     // target round it: the pad spills into the gap and the margin, and moves nothing.
-    let pad = (theme.density.hit.mul_add(scale, -side) / 2.0).max(spacing.xs * scale);
+    let pad = ((theme.density.hit - side) / 2.0).max(spacing.xs);
     let mut hit = div().id(ElementId::Name(format!("{text_id}-hit").into())).flex_none();
     if let Some(toggle) = toggle {
         if !done {
@@ -324,7 +315,7 @@ pub fn task_row(
     div()
         .flex()
         .items_start()
-        .gap(px(spacing.xs * scale))
+        .gap(px(spacing.xs))
         .child(hit.child(boxed))
         .child(
             div()
@@ -344,7 +335,7 @@ pub fn task_row(
                         ElementId::Name(text_id.into()),
                         SharedString::from(text.to_owned()),
                     )
-                    .style(style(theme, mono, scale))
+                    .style(style(theme, mono))
                     .when(done, |text| text.text_color(hsla(s.text_muted)))
                     .selectable(false),
                 ),
@@ -357,19 +348,16 @@ pub fn task_row(
 /// Paragraphs one base unit apart, headings stepping down from the title size to the base,
 /// code in the terminal mono at `small()` on the raised surface with `radii.xs` corners.
 /// Colours come from the gpui-kit theme, which [`crate::kit::sync`] keeps on the same tokens.
-///
-/// `scale` multiplies every size, for a surface that is drawn at a zoom of its own (a file's
-/// preview in the overview); the chrome passes `1.0`.
 #[must_use]
-pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
-    let small = theme.typography.small() * scale;
+pub fn style(theme: &Theme, mono: &str) -> TextViewStyle {
+    let small = theme.typography.small();
     let code_block = gpui::StyleRefinement::default()
         .font_family(mono.to_owned())
         .text_size(px(small))
         .bg(hsla(theme.surfaces.card))
         .rounded(px(theme.radii.sm))
-        .px(px(theme.spacing.sm * scale))
-        .py(px(theme.spacing.xs * scale));
+        .px(px(theme.spacing.sm))
+        .py(px(theme.spacing.xs));
     let inline_code = gpui::HighlightStyle {
         background_color: Some(hsla(theme.surfaces.hover)),
         color: Some(hsla(theme.surfaces.text)),
@@ -379,9 +367,9 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let (title, base) = (theme.roles().panel_title.size, theme.typography.ui_size);
     TextViewStyle {
         paragraph_gap: gpui::rems(theme.spacing.sm / base),
-        heading_base_font_size: px(base * scale),
+        heading_base_font_size: px(base),
         heading_font_size: Some(std::sync::Arc::new(move |level: u8, _base| {
-            px((title - f32::from(level.saturating_sub(1))).max(base) * scale)
+            px((title - f32::from(level.saturating_sub(1))).max(base))
         })),
         code_block,
         inline_code,
@@ -697,7 +685,6 @@ mod tests {
                     &task,
                     &theme,
                     "Menlo",
-                    1.0,
                     Some(Rc::clone(&self.0)),
                 ))
             }
@@ -727,7 +714,7 @@ mod tests {
                 let theme = Theme::default();
                 let row = |ix, done| {
                     let task = Task { ix, done, text: "ship the bundle".to_owned() };
-                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", 1.0, None)
+                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", None)
                 };
                 div().p(px(40.0)).w(px(400.0)).child(row(0, false)).child(row(1, true))
             }
@@ -774,7 +761,7 @@ mod tests {
                 let theme = Theme::default();
                 let row = |ix, done| {
                     let task = Task { ix, done, text: "ship".to_owned() };
-                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", 1.0, None)
+                    task_row(format!("task-{ix}"), &task, &theme, "Menlo", None)
                 };
                 div().p(px(40.0)).w(px(400.0)).child(row(0, false)).child(row(1, true))
             }
