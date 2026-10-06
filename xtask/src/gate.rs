@@ -187,6 +187,7 @@ impl Shard {
             Self::Rest => &[
                 "slopty-server",
                 "slopty-serverd",
+                "slopty-push",
                 "slopty-cli",
                 "slopty-proto",
                 "slopty-agent",
