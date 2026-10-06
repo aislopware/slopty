@@ -912,12 +912,12 @@ mod tests {
         [320.0, crate::settings_form::sidebar_from(&Theme::default())]
     }
 
-    /// Each row's description, at `width`, by section: its row, its words and the height they
-    /// take. A sheet as wide as a phone's lists every section in one column.
-    fn descriptions(cx: &mut VisualTestContext, width: f32) -> Vec<(usize, &'static str, f32)> {
+    /// Each row shown at `width`, by section: its row and the height it stands. A sheet as
+    /// wide as a phone's lists every section in one column.
+    fn row_heights(cx: &mut VisualTestContext, width: f32) -> Vec<(usize, f32)> {
         cx.simulate_resize(gpui::size(px(width), px(900.0)));
         cx.run_until_parked();
-        let mut seen: Vec<(usize, &'static str, f32)> = Vec::new();
+        let mut seen: Vec<(usize, f32)> = Vec::new();
         for section in Section::ALL {
             if let Some(tab) =
                 cx.debug_bounds(leak(format!("settings-section-{}", section.index())))
@@ -925,69 +925,48 @@ mod tests {
                 cx.simulate_click(tab.center(), gpui::Modifiers::default());
                 cx.run_until_parked();
             }
-            for (ix, row) in rows().iter().enumerate().filter(|(_, r)| r.section == section) {
-                if seen.iter().any(|&(at, ..)| at == ix) {
+            for (ix, _) in rows().iter().enumerate().filter(|(_, r)| r.section == section) {
+                if seen.iter().any(|&(at, _)| at == ix) {
                     continue;
                 }
-                if let Some(meta) = cx.debug_bounds(leak(format!("settings-row-meta-{ix}"))) {
-                    seen.push((ix, row.meta(), f32::from(meta.size.height)));
+                if let Some(row) = cx.debug_bounds(leak(format!("settings-row-{ix}"))) {
+                    seen.push((ix, f32::from(row.size.height)));
                 }
             }
         }
         seen
     }
 
-    /// A description longer than its row wraps under the label rather than ending in an
-    /// ellipsis, in a column at most two thirds of the row on a sheet with the sidebar; its
-    /// control is told the whole of it, and the label and control share one line.
+    /// Every row is one line at the narrowest sheets, as System Settings draws its rows: its
+    /// title and its control, with no description under them. What the file says of it is
+    /// still its control's description to a screen reader, and a search still finds it.
     #[test]
-    fn a_description_wraps_and_never_cuts() {
+    fn every_row_is_one_line_at_the_narrowest_sheet() {
         let mut cx = real_text();
         let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
-        let all = descriptions(cx, narrowest()[1]);
-        let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
-        let &(ix, words, height) =
-            all.iter().max_by_key(|&&(_, words, _)| words.len()).expect("a description");
-        assert!(height > 1.5 * line, "{words:?} stands {height} tall, one line is {line}");
-        click(cx, leak(format!("settings-section-{}", rows()[ix].section.index())));
-        let row = cx.debug_bounds(leak(format!("settings-row-{ix}"))).expect("its row");
-        let meta = cx.debug_bounds(leak(format!("settings-row-meta-{ix}"))).expect("its words");
-        let share = crate::settings_form::DESCRIPTION_SHARE;
-        assert!(f32::from(meta.size.width) <= f32::from(row.size.width).mul_add(share, 0.5));
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        let label = rows()[ix].label();
-        assert!(
-            tree.iter()
-                .any(|n| n.label.as_deref() == Some(label)
-                    && n.description.as_deref() == Some(words)),
-            "{label}: {tree:#?}"
-        );
-    }
-
-    /// Every description fits two lines at the narrowest sheets it is written for, so none is
-    /// a wall; one longer is a copy defect, named here with its length.
-    #[test]
-    fn every_description_fits_two_lines_at_the_narrowest_sheet() {
-        let mut cx = real_text();
-        let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
+        let theme = Theme::default();
+        let one = theme.density.row + theme.spacing.sm;
         for width in narrowest() {
-            let all = descriptions(cx, width);
+            let all = row_heights(cx, width);
             assert!(all.len() > 20, "{width}: {} rows", all.len());
-            let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
-            let long: Vec<String> = all
+            let tall: Vec<String> = all
                 .iter()
-                .filter(|&&(_, _, h)| h > 2.0_f32.mul_add(line, 0.5))
-                .map(|&(ix, words, h)| {
-                    format!(
-                        "{} ({} chars, {:.1} lines): {words}",
-                        rows()[ix].label(),
-                        words.len(),
-                        h / line
-                    )
-                })
+                .filter(|&&(_, h)| (h - one).abs() > 0.5)
+                .map(|&(ix, h)| format!("{} ({h} pt)", rows()[ix].label()))
                 .collect();
-            assert!(long.is_empty(), "at {width} pt:\n{}", long.join("\n"));
+            assert!(tall.is_empty(), "at {width} pt, rows not one line:\n{}", tall.join("\n"));
         }
+        cx.simulate_resize(gpui::size(px(900.0), px(900.0)));
+        cx.run_until_parked();
+        click(cx, leak(format!("settings-section-{}", Section::Appearance.index())));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let row = rows().first().expect("a row");
+        assert!(
+            tree.iter().any(|n| n.label.as_deref() == Some(row.label())
+                && n.description.as_deref() == Some(row.meta())),
+            "{}: its words, to a screen reader",
+            row.label()
+        );
     }
 
     /// A test app shaping with the platform's own text system, so a line wraps where it would.

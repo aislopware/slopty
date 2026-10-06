@@ -448,9 +448,11 @@ impl ProjectView {
         Some((place, short, lines.join("\n")))
     }
 
-    /// `node`'s place as a quiet chip: the worker and its system, in a stronger ink while its
-    /// agent runs there. Its hint says the rest; a click moves a task not started yet ("Run
-    /// on…"), and a chip that cannot move is only words.
+    /// `node`'s place as a quiet chip: the worker and its system in words, in a stronger ink
+    /// while its agent runs there, with no machine glyph: a row carries one mark, its state's,
+    /// and a machine's colour is the navigator's alone. A pin keeps its lock, which the words
+    /// do not say. Its hint says the rest; a click moves a task not started yet ("Run on…"),
+    /// and a chip that cannot move is only words.
     fn where_chip(
         &self,
         board: &Board,
@@ -462,17 +464,10 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let machine =
-            crate::icons::machine(self.seen.workers.get(&place.worker).and_then(|w| w.form));
-        // The machine it runs on wears its own colour on its glyph; one it ran on is muted.
-        let (glyph, tone, ink) = match place.how {
-            PlaceHow::Runs => {
-                // The workspace's key for the worker, so its colour is the navigator's.
-                let key = slopty_client::layout::WorkerKey::new(place.worker.as_uuid().as_u128());
-                (machine, s.text_secondary, crate::kit::machine_ink(theme, key, false))
-            }
-            PlaceHow::Ran => (machine, s.text_muted, s.text_muted),
-            PlaceHow::Pinned => (Symbol::Lock, s.text_muted, s.text_muted),
+        let (pinned, tone) = match place.how {
+            PlaceHow::Runs => (false, s.text_secondary),
+            PlaceHow::Ran => (false, s.text_muted),
+            PlaceHow::Pinned => (true, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
         let id = format!("{prefix}-{}-where", node_key(node));
@@ -494,10 +489,12 @@ impl ProjectView {
             .overflow_hidden()
             .text_size(self.z(theme.roles().metadata.size))
             .text_color(hsla(tone))
-            .child(
-                icon(theme, glyph, IconSize::Inline, hsla(ink))
-                    .size(self.z(theme.typography.icon())),
-            )
+            .when(pinned, |el| {
+                el.child(
+                    icon(theme, Symbol::Lock, IconSize::Inline, hsla(tone))
+                        .size(self.z(theme.typography.icon())),
+                )
+            })
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
             .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
@@ -1461,19 +1458,16 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let side = self.z(theme.typography.icon());
+        // A pass is its word alone: the row's own done glyph already marks it.
         let (glyph, word, label) = match check {
             Check::Running { line, .. } => (
-                status_icon(theme, Status::Working, side, hsla(Status::Working.ink(theme))),
+                Some(status_icon(theme, Status::Working, side, hsla(Status::Working.ink(theme)))),
                 "Verifying",
                 format!("Verifying, {line}"),
             ),
-            Check::Verdict { run, .. } => (
-                icon(theme, Symbol::CheckmarkCircle, IconSize::Inline, hsla(s.success_fill))
-                    .size(side)
-                    .into_any_element(),
-                "Verified",
-                format!("Verifier passed {}", verdict_detail(run)),
-            ),
+            Check::Verdict { run, .. } => {
+                (None, "Verified", format!("Verifier passed {}", verdict_detail(run)))
+            }
         };
         let output = check.term().map(|term| self.output_link(key, term, cx));
         let selector = format!("{key}-check");
@@ -1488,7 +1482,7 @@ impl ProjectView {
             .whitespace_nowrap()
             .text_size(self.z(theme.roles().metadata.size))
             .text_color(hsla(s.text_muted))
-            .child(glyph)
+            .children(glyph)
             .child(word)
             .children(output)
     }

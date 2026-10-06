@@ -244,7 +244,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     window and no inspector.
 
 
-- ✅ **A description wraps to two lines and is never cut** (2026-10-04,
+- ⛔ **A description wraps to two lines and is never cut** (superseded 2026-10-06 by "The
+  settings pane is a macOS form"; 2026-10-04,
   `.research/rulings-2026-10-04.md` §4c). Each row's description was cut to one line, with the
   rest in a hover hint, so on a touch screen the rest could not be reached. The golden showed
   "Any monospace; JetBrains Mono is b…". This supersedes "A row holds one line" (`ui.md`,
@@ -260,9 +261,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     defect, and a test names it with its length. Those sheets are 320 pt (an iPad's Slide Over,
     the narrowest iOS gives) and the List overlay's width, the narrowest that keeps the sidebar.
     The copy pass that made them fit is in `slopty-settings`' doc comments' first lines.
-  - Tests: `slopty-ui` `settings_editor` `a_description_wraps_and_never_cuts`,
-    `every_description_fits_two_lines_at_the_narrowest_sheet`, both shaping with the platform's
-    own text system.
+  - Tests: the two description tests went with the descriptions (2026-10-06); their successor
+    is `settings_editor::tests::every_row_is_one_line_at_the_narrowest_sheet`, shaping with the
+    platform's own text system.
 
 - ✅ **Fewer settings: one alert, no frame-rate ceiling, no inspector switch, no external
   editor** (2026-10-04, the day's cuts; `docs/decisions/ui.md`, "One way to branch, and
@@ -373,8 +374,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     takes a chord from a default the file gives elsewhere and says so above the page
     ("One chord runs one command in a context", `keymap.rs`).
   - Tests: `settings_editor::tests::the_file_is_the_sidebars_advanced_path`,
-    `settings_editor::tests::a_description_wraps_and_never_cuts` (at the new narrowest width
-    with the sidebar), `settings_editor::tests::every_description_fits_two_lines_at_the_narrowest_sheet`.
+    `settings_editor::tests::every_row_is_one_line_at_the_narrowest_sheet` (the description
+    tests went with the descriptions, 2026-10-06).
     Goldens: `settings`, `settings-dark`, `settings-form`, `settings-keyboard`,
     `settings-about`.
 - ✅ **A map setting is edited entry by entry, in the form the file already gives it**
@@ -426,5 +427,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     do not fit (curly braces, a gear).
   - Tests: `settings_editor::tests::{the_columns_start_together,
     the_file_is_the_sidebars_advanced_path, a_narrow_sheet_keeps_its_heads_whole}` and
-    `settings_form::tests::a_groups_rows_are_one_card_under_its_label`. Goldens: `settings`,
+    `settings_form::tests::a_groups_rows_are_one_ring_under_its_label`. Goldens: `settings`,
     `settings-dark`, `settings-form`, `settings-keyboard`, `settings-about`, `settings-input`.
+
+- ✅ **The settings pane is a macOS form** (2026-10-06,
+  `.research/premium-foundations-2026-10-06.md` change 7). The page was a grey plane carrying
+  white cards, and every row stood two lines, its description under its title, with nothing
+  between rows. It read as a web form. Most descriptions only said the title again ("Follow the
+  system, or stay light or dark", "Empty keeps the theme's own").
+  - **The page lies on the content plane.** The sidebar keeps its tone step (`panel`).
+  - **A group is a ring.** A `border_subtle` hairline at `radii.md` runs round its rows, with
+    no fill, as t3code's settings groups are drawn. Its head is the section role in the
+    secondary tone, a row tall, at the group's leading inset.
+  - **A row is one line**, as System Settings draws it: the title in the action role at the
+    start and the control at the end, 36 pt tall on a pointer and 44 under a finger. Rows are
+    parted by an inset hairline that starts where the titles do. Under a row stands only what is
+    wrong with it: a value that was not written, in the error's colour, or a login item the
+    system holds off.
+  - **What a group must say is its footer.** The descriptions that restated their titles are
+    gone from the page. What only a sentence can say (an empty colour keeps the theme's own,
+    loopback and the tailnet are always let in) is said once under its group's ring, in the
+    metadata role and the muted tone (`settings_form_schema::FOOTERS`). Every row's own words
+    remain its control's description for VoiceOver and what a search finds, along with its
+    group's footer.
+  - This overrules S §7's "no rule between settings rows": that ruling assumed two-line rows,
+    which need none, and one-line rows do.
+  - Tests: `settings_form::tests::a_groups_rows_are_one_ring_under_its_label`,
+    `settings_editor::tests::every_row_is_one_line_at_the_narrowest_sheet`.

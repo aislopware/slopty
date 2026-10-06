@@ -4802,8 +4802,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `kit::sheet_pad` inside their hairline, and the rows (`kit::sheet_row`) round at 6 inside
     the sheet's 12, so the corners share a centre.
   - **Settings** set each group's rows in a card under its label, as System Settings and Zed's
-    settings do: the hover step in dark, the floating surface ringed by a hairline in light,
-    rows parted by the quiet hairline. Each row stays a child of the page, so the keyboard's
+    settings do (superseded 2026-10-06: a ring with no fill on the content plane, one-line rows;
+    `settings.md`, "The settings pane is a macOS form"): the hover step in dark, the floating
+    surface ringed by a hairline in light, rows parted by the quiet hairline. Each row stays a child of the page, so the keyboard's
     scrolling to a row still finds it.
   - **The green stays a meaning.** Links read in the text's tone, underlined under the pointer,
     their external-link glyph muted; a picker's tick is the text's; a notice's one action is
@@ -4822,7 +4823,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `chrome::the_workspace_in_view_carries_no_second_mark`,
     `nav_rows::a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer`,
     `overlays::a_sheets_rows_nest_in_its_corners`,
-    `settings_form::tests::a_groups_rows_are_one_card_under_its_label`.
+    `settings_form::tests::a_groups_rows_are_one_ring_under_its_label`.
 - ✅ **What the showcase showed: say each thing once, where it fits** (2026-10-02, design
   review of the showcase renders, `target/lanes/showcase-notes.md`). A dense workspace with
   three workers and agents at work showed where the chrome still crowded or lied.
@@ -5545,7 +5546,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: theme `elevation_and_density` (the pair, the rims' sides and steps); kit
     `a_card_rests_on_its_rim`, `a_secondary_button_catches_the_light`,
     `the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark`; settings
-    `a_groups_rows_are_one_card_under_its_label`.
+    `a_groups_rows_are_one_ring_under_its_label`.
 
 - ✅ **Stage 3 of the design-systems study: one composer shell, capsules, quieter marks,
   motion that respects frequency, and the finishing details** (2026-10-03,

@@ -416,11 +416,28 @@ impl Driver {
 
     /// Render the current frame to `path` and load it back, with what the frame says in words.
     ///
+    /// In a design review (`--review`) the same frame is also drawn at 2x beside the 1x renders
+    /// in the artifacts, as `<name>@2x.png`: what a Retina Mac shows, which is what the person
+    /// judges by. A golden stays 1x and passes or fails on its numbers.
+    ///
     /// # Errors
     ///
     /// When the app was built without the `e2e` feature, or the file cannot be read.
     pub async fn render(&mut self, path: &Path) -> Result<Frame> {
-        self.rendered(path, None).await
+        let frame = self.rendered(path, None).await?;
+        if crate::snapshot::Accept::from_env() == crate::snapshot::Accept::Review {
+            self.review_at_2x(path).await?;
+        }
+        Ok(frame)
+    }
+
+    /// The render at `path` drawn again at 2x into the artifacts as `<name>@2x.png`.
+    async fn review_at_2x(&mut self, path: &Path) -> Result<()> {
+        let dir = crate::harness::artifacts_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let name = path.file_stem().and_then(|n| n.to_str()).context("a render names a file")?;
+        let _frame = self.rendered(&dir.join(format!("{name}@2x.png")), Some(2.0)).await?;
+        Ok(())
     }
 
     /// [`Self::render`] at `scale` device pixels to the point rather than the window's own:

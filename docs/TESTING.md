@@ -47,7 +47,7 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    `render` is GPUI drawing its own window to a PNG, compared numerically with
    `crates/slopty-e2e/golden`, and what the same frame says in words (its accessibility tree's
    roles, labels and values, a line a node) compared exactly with the `.txt` beside it, so a
-   changed word fails with the lines that changed where the pixel tolerance cannot see it (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails on none, leaving each changed frame's render and diff in the artifacts, so a design review sees every golden in one run). `--filter <filterset>` (nextest's `-E`, such
+   changed word fails with the lines that changed where the pixel tolerance cannot see it (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails on none, leaving each changed frame's render and diff in the artifacts, so a design review sees every golden in one run; it also draws every render again at 2x beside the 1x ones, as `target/e2e/artifacts/<name>@2x.png`, the set shown to the person, since a 1x render is not what a Retina Mac shows). `--filter <filterset>` (nextest's `-E`, such
    as `test(a_folder_tile_browses_the_worker)`) runs only the tests it picks, in any case, and
    `--accept`/`--review` then touch only the goldens those tests render. `--no-build` reruns
    what the last run built without calling cargo, so a rerun right after a build takes seconds

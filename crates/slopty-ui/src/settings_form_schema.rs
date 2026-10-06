@@ -143,6 +143,43 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (Section::Network, "This Mac as a server", &["server.allow"]),
 ];
 
+/// What a group says under its rows, as System Settings notes a consequence under a group: what
+/// its rows' titles cannot say. A row has one line and no description of its own, since most
+/// only said its title again ("Follow the system, or stay light or dark"); the rest are said
+/// here once, for the group. A search still finds every row's own words ([`Row::haystack`]).
+const FOOTERS: &[(&str, &str)] = &[
+    ("Interface", "Reading size is for agents' answers and your messages; text size for the rest"),
+    (
+        "Light terminal colours",
+        "An empty colour keeps the theme's own; the chrome follows the background",
+    ),
+    (
+        "Dark terminal colours",
+        "An empty colour keeps the theme's own; the chrome follows the background",
+    ),
+    ("Font", "JetBrains Mono is built in. Zooming a tile changes its size for that tile only"),
+    ("Cursor", "Auto lets the shell or the editor choose"),
+    ("Text", "Text under the minimum contrast moves toward black or white; 1 keeps every colour"),
+    ("Behaviour", "When hidden, the alert sounds only while Slopty is behind other windows"),
+    ("Keys", "Secure keyboard entry keeps passwords typed here from other apps, as Terminal does"),
+    ("Clipboard", "Off, each machine keeps its own. A paste that would run a command asks first"),
+    ("Remote windows and desktops", "A stream grows toward its ceiling as the link allows"),
+    (THIS_APP, "The server lists your machines; it is empty until this app is set up"),
+    ("Share this Mac's shells and windows", "Loopback and the tailnet are always let in"),
+    ("This Mac as a server", "Loopback and the tailnet are always let in"),
+    ("Projects", "Live agents counts every agent running across the fleet, in a project or not"),
+    (
+        "Notes on your phone",
+        "A relay you deployed carries notes to your phone; your own APNs key needs none",
+    ),
+];
+
+/// What `group` says under its rows, where it says anything (`FOOTERS`).
+#[must_use]
+pub fn footer(group: &str) -> Option<&'static str> {
+    FOOTERS.iter().find(|(g, _)| *g == group).map(|(_, words)| *words)
+}
+
 /// The group of the app's own keys, which the system's [`System::OpenAtLogin`] closes.
 const THIS_APP: &str = "This app";
 
@@ -199,7 +236,8 @@ impl Row {
         &self.field.title
     }
 
-    /// What it does, under the label: two lines at most at the narrowest sheet.
+    /// What it does, in the file's own words: a search finds it by them, and the row says
+    /// nothing under its title ([`footer`] says what its group must).
     #[must_use]
     pub fn meta(&self) -> &'static str {
         &self.field.summary
@@ -209,9 +247,10 @@ impl Row {
     /// file spells it.
     #[must_use]
     pub fn haystack(&self) -> String {
+        let said = footer(self.group).unwrap_or_default();
         if self.system.is_some() {
             return format!(
-                "{} {} {} {}",
+                "{} {} {} {} {said}",
                 self.label(),
                 self.meta(),
                 self.group,
@@ -219,7 +258,7 @@ impl Row {
             );
         }
         format!(
-            "{} {} {} {} {}.{}",
+            "{} {} {} {} {}.{} {said}",
             self.label(),
             self.meta(),
             self.group,

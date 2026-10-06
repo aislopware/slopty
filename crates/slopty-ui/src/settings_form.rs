@@ -63,10 +63,6 @@ pub mod map;
 
 use schema::{KeyRow, Row, Section, System, rows};
 
-/// How much of a row's width its description may take: Zed's two thirds, so the words read as
-/// one column down the page whatever the control beside them.
-pub const DESCRIPTION_SHARE: f32 = 2.0 / 3.0;
-
 /// What the search field says before anything is typed.
 pub const SEARCH_PLACEHOLDER: &str = "Search settings";
 
@@ -1066,8 +1062,8 @@ impl SettingsForm {
     }
 
     /// A group's heading over the rows it names, as System Settings titles its groups: the
-    /// section role in the text's ink, a step of space over its card and more above it. In a
-    /// search or a single column it names the section instead.
+    /// section role in the secondary tone, on a row's height at the group's leading inset, with
+    /// space above it. In a search or a single column it names the section instead.
     fn heading(&self, text: &'static str, n: usize, first: bool) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
@@ -1077,10 +1073,29 @@ impl SettingsForm {
             .role(gpui::accesskit::Role::Heading)
             .aria_label(text)
             .flex_none()
-            .text_color(hsla(theme.surfaces.text))
-            .pt(px(if first { spacing.md } else { spacing.xl }))
-            .pb(px(spacing.sm))
+            .h(px(theme.density.row))
+            .flex()
+            .items_center()
+            .px(px(spacing.inset()))
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .mt(px(if first { spacing.sm } else { spacing.lg }))
             .child(text)
+            .into_any_element()
+    }
+
+    /// What a group says under its ring ([`schema::footer`]): the metadata role in the muted
+    /// tone, a step under the ring, at its leading inset.
+    fn footer(&self, words: &'static str, n: usize) -> AnyElement {
+        let theme = &self.theme;
+        crate::kit::typed(div(), theme.roles().metadata, 1.0)
+            .id(("settings-footer", n))
+            .debug_selector(move || format!("settings-footer-{n}"))
+            .aria_label(words)
+            .flex_none()
+            .pt(px(theme.spacing.xs))
+            .px(px(theme.spacing.inset()))
+            .text_color(hsla(theme.surfaces.text_muted))
+            .child(words)
             .into_any_element()
     }
 
@@ -1493,8 +1508,16 @@ impl SettingsForm {
         let mut parts: Vec<(Part, AnyElement)> = Vec::new();
         let mut placed = Vec::new();
         let mut last: Option<&'static str> = None;
+        // The group whose rows run now: its footer closes its ring when the next group starts.
+        let mut group: Option<&'static str> = None;
         for &ix in shown {
             let Some(row) = rows().get(ix) else { continue };
+            if group.is_some_and(|g| g != row.group)
+                && let Some(words) = group.and_then(schema::footer)
+            {
+                parts.push((Part::Apart, self.footer(words, parts.len())));
+            }
+            group = Some(row.group);
             let heading = if by_section { row.section.label() } else { row.group };
             if last != Some(heading) {
                 parts.push((Part::Apart, self.heading(heading, parts.len(), last.is_none())));
@@ -1505,6 +1528,9 @@ impl SettingsForm {
             if self.font_open && row.field.kind == Kind::Font {
                 parts.push((Part::Row { spaced: false }, self.font_list(ix, row, cx)));
             }
+        }
+        if let Some(words) = group.and_then(schema::footer) {
+            parts.push((Part::Apart, self.footer(words, parts.len())));
         }
         if let Some(said) = self.keys_said(&said) {
             parts.push((Part::Apart, said));
@@ -1556,59 +1582,65 @@ impl SettingsForm {
             .into_any_element()
     }
 
-    /// A row: its label with its control beside it, centred on the label's line, and under them
-    /// what it does, or why the value typed was not written, in the error's colour, until it is
-    /// typed again.
-    ///
-    /// The words wrap and are never cut: a hover hint reaches no finger, and a cut sentence
-    /// tells nothing. Beside the sidebar they keep to [`DESCRIPTION_SHARE`] of the row, a
-    /// column read down the page; on a phone's sheet they take the row, which is narrow
-    /// enough. Each is written to fit two lines at the narrowest sheet, so a row is as tall as
-    /// its words.
+    /// A row, one line as System Settings draws it: its title in the action role at the start
+    /// and its control at the end. What a group must say goes under its ring
+    /// ([`schema::footer`]); under the row goes only what is wrong with it: why a value typed
+    /// was not written, in the error's colour, until it is typed again, or where the system
+    /// holds the login item off.
     fn row(&self, ix: usize, row: &Row, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
-        let under = crate::kit::meta(div(), theme)
-            .line_height(px(theme.roles().metadata.line))
-            .w_full()
-            .min_w_0()
-            .when(!self.narrow, |el| el.max_w(gpui::relative(DESCRIPTION_SHARE)));
+        let under = |el: Div| {
+            crate::kit::meta(el, theme)
+                .line_height(px(theme.roles().metadata.line))
+                .w_full()
+                .min_w_0()
+                .pb(px(spacing.xs))
+        };
         let under = if let Some(error) = self.error(ix) {
-            under
-                .id(("settings-row-error", ix))
-                .debug_selector(move || format!("settings-row-error-{ix}"))
-                .role(gpui::accesskit::Role::Alert)
-                .aria_label(error.to_owned())
-                .text_color(hsla(s.error))
-                .child(SharedString::from(error.to_owned()))
+            Some(
+                under(div())
+                    .id(("settings-row-error", ix))
+                    .debug_selector(move || format!("settings-row-error-{ix}"))
+                    .role(gpui::accesskit::Role::Alert)
+                    .aria_label(error.to_owned())
+                    .text_color(hsla(s.error))
+                    .child(SharedString::from(error.to_owned())),
+            )
         } else {
-            under
-                .id(("settings-row-meta", ix))
-                .debug_selector(move || format!("settings-row-meta-{ix}"))
-                .child(self.meta(row))
+            let held =
+                row.system == Some(System::OpenAtLogin) && self.login == Some(Login::Blocked);
+            held.then(|| {
+                under(div())
+                    .id(("settings-row-meta", ix))
+                    .debug_selector(move || format!("settings-row-meta-{ix}"))
+                    .role(gpui::accesskit::Role::Status)
+                    .child(LOGIN_BLOCKED)
+            })
         };
         div()
             .id(("settings-row", ix))
             .debug_selector(move || format!("settings-row-{ix}"))
+            .w_full()
             .flex()
             .flex_col()
-            .gap(px(spacing.xxs))
-            .py(px(spacing.xs))
             .child(
                 div()
+                    .h(px(row_height(theme)))
                     .flex()
                     .items_center()
                     .gap(px(spacing.md))
                     .child(
-                        crate::kit::typed(div(), theme.roles().chrome, 1.0)
+                        crate::kit::typed(div(), theme.roles().action, 1.0)
                             .flex_1()
                             .min_w_0()
+                            .truncate()
                             .text_color(hsla(s.text))
                             .child(row.label()),
                     )
                     .child(div().flex_none().child(self.control(ix, row, cx))),
             )
-            .child(under)
+            .children(under)
             .children(self.map_entries(ix, row, cx))
             .into_any_element()
     }
@@ -2051,14 +2083,23 @@ enum Part {
     Apart,
 }
 
-/// The page's children with each run of rows set in a card ([`crate::kit::card_part`]), as
-/// System Settings groups them: white on the page's quiet well in light, a step over the sheet
-/// in dark. Its rows are parted by space alone: each has a description under its words, which
-/// already makes it a block, so a hairline between them only added lines. Each row stays a
-/// child of the page, so scrolling to one still finds it.
+/// A settings row's height: a row and a step on a pointer (36), the touch row (44) under a
+/// finger, as System Settings' rows stand taller than a list's.
+fn row_height(theme: &Theme) -> f32 {
+    let touch = theme.density.hit > slopty_theme::Density::COMPACT.hit;
+    if touch { theme.density.row } else { theme.density.row + theme.spacing.sm }
+}
+
+/// The page's children with each run of rows set in one ring, as System Settings groups them:
+/// a quiet hairline round the group at `radii.md` with no fill, the rows the content itself,
+/// each parted from the one before by an inset hairline that starts where the titles do. Each
+/// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
+/// its row with no rule.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
+    let ring = hsla(theme.surfaces.border_subtle);
+    let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
     parts
         .into_iter()
         .enumerate()
@@ -2066,10 +2107,28 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
             let Part::Row { spaced } = part else { return child };
             let first = !row_at(i.checked_sub(1));
             let last = !row_at(i.checked_add(1));
-            crate::kit::card_part(theme, first, last)
+            div()
                 .debug_selector(move || format!("settings-card-{i}"))
-                .px(px(theme.spacing.inset()))
-                .when(spaced && !first, |el| el.pt(px(theme.spacing.xs)))
+                .relative()
+                .w_full()
+                .px(inset)
+                .border_color(ring)
+                .border_l(crate::kit::HAIR)
+                .border_r(crate::kit::HAIR)
+                .when(first, |el| el.border_t(crate::kit::HAIR).rounded_t(r))
+                .when(last, |el| el.border_b(crate::kit::HAIR).rounded_b(r))
+                .when(spaced && !first, |el| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("settings-rule-{i}"))
+                            .absolute()
+                            .top_0()
+                            .left(inset)
+                            .right_0()
+                            .h(crate::kit::HAIR)
+                            .bg(ring),
+                    )
+                })
                 .child(child)
                 .into_any_element()
         })
@@ -2215,21 +2274,26 @@ impl Render for SettingsForm {
             .size_full()
             .min_h_0()
             .flex();
-        // The head, the search in one column, and the page on the page's quiet well, which
-        // sits outside the fade so the edge fades the rows into it, not into the sheet.
+        // The head, the search in one column, and the page on the content's own plane, as a
+        // macOS 26 pane lays its groups on it: no grey page under white cards.
         let head = self.head(cx);
-        let column =
-            crate::kit::well(div().flex_1().min_w_0().min_h_0().flex().flex_col(), &self.theme)
-                .child(head)
-                .when(self.narrow, |el| {
-                    el.child(
-                        crate::kit::inset_x(div(), &self.theme)
-                            .flex_none()
-                            .py(px(self.theme.spacing.sm))
-                            .child(self.search_field(cx)),
-                    )
-                })
-                .child(div().flex_1().min_h_0().flex().child(page));
+        let column = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(hsla(self.theme.content()))
+            .child(head)
+            .when(self.narrow, |el| {
+                el.child(
+                    crate::kit::inset_x(div(), &self.theme)
+                        .flex_none()
+                        .py(px(self.theme.spacing.sm))
+                        .child(self.search_field(cx)),
+                )
+            })
+            .child(div().flex_1().min_h_0().flex().child(page));
         if self.narrow {
             root.child(column)
         } else {
@@ -2244,22 +2308,24 @@ mod tests {
 
     use super::*;
 
-    /// A group's rows are one card under its label: the label stands apart, the rows' parts
-    /// meet edge to edge on one column, the first rounded at the top and the last at the
-    /// bottom, filled with the hover wash in dark.
+    /// A group's rows are one ring under its label, as System Settings draws a group: the
+    /// label stands apart, the rows' parts meet edge to edge on one column, the first rounded at
+    /// the top, with no fill under them and the page on the content plane; each row after the
+    /// first is parted by a hairline inset to where the titles start, and the group's footer
+    /// stands under the ring.
     #[gpui::test]
-    fn a_groups_rows_are_one_card_under_its_label(cx: &mut TestAppContext) {
+    fn a_groups_rows_are_one_ring_under_its_label(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let theme = Theme::default();
         let (_form, cx): (_, &mut VisualTestContext) =
             cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
         cx.simulate_resize(size(px(900.0), px(1400.0)));
         cx.run_until_parked();
-        let card = |cx: &mut VisualTestContext, i: usize| {
-            cx.debug_bounds(Box::leak(format!("settings-card-{i}").into_boxed_str()))
+        let at = |cx: &mut VisualTestContext, what: &str, i: usize| {
+            cx.debug_bounds(Box::leak(format!("settings-{what}-{i}").into_boxed_str()))
         };
-        assert!(card(cx, 0).is_none(), "the label stands apart");
-        let parts: Vec<_> = (1..).map_while(|i| card(cx, i)).collect();
+        assert!(at(cx, "card", 0).is_none(), "the label stands apart");
+        let parts: Vec<_> = (1..).map_while(|i| at(cx, "card", i)).collect();
         assert!(parts.len() > 1, "a group of rows: {parts:?}");
         for pair in parts.windows(2) {
             let [a, b] = pair else { continue };
@@ -2267,16 +2333,21 @@ mod tests {
             assert_eq!((a.left(), a.right()), (b.left(), b.right()), "one column");
         }
         let first = parts.first().copied().expect("a part");
+        assert!(at(cx, "rule", 1).is_none(), "no rule over the first row");
+        let rule = at(cx, "rule", 2).expect("a rule over the second");
+        let inset = px(theme.spacing.inset());
+        assert!((rule.left() - first.left() - inset).abs() < px(1.0), "inset to the titles");
+        let footer = at(cx, "footer", parts.len().saturating_add(1)).expect("the group's footer");
+        let last = parts.last().copied().expect("a part");
+        assert!(footer.top() >= last.bottom() - px(0.5), "under the ring");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let fill = gpui::Background::from(hsla(theme.surfaces.hover));
-        let top = quads.iter().find(|q| {
+        let filled = quads.iter().any(|q| {
             (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
                 && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
-                && q.background == fill
+                && !q.background.is_transparent()
+                && q.background != gpui::Background::from(hsla(theme.content()))
         });
-        let top = top.expect("the card's first part, in the hover step");
-        assert!((top.corner_radii.top_left.0 / scale - theme.radii.md).abs() < 0.5, "rounded");
-        assert!(top.corner_radii.bottom_left.0.abs() < 0.5, "and open below");
+        assert!(!filled, "no fill under the ring");
     }
 
     /// A setting named from elsewhere opens on its page with the keyboard in its field and its
