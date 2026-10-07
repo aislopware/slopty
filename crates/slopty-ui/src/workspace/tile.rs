@@ -1276,7 +1276,10 @@ impl WorkspaceView {
                 })
                 .into_any_element()
         });
-        let place = address.or(text_place);
+        // A pane of tabs keeps a page's address after the tabs, which is a control, and no other
+        // place: a shell's prompt says where it is, and a file's tab its folder where two read
+        // alike ([`Self::render_tabs`]).
+        let place = if placed.tabs { address } else { address.or(text_place) };
         // The worker's name, where more than one could be meant (the tile's project holds
         // tiles of several): quiet text after a server glyph, a fact about the tile rather than
         // a control. A project on one machine never pays for it.
@@ -1577,6 +1580,22 @@ impl WorkspaceView {
         } else {
             tab_min
         };
+        // Files of the column that share a name show their folders, dimmed after the name, as
+        // Zed's tabs do: the folder tells them apart where a number would not.
+        let files: Vec<(TileRef, String, Option<String>)> = column
+            .iter()
+            .filter_map(|tab| match &self.item(*tab)?.kind {
+                ItemKind::File { path } if self.item(*tab)?.name.is_none() => {
+                    Some((*tab, file_title(path), file_dir(path)))
+                }
+                _ => None,
+            })
+            .collect();
+        let folder_of = |tab: TileRef| {
+            let (_, name, dir) = files.iter().find(|(t, ..)| *t == tab)?;
+            let shared = files.iter().filter(|(_, n, _)| n == name).count() > 1;
+            shared.then(|| (name.clone(), dir.clone()))
+        };
         let tabs: Vec<gpui::AnyElement> = column
             .iter()
             .copied()
@@ -1596,8 +1615,24 @@ impl WorkspaceView {
                         crate::icons::status_mark(theme, Some(st))
                             .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
                     });
-                let title = self.tile_title(item);
-                let label = SharedString::from(title.clone());
+                let alike = folder_of(tab);
+                let title =
+                    alike.as_ref().map_or_else(|| self.tile_title(item), |(n, _)| n.clone());
+                let dir = alike.and_then(|(_, dir)| dir);
+                let label = SharedString::from(
+                    dir.as_ref().map_or_else(|| title.clone(), |d| format!("{title}, {d}")),
+                );
+                let folder = dir.map(|dir| {
+                    let mut folder = div();
+                    folder.style().flex_shrink = Some(PLACE_SHRINK);
+                    folder
+                        .debug_selector(move || format!("tab-folder-{}", id.as_uuid()))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
+                        .text_color(hsla(s.text_muted))
+                        .child(ChromeText::new(dir, px(theme.typography.small())).fill_from_start())
+                });
                 let name = self.header_name(tab, id, title);
                 // A file with an edit not yet on disk says so after its name, in its tab as in a
                 // lone tile's header.
@@ -1674,6 +1709,7 @@ impl WorkspaceView {
                         )
                         .child(slot)
                         .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
+                        .children(folder)
                         .children(unsaved)
                         .children(state)
                         .child(close)
