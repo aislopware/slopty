@@ -1456,7 +1456,7 @@ impl ThreadView {
             }
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
-            Row::Changes { turn } => (self.changes_card(*turn, cx), spacing.md),
+            Row::Changes { turn } => (self.changes_card(*turn, cx), spacing.xxs),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
         };
         // Turns group: the person's message opens one a large step under the last, and what
@@ -1466,6 +1466,9 @@ impl ThreadView {
         // the answer after a run a paragraph away, so the stream's rhythm broke at every change
         // of kind. A plan is prose, not a call.
         let gap = match ix.checked_sub(1) {
+            // The changes card follows the answer's own line of actions, which already parts it
+            // from the words: a paragraph's step on top of that left it adrift.
+            Some(_) if matches!(row, Row::Changes { .. }) => spacing.xxs,
             Some(before)
                 if !matches!(row, Row::User { .. })
                     && matches!(self.rows.get(before), Some(Row::User { .. })) =>

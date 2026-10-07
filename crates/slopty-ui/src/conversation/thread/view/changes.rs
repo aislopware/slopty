@@ -33,7 +33,7 @@ pub(super) const SHOWN: usize = 3;
 
 /// One changed file as the card lists it.
 struct Listed {
-    /// As a person reads it: under the agent's folder, relative to it.
+    /// As a person reads it ([`shown_path`]).
     path: String,
     added: u32,
     removed: u32,
@@ -105,7 +105,7 @@ impl ThreadView {
                 .unwrap_or_default()
                 .into_iter()
                 .map(|e| Listed {
-                    path: super::tools::tidy(&e.path, &cwd),
+                    path: shown_path(&e.path, &cwd),
                     added: e.added,
                     removed: e.removed,
                 })
@@ -267,6 +267,18 @@ impl ThreadView {
     }
 }
 
+/// A file the turn edited as the card names it: under the agent's folder, relative to it;
+/// anywhere else by its name alone, since a whole path from the root reads as noise beside the
+/// others.
+fn shown_path(path: &str, cwd: &str) -> String {
+    let tidy = super::tools::tidy(path, cwd);
+    if tidy.starts_with('/') {
+        tidy.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&tidy).to_owned()
+    } else {
+        tidy
+    }
+}
+
 /// The card's way to put the turn's files back as they were.
 pub(super) const UNDO: &str = "Undo";
 
@@ -275,3 +287,13 @@ pub(super) const KEEP: &str = "Keep";
 
 /// The card's way to the whole review.
 pub(super) const REVIEW: &str = "Review";
+
+#[cfg(test)]
+mod tests {
+    /// Under the folder a path is relative; outside it, the file's name alone.
+    #[test]
+    fn a_path_reads_from_the_folder_or_by_its_name() {
+        assert_eq!(super::shown_path("/w/src/a.rs", "/w"), "src/a.rs");
+        assert_eq!(super::shown_path("/work/notes.md", "/tmp/e2e/project"), "notes.md");
+    }
+}
