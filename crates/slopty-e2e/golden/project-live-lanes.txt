@@ -11,8 +11,8 @@ Button │ Board, 0 of 2 merged
 Image │ Working
 Button │ #1 Read a pull request's checks, Working
 Image │ Claude Code
-Image │ Working
 Button │ Close tile
+Image │ Working
 Button │ Orchestrator
 Image │ Claude Code
 Button │ Close tile
@@ -22,6 +22,8 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ studio
 TabList

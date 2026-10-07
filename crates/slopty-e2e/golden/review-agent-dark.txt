@@ -14,6 +14,8 @@ Button │ Terminal
 Button │ Close tile
 Button │ Review
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
@@ -43,6 +45,7 @@ TabList
 Tab │ Last turn
 Tab │ Since reviewed
 Tab │ All turns
+Button │ Collapse all files
 Button │ Review with Claude Code
 Button │ Commit…
 List │ The agent's review
@@ -52,6 +55,7 @@ ListItem │ The README still says refresh never retries. README.md:12
 Button │ Let the finding go
 List │ Files
 ListItem │ src/refresh.rs
+Button │ src/refresh.rs
 Button │ Revert
 Button │ Keep
 Button │ Add to message

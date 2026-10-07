@@ -10,6 +10,8 @@ Button │ Machine actions, e2e-worker
 Button │ Do these steps in order, using the named tools, then reply "done". 1)…
 Image │ Claude Code
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
@@ -32,6 +34,9 @@ Button │ Show more
 Button │ Worked 35 s: Edited notes.md · Ran 3 commands · 9 more
 Article │ done
 Button │ Copy message
+Group │ Changed 1 file, 2 added, 0 removed
+Button │ Review
+Button │ Review /work/notes.md
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5

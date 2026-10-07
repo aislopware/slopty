@@ -1,6 +1,8 @@
 Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-ios-worker
 TabList

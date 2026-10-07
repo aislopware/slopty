@@ -13,6 +13,8 @@ Button │ RELEASE.md
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

@@ -12,8 +12,8 @@ Button │ Fold
 Button │ New shell in atlas
 Button │ Claude Code, Needs approval
 Image │ Claude Code
-Image │ Needs you
 Button │ Close tile
+Image │ Needs you
 Button │ opencode
 Button │ Close tile
 Button │ pi
@@ -28,8 +28,10 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Claude Code 2, Working
 Image │ Claude Code
-Image │ Working
 Button │ Close tile
+Image │ Working
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ atlas
 TabList

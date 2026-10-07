@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

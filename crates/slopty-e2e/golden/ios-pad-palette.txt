@@ -3,6 +3,8 @@ Group │ Workspace
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-ios-worker
 TabList
@@ -24,17 +26,17 @@ Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Dialog │ Commands
-TextInput │ Command (focused)
+TextInput │ Command │ > (focused)
 Button │ Cancel
 ListBox │ Commands
-Heading │ Tiles
-ListBoxOption │ Terminal ~
-ListBoxOption │ scratch home
-Heading │ Machines
-ListBoxOption │ e2e-ios-worker
-Heading │ Recent
-ListBoxOption │ Name this tile ⌘E
-ListBoxOption │ Open settings ⌘,
-ListBoxOption │ New note ⇧⌘N
-Heading │ Commands
+ListBoxOption │ Reopen Terminal
 ListBoxOption │ New terminal ⇧⌘T
+ListBoxOption │ New agent ⌘T
+ListBoxOption │ New agent…
+ListBoxOption │ Split right with a terminal ⌘D
+ListBoxOption │ Split down with a terminal ⇧⌘D
+ListBoxOption │ Show or hide the tab's terminal ⌥⌘T
+ListBoxOption │ New project…
+ListBoxOption │ New note ⇧⌘N
+ListBoxOption │ Add a window or display ⌘O
+ListBoxOption │ Open file… ⌘P

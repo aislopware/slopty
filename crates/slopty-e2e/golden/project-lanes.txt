@@ -21,6 +21,8 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ studio
 TabList

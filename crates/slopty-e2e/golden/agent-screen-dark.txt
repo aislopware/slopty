@@ -9,10 +9,12 @@ Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Check the editor, Working
 Image │ Claude Code
-Image │ Working
 Button │ Close tile
+Image │ Working
 Button │ Terminal
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

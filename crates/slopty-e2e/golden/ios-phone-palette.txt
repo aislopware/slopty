@@ -11,16 +11,16 @@ MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Dialog │ Commands
 ListBox │ Commands
-Heading │ Tiles
-ListBoxOption │ Terminal ~
-ListBoxOption │ scratch home
-Heading │ Machines
-ListBoxOption │ e2e-ios-worker
-Heading │ Recent
-ListBoxOption │ Name this tile ⌘E
-ListBoxOption │ Open settings ⌘,
-ListBoxOption │ New note ⇧⌘N
-Heading │ Commands
+ListBoxOption │ Reopen Terminal
 ListBoxOption │ New terminal ⇧⌘T
-TextInput │ Command (focused)
+ListBoxOption │ New agent ⌘T
+ListBoxOption │ New agent…
+ListBoxOption │ Split right with a terminal ⌘D
+ListBoxOption │ Split down with a terminal ⇧⌘D
+ListBoxOption │ Show or hide the tab's terminal ⌥⌘T
+ListBoxOption │ New project…
+ListBoxOption │ New note ⇧⌘N
+ListBoxOption │ Add a window or display ⌘O
+ListBoxOption │ Open file… ⌘P
+TextInput │ Command │ > (focused)
 Button │ Cancel

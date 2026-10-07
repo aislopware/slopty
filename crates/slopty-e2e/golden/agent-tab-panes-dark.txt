@@ -28,6 +28,8 @@ Button │ Terminal
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ studio
 TabList

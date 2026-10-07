@@ -2,6 +2,8 @@ Window │ e2e-worker
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

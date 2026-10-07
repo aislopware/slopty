@@ -3,6 +3,8 @@ Group │ Workspace
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-ios-worker
 TabList

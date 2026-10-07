@@ -12,11 +12,13 @@ Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Claude Code, Needs approval
 Image │ Claude Code
-Image │ Needs you
 Button │ Close tile
+Image │ Needs you
 Button │ Fix the login redirect
 Image │ Claude Code
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

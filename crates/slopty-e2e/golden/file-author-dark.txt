@@ -19,6 +19,8 @@ Image │ Claude Code
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList

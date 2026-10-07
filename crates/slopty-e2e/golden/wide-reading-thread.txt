@@ -3,6 +3,8 @@ Group │ Workspace
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Button │ Back
+Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
@@ -25,6 +27,9 @@ Button │ Copy message
 Button │ Worked 23 s: Edited notes.txt · Read 3 files
 Article │ done
 Button │ Copy message
+Group │ Changed 1 file, 2 added, 1 removed
+Button │ Review
+Button │ Review /work/notes.txt
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
