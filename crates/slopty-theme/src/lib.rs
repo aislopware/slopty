@@ -1582,12 +1582,13 @@ impl Curve {
 
 /// How chrome moves: durations and curves, one set for every animation, `MonoCode`'s.
 ///
-/// Feedback 120 ms, a toast 150, a sheet 200. Menus, popovers and the palette open on their
-/// first frame, as Zed's do: latency comes first, and an overlay that takes longer to arrive
-/// than a key takes to type reads as waiting, where words an agent is writing are read as they
-/// come and lift with its pace. What moves is opacity and a small translate. Under Reduce Motion
-/// all of it lands at once (`slopty_ui::kit::motion`), but for what says work is live: the working
-/// mark breathes in opacity over [`Self::breath`].
+/// Feedback 120 ms, a toast or a card 180, a sheet or a closing tab 200, a new pane 260, a sent
+/// prompt's turn 320 (`docs/decisions/ui.md`, "Motion's numbers are `MonoCode`'s"). Menus, popovers
+/// and the palette open on their first frame, as Zed's do: latency comes first, and an overlay that
+/// takes longer to arrive than a key takes to type reads as waiting, where words an agent is
+/// writing are read as they come and lift with its pace. What moves is opacity and a small
+/// translate. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`), but for what
+/// says work is live: the working mark breathes in opacity over [`Self::breath`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Motion {
     /// A hover or a press arriving or leaving: `MonoCode`'s `--motion-feedback-duration`,
@@ -1595,7 +1596,8 @@ pub struct Motion {
     pub feedback: std::time::Duration,
     /// A small fade: a hint, a word, a mark appearing.
     pub fade: std::time::Duration,
-    /// A toast or a notice arriving, [`Self::toast_travel`] in from its edge.
+    /// A toast, a notice or a card arriving, [`Self::toast_travel`] in from its edge:
+    /// `MonoCode`'s approval card's 180 ms.
     pub toast: std::time::Duration,
     /// Overlays, menus and hints leaving: shorter than their entrance, since what is dismissed
     /// is no longer looked at (Radix, `HeroUI`: 100 ms out against 150 to 200 in).
@@ -1605,6 +1607,12 @@ pub struct Motion {
     /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval, a
     /// tab closing: `MonoCode`'s 200 ms.
     pub sheet: std::time::Duration,
+    /// A new pane sliding in from the edge it opened at, on [`Self::ease_out`]: `MonoCode`'s
+    /// 260 ms.
+    pub pane: std::time::Duration,
+    /// A prompt the person sent rising into its place, [`Self::prompt_rise`] up from below,
+    /// on [`Self::ease_out`]: `MonoCode`'s turn reveal's 320 ms.
+    pub reveal: std::time::Duration,
     /// One breath of a live mark under Reduce Motion: its opacity rises and falls over this,
     /// with no travel or turn, since a mark that freezes reads as hung (Zeron's activity pulse;
     /// the platform keeps its activity indicators alive under Reduce Motion).
@@ -1626,6 +1634,8 @@ pub struct Motion {
     pub ease_out: Curve,
     /// How far a toast travels in, in points.
     pub toast_travel: f32,
+    /// How far a sent prompt rises into its place, in points.
+    pub prompt_rise: f32,
     /// A sheet's curve: a drawer's, which follows a finger's flick.
     pub drawer: Curve,
 }
@@ -1635,16 +1645,19 @@ impl Motion {
     pub const DEFAULT: Self = Self {
         feedback: std::time::Duration::from_millis(120),
         fade: std::time::Duration::from_millis(120),
-        toast: std::time::Duration::from_millis(150),
+        toast: std::time::Duration::from_millis(180),
         exit: std::time::Duration::from_millis(100),
         settle: std::time::Duration::from_millis(160),
         sheet: std::time::Duration::from_millis(200),
+        pane: std::time::Duration::from_millis(260),
+        reveal: std::time::Duration::from_millis(320),
         breath: std::time::Duration::from_millis(2_400),
         blink: std::time::Duration::from_millis(600),
         stream: std::time::Duration::from_millis(400),
         stream_stagger: std::time::Duration::from_millis(10),
         ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
         toast_travel: 8.0,
+        prompt_rise: 10.0,
         drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
     };
 }
@@ -3034,8 +3047,12 @@ mod tests {
         let linear = Curve { p1: (0.25, 0.25), p2: (0.75, 0.75) };
         assert!((linear.at(0.3) - 0.3).abs() < 1e-3);
         let ms = |d: std::time::Duration| d.as_millis();
-        assert_eq!((ms(motion.feedback), ms(motion.toast)), (120, 150), "feedback and a toast");
+        assert_eq!((ms(motion.feedback), ms(motion.toast)), (120, 180), "feedback and a card");
+        assert_eq!((ms(motion.sheet), ms(motion.pane)), (200, 260), "a closing tab, a new pane");
+        assert_eq!(ms(motion.reveal), 320, "a sent prompt's turn");
         assert!((motion.toast_travel - 8.0).abs() < f32::EPSILON, "a toast travels 8 pt");
+        assert!((motion.prompt_rise - 10.0).abs() < f32::EPSILON, "a sent prompt rises 10 pt");
+        assert!(motion.sheet < motion.pane && motion.pane < motion.reveal);
         assert!(motion.fade <= motion.settle && motion.settle < motion.sheet);
         assert!(motion.toast < motion.sheet, "a toast is quicker than a sheet");
         assert!(motion.exit < motion.fade, "what leaves goes quicker than it came");

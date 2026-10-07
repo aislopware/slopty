@@ -143,9 +143,13 @@ pub enum Pace {
     /// An overlay, a menu or a popover leaving: [`Motion::exit`], eased out, shorter than its
     /// way in, since what is dismissed is no longer looked at.
     Exit,
-    /// A toast or a notice arriving: [`Motion::toast`], eased out. Menus, popovers and the
-    /// palette have no pace: they open on their first frame.
+    /// A toast, a notice or a card arriving: [`Motion::toast`], eased out. Menus, popovers and
+    /// the palette have no pace: they open on their first frame.
     Toast,
+    /// A new pane sliding in from the edge it opened at: [`Motion::pane`], eased out.
+    Pane,
+    /// A prompt the person sent rising into its place: [`Motion::reveal`], eased out.
+    Reveal,
 }
 
 impl Pace {
@@ -159,6 +163,8 @@ impl Pace {
             Self::Sheet => m.sheet,
             Self::Exit => m.exit,
             Self::Toast => m.toast,
+            Self::Pane => m.pane,
+            Self::Reveal => m.reveal,
         }
     }
 
@@ -167,7 +173,9 @@ impl Pace {
     pub const fn curve(self) -> slopty_theme::Curve {
         let m = Motion::DEFAULT;
         match self {
-            Self::Fade | Self::Settle | Self::Exit | Self::Toast => m.ease_out,
+            Self::Fade | Self::Settle | Self::Exit | Self::Toast | Self::Pane | Self::Reveal => {
+                m.ease_out
+            }
             Self::Sheet => m.drawer,
         }
     }
@@ -3649,6 +3657,9 @@ mod tests {
         assert_eq!(Pace::Exit.duration(), m.exit);
         assert_eq!((Pace::Toast.duration(), Pace::Toast.curve()), (m.toast, m.ease_out));
         assert_eq!(Pace::Exit.curve(), m.ease_out);
+        assert_eq!((Pace::Pane.duration(), Pace::Pane.curve()), (m.pane, m.ease_out));
+        assert_eq!((Pace::Reveal.duration(), Pace::Reveal.curve()), (m.reveal, m.ease_out));
+        assert!(Pace::Sheet.duration() < Pace::Pane.duration(), "a pane travels further");
         assert!(Pace::Exit.duration() < Pace::Fade.duration(), "out quicker than in");
         assert!(Pace::Fade.duration() < Pace::Settle.duration());
         assert!(Pace::Settle.duration() < Pace::Sheet.duration());
