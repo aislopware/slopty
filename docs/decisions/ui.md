@@ -8908,3 +8908,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The composer stays under the question, as in MonoCode, so a message can be written in
     place of an answer.
   - Test: `thread::tests::questions::a_question_is_walked_by_home_and_end_and_skipped`.
+
+- ✅ **The prompt outline stands at the transcript's right edge** (2026-10-07,
+  `.research/ui-audit-monocode-2026-10-06.md` item 20, M19). The old conversation face had a
+  rail of prompt ticks ("The prompt rail is a cached view of its own"), and it went with that
+  face, so the thread view had no outline. MonoCode's sits at the transcript's right edge,
+  centred on its height, and hides in a pane under 58 rem.
+  - **A bar per prompt** (`thread::view::outline`), 2 pt thick and 11 pt long, 10 pt apart,
+    in a stack at most 330 pt tall or three quarters of the transcript. The prompt in view is
+    lit: the last at the transcript's end, else the topmost one in view, else the last above
+    it. Past what fits, the gap closes to a point first, then a window of bars slides to keep
+    the prompt in view inside it, the newest preferred.
+  - **The pointer** on a bar lifts it to 24 pt and its two neighbours each side less, as a
+    dock magnifies, and shows a card to its left with the prompt's start and its answer's,
+    two lines each. A press takes the transcript to the prompt.
+  - **It needs two prompts and a tile 928 pt wide** (`outline::OUTLINE_FROM`), so it never
+    crowds the reading column.
+  - Tests: `thread::tests::steps::the_prompt_outline_takes_the_transcript_to_a_prompt`,
+    `thread::view::outline::tests::the_stack_closes_its_gap_then_slides` and
+    `a_bar_lifts_with_its_neighbours`.
+
+- ✅ **Motion's numbers are MonoCode's** (2026-10-07, `.research/ui-audit-monocode-2026-10-06.md`
+  item 19, M5, M28, M40). The motion tokens held a feedback, a fade, a toast, an exit, a settle
+  and a sheet. MonoCode's motion also has a new pane sliding in over 260 ms, a tab closing over
+  200 ms, an approval card rising over 180 ms, and a sent prompt's turn rising 10 pt over
+  320 ms. Every one of them has its reduced-motion block.
+  - **The tokens** (`slopty_theme::Motion`): `toast` is 180 ms (it was 150), for a toast, a
+    notice or a card; `pane` is 260 ms; `reveal` is 320 ms; `prompt_rise` is 10 pt. A tab
+    closing takes `sheet`, already 200 ms. The paces `kit::Pace::Pane` and `kit::Pace::Reveal`
+    put the new two on the ease-out curve.
+  - **A sent prompt rises.** The row of what the person just sent (`Row::Sending`) comes up
+    10 pt from below as it fades in, over `reveal` (`kit::slide_fade`). The agent's echo
+    replaces it in place, so the prompt does not move again.
+  - **Reduce Motion lands each at once**, as `kit::motion` gates every pace.
+  - The pane's slide and the tab's close draw in the tiling area and the title tabs, which
+    take `Pace::Pane` and `Pace::Sheet` as they come to it.
+  - Tests: `slopty_theme::tests::a_curve_runs_from_rest_to_landed` and
+    `kit::tests::the_paces_are_the_motion_tokens`.

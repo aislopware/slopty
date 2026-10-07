@@ -486,3 +486,37 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
     let rows = view.read_with(cx, |v, _| v.rows().to_vec());
     assert!(!rows.iter().any(|r| matches!(r, Row::Changes { .. })), "the card goes: {rows:?}");
 }
+
+/// The prompt outline stands at the transcript's right edge in a wide tile, a bar per prompt,
+/// the one in view lit; the pointer on a bar shows the prompt beside it, and a press takes the
+/// transcript to it. A tile under 928 points has none.
+#[gpui::test]
+fn the_prompt_outline_takes_the_transcript_to_a_prompt(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::long(6, 2);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-outline").is_none(), "an 800 pt tile has none");
+
+    cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(700.0)));
+    view.update(cx, |v, cx| v.set_layout(1100.0, cx));
+    cx.run_until_parked();
+    let rail = cx.debug_bounds("thread-outline").expect("the outline in a wide tile");
+    assert!(f32::from(rail.right()) > 1050.0, "at the right edge: {rail:?}");
+    let first = cx.debug_bounds("outline-0").expect("a bar per prompt");
+    let last = cx.debug_bounds("outline-5").expect("the sixth");
+    let middle = (first.top() + last.bottom()) / 2.0;
+    let rows = cx.debug_bounds("thread-rows").expect("the rows");
+    let centre = (rows.top() + rows.bottom()) / 2.0;
+    assert!((f32::from(middle) - f32::from(centre)).abs() < 4.0, "centred: {middle:?} {centre:?}");
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-outline-preview").is_some(), "the prompt shows beside it");
+    cx.simulate_click(first.center(), Modifiers::none());
+    let prompt = view.read_with(cx, |v, _| v.prompt_rows()[0]);
+    assert_eq!(view.read_with(cx, |v, _| v.top_row()), prompt, "taken to the first prompt");
+}

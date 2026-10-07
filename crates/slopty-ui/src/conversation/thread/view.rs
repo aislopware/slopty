@@ -124,6 +124,7 @@ mod keyed;
 mod later;
 mod message_menu;
 mod notes;
+mod outline;
 mod pictures;
 mod plan;
 pub mod screens;
@@ -241,6 +242,8 @@ pub struct ThreadView {
     changes_asked: Option<TurnId>,
     /// The changes card lists every file, not only its first few.
     changes_open: bool,
+    /// The prompt whose outline bar the pointer is on, by its row.
+    outline_hovered: Option<usize>,
     /// Calls and reasoning the reader opened.
     items_open: HashSet<ItemId>,
     /// The picture open large over the thread.
@@ -489,6 +492,7 @@ impl ThreadView {
             kept: HashSet::new(),
             changes_asked: None,
             changes_open: false,
+            outline_hovered: None,
             items_open: HashSet::new(),
             viewing: None,
             groups: HashSet::new(),
@@ -2114,16 +2118,18 @@ impl ThreadView {
                 })
                 .into_any_element(),
         };
-        div()
-            .debug_selector(move || format!("sending-{intent}"))
-            .child(self.bubble(
-                format!("sending-bubble-{}", sent.id),
-                text.clone(),
-                None,
-                Bubble { beside: None, under: Some(under) },
-                sent.failure().is_none(),
-            ))
-            .into_any_element()
+        let row = div().debug_selector(move || format!("sending-{intent}")).child(self.bubble(
+            format!("sending-bubble-{}", sent.id),
+            text.clone(),
+            None,
+            Bubble { beside: None, under: Some(under) },
+            sent.failure().is_none(),
+        ));
+        // What the person just sent rises into its place, as `MonoCode`'s prompt does; under
+        // Reduce Motion it is there at once.
+        let rise = slopty_theme::Motion::DEFAULT.prompt_rise;
+        let id = ElementId::Name(format!("sending-rise-{intent}").into());
+        kit::slide_fade(row, id, rise, kit::Pace::Reveal, cx)
     }
 
     // ----- drawing: header, bar, composer ----------------------------------------------
@@ -2376,6 +2382,7 @@ impl ThreadView {
                 )
                 .hidden_by_list(&self.list),
             )
+            .children(self.outline(cx))
             .children(self.marks.get().down.then(|| self.down_button(cx)))
             .children(self.find_bar(cx))
             .into_any_element()
