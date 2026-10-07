@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{App, Context, SharedString, WeakEntity, Window};
 use slopty_client::layout::tiling::TabId;
-use slopty_client::layout::{GroupKey, Side, Tab, TileRef, WorkerKey};
+use slopty_client::layout::{Drop, GroupKey, Side, Tab, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::RequestId;
 use slopty_proto::items::ItemKind;
@@ -36,6 +36,8 @@ pub(super) enum Opening {
     Split(Side),
     /// The terminal of the tab on show, below the whole tab (⌘⌥T's first press).
     Terminal,
+    /// Where a drop on a pane of the tab on show said: a thread's row carried there.
+    At(Drop),
 }
 
 /// The shells asked of one worker and not come yet, the first asked first.
@@ -155,6 +157,9 @@ impl WorkspaceView {
     /// first one not come yet; anything else beside the focus.
     pub(super) fn opening_of(&mut self, key: WorkerKey, id: ItemId) -> Opening {
         let Some(w) = self.workers.get_mut(&key) else { return Opening::Beside };
+        if let Some(drop) = w.dropped.remove(&id) {
+            return Opening::At(drop);
+        }
         let shell =
             w.doc.get(id).is_some_and(|item| matches!(item.kind, ItemKind::Terminal { .. }));
         let queued = if shell { w.openings.pop_front() } else { None };
@@ -181,6 +186,14 @@ impl WorkspaceView {
             Opening::Terminal => {
                 if !self.layout.set_terminal(tile) {
                     self.layout.new_tab(tile, &home);
+                }
+            }
+            // The pane dropped on may have gone since: then beside the focus, as anything else.
+            Opening::At(drop) => {
+                if self.layout.place(tile, drop) {
+                    self.layout.focus(tile);
+                } else {
+                    self.layout.open_beside(tile, &home);
                 }
             }
         }

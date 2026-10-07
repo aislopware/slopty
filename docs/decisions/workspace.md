@@ -2145,3 +2145,16 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::nav_projects::a_projects_head_shows_its_changes_and_pins_and_mutes_it`,
     `workspace::attention::tests::a_muted_projects_moments_post_nothing`, and
     `layout::tests::the_tiling_and_the_navigator_are_saved_and_restored`.
+- ✅ **A thread's row warms on its press and drops on a pane's edge** (2026-10-07, item 12 of
+  the MonoCode audit, `MonoCode`'s session card).
+  - **Warm on the press.** Pressing a navigator row of a thread with no tile here follows the
+    thread at once (`ThreadHub::open`), so the tile the click opens finds it on its way and
+    draws it from the first frame. The hold lets go at the next press or after 10 s
+    (`WARM_HOLD`); by then the tile's own view holds the thread.
+  - **Drop on a pane.** Pressed and moved, the row carries the thread (`Carried::Thread`). Over
+    a pane of the tab on show it washes where it would land, as a tile does. Let go there, its
+    tile opens (the live terminal's where its agent runs in one) and lands at the drop once the
+    worker's list has it (`Opening::At`, kept per worker until the item comes). A thread whose
+    tile is already here moves that tile. The title strip and the projects' rows take no thread.
+  - A tile's row already carried its tile onto a pane's edge (step 5).
+  - Tests: `workspace::tests::drag::a_threads_row_warms_on_its_press_and_drops_on_a_panes_edge`.

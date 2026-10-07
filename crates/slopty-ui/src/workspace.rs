@@ -443,6 +443,8 @@ struct Worker {
     /// The shells asked of it on this link and not come yet, and where each goes
     /// ([`tabs::Opening`]).
     openings: tabs::Openings,
+    /// Tiles this client opened by a drop on a pane, not come yet: where each lands.
+    dropped: HashMap<ItemId, slopty_client::layout::Drop>,
     /// Remote tiles whose open the worker refused on this link, and why: not asked again
     /// until the next link or a retry.
     failed_opens: HashMap<ItemId, slopty_proto::screen::ScreenFailure>,
@@ -494,6 +496,7 @@ impl Worker {
             display_wanted: false,
             pending_opens: HashMap::new(),
             openings: tabs::Openings::new(),
+            dropped: HashMap::new(),
             failed_opens: HashMap::new(),
             stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
@@ -951,6 +954,8 @@ pub struct WorkspaceView {
     popouts: popout::PopOuts,
     /// The window's title as last set: the project on show ([`Self::retitle_window`]).
     window_title: String,
+    /// A thread held open from a navigator row's press until its tile's own view takes it.
+    warm: Option<navigator::Warm>,
     /// Workers told this client wants their clipboard.
     watching: HashSet<WorkerKey>,
     /// Which workers the clipboard is shared with, as the settings say.
@@ -1187,6 +1192,7 @@ impl WorkspaceView {
             app_active: true,
             popouts: popout::PopOuts::default(),
             window_title: String::new(),
+            warm: None,
             watching: HashSet::new(),
             clip_sharing: slopty_settings::ClipboardSettings::default(),
             clip_unshared: Rc::default(),

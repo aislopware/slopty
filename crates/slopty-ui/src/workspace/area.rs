@@ -50,6 +50,9 @@ pub(super) enum Carried {
     Tile(TileRef),
     /// A title tab, its layout whole.
     Tab(TabId),
+    /// A thread with no tile here, from its navigator row: dropped on a pane, its tile opens
+    /// there (`MonoCode`'s session card dragged onto a pane's edge).
+    Thread { worker: WorkerKey, thread: ThreadId },
 }
 
 /// Where what a drag carries would land.
@@ -219,7 +222,8 @@ impl WorkspaceView {
     /// row other than its own, then for a tile a pane of the tab on show.
     fn landing_at(&self, carried: Carried, p: Point<Pixels>) -> Option<Landing> {
         let spots = &self.drop_spots;
-        if spots.strip.get().is_some_and(|b| b.contains(&p)) {
+        let thread = matches!(carried, Carried::Thread { .. });
+        if !thread && spots.strip.get().is_some_and(|b| b.contains(&p)) {
             let mut tabs = spots.tabs.borrow().clone();
             tabs.sort_by(|a, b| f32::from(a.1.origin.x).total_cmp(&f32::from(b.1.origin.x)));
             let index = tabs.iter().position(|(_, b)| p.x < b.center().x).unwrap_or(tabs.len());
@@ -227,17 +231,20 @@ impl WorkspaceView {
         }
         let row =
             spots.projects.borrow().iter().find(|(_, b)| b.contains(&p)).map(|(k, _)| k.clone());
-        if let Some(home) = row {
+        if let Some(home) = row.filter(|_| !thread) {
             let own = match carried {
                 Carried::Tile(tile) => self.layout.position(tile).map(|pos| pos.project),
                 Carried::Tab(id) => self.layout.tab_place(id).map(|(p, _)| p),
+                Carried::Thread { .. } => None,
             };
             let own = own
                 .and_then(|p| self.layout.projects().get(p))
                 .map(slopty_client::layout::Project::home);
             return (own != Some(&home)).then_some(Landing::Project(home));
         }
-        let Carried::Tile(_) = carried else { return None };
+        if let Carried::Tab(_) = carried {
+            return None;
+        }
         if !self.drawn.viewport.get().contains(&p) {
             return None;
         }
@@ -320,7 +327,11 @@ impl WorkspaceView {
     fn end_drag(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
         let Drag::Move { carried, moving, target, .. } = drag;
-        if let (true, Some(target)) = (moving, target) {
+        if let (true, Carried::Thread { worker, thread }, Some(Landing::Pane(drop))) =
+            (moving, carried, &target)
+        {
+            self.open_thread_dropped(worker, thread, *drop, cx);
+        } else if let (true, Some(target)) = (moving, target) {
             let home = self.layout.shown_project().map(|p| p.home().clone());
             self.layout_action(cx, |l| match (carried, target) {
                 (Carried::Tile(tile), Landing::Pane(drop)) => {
@@ -339,12 +350,43 @@ impl WorkspaceView {
                 (Carried::Tab(id), Landing::Project(home)) => {
                     l.move_tab_to_project(id, &home);
                 }
-                (Carried::Tab(_), Landing::Pane(_)) => {}
+                (Carried::Tab(_), Landing::Pane(_)) | (Carried::Thread { .. }, _) => {}
             });
         }
         // A press let go where it was is a click: nothing was drawn for it.
         if moving {
             self.landing_moved(cx);
+        }
+    }
+
+    /// `thread` on `worker`, dropped on a pane: its tile there. One it already has here moves
+    /// there; else its tile opens (its live terminal's, or its own) and lands where it was
+    /// dropped once it comes.
+    fn open_thread_dropped(
+        &mut self,
+        worker: WorkerKey,
+        thread: ThreadId,
+        drop: Drop,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tile) = self.tile_of_thread(thread) {
+            self.layout_action(cx, |l| {
+                l.place(tile, drop);
+                l.focus(tile);
+            });
+            return;
+        }
+        let id = ItemId::new();
+        let (key, session) = match self.live_terminal(thread) {
+            Some((at, session)) => (at, Some(session)),
+            None => (worker, None),
+        };
+        if let Some(w) = self.workers.get_mut(&key) {
+            w.dropped.insert(id, drop);
+        }
+        match session {
+            Some(session) => self.open_terminal_as(key, session, id, cx),
+            None => self.open_thread_as(key, thread, id, cx),
         }
     }
 

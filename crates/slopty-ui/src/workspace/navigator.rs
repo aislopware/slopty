@@ -3502,6 +3502,17 @@ impl WorkspaceView {
                 ),
                 None => t.age.clone().map(|age| readout(theme, age).into_any_element()),
             })
+            // The press warms the thread, so the click finds it on the way; pressed and moved,
+            // the row carries it to a pane.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                    this.warm_thread(worker, thread, cx);
+                    if this.theme.density != slopty_theme::Density::TOUCH {
+                        this.begin_carry(super::area::Carried::Thread { worker, thread }, ev);
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
             .into_any_element()
     }
@@ -3761,6 +3772,60 @@ impl WorkspaceView {
             })
             .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
             .into_any_element()
+    }
+}
+
+/// How long a thread warmed by a row's press is held open for the click that opens its tile:
+/// past a press held and dragged, short enough that a press let go elsewhere costs little.
+const WARM_HOLD: Duration = Duration::from_secs(10);
+
+/// A thread followed from a navigator row's press (`MonoCode`'s prefetch on a card's press), so
+/// its tile's view finds it on the way and draws it at once. Held until the next press or
+/// [`WARM_HOLD`]; the tile's own view holds it after that.
+pub(super) struct Warm {
+    worker: WorkerKey,
+    thread: ThreadId,
+    _lapse: Task<()>,
+}
+
+impl WorkspaceView {
+    /// A thread's row was pressed: follow `thread` on `worker` now, before the click opens its
+    /// tile, and let the last one warmed go.
+    pub(super) fn warm_thread(
+        &mut self,
+        worker: WorkerKey,
+        thread: ThreadId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.warm.as_ref().is_some_and(|w| w.thread == thread) {
+            return;
+        }
+        self.let_warm_go(cx);
+        let hub = self.thread_hub(worker, cx);
+        hub.update(cx, |hub, cx| hub.open(thread, cx));
+        let lapse = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(WARM_HOLD).await;
+            let _gone = this.update(cx, |this, cx| {
+                if this.warm.as_ref().is_some_and(|w| w.thread == thread) {
+                    this.let_warm_go(cx);
+                }
+            });
+        });
+        self.warm = Some(Warm { worker, thread, _lapse: lapse });
+    }
+
+    /// Let the thread warmed by a press go: its tile's view holds it now, or nothing does.
+    fn let_warm_go(&mut self, cx: &mut Context<Self>) {
+        let Some(warm) = self.warm.take() else { return };
+        if let Some(hub) = self.held_hub(warm.worker).cloned() {
+            hub.update(cx, |hub, cx| hub.close(warm.thread, cx));
+        }
+    }
+
+    /// Whether `thread` is held warm by a press.
+    #[cfg(test)]
+    pub(super) fn warmed(&self) -> Option<ThreadId> {
+        self.warm.as_ref().map(|w| w.thread)
     }
 }
 

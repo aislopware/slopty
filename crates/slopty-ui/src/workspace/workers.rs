@@ -274,6 +274,7 @@ impl WorkspaceView {
         w.watched_folders.clear();
         w.pending_opens.clear();
         w.openings.clear();
+        w.dropped.clear();
         w.failed_opens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
@@ -323,8 +324,9 @@ impl WorkspaceView {
         w.relay.reset();
         w.relay_due = None;
         w.pending_opens.clear();
-        // A shell asked for on it never comes.
+        // A shell asked for on it never comes, nor a tile opened by a drop.
         w.openings.clear();
+        w.dropped.clear();
         // A stream opened on the link that dropped has nothing more coming.
         w.fresh_screens.clear();
         if let Some(sized) = w.sized.as_mut() {

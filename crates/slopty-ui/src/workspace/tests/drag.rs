@@ -188,3 +188,72 @@ fn a_title_tab_dropped_on_a_project_row_moves_there_whole(cx: &mut TestAppContex
     assert_eq!(a.tab, moved, "the same tab");
     assert_eq!(view.read_with(cx, |v, _| v.layout().shown_index()), Some(b.project), "shown");
 }
+
+/// A thread with no tile here is warmed by its row's press: the worker is asked to follow it
+/// before the click. Its row carried onto a pane's trailing edge opens its tile in a pane of
+/// its own there, once the worker's list has it.
+#[gpui::test]
+fn a_threads_row_warms_on_its_press_and_drops_on_a_panes_edge(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
+    use slopty_proto::thread::{Cursor, ThreadId};
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let (_, shell) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = None;
+    let mut row = state.row(WallMs::ZERO);
+    row.id = ThreadId::new();
+    row.cwd = Some("/w/atlas/src".to_owned());
+    row.repo = Some("/w/atlas".to_owned());
+    // Waiting on the person, so it is listed under its project rather than folded away.
+    row.requests = vec![slopty_proto::thread::wire::RequestCard {
+        id: slopty_proto::thread::AskId("ask-1".to_owned()),
+        item: None,
+        kind: slopty_proto::thread::Request::APPROVAL.to_owned(),
+        title: "Run `cargo test`".to_owned(),
+        options: Vec::new(),
+        opened_ms: WallMs::ZERO,
+    }];
+    let thread = row.id;
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
+        v.thread_table(key, &table, cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+
+    let from = bounds(cx, leak(format!("nav-thread-{thread}"))).center();
+    let pane = view.read_with(cx, |v, _| v.tile_bounds(shell)).expect("the shell's pane");
+    carry(cx, from, near(pane, true), |cx| {
+        assert_eq!(view.read_with(cx, |v, _| v.warmed()), Some(thread), "warm from the press");
+        assert!(cx.debug_bounds("drop-wash").is_some(), "the landing is drawn");
+    });
+    let sent = studio.drain();
+    let followed = sent.iter().any(
+        |m| matches!(m, ClientMsg::Thread(ThreadRequest::Follow { thread: t, .. }) if *t == thread),
+    );
+    assert!(followed, "the press asked the worker to follow it: {sent:?}");
+    let item = sent
+        .into_iter()
+        .find_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(item)) if item.kind == ItemKind::Thread { thread } => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .expect("its tile is asked for");
+    let tile = TileRef { worker: key, item: item.id };
+    view.update_in(cx, |v, _w, cx| {
+        let op = ItemOp::Add(item);
+        v.apply_sync(key, ItemSync::Delta { version: 2, by: studio.me, op }, cx);
+    });
+    cx.run_until_parked();
+    let (a, b) = (pos_of(&view, cx, shell), pos_of(&view, cx, tile));
+    assert_eq!(a.tab, b.tab, "in the tab on show");
+    assert_ne!(a.pane, b.pane, "in a pane of its own");
+    let at = |tile: TileRef| view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
+    assert!(at(tile).left() >= at(shell).right() - px(1.0), "on the trailing edge");
+}
