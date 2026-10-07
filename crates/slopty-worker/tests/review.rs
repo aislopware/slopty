@@ -230,6 +230,40 @@ mod review {
         assert!(to_review(), "what was kept is gone from the tree: a change to review");
     }
 
+    /// Each side of a file a review showed reads back whole from its blob, for the lines
+    /// between the hunks; what is no blob of the repository, and a thread outside git, read as
+    /// gone.
+    #[tokio::test]
+    async fn a_review_s_sides_read_back_whole_from_their_blobs() {
+        use slopty_proto::thread::wire::Expanded;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let rig = Rig::new(dir.path(), &repo);
+        rig.status(Phase::Working);
+        rig.begin(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
+        let changed = A.replace("two\n", "TWO\n").replace("eleven\n", "ELEVEN\nmore\n");
+        std::fs::write(repo.join("a.txt"), &changed).unwrap();
+        rig.end(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
+        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
+        let a = file(&review, "a.txt").unwrap();
+        let (from, to) = (a.from.clone().unwrap(), a.to.clone().unwrap());
+
+        let (snapshots, thread) = (&rig.snapshots, rig.thread);
+        assert_eq!(snapshots.blob(thread, &to).await, Expanded::Text(changed), "the new side");
+        assert_eq!(snapshots.blob(thread, &from).await, Expanded::Text(A.to_owned()), "the old");
+        let missing = "0".repeat(40);
+        assert_eq!(snapshots.blob(thread, &missing).await, Expanded::Gone, "no such blob");
+        assert_eq!(snapshots.blob(thread, "--help").await, Expanded::Gone, "no object id");
+        assert_eq!(snapshots.blob(thread, "HEAD:a.txt").await, Expanded::Gone, "a name");
+
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let outside = Rig::new(&dir.path().join("other"), &plain);
+        assert_eq!(outside.snapshots.blob(outside.thread, &from).await, Expanded::Gone);
+    }
+
     /// A thread outside git takes no snapshot and its review says why.
     #[tokio::test]
     async fn a_thread_outside_git_has_no_review() {

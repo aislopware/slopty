@@ -1,5 +1,5 @@
 //! The review tile in a headless window over a hub that holds a recorded review: the order of
-//! its files, its two layouts, and what keeping, commenting and marking it reviewed send.
+//! its files, its folds, and what keeping, commenting and marking it reviewed send.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -208,6 +208,44 @@ fn files_fold_to_their_heads_one_or_all(cx: &mut TestAppContext) {
     for line in ["review-line-0-0-0", "review-line-1-0-0", "review-line-2-0-0"] {
         assert!(shown(cx, line), "{line}: every file open");
     }
+}
+
+/// The unchanged lines between hunks fold to one line each, before the first hunk and between
+/// two. Opening one asks the worker for the file's new side by its blob, through the thread,
+/// and draws the stretch's lines as they come. (Where the stretches lie, past the last hunk
+/// too, is `gaps::tests::the_stretches_lie_between_the_hunks`.)
+#[gpui::test]
+fn the_lines_between_hunks_open_from_the_file_s_blob(cx: &mut TestAppContext) {
+    use slopty_proto::thread::ContentRef;
+    use slopty_proto::thread::wire::Expanded;
+
+    let (_view, hub, sent, cx) = tile(cx, 1200.0);
+    let thread = sent
+        .borrow()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Review { thread, .. }) => Some(*thread),
+            _ => None,
+        })
+        .expect("the review was asked");
+    for gap in ["review-gap-1-0", "review-gap-1-1"] {
+        assert!(cx.debug_bounds(gap).is_some(), "{gap}: a fold");
+    }
+    assert!(cx.debug_bounds("review-gap-1-2").is_none(), "the file's length is not known");
+    click(cx, "review-gap-1-1");
+    let content = ContentRef::blob("src/lib.rs@new");
+    let asked = sent.borrow().iter().any(|m| {
+        matches!(m, ClientMsg::Thread(ThreadRequest::Expand { content: c, .. }) if *c == content)
+    });
+    assert!(asked, "the new side, asked by its blob");
+
+    let text = (1..=50).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+    let body = Expanded::Text(text);
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Expanded { content, body }, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-gap-1-1").is_none(), "the fold opened");
+    assert!(cx.debug_bounds("review-context-1-1-0").is_some(), "its first line");
+    assert!(cx.debug_bounds("review-gap-1-0").is_some(), "the other stays folded");
 }
 
 /// A review is one plane, as the status-colour study ruled (`docs/decisions/ui.md`, "Space,

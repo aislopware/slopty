@@ -1240,7 +1240,8 @@ async fn stream(
             return;
         }
     };
-    let (reviewed_tx, mut reviewed) = mpsc::unbounded_channel();
+    // What runs git comes back here from a task of its own, so the thread's frames go on.
+    let (slow_tx, mut slow) = mpsc::unbounded_channel();
     let why = loop {
         let frame = tokio::select! {
             frame = follower.next() => match frame {
@@ -1255,6 +1256,16 @@ async fn stream(
                     };
                     ThreadFrame::Page(page)
                 }
+                // A side of a file a review showed is read from git, on a task of its own.
+                Some(Command::Expand { content }) if content.blob_id().is_some() => {
+                    let (snapshots, done) = (threads.snapshots.clone(), slow_tx.clone());
+                    tokio::spawn(async move {
+                        let id = content.blob_id().unwrap_or_default();
+                        let body = snapshots.blob(thread, id).await;
+                        let _gone = done.send(ThreadFrame::Expanded { content, body });
+                    });
+                    continue;
+                }
                 Some(Command::Expand { content }) => {
                     let body = threads.expand(thread, content.clone()).await;
                     ThreadFrame::Expanded { content, body }
@@ -1262,14 +1273,15 @@ async fn stream(
                 // A review runs git for a while: on a task of its own, so the thread's frames
                 // go on meanwhile.
                 Some(Command::Review { scope }) => {
-                    let (snapshots, reviewed) = (threads.snapshots.clone(), reviewed_tx.clone());
+                    let (snapshots, done) = (threads.snapshots.clone(), slow_tx.clone());
                     tokio::spawn(async move {
-                        let _gone = reviewed.send(snapshots.review(thread, scope).await);
+                        let review = snapshots.review(thread, scope).await;
+                        let _gone = done.send(ThreadFrame::Review(Box::new(review)));
                     });
                     continue;
                 }
             },
-            Some(review) = reviewed.recv() => ThreadFrame::Review(Box::new(review)),
+            Some(frame) = slow.recv() => frame,
         };
         if let Err(e) = out.send(&frame).await {
             tracing::debug!(%thread, error = %e, "thread stream ended");

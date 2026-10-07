@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use slopty_proto::thread::wire::{Intent, Outcome, Review, ReviewScope};
+use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded, Intent, Outcome, Review, ReviewScope};
 use slopty_proto::thread::{Action, Cap, Edge, IntentId, ThreadId, ThreadState, TreeRef, TurnId};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -324,6 +324,22 @@ impl Snapshots {
         let _held = lock.lock().await;
         let (base, head) = repo.review_pair(thread, from, to).await.map_err(|e| e.0)?;
         Ok(Range { base, head })
+    }
+
+    /// The text of blob `id` in `thread`'s repository, the side of a file a review showed, for
+    /// the unchanged lines between its hunks (`ContentRef::blob`). [`Expanded::Gone`] outside
+    /// git, for an id that is no blob there, a file that is not UTF-8, or one longer than
+    /// [`EXPANDED_CHARS`]: its lines would be cut, so none are given.
+    pub async fn blob(&self, thread: ThreadId, id: &str) -> Expanded {
+        let Some(repo) = self.repo(thread) else { return Expanded::Gone };
+        match repo.object(id).await.map(String::from_utf8) {
+            Ok(Ok(text)) if text.len() <= EXPANDED_CHARS => Expanded::Text(text),
+            Ok(_) => Expanded::Gone,
+            Err(e) => {
+                tracing::debug!(%thread, "no blob {id}: {e}");
+                Expanded::Gone
+            }
+        }
     }
 
     /// Let every ref `state`'s thread keeps in its repository go, before the thread is.

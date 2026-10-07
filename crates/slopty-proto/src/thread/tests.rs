@@ -496,3 +496,14 @@ fn a_message_goes_now_or_after_the_turn_by_what_the_agent_can_do() {
         (Delivery::Steer, Delivery::Steer)
     );
 }
+
+/// A blob is named as `blob:` and its id, and read back; any other content names none.
+#[test]
+fn a_content_ref_names_a_blob() {
+    let id = "8ab686eafeb1f44702738c8b0f24f2567c36da6d";
+    let blob = ContentRef::blob(id);
+    assert_eq!(blob.0, format!("blob:{id}"));
+    assert_eq!(blob.blob_id(), Some(id));
+    assert_eq!(ContentRef("r1#2".to_owned()).blob_id(), None, "a transcript's part");
+    assert_eq!(ContentRef("blob:".to_owned()).blob_id(), None, "no id");
+}

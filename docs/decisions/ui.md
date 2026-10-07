@@ -8865,6 +8865,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     replaced the other's. The review tile reads the scope it asked.
   - Deleted: the tray's edits row (`edited_section`, `thread-edited`), which the card replaces
     where the thread has no composer.
+  - Amended 2026-10-07 (golden review): the card stands right under the answer's line of
+    actions, which already parts it from the words; a paragraph's step on top of that left it
+    48 pt adrift. A file outside the agent's folder is named by its name alone, not by its
+    whole path from the root (`changes::shown_path`).
   - Tests: `thread::tests::steps::the_latest_turn_ends_in_its_changed_files_which_keep_from_there`,
     and `workspace::tests::thread_start::a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out`
     now counts the review tile's asks apart from the card's.
@@ -8886,11 +8890,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `arrows-move-vertical`.
   - **What was already there.** The files were stacked, a hunk had its own Keep and Revert
     (the thread's stage of a hunk), and a comment was written inline under its lines.
-  - **Not yet:** folds of the unchanged lines between hunks that open. A hunk carries three
-    lines of context and nothing else of the file reaches the client, so a fold would need the
-    new side's text from the worker.
-  - Tests: `review::tests::the_diff_is_unified_at_every_width` and
-    `review::tests::files_fold_to_their_heads_one_or_all`.
+  - **The unchanged lines between hunks fold** to one line each, "27 unchanged lines", before
+    the first hunk and between two, and past the last once the file's length is known
+    (`review::view::gaps`). A hunk carries three lines of context and nothing else of the file
+    reaches the client, so opening one asks the worker for the file's new side whole, by the
+    blob the review named: `ContentRef::blob(id)` through the thread's own
+    `ThreadRequest::Expand`, which the worker's snapshots answer from git (`Snapshots::blob`)
+    on a task of its own, so the thread's frames go on. No wire type changed. A side comes
+    once per blob and is kept while the tile is open; one that is not UTF-8 or longer than
+    `EXPANDED_CHARS` comes as gone, and its folds stay shut. A folder's review has no thread to
+    ask through, so it shows no folds. (Added 2026-10-07.)
+  - Tests: `review::tests::the_diff_is_unified_at_every_width`,
+    `review::tests::files_fold_to_their_heads_one_or_all`,
+    `review::tests::the_lines_between_hunks_open_from_the_file_s_blob`,
+    `review::view::gaps::tests::the_stretches_lie_between_the_hunks`, and on the worker
+    `review::a_review_s_sides_read_back_whole_from_their_blobs` (`crates/slopty-worker/tests/review.rs`).
 
 - ✅ **A question is answered from the keyboard, or skipped** (2026-10-07,
   `.research/ui-audit-monocode-2026-10-06.md` item 18, M20). An agent's questions already
@@ -8945,3 +8959,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     take `Pace::Pane` and `Pace::Sheet` as they come to it.
   - Tests: `slopty_theme::tests::a_curve_runs_from_rest_to_landed` and
     `kit::tests::the_paces_are_the_motion_tokens`.
+
+- ✅ **A pane of tabs names no place, and alike files by their folders** (2026-10-07, golden
+  review). A pane of tabs put the shown tile's place after its tabs, so a terminal's row ended
+  in a lone "~" far from anything, read as a stray. Zed's tab bar says no place at all.
+  - **No plain place after the tabs.** A shell's prompt says where it is, and the title bar's
+    project says which project. A lone tile's header keeps its place beside its title, as
+    before.
+  - **A page keeps its address after the tabs,** since it is a control: a click turns it into
+    the address field (`a_tabbed_page_keeps_its_address_after_the_tabs`).
+  - **Files that share a name show their folders,** dimmed after the name inside each tab, as
+    Zed's tabs do, by the name alone rather than "lib.rs 2". A file whose name is its own in
+    the row shows none. The tab's spoken name carries the folder too ("lib.rs, src").
+  - Test: `workspace::tests::tiles::a_tab_row_names_folders_only_where_files_read_alike`.

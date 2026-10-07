@@ -7,10 +7,32 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Where the whole of a clipped text or a picture is, in words only the worker's adapter
-/// reads (a transcript record and part, a Codex item, a file).
+/// Where the whole of a clipped text or a picture is.
+///
+/// In words only the worker's adapter reads (a transcript record and part, a Codex item, a
+/// file), or a blob of the thread's repository ([`ContentRef::blob`]).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ContentRef(pub String);
+
+impl ContentRef {
+    /// How a blob is named: `blob:` and its object id.
+    const BLOB: &'static str = "blob:";
+
+    /// The blob `id` of the thread's repository, a side of a file a review showed
+    /// ([`FileDiff::from`](super::wire::FileDiff::from),
+    /// [`FileDiff::to`](super::wire::FileDiff::to)): the worker's snapshots read it from git,
+    /// whole, for the unchanged lines between the file's hunks.
+    #[must_use]
+    pub fn blob(id: &str) -> Self {
+        Self(format!("{}{id}", Self::BLOB))
+    }
+
+    /// The object id this names, when it names a blob ([`Self::blob`]).
+    #[must_use]
+    pub fn blob_id(&self) -> Option<&str> {
+        self.0.strip_prefix(Self::BLOB).filter(|id| !id.is_empty())
+    }
+}
 
 /// A clipping limit: whichever of the two is reached first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

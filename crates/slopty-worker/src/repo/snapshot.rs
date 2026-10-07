@@ -429,6 +429,20 @@ impl Repo {
         Ok(files)
     }
 
+    /// The bytes of the blob a review named on one side of a file ([`FileDiff::from`],
+    /// [`FileDiff::to`]): the whole file there, for the lines between its hunks.
+    ///
+    /// # Errors
+    ///
+    /// When `id` is not an object id, or git has no such blob.
+    pub async fn object(&self, id: &str) -> Result<Vec<u8>, Failed> {
+        let hex = id.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex || !matches!(id.len(), 40 | 64) {
+            return Err(Failed(format!("{id:?} is no object id")));
+        }
+        self.blob(Some(id)).await
+    }
+
     /// The bytes of blob `id`, empty for none.
     async fn blob(&self, id: Option<&str>) -> Result<Vec<u8>, Failed> {
         match id {

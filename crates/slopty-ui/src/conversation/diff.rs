@@ -1,5 +1,6 @@
 //! An edit's patch as the face draws it: each line with its old and new numbers and its
-//! syntax colours, in one column or paired side by side.
+//! syntax colours, in one column, and the file's unchanged lines between its hunks when they
+//! are opened ([`context`]).
 //!
 //! Each hunk's two sides are parsed as texts of their own (the old side is its context and
 //! removed lines, the new side its context and added lines), so a removed line that opens a
@@ -52,6 +53,8 @@ pub struct Line {
 /// A hunk's lines.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Block {
+    /// Where it starts in the old file.
+    pub old_start: u32,
     /// Where it starts in the new file, for the hunk's divider.
     pub new_start: u32,
     /// The line before it that names where it is, as git gives it after `@@ … @@` (a
@@ -154,7 +157,42 @@ fn block_of(
     }
     emphasise(&mut lines);
     let heading = heading.filter(|h| !h.trim().is_empty());
-    Block { new_start, heading, lines }
+    Block { old_start, new_start, heading, lines }
+}
+
+impl Block {
+    /// The last line it covers in the old file and in the new: the line before it on a side
+    /// it has none of.
+    #[must_use]
+    pub fn ends(&self) -> (u32, u32) {
+        let last = |side: fn(&Line) -> Option<u32>, start: u32| {
+            self.lines.iter().filter_map(side).max().unwrap_or_else(|| start.saturating_sub(1))
+        };
+        (last(|l| l.old, self.old_start), last(|l| l.new, self.new_start))
+    }
+}
+
+/// Unchanged lines of the file at `path`, `texts`, as a diff draws them between two hunks:
+/// the first numbered `old` in the old file and `new` in the new, coloured as one text.
+#[must_use]
+pub fn context(path: &str, texts: &[&str], (old, new): (u32, u32)) -> Vec<Line> {
+    let spans =
+        Syntax::for_path(path, "").map(|syntax| highlight::spans(&texts.join("\n"), syntax));
+    (0_u32..)
+        .zip(texts)
+        .map(|(ix, text)| Line {
+            kind: Kind::Context,
+            old: Some(old.saturating_add(ix)),
+            new: Some(new.saturating_add(ix)),
+            text: (*text).to_owned(),
+            spans: spans
+                .as_ref()
+                .zip(usize::try_from(ix).ok())
+                .and_then(|(s, i)| s.get(i).cloned()),
+            no_newline: false,
+            emph: Vec::new(),
+        })
+        .collect()
 }
 
 /// The bytes of a line that changed.

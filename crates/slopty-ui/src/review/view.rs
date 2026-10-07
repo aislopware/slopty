@@ -64,6 +64,7 @@ const LIST_WIDTH: f32 = 240.0;
 
 mod authors;
 mod file_menu;
+mod gaps;
 
 pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
 
@@ -197,6 +198,11 @@ enum Row {
     Hunk(usize, usize),
     /// A line of a hunk.
     Line(usize, usize, usize),
+    /// The unchanged lines before a hunk of a file (after its last, at the hunks' count),
+    /// folded to one line that opens them.
+    Gap(usize, usize),
+    /// An unchanged line of an opened stretch: the file, the stretch, the line.
+    Context(usize, usize, usize),
     /// A comment waiting, by its place among them.
     Comment(usize),
     /// The field a comment is written in.
@@ -343,6 +349,13 @@ pub struct ReviewView {
     file_menu: Option<file_menu::FileMenu>,
     /// The files folded to their heads, by path: kept across the review's updates and spans.
     folded: HashSet<String>,
+    /// The stretches between hunks the person opened, by the file's path and the hunk after
+    /// each ([`Row::Gap`]).
+    unfolded: HashSet<(String, usize)>,
+    /// The lines of each file side a stretch was opened in, by its blob, once they came.
+    sides: HashMap<String, Rc<[String]>>,
+    /// The opened stretches' lines as drawn, by the file's place and the stretch.
+    context: HashMap<(usize, usize), Rc<[Line]>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -429,6 +442,7 @@ impl ReviewView {
             HubEvent::Thread(t) if this.own() == Some(*t) => this.thread_moved(cx),
             HubEvent::Git(repo) if this.repo(cx).as_ref() == Some(repo) => this.git_moved(cx),
             HubEvent::Authors => this.authors_came(cx),
+            HubEvent::Expanded(content) => this.expanded(content, cx),
             _ => {}
         });
         let watching = cx.observe(&draft, |_, _, cx| cx.notify());
@@ -482,6 +496,9 @@ impl ReviewView {
             findings_open: false,
             file_menu: None,
             folded: HashSet::new(),
+            unfolded: HashSet::new(),
+            sides: HashMap::new(),
+            context: HashMap::new(),
             _subscriptions: vec![writing, hearing, watching],
         };
         if let Some(thread) = view.own() {
@@ -775,18 +792,20 @@ impl ReviewView {
     /// the comments under the lines they are on.
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
-        for listed in self.model.listed() {
-            let at = listed.at;
+        self.context.clear();
+        let listed: Vec<usize> = self.model.listed().iter().map(|l| l.at).collect();
+        for at in listed {
             rows.push(Row::File(at));
             if self.model.file(at).is_some_and(|f| self.folded.contains(&f.path)) {
                 continue;
             }
-            let Some(blocks) = self.blocks.get(&at).filter(|b| !b.is_empty()) else {
+            let Some(blocks) = self.blocks.get(&at).filter(|b| !b.is_empty()).cloned() else {
                 rows.push(Row::Bare(at));
                 continue;
             };
             let path = self.model.file(at).map(|f| f.path.clone()).unwrap_or_default();
             for (hunk, block) in blocks.iter().enumerate() {
+                self.push_gap(&mut rows, at, hunk);
                 rows.push(Row::Hunk(at, hunk));
                 for (ix, line) in block.lines.iter().enumerate() {
                     let row = Row::Line(at, hunk, ix);
@@ -794,6 +813,7 @@ impl ReviewView {
                     self.under(&mut rows, &path, &[line], row);
                 }
             }
+            self.push_gap(&mut rows, at, blocks.len());
         }
         let old = self.rows.len();
         self.list.splice(0..old, rows.len());
@@ -1930,6 +1950,8 @@ impl ReviewView {
             Row::Bare(at) => self.bare(at),
             Row::Hunk(at, hunk) => self.hunk_head(at, hunk, cx),
             Row::Line(at, hunk, line) => self.line_row(at, hunk, line, cx),
+            Row::Gap(at, gap) => self.gap_row(at, gap, cx),
+            Row::Context(at, gap, line) => self.context_row(at, gap, line),
             Row::Comment(c) => self.comment_row(c, cx),
             Row::Draft => self.draft_row(),
         };
