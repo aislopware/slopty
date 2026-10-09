@@ -212,10 +212,15 @@ async fn session(
     if out.send(ToServer::Load(load)).await.is_err() {
         return Ok("the writer stopped");
     }
-    // Nor where each agent's work lands, which the status lines said before this link.
-    let branches = daemon.agents.lock().branches();
-    for branch in branches {
-        if out.send(ToServer::Report(AgentReport::Branch(branch))).await.is_err() {
+    // Nor where each agent's work lands, which the status lines said before this link, nor
+    // each agent's permissions, which the server's guard judges.
+    let standing = {
+        let agents = daemon.agents.lock();
+        let branches = agents.branches().into_iter().map(AgentReport::Branch);
+        branches.chain(agents.permission_reports()).collect::<Vec<_>>()
+    };
+    for report in standing {
+        if out.send(ToServer::Report(report)).await.is_err() {
             return Ok("the writer stopped");
         }
     }
@@ -349,8 +354,17 @@ async fn session(
                 let msg = match report {
                     Ok(report) => ToServer::Report(report),
                     // A subagent's start or stop the tree missed is only a leaf short.
+                    // What was dropped of each agent's permissions is told again whole.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "agent reports dropped");
+                        tracing::warn!(missed, "agent reports dropped; their permissions told again");
+                        let standing = daemon.agents.lock().permission_reports();
+                        let mut sent = true;
+                        for report in standing {
+                            sent &= out.send(ToServer::Report(report)).await.is_ok();
+                        }
+                        if !sent {
+                            break "the writer stopped";
+                        }
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",

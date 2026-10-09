@@ -893,7 +893,8 @@ mod tests {
 
     /// A terminal whose command starts Claude Code, however wrapped, is an agent's from the
     /// start: nothing is typed into it before its first hook, and what its command line gives
-    /// it beyond what asks the person is reported, for the server to judge.
+    /// it beyond what asks the person is reported, for the server to judge, and told again to
+    /// the next link after the server restarts.
     #[tokio::test]
     async fn claude_in_a_shell_line_is_guarded_and_judged_as_a_spawned_one() {
         use slopty_proto::project::AgentReport;
@@ -939,6 +940,18 @@ mod tests {
         .await;
         let quiet = recorded(&record, |_| true).await;
         assert_eq!(quiet["typed"], serde_json::json!([]), "nothing reached its TUI");
+
+        // The server restarts: the next link hears it again, though nothing changed, so the
+        // guard judges an agent that loosened itself while the server could not hear.
+        peer.conn.close(0_u32.into(), b"server restarting");
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut again, _) = Peer::welcome(link).await;
+        again
+            .heard(|m| {
+                matches!(m, ToServer::Report(AgentReport::Loosened { session, found })
+                    if *session == term.session && found.iter().any(|f| f == "--allowedTools"))
+            })
+            .await;
     }
 
     /// Reports the server sends an agent reach it through its own hooks, never its terminal:

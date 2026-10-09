@@ -1394,6 +1394,22 @@ impl AgentTable {
         Some(AgentReport::PermissionMode { session, mode: mode.clone() })
     }
 
+    /// What was last reported of each live session's permissions: its mode, and what loosens
+    /// them when anything does. A server link that was down, or fell behind, when they were
+    /// reported missed them, so every new link is told them again: the server's guard closes
+    /// a terminal held to asking whose agent went looser while it could not hear.
+    #[must_use]
+    pub fn permission_reports(&self) -> Vec<AgentReport> {
+        let modes = self.reported_modes.iter().map(|(session, mode)| AgentReport::PermissionMode {
+            session: *session,
+            mode: mode.clone(),
+        });
+        let loosened = self.reported_loosened.iter().filter(|(_, found)| !found.is_empty()).map(
+            |(session, found)| AgentReport::Loosened { session: *session, found: found.clone() },
+        );
+        modes.chain(loosened).collect()
+    }
+
     /// Name what the worker adds to the agents it starts (its `slopty` for the hooks, the status
     /// line and the tools, its mod's plugin directory), so [`Self::loosening_report`] tells them
     /// from the same flags an agent passed itself.
@@ -3064,5 +3080,29 @@ mod tests {
             panic!("reported")
         };
         assert_eq!(found.len(), slopty_proto::project::LOOSENED_MAX, "bounded for the wire");
+    }
+
+    /// What was reported of each live session's permissions stands to be told again to a new
+    /// server link: its mode, and what loosens it when anything does. A session forgotten
+    /// takes them with it.
+    #[test]
+    fn the_permissions_reported_stand_for_the_next_link() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        assert_eq!(table.permission_reports(), []);
+        table.observe(sid, &claude("--allowedTools Bash"));
+        table.apply(
+            sid,
+            &hook(r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#),
+        );
+        let reported = [table.permission_mode_report(sid), table.loosening_report(sid)];
+        let mut standing = table.permission_reports();
+        standing.sort_by_key(|r| matches!(r, AgentReport::Loosened { .. }));
+        assert_eq!(
+            standing.into_iter().map(Some).collect::<Vec<_>>(),
+            reported,
+            "told again whole"
+        );
+        table.forget(sid);
+        assert_eq!(table.permission_reports(), [], "gone with its session");
     }
 }

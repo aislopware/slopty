@@ -2398,3 +2398,20 @@ reordering and edited allows are gone" in `agents.md`.*
     the worktree, a discard goes on); goldens `client_git_scripts` and `worker_git_scripts`.
     The project goldens changed, and `script_set`, `script_delete`, `script_run` and
     `run_script` are gone with their verbs.
+
+- ✅ **An agent's permissions are told again to every new server link** (2026-10-10, readiness
+  10-10 rank 8). The worker marked an agent's permission mode (`PermissionMode`) and what
+  loosens it (`Loosened`) as reported once it put them on the daemon's report broadcast. With
+  the server link down (a server restart, which is every update) or behind, they were lost, and
+  registration did not send them again. So the guard never closed a terminal held to asking
+  whose agent went looser while the server could not hear.
+  - What was last reported of each live session stands in the agent table
+    (`AgentTable::permission_reports`): its mode, and what loosens it when anything does. A
+    session that ends takes them with it.
+  - Every registration sends them after the agents' branches, and so does a link that fell
+    behind the broadcast (`Lagged`). The server's guard judges a report it already acted on
+    the same way, and a terminal it closed is no longer among the live sessions.
+  - Tests: `slopty-agent` `tests::the_permissions_reported_stand_for_the_next_link`, and the
+    daemon's `claude_in_a_shell_line_is_guarded_and_judged_as_a_spawned_one`
+    (`apps/slopty-worker/tests/server_link.rs`), whose second link, after the first closes as
+    a restarting server's does, hears the `Loosened` again with nothing changed.
