@@ -13,11 +13,15 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-ios-worker
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
 Group (focused)
 Terminal │ shell │ ~ %
+Group │ Status
+Button │ Show the tab's terminal
 Button │ Escape
 Button │ Tab
 Button │ Control

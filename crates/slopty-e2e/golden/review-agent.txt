@@ -61,3 +61,5 @@ Button │ Keep
 Button │ Add to message
 Button │ Send 2 comments
 Button │ Mark reviewed
+Group │ Status
+Button │ Show the tab's terminal

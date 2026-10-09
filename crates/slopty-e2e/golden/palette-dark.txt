@@ -13,13 +13,14 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker
 Group │ Terminal
 Heading │ terminal Terminal
 Tab │ Terminal
 Button │ Close tile
 Tab │ RELEASE.md
 Button │ Close tile
-Label │ ~
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
@@ -28,6 +29,8 @@ Heading │ terminal Terminal 2
 Button │ Close tile
 Group
 Terminal │ shell
+Group │ Status
+Button │ Show the tab's terminal
 Dialog │ Commands
 TextInput │ Command │ > (focused)
 ListBox │ Commands

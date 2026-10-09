@@ -13,15 +13,19 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ project
+Button │ e2e-worker
 Group │ capture.log
 Heading │ file capture.log
 Tab │ Terminal
 Button │ Close tile
 Tab │ capture.log
 Button │ Close tile
-Label │ project
 Button │ Close tile
 Document │ File $SCRATCH/project/capture.log │ too large, 40.0 MB (focused)
 Status │ Too large to open here: 40.0 MB, over the 16.0 MB a tile opens
 Button │ Open in editor
 Button │ Open in pager
+Group │ Status
+Button │ Show the tab's terminal

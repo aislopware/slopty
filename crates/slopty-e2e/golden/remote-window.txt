@@ -13,6 +13,8 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker
 Group │ Safari
 Heading │ window Safari
 Tab │ Terminal
@@ -20,5 +22,7 @@ Button │ Close tile
 Tab │ Safari
 Button │ Close tile
 Button │ Close tile
-Status │ Window is no longer available. Safari is not open on e2e-worker any more.
+Status │ Safari did not open. e2e-worker may not record its screen. Turn on Screen Recording for slopty-worker in its System Settings.
 Button │ Choose another window
+Group │ Status
+Button │ Show the tab's terminal

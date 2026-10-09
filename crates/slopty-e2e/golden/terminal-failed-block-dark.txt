@@ -13,6 +13,8 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
@@ -20,3 +22,5 @@ Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
 Button │ Block actions
+Group │ Status
+Button │ Show the tab's terminal

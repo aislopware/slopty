@@ -13,25 +13,25 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
-Group
-Terminal │ shell │ ~ %
-Dialog │ Settings
+Navigation │ Projects
+Button │ e2e-worker
+Group │ Settings
+Group │ Settings sections
 TextInput │ Search settings (focused)
 TabList │ Sections
+Heading │ App
 Tab │ Appearance
 Tab │ Terminal
 Tab │ Input
+Heading │ Machines
 Tab │ Streams
 Tab │ Network
+Heading │ Help
 Tab │ Keyboard
 Tab │ About
 Button │ Edit as TOML
+Button │ Back
 Heading │ Input
-Button │ Done
 TabPanel │ Input
 Heading │ Keys
 RadioGroup │ Option as Alt │ Off

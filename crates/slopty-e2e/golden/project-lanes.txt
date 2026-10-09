@@ -30,8 +30,6 @@ Tab │ Terminal
 Button │ Close tab
 Tab │ Orchestrator
 Button │ Close tab
-Tab │ #1 Mirror the server's projects
-Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
@@ -73,4 +71,17 @@ List │ Merged
 Button │ Show Merged 1
 MultilineTextInput │ Message the orchestrator
 Button │ Send
+Group │ #1 Mirror the server's projects
+Heading │ Claude Code #1 Mirror the server's projects
+Image │ Claude Code
+Button │ Show terminal
+Button │ Close tile
+Group │ Thread
+MultilineTextInput │ Message
+Button │ Add to the message
+Button │ Model, Claude
+Button │ Send
+Group │ Status
+Status │ Claude Code
+Button │ Show the tab's terminal
 Status │ #5 Check the wire goldens: its verifier failed

@@ -12,9 +12,13 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker
 Heading │ display Display 1
 Tab │ Terminal
 Button │ Close tile
 Tab │ Display 1
 Button │ Close tile
 Button │ Close tile
+Group │ Status
+Button │ Show the tab's terminal

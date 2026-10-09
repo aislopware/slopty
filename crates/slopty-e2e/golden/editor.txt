@@ -13,14 +13,18 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ project
+Button │ e2e-worker
 Group │ main.rs
 Heading │ file main.rs
 Tab │ Terminal
 Button │ Close tile
 Tab │ main.rs
 Button │ Close tile
-Label │ project
 Button │ Close tile
 Document │ File $SCRATCH/project/main.rs │ 3 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/project/main.rs │ fn main() {⏎    println!("hello");⏎} (focused)
 Status │ Rust, Spaces: 4, Ln 1, Col 1
+Group │ Status
+Button │ Show the tab's terminal

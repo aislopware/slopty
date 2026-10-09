@@ -11,8 +11,11 @@ TabList
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
 Button │ New agent
 Button │ New terminal
 Button │ Add a window or display
 Button │ New terminal in ~
 Button │ New terminal on e2e-worker
+Group │ Status
+Button │ Show the tab's terminal

@@ -13,15 +13,19 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ project
+Button │ e2e-worker
 Group │ screenshot
 Heading │ file screenshot
 Tab │ Terminal
 Button │ Close tile
 Tab │ screenshot
 Button │ Close tile
-Label │ project
 Button │ Close tile
 Document │ File $SCRATCH/project/screenshot │ image/png, 1600 × 900, 23 KB (focused)
 Image │ image/png, 1600 × 900, 23 KB
 Label │ PNG · 1600 × 900 · 23 KB
 Button │ Actual size
+Group │ Status
+Button │ Show the tab's terminal

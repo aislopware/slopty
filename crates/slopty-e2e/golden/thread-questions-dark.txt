@@ -43,7 +43,7 @@ Article │ done
 Button │ Copy message
 Group │ Changed 1 file, 2 added, 1 removed
 Button │ Review
-Button │ Review /work/notes.txt
+Button │ Review notes.txt
 Dialog │ Which layout should the review use?
 Form
 Group │ Which layout should the review use?
@@ -61,3 +61,7 @@ Button │ Model, Opus 5.5
 Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send
+Group │ Status
+Status │ Claude Code, Needs you
+Image │ Needs you
+Button │ Show the tab's terminal

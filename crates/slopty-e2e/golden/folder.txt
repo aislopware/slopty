@@ -13,6 +13,8 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ project
 Group │ project
 Heading │ folder project
 Tab │ project
@@ -32,3 +34,5 @@ ListBox │ Entries
 ListBoxOption │ src
 ListBoxOption │ .env
 ListBoxOption │ README.md
+Group │ Status
+Button │ Show the tab's terminal

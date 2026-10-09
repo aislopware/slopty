@@ -14,6 +14,7 @@ Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ e2e-worker
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
 Image │ Claude Code
@@ -29,10 +30,13 @@ Article │ done
 Button │ Copy message
 Group │ Changed 1 file, 2 added, 1 removed
 Button │ Review
-Button │ Review /work/notes.txt
+Button │ Review notes.txt
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ Review the changes
 Button │ Context 34% of 200k
 Button │ Send
+Group │ Status
+Status │ Claude Code
+Button │ Show the tab's terminal

@@ -13,6 +13,8 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker
 Group │ Synthetic editor
 Heading │ window Synthetic editor
 Tab │ Terminal
@@ -22,3 +24,5 @@ Button │ Close tile
 Button │ Close tile
 Button │ Show its window
 Status │ In its own window
+Group │ Status
+Button │ Show the tab's terminal

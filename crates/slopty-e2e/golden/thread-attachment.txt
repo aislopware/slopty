@@ -36,13 +36,15 @@ Article │ done
 Button │ Copy message
 Group │ Changed 1 file, 2 added, 0 removed
 Button │ Review
-Button │ Review /work/notes.md
+Button │ Review notes.md
 Status │ Attaching screen-recording.mov, 0%
 Button │ Remove screen-recording.mov
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
-Button │ Model, Opus 5.5
+Button │ Model, Claude
 Button │ 1 finished
 Button │ Review the changes
-Button │ Context 34% of 200k
 Button │ Send
+Group │ Status
+Status │ Claude Code
+Button │ Show the tab's terminal

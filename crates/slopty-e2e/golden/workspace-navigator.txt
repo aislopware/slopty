@@ -29,7 +29,6 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ RELEASE.md
 Button │ Close tile
-Label │ ~
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
@@ -38,3 +37,5 @@ Heading │ terminal Terminal 2
 Button │ Close tile
 Group
 Terminal │ shell
+Group │ Status
+Button │ Show the tab's terminal

@@ -15,6 +15,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ project
+Button │ e2e-worker
 Group │ NOTES.md
 Heading │ file NOTES.md
 Button │ Drag the file out
@@ -23,3 +24,5 @@ Button │ Show source
 Button │ Close tile
 Document │ File $SCRATCH/project/NOTES.md │ 11 lines, Markdown (focused)
 Document │ Preview of $SCRATCH/project/NOTES.md │ # The board as a grouped list⏎⏎Lanes in a grid of bordered cards read as a dashboard of boxes. The board is now one column, as Linear's grouped issues are, and each task is a row that says only what moves it on; what needs reading waits under it until it is needed, and nothing else is boxed.⏎⏎## What a row holds⏎⏎Its mark, its number and its title, then at the trailing end the facts a glance needs: what moves it on, its check, its branch and the machine it runs on. The least needed leave first as the column narrows, so a row fits a narrow column with no wrapping, and the title keeps a floor of eight ems.⏎⏎- One column, the lanes in their order⏎- Rows, not cards⏎- Merged folds to its head
+Group │ Status
+Button │ Show the tab's terminal

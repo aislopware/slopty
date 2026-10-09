@@ -46,3 +46,6 @@ Button │ Model, Opus 5.5
 Button │ 1 finished
 Button │ Context 34% of 200k
 Button │ Send
+Group │ Status
+Status │ Claude Code
+Button │ Show the tab's terminal

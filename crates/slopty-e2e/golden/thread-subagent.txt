@@ -36,3 +36,6 @@ Button │ Read /work/main.rs
 Link │ Open /work/main.rs
 Article │ 4
 Button │ Copy message
+Group │ Status
+Status │ Claude Code
+Button │ Show the tab's terminal

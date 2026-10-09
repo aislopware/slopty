@@ -13,6 +13,8 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-ios-worker
 Group │ Terminal
 Heading │ terminal Terminal
 Label │ ~
@@ -25,3 +27,5 @@ Document │ File $SCRATCH/home/note-$MOMENT.md │ 1 line, Markdown, not on dis
 Status │ Not on disk: saving makes it
 MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md (focused)
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
+Group │ Status
+Button │ Show the tab's terminal

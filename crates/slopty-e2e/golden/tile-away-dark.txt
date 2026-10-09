@@ -13,8 +13,12 @@ Button │ Close tab
 Button │ New
 Button │ Needs you
 Button │ More
+Navigation │ Projects
+Button │ e2e-worker, unreachable
 Group │ e2e-worker
 Heading │ e2e-worker
 Status │ e2e-worker is unreachable
 Button │ Wake
 Button │ Retry now
+Group │ Status
+Button │ Show the tab's terminal
