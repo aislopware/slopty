@@ -9,6 +9,12 @@
 //!
 //! While there are more bars than the stack has room for, their gap closes first, down to a
 //! point, and then a window of them slides to keep the prompt in view inside it.
+//!
+//! The stack is sized to the transcript and lit by the prompt in view, both read off the list,
+//! which lays out after the frame that reads it. So the outline is one of the frame's marks
+//! (`tray::Marks`): when the list's layout moves it (the soft keyboard shrinking the
+//! transcript), the next frame draws it again, and what shows is what a frame from scratch
+//! draws.
 
 use gpui::accesskit::Role;
 use gpui::{
@@ -53,6 +59,16 @@ const RIPPLE: usize = 2;
 
 /// The preview's width, in points.
 const PREVIEW_WIDTH: f32 = 288.0;
+
+/// What a frame drew of the outline from the list: the bars on show, their gap (its bits, so
+/// the mark compares whole), and the prompt lit as in view.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct OutlineMark {
+    pub start: usize,
+    pub end: usize,
+    pub gap: u32,
+    pub active: Option<usize>,
+}
 
 /// The bars on show: the first and past the last of the prompts, and the room between two.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -167,11 +183,7 @@ impl ThreadView {
         }
         let theme = &self.theme;
         let s = theme.surfaces;
-        let height = f32::from(self.list.viewport_bounds().size.height);
-        let budget =
-            if height > 0.0 { (height * STACK_SHARE).floor().min(STACK_MAX) } else { STACK_MAX };
-        let active = self.prompt_in_view(&prompts);
-        let stack = stack(prompts.len(), active, budget);
+        let (stack, active) = self.outline_stack(&prompts);
         let hovered = self.outline_hovered.and_then(|row| prompts.iter().position(|&p| p == row));
         let bars = (stack.start..stack.end).filter_map(|at| {
             let row = *prompts.get(at)?;
@@ -235,6 +247,29 @@ impl ThreadView {
                 .child(div().w_full().flex().flex_col().children(bars))
                 .into_any_element(),
         )
+    }
+
+    /// The bars the outline draws for `prompts` as the list now stands, and the prompt in view.
+    fn outline_stack(&self, prompts: &[usize]) -> (Stack, Option<usize>) {
+        let height = f32::from(self.list.viewport_bounds().size.height);
+        let budget =
+            if height > 0.0 { (height * STACK_SHARE).floor().min(STACK_MAX) } else { STACK_MAX };
+        let active = self.prompt_in_view(prompts);
+        (stack(prompts.len(), active, budget), active)
+    }
+
+    /// What the outline draws from the list, as a frame's mark ([`OutlineMark`]); `None` while
+    /// there is no outline.
+    pub(super) fn outline_mark(&self) -> Option<OutlineMark> {
+        if self.width < OUTLINE_FROM {
+            return None;
+        }
+        let prompts = self.prompt_rows();
+        if prompts.len() < MIN_PROMPTS {
+            return None;
+        }
+        let (stack, active) = self.outline_stack(&prompts);
+        Some(OutlineMark { start: stack.start, end: stack.end, gap: stack.gap.to_bits(), active })
     }
 
     /// The card beside a bar under the pointer: the prompt's start, then its answer's, muted,

@@ -41,6 +41,8 @@ pub(super) struct Marks {
     pub asked: Option<(usize, Placement)>,
     /// The list is scrolled up from its newest row.
     pub down: bool,
+    /// The prompt outline's bars and the prompt it lights.
+    pub outline: Option<super::outline::OutlineMark>,
 }
 
 /// Where the request on show is answered.
@@ -98,7 +100,7 @@ impl ThreadView {
             .and_then(|request| request.item.as_ref())
             .and_then(|item| self.call_row(item))
             .map(|row| (row, self.placement_of(row)));
-        Marks { asked, down: self.away_from_newest() }
+        Marks { asked, down: self.away_from_newest(), outline: self.outline_mark() }
     }
 
     /// Whether the way down shows: the list does not follow its newest row, and is not known
@@ -110,13 +112,14 @@ impl ThreadView {
     }
 
     /// Draw again once the list's layout moved what the frame drew from it: the request's
-    /// place, the way down. Reads only the list, so a frame that changes neither costs no
-    /// second one.
+    /// place, the way down, the outline. Reads only the list, so a frame that changes neither costs
+    /// no second one.
     pub(super) fn recheck_marks(&self, cx: &mut Context<Self>) {
         let was = self.marks.get();
         let now = Marks {
             asked: was.asked.map(|(row, _)| (row, self.placement_of(row))),
             down: self.away_from_newest(),
+            outline: self.outline_mark(),
         };
         if now != was {
             #[cfg(test)]

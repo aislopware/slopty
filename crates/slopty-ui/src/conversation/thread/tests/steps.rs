@@ -520,3 +520,76 @@ fn the_prompt_outline_takes_the_transcript_to_a_prompt(cx: &mut TestAppContext) 
     let prompt = view.read_with(cx, |v, _| v.prompt_rows()[0]);
     assert_eq!(view.read_with(cx, |v, _| v.top_row()), prompt, "taken to the first prompt");
 }
+
+/// A thread view drawn as a workspace tile draws it, from its cached drawing (built again only
+/// when it was told something moved), above a soft keyboard `keyboard` points tall.
+struct Tiled {
+    view: gpui::Entity<ThreadView>,
+    keyboard: f32,
+}
+
+impl gpui::Render for Tiled {
+    fn render(
+        &mut self,
+        _w: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        let tile = gpui::StyleRefinement::default().flex_1().min_h_0().w_full();
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(self.view.clone().cached(tile))
+            .child(gpui::div().flex_none().w_full().h(gpui::px(self.keyboard)))
+    }
+}
+
+/// When the soft keyboard rises and shrinks the transcript under the outline, though nothing
+/// tells the thread, the stack is sized to the column it now stands in by the next frame: the
+/// frame shown is the one a frame from scratch draws, and every bar stays inside the rows.
+#[gpui::test]
+fn the_prompt_outline_follows_a_shrinking_transcript(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::long(40, 2);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let hosted = hub.clone();
+    let (tiled, cx) = cx.add_window_view(|window, cx| {
+        let theme = slopty_theme::Theme::default();
+        let view =
+            gpui::AppContext::new(cx, |cx| ThreadView::new(hosted, thread, theme, window, cx));
+        Tiled { view, keyboard: 0.0 }
+    });
+    let view = tiled.read_with(cx, |t, _| t.view.clone());
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(700.0)));
+    view.update(cx, |v, cx| v.set_layout(1100.0, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-outline").is_some(), "the outline in a wide tile");
+
+    for keyboard in [440.0, 549.0, 0.0, 549.0] {
+        tiled.update(cx, |t, cx| {
+            t.keyboard = keyboard;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // The frame the display asks for next, as the window draws it: only what was told is
+        // built again.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        assert!(stale.is_none(), "{keyboard} pt of keyboard: {stale:?}");
+        let rail = cx.debug_bounds("thread-outline").expect("the outline");
+        let bars: Vec<_> =
+            (0..40).filter_map(|at| cx.debug_bounds(format!("outline-{at}").leak())).collect();
+        let (Some(first), Some(last)) = (bars.first(), bars.last()) else {
+            panic!("{keyboard} pt of keyboard: no bar shows");
+        };
+        let (top, bottom) = (first.top(), last.bottom());
+        assert!(
+            top >= rail.top() && bottom <= rail.bottom(),
+            "{keyboard} pt of keyboard: {top:?}..{bottom:?} in {rail:?}"
+        );
+    }
+}
