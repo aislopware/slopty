@@ -20,7 +20,7 @@ use crate::tools::repo_root;
 /// The Claude Code version fixtures are recorded with unless another is named: the newest the
 /// mod was verified against (`slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS`, which a test holds
 /// to the recording).
-pub const VERSION: &str = "2.1.291";
+pub const VERSION: &str = "2.1.295";
 
 /// Names a `claude` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_CLAUDE";

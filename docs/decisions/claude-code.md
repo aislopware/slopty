@@ -1222,8 +1222,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.291"]`, recorded 2026-10-06 with the mod unchanged; 2.1.290,
-      2.1.289 and 2.1.286 before it).
+      recorded (today `["2.1.295"]`, recorded 2026-10-09 with the mod unchanged; 2.1.291,
+      2.1.290, 2.1.289 and 2.1.286 before it).
+    - From 2.1.295 a session with no settings starts in auto mode, and the request carries
+      `system` entries after the turn. The recorder runs `--permission-mode default`, since
+      auto mode's classifier would ask the canned API and be refused, and its canned API reads
+      the conversation without the `system` entries.
     - A newer release is heard provisionally (2026-10-05, ruled; see "A managed `claude`"
       below). A fleet moves to a new release before anyone records it, and refusing it left the
       face without its live stream on the very machines that most need it. So the gate has

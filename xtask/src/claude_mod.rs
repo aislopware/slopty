@@ -116,6 +116,9 @@ fn capture(claude: &Path, plugin: &Path, port: u16, scenario: &Scenario, out: &P
         .args(["-p", scenario.prompt, "--model", "haiku"])
         .arg(format!("--plugin-dir={}", plugin.display()))
         .args(["--allowedTools", "Bash Agent", "--setting-sources", ""])
+        // From 2.1.295 a session starts in auto mode, whose classifier asks the canned API and
+        // is refused; the fixtures record the mod, so the run asks as `default` does.
+        .args(["--permission-mode", "default"])
         .current_dir(&work)
         .env_clear()
         .envs([
@@ -376,7 +379,16 @@ pub enum Block {
 
 /// The fake model's answer to a request: its blocks and its stop reason.
 fn answer(body: &Value) -> (Vec<Block>, &'static str) {
-    let messages = body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
+    // Claude Code 2.1.295 appends `system` entries (context reminders) after the turn, so the
+    // conversation is read without them.
+    let messages: Vec<Value> = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("role").and_then(Value::as_str) != Some("system"))
+        .cloned()
+        .collect();
     let text_of = |m: &Value| match m.get("content") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(parts)) => {
