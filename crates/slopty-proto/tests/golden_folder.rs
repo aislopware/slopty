@@ -5,7 +5,9 @@
 #[cfg(test)]
 mod golden_folder {
     use slopty_core::WallMs;
-    use slopty_proto::folder::{After, FolderEntry, FsOp, FsOutcome, FsRefusal, Listing};
+    use slopty_proto::folder::{
+        After, FileVersion, FolderEntry, FsOp, FsOutcome, FsRefusal, Listing,
+    };
     use slopty_proto::orchestration::FileKind;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
@@ -66,6 +68,12 @@ mod golden_folder {
             &op(8, FsOp::Move { from: "~/src/a.txt".to_owned(), to: "~/src/b.txt".to_owned() }),
         );
         snap("client_fs_trash", &op(9, FsOp::Trash { path: "/w/old".to_owned() }));
+        let replace = FsOp::Replace {
+            path: "~/src/plan.key".to_owned(),
+            with: "/Users/dev/.slopty/drop/7/plan.key".to_owned(),
+            base: FileVersion { size: 4096, modified_ms: WallMs::from_millis(1_700_000_000_123) },
+        };
+        snap("client_fs_replace", &op(10, replace));
     }
 
     #[test]
@@ -88,6 +96,15 @@ mod golden_folder {
             ("into_itself", FsRefusal::IntoItself),
             ("other_volume", FsRefusal::OtherVolume),
             ("no_trash", FsRefusal::NoTrash),
+            (
+                "changed",
+                FsRefusal::Changed {
+                    now: FileVersion {
+                        size: 4100,
+                        modified_ms: WallMs::from_millis(1_700_000_000_456),
+                    },
+                },
+            ),
         ];
         for (name, why) in refused {
             snap(&format!("worker_fs_refused_{name}"), &done(8, FsOutcome::Refused(why)));

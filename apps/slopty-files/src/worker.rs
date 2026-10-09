@@ -372,7 +372,7 @@ impl Worker {
         let path = match &op {
             FsOp::MakeDir { parent, name } => format!("{parent}/{name}"),
             FsOp::Move { from, .. } => from.clone(),
-            FsOp::Trash { path } => path.clone(),
+            FsOp::Trash { path } | FsOp::Replace { path, .. } => path.clone(),
         };
         let request = self.asked.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         let (tx, rx) = oneshot::channel();

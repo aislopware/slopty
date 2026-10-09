@@ -1,20 +1,24 @@
-//! A folder tile's changes to the worker's files: a new folder, a move or rename, and a trip to
-//! the OS's own trash ([`slopty_platform::trash`]).
+//! A folder tile's changes to the worker's files: a new folder, a move or rename, a trip to the
+//! OS's own trash ([`slopty_platform::trash`]), and a file's contents replaced over the version
+//! its asker saw.
 //!
 //! Each op is checked before anything is touched and refused, as a [`FsRefusal`], when it would
 //! do what it must not: a path that is relative or climbs with `..`, a name that is not one
 //! plain name, a move or trash of a place that holds others' work (the file system's root, a
-//! volume's, the home or a folder holding it), or anything already at the destination. Nothing
-//! is ever replaced: a move is a rename that fails when its destination is taken, in one step
-//! where the file system allows it ([`slopty_platform::fs::rename_new`]). Nothing is ever
-//! unlinked: a trashed entry can be put back from the OS's trash.
+//! volume's, the home or a folder holding it), or anything already at the destination. A move
+//! never replaces: it is a rename that fails when its destination is taken, in one step where
+//! the file system allows it ([`slopty_platform::fs::rename_new`]). Only a replace writes over a
+//! file, and only over the version its asker saw: one written meanwhile is refused as
+//! [`FsRefusal::Changed`], looked at again just before the new contents go in
+//! ([`slopty_platform::fs::replace_from`]). Nothing is ever unlinked but the file a replace
+//! took its new contents from: a trashed entry can be put back from the OS's trash.
 
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 
 use slopty_platform::trash::TrashError;
-use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal};
+use slopty_proto::folder::{FileVersion, FsOp, FsOutcome, FsRefusal};
 
 /// Do `op` as this worker's user, its home the place `~` names.
 #[must_use]
@@ -32,6 +36,7 @@ fn apply_in(
         FsOp::MakeDir { parent, name } => make_dir(home, parent, name),
         FsOp::Move { from, to } => move_to(home, from, to),
         FsOp::Trash { path } => throw_away(home, path, trash),
+        FsOp::Replace { path, with, base } => replace(home, path, with, *base),
     };
     done.unwrap_or_else(|refused| refused)
 }
@@ -108,6 +113,52 @@ fn throw_away(
         Err(TrashError::Os(e)) if e.kind() == ErrorKind::NotFound => Err(missing(&path)),
         Err(TrashError::Os(e)) => Err(failed(&e)),
     }
+}
+
+fn replace(home: &Path, path: &str, with: &str, base: FileVersion) -> Step<FsOutcome> {
+    let (at, from) = (place(home, path)?, place(home, with)?);
+    let source = there(&from)?;
+    if !source.is_file() {
+        return Err(failed(&std::io::Error::new(ErrorKind::InvalidInput, "Not a regular file")));
+    }
+    if real(&from).is_some_and(|f| real(&at).is_some_and(|a| a == f)) {
+        return Err(refused(FsRefusal::IntoItself));
+    }
+    as_seen(&at, base)?;
+    // Looked at again just before the rename: a write in between is refused, not lost.
+    let changed = std::cell::Cell::new(None);
+    let ready = || match as_seen(&at, base) {
+        Ok(()) => Ok(()),
+        Err(outcome) => {
+            changed.set(Some(outcome));
+            Err(std::io::Error::other("changed meanwhile"))
+        }
+    };
+    match slopty_platform::fs::replace_from(&at, &from, ready) {
+        Ok(()) => {
+            if let Err(e) = std::fs::remove_file(&from) {
+                tracing::debug!(with = %from.display(), "a replace's source stayed: {e}");
+            }
+            Ok(done(&at))
+        }
+        Err(e) => Err(changed.take().unwrap_or_else(|| match e.kind() {
+            ErrorKind::NotFound => missing(&at),
+            _other => failed(&e),
+        })),
+    }
+}
+
+/// Refuse unless the file at `path` (a link followed) is the version `base`.
+fn as_seen(path: &Path, base: FileVersion) -> Step<()> {
+    let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => missing(path),
+        _other => failed(&e),
+    })?;
+    if !meta.is_file() {
+        return Err(failed(&std::io::Error::new(ErrorKind::InvalidInput, "Not a regular file")));
+    }
+    let now = FileVersion { size: meta.len(), modified_ms: crate::listing::modified_ms(&meta) };
+    if now == base { Ok(()) } else { Err(refused(FsRefusal::Changed { now })) }
 }
 
 /// `path` as the worker names it: `~` spelled out, lexically clean (`a//b/./` is `a/b`), not
@@ -379,5 +430,49 @@ mod tests {
         let w = World::new();
         let trash = w.apply(&FsOp::Trash { path: "/dev".to_owned() });
         assert_eq!(trash, refused(FsRefusal::Protected { path: "/dev".to_owned() }));
+    }
+
+    /// A replace puts the sent file's contents in place over the version its asker saw, and
+    /// the sent file goes. Over a file written meanwhile it is refused with the version there
+    /// now, and nothing is touched, the sent file included; a file that is not there is missing.
+    #[test]
+    fn a_replace_writes_only_over_the_version_seen() {
+        let w = World::new();
+        let version = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            FileVersion { size: meta.len(), modified_ms: crate::listing::modified_ms(&meta) }
+        };
+        write(&w.at("work/plan.key"), "first");
+        let seen = version(&w.at("work/plan.key"));
+        write(&w.at(".slopty/drop/7/plan.key"), "second, longer");
+        let op = |base| FsOp::Replace {
+            path: "~/work/plan.key".to_owned(),
+            with: w.s(".slopty/drop/7/plan.key"),
+            base,
+        };
+        assert_eq!(w.apply(&op(seen)), FsOutcome::Done { path: w.s("work/plan.key") });
+        assert_eq!(std::fs::read_to_string(w.at("work/plan.key")).unwrap(), "second, longer");
+        assert!(!w.at(".slopty/drop/7/plan.key").exists(), "the sent file is taken");
+
+        write(&w.at(".slopty/drop/8/plan.key"), "third");
+        let stale = FsOp::Replace {
+            path: w.s("work/plan.key"),
+            with: w.s(".slopty/drop/8/plan.key"),
+            base: seen,
+        };
+        let now = version(&w.at("work/plan.key"));
+        assert_eq!(w.apply(&stale), refused(FsRefusal::Changed { now }));
+        assert_eq!(std::fs::read_to_string(w.at("work/plan.key")).unwrap(), "second, longer");
+        assert!(w.at(".slopty/drop/8/plan.key").exists(), "nothing is touched");
+
+        let gone = FsOp::Replace {
+            path: w.s("work/gone.key"),
+            with: w.s(".slopty/drop/8/plan.key"),
+            base: now,
+        };
+        assert_eq!(w.apply(&gone), refused(FsRefusal::Missing { path: w.s("work/gone.key") }));
+        let folder =
+            FsOp::Replace { path: w.s("work"), with: w.s(".slopty/drop/8/plan.key"), base: now };
+        assert!(matches!(w.apply(&folder), FsOutcome::Failed { .. }), "a folder is no file");
     }
 }

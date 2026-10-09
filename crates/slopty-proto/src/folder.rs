@@ -1,5 +1,7 @@
-//! A folder tile's listing, page by page, and the changes it asks of the worker's files: a new
-//! folder, a move or rename, and a trip to the worker OS's own trash.
+//! A folder tile's listing, page by page, and the changes it asks of the worker's files.
+//!
+//! The changes: a new folder, a move or rename, a trip to the worker OS's own trash, and a
+//! file's contents replaced only while it is the version the asker saw.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
@@ -79,7 +81,8 @@ impl After {
 /// `WorkerMsg::FsDone`.
 ///
 /// Paths are absolute on the worker, or `~/…` in its home; none may climb with `..`. Nothing
-/// is ever replaced and nothing is ever unlinked.
+/// is ever unlinked, and nothing is replaced but by a [`FsOp::Replace`], over the version its
+/// asker saw.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FsOp {
     /// Make an empty folder `name` in `parent`.
@@ -103,6 +106,30 @@ pub enum FsOp {
         /// What to trash.
         path: String,
     },
+    /// Put the file `with` in place of the file at `path`, only while `path` is still at
+    /// `base`: a file saved where it was opened (Finder's save-back), never over a change made
+    /// meanwhile, which is refused as [`FsRefusal::Changed`]. `with` is a file the asker sent up
+    /// first (an upload into the worker's drop directory); it is taken, and goes once its
+    /// contents are in place. The file at `path` keeps its mode, and a link there keeps
+    /// pointing at the file it names, which is the one replaced.
+    Replace {
+        /// The file whose contents go.
+        path: String,
+        /// The file whose contents take their place.
+        with: String,
+        /// The version of `path` the new contents were made from.
+        base: FileVersion,
+    },
+}
+
+/// A version of a file, as a listing shows it ([`FolderEntry::size`],
+/// [`FolderEntry::modified_ms`]): any write moves one or the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileVersion {
+    /// Bytes.
+    pub size: u64,
+    /// Last modification.
+    pub modified_ms: WallMs,
 }
 
 /// How an [`FsOp`] went.
@@ -159,6 +186,12 @@ pub enum FsRefusal {
     /// The volume keeps no trash the worker can use (a network share, a volume without a
     /// writable trash).
     NoTrash,
+    /// The file is no longer the version the change was made from: someone wrote it meanwhile.
+    /// It is left as it is.
+    Changed {
+        /// The version there now.
+        now: FileVersion,
+    },
 }
 
 /// Where the worker's `path` is under its home `home`, as `/`-separated names.

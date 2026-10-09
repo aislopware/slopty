@@ -85,6 +85,53 @@ pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rustix::fs::fsync(File::open(dir)?).map_err(io::Error::from)
 }
 
+/// Put a copy of `source` in place of the regular file at `path`, whole or not at all, once
+/// `ready` says the moment has come.
+///
+/// The copy is made beside `path` (a clone where the file system makes one, as `copyfile(3)`
+/// does on APFS), takes the mode of the file it replaces, and is put on the device ahead of
+/// anything written after it. `ready` is asked just before the copy is renamed over `path`: an
+/// error from it leaves `path` as it was. A symbolic link at `path` keeps pointing at the file
+/// it names, and that file is replaced. `source` is left where it is.
+///
+/// # Errors
+///
+/// Nothing at `path` (`NotFound`), a directory (`IsADirectory`) or another non-regular file
+/// (`InvalidInput`) there, `ready`'s error, or whatever the OS refuses.
+pub fn replace_from(
+    path: &Path,
+    source: &Path,
+    ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let meta = std::fs::metadata(path)?;
+    if meta.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::IsADirectory, "Is a directory"));
+    }
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Not a regular file"));
+    }
+    // Renaming over a link would swap the link for a file.
+    let path = std::fs::canonicalize(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Names no file"))?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("/"));
+    let temp = dir.join(format!(".{}.{}.slopty-tmp", name.to_string_lossy(), unique()));
+    let written = (|| {
+        std::fs::copy(source, &temp)?;
+        std::fs::set_permissions(&temp, meta.permissions())?;
+        // Read only: a file whose mode lets no one write it is synced all the same.
+        order_before_later_writes(&File::open(&temp)?)?;
+        ready()?;
+        std::fs::rename(&temp, &path)
+    })();
+    if let Err(e) = written {
+        let _removed = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    rustix::fs::fsync(File::open(dir)?).map_err(io::Error::from)
+}
+
 /// A temporary name's part that no other call, in this process or an earlier one with the same
 /// pid, has used: the pid, the clock and a count.
 fn unique() -> String {
@@ -127,7 +174,7 @@ pub fn order_before_later_writes(file: &File) -> io::Result<()> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::replace;
+    use super::{replace, replace_from};
 
     /// Creates, overwrites, follows a link to its file, keeps an existing file's mode, refuses a
     /// directory, and leaves nothing but the file behind.
@@ -158,5 +205,40 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         left.sort();
         assert_eq!(left, ["link.json", "state.json"], "no temporary file is left behind");
+    }
+
+    /// A copy takes a file's place whole and keeps its mode, through a link to it too; a `ready`
+    /// that says no, a directory or nothing there leaves everything as it was, the source
+    /// included.
+    #[test]
+    fn replace_from_puts_a_copy_in_place_only_when_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, source) = (dir.path().join("plan.key"), dir.path().join("new.key"));
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::write(&source, b"new, longer").unwrap();
+
+        let no = std::io::Error::other("not now");
+        let refused = replace_from(&path, &source, || Err(no)).unwrap_err();
+        assert_eq!(refused.to_string(), "not now");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old", "left as it was");
+
+        let link = dir.path().join("link.key");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        replace_from(&link, &source, || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new, longer");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink(), "the link stays a link");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "the file's own mode");
+        assert_eq!(std::fs::read(&source).unwrap(), b"new, longer", "the source stays");
+
+        let gone = replace_from(&dir.path().join("gone"), &source, || Ok(())).unwrap_err();
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        let folder = replace_from(dir.path(), &source, || Ok(())).unwrap_err();
+        assert_eq!(folder.kind(), std::io::ErrorKind::IsADirectory);
+        let mut left: Vec<_> =
+            std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        left.sort();
+        assert_eq!(left, ["link.key", "new.key", "plan.key"], "no temporary file is left");
     }
 }

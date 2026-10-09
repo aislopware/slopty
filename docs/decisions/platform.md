@@ -589,6 +589,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         nothing over, and an edit saved in place would have to. So a file in the domain is
         read-only; an edited copy is saved as a new file. Writing contents back waits on a
         replace the worker checks against the version the edit began from.
+      - *The worker's replace (2026-10-10).* That replace is on the wire:
+        `FsOp::Replace { path, with, base: FileVersion { size, modified_ms } }`. The new
+        contents are sent up first, as any upload into the drop directory. The worker refuses
+        unless `path` is still the version `base` names, the same size and modification time
+        pair the domain's item versions are made of (`apps/slopty-files/src/item.rs`). A refusal
+        is `FsRefusal::Changed { now }`, with nothing touched. Otherwise it copies the sent file
+        beside `path` (a clone on APFS), keeps the file's mode, puts the copy on the device,
+        and looks at `path` once more. Only then is the copy renamed over `path`, so a write
+        made between the first look and the rename is refused rather than lost. The sent file
+        goes after. A link at `path` keeps pointing at its file, which is the one replaced
+        (`slopty_platform::fs::replace_from`, `slopty_worker::fsop`). The domain's
+        save-back is wired on top of it, and until then contents stay read-only as above.
+        Tests: `fsop::tests::a_replace_writes_only_over_the_version_seen`,
+        `fs::tests::replace_from_puts_a_copy_in_place_only_when_ready`, goldens
+        `client_fs_replace` and `worker_fs_refused_changed`.
       - *A rename changes the item's identifier.* The identifier is the path, so a moved item
         comes back under its new one, which the system takes as the moved item merged into
         the one at the new place (the header's merge rule); a child of a folder moved before it

@@ -1549,6 +1549,15 @@ fn refused(refusal: &FsRefusal) -> Failure {
             ErrorCode::Unsupported,
             "its volume keeps no trash the worker can use, so it was left where it is".to_owned(),
         ),
+        FsRefusal::Changed { now } => (
+            ErrorCode::Conflict,
+            format!(
+                "the file changed since the version the new contents were made from (it is {} \
+                 bytes now, written at {} ms); read it again and make the change over that",
+                now.size,
+                now.modified_ms.as_millis()
+            ),
+        ),
     };
     Failure::new(code, format!("refused, nothing was touched: {message}"))
 }

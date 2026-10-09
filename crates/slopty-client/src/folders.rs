@@ -167,6 +167,7 @@ fn done(op: &FsOp) -> String {
         }
         FsOp::Move { to, .. } => format!("Moved to “{}”", name(parent(to))),
         FsOp::Trash { path: was } => format!("Moved “{}” to the Trash", name(was)),
+        FsOp::Replace { path, .. } => format!("Saved “{}”", name(path)),
     }
 }
 
@@ -182,6 +183,9 @@ pub fn refused(why: &FsRefusal) -> String {
         FsRefusal::IntoItself => "A folder cannot go inside itself".to_owned(),
         FsRefusal::OtherVolume => "That is on another volume: copy it there instead".to_owned(),
         FsRefusal::NoTrash => "That volume has no Trash, so it was left where it is".to_owned(),
+        FsRefusal::Changed { .. } => {
+            "It changed on the worker since it was opened, so nothing was written".to_owned()
+        }
     }
 }
 
@@ -190,6 +194,7 @@ fn verb(op: &FsOp) -> String {
         FsOp::MakeDir { name, .. } => format!("make “{name}”"),
         FsOp::Move { from, .. } => format!("move “{}”", name(from)),
         FsOp::Trash { path } => format!("trash “{}”", name(path)),
+        FsOp::Replace { path, .. } => format!("save “{}”", name(path)),
     }
 }
 
