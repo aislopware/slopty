@@ -9115,3 +9115,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `docs/MEASUREMENTS.md`, 2026-10-09).
   - Tests: `workspace::tests::lone_tile::*`; the header tests give their tile a neighbour
     (`tests::paired`).
+
+- ✅ **A task asked to start again says so at once** (2026-10-09, readiness item 13, the board's
+  half of R22's `Verb::TaskRestart`). The board already offered "Start fresh" and "Give to
+  another agent…" among a stood-on task's controls (`docs/decisions/projects.md`, "A task starts
+  fresh, or goes to another agent"). The card said nothing until the server's board moved, which
+  can take a whole agent start, so a second press looked needed.
+  - **The intent.** The moment either is asked, the card's first detail line says
+    "Starting #3 fresh…" or "Handing #3 to Codex…", in the secondary ink, as a status a screen
+    reader is told. Neither control is offered again on that task while it shows, and the
+    palette's ask says the task is starting again. The board holds the ask with the agent's
+    terminal or seat at the time, so the line ends when the card shows a new one, or when the
+    task merges or leaves the board. A refusal (or no server linked) is said in the server's
+    words, and the card goes back to what it said (`ProjectView::handing_refused`).
+  - **The palette.** "Start the task fresh" and "Give the task to another agent…" act on the task
+    the board stands on, as its other task commands do, with no key: each is rare. The second
+    opens the card's agent picker.
+  - Tests: `workspace::tests::projects::a_task_starts_again_and_says_so_at_once` (both verbs from
+    the card and the palette, the line before the answer, the refusal, the new agent ending it);
+    `project::tests::a_task_starts_fresh_or_goes_to_another_agent`. The keyboard settings golden
+    lists the two commands.

@@ -726,6 +726,94 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     assert!(!shown(&view, cx, orchestrator), "the header's way back to the terminal");
 }
 
+/// "Start fresh" and "Give to another agent…" on a task an agent worked on send `TaskRestart`,
+/// with no agent (the one it ran last) or the one picked, from its card's controls and from the
+/// palette. The card says so at once, before the server answers, and offers neither again
+/// while it does; a refusal is said in the server's words and the card goes back to what it
+/// said; the new agent on the board ends what it says.
+#[gpui::test]
+fn a_task_starts_again_and_says_so_at_once(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::ErrorCode;
+    use slopty_proto::thread::AgentId;
+
+    use crate::project::{GiveTaskToAgent, StartTaskFresh};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let project = fixtures::id("board");
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let b = board(&view, cx, orchestrator);
+    for _ in 0..4 {
+        if b.read_with(cx, |b, _| b.picked()) != Some(Some(TaskId(1))) {
+            b.update(cx, |b, cx| b.select_by(1, cx));
+        }
+    }
+    cx.run_until_parked();
+    assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))), "on the task at work");
+    let says =
+        |cx: &mut VisualTestContext, words: &str| labels(&view, cx).iter().any(|l| l == words);
+
+    click(cx, "project-card-start-fresh-1");
+    assert!(says(cx, "Starting #1 fresh\u{2026}"), "said before the server answers");
+    assert!(cx.debug_bounds("project-card-start-fresh-1").is_none(), "and not asked twice");
+    assert!(cx.debug_bounds("project-card-give-to-1").is_none(), "nor handed meanwhile");
+    let refused = |_: &Verb| Outcome::Error {
+        code: ErrorCode::Conflict,
+        message: "#1's machine is not linked".into(),
+    };
+    assert_eq!(
+        sent(&mut queue, cx, refused),
+        [Verb::TaskRestart { project: project.clone(), task: TaskId(1), agent: None }]
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("#1's machine is not linked"),
+        "a refusal in the server's words"
+    );
+    assert!(cx.debug_bounds("project-card-1-handing").is_none(), "the card as it was");
+    assert!(cx.debug_bounds("project-card-start-fresh-1").is_some(), "to be asked again");
+
+    // From the palette: the picker of the agents its machine can start, then the one picked.
+    cx.dispatch_action(GiveTaskToAgent);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-give-1").is_some(), "the agents its machine starts");
+    click(cx, "project-card-give-1-0");
+    assert!(says(cx, "Handing #1 to Claude Code\u{2026}"), "said at once");
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskRestart { project: project.clone(), task: TaskId(1), agent: Some(claude) }]
+    );
+    assert!(says(cx, "Handing #1 to Claude Code\u{2026}"), "until the board shows its agent");
+    let restarted = on(card(1, "Wire the board", TaskState::Running), worker, SessionId::new());
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", restarted, None), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-1-handing").is_none(), "its new agent is the word");
+
+    cx.dispatch_action(StartTaskFresh);
+    cx.run_until_parked();
+    assert!(says(cx, "Starting #1 fresh\u{2026}"), "from the palette too");
+    cx.dispatch_action(GiveTaskToAgent);
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("#1 is starting again"),
+        "and not asked twice from there either"
+    );
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskRestart { project, task: TaskId(1), agent: None }]
+    );
+}
+
 /// "New project…" offers only the agents that run in a terminal, as an orchestrator must: with
 /// Claude Code and pi installed it passes the agent step over for Claude Code, and the one
 /// machine's too. The folder step offers no past sessions. Its pick starts the agent at once,

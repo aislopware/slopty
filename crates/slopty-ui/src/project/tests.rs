@@ -738,6 +738,11 @@ fn a_task_starts_fresh_or_goes_to_another_agent(cx: &mut gpui::TestAppContext) {
     };
     click(cx, "project-card-start-fresh-3");
     assert_eq!(*heard.borrow(), [ProjectEvent::Act(TaskId(3), TaskAction::StartFresh)]);
+    assert!(cx.debug_bounds("project-card-3-handing").is_some(), "said at once");
+    assert!(cx.debug_bounds("project-card-give-to-3").is_none(), "not handed on meanwhile");
+    // The server refused it, as the workspace tells the board.
+    view.update(cx, |v, cx| v.handing_refused(TaskId(3), cx));
+    cx.run_until_parked();
     heard.borrow_mut().clear();
     click(cx, "project-card-give-to-3");
     assert!(heard.borrow().is_empty(), "the board picks the agent itself");

@@ -36,9 +36,9 @@ use super::model::{
 };
 use super::recap::{Recap, RecapKind};
 use super::{
-    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, MergeTask, OpenNode, PushTask,
-    ResolveConflicts, RetryTask, ReviewTask, RunTaskOn, SelectNext, SelectPrevious, ShowTerminal,
-    StopTaskAgent, TellOrchestrator, TogglePush,
+    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, GiveTaskToAgent, MergeTask,
+    OpenNode, PushTask, ResolveConflicts, RetryTask, ReviewTask, RunTaskOn, SelectNext,
+    SelectPrevious, ShowTerminal, StartTaskFresh, StopTaskAgent, TellOrchestrator, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -212,6 +212,16 @@ struct Checks {
     _enter: Subscription,
 }
 
+/// A task the person asked to start again, until the board shows its new agent or the server
+/// refuses: what its card says meanwhile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Handing {
+    /// "Starting #3 fresh…", "Handing #3 to Codex…".
+    words: String,
+    /// The agent's terminal or seat it had when asked; a new one says the start came.
+    from: Option<TermRef>,
+}
+
 /// One project's board.
 pub struct ProjectView {
     id: ProjectId,
@@ -237,6 +247,8 @@ pub struct ProjectView {
     checks: Option<Checks>,
     /// The task whose "Give to another agent" picker is open.
     giving: Option<TaskId>,
+    /// The tasks asked to start again whose new agent the board does not show yet.
+    handing: BTreeMap<TaskId, Handing>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -277,6 +289,7 @@ impl ProjectView {
             refused: None,
             checks: None,
             giving: None,
+            handing: BTreeMap::new(),
             #[cfg(test)]
             renders: 0,
         }
@@ -317,8 +330,52 @@ impl ProjectView {
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
                 self.picked = None;
             }
+            self.settle_handing();
             cx.notify();
         }
+    }
+
+    /// Say at once on `task`'s card that it starts again, before the server answers.
+    fn hand(&mut self, task: TaskId, words: String) {
+        let card = self.seen.board.as_ref().and_then(|b| b.tasks.get(&task));
+        let from = card.and_then(|c| c.assignment.as_ref()).map(|a| a.term);
+        self.handing.insert(task, Handing { words, from });
+    }
+
+    /// The server refused to start `task` again: its card says what it did before.
+    pub fn handing_refused(&mut self, task: TaskId, cx: &mut Context<Self>) {
+        if self.handing.remove(&task).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Forget the asks the board has answered: a task with a new agent, merged, or gone.
+    fn settle_handing(&mut self) {
+        let Some(board) = &self.seen.board else {
+            self.handing.clear();
+            return;
+        };
+        self.handing.retain(|task, handing| {
+            board.tasks.get(task).is_some_and(|card| {
+                card.state != TaskState::Merged
+                    && card.assignment.as_ref().is_none_or(|a| Some(a.term) == handing.from)
+            })
+        });
+    }
+
+    /// Do `action` to `task`: the board's own pickers open here, and a start again shows at
+    /// once on its card.
+    fn act(&mut self, task: TaskId, action: TaskAction, cx: &mut Context<Self>) {
+        match action {
+            TaskAction::GiveTo => return self.toggle_giving(task, cx),
+            TaskAction::StartFresh => {
+                self.giving = None;
+                self.hand(task, format!("Starting #{task} fresh\u{2026}"));
+                cx.notify();
+            }
+            _ => {}
+        }
+        cx.emit(ProjectEvent::Act(task, action));
     }
 
     /// Draw by another theme.
@@ -376,10 +433,12 @@ impl ProjectView {
             cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
             return;
         };
-        if action == TaskAction::GiveTo && board.controls(task).contains(&action) {
-            self.toggle_giving(task, cx);
+        let handing = self.handing.contains_key(&task)
+            && matches!(action, TaskAction::StartFresh | TaskAction::GiveTo);
+        if handing {
+            cx.emit(ProjectEvent::Say(format!("#{task} is starting again")));
         } else if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
-            cx.emit(ProjectEvent::Act(task, action));
+            self.act(task, action, cx);
         } else {
             cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
         }
@@ -786,7 +845,13 @@ impl ProjectView {
             if offered.contains(&TaskAction::RunOn) {
                 actions.push((TaskAction::RunOn, true));
             }
-            actions.extend(board.controls(task).into_iter().map(|a| (a, true)));
+            // A task asked to start again is not asked twice while it does.
+            let handing = self.handing.contains_key(&task);
+            let controls = board
+                .controls(task)
+                .into_iter()
+                .filter(|a| !(handing && matches!(a, TaskAction::StartFresh | TaskAction::GiveTo)));
+            actions.extend(controls.map(|a| (a, true)));
         }
         if actions.is_empty() {
             return None;
@@ -829,11 +894,7 @@ impl ProjectView {
             };
             tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
-                if action == TaskAction::GiveTo {
-                    this.toggle_giving(task, cx);
-                } else {
-                    cx.emit(ProjectEvent::Act(task, action));
-                }
+                this.act(task, action, cx);
             }))
         });
         Some(div().flex_none().flex().items_center().gap(px(sp.xxs)).children(buttons))
@@ -1440,6 +1501,22 @@ impl ProjectView {
             .into_any_element()
     }
 
+    /// A start again the person asked for, while the board does not show its new agent: in the
+    /// secondary ink, and told to a screen reader as it changes.
+    fn handing_line(&self, key: &str, words: String) -> AnyElement {
+        let id = format!("{key}-handing");
+        let selector = id.clone();
+        crate::kit::typed(div(), self.theme.roles().metadata)
+            .id(SharedString::from(id))
+            .debug_selector(move || selector)
+            .role(Role::Status)
+            .aria_label(SharedString::from(words.clone()))
+            .min_w_0()
+            .text_color(hsla(self.theme.surfaces.text_secondary))
+            .child(SharedString::from(words))
+            .into_any_element()
+    }
+
     /// One of a row's facts at its trailing end: words in the facts' size and the muted ink,
     /// after a glyph when it has one, on one line.
     fn fact(&self, id: String, glyph: Option<Mark>, words: String) -> Stateful<Div> {
@@ -1566,6 +1643,7 @@ impl ProjectView {
                     .or_else(|| card.status.as_deref().filter(|s| !s.is_empty()).map(str::to_owned))
             })
             .flatten();
+        let handing = self.handing.get(&card.id).map(|h| h.words.clone());
         let CardFacts { check, stages, meta } = self.card_facts(board, card, asks.is_some());
         let failed = matches!(&check, Some(Check::Verdict { run, .. }) if !run.passed);
         let held = stages.iter().any(|stage| stage.holds) || failed;
@@ -1577,6 +1655,7 @@ impl ProjectView {
             &card.title,
             state_word(card.state),
             asks.as_deref().unwrap_or(""),
+            handing.as_deref().unwrap_or(""),
             &place_words,
             reason.as_deref().unwrap_or(""),
             &meta,
@@ -1635,9 +1714,10 @@ impl ProjectView {
             line = line.item("actions", Priority::ESSENTIAL, actions);
         }
 
-        let detail: Vec<AnyElement> = asks
-            .map(|asks| self.asks_line(&key, asks))
+        let detail: Vec<AnyElement> = handing
+            .map(|words| self.handing_line(&key, words))
             .into_iter()
+            .chain(asks.map(|asks| self.asks_line(&key, asks)))
             .chain(self.pipeline_row(&key, &loud).map(IntoElement::into_any_element))
             .chain(
                 check
@@ -1982,6 +2062,7 @@ impl ProjectView {
             let selector = id.clone();
             let name = crate::conversation::thread::view::agent_label(agent);
             let pick = agent.clone();
+            let handing = format!("Handing #{task} to {name}\u{2026}");
             let el = div()
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
@@ -1997,6 +2078,7 @@ impl ProjectView {
             tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.giving = None;
+                this.hand(task, handing.clone());
                 cx.emit(ProjectEvent::GiveTo(task, pick.clone()));
                 cx.notify();
             }))
@@ -2280,6 +2362,12 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &StopTaskAgent, _w, cx| {
                 this.act_on_picked(TaskAction::Stop, cx);
+            }))
+            .on_action(cx.listener(|this, _: &StartTaskFresh, _w, cx| {
+                this.act_on_picked(TaskAction::StartFresh, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GiveTaskToAgent, _w, cx| {
+                this.act_on_picked(TaskAction::GiveTo, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
             .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {

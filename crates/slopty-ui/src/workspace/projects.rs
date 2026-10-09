@@ -660,9 +660,7 @@ impl WorkspaceView {
                 ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
                 ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
                 ProjectEvent::GiveTo(task, agent) => {
-                    let agent = Some(agent.clone());
-                    let verb = Verb::TaskRestart { project: asked.clone(), task: *task, agent };
-                    this.send_to_server(verb, |_, _| (), cx);
+                    this.restart_task(&asked, *task, Some(agent.clone()), cx);
                 }
                 ProjectEvent::CloseRecap => {
                     if this.projects.recaps.remove(&asked).is_some() {
@@ -697,7 +695,7 @@ impl WorkspaceView {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::PushAgain => Verb::TaskPush { project, task },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
-            TaskAction::StartFresh => Verb::TaskRestart { project, task, agent: None },
+            TaskAction::StartFresh => return self.restart_task(&project, task, None, cx),
             // The board picks the agent itself, and says so as `ProjectEvent::GiveTo`.
             TaskAction::GiveTo => return,
             TaskAction::Cancel => {
@@ -816,6 +814,43 @@ impl WorkspaceView {
         let change = TaskChange { run_on: Some(run_on), ..TaskChange::default() };
         let verb = Verb::TaskUpdate { project: project.clone(), task, change: Box::new(change) };
         self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// Start `task` again with `agent`, else the one it ran last ([`Verb::TaskRestart`]). Its
+    /// board says so at once; a refusal is said in the server's words, and the card goes back
+    /// to what it said before.
+    fn restart_task(
+        &mut self,
+        project: &ProjectId,
+        task: TaskId,
+        agent: Option<AgentId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.projects.caller.is_none() {
+            let said = format!("#{task} was not started again: no server is linked");
+            return self.restart_refused(project, task, said, cx);
+        }
+        let asked = project.clone();
+        let verb = Verb::TaskRestart { project: project.clone(), task, agent };
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            if let Outcome::Error { message, .. } = outcome {
+                this.restart_refused(&asked, task, message, cx);
+            }
+        });
+    }
+
+    /// The server would not start `task` again: say why, and let its card say what it did.
+    fn restart_refused(
+        &mut self,
+        project: &ProjectId,
+        task: TaskId,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(board) = self.projects.views.get(project) {
+            board.update(cx, |board, cx| board.handing_refused(task, cx));
+        }
+        self.show_failure(message, cx);
     }
 
     /// Send `verb` and hand whatever the server answers to `then`.

@@ -387,6 +387,10 @@ ListItem │ Cancel the task
 Button │ Keys for Cancel the task
 ListItem │ Stop the task's agent
 Button │ Keys for Stop the task's agent
+ListItem │ Start the task fresh
+Button │ Keys for Start the task fresh
+ListItem │ Give the task to another agent…
+Button │ Keys for Give the task to another agent…
 ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
 ListItem │ Message the orchestrator… │ C

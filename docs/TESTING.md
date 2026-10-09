@@ -18,14 +18,15 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    and colour, as sorted lines), draws the same state again with every view built from scratch,
    and names the lines only one side holds. When two scratch draws differ (something moves),
    the lines both agree on must still be in the frame shown. `workspace/tests/retained.rs` runs it after each
-   step of an echo, a command starting (in a shell on the strip and in one scrolled off it), a
-   spring, a trackpad scroll, a hover, a window resize and the overview around a stream, and a
-   page tile whose page fails as it is drawn, with the workspace's clock held so a frame of motion and its scratch twin fall on
-   the same instant; its own test proves it catches a view changed without a notify and that
+   step of an echo, a command that ends beside the focused shell and one that starts on a tab
+   not shown, the pane keys, a sash drag, a hover, a remote window resized, the keyboard
+   moving, title tabs that run past the bar, a shell's lines of output, and a page tile whose
+   page fails as it is drawn, with the workspace's clock held so a frame of motion and its
+   scratch twin fall on the same instant; its own test proves it catches a view changed without a notify and that
    scratch after scratch agrees. The oracle compares quads and sprites, so what they cannot
    show is asserted beside it: a stream's picture laid out at the bounds its view was drawn in,
-   a view drawn again after a change (`renders()`), a shell not built again when only its strip
-   was. In the app self-test every `dump` carries the same check
+   a view drawn again after a change (`renders()`), a shell not built again when only the area
+   around it was, or when the shell beside it wrote a line. In the app self-test every `dump` carries the same check
    (`Dump::stale`), and `render` answers with an error, the scratch frame saved beside the
    render, when the frame the app drew is stale: the goldens are the frames the app draws
    through its notifies, never a forced full redraw. The check runs once the frame's

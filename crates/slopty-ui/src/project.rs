@@ -49,6 +49,10 @@ gpui::actions!(
         CancelTask,
         /// End the terminal of the agent of the task the keyboard stands on.
         StopTaskAgent,
+        /// Start the task the keyboard stands on again, with a new run of its agent.
+        StartTaskFresh,
+        /// Choose another agent to hand the task the keyboard stands on to.
+        GiveTaskToAgent,
         /// Push the target after each merge, or stop.
         TogglePush,
         /// Turn the orchestrator's tile back to its terminal.
@@ -86,6 +90,8 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "push_task", PushTask, &[], BOARD),
         Command::new(Scope::Project, "cancel_task", CancelTask, &[], BOARD),
         Command::new(Scope::Project, "stop_task_agent", StopTaskAgent, &[], BOARD),
+        Command::new(Scope::Project, "start_task_fresh", StartTaskFresh, &[], BOARD),
+        Command::new(Scope::Project, "give_task_to_agent", GiveTaskToAgent, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
@@ -113,6 +119,8 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Push the task's merge again", Box::new(PushTask)),
         line("Cancel the task", Box::new(CancelTask)),
         line("Stop the task's agent", Box::new(StopTaskAgent)),
+        line("Start the task fresh", Box::new(StartTaskFresh)),
+        line("Give the task to another agent\u{2026}", Box::new(GiveTaskToAgent)),
         line("Run the task on\u{2026}", Box::new(RunTaskOn)),
         line("Push after each merge", Box::new(TogglePush)),
         line("Show the orchestrator's terminal", Box::new(ShowTerminal)),
