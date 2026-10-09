@@ -2,7 +2,7 @@
 //! its merge on their word ([`slopty_proto::git::PullStatus`]).
 //!
 //! The forge is the one the repository's `origin` names ([`crate::repo::forge_of`]): GitHub's
-//! pull requests go through `gh`, a GitLab's merge requests through `glab` ([`gitlab`]). Either
+//! pull requests go through `gh`, a GitLab's merge requests through `glab` (`gitlab`). Either
 //! runs as the worker's user, signed in as they signed it in, with prompts off; nothing of the
 //! sign-in is read or passed. What the forge reports is kept in GitHub's words, a merge
 //! request's put in them.
