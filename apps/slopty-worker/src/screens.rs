@@ -188,9 +188,10 @@ async fn run_on<P: Platform>(
 ) {
     let on_event = on_event(id, link.out.clone());
     let sink = Arc::new(QuicSink(link.conn.clone()));
+    let shield = shield(&link);
     let opened = Pipeline::<P>::open(id, target, quality, sink, on_event).await;
     let opened = opened.map(|(stream, opened)| (stream, vec![opened], None));
-    serve_opened(link, id, OpenAsk::Target(target), opened, commands).await;
+    serve_opened(link, id, OpenAsk::Target(target), opened, shield, commands).await;
 }
 
 /// Open a stream of a display made for the client (or, when none can be had, of a physical
@@ -205,16 +206,24 @@ pub async fn run_display(
     let on_event = on_event(id, link.out.clone());
     let sink = Arc::new(QuicSink(link.conn.clone()));
     let made = OpenAsk::Made(asked.key);
+    let shield = shield(&link);
     #[cfg(target_os = "macos")]
     if slopty_worker::screen::synthetic_screen() {
         let opened = sized::open::<Synthetic, sized::Cg>(None, id, asked, sink, on_event).await;
         let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
-        return serve_opened(link, id, made, opened, commands).await;
+        return serve_opened(link, id, made, opened, shield, commands).await;
     }
     let displays = link.daemon.displays.as_ref();
     let opened = sized::open::<Native, sized::Cg>(displays, id, asked, sink, on_event).await;
     let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
-    serve_opened(link, id, made, opened, commands).await;
+    serve_opened(link, id, made, opened, shield, commands).await;
+}
+
+/// What says the curtain's shield moved, taken before a stream resolves its filter: a shield
+/// raised while the stream opens is then heard, and the stream takes its filter again, rather
+/// than keep one made before the shield was listed.
+fn shield(link: &Link) -> Option<tokio::sync::watch::Receiver<u64>> {
+    link.daemon.curtain.as_ref().map(slopty_worker::screen::curtain::Curtain::shield_moved)
 }
 
 /// What a stream tells its client outside its commands' answers. A cursor lost to a full link
@@ -257,14 +266,15 @@ async fn serve_opened<P: Platform>(
     id: StreamId,
     asked: OpenAsk,
     opened: Opened<P>,
+    shield: Option<tokio::sync::watch::Receiver<u64>>,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let Link { daemon, client, conn, out, told, sound } = link;
     let (mut stream, mut sized) = match opened {
         Ok((mut stream, events, sized)) => {
             stream.listen(&*sound);
-            if let Some(curtain) = &daemon.curtain {
-                stream.follow_shield(curtain.shield_moved());
+            if let Some(shield) = shield {
+                stream.follow_shield(shield);
             }
             let target = stream.target();
             tracing::info!(%client, %id, ?target, made = sized.is_some(), "screen opened");

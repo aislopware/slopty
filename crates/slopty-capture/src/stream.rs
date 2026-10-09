@@ -134,7 +134,13 @@ impl Target {
 
     /// Resolve a target, a display capture leaving out the windows numbered `excluded` (the
     /// curtain's shield, `slopty_platform::curtain`). A window target is the window alone, so
-    /// nothing is left out of it. A number the snapshot does not list is passed over.
+    /// nothing is left out of it.
+    ///
+    /// # Errors
+    ///
+    /// [`CaptureError::NotFound`] for a target the snapshot does not list, and
+    /// [`CaptureError::Unlisted`] for a display when a window to leave out is not in it: the
+    /// snapshot is older than the window, and showing it is never the fallback.
     pub fn resolve_excluding(
         content: &Shareable,
         kind: CaptureTarget,
@@ -148,10 +154,12 @@ impl Target {
             }
             CaptureTarget::Display(id) => {
                 let display = content.display(id.0).ok_or(CaptureError::NotFound(kind))?;
-                let left_out: Vec<_> = excluded
+                let left_out = excluded
                     .iter()
-                    .filter_map(|number| content.window(WindowId(*number)))
-                    .collect();
+                    .map(|number| {
+                        content.window(WindowId(*number)).ok_or(CaptureError::Unlisted(*number))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self::display_without(kind, &display, &left_out))
             }
         }

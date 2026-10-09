@@ -283,7 +283,8 @@ mod tests {
         move_to(a, 0);
         assert!(near(pointer(), a), "the guest takes an untagged move before the hold");
 
-        let hold = InputHold::start(OURS).expect("Accessibility in the guest");
+        let hold =
+            InputHold::start(OURS, Duration::from_secs(60)).expect("Accessibility in the guest");
         move_to(b, 0);
         assert!(
             near(pointer(), a),
@@ -297,5 +298,15 @@ mod tests {
 
         move_to(b, 0);
         assert!(near(pointer(), b), "let go, local input moves the pointer again");
+
+        // A lease nobody renews lapses, and the desk has its input back while still held.
+        let lease = Duration::from_millis(300);
+        let hold = InputHold::start(OURS, lease).expect("Accessibility in the guest");
+        // Nothing is sent on it: the wait is the lease running out.
+        let (_quiet, out) = mpsc::channel::<()>();
+        let _lapsed = out.recv_timeout(lease * 2);
+        move_to(a, 0);
+        assert!(near(pointer(), a), "the lease lapsed: a local move goes through");
+        drop(hold);
     }
 }

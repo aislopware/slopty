@@ -3768,6 +3768,41 @@ fn probe<P: Platform>(
     probe
 }
 
+/// How many times a display's enumeration is taken again for want of a window every display
+/// capture leaves out, before the open or the filter fails.
+const RELIST_TRIES: u32 = 5;
+/// How long between those enumerations: the window server lists a window made a moment ago
+/// within one.
+const RELIST_AFTER: Duration = Duration::from_millis(100);
+
+/// An enumeration (`take`, fresh when asked) and what `resolve` makes of it, taken again while
+/// it lacks a window every display capture leaves out (the curtain's shield,
+/// [`CaptureError::Unlisted`]): an enumeration from before the shield was made, cached or
+/// landing after the cache was cleared. Showing the shield to a client is never the fallback,
+/// so after [`RELIST_TRIES`] the error stands.
+async fn listing_left_out<C, R, Fut>(
+    mut take: impl FnMut(bool) -> Fut,
+    resolve: impl Fn(&C) -> Result<R, ScreenError>,
+) -> Result<(C, R), ScreenError>
+where
+    Fut: Future<Output = Result<C, ScreenError>>,
+{
+    let mut tries: u32 = 0;
+    let mut fresh = false;
+    loop {
+        let content = take(fresh).await?;
+        match resolve(&content) {
+            Err(ScreenError::Capture(CaptureError::Unlisted(window))) if tries < RELIST_TRIES => {
+                tries = tries.saturating_add(1);
+                fresh = true;
+                tracing::debug!(window, tries, "enumerating again for a window left out");
+                tokio::time::sleep(RELIST_AFTER).await;
+            }
+            resolved => return resolved.map(|r| (content, r)),
+        }
+    }
+}
+
 /// Resolve a target, choosing the path for a window.
 fn resolve<P: Platform>(
     content: &Content<P>,
@@ -4216,6 +4251,14 @@ impl<P: Platform> Pipeline<P> {
         Ok(content)
     }
 
+    /// [`Self::shareable`], taken anew rather than reused when `fresh`.
+    async fn taken(fresh: bool) -> Result<Arc<Content<P>>, ScreenError> {
+        if fresh {
+            *SHAREABLE.lock() = None;
+        }
+        Self::shareable().await
+    }
+
     /// Start and stop one small capture of the first display; returns how long that took
     /// ([`warm_up`]).
     pub async fn warm_up() -> Result<Duration, ScreenError> {
@@ -4337,9 +4380,9 @@ impl<P: Platform> Pipeline<P> {
             Arc::new(move |e| on_event(StreamEvent::Stopped(e)))
         };
         let t0 = Instant::now();
-        let content = Self::shareable().await?;
+        let (content, (resolved, path)) =
+            listing_left_out(Self::taken, |content| resolve::<P>(content, target)).await?;
         let enumerated = t0.elapsed();
-        let (resolved, path) = resolve::<P>(&content, target)?;
         let native = Source::<P>::pixel_size(&resolved);
         let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         let refresh_hz = Source::<P>::refresh_hz(target);
@@ -5217,9 +5260,12 @@ impl<P: Platform> Pipeline<P> {
         if !matches!(self.target, CaptureTarget::Display(_)) {
             return Ok(());
         }
-        *SHAREABLE.lock() = None;
-        let content = Self::shareable().await?;
-        let resolved = Source::<P>::resolve(&content, self.target)?;
+        let target = self.target;
+        let (content, resolved) = listing_left_out(
+            |_fresh| Self::taken(true),
+            |content| Ok(Source::<P>::resolve(content, target)?),
+        )
+        .await?;
         let (tx, rx) = oneshot::channel();
         Source::<P>::retarget(&self.capture, &resolved, move |result| {
             let _receiver_gone = tx.send(result);
@@ -5244,10 +5290,12 @@ impl<P: Platform> Pipeline<P> {
         if !matches!(self.target, CaptureTarget::Display(_)) {
             return Err(ScreenError::NotDisplay);
         }
-        *SHAREABLE.lock() = None;
-        let content = Self::shareable().await?;
         let target = CaptureTarget::Display(display);
-        let resolved = Source::<P>::resolve(&content, target)?;
+        let (content, resolved) = listing_left_out(
+            |_fresh| Self::taken(true),
+            |content| Ok(Source::<P>::resolve(content, target)?),
+        )
+        .await?;
         let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         if target == self.target && (point_scale - self.point_scale).abs() < f64::EPSILON {
             return Ok(());
@@ -5734,6 +5782,36 @@ mod tests {
     use super::*;
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
+
+    /// An enumeration that lacks a window every display capture leaves out is taken again,
+    /// fresh, until one lists it; one that never does fails rather than show it. Anything else
+    /// is answered at once.
+    #[tokio::test(start_paused = true)]
+    async fn an_enumeration_without_the_shield_is_taken_again() {
+        fn unlisted<T>() -> Result<T, ScreenError> {
+            Err(ScreenError::Capture(CaptureError::Unlisted(42)))
+        }
+        let takes = std::cell::RefCell::new(Vec::new());
+        let take = |fresh| {
+            takes.borrow_mut().push(fresh);
+            let n = takes.borrow().len();
+            async move { Ok::<_, ScreenError>(n) }
+        };
+        let got = listing_left_out(take, |n: &usize| if *n < 3 { unlisted() } else { Ok(*n) });
+        assert_eq!(got.await.unwrap(), (3, 3), "the third lists it");
+        assert_eq!(*takes.borrow(), [false, true, true], "taken anew after the first");
+
+        takes.borrow_mut().clear();
+        let never = listing_left_out(take, |_: &usize| unlisted::<()>()).await;
+        assert!(matches!(never, Err(ScreenError::Capture(CaptureError::Unlisted(42)))));
+        assert_eq!(takes.borrow().len(), RELIST_TRIES as usize + 1, "a bounded number of times");
+
+        takes.borrow_mut().clear();
+        let gone =
+            listing_left_out(take, |_: &usize| -> Result<(), _> { Err(ScreenError::NoDisplay) });
+        assert!(matches!(gone.await, Err(ScreenError::NoDisplay)));
+        assert_eq!(takes.borrow().len(), 1, "any other error stands at once");
+    }
 
     /// The focused field's caret goes to the client in stream pixels from the target's corner,
     /// at the stream's scale, and only while it is over the target; a password field says so

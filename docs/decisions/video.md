@@ -2870,3 +2870,50 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and a stream's frames, an untagged pointer move dropped and a tagged one passed) covers
     the screens and posts HID events, so it runs in the VM lane's guest only
     (`cargo xtask vm live -p slopty-platform --test curtain`), never on a Mac someone is using.
+  - *Hardened after review* (2026-10-10).
+    - **The hold never hangs its owner.** Dropping the hold invalidates the tap's port before
+      it stops the loop. A stop sent to a loop that has not started is lost, because the run's
+      start clears it. A loop with no source left returns as soon as it runs. The wait for the
+      thread is bounded (2 s, then it is left behind), because it runs on the main queue.
+      Test: `curtain::tests::a_hold_ended_before_its_loop_runs_still_ends`, which hangs and
+      fails with a stop alone.
+    - **A dead-man switch.** The hold is a lease: every event passes once 5 s go by without a
+      renewal (`HOLD_LEASE`). The runtime renews it every second, not the main queue. A worker
+      that is alive but stuck therefore never shuts the desk out. A panic on the daemon thread
+      ends the process (exit 101) rather than leave the main thread parked with the shield and
+      the tap. Tests: `a_lease_lapses_unless_it_is_renewed`,
+      `the_hold_s_lease_is_renewed_while_the_curtain_is_up`, and the live test's lapse.
+    - **Held per link.** A client holds the curtain on each of its links
+      (`curtain::Link`), and lets go only when its last link goes. A phone that relinks holds
+      on the new link before the old one times out (QUIC's 45 s idle), and the old link's end
+      then starts no grace and locks nothing. A hold asked on a link that has already gone holds
+      nothing: the link is marked gone under the holders' lock, so no holder outlives its link.
+      Test: `a_new_link_holding_keeps_the_curtain_through_the_old_link_timing_out`.
+    - **Locked before it falls.** `SACLockScreenImmediate` only posts the lock, so its status
+      is checked. The curtain then stays up until the session reads as locked
+      (`slopty_capture::console`), for at most 5 s. If the lock cannot be asked for, or never
+      lands, the shield stays (`Up` with no holders) until a client lifts it on the person's
+      word. Test: `the_curtain_falls_only_once_the_mac_reads_as_locked`.
+    - **The shield is never in a client's picture.** A stream subscribes to the shield's moves
+      before it resolves its filter, so a curtain raised while it opens is heard. An enumeration
+      that lacks a shield window (the 2 s cache, or one landing after a refilter cleared it) is
+      taken again rather than passed over (`CaptureError::Unlisted`). After 5 tries the open or
+      the filter fails rather than show the shield. Test:
+      `screen::tests::an_enumeration_without_the_shield_is_taken_again`.
+    - **No main-queue trip on a link.** A greeting and a resync after a lagged broadcast read
+      where the curtain stands from a watch the main thread sets as it settles
+      (`Curtain::current`), so a stalled main queue holds up no link.
+    - **The client's state follows the worker's.** A Down said after the worker answered this
+      device's ask lets the hold go and says so. A Down from before the answer changes nothing.
+      The lift stays offered while the device holds the curtain, even if the caps turn it off.
+      Test: `a_held_curtain_stays_liftable_and_a_down_unasked_lets_it_go`.
+    - **Smaller fixes:**
+      - Displays CoreGraphics will not list leave the shield as it was.
+      - A Mac panel mirroring a client's virtual display is covered (`to_cover`).
+      - Keys and buttons held down at the desk as the hold starts get a tagged release, so the
+        session sees none stuck.
+      - The tapped kinds come from `CGEventType` and `NSEventType`.
+    - **Open, for the VM lane's guest.** Two checks are still open. Whether Caps Lock's light
+      and state, which the keyboard toggles below the tap, change under a held curtain. And
+      whether Secure Event Input (a password field focused at the desk) lets keys past the
+      tap.

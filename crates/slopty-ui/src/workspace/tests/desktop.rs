@@ -689,3 +689,70 @@ fn the_curtain_is_held_from_a_desktop_tile_and_asked_again_on_each_link(cx: &mut
     hear(cx, CurtainState::Down);
     assert!(palette_has(&view, cx, DRAW_CURTAIN));
 }
+
+/// A curtain this device holds stays liftable while the worker's caps say it draws none. A
+/// Down said before the worker answered this device's ask changes nothing; one said after,
+/// with nothing asked since, lets the hold go and says so.
+#[gpui::test]
+fn a_held_curtain_stays_liftable_and_a_down_unasked_lets_it_go(cx: &mut TestAppContext) {
+    use slopty_proto::screen::CurtainState;
+
+    use crate::workspace::actions::ToggleCurtain;
+    use crate::workspace::desktop::{DRAW_CURTAIN, LIFT_CURTAIN};
+
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let physical = DisplayId(1);
+    let tile = arrives(&view, cx, &fake, ItemKind::Display { display: physical }, 1);
+    opened(&view, cx, &fake, 1, CaptureTarget::Display(physical), (2560, 1440));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    let key = fake.key;
+    let caps = |cx: &mut VisualTestContext, curtain: bool| {
+        view.update_in(cx, |v, _w, cx| {
+            v.set_worker_caps(key, WorkerCaps { curtain, ..healthy() }, cx);
+        });
+        cx.run_until_parked();
+    };
+    let asks = |fake: &mut Fake, cx: &VisualTestContext| -> Vec<bool> {
+        sent(fake, cx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Screen(ScreenRequest::Curtain { on }) => Some(on),
+                _ => None,
+            })
+            .collect()
+    };
+    let toggle = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| v.toggle_curtain(&ToggleCurtain, window, cx));
+        cx.run_until_parked();
+    };
+    let hear = |cx: &mut VisualTestContext, state: CurtainState| {
+        view.update_in(cx, |v, _w, cx| v.screen_event(key, ScreenEvent::Curtain(state), cx));
+        cx.run_until_parked();
+    };
+    let holds = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.holds_curtain(key));
+    let up = CurtainState::Up { holders: 1, input_held: true };
+
+    caps(cx, true);
+    sent(&mut fake, cx);
+    toggle(cx);
+    assert_eq!(asks(&mut fake, cx), [true]);
+    hear(cx, CurtainState::Down);
+    assert!(holds(cx), "a Down from before the answer changes nothing");
+    hear(cx, up.clone());
+    caps(cx, false);
+    assert!(palette_has(&view, cx, LIFT_CURTAIN), "still liftable without the caps");
+    toggle(cx);
+    assert_eq!(asks(&mut fake, cx), [false], "lifted");
+    hear(cx, CurtainState::Down);
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "let go on the word: quiet");
+    assert!(!palette_has(&view, cx, DRAW_CURTAIN), "no caps, not held: not offered");
+
+    caps(cx, true);
+    toggle(cx);
+    hear(cx, up);
+    hear(cx, CurtainState::Down);
+    assert!(!holds(cx), "down with nothing asked since: the hold goes");
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("The curtain over studio is down"));
+}

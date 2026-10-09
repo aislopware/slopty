@@ -25,6 +25,11 @@ pub enum CaptureError {
     /// The stream stopped on its own (window closed, display unplugged, permission revoked).
     #[error("stream stopped: {0}")]
     Stopped(String),
+    /// A window this process leaves out of every display capture (the curtain's shield,
+    /// [`crate::leave_out`]) is not in the enumeration a display was resolved against: one
+    /// taken before the window was made. Enumerate again rather than show it.
+    #[error("window {0}, left out of every display capture, is not in this enumeration")]
+    Unlisted(u32),
     /// This platform has no screen capture (`docs/decisions/platform.md`, "Linux seams").
     #[error("screen capture is unsupported on this platform")]
     Unsupported,

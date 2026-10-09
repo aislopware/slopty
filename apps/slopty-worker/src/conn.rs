@@ -262,8 +262,9 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let known = daemon.ports.lock().known();
     greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
     // A curtain up is said at once, so a client linking (or linking again) knows it is drawn.
+    // Read as last settled: a stalled main thread must not hold up every link's greeting.
     if let Some(curtain) = &daemon.curtain {
-        let state = curtain.state().await;
+        let state = curtain.current();
         if state != CurtainState::Down {
             greeting.push(WorkerMsg::Screen(ScreenEvent::Curtain(state)));
         }
@@ -346,6 +347,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         threads: crate::threads::Following::default(),
         searches: slopty_worker::search::Searches::default(),
         saves,
+        curtain: daemon.curtain.as_ref().map(|c| c.link(hello.client)),
     };
     daemon.wake.lock().client_joined();
 
@@ -700,6 +702,10 @@ async fn resync(
     msgs.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let ports = daemon.ports.lock().known();
     msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
+    // A curtain that moved among what was missed: where it stands now.
+    if let Some(curtain) = &daemon.curtain {
+        msgs.push(WorkerMsg::Screen(ScreenEvent::Curtain(curtain.current())));
+    }
     for msg in msgs {
         if heard.admit(&msg) {
             out.send(msg).await.map_err(|_gone| ())?;
@@ -879,6 +885,8 @@ struct Peer<'d> {
     searches: slopty_worker::search::Searches,
     /// This client's saves and edit ends, taken in order ([`crate::files::save_in_order`]).
     saves: mpsc::UnboundedSender<crate::files::Save>,
+    /// This connection's hold on the curtain, on a Mac.
+    curtain: Option<crate::CurtainLink>,
 }
 
 impl Drop for Peer<'_> {
@@ -904,9 +912,9 @@ impl Drop for Peer<'_> {
         let released = self.daemon.follows.lock().holds.leave(self.link);
         crate::threads::hold::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
-        if let Some(curtain) = &self.daemon.curtain {
+        if let Some(curtain) = &self.curtain {
             let daemon = self.daemon.clone();
-            curtain.went(self.client, CURTAIN_GRACE, move |settled| {
+            curtain.went(CURTAIN_GRACE, move |settled| {
                 if settled.changed {
                     tell_curtain(&daemon, settled.state);
                 }
@@ -1433,30 +1441,27 @@ impl Peer<'_> {
     /// This client holds the curtain over the Mac (`on`), or lets it go on the person's word.
     /// A change goes to every client; an ask that moved nothing is answered to this one alone.
     fn curtain(&mut self, on: bool) {
-        let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
+        let (daemon, out, link) = (self.daemon.clone(), self.out.clone(), self.curtain.clone());
         self.tasks.spawn(async move {
-            let Some(curtain) = daemon.curtain.as_ref() else {
+            let Some(link) = link else {
                 let why = "this worker draws no curtain: only a Mac does".to_owned();
                 let refused = ScreenEvent::Curtain(CurtainState::Refused { why });
                 let _sent = out.send(WorkerMsg::Screen(refused)).await;
                 return;
             };
-            let settled = if on {
-                Some(curtain.hold(client).await)
-            } else {
-                curtain.let_go(client, false).await
-            };
-            match settled {
-                Some(settled) if settled.changed => tell_curtain(&daemon, settled.state),
-                Some(settled) => {
-                    let _sent =
-                        out.send(WorkerMsg::Screen(ScreenEvent::Curtain(settled.state))).await;
-                }
+            let settled = if on { Some(link.hold().await) } else { link.let_go().await };
+            let state = match settled {
+                Some(settled) if settled.changed => return tell_curtain(&daemon, settled.state),
+                Some(settled) => settled.state,
                 None => {
-                    let state = ScreenEvent::Curtain(curtain.state().await);
-                    let _sent = out.send(WorkerMsg::Screen(state)).await;
+                    let curtain = daemon.curtain.as_ref();
+                    curtain.map_or(
+                        CurtainState::Down,
+                        slopty_worker::screen::curtain::Curtain::current,
+                    )
                 }
-            }
+            };
+            let _sent = out.send(WorkerMsg::Screen(ScreenEvent::Curtain(state))).await;
         });
     }
 

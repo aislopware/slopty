@@ -107,6 +107,9 @@ objc2-core-graphics = { workspace = true, features = [
     "CGDirectDisplay",
     "CGDisplayConfiguration",
     "CGWindowLevel",
+    # What the Mac's own keyboard and pointer hold down as the curtain's hold starts, let go.
+    "CGEventSource",
+    "CGRemoteOperation",
 ] }
 objc2-core-foundation = { workspace = true, features = [
     "CFMachPort",

@@ -485,6 +485,10 @@ struct Worker {
     /// Remote tiles whose open the worker refused on this link, and why: not asked again
     /// until the next link or a retry.
     failed_opens: HashMap<ItemId, slopty_proto::screen::ScreenFailure>,
+    /// Remote tiles whose stream the worker ended unasked on this link
+    /// ([`workers::Stopped`]): asked for again at once, and shown as stopped, with a way to
+    /// reopen, when it ends again soon after.
+    stopped: HashMap<ItemId, workers::Stopped>,
     /// Remote tiles whose view came over a link that has gone: it shows its last picture, set
     /// back, until a stream opened on the next link has one of its own.
     stale_screens: HashSet<ItemId>,
@@ -507,6 +511,8 @@ struct Worker {
     curtain: slopty_proto::screen::CurtainState,
     /// This device holds the curtain over its Mac: asked again on each link.
     curtain_wanted: bool,
+    /// This device asked to hold it and the worker has not answered yet.
+    curtain_asked: bool,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -540,6 +546,7 @@ impl Worker {
             openings: tabs::Openings::new(),
             dropped: HashMap::new(),
             failed_opens: HashMap::new(),
+            stopped: HashMap::new(),
             stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
             sized: None,
@@ -549,6 +556,7 @@ impl Worker {
             fs_ops: slopty_client::folders::FsOps::default(),
             curtain: slopty_proto::screen::CurtainState::Down,
             curtain_wanted: false,
+            curtain_asked: false,
         }
     }
 

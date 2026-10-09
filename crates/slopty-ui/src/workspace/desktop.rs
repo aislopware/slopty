@@ -376,9 +376,12 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Whether `worker` can draw the curtain over its Mac.
+    /// Whether `worker` can draw the curtain over its Mac, or this device holds it there: the
+    /// way to lift a curtain held stays while the worker's caps say it draws none.
     pub(super) fn draws_curtain(&self, worker: WorkerKey) -> bool {
-        self.workers.get(&worker).and_then(|w| w.caps.as_ref()).is_some_and(|caps| caps.curtain)
+        self.workers
+            .get(&worker)
+            .is_some_and(|w| w.curtain_wanted || w.caps.as_ref().is_some_and(|caps| caps.curtain))
     }
 
     /// Whether this device holds the curtain over `worker`'s Mac.
@@ -415,6 +418,7 @@ impl WorkspaceView {
             return;
         }
         w.curtain_wanted = on;
+        w.curtain_asked = on;
         cx.notify();
     }
 
@@ -423,14 +427,17 @@ impl WorkspaceView {
     pub(super) fn curtain_relinked(&mut self, worker: WorkerKey) {
         let Some(w) = self.workers.get_mut(&worker) else { return };
         w.curtain = CurtainState::Down;
+        w.curtain_asked = false;
         if w.curtain_wanted {
-            let _sent = w.send(ClientMsg::Screen(ScreenRequest::Curtain { on: true }));
+            w.curtain_asked = w.send(ClientMsg::Screen(ScreenRequest::Curtain { on: true }));
         }
     }
 
     /// `worker` said where its curtain stands. A refusal while this device held it lets the
     /// hold go and says why; a curtain up while the Mac's own input could not be held says
-    /// what it needs.
+    /// what it needs. Down while this device held it and asked nothing since lets the hold
+    /// go: the worker no longer holds it for this device. A Down said before the worker
+    /// answered this device's ask is older than the ask and changes nothing.
     pub(super) fn curtain_heard(
         &mut self,
         worker: WorkerKey,
@@ -439,10 +446,17 @@ impl WorkspaceView {
     ) {
         let Some(w) = self.workers.get_mut(&worker) else { return };
         let was_up = matches!(w.curtain, CurtainState::Up { .. });
+        // An ask is answered by anything but a Down, which may be older than it.
+        let asked = w.curtain_asked;
+        w.curtain_asked = asked && state == CurtainState::Down;
         let said = match &state {
             CurtainState::Refused { why } if w.curtain_wanted => {
                 w.curtain_wanted = false;
                 Some(format!("No curtain over {}: {why}", w.name))
+            }
+            CurtainState::Down if w.curtain_wanted && !asked => {
+                w.curtain_wanted = false;
+                Some(format!("The curtain over {} is down", w.name))
             }
             CurtainState::Up { input_held: false, .. } if w.curtain_wanted && !was_up => {
                 Some(format!(

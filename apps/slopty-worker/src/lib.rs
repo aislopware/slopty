@@ -581,6 +581,13 @@ type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::scr
 type Curtain =
     Option<slopty_worker::screen::curtain::Curtain<slopty_worker::screen::curtain::Native>>;
 
+/// The exit code of a worker whose daemon thread panicked, as Rust's own for a panic.
+#[cfg(target_os = "macos")]
+const PANICKED: i32 = 101;
+
+/// One connection's hold on the curtain.
+type CurtainLink = slopty_worker::screen::curtain::Link<slopty_worker::screen::curtain::Native>;
+
 /// The daemon: `src/main.rs` is this and nothing else.
 pub fn main() -> Result<std::process::ExitCode> {
     #[cfg(target_os = "macos")]
@@ -613,16 +620,28 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
         .name("slopty-worker".to_owned())
         .spawn(move || {
             slopty_platform::user_interactive_thread();
-            let ended = runtime.block_on(run(displays, curtain, sources));
-            drop(runtime);
-            if let Err(e) = &ended {
-                tracing::error!(error = ?e, "worker stopped");
-            }
+            // A panic here must end the process as well: the main thread never returns, and a
+            // process left with it alone keeps the curtain's shield and input hold, which only
+            // the process ending takes down.
+            let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(run(displays, curtain, sources))
+            }));
+            let code = match ended {
+                Ok(Ok(())) => 0,
+                Ok(Err(e)) => {
+                    tracing::error!(error = ?e, "worker stopped");
+                    1
+                }
+                Err(_panic) => {
+                    tracing::error!("the daemon thread panicked; the worker ends");
+                    PANICKED
+                }
+            };
             #[expect(
                 clippy::exit,
                 reason = "the main thread never returns; this ends the process"
             )]
-            std::process::exit(i32::from(ended.is_err()));
+            std::process::exit(code);
         })
         .context("start the daemon thread")?;
     slopty_worker::screen::sized::park_main()
