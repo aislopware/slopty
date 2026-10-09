@@ -61,6 +61,7 @@ impl WorkspaceView {
         match self.item(tile).map(|i| i.kind.clone()) {
             Some(ItemKind::Terminal { session }) => {
                 self.finished.remove(&About::Session(session));
+                self.see_program(session);
                 self.pending_focus = Some(session);
             }
             // A file tile is an editor: the keyboard goes into its text, as into a shell.

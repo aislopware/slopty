@@ -9135,3 +9135,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the card and the palette, the line before the answer, the refusal, the new agent ending it);
     `project::tests::a_task_starts_fresh_or_goes_to_another_agent`. The keyboard settings golden
     lists the two commands.
+
+- ✅ **A program's status is its tile's state** (2026-10-09, readiness item 11, the UI half;
+  the wire is `terminal.md`'s "A program's status records (`OSC 7501`) are session state on the
+  wire").
+  - **Needs you.** A record waiting on the person (`blocked`) makes its terminal's tile "needs
+    you" wherever the tile's state shows: its header, its tab, the navigator, the foot and the
+    bar. The word says what it needs as a waiting agent's does: "Needs approval" for
+    `permission`, "Has a question" for `question`, "Needs a sign-in" for `auth`, "Needs you" for
+    a need the client does not know.
+  - **A result until looked at.** A `done` or `error` record is the tile's "done" or "failed"
+    until the tile takes the focus, a failure first. One that arrives while the tile has the
+    focus is looked at already. The records stay on the worker; what the person has looked at
+    is the client's (`WorkspaceView::program_seen`).
+  - **Its words.** The tile's row says what the program says under its name: the waiting
+    record's message, else one at work, else an unseen result's, each its message or else its
+    title, in place of the command the shell ran.
+  - **Precedence.** An agent's own adapter leads, being the richer source; a record outranks
+    what is only inferred (a command's exit, a finished command not looked at). The records come
+    with the session's summary, so a tile not viewed shows them.
+  - **No notification yet.** A record raises no banner or sound; the tile and the navigator
+    say it. One would be rate-limited, as the ruling asks, once a program worth it sends them.
+  - Test: `workspace::tests::program_status::a_programs_status_is_its_tiles_state` (needs
+    you and its word, an unknown need, results and a failure first, looked at on focus, a result
+    arriving while focused, the row's words; each frame the one drawn from scratch).

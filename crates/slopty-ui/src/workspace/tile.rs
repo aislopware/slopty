@@ -1898,6 +1898,10 @@ impl WorkspaceView {
             return Some(Status::Working);
         }
         let session = session?;
+        // What the program says of itself outranks what is inferred of it.
+        if let Some(status) = self.program_mark(session) {
+            return Some(status);
+        }
         let failed = |exit: i64| if exit == 0 { Status::Done } else { Status::Failed };
         if let Some(done) = self.finished.get(&About::Session(session)) {
             return Some(failed(done.exit.map_or(0, i64::from)));

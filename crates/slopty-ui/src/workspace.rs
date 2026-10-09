@@ -63,6 +63,7 @@ mod panes;
 mod popout;
 mod presence;
 mod preview;
+mod program_status;
 mod project_lines;
 mod project_search;
 mod projects;
@@ -848,6 +849,9 @@ pub struct WorkspaceView {
     /// What ended while nobody looked, by what it is about: a terminal's command or agent turn,
     /// or the turn of a thread with no terminal ([`attention::About`]).
     finished: HashMap<attention::About, Finished>,
+    /// The results each terminal's program reported (`OSC 7501`) that the person has looked at
+    /// ([`program_status`]).
+    program_seen: HashMap<SessionId, Vec<slopty_proto::terminal::ProgramStatus>>,
     slow_command: Duration,
     /// How long a command runs before its tile says so ([`RUNNING_AFTER`]).
     running_after: Duration,
@@ -1151,6 +1155,7 @@ impl WorkspaceView {
             titles: HashMap::new(),
             server_status: None,
             finished: HashMap::new(),
+            program_seen: HashMap::new(),
             slow_command: SLOW_COMMAND,
             running_after: RUNNING_AFTER,
             recency: Vec::new(),

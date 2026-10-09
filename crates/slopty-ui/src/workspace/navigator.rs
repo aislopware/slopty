@@ -1497,7 +1497,11 @@ impl WorkspaceView {
             (Some(a), face) if at_rest(a) => face.as_deref().and_then(rest_words),
             (a, _) => a.map(agent_status_text),
         };
-        let command = state.is_none().then(|| self.last_command(session)).flatten();
+        // What the program says it is doing outranks the command it was started by.
+        let command = state
+            .is_none()
+            .then(|| self.program_words(session).or_else(|| self.last_command(session)))
+            .flatten();
         let since = resting.map_or_else(
             || summary.map_or(0, |s| s.started_ms.as_millis()),
             |a| a.status.as_ref().map_or(a.since, |st| st.since_ms).as_millis(),
@@ -2090,9 +2094,12 @@ impl WorkspaceView {
     /// "Has a question"), else the status's own name.
     pub(super) fn tile_word(&self, item: &Item, mark: Option<Status>) -> Option<String> {
         status_word(mark).map(|word| match (word, &item.kind) {
-            (Status::NeedsYou, ItemKind::Terminal { session }) => self
-                .agent_state(*session)
-                .map_or_else(|| word.label().to_owned(), agent_status_word),
+            (Status::NeedsYou, ItemKind::Terminal { session }) => {
+                self.agent_state(*session).map_or_else(
+                    || self.program_need_word(*session).unwrap_or_else(|| word.label().to_owned()),
+                    agent_status_word,
+                )
+            }
             _ => word.label().to_owned(),
         })
     }

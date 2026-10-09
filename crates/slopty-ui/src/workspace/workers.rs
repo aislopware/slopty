@@ -741,9 +741,11 @@ impl WorkspaceView {
         summary: SessionSummary,
         cx: &mut Context<Self>,
     ) {
+        let session = summary.id;
         if let Some(w) = self.workers.get_mut(&key) {
-            w.sessions.insert(summary.id, summary);
+            w.sessions.insert(session, summary);
         }
+        self.program_moved(session);
         self.reconcile(cx);
         // A thread tile waiting on this session as its agent's terminal becomes its tile.
         self.settle_thread_tiles(cx);
@@ -758,6 +760,7 @@ impl WorkspaceView {
         self.handoff.forget_session(session);
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
         self.finished.remove(&About::Session(session));
+        self.program_seen.remove(&session);
         self.update_awake(cx);
         self.reconcile(cx);
         self.agents_moved(cx);
