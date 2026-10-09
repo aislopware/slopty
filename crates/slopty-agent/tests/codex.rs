@@ -284,7 +284,7 @@ mod tests {
         let (state, statuses, applied) = mapped("a", None);
         assert_eq!(state.meta.drive, Drive::named(Drive::SHARED));
         assert_eq!(state.meta.agent, AgentId::named(AgentId::CODEX));
-        assert_eq!(state.meta.agent_version, "0.160.0");
+        assert_eq!(state.meta.agent_version, slopty_agent::codex::protocol::VERSION);
         let warned = "info: Model metadata for `mock-model` not found. Defaulting to fallback \
                       metadata; this can degrade performance and cause issues.";
         assert_eq!(
