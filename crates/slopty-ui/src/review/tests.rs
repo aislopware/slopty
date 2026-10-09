@@ -499,7 +499,9 @@ fn a_drag_comments_on_a_run_and_add_to_message_sends_nothing(cx: &mut TestAppCon
     let into = Rc::clone(&heard);
     cx.update(|_w, cx| {
         cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
+            if !matches!(event, ReviewEvent::Drafted) {
+                into.borrow_mut().push(event.clone());
+            }
         })
         .detach();
     });
@@ -868,7 +870,9 @@ fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext
     let into = Rc::clone(&heard);
     cx.update(|_w, cx| {
         cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
+            if !matches!(event, ReviewEvent::Drafted) {
+                into.borrow_mut().push(event.clone());
+            }
         })
         .detach();
     });
@@ -956,7 +960,9 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
     let into = Rc::clone(&heard);
     cx.update(|_w, cx| {
         cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
+            if !matches!(event, ReviewEvent::Drafted) {
+                into.borrow_mut().push(event.clone());
+            }
         })
         .detach();
     });
@@ -1122,4 +1128,65 @@ fn a_file_past_the_review_s_budget_says_so_and_comes_whole_on_a_press(cx: &mut T
     assert!(cx.debug_bounds("review-whole-said-1").is_some(), "why it could not be read");
     assert!(cx.debug_bounds("review-whole-1").is_some(), "and the press again");
     assert!(cx.debug_bounds("review-left-out-1").is_some(), "its row stays");
+}
+
+/// The keyboard reads a review down: ↓ and j walk the changes in the diff's order (the source
+/// first), ⌘Y keeps the change it stands on and steps on, ⇧J goes to the next file's head, and
+/// `v` marks that file viewed and folds it.
+#[gpui::test]
+fn keys_walk_the_changes_and_keep_them(cx: &mut TestAppContext) {
+    use gpui::Focusable as _;
+    let (view, _hub, sent, cx) = tile(cx, 1200.0);
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    cx.simulate_keystrokes("down j");
+    cx.simulate_keystrokes("cmd-y");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Keep(slopty_proto::thread::wire::Pick {
+            path: "src/lib.rs".to_owned(),
+            from: Some("src/lib.rs@old".to_owned()),
+            stamp: Some("src/lib.rs@new".to_owned()),
+            hunks: vec![1],
+        })],
+        "the source's second change, kept by its key"
+    );
+    // On to the lock's one change: its file keeps whole.
+    cx.simulate_keystrokes("cmd-y");
+    let kept: Vec<_> = intents(&sent)
+        .into_iter()
+        .filter_map(|i| match i {
+            Intent::Keep(p) => Some((p.path, p.hunks)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept.last(), Some(&("Cargo.lock".to_owned(), Vec::new())), "{kept:?}");
+
+    cx.simulate_keystrokes("shift-j");
+    assert!(cx.debug_bounds("review-line-2-0-0").is_some(), "the test file is open");
+    cx.simulate_keystrokes("v");
+    assert!(cx.debug_bounds("review-line-2-0-0").is_none(), "viewed, it folds to its head");
+    assert!(view.read_with(cx, |v, _| v.viewed_count()) == 1, "and is marked viewed");
+}
+
+/// A bare key typed into a comment's field is a letter, not a step.
+#[gpui::test]
+fn a_comment_s_field_keeps_its_letters(cx: &mut TestAppContext) {
+    let (_view, _hub, sent, cx) = tile(cx, 800.0);
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("jvc");
+    cx.simulate_keystrokes("enter");
+    assert!(intents(&sent).is_empty(), "no key acted");
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "the comment kept its words");
+}
+
+/// On a tile too narrow for the list of files, the scope bar's Files opens them as a menu,
+/// and a file picked there is where the keyboard stands.
+#[gpui::test]
+fn a_narrow_tile_goes_to_a_file_from_its_menu(cx: &mut TestAppContext) {
+    let (view, _hub, _sent, cx) = tile(cx, 600.0);
+    assert!(cx.debug_bounds("review-files").is_none(), "no list beside the diff");
+    click(cx, "review-files-button");
+    assert!(cx.debug_bounds("review-files-file-2").is_some(), "the files, as a menu");
+    click(cx, "review-files-file-2");
+    assert_eq!(view.read_with(cx, |v, _| v.cursor_file()), Some(2));
 }

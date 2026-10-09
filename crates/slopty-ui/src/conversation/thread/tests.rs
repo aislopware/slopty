@@ -111,7 +111,10 @@ fn asked(
     let into = Rc::clone(&asked);
     cx.update(|_window, cx| {
         cx.subscribe(view, move |_view, event: &ThreadViewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
+            // A changed draft only tells the store to write; it asks nothing.
+            if !matches!(event, ThreadViewEvent::Drafted) {
+                into.borrow_mut().push(event.clone());
+            }
         })
         .detach();
     });

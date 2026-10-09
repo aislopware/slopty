@@ -9365,3 +9365,70 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the agent said them: "Explore · 14 tools · 12k tokens" (`agent_words`).
   - Tests: `conversation::thread::tests::proposed::an_mcp_call_shows_what_it_was_called_with`,
     `view::tools::tests::{a_call_shows_what_it_was_called_with, a_subagent_says_what_it_did}`.
+
+- ✅ **A review is read by keyboard, marks what was viewed, and reaches a file on a narrow
+  tile** (2026-10-11, readiness audit item 7).
+  - **The keys.** A review tile has a key context of its own (`Review`; a new `review` table
+    under `[keys]`, listed as "Reviews" on the Keyboard page). ↓ and ↑, or j and k, walk the
+    changes in the diff's order. A file folded to its head, or one with no lines to show,
+    counts as one stop. ⇧ with them walks the files' heads. ⌘Y keeps what the keyboard stands
+    on and ⌘N puts it back (Zed's keys), then step on, so a run of ⌘Y reads a review down. A
+    file of one change is kept whole. `c` opens a comment on the whole change, and `v` marks
+    its file viewed. Each is in the palette.
+  - **Bare keys.** The bare keys bind on `Review && !Input`. While a comment's field has the
+    keyboard, a `j` is a letter. GPUI's `!` looks at the whole context stack.
+  - **Where it stands.** A hunk's or a file's head takes the selection wash, and the list
+    marks the file. The keyboard stays on its file by path when the review comes again, since
+    a kept file leaves it and the rest move up.
+  - **Viewed.** Each file's head has a "Viewed" tick box, as a forge's diff does. Ticked, the
+    file folds to its head and the list shows a tick in place of its counts. The mark is the
+    person's own, kept by the file's path and the blob it shows, so a file that changes again
+    is not viewed. It lives in the tile for now; item 8's store will keep it across quits.
+  - **A narrow tile** has no list beside the diff. Its scope bar gets "Files" (⌘⇧O), a menu
+    of every file with its counts or "Viewed". A pick reveals the file and stands on it.
+  - Tests: `review::tests::{keys_walk_the_changes_and_keep_them,
+    a_comment_s_field_keeps_its_letters, a_narrow_tile_goes_to_a_file_from_its_menu}`.
+
+- ✅ **"To review" is the worker's word, and a thread reviews its whole branch** (2026-10-11,
+  readiness audit items 9 and 2's client half).
+  - **The section.** *To review* used to list only this device's unread finishes, so a phone
+    and a Mac disagreed and a thread looked at but not kept dropped off. It now leads with
+    every agent whose row stands on `Rung::ToReview`: the worker says its tree holds changes
+    the person has not kept. That reads the same on every device, until the person keeps
+    them. Unread finishes follow, each agent once. The bell counts both.
+  - **Review next** (⌘⇧R, in the palette while anything waits) opens the review of the first
+    agent under *To review*, then the next after the one on show, round again.
+  - **Scopes.** A thread's review also offers "Uncommitted" and "Whole branch", the folder's
+    working tree as the worker reads it for a thread. An empty span still offers "All turns"
+    as its next step.
+  - **The opening span** (item 2). A thread's review opens on "Since reviewed" when an earlier
+    turn changed files too and the tree still holds unkept changes. Otherwise it opens on the
+    last turn (`Scope::opening`), so the first view is never part of what waits. A span the
+    person or the thread view chose stands.
+  - Tests: `workspace::tests::thread_waits::a_thread_with_changes_unkept_stays_to_review`,
+    `review::model::tests::a_review_opens_on_since_reviewed_when_an_earlier_turn_waits`.
+
+- ✅ **Drafts survive the app: one store for composers, starts and review comments**
+  (2026-10-11, readiness audit item 8).
+  - **The defect.** A half-written message to an agent, a start's first message and unsent
+    review comments lived only in memory. The faces kept hidden views' text in a map by
+    terminal session. A quit, a crash or iOS ending a suspended app lost all of them.
+  - **The store** (`workspace/drafts.rs`) is one file, `drafts.json` beside the layout,
+    replaced whole by `slopty_platform::fs::replace`. It is the user's alone (0600 in 0700),
+    since a draft may hold a secret. It keeps each draft by what it is about, not by the view
+    that held it:
+    - a thread's composer by the thread, whichever tile shows it, or none;
+    - a start's first message by its machine, agent and folder (start tiles are not kept
+      across a launch, so the next start there takes the words back);
+    - a review's comments and the files marked viewed by its thread, or by its folder on its
+      machine.
+  - **Writes.** A composer emits `ThreadViewEvent::Drafted` and a review `ReviewEvent::Drafted`
+    (a hash of its comments and viewed files changed). A pass 400 ms after the last change
+    reads every live view and writes off the UI thread. A view that goes hands its words over
+    as it goes. Going to the background (`set_app_active(false)`) and quitting write at once
+    on the UI thread, so the words are on the disk before the app can be ended.
+  - **What clears.** A sent message, a start that went, a start tile closed by the person,
+    and comments the agent took leave nothing. A draft kept more than 30 days ago goes when
+    the file is read. The faces' in-memory `drafts` map is deleted: one store, not two.
+  - Tests: `workspace::tests::drafts::a_composer_s_words_come_back_after_a_relaunch`,
+    `workspace::drafts::tests::drafts_come_back_and_old_ones_go`.

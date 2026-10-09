@@ -196,6 +196,19 @@ impl Starts {
         Some(Target(drafting.view.downgrade()))
     }
 
+    /// Each start's first message as its composer holds it, by where it starts: empty for
+    /// one that went, which leaves nothing to keep.
+    pub(super) fn drafts(&self, cx: &gpui::App) -> Vec<(WorkerKey, AgentId, String, String)> {
+        self.tiles
+            .values()
+            .filter_map(|s| {
+                let text =
+                    if s.sent { String::new() } else { s.draft.as_ref()?.view.read(cx).draft(cx) };
+                Some((s.worker, s.agent.clone(), s.cwd.clone(), text))
+            })
+            .collect()
+    }
+
     /// The thread view writing start `item`'s first message, while it is written.
     pub(super) fn draft_view(&self, item: ItemId) -> Option<Entity<ThreadView>> {
         Some(self.tiles.get(&item)?.draft.as_ref()?.view.clone())
@@ -354,7 +367,15 @@ impl WorkspaceView {
                 .seeded(chips)
         });
         let theme = self.theme.clone();
-        let view = cx.new(|cx| ThreadView::drafting(hub, draft.clone(), theme, window, cx));
+        // The first message left unsent in a start here before, as it was.
+        let left = self.drafts.start(worker, &agent, &cwd).map(str::to_owned);
+        let view = cx.new(|cx| {
+            let mut view = ThreadView::drafting(hub, draft.clone(), theme, window, cx);
+            if let Some(left) = left {
+                view.restore_draft(&left, window, cx);
+            }
+            view
+        });
         let sending = cx.subscribe(&draft, move |this, _draft, sent: &DraftSent, cx| {
             this.draft_sent(item, sent.clone(), cx);
         });
@@ -550,6 +571,7 @@ impl WorkspaceView {
         let Some(worker) = self.starting.get(item).map(|s| s.worker) else { return };
         let tile = TileRef { worker, item };
         match event {
+            ThreadViewEvent::Drafted => self.drafts_changed(cx),
             ThreadViewEvent::Attach { id, what } => {
                 self.attach_to_composer(Some(tile), Target(view.downgrade()), id, what, cx);
             }
@@ -701,6 +723,10 @@ impl WorkspaceView {
     pub(super) fn close_starting(&mut self, tile: TileRef, cx: &mut Context<Self>) {
         let Some(starting) = self.starting.tiles.remove(&tile.item) else { return };
         tracing::debug!(item = %tile.item, sent = starting.sent, "close a thread on its way");
+        // Closed, its words are let go: only a quit or a crash leaves them for the next start.
+        let now = crate::clock::now(cx);
+        self.drafts.set_start((starting.worker, &starting.agent, &starting.cwd), "", now);
+        self.drafts_changed(cx);
         self.drop_starting_tile(tile, cx);
     }
 

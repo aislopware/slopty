@@ -51,6 +51,8 @@ actions!(
         /// Review the changes of the focused folder's repository, or of the focused shell's,
         /// with no thread: what is not committed, and the whole branch.
         ReviewChanges,
+        /// Open the review of what waits first under *To review*, after the one on show.
+        ReviewNext,
         /// "Review a pull request…": which repository, then which pull request by number; an
         /// agent starts on it in a new worktree that checks it out, its whole change beside it.
         ReviewPull,
@@ -479,6 +481,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Open file…", Box::new(OpenFile)),
         w("Open folder…", Box::new(OpenFolder)),
         w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
+        w(super::reviews::REVIEW_NEXT, Box::new(ReviewNext)),
         w(super::pull_review::REVIEW_PULL, Box::new(ReviewPull)),
         w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
         w(super::worktrees::REMOVE_MERGED, Box::new(RemoveMerged)),
@@ -549,6 +552,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     items.extend(crate::folder::folder_palette_items(&workspace));
     items.extend(crate::conversation::palette_items(&workspace));
     items.extend(crate::project::palette_items(&workspace));
+    items.extend(crate::review::palette_items(&workspace));
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only the Mac has a Web Inspector window of its own; iOS reaches it from Safari on a Mac.
     if cfg!(target_os = "macos") {

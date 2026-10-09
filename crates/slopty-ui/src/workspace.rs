@@ -47,6 +47,7 @@ mod clone_here;
 mod commands;
 mod context_menus;
 mod desktop;
+mod drafts;
 mod faces;
 mod facts;
 mod folder_typing;
@@ -97,6 +98,7 @@ pub use actions::*;
 pub use agents::{banner_title, program_banner};
 #[cfg(test)]
 pub(crate) use area::{ADD_WORKER, NEW_AGENT, NO_WORKERS, NO_WORKERS_NEXT};
+pub use drafts::ReviewDraft;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
@@ -1039,6 +1041,8 @@ pub struct WorkspaceView {
     /// The file tiles' unsaved edits, kept on this device; `None` where nothing is kept (a
     /// test without a store).
     kept: Option<unsaved::Kept>,
+    /// What the person wrote and has not sent, kept on this device.
+    drafts: drafts::Drafts,
     /// Slopty's mark over the empty workspace.
     empty_mark: Entity<about::Mark>,
     /// Uploads in flight.
@@ -1276,6 +1280,7 @@ impl WorkspaceView {
             clip_unshared: Rc::default(),
             handoff: handoffs::HandoffState::default(),
             kept: None,
+            drafts: drafts::Drafts::default(),
             empty_mark,
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
@@ -1789,7 +1794,6 @@ impl WorkspaceView {
             ("nav.folded", self.nav.folded.len()),
             ("faces.chosen", self.faces.chosen.len()),
             ("faces.focus", self.faces.focus.len()),
-            ("faces.drafts", self.faces.drafts.len()),
         ]
         .into_iter()
         .chain(self.project_sizes())
@@ -2161,6 +2165,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::run_script_on))
             .on_action(cx.listener(Self::resume_session))
             .on_action(cx.listener(Self::review_pull))
+            .when(!self.to_review().is_empty(), |el| el.on_action(cx.listener(Self::review_next)))
             .on_action(cx.listener(Self::review_pull_in))
             .on_action(cx.listener(Self::review_pull_number))
             .on_action(cx.listener(Self::remove_machine))

@@ -4102,6 +4102,8 @@ pub fn open_workspace(
             slopty_client::unsaved::Store::new(slopty_platform::dirs::data_dir().join("unsaved")),
             cx,
         );
+        // And what the person wrote and has not sent: a composer, a start, a review's comments.
+        view.set_drafts_path(slopty_platform::dirs::data_dir().join("drafts.json"), cx);
         // And the transfers in flight, taken up again at the next launch.
         view.set_transfer_ledger(
             slopty_platform::dirs::data_dir().join(slopty_client::xfer::ledger::FILE),
@@ -4141,6 +4143,7 @@ pub fn open_workspace(
         quitting.update(cx, |ws, cx| {
             ws.view.update(cx, |v, cx| {
                 v.keep_unsaved_now(cx);
+                v.keep_drafts_now(cx);
                 // Where the windows stand changed a moment ago, maybe: written before the wait.
                 v.save_layout_now();
             });

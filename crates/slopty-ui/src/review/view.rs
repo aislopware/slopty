@@ -58,6 +58,10 @@ use crate::conversation::thread::{HubEvent, ThreadHub};
 use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
 use crate::icons::{IconSize, Symbol};
 use crate::kit;
+use crate::review::{
+    CommentOnChange, KeepChange, NextChange, NextFile, PreviousChange, PreviousFile, PutBackChange,
+    ShowFiles, ToggleViewed,
+};
 
 /// The file list's width, in points.
 const LIST_WIDTH: f32 = 240.0;
@@ -65,6 +69,7 @@ const LIST_WIDTH: f32 = 240.0;
 mod authors;
 mod file_menu;
 mod gaps;
+mod keys;
 mod whole;
 
 pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
@@ -130,6 +135,9 @@ const BAR_REFRESH: &str = "refresh";
 /// The scope bar's switch that folds or opens every file, by its key in its row.
 const BAR_FOLD: &str = "fold";
 
+/// The scope bar's way to a file on a narrow tile, by its key in its row.
+const BAR_FILES: &str = "files";
+
 /// The fold switch while a file is open.
 pub const COLLAPSE_ALL: &str = "Collapse all files";
 
@@ -167,6 +175,9 @@ pub enum ReviewEvent {
         /// Which hand-over this is, for its answer.
         id: u64,
     },
+    /// What was left in it (comments not sent, files marked viewed) changed
+    /// ([`ReviewView::left`]).
+    Drafted,
     /// A folder's comments are for a new agent there: the host opens a start in `folder` with
     /// `text` in its composer, then says whether one took it ([`ReviewView::added`]). The
     /// comments stay until one did.
@@ -356,6 +367,17 @@ pub struct ReviewView {
     /// The stretches between hunks the person opened, by the file's path and the hunk after
     /// each ([`Row::Gap`]).
     unfolded: HashSet<(String, usize)>,
+    /// The span is the person's, or was read from the thread once: a thread's opening span
+    /// waits for its state ([`Scope::opening`]).
+    scope_settled: bool,
+    /// Where the keyboard stands in the diff.
+    cursor: Option<keys::Cursor>,
+    /// What was left here (comments, viewed files) when the host last heard of it.
+    left: u64,
+    /// The files the person marked viewed, by path and the blob they showed.
+    viewed: HashSet<(String, Option<String>)>,
+    /// The list of files is open over a narrow tile.
+    files_open: bool,
     /// The lines of each file side a stretch was opened in, by its blob, once they came.
     sides: HashMap<String, Rc<[String]>>,
     /// The opened stretches' lines as drawn, by the file's place and the stretch.
@@ -501,6 +523,11 @@ impl ReviewView {
             file_menu: None,
             folded: HashSet::new(),
             unfolded: HashSet::new(),
+            scope_settled: folder,
+            cursor: None,
+            left: 0,
+            viewed: HashSet::new(),
+            files_open: false,
             sides: HashMap::new(),
             context: HashMap::new(),
             _subscriptions: vec![writing, hearing, watching],
@@ -512,6 +539,15 @@ impl ReviewView {
         view.ask(cx);
         view.ask_pull(cx);
         view
+    }
+
+    /// The folder whose changes it reviews; none for a thread's.
+    #[must_use]
+    pub fn folder_path(&self) -> Option<&str> {
+        match &self.reviewed {
+            Reviewed::Folder(path) => Some(path),
+            Reviewed::Thread(_) => None,
+        }
     }
 
     /// The thread it reviews; none for a folder's changes.
@@ -565,6 +601,7 @@ impl ReviewView {
 
     /// Show `scope`.
     pub fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.scope_settled = true;
         if self.scope != scope {
             self.scope = scope;
             self.asked = None;
@@ -599,6 +636,10 @@ impl ReviewView {
         let Some(state) = hub.threads().mirror(thread).and_then(Mirror::state) else {
             return;
         };
+        if !self.scope_settled {
+            self.scope_settled = true;
+            self.scope = Scope::opening(state);
+        }
         let held = self.reviewing.is_some() || self.model.has_findings();
         let pinned = self.pinned.clone().filter(|_| held);
         // A thread on a pull request's branch reads its whole change against the branch that
@@ -790,6 +831,10 @@ impl ReviewView {
 
     /// Show `review`.
     pub fn show(&mut self, review: Arc<Review>) {
+        // The keyboard stays on its file by path: a kept file leaves the review, and the rest
+        // move up.
+        let standing =
+            self.cursor.and_then(|c| Some((self.model.file(c.at)?.path.clone(), c.hunk)));
         self.model.set_review(review);
         self.blocks.clear();
         if let Some(review) = self.model.review().cloned() {
@@ -801,6 +846,11 @@ impl ReviewView {
         }
         self.drafting = None;
         self.marking = None;
+        self.cursor = standing.and_then(|(path, hunk)| {
+            let at = self.model.review()?.files.iter().position(|f| f.path == path)?;
+            let hunk = hunk.filter(|h| self.blocks.get(&at).is_some_and(|b| *h < b.len()));
+            Some(keys::Cursor { at, hunk })
+        });
         self.rebuild();
     }
 
@@ -1409,6 +1459,9 @@ impl ReviewView {
             row = row.item(scope.label(), priority, tab);
         }
         let mut row = row.end();
+        if let Some(files) = self.files_part(cx) {
+            row = row.item(BAR_FILES, kit::Priority::ESSENTIAL, files);
+        }
         if let Some(fold) = self.fold_part(cx) {
             row = row.item(BAR_FOLD, kit::Priority::ESSENTIAL, fold);
         }
@@ -1935,7 +1988,9 @@ impl ReviewView {
                 let file = self.model.file(listed.at)?;
                 let at = listed.at;
                 let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_owned();
-                let tone = if listed.quiet { s.text_muted } else { s.text };
+                let viewed = self.is_viewed(at);
+                let tone = if listed.quiet || viewed { s.text_muted } else { s.text };
+                let here = self.cursor.is_some_and(|c| c.at == at);
                 let id = format!("review-file-{at}");
                 let selector = id.clone();
                 let row = div()
@@ -1949,7 +2004,8 @@ impl ReviewView {
                     .px(px(theme.spacing.md))
                     .min_h(px(kit::Row::One.height(theme)))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .when(here, |el| el.bg(hsla(s.selected)))
+                    .when(!here, |el| el.hover(move |el| el.bg(hsla(s.hover))))
                     .child(
                         div()
                             .min_w_0()
@@ -1960,7 +2016,10 @@ impl ReviewView {
                             .text_color(hsla(tone))
                             .child(SharedString::from(name)),
                     )
-                    .children(kit::changes(theme, file.patch.added, file.patch.removed))
+                    .when(viewed, |el| el.child(self.icon(Symbol::Checkmark, s.text_muted)))
+                    .when(!viewed, |el| {
+                        el.children(kit::changes(theme, file.patch.added, file.patch.removed))
+                    })
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal(at, cx)));
                 Some(Self::file_menu_press(row, at, cx))
             }))
@@ -2114,6 +2173,7 @@ impl ReviewView {
         )
         .children(status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)))
         .children(kit::changes(theme, file.patch.added, file.patch.removed));
+        let here = self.stands_on(at, None);
         let head = div()
             .debug_selector(move || format!("review-head-row-{at}"))
             .w_full()
@@ -2122,10 +2182,12 @@ impl ReviewView {
             .gap(px(theme.spacing.sm))
             .px(px(theme.spacing.sm))
             .rounded(radius)
-            .map(|el| kit::inset(el, theme))
+            .when(here, |el| el.bg(hsla(s.selected)))
+            .when(!here, |el| kit::inset(el, theme))
             .min_h(px(kit::Row::One.height(theme)))
             .text_size(px(theme.typography.small()))
             .child(fold)
+            .child(self.viewed_box(at, cx))
             .child(self.picks(at, None, "file", cx));
         div()
             .debug_selector(move || format!("review-head-{at}"))
@@ -2165,7 +2227,13 @@ impl ReviewView {
         let Some(blocks) = self.blocks.get(&at) else { return div().into_any_element() };
         let Some(block) = blocks.get(hunk) else { return div().into_any_element() };
         let ink = self.ink(at);
-        let head = ink.hunk_head(block).flex().items_center();
+        let here = self.stands_on(at, Some(hunk));
+        let s = self.theme.surfaces;
+        let head = ink
+            .hunk_head(block)
+            .flex()
+            .items_center()
+            .when(here, |el| el.bg(hsla(s.selected)).text_color(hsla(s.text_secondary)));
         if blocks.len() < 2 {
             return head.into_any_element();
         }
@@ -2492,7 +2560,11 @@ impl ReviewView {
         if review.files.is_empty() {
             // The widest span of the kind is the one next step from a narrower one that holds
             // nothing: the change may lie in an earlier turn, or already be committed.
-            let widest = self.scopes().last().copied().filter(|widest| *widest != self.scope);
+            let widest = match self.reviewed {
+                Reviewed::Thread(_) => Scope::AllTurns,
+                Reviewed::Folder(_) => Scope::WholeBranch,
+            };
+            let widest = Some(widest).filter(|widest| *widest != self.scope);
             let next = widest.map(|widest| {
                 kit::notice_action(theme, "review-widen", widen_words(widest))
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(widest, cx)))
@@ -2566,6 +2638,12 @@ fn on(line: &Line, side: Side, number: u32) -> bool {
 
 impl Render for ReviewView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // What the person left here changed: the host keeps it across a quit.
+        let left = self.left_mark();
+        if left != self.left {
+            self.left = left;
+            cx.emit(ReviewEvent::Drafted);
+        }
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let scopes = self.scope_bar(cx);
@@ -2578,6 +2656,7 @@ impl Render for ReviewView {
             .id("review")
             .debug_selector(|| "review".to_owned())
             .track_focus(&self.focus)
+            .key_context(crate::review::CTX)
             .role(Role::Group)
             .aria_label("Review")
             .on_mouse_up(
@@ -2598,6 +2677,26 @@ impl Render for ReviewView {
             .text_color(hsla(s.text))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .on_action(cx.listener(|this, _: &NextChange, _w, cx| this.step(1, false, cx)))
+            .on_action(cx.listener(|this, _: &PreviousChange, _w, cx| this.step(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &NextFile, _w, cx| this.step(1, true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousFile, _w, cx| this.step(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &ToggleViewed, _w, cx| this.viewed_by_key(cx)))
+            .on_action(cx.listener(|this, _: &CommentOnChange, window, cx| {
+                this.comment_by_key(window, cx);
+            }))
+            .when(self.own().is_some(), |el| {
+                el.on_action(cx.listener(|this, _: &KeepChange, _w, cx| this.pick_by_key(true, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &PutBackChange, _w, cx| this.pick_by_key(false, cx)),
+                    )
+            })
+            .when(!self.room().is_wide(), |el| {
+                el.on_action(cx.listener(|this, _: &ShowFiles, _w, cx| {
+                    this.files_open = !this.files_open;
+                    cx.notify();
+                }))
+            })
             .when(door, |el| {
                 el.on_action(
                     cx.listener(|this, _: &ReviewWithAgent, _w, cx| this.review_with_agent(cx)),

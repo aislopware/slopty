@@ -30,12 +30,16 @@ use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
-use super::actions::{ReviewChanges, StartThread};
+use super::actions::{ReviewChanges, ReviewNext, StartThread};
+use super::agents::Step;
 use crate::conversation::thread::ThreadView;
 use crate::review::{ReviewEvent, ReviewView};
 
 /// The palette's line that opens a folder's changes.
 pub(super) const REVIEW_CHANGES: &str = "Review changes";
+
+/// The palette's line that opens what waits first under *To review*.
+pub(super) const REVIEW_NEXT: &str = "Review next";
 
 /// What the workspace keeps of review tiles.
 #[derive(Default)]
@@ -207,6 +211,7 @@ impl WorkspaceView {
             ReviewEvent::OpenThread(opens) => self.open_thread_at(*opens, cx),
             ReviewEvent::OpenFile { path } => self.open_file_on(Some(key), path, None, cx),
             ReviewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, root, cx),
+            ReviewEvent::Drafted => self.drafts_changed(cx),
             // A folder's alone, heard with the window it starts in (`sync_changes`).
             ReviewEvent::NewAgent { .. } => {}
         }
@@ -275,6 +280,31 @@ impl WorkspaceView {
         Some((tile.worker, path))
     }
 
+    /// "Review next" (⌘⇧R): the review of what waits first under *To review*, after the one
+    /// the focused review tile shows, each in turn and round again; its tile opens on its
+    /// agent's machine, or the one open there takes the focus.
+    pub(super) fn review_next(&mut self, _: &ReviewNext, _w: &mut Window, cx: &mut Context<Self>) {
+        let threads: Vec<(WorkerKey, ThreadId)> = self
+            .to_review()
+            .into_iter()
+            .filter_map(|step| match step {
+                Step::Session(w) => Some((w.worker, self.session_thread(w.session)?)),
+                Step::Thread(w) => Some((w.worker, w.thread)),
+            })
+            .collect();
+        let on_show = self.focused().and_then(|t| match self.item(t)?.kind {
+            ItemKind::Review { thread } => Some(thread),
+            _ => None,
+        });
+        let at = on_show
+            .and_then(|shown| threads.iter().position(|(_, t)| *t == shown))
+            .map_or(0, |at| at.saturating_add(1));
+        let Some(&(key, thread)) = threads.get(at).or_else(|| threads.first()) else { return };
+        self.faces_dirty = true;
+        self.ask_review(key, thread, None);
+        cx.notify();
+    }
+
     /// "Review changes": the focused folder's changes, in their own tile on its machine; the
     /// one open there already for that folder takes the focus instead.
     pub(super) fn review_changes(
@@ -339,9 +369,17 @@ impl WorkspaceView {
             let hub = self.thread_hub(*key, cx);
             let theme = self.theme.clone();
             let path = path.clone();
-            let view = cx.new(|cx| match against.clone() {
-                Some(branch) => ReviewView::branch(hub, path, branch, theme, window, cx),
-                None => ReviewView::folder(hub, path, theme, window, cx),
+            let left =
+                self.drafts.review(&super::drafts::review_key(None, Some((*key, &path)))).cloned();
+            let view = cx.new(|cx| {
+                let mut view = match against.clone() {
+                    Some(branch) => ReviewView::branch(hub, path, branch, theme, window, cx),
+                    None => ReviewView::folder(hub, path, theme, window, cx),
+                };
+                if let Some(left) = left {
+                    view.take_back(left, cx);
+                }
+                view
             });
             let key = *key;
             let hearing = cx.subscribe_in(&view, window, move |this, view, event, window, cx| {
@@ -355,6 +393,29 @@ impl WorkspaceView {
             self.reviews.changes.insert(*item, (view, hearing));
         }
         self.reviews.changes.retain(|item, _| tiled.iter().any(|(i, ..)| i == item));
+    }
+
+    /// What every review tile holds left by the person, by what it reviews
+    /// ([`super::drafts::review_key`]).
+    pub(super) fn review_drafts(
+        &self,
+        cx: &gpui::App,
+    ) -> Vec<(String, super::drafts::ReviewDraft)> {
+        let threads = self.open_reviews().filter_map(|view| {
+            let view = view.read(cx);
+            Some((super::drafts::review_key(Some(view.thread()?), None), view.left()))
+        });
+        let tiles: HashMap<ItemId, WorkerKey> =
+            self.layout.tiles().map(|t| (t.item, t.worker)).collect();
+        let folders = self.reviews.changes.iter().filter_map(|(item, (view, _))| {
+            let worker = *tiles.get(item)?;
+            let view = view.read(cx);
+            Some((
+                super::drafts::review_key(None, Some((worker, view.folder_path()?))),
+                view.left(),
+            ))
+        });
+        threads.chain(folders).collect()
     }
 
     /// The view of the folder's changes tile `item`, once made.

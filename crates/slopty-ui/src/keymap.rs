@@ -53,15 +53,18 @@ pub enum Scope {
     Search,
     /// A project's board.
     Project,
+    /// A review tile.
+    Review,
 }
 
 impl Scope {
     /// Every scope, in the order the Keyboard page lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::App,
         Self::Workspace,
         Self::Terminal,
         Self::Conversation,
+        Self::Review,
         Self::Project,
         Self::File,
         Self::Folder,
@@ -82,15 +85,17 @@ impl Scope {
             Self::Folder => "folder",
             Self::Search => "search",
             Self::Project => "project",
+            Self::Review => "review",
         }
     }
 
-    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows and a board's hold no
-    /// text, so bare keys walk them. Elsewhere a key alone is typed into the
+    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows, a board's and a
+    /// review's hold no text (a review's comment field takes its keys back), so bare keys walk
+    /// them. Elsewhere a key alone is typed into the
     /// terminal or a field, and a chord carries ⌘ or ⌃ (or is an F key).
     #[must_use]
     pub const fn takes_bare_keys(self) -> bool {
-        matches!(self, Self::Folder | Self::Project)
+        matches!(self, Self::Folder | Self::Project | Self::Review)
     }
 
     fn named(name: &str) -> Option<Self> {
@@ -294,6 +299,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "open_folder", ws::OpenFolder, &[], W),
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
         c(Workspace, "review_changes", ws::ReviewChanges, &[], W),
+        c(Workspace, "review_next", ws::ReviewNext, &["cmd-shift-r"], W),
         c(Workspace, "remove_worktree", ws::RemoveWorktree, &[], W),
         c(Workspace, "remove_merged_worktrees", ws::RemoveMerged, &[], W),
         c(Workspace, "run_script", ws::RunHere, &[], W),
@@ -536,6 +542,7 @@ pub fn defaults() -> Vec<Command> {
         ]);
     }
     out.extend(crate::project::key_bindings());
+    out.extend(crate::review::key_bindings());
     out
 }
 

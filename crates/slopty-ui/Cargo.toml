@@ -65,7 +65,8 @@ slopty-proto.workspace = true
 # (`settings_form`).
 slopty-settings.workspace = true
 slopty-theme.workspace = true
-# The device's layout, saved as `layout.json` (`workspace`).
+# The device's layout, saved as `layout.json`, and its drafts, as `drafts.json` (`workspace`).
+serde.workspace = true
 serde_json.workspace = true
 # Syntax colouring for a file tile and a fenced code block (`highlight`).
 syntect.workspace = true

@@ -32,8 +32,21 @@ impl Scope {
         [Self::LastTurn, Self::SinceReviewed, Self::AllTurns, Self::Uncommitted, Self::WholeBranch];
     /// A folder's scopes, in the switch's order.
     pub const FOLDER: [Self; 2] = [Self::Uncommitted, Self::WholeBranch];
-    /// A thread's scopes, in the switch's order.
-    pub const THREAD: [Self; 3] = [Self::LastTurn, Self::SinceReviewed, Self::AllTurns];
+    /// A thread's scopes, in the switch's order: its turns, then its folder's working tree
+    /// against `HEAD` and against where its branch left its base.
+    pub const THREAD: [Self; 5] =
+        [Self::LastTurn, Self::SinceReviewed, Self::AllTurns, Self::Uncommitted, Self::WholeBranch];
+
+    /// The span a thread's review opens on: its last turn, unless an earlier turn changed
+    /// files too and the tree still holds changes the person has not kept; then since they
+    /// last reviewed, so the first view is never part of what waits (and a keep on it is
+    /// over what was kept).
+    #[must_use]
+    pub fn opening(state: &ThreadState) -> Self {
+        let Some((_, earlier)) = state.turns.split_last() else { return Self::LastTurn };
+        let changed = earlier.iter().any(|t| t.changed.added > 0 || t.changed.removed > 0);
+        if state.to_review && changed { Self::SinceReviewed } else { Self::LastTurn }
+    }
 
     /// Its name on the switch.
     #[must_use]
@@ -113,7 +126,7 @@ pub fn order(review: &Review) -> Vec<Listed> {
 }
 
 /// Which side of a diff a line is on.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Side {
     /// The old file's line, removed.
     Old,
@@ -121,8 +134,9 @@ pub enum Side {
     New,
 }
 
-/// A comment on a line or a run of lines, waiting to be sent with the rest.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A comment on a line or a run of lines, waiting to be sent with the rest: kept on the device
+/// until it goes (`workspace::drafts`).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Comment {
     /// The file.
     pub path: String,
@@ -251,6 +265,15 @@ impl Model {
     pub fn comment(&mut self, comment: Comment) {
         if !comment.body.trim().is_empty() {
             self.comments.push(comment);
+        }
+    }
+
+    /// The comments left waiting before the app last went, back as they were.
+    pub fn take_back(&mut self, comments: Vec<Comment>) {
+        for comment in comments {
+            if !self.comments.contains(&comment) {
+                self.comments.push(comment);
+            }
         }
     }
 
@@ -483,5 +506,33 @@ mod tests {
             }))
         );
         assert_eq!(model.keep_all().len(), 2, "mark reviewed keeps every file");
+    }
+
+    /// A thread's review opens on its last turn, unless an earlier turn changed files too and
+    /// some are not kept: then on what changed since the person last reviewed.
+    #[test]
+    fn a_review_opens_on_since_reviewed_when_an_earlier_turn_waits() {
+        use slopty_proto::thread::{Changed, Turn, TurnState, Usage};
+        let turn = |id: u32, added: u32| Turn {
+            id: TurnId(id),
+            input: None,
+            state: TurnState::Complete,
+            started_ms: slopty_core::WallMs::ZERO,
+            ended_ms: None,
+            usage: Usage::default(),
+            models: Vec::new(),
+            changed: Changed { added, removed: 0 },
+            before: None,
+            after: None,
+        };
+        let mut state = crate::conversation::thread::fixtures::empty();
+        assert_eq!(Scope::opening(&state), Scope::LastTurn, "no turn yet");
+        state.turns = vec![turn(1, 0), turn(2, 4)];
+        state.to_review = true;
+        assert_eq!(Scope::opening(&state), Scope::LastTurn, "only the last turn changed files");
+        state.turns = vec![turn(1, 3), turn(2, 4)];
+        assert_eq!(Scope::opening(&state), Scope::SinceReviewed, "an earlier turn did too");
+        state.to_review = false;
+        assert_eq!(Scope::opening(&state), Scope::LastTurn, "all of it kept");
     }
 }

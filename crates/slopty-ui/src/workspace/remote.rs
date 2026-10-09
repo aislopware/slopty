@@ -213,6 +213,10 @@ impl WorkspaceView {
             self.app_active = active;
             if active {
                 self.release_held_toasts(cx);
+            } else {
+                // The app may be ended while it is away (iOS ends a suspended one): what the
+                // person wrote is on the disk before it goes.
+                self.keep_drafts_now(cx);
             }
             cx.notify();
         }

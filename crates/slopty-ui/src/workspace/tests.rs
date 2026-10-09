@@ -1656,6 +1656,7 @@ mod clone_start;
 mod context_menus;
 mod cwd;
 mod desktop;
+mod drafts;
 mod drag;
 mod faces;
 mod facts;

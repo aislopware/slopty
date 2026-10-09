@@ -638,3 +638,39 @@ fn a_threads_finished_turn_without_a_terminal_is_to_review(cx: &mut TestAppConte
     turn(&mut row, cx, 70_000, 71_000);
     assert!(view.read_with(cx, |v, _| v.to_review().is_empty()), "a short turn earns nothing");
 }
+
+/// A thread whose worker says its changes wait unkept stays under *To review* after its tile
+/// was looked at, on the bell too, until the worker says they were kept; "Review next" opens
+/// its review.
+#[gpui::test]
+fn a_thread_with_changes_unkept_stays_to_review(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = None;
+    let mut row = state.row(WallMs::ZERO);
+    row.to_review = true;
+    let thread = row.id;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    table(&view, cx, key, vec![row.clone()]);
+    view.update(cx, |v, _| {
+        let review = v.to_review();
+        assert!(
+            matches!(review.as_slice(), [agents::Step::Thread(w)] if w.thread == thread),
+            "looked at, still to review: {review:?}"
+        );
+        assert_eq!(v.bell_count(), 1, "the bell counts it");
+    });
+
+    cx.simulate_keystrokes("cmd-shift-r");
+    cx.run_until_parked();
+    let asked = view.read_with(cx, |v, _| v.review_of(thread).is_some());
+    assert!(asked, "Review next opened its review");
+
+    row.to_review = false;
+    table(&view, cx, key, vec![row]);
+    assert!(view.read_with(cx, |v, _| v.to_review().is_empty()), "kept: nothing left");
+}

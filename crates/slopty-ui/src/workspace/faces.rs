@@ -52,9 +52,6 @@ pub(super) struct Faces {
     pub chosen: HashMap<SessionId, bool>,
     /// Sessions whose thread view takes the keyboard on the next frame.
     pub focus: HashSet<SessionId>,
-    /// What each hidden thread view's composer held, put back when its tile shows the thread
-    /// again: a view is made only while it shows.
-    pub drafts: HashMap<SessionId, String>,
     /// The thread views and the hubs they read.
     pub threads: ThreadFaces,
     /// The live palette's ask of every worker for the threads its words were said in.
@@ -364,7 +361,14 @@ impl WorkspaceView {
         }
         let hub = self.thread_hub(key, cx);
         let theme = self.theme.clone();
-        let view = cx.new(|cx| ReviewView::new(hub, thread, theme, window, cx));
+        let left = self.drafts.review(&super::drafts::review_key(Some(thread), None)).cloned();
+        let view = cx.new(|cx| {
+            let mut view = ReviewView::new(hub, thread, theme, window, cx);
+            if let Some(left) = left {
+                view.take_back(left, cx);
+            }
+            view
+        });
         self.faces.threads.reviews.insert(thread, view.clone());
         view
     }
@@ -1053,13 +1057,10 @@ impl WorkspaceView {
         {
             threads.handed.insert(session, view);
         }
-        if let Some(old) = from {
-            if let Some(face) = self.faces.chosen.remove(&old) {
-                self.faces.chosen.insert(session, face);
-            }
-            if let Some(draft) = self.faces.drafts.remove(&old) {
-                self.faces.drafts.insert(session, draft);
-            }
+        if let Some(old) = from
+            && let Some(face) = self.faces.chosen.remove(&old)
+        {
+            self.faces.chosen.insert(session, face);
         }
         if focused {
             self.faces.focus.insert(session);
@@ -1304,7 +1305,7 @@ impl WorkspaceView {
             } else {
                 let hub = self.thread_hub(key, cx);
                 let theme = self.theme.clone();
-                let draft = self.faces.drafts.remove(session);
+                let draft = self.drafts.thread(thread).map(str::to_owned);
                 cx.new(|cx| {
                     let mut view = ThreadView::new(hub, thread, theme, window, cx);
                     if let Some(draft) = draft {
@@ -1355,12 +1356,14 @@ impl WorkspaceView {
             self.pending_focus = held;
         }
         let threads = &mut self.faces.threads;
-        let drafts = &mut self.faces.drafts;
+        let drafts = &mut self.drafts;
+        let now = crate::clock::now(cx);
         threads.views.retain(|s, view| {
             let kept = wanted.contains(s) && threads.of_session.contains_key(s);
-            let draft = view.read(cx).draft(cx);
-            if !kept && !draft.is_empty() {
-                drafts.insert(*s, draft);
+            if !kept {
+                // What its composer held stays with its thread, for its next view.
+                let view = view.read(cx);
+                drafts.set_thread(view.thread(), &view.draft(cx), now);
             }
             kept
         });
@@ -1405,7 +1408,14 @@ impl WorkspaceView {
             }
             let hub = self.thread_hub(key, cx);
             let theme = self.theme.clone();
-            let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
+            let draft = self.drafts.thread(thread).map(str::to_owned);
+            let view = cx.new(|cx| {
+                let mut view = ThreadView::new(hub, thread, theme, window, cx);
+                if let Some(draft) = draft {
+                    view.restore_draft(&draft, window, cx);
+                }
+                view
+            });
             let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
                 this.thread_item_event(key, item, &view, event.clone(), cx);
             });
@@ -1413,7 +1423,16 @@ impl WorkspaceView {
             self.faces.threads.items.insert(item, view);
         }
         let threads = &mut self.faces.threads;
-        threads.items.retain(|item, _| tiled.iter().any(|(i, ..)| i == item));
+        let drafts = &mut self.drafts;
+        let now = crate::clock::now(cx);
+        threads.items.retain(|item, view| {
+            let kept = tiled.iter().any(|(i, ..)| i == item);
+            if !kept {
+                let view = view.read(cx);
+                drafts.set_thread(view.thread(), &view.draft(cx), now);
+            }
+            kept
+        });
         let items = &threads.items;
         threads.item_asks.retain(|item, _| items.contains_key(item));
         let focus = threads.focus_item.take().and_then(|item| threads.items.get(&item)).cloned();
@@ -1441,6 +1460,7 @@ impl WorkspaceView {
     ) {
         let thread = view.read(cx).thread();
         match event {
+            ThreadViewEvent::Drafted => self.drafts_changed(cx),
             // The view asks only once its thread names a terminal: the tile becomes that
             // terminal's, on its TUI.
             ThreadViewEvent::ShowTerminal => match self.live_terminal(thread) {
@@ -1592,6 +1612,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         match event {
+            ThreadViewEvent::Drafted => self.drafts_changed(cx),
             ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
             ThreadViewEvent::Review { thread } => {
                 if let Some(key) = self.worker_of_session(session) {
@@ -1786,7 +1807,6 @@ impl WorkspaceView {
             })
             .collect();
         self.faces.threads.handed.retain(|s, _| tiled.contains(s));
-        self.faces.drafts.retain(|s, _| terminals.contains_key(s));
         for session in std::mem::take(&mut self.faces.focus) {
             if !wanted.contains(&session) {
                 continue;

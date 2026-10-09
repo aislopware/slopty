@@ -55,6 +55,14 @@ impl Step {
     }
 }
 
+/// What `step` is about, to tell the same agent reached two ways.
+const fn step_about(step: Step) -> About {
+    match step {
+        Step::Session(w) => About::Session(w.session),
+        Step::Thread(w) => About::Thread(w.thread),
+    }
+}
+
 /// A banner's title: what the agent is doing, led by the tile's name when the human gave it
 /// one, so a banner from several agents says which tile it is about.
 #[must_use]
@@ -256,11 +264,26 @@ impl WorkspaceView {
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
     }
 
-    /// The agents whose turn ended while nobody looked, left to review: unread, in reading
-    /// order. A terminal's agent counts while its tile is here; a thread with no terminal
-    /// (Codex beside no TUI, pi, an ACP agent, a message's runs) counts with or without one.
+    /// What is left for the person to review, in reading order, each once: the agents whose
+    /// worker says their changes wait unkept (their row's [`Rung::ToReview`], the same on every
+    /// device, until the person keeps them), then the turns that ended while nobody looked. A
+    /// terminal's agent counts while its tile is here; a thread with no terminal (Codex beside
+    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one.
     pub(super) fn to_review(&self) -> Vec<Step> {
-        self.steps_in_reading_order(self.agent_turns().filter_map(|about| self.step_of(about)))
+        let waiting = self
+            .agent_sessions()
+            .filter(|(_, stand)| stand.rung == Rung::ToReview)
+            .filter_map(|(session, _)| self.step_of(About::Session(session)))
+            .chain(self.threads_on(Rung::ToReview).into_iter().map(Step::Thread));
+        let unread = self.agent_turns().filter_map(|about| self.step_of(about));
+        let mut steps: Vec<Step> = Vec::new();
+        for step in self.steps_in_reading_order(waiting).into_iter().chain(unread) {
+            let about = step_about(step);
+            if !steps.iter().any(|s| step_about(*s) == about) {
+                steps.push(step);
+            }
+        }
+        steps
     }
 
     /// The ladder's step for what `about` names: a terminal whose tile is here, or a thread

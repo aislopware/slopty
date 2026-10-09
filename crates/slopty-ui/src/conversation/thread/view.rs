@@ -144,6 +144,9 @@ type Coloured = HashMap<ItemId, Rc<[Block]>>;
 pub enum ThreadViewEvent {
     /// Show the agent's own terminal in the tile instead.
     ShowTerminal,
+    /// What the composer holds changed: the workspace keeps drafts across a quit
+    /// ([`ThreadView::draft`]).
+    Drafted,
     /// Open the review of what the thread changed.
     Review {
         /// The thread.

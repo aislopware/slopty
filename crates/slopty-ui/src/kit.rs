@@ -2760,6 +2760,7 @@ mod tests {
             .into_iter()
             .chain(crate::conversation::palette_items(&bindings))
             .chain(crate::project::palette_items(&bindings))
+            .chain(crate::review::palette_items(&bindings))
             .chain(crate::folder::folder_palette_items(&bindings))
             .chain(crate::file::editor_palette_items(&bindings));
         let marked: Vec<String> =
