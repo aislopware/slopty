@@ -1456,8 +1456,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     dropped, new words drop the ask still waiting, the line the person is on stays chosen, and
     a machine out of reach by then is not asked. Test:
     `workspace::tests::thread_start::a_past_session_is_found_by_what_was_asked_in_it`.
-  - **Not yet.** A search of every machine's prompts at once (the session step asks only the
-    machine it is on), `slopty prompts` and an MCP tool are not built. Claude Code driven over
+  - Every machine with the agent is asked at once since 2026-10-09 (`docs/decisions/workspace.md`).
+  - **Not yet.** `slopty prompts` and an MCP tool are not built. Claude Code driven over
     stream-json may not write its prompt history; that is checked when the driven drive is used.
   - Tests: `claude_codes_history_gives_prompts_with_their_pastes`,
     `codex_gives_prompts_from_its_history_and_rollouts`, `pi_gives_prompts_from_its_session_files`,
@@ -2479,3 +2479,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `conversation::tests::a_prompt_is_held_for_a_pushed_phone` (slopty-worker), and the
     daemon's `server_link::a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server`
     (a plan held with no client linked until the relay's wait runs out, then handed back).
+
+- ✅ **A resumed session names `default` too** (2026-10-09). A resume carries the mode the
+  hooks last reported (`resume::with_mode`). It used to drop the flag for `default`, because
+  no flag once meant default. Since Claude Code 2.1.283 a run with no mode starts in auto, so
+  a session the person kept asking ("Manual") came back looser. `default` is now passed as
+  `--permission-mode default` like any other mode. Tests: `resume::tests::the_last_permission_mode_wins`,
+  `tests::the_newest_conversation_is_the_one_to_resume`.

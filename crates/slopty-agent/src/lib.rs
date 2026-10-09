@@ -2635,7 +2635,8 @@ mod tests {
             &hook(r#"{"session_id":"b2","hook_event_name":"SessionStart","source":"clear","permission_mode":"default"}"#),
         );
         table.observe(sid, &claude("--model opus --append-system-prompt hush-hush fix-it"));
-        assert_eq!(resumed(&table, sid), ("b2".into(), vec!["--model".into(), "opus".into()]));
+        let asking = ["--model", "opus", "--permission-mode", "default"].map(String::from);
+        assert_eq!(resumed(&table, sid), ("b2".into(), asking.to_vec()), "asking, not auto");
     }
 
     /// An agent the person ended does not come back; one ended by a signal does, until the

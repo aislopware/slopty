@@ -348,6 +348,9 @@ fn serves_slopty(value: &str) -> bool {
 /// `args` with the permission mode the agent was last in (`mode`, from its hooks) in place of
 /// the one it was started with. A session started skipping every permission and switched out
 /// of that mode keeps the right to switch back, not the mode.
+///
+/// `default` is named too: since Claude Code 2.1.283 a run with no mode starts in auto, so a
+/// session the person kept asking would come back looser without it.
 pub(crate) fn with_mode(args: Vec<String>, mode: Option<&str>) -> Vec<String> {
     let Some(mode) = mode.filter(|m| *m == "default" || PERMISSION_MODES.contains(m)) else {
         return args;
@@ -367,9 +370,7 @@ pub(crate) fn with_mode(args: Vec<String>, mode: Option<&str>) -> Vec<String> {
     if skipped && !out.iter().any(|w| w == ALLOW_SKIP_PERMISSIONS) {
         out.push(ALLOW_SKIP_PERMISSIONS.to_owned());
     }
-    if mode != "default" {
-        out.extend([PERMISSION_MODE.to_owned(), mode.to_owned()]);
-    }
+    out.extend([PERMISSION_MODE.to_owned(), mode.to_owned()]);
     out
 }
 
@@ -675,8 +676,9 @@ mod tests {
         assert_eq!(starting_mode_under(&none, home.path()), "plan", "the person's settings");
     }
 
-    /// The mode the hooks last reported replaces the one the agent was started with; `default`
-    /// drops the flag, and leaving the skip-everything mode keeps only the right to go back.
+    /// The mode the hooks last reported replaces the one the agent was started with, `default`
+    /// named as any other (a run with none starts in auto), and leaving the skip-everything
+    /// mode keeps only the right to go back.
     #[test]
     fn the_last_permission_mode_wins() {
         let started = words("--model x --permission-mode plan --dangerously-skip-permissions");
@@ -686,7 +688,12 @@ mod tests {
         );
         assert_eq!(
             with_mode(started.clone(), Some("default")),
-            words("--model x --allow-dangerously-skip-permissions")
+            words("--model x --allow-dangerously-skip-permissions --permission-mode default")
+        );
+        assert_eq!(
+            with_mode(words("--model x"), Some("default")),
+            words("--model x --permission-mode default"),
+            "a Manual session resumes asking, not in auto"
         );
         assert_eq!(with_mode(started.clone(), None), started, "not reported");
         assert_eq!(with_mode(started.clone(), Some("yolo")), started, "not a mode");
