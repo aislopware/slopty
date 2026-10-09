@@ -225,17 +225,27 @@ pub fn with_pointer(args: Vec<String>) -> Vec<String> {
 /// (<https://code.claude.com/docs/en/settings-reference>, `permissions`).
 const DISABLE_BYPASS: &str = "disableBypassPermissionsMode";
 
-/// `claude` arguments whose run may not skip its permission prompts.
+/// The setting that takes auto mode away: a session it would start in auto starts in
+/// `default`, and `auto` leaves the mode cycle (<https://code.claude.com/docs/en/permission-modes>,
+/// "Which mode a session starts in": any settings file that sets it starts the session in
+/// `default`). With auto mode unavailable, plan mode's classifier approves nothing either.
+const DISABLE_AUTO: &str = "disableAutoMode";
+
+/// `claude` arguments whose run asks the person no less than `default` does: it may neither
+/// skip its permission prompts nor hand them to auto mode's classifier.
 ///
-/// They carry `permissions.disableBypassPermissionsMode` set to `"disable"` on the one
-/// `--settings`, the caller's own merged in as [`with_relay`] merges them.
+/// They carry `permissions.disableBypassPermissionsMode` and `permissions.disableAutoMode`,
+/// each set to `"disable"`, on the one `--settings`, the caller's own merged in as
+/// [`with_relay`] merges them.
 ///
 /// A permission setting takes the strictest value any source gives, and `--settings` ranks
 /// above the user's, the project's and the local settings (only managed settings rank above
-/// it), so neither `--dangerously-skip-permissions` nor `--permission-mode bypassPermissions`
-/// nor a settings file the agent may edit opens the mode again.
+/// it). So neither `--dangerously-skip-permissions`, `--permission-mode bypassPermissions` nor
+/// `--permission-mode auto`, nor a settings file the agent may edit, nor keys typed into its
+/// TUI (`Shift+Tab`) opens either mode again. Claude Code 2.1.283 and later start a session in
+/// auto when nothing names a mode, so this is also what starts it in `default`.
 #[must_use]
-pub fn without_bypass(args: Vec<String>, cwd: &Path) -> Vec<String> {
+pub fn held_to_asking(args: Vec<String>, cwd: &Path) -> Vec<String> {
     with_settings(args, cwd, |doc| {
         let Some(root) = doc.as_object_mut() else { return };
         let permissions = root.entry("permissions").or_insert_with(|| json!({}));
@@ -244,11 +254,12 @@ pub fn without_bypass(args: Vec<String>, cwd: &Path) -> Vec<String> {
         }
         if let Some(permissions) = permissions.as_object_mut() {
             permissions.insert(DISABLE_BYPASS.to_owned(), json!("disable"));
+            permissions.insert(DISABLE_AUTO.to_owned(), json!("disable"));
         }
     })
 }
 
-/// Whether a settings document holds the lock [`without_bypass`] puts on.
+/// Whether a settings document holds the lock [`held_to_asking`] puts on.
 #[must_use]
 pub fn locks_bypass(doc: &Value) -> bool {
     doc.pointer(&format!("/permissions/{DISABLE_BYPASS}")).is_some_and(|v| v == "disable")
@@ -720,10 +731,10 @@ mod tests {
         }
     }
 
-    /// A run that may not skip its prompts carries the lock on its one `--settings`, beside
-    /// the relay and the caller's own permissions; nothing else is added.
+    /// A run held to asking carries the locks on bypass and auto mode on its one `--settings`,
+    /// beside the relay and the caller's own permissions; nothing else is added.
     #[test]
-    fn a_run_without_permission_flags_locks_bypass_mode_off() {
+    fn a_run_without_permission_flags_locks_bypass_and_auto_mode_off() {
         let dir = tempfile::tempdir().expect("tempdir");
         let user = dir.path().join("user-settings.json");
         let settings = |out: &[String]| -> Value {
@@ -733,11 +744,16 @@ mod tests {
         let mine = r#"{"permissions":{"allow":["Bash(git *)"],"defaultMode":"plan"}}"#;
         let args = ["--settings", mine, "--dangerously-skip-permissions"].map(str::to_owned);
         let relayed = with_relay_for(args.to_vec(), "/opt/slopty", dir.path(), &user);
-        let locked = without_bypass(relayed.clone(), dir.path());
+        let locked = held_to_asking(relayed.clone(), dir.path());
         let doc = settings(&locked);
         assert_eq!(
             doc["permissions"],
-            json!({ "allow": ["Bash(git *)"], "defaultMode": "plan", DISABLE_BYPASS: "disable" })
+            json!({
+                "allow": ["Bash(git *)"],
+                "defaultMode": "plan",
+                DISABLE_BYPASS: "disable",
+                DISABLE_AUTO: "disable",
+            })
         );
         assert!(has_relay(&doc, HookEvent::SessionStart), "the relay stays");
         assert_eq!(locked.get(2..), Some(&["--dangerously-skip-permissions".to_owned()][..]));
@@ -745,13 +761,14 @@ mod tests {
             settings(&relayed).pointer("/permissions/disableBypassPermissionsMode").is_none(),
             "only a locked run carries it"
         );
-        let bare = without_bypass(Vec::new(), dir.path());
-        assert_eq!(settings(&bare), json!({ "permissions": { DISABLE_BYPASS: "disable" } }));
-        let odd = without_bypass(
+        let bare = held_to_asking(Vec::new(), dir.path());
+        let both = json!({ DISABLE_BYPASS: "disable", DISABLE_AUTO: "disable" });
+        assert_eq!(settings(&bare), json!({ "permissions": both }));
+        let odd = held_to_asking(
             ["--settings", r#"{"permissions":true}"#].map(str::to_owned).to_vec(),
             dir.path(),
         );
-        assert_eq!(settings(&odd)["permissions"], json!({ DISABLE_BYPASS: "disable" }));
+        assert_eq!(settings(&odd)["permissions"], both);
     }
 
     /// The run's status line is the wrapper, in front of the person's own: theirs from the

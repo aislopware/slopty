@@ -10,8 +10,8 @@ use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::{AgentKind, Worktree};
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
-    Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV, TaskCard,
-    TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+    ASKING_ENV, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV,
+    TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::{PullStands, TableFrame};
@@ -870,7 +870,7 @@ async fn an_agent_looser_than_allowed_is_closed() {
     lease.handle(mode(started[1], "plan"));
     lease.handle(mode(TermRef { worker: linux, session: own }, "bypassPermissions"));
     assert!(rx.try_recv().is_err(), "modes that ask, and the person's own terminal, stay");
-    lease.handle(mode(started[1], "acceptEdits"));
+    lease.handle(mode(started[1], "auto"));
     let (_, verb) = request(&mut rx).await;
     assert_eq!(verb, Verb::Close { term: started[1] }, "typed into its TUI later");
     lease.handle(mode(started[0], "bypassPermissions"));
@@ -882,6 +882,13 @@ async fn an_agent_looser_than_allowed_is_closed() {
             |e| matches!(&e.what, Moment::Note { text } if text.contains("bypassPermissions mode"))
         ),
         "{timeline:?}"
+    );
+    let auto_said = "auto mode, where Claude Code's classifier approves what the person never";
+    assert!(
+        timeline
+            .iter()
+            .any(|e| matches!(&e.what, Moment::Note { text } if text.contains(auto_said))),
+        "auto is said for what it is: {timeline:?}"
     );
 
     let opened_by_agent = spawn_as(
@@ -900,10 +907,49 @@ async fn an_agent_looser_than_allowed_is_closed() {
     );
     let (_, verb) = request(&mut rx).await;
     let (_, session) = chosen(&verb);
+    let asking = (ASKING_ENV.to_owned(), "1".to_owned());
+    assert!(
+        matches!(&verb, Verb::OpenTerminal { env, .. } if env.contains(&asking)),
+        "a claude typed there is held to asking: {verb:?}"
+    );
     opened_by_agent.abort();
     lease.handle(mode(TermRef { worker: linux, session }, "auto"));
     let (_, verb) = request(&mut rx).await;
     assert_eq!(verb, Verb::Close { term: TermRef { worker: linux, session } }, "an agent's shell");
+    let auto = vec!["claude".to_owned(), "--permission-mode".to_owned(), "auto".to_owned()];
+    let typed = |env: Vec<(String, String)>| Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: auto.clone(),
+        env,
+        name: None,
+        size: None,
+        session: None,
+        worktree: None,
+    };
+    let by_agent = typed(Vec::new());
+    let refused_auto = hub.dispatch_as(Speaker::Agent, None, by_agent).await;
+    assert!(
+        refused(&refused_auto, ErrorCode::Limit).contains("classifier approves"),
+        "{refused_auto:?}"
+    );
+    let shell = Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: Vec::new(),
+        env: vec![(ASKING_ENV.to_owned(), "0".to_owned())],
+        name: None,
+        size: None,
+        session: None,
+        worktree: None,
+    };
+    let by_person = spawn_as(&hub, Speaker::Person, shell);
+    let (_, verb) = request(&mut rx).await;
+    assert!(
+        matches!(&verb, Verb::OpenTerminal { env, .. } if !env.iter().any(|(k, _)| k == ASKING_ENV)),
+        "the person's own terminal is theirs, and no caller's value stands: {verb:?}"
+    );
+    by_person.abort();
 
     hub.set_policy(Policy { permission_flags: [project()].into(), ..Policy::default() });
     lease.handle(mode(started[1], "acceptEdits"));

@@ -14,9 +14,9 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentKind};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
-    Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
-    Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV, Task, TaskId,
-    TaskLaunch, TaskState, TimelineEntry, WorkerFacts,
+    ASKING_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
+    PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV,
+    Task, TaskId, TaskLaunch, TaskState, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -390,14 +390,27 @@ fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
         || "an agent started outside a project".to_owned(),
         |p| format!("project {p}'s agents"),
     );
+    let why = if names_auto(flag) {
+        "in auto mode Claude Code's classifier approves what the person never allowed, so it \
+         asks them less than default does"
+    } else {
+        "only what is known to ask the person no less is let through"
+    };
     error(
         ErrorCode::Limit,
         &format!(
-            "{flag} may give the agent more than its starter has (only what is known to ask the \
-             person no less is let through); the person allows it for {whose} only in the \
-             server's settings.toml (`[server.projects] permission_flags`)"
+            "{flag} may give the agent more than its starter has ({why}); the person allows it \
+             for {whose} only in the server's settings.toml (`[server.projects] \
+             permission_flags`)"
         ),
     )
+}
+
+/// Whether `flag`, as the loosening check words it, asks for auto mode.
+fn names_auto(flag: &str) -> bool {
+    flag.strip_prefix(PERMISSION_MODE_FLAG)
+        .map(|rest| rest.trim_start_matches(['=', ' ']).trim())
+        .is_some_and(|mode| mode == "auto")
 }
 
 /// `args` for an agent the server starts: the permission mode pinned to `default` when they
@@ -1293,14 +1306,20 @@ impl Hub {
         if let Some(answer) = self.start_keyed(key.as_ref(), sent).await {
             return answer;
         }
-        let Verb::OpenTerminal { worker, cwd, command, env, name, size, .. } = verb else {
+        let Verb::OpenTerminal { worker, cwd, command, mut env, name, size, .. } = verb else {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
-        if let Some(args) = claude_args(&command) {
-            let allowed = allowance(&self.inner.state.lock(), caller, from, None);
-            if let Some(flag) = loosening(&args).filter(|_| !allowed) {
-                return loosened(&flag, None);
-            }
+        let allowed = allowance(&self.inner.state.lock(), caller, from, None);
+        if let Some(args) = claude_args(&command)
+            && let Some(flag) = loosening(&args).filter(|_| !allowed)
+        {
+            return loosened(&flag, None);
+        }
+        // An agent's terminal is held to asking: a `claude` typed there is locked to it as one
+        // the server starts is, rather than starting in auto and being closed for it.
+        env.retain(|(name, _)| name != ASKING_ENV);
+        if caller == Caller::Agent && !allowed {
+            env.push((ASKING_ENV.to_owned(), "1".to_owned()));
         }
         // An agent's terminal counts as an agent's start from now: it may run one there.
         let placed = match caller {
@@ -1946,8 +1965,13 @@ impl Hub {
         if SAFE_MODES.contains(&mode) || !Self::held_to_asking(state, term) {
             return;
         }
+        let how = if mode == "auto" {
+            ", where Claude Code's classifier approves what the person never allowed"
+        } else {
+            ""
+        };
         let why = format!(
-            "its agent went into {mode} mode, looser than the person allows \
+            "its agent went into {mode} mode{how}, looser than the person allows \
              (`[server.projects] permission_flags`), so its terminal was closed"
         );
         self.close_looser(state, term, &why);

@@ -783,7 +783,7 @@ impl Orchestrator {
     /// hook relay, Slopty's tools and the mod ([`Launch`]), a conversation id of its own
     /// (`--session-id`, [`slopty_agent::resume::with_session_id`]), and unless the person
     /// allowed it flags that loosen permissions, a lock on the mode that asks none
-    /// ([`slopty_agent::hooks::without_bypass`]). The caller's own settings, MCP servers,
+    /// ([`slopty_agent::hooks::held_to_asking`]). The caller's own settings, MCP servers,
     /// arguments and variables are kept, and its variables win. The server it asks for tools
     /// is the session's own `SLOPTY_SERVER`.
     async fn spawn_agent(
@@ -814,7 +814,7 @@ impl Orchestrator {
                 Ok(if permission_flags {
                     args
                 } else {
-                    slopty_agent::hooks::without_bypass(args, &dir)
+                    slopty_agent::hooks::held_to_asking(args, &dir)
                 })
             }
         })

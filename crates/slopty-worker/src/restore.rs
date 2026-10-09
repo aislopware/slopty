@@ -159,7 +159,7 @@ impl Recipe {
                 args = slopty_agent::hooks::with_relay(args, relay, &cwd);
             }
             if agent.locked {
-                args = slopty_agent::hooks::without_bypass(args, &cwd);
+                args = slopty_agent::hooks::held_to_asking(args, &cwd);
             }
             if agent.mcp
                 && let Some(relay) = &launch.relay

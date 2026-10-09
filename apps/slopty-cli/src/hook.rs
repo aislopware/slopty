@@ -349,10 +349,12 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
 ///
 /// Inside a session it is wired as an agent the worker starts ([`hooks::wired`]): the relay's
 /// hooks and status line, Slopty's tools in a project's session and the pointer to Slopty's
-/// CLI in any other, and a pinned conversation. Wherever the worker named its mod, it also loads
-/// the mod, with the switch that lets it run, unless the person loads it already. An inherited
-/// switch that silences the mod's traffic is the person's, and is left alone, and the mod with
-/// it: it could not be heard ([`slopty_agent::managed::ManagedSettings::mod_off`]). What the
+/// CLI in any other, and a pinned conversation. In a terminal the server holds to asking
+/// ([`slopty_proto::project::ASKING_ENV`]) it may reach neither auto nor bypass mode
+/// ([`hooks::held_to_asking`]), so it starts in `default`. Wherever the worker named its mod, it
+/// also loads the mod, with the switch that lets it run, unless the person loads it already. An
+/// inherited switch that silences the mod's traffic is the person's, and is left alone, and the mod
+/// with it: it could not be heard ([`slopty_agent::managed::ManagedSettings::mod_off`]). What the
 /// organization's `managed` settings forbid, or would refuse the run for, is left out.
 fn wire(
     args: Vec<String>,
@@ -369,6 +371,12 @@ fn wire(
             hooks::wired_under(args.clone(), relay, cwd, project, managed).unwrap_or(args)
         }
         None => args,
+    };
+    // A terminal the server opened for an agent holds what runs there to asking.
+    let args = if set(slopty_proto::project::ASKING_ENV).is_some() {
+        hooks::held_to_asking(args, cwd)
+    } else {
+        args
     };
     let installed = set(claude_mod::DIR_ENV)
         .zip(set(claude_mod::SOCKET_ENV))
@@ -448,6 +456,38 @@ mod tests {
         let gone = [(slopty_agent::claude_mod::DIR_ENV, "/nowhere"), modded[1]];
         let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&gone), &none);
         assert_eq!((env, args), (Vec::new(), words(&["x"])), "no mod on disk");
+    }
+
+    /// A `claude` typed in a terminal the server holds to asking (one it opened for an agent)
+    /// may reach neither auto nor bypass mode, so Claude Code 2.1.283 and later start it in
+    /// `default` rather than in auto, which the server would close it for. One typed anywhere
+    /// else keeps whatever mode the person's settings give it.
+    #[test]
+    fn a_claude_typed_where_the_server_holds_to_asking_starts_in_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = SessionId::new().to_string();
+        let none = slopty_agent::managed::ManagedSettings::default();
+        let permissions = |asking: Option<&str>| {
+            let mut vars = vec![(SESSION_ENV, session.as_str())];
+            vars.extend(asking.map(|v| (slopty_proto::project::ASKING_ENV, v)));
+            let var =
+                |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned());
+            let (_env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), var, &none);
+            assert_eq!(args.iter().filter(|a| *a == "--settings").count(), 1, "{args:?}");
+            let at = args.iter().position(|a| a == "--settings").expect("settings");
+            let doc: serde_json::Value = serde_json::from_str(&args[at + 1]).expect("json");
+            assert!(doc.get("hooks").is_some(), "the relay stays: {doc}");
+            doc.get("permissions").cloned()
+        };
+        assert_eq!(
+            permissions(Some("1")),
+            Some(json!({
+                "disableBypassPermissionsMode": "disable",
+                "disableAutoMode": "disable",
+            }))
+        );
+        assert_eq!(permissions(None), None, "the person's own terminal");
+        assert_eq!(permissions(Some("")), None, "set empty is unset");
     }
 
     /// Under managed settings that refuse `--plugin-dir` and `--mcp-config`, a typed `claude`

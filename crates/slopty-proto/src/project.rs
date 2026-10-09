@@ -34,6 +34,12 @@ pub const SERVER_ENV: &str = "SLOPTY_SERVER";
 pub const PROJECT_ENV: &str = "SLOPTY_PROJECT";
 /// The variable naming the task, in the session of an agent spawned for it.
 pub const TASK_ENV: &str = "SLOPTY_TASK";
+/// Set to `1` in a terminal the server holds to asking.
+///
+/// That is one it opened for an agent whose project allows no looser permissions. A `claude`
+/// typed there is held to asking as an agent the server starts is (`slopty hook wire`), so it
+/// starts in `default` and cannot reach auto or bypass mode.
+pub const ASKING_ENV: &str = "SLOPTY_ASKING";
 /// The fact on a task's thread row ([`crate::thread::wire::ThreadRow::facts`]) naming the
 /// seat it was started at ([`Assignment::thread`]), so the server knows the row as the task's
 /// whatever terminal it has.

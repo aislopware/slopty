@@ -316,7 +316,7 @@ merging on the person's word since 2026-10-04
   another, and keys typed into a TUI a third. So an agent the server starts also:
   - begins in `--permission-mode default` when its arguments name no mode;
   - has bypass mode locked off (`disableBypassPermissionsMode: "disable"` in the settings the
-    worker adds, `slopty_agent::hooks::without_bypass`).
+    worker adds, `slopty_agent::hooks::held_to_asking`).
 - Two backstops watch what actually runs, on every terminal the server started or an agent
   opened or typed into:
   - The mode each hook reports: a mode looser than those closes the terminal, with a note on its
@@ -2245,3 +2245,41 @@ reordering and edited allows are gone" in `agents.md`.*
     `hub::queue::tests::a_protected_target_takes_the_work_through_a_pull_request`; `slopty-ui`
     `project::tests::work_waiting_in_a_pull_request_says_where`; goldens
     `land_pull`, `pull_opened`, `project_reply_protected` and `task_in_pull_card`.
+
+- ✅ **Auto mode is looser than asking; a held terminal takes it away** (readiness 10-09 rank
+  5, 2026-10-09). Claude Code 2.1.283 and later start an interactive session in `auto` when
+  nothing names a mode (<https://code.claude.com/docs/en/permission-modes>, "Which mode a
+  session starts in"). So a `claude` an orchestrator typed into a terminal the server opened
+  for it came up in auto, the server read that as looser than allowed, and closed the
+  terminal.
+  - **Ruled: `auto` stays off `SAFE_MODES`.** In auto mode a second model, the classifier,
+    reviews actions instead of the person, and lets through "everything, with background
+    safety checks" (the same page's table of modes). That is less asking than `default`, which
+    runs only reads unasked. With auto mode available, plan mode also lets classifier-approved
+    commands run.
+  - **What holds a run to asking.** It is the `--settings` lock the worker already put on
+    agents the server starts (`slopty_agent::hooks::held_to_asking`, renamed from
+    `without_bypass`): `permissions.disableBypassPermissionsMode` and now
+    `permissions.disableAutoMode`, both `"disable"`. The docs say any settings file setting
+    `disableAutoMode` starts the session in `default` and takes `auto` out of the Shift+Tab
+    cycle. So the run starts asking and stays asking: keys typed into its TUI cannot reach
+    auto, a settings file the agent writes cannot either, and plan mode's classifier is gone
+    with it. A settings lock was chosen over pinning `--permission-mode default` because the
+    flag sets only the start, while the lock also holds a mode switch later.
+  - **The typed `claude`.** A terminal the server opens for an agent caller, in a project that
+    allows no looser permissions, carries `SLOPTY_ASKING=1` (`project::ASKING_ENV`). Any value
+    a caller passes is dropped first, and an agent naming it is refused, as every `SLOPTY_`
+    variable is. `slopty hook wire` (the shell's `claude` function) puts the same lock on a
+    `claude` typed there. A person's own terminal carries none and keeps their mode.
+  - **Still closed.** A looser mode reported from a held terminal still closes it, and the
+    words now say what auto mode is: "went into auto mode, where Claude Code's classifier
+    approves what the person never allowed". `--permission-mode auto` named on an agent's
+    start is refused with the same reason. A `claude` an agent types into a terminal the
+    person opened carries no lock (the variable cannot be added to a running shell), so that
+    case is still closed when it reports auto.
+  - Tests: `slopty-agent`
+    `hooks::tests::a_run_without_permission_flags_locks_bypass_and_auto_mode_off`; `slopty-cli`
+    `hook::tests::a_claude_typed_where_the_server_holds_to_asking_starts_in_default`;
+    `slopty-server` `hub::project_tests::an_agent_looser_than_allowed_is_closed` (the
+    variable on an agent's terminal, none on the person's, the closing and refusing words for
+    auto).

@@ -564,7 +564,7 @@ mod tests {
         let dir = Path::new("/nowhere");
         let none = crate::managed::ManagedSettings::default();
         let ours = crate::hooks::with_mcp_under(words("--model x"), "/bin/slopty", &none);
-        let ours = crate::hooks::without_bypass(ours, dir);
+        let ours = crate::hooks::held_to_asking(ours, dir);
         let mut args = ours;
         args.push("--append-system-prompt=You work on task 3.\nReport with task_report.".into());
         let kept = invocation(&args);
