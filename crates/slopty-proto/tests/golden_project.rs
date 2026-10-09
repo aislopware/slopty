@@ -971,8 +971,14 @@ mod golden_project {
             &FromServer::Deliver {
                 session,
                 batch: 7,
-                context: "<slopty-reports project=\"slopty\">\ntask 3: done\n</slopty-reports>"
-                    .to_owned(),
+                reports: slopty_proto::server::Reports {
+                    open: "<slopty-reports project=\"slopty\">".to_owned(),
+                    blocks: vec![slopty_proto::server::ReportBlock {
+                        id: 12,
+                        text: "task 3: done".to_owned(),
+                    }],
+                    close: "</slopty-reports>".to_owned(),
+                },
             },
         );
     }

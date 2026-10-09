@@ -26,7 +26,9 @@
 //! What waits and what is outstanding outlives the server: the store keeps it
 //! ([`Deliveries::kept`], [`Deliveries::adopt`]), and each change is said
 //! ([`Deliveries::changes`]). A batch's number is never used twice, across restarts too, so a
-//! worker knows a batch it handed over already when it comes again.
+//! worker knows a batch it handed over already when it comes again; nor is a word's
+//! ([`ReportBlock::id`]), which it keeps in every batch it rides in, so a worker leaves out a
+//! word its agent read in a batch whose word of being read was lost.
 //!
 //! Pure but for that word of a change: the hub keeps it under its lock and says what time it is.
 
@@ -37,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{ProjectId, Report, TaskId};
+use slopty_proto::server::{ReportBlock, Reports};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -88,6 +91,8 @@ enum By {
 /// What waits for a node: a task's report, the server's own words, or the person's.
 #[derive(Clone, Debug)]
 struct Item {
+    /// Its number, the block's id in every batch it rides in.
+    id: u64,
     task: Option<TaskId>,
     kind: Kind,
     report: Report,
@@ -156,9 +161,9 @@ pub(crate) struct Batch {
     /// Its number.
     pub number: u64,
     /// The words the agent reads.
-    pub context: String,
+    pub reports: Reports,
     /// How many tasks' reports it holds; the server's own words beside them are not counted.
-    pub reports: u16,
+    pub count: u16,
 }
 
 /// How many of `items` are tasks' reports, not the server's own words.
@@ -171,6 +176,8 @@ fn reports_in(items: &[Item]) -> u16 {
 pub(crate) struct Deliveries {
     queues: BTreeMap<Node, Queue>,
     next_batch: u64,
+    /// The last word's number ([`Item::id`]).
+    next_item: u64,
     /// What the server last sent each node of each task's agent, by its kind and words: the
     /// same again says nothing new and is not sent.
     told: HashMap<(Node, TaskId), (Kind, u64)>,
@@ -183,6 +190,7 @@ impl Default for Deliveries {
         Self {
             queues: BTreeMap::new(),
             next_batch: 0,
+            next_item: 0,
             told: HashMap::new(),
             changes: watch::Sender::new(0),
         }
@@ -200,14 +208,16 @@ impl Deliveries {
     /// `task`'s report of its finished work for `node`: it replaces the task's report still
     /// waiting.
     pub(crate) fn add(&mut self, node: Node, task: Option<TaskId>, report: Report, at: Instant) {
-        self.push(node, Item { task, kind: Kind::Done, report, at, by: By::Agent });
+        let id = self.next_id();
+        self.push(node, Item { id, task, kind: Kind::Done, report, at, by: By::Agent });
     }
 
     /// The server's standing instructions for `node`'s agent (its role): they go at once, and
     /// replace those still waiting.
     pub(crate) fn instructions(&mut self, node: Node, note: &str, at: Instant) {
         let (kind, report) = (Kind::NeedsInput, words(note));
-        self.push(node, Item { task: None, kind, report, at, by: By::Server });
+        let id = self.next_id();
+        self.push(node, Item { id, task: None, kind, report, at, by: By::Server });
     }
 
     /// The server's own `note` about `task`, for `node`, paced as a report of `kind`: it
@@ -217,7 +227,8 @@ impl Deliveries {
         // It quotes what others wrote (a verifier's output, git's words), so it is kept from
         // closing its block as an agent's words are.
         let report = words(note);
-        self.push(node, Item { task: Some(task), kind, report, at, by: By::Server });
+        let id = self.next_id();
+        self.push(node, Item { id, task: Some(task), kind, report, at, by: By::Server });
     }
 
     /// What the server says of `task`'s agent, which did not report, for `node`: `note`, paced
@@ -232,7 +243,8 @@ impl Deliveries {
         at: Instant,
     ) {
         let report = words(note);
-        self.push(node, Item { task: Some(task), kind, report, at, by: By::Outcome });
+        let id = self.next_id();
+        self.push(node, Item { id, task: Some(task), kind, report, at, by: By::Outcome });
     }
 
     /// `task`'s agent went back to work: what the server was to say of it for `node`, and has
@@ -278,19 +290,27 @@ impl Deliveries {
         at: Instant,
     ) {
         let (kind, report) = (Kind::NeedsInput, self::words(words));
-        self.push((project, task), Item { task, kind, report, at, by: By::Person });
+        let id = self.next_id();
+        self.push((project, task), Item { id, task, kind, report, at, by: By::Person });
     }
 
     /// The orchestrator's words to the agent of `node`'s task: they go at once, after the
     /// person's words and never in their place, and replace its own earlier words still unread.
     pub(crate) fn orchestrator(&mut self, node: Node, words: &str, at: Instant) {
         let (kind, report, task) = (Kind::NeedsInput, self::words(words), node.1);
-        self.push(node, Item { task, kind, report, at, by: By::Orchestrator });
+        let id = self.next_id();
+        self.push(node, Item { id, task, kind, report, at, by: By::Orchestrator });
+    }
+
+    /// A new word's number ([`Item::id`]).
+    const fn next_id(&mut self) -> u64 {
+        self.next_item = self.next_item.wrapping_add(1);
+        self.next_item
     }
 
     fn push(&mut self, node: Node, item: Item) {
-        let queue = self.queues.entry(node).or_default();
         let task = item.task;
+        let queue = self.queues.entry(node).or_default();
         queue.waiting.retain(|i| {
             // Every word the person says is kept: a second message is not a newer first.
             let replaced = match item.by {
@@ -344,7 +364,7 @@ impl Deliveries {
             };
             let mut items = queue.outstanding.take().map(|o| o.items).unwrap_or_default();
             items.append(&mut queue.waiting);
-            let (context, items, left) = context(&node.0, items);
+            let (reports, items, left) = context(&node.0, items);
             // What did not fit waits for the next batch, due as it was.
             queue.waiting = left;
             queue.fresh = false;
@@ -355,9 +375,9 @@ impl Deliveries {
             }
             self.next_batch = self.next_batch.wrapping_add(1);
             let batch = self.next_batch;
-            let reports = reports_in(&items);
+            let count = reports_in(&items);
             queue.outstanding = Some(Outstanding { batch, term, items, resend: None });
-            out.push(Batch { node: node.clone(), term, number: batch, context, reports });
+            out.push(Batch { node: node.clone(), term, number: batch, reports, count });
         }
         self.prune();
         if !out.is_empty() {
@@ -411,8 +431,8 @@ impl Deliveries {
                     node: node.clone(),
                     term: o.term,
                     number: o.batch,
-                    context: context(&node.0, o.items.clone()).0,
-                    reports: reports_in(&o.items),
+                    reports: context(&node.0, o.items.clone()).0,
+                    count: reports_in(&o.items),
                 })
             })
             .collect()
@@ -473,6 +493,7 @@ impl Deliveries {
             let ago =
                 u64::try_from(now.saturating_duration_since(i.at).as_millis()).unwrap_or(u64::MAX);
             KeptItem {
+                id: i.id,
                 task: i.task,
                 kind: i.kind,
                 report: i.report.clone(),
@@ -499,16 +520,17 @@ impl Deliveries {
             .iter()
             .map(|((node, task), (kind, words))| (node.clone(), *task, *kind, *words))
             .collect();
-        Kept { next_batch: self.next_batch, queues, told }
+        Kept { next_batch: self.next_batch, next_item: self.next_item, queues, told }
     }
 
     /// Take up what the store kept, as of `now`, which is `wall` on the clock, in place of
-    /// what is here. Batch numbers go on past the kept ones and past `wall` in milliseconds:
-    /// a store lost or set aside never makes a number a worker saw before.
+    /// what is here. Batch and word numbers go on past the kept ones and past `wall` in
+    /// milliseconds: a store lost or set aside never makes a number a worker saw before.
     pub(crate) fn adopt(&mut self, kept: Kept, now: Instant, wall: WallMs) {
         let item = |i: KeptItem| {
             let ago = Duration::from_millis(wall.as_millis().saturating_sub(i.at.as_millis()));
             Item {
+                id: i.id,
                 task: i.task,
                 kind: i.kind,
                 report: i.report,
@@ -540,6 +562,7 @@ impl Deliveries {
             .map(|(node, task, kind, words)| ((node, task), (kind, words)))
             .collect();
         self.next_batch = kept.next_batch.max(wall.as_millis());
+        self.next_item = kept.next_item.max(wall.as_millis());
         self.prune();
         self.changed();
     }
@@ -566,6 +589,7 @@ impl Deliveries {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Kept {
     next_batch: u64,
+    next_item: u64,
     queues: Vec<KeptQueue>,
     told: Vec<(Node, TaskId, Kind, u64)>,
 }
@@ -587,6 +611,7 @@ struct KeptBatch {
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 struct KeptItem {
+    id: u64,
     task: Option<TaskId>,
     kind: Kind,
     report: Report,
@@ -602,12 +627,12 @@ fn words(note: &str) -> Report {
 /// The batch as the agent reads it: one block per report, the person's words first, then the
 /// server's own, as many as fit [`CONTEXT_MAX`]. The reports it holds, and those left for the
 /// next batch, come back with it.
-fn context(project: &ProjectId, mut items: Vec<Item>) -> (String, Vec<Item>, Vec<Item>) {
+fn context(project: &ProjectId, mut items: Vec<Item>) -> (Reports, Vec<Item>, Vec<Item>) {
     items.sort_by_key(|i| (i.by != By::Person, i.task.is_some(), i.at));
     let head = format!("<slopty-reports project=\"{project}\">");
     let tail = "</slopty-reports>";
     let room = CONTEXT_MAX.saturating_sub(head.len()).saturating_sub(tail.len()).saturating_sub(64);
-    let mut blocks: Vec<String> = Vec::new();
+    let mut blocks: Vec<ReportBlock> = Vec::new();
     let mut used = 0_usize;
     let mut taken = Vec::new();
     let mut left = Vec::new();
@@ -620,18 +645,15 @@ fn context(project: &ProjectId, mut items: Vec<Item>) -> (String, Vec<Item>, Vec
             continue;
         }
         used = used.saturating_add(block.len()).saturating_add(1);
-        blocks.push(block);
+        blocks.push(ReportBlock { id: item.id, text: block });
         taken.push(item);
     }
-    let more =
-        (!left.is_empty()).then(|| format!("({} more follow once these are read)", left.len()));
-    let text = std::iter::once(head)
-        .chain(blocks)
-        .chain(more)
-        .chain(std::iter::once(tail.to_owned()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (text, taken, left)
+    let close = if left.is_empty() {
+        tail.to_owned()
+    } else {
+        format!("({} more follow once these are read)\n{tail}", left.len())
+    };
+    (Reports { open: head, blocks, close }, taken, left)
 }
 
 /// `text` cut to at most `max` bytes, at a character boundary.

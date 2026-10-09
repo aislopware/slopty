@@ -265,12 +265,13 @@ async fn session(
                     });
                 }
                 // A task's thread that runs in no terminal is sent the reports as a message.
-                Ok(FromServer::Deliver { session, batch, context })
+                Ok(FromServer::Deliver { session, batch, reports })
                     if daemon
                         .threads
                         .as_ref()
                         .is_some_and(|t| t.seated_without_terminal(session).is_some()) =>
                 {
+                    let context = reports.text();
                     let sent = daemon.threads.as_ref().map(|t| t.deliver(session, batch, &context));
                     match sent {
                         Some(
@@ -286,16 +287,16 @@ async fn session(
                         other => tracing::warn!(%session, batch, ?other, "reports not sent"),
                     }
                 }
-                Ok(FromServer::Deliver { session, batch, context }) => {
+                Ok(FromServer::Deliver { session, batch, reports }) => {
                     let (dir, turn) =
                         (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
                     let kept = tokio::task::spawn_blocking(move || {
-                        let batch = slopty_agent::reports::Batch { batch, context };
                         let _turn = turn.lock();
-                        slopty_agent::reports::put(&dir, session, &batch)
+                        slopty_agent::reports::put(&dir, session, batch, &reports)
                     });
                     match kept.await {
-                        // Read already: the server did not hear so, and hears it again.
+                        // Read already, every report of it: the server did not hear so, and
+                        // hears it now.
                         Ok(Ok(false)) => {
                             tracing::debug!(%session, batch, "reports read already");
                             let report = AgentReport::Delivered { session, batch };
@@ -496,7 +497,7 @@ async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
         Ok(Err(e)) => return tracing::warn!(%session, error = %e, "reports not read"),
         Err(e) => return tracing::warn!(%session, error = %e, "reports not read"),
     };
-    let posted = reports::Posted::new(batch.batch);
+    let posted = reports::Posted::new(batch.number);
     // Noted before the post: a hook the message sets off at once finds the note.
     let noted = tokio::task::spawn_blocking({
         let (deliveries, posted) = (deliveries.clone(), posted.clone());
@@ -509,7 +510,7 @@ async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
     let text = reports::message(&inbox, &batch.context, &posted.mark);
     match tokio::time::timeout(INBOX_PATIENCE, post(&inbox.socket, text.as_bytes())).await {
         Ok(Ok(())) => {
-            tracing::debug!(%session, batch = batch.batch, "reports posted to the agent's inbox");
+            tracing::debug!(%session, batch = batch.number, "reports posted to the agent's inbox");
         }
         failed => {
             let gone = matches!(&failed, Ok(Err(e)) if matches!(

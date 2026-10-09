@@ -2438,12 +2438,19 @@ reordering and edited allows are gone" in `agents.md`.*
     sent again under that number is acknowledged again and never kept to be read twice. A link
     that fell behind the report broadcast says every last read again. A repeated `Delivered` on
     the server matches no outstanding batch and does nothing.
-  - **Still open: a fold after a lost word.** Suppose the word that batch N was read is lost
-    while the link stays up. If a new report falls due before the worker says N again, the
-    server folds N's reports into N+1 and the agent reads them twice. The worker cannot drop
-    them one by one: a report waiting here has no id of its own, and a batch reaches the worker
-    as one block of text. Closing this needs an id per report in `Deliver`, a wire change. The
-    window is a broadcast lag or a registration, and the cost is one repeat, never a loss.
+  - **A fold after a lost word.** Suppose the word that batch N was read is lost while the
+    link stays up, and a new report falls due before the worker says N again. The server then
+    folds N's reports into N+1. So each report carries an id of its own in every batch it rides
+    in. `Deliver` holds `Reports { open, blocks: [ReportBlock { id, text }], close }` where it
+    held one text. Ids are never reused, across restarts too, and go on past the wall clock as
+    batch numbers do.
+    - The worker notes the ids its agent read with the last batch (`reports::Read`, the latest
+      `READ_KEPT`). It keeps a batch without them (`reports::put`). A batch with nothing left
+      to read is only acknowledged.
+    - Tests: `deliver::tests::a_word_keeps_its_id_in_every_batch_it_rides_in`,
+      `reports::tests::nothing_read_is_kept_again`. The daemon's
+      `reports_reach_an_agent_through_its_next_prompt_s_hook` folds the read report into
+      batch 8 beside a new one, and only the new one waits. Golden `deliver` changed.
   - Tests: `deliver::tests` `a_batch_the_link_could_not_take_goes_again`,
     `reports_on_their_way_outlive_a_restart` and
     `an_outstanding_batch_on_a_terminal_gone_is_found`; the hub's

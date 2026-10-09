@@ -1032,8 +1032,8 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     };
     let next_batch = async |rx: &mut mpsc::Receiver<FromServer>| loop {
         match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
-            Ok(Some(FromServer::Deliver { session, batch, context })) => {
-                return (session, batch, context);
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return (session, batch, reports.text());
             }
             Ok(Some(_)) => {}
             other => panic!("no batch: {other:?}"),
@@ -1098,8 +1098,8 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
 async fn next_batch(rx: &mut mpsc::Receiver<FromServer>) -> (SessionId, u64, String) {
     loop {
         match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
-            Ok(Some(FromServer::Deliver { session, batch, context })) => {
-                return (session, batch, context);
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return (session, batch, reports.text());
             }
             Ok(Some(_)) => {}
             other => panic!("no batch: {other:?}"),
@@ -1652,7 +1652,7 @@ async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
 
     let context = loop {
         match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-            Ok(Some(FromServer::Deliver { context, .. })) => break context,
+            Ok(Some(FromServer::Deliver { reports, .. })) => break reports.text(),
             Ok(Some(_)) => {}
             other => panic!("no batch: {other:?}"),
         }

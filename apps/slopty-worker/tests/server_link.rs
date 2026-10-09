@@ -20,7 +20,9 @@ mod tests {
     use slopty_proto::orchestration::{
         ErrorCode, Input, ItemRef, Outcome, Size, TermRef, UploadPart, Verb, WaitUntil, Waited,
     };
-    use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
+    use slopty_proto::server::{
+        FromServer, Os, Registration, ReportBlock, Reports, Role, ToServer,
+    };
     use slopty_proto::terminal::{CloseReason, SessionState};
     use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -32,6 +34,18 @@ mod tests {
     const EXIT_BOUND: Duration = Duration::from_secs(5);
 
     /// A binary of this build (`slopty_testkit::bins`).
+    /// Batch `batch` as the server sends it, `context` as the agent reads it: its first line
+    /// opens it, its last closes it, and the lines between are one report, numbered as the batch.
+    fn deliver(session: SessionId, batch: u64, context: &str) -> FromServer {
+        let lines: Vec<&str> = context.lines().collect();
+        let (open, rest) = lines.split_first().expect("an opening");
+        let (close, between) = rest.split_last().expect("a closing");
+        let block = ReportBlock { id: batch, text: between.join("\n") };
+        let reports =
+            Reports { open: (*open).to_owned(), blocks: vec![block], close: (*close).to_owned() };
+        FromServer::Deliver { session, batch, reports }
+    }
+
     fn bin(name: &str) -> PathBuf {
         slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty-worker"), name)
     }
@@ -1002,7 +1016,7 @@ mod tests {
         assert_eq!(started["hooks"][0]["outputs"], json!([]), "nothing waits yet");
 
         let context = "<slopty-reports project=\"demo\">\ntask 2: needs input\n  Which crate owns the store?\n</slopty-reports>";
-        let deliver = FromServer::Deliver { session, batch: 7, context: context.to_owned() };
+        let deliver = deliver(session, 7, context);
         peer.tx.send(&deliver).await.unwrap();
         let kept = slopty_agent::reports::dir(&dir.path().join("worker.sock"));
         let waiting = async {
@@ -1040,6 +1054,31 @@ mod tests {
         })
         .await;
         assert!(!kept.join(format!("{session}.json")).exists(), "not kept to be read twice");
+
+        // Folded into the next batch with a new report, it is left out: only the new one waits.
+        let read = ReportBlock { id: 7, text: "task 2: needs input".to_owned() };
+        let new = ReportBlock { id: 8, text: "task 3: done".to_owned() };
+        let folded = Reports {
+            open: "<slopty-reports project=\"demo\">".to_owned(),
+            blocks: vec![read, new],
+            close: "</slopty-reports>".to_owned(),
+        };
+        peer.tx.send(&FromServer::Deliver { session, batch: 8, reports: folded }).await.unwrap();
+        let file = kept.join(format!("{session}.json"));
+        tokio::time::timeout(STEP, async {
+            while !file.exists() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the new report is kept");
+        let waiting: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            waiting["context"],
+            "<slopty-reports project=\"demo\">\ntask 3: done\n</slopty-reports>",
+            "without the report read already"
+        );
     }
 
     /// An agent at rest that takes messages on an inbox: the stub with an inbox and a
@@ -1120,7 +1159,7 @@ mod tests {
 
         let context =
             "<slopty-reports project=\"demo\">\ntask 2: done\n  Merged.\n</slopty-reports>";
-        let deliver = FromServer::Deliver { session, batch: 9, context: context.to_owned() };
+        let deliver = deliver(session, 9, context);
         peer.tx.send(&deliver).await.unwrap();
         peer.heard(|m| {
             matches!(m, ToServer::Report(AgentReport::Delivered { session: s, batch: 9 }) if *s == session)
@@ -1170,7 +1209,7 @@ mod tests {
             resting_agent_with_an_inbox(dir.path(), &more).await;
 
         let context = "<slopty-reports project=\"demo\">\ntask 2: stuck\n</slopty-reports>";
-        let deliver = FromServer::Deliver { session, batch: 4, context: context.to_owned() };
+        let deliver = deliver(session, 4, context);
         peer.tx.send(&deliver).await.unwrap();
         let got = inbox_notes(&posted, 1).await;
         assert_eq!(got[0]["held"], true, "{got:?}");
@@ -1209,7 +1248,7 @@ mod tests {
     /// The batch kept for `session` in `kept` once it is `batch`.
     async fn kept_batch(kept: &Path, session: SessionId, batch: u64) {
         let looking = async {
-            while slopty_agent::reports::peek(kept, session).ok().flatten().map(|b| b.batch)
+            while slopty_agent::reports::peek(kept, session).ok().flatten().map(|b| b.number)
                 != Some(batch)
             {
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1237,13 +1276,13 @@ mod tests {
         // The link takes one message at a time, so the batch after one is kept only once the
         // one before was judged.
         for batch in [5, 6] {
-            let deliver = FromServer::Deliver { session, batch, context: context(batch) };
+            let deliver = deliver(session, batch, &context(batch));
             peer.tx.send(&deliver).await.unwrap();
             kept_batch(&kept, session, batch).await;
         }
         let ran = json!({ "hook_event_name": "PostToolUse", "tool_name": "Bash" });
         hook(dir.path(), session, ran).await;
-        let deliver = FromServer::Deliver { session, batch: 7, context: context(7) };
+        let deliver = deliver(session, 7, &context(7));
         peer.tx.send(&deliver).await.unwrap();
         let got = inbox_notes(&posted, 1).await;
         let [note] = got.as_slice() else { panic!("one message: {got:?}") };
@@ -1295,12 +1334,12 @@ mod tests {
         // The link takes one message at a time, so the batch after one is kept only once the
         // one before was judged.
         for batch in [5, 6] {
-            let deliver = FromServer::Deliver { session, batch, context: context(batch) };
+            let deliver = deliver(session, batch, &context(batch));
             peer.tx.send(&deliver).await.unwrap();
             kept_batch(&kept, session, batch).await;
         }
         hook(dir.path(), session, prompt).await;
-        let deliver = FromServer::Deliver { session, batch: 7, context: context(7) };
+        let deliver = deliver(session, 7, &context(7));
         peer.tx.send(&deliver).await.unwrap();
         let got = inbox_notes(&posted, 1).await;
         let [note] = got.as_slice() else { panic!("one message: {got:?}") };
@@ -1416,7 +1455,7 @@ mod tests {
         let (mut peer, session, _record, _posted, kept, _daemons) =
             resting_agent_with_an_inbox(dir.path(), &more).await;
         let context = "<slopty-reports project=\"demo\">\ntask 3: done\n</slopty-reports>";
-        let deliver = FromServer::Deliver { session, batch: 3, context: context.to_owned() };
+        let deliver = deliver(session, 3, context);
         peer.tx.send(&deliver).await.unwrap();
         kept_batch(&kept, session, 3).await;
 
@@ -1440,7 +1479,7 @@ mod tests {
         assert!(matches!(refused, CtlReply::Error { .. }), "{refused:?}");
         let refused = ctl(dir.path(), &handed("")).await;
         assert!(matches!(refused, CtlReply::Error { .. }), "{refused:?}");
-        assert_eq!(slopty_agent::reports::peek(&kept, session).unwrap().map(|b| b.batch), Some(3));
+        assert_eq!(slopty_agent::reports::peek(&kept, session).unwrap().map(|b| b.number), Some(3));
 
         let CtlReply::Reports { batch: Some(3), print: Some(print) } =
             ctl(dir.path(), &ask(&own)).await

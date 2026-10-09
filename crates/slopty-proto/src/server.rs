@@ -351,14 +351,15 @@ pub enum FromServer {
     /// For a worker: reports ([`crate::project::Report`]) for the agent in `session`, which its
     /// hooks hand it as context (`slopty hook reports`) and then acknowledge as
     /// [`crate::project::AgentReport::Delivered`]. A later batch for the session replaces one
-    /// not yet handed over, and holds its reports too.
+    /// not yet handed over, and holds its reports too; the worker leaves out each one its agent
+    /// read already ([`ReportBlock::id`]).
     Deliver {
         /// The agent's terminal on this worker.
         session: SessionId,
         /// Which batch.
         batch: u64,
         /// The reports, as the agent reads them.
-        context: String,
+        reports: Reports,
     },
     /// For a client or agent: the fleet's attention ladder, sent after the projects and again
     /// whenever a rung moves. Each replaces the last.
@@ -395,5 +396,49 @@ impl Refusal {
             Self::NotGranted => "Not granted by the tailnet policy",
             Self::DuplicateWorker => "A worker with this id is already connected",
         }
+    }
+}
+
+/// A batch of reports as the agent reads them ([`FromServer::Deliver`]): a block per report or
+/// word of the server's, between the batch's opening and closing lines.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Reports {
+    /// The opening line.
+    pub open: String,
+    /// The blocks, in the order the agent reads them.
+    pub blocks: Vec<ReportBlock>,
+    /// The closing lines: what follows in a later batch, and the end.
+    pub close: String,
+}
+
+/// One report or word of the server's in a batch.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReportBlock {
+    /// The server's number for it, never given to another: a block in two batches (one
+    /// folded into the next) has one id, so an agent that read it in the first is not given
+    /// it again.
+    pub id: u64,
+    /// What the agent reads.
+    pub text: String,
+}
+
+impl Reports {
+    /// The context the agent reads: the opening, each block, the closing, a line each.
+    #[must_use]
+    pub fn text(&self) -> String {
+        std::iter::once(self.open.as_str())
+            .chain(self.blocks.iter().map(|b| b.text.as_str()))
+            .chain(std::iter::once(self.close.as_str()))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The batch without the blocks `read` names; none when it left nothing to read.
+    #[must_use]
+    pub fn unread(&self, read: impl Fn(u64) -> bool) -> Option<Self> {
+        let blocks: Vec<ReportBlock> =
+            self.blocks.iter().filter(|b| !read(b.id)).cloned().collect();
+        (!blocks.is_empty()).then(|| Self { blocks, ..self.clone() })
     }
 }

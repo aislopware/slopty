@@ -57,8 +57,8 @@ impl Studio {
                     answer(&self.lease, id, Outcome::TestDiff(self.tests.clone()));
                 }
                 Ok(Some(FromServer::Request { id, verb, .. })) => return (id, verb),
-                Ok(Some(FromServer::Deliver { session, context, .. })) => {
-                    self.delivered.push((session, context));
+                Ok(Some(FromServer::Deliver { session, reports, .. })) => {
+                    self.delivered.push((session, reports.text()));
                 }
                 Ok(Some(_)) => {}
                 other => panic!("no request: {other:?}"),
@@ -87,8 +87,8 @@ impl Studio {
                 if let Some(context) = found(&self.delivered) {
                     return context;
                 }
-                if let Some(FromServer::Deliver { session, context, .. }) = self.rx.recv().await {
-                    self.delivered.push((session, context));
+                if let Some(FromServer::Deliver { session, reports, .. }) = self.rx.recv().await {
+                    self.delivered.push((session, reports.text()));
                 }
             }
         })

@@ -25,8 +25,8 @@ use super::*;
 async fn next_batch(rx: &mut mpsc::Receiver<FromServer>) -> (SessionId, u64, String) {
     loop {
         match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
-            Ok(Some(FromServer::Deliver { session, batch, context })) => {
-                return (session, batch, context);
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return (session, batch, reports.text());
             }
             Ok(Some(_)) => {}
             other => panic!("no batch: {other:?}"),
@@ -39,7 +39,7 @@ async fn a_batch_within(rx: &mut mpsc::Receiver<FromServer>, wait: Duration) -> 
     let deadline = tokio::time::Instant::now().checked_add(wait)?;
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(FromServer::Deliver { context, .. })) => return Some(context),
+            Ok(Some(FromServer::Deliver { reports, .. })) => return Some(reports.text()),
             Ok(Some(_)) => {}
             _ => return None,
         }

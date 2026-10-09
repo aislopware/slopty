@@ -1926,10 +1926,10 @@ impl Hub {
     /// batch; one for a worker with no link goes again when it registers. Whether the link took
     /// it, or there was none to try.
     pub(super) fn push_batch(state: &mut State, batch: &Batch, now: tokio::time::Instant) -> bool {
-        let Batch { node, term, number, context, .. } = batch;
+        let Batch { node, term, number, reports, .. } = batch;
         let link = state.workers.get(&term.worker).and_then(|e| e.link.as_ref());
         let msg =
-            FromServer::Deliver { session: term.session, batch: *number, context: context.clone() };
+            FromServer::Deliver { session: term.session, batch: *number, reports: reports.clone() };
         if let Some(link) = link
             && link.tx.try_send(msg).is_err()
         {
