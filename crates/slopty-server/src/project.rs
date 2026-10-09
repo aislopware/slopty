@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentBranch;
-use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
+use slopty_proto::orchestration::{
+    ErrorCode, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef, Verb,
+};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits,
     LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent,
@@ -62,12 +64,17 @@ pub(crate) enum Teller {
 
 /// The store's file: every project whole, and the terminals the server watches, as of the
 /// `through`th change.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectsFile {
     /// By name.
     pub projects: Vec<Record>,
     /// The terminals the server watches, whatever project they are in.
     pub watched: Vec<Watched>,
+    /// The keys changes and starts were made under lately, oldest first, so a caller that
+    /// sends one again after a restart is answered as the first time and nothing is done twice.
+    pub keys: Vec<KeptKey>,
+    /// The merges the person asked for that wait for their task's branch to come home.
+    pub merges: Vec<(ProjectId, TaskId)>,
     /// How many changes it holds: the store's log goes on from the next.
     pub through: u64,
 }
@@ -97,7 +104,7 @@ pub struct Watched {
 }
 
 /// One change the store keeps.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Keep {
     /// A project's.
     Project(Box<Kept>),
@@ -107,6 +114,74 @@ pub enum Keep {
     Unwatch(SessionId),
     /// A project the person let go, with all it held.
     Forget(ProjectId),
+    /// A key a change or a start was made under, as it stands now.
+    Key(Box<KeptKey>),
+    /// A merge the person asked for now waits for its task's branch to come home (`waits`), or
+    /// no longer does.
+    Merge {
+        /// The task's project.
+        project: ProjectId,
+        /// The task.
+        task: TaskId,
+        /// Whether it waits.
+        waits: bool,
+    },
+}
+
+/// The most keys the store holds: the hub remembers [`KEYS_REMEMBERED`] changes and as many
+/// starts.
+pub const KEYS_KEPT: usize = KEYS_REMEMBERED.saturating_mul(2);
+
+/// Keyed changes, and keyed starts, the hub remembers each, the oldest dropped first: an
+/// orchestrator makes a few tasks a minute, so this outlasts [`KEY_LIFETIME`] with room to
+/// spare.
+pub const KEYS_REMEMBERED: usize = 1024;
+
+/// A key a change or a start was made under, kept so a repeat of its verb, even after a
+/// restart, answers as the first did.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct KeptKey {
+    /// The key.
+    pub key: IdempotencyKey,
+    /// The digest of the verb as its caller sent it.
+    pub digest: [u8; 32],
+    /// What a repeat answers.
+    pub first: First,
+    /// When it was first used.
+    pub at: WallMs,
+}
+
+/// What a key was used for, and what a repeat under it does.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum First {
+    /// A project change.
+    Change(Remembered),
+    /// A start of an agent or a task's terminal.
+    Start(StartKept),
+}
+
+/// What a keyed change answered, as a repeat of it answers.
+///
+/// The answer is kept as what it names (a task, a project) and read again for a repeat: a
+/// whole project's status or a task's brief held for each of a thousand keys would be
+/// gigabytes.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum Remembered {
+    /// This answer, which is small: done, an error, a terminal.
+    Outcome(Outcome),
+    /// The task as it is when asked again.
+    Task(ProjectId, TaskId),
+    /// The project's status as it is when asked again.
+    Status(ProjectId),
+}
+
+/// What a keyed start keeps for a repeat.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum StartKept {
+    /// The start as forwarded, not yet answered for sure.
+    Forwarded(Box<Verb>),
+    /// Its worker's answer.
+    Answered(Outcome),
 }
 
 /// One change a project took, whole: what the store's log keeps, and what a client is pushed
@@ -150,8 +225,33 @@ impl ProjectsFile {
                 }
             }
             Keep::Unwatch(session) => self.watched.retain(|w| w.term.session != *session),
-            Keep::Forget(project) => self.projects.retain(|r| r.project.id != *project),
+            Keep::Forget(project) => {
+                self.projects.retain(|r| r.project.id != *project);
+                self.merges.retain(|(p, _)| p != project);
+            }
+            Keep::Key(kept) => self.apply_key(kept),
+            Keep::Merge { project, task, waits } => {
+                let merge = (project.clone(), *task);
+                self.merges.retain(|m| *m != merge);
+                if *waits {
+                    self.merges.push(merge);
+                }
+            }
         }
+    }
+
+    /// Hold `kept` in place of what its key held, and let go of the keys past their lifetime
+    /// as of it, and of the oldest past [`KEYS_KEPT`].
+    fn apply_key(&mut self, kept: &KeptKey) {
+        match self.keys.iter_mut().find(|k| k.key == kept.key) {
+            Some(held) => held.clone_from(kept),
+            None => self.keys.push(kept.clone()),
+        }
+        let lifetime = u64::try_from(KEY_LIFETIME.as_millis()).unwrap_or(u64::MAX);
+        let since = kept.at.as_millis().saturating_sub(lifetime);
+        self.keys.retain(|k| k.at.as_millis() >= since);
+        let past = self.keys.len().saturating_sub(KEYS_KEPT);
+        self.keys.drain(..past);
     }
 
     fn apply_project(&mut self, kept: &Kept) {
@@ -825,7 +925,8 @@ impl Projects {
 
     /// Every project, as the store keeps it after `through` changes, beside `watched`.
     pub(crate) fn file(&self, watched: Vec<Watched>, through: u64) -> ProjectsFile {
-        ProjectsFile { projects: self.records.values().cloned().collect(), watched, through }
+        let projects = self.records.values().cloned().collect();
+        ProjectsFile { projects, watched, keys: Vec::new(), merges: Vec::new(), through }
     }
 
     /// The person's policy.

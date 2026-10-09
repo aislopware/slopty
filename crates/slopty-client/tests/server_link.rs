@@ -158,6 +158,73 @@ mod tests {
         let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not let in") };
     }
 
+    /// The next two requests a client sent, by verb: the change's id and key, and the read's
+    /// id and key.
+    async fn two_requests(
+        rx: &mut slopty_net::framed::FramedRecv<slopty_proto::server::ToServer>,
+    ) -> [(u64, Option<slopty_proto::orchestration::IdempotencyKey>); 2] {
+        use slopty_proto::orchestration::Verb;
+        use slopty_proto::server::ToServer;
+        let (mut change, mut read) = (None, None);
+        while change.is_none() || read.is_none() {
+            match tokio::time::timeout(WAIT, rx.recv()).await.unwrap().unwrap() {
+                ToServer::Request { id, key, verb: Verb::TaskCreate { .. } } => {
+                    change = Some((id, key));
+                }
+                ToServer::Request { id, key, verb: Verb::ListWorkers } => read = Some((id, key)),
+                other => panic!("{other:?}"),
+            }
+        }
+        [change.unwrap(), read.unwrap()]
+    }
+
+    /// A verb whose answer a drop lost goes again on the next link under the key it went
+    /// under, so the server answers it as the first time, and its answer comes back; a read
+    /// goes again too, with no key.
+    #[tokio::test]
+    async fn a_verb_whose_answer_a_drop_lost_goes_again_under_its_key() {
+        use slopty_proto::orchestration::{Outcome, Verb};
+        use slopty_proto::project::{ProjectId, TaskSpec};
+        let listener =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let addr = HostAddr::new("127.0.0.1", port);
+        let (task, mut events) =
+            spawn(&tokio::runtime::Handle::current(), endpoint, addr, role(), None);
+        let mut link = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not linked") };
+        let ServerEvent::Message(_) = next(&mut events).await else { panic!("no directory") };
+
+        let caller = task.caller();
+        let create = Verb::TaskCreate {
+            project: ProjectId::new("demo").unwrap(),
+            spec: Box::new(TaskSpec { title: "Once".to_owned(), ..TaskSpec::default() }),
+        };
+        let asked = tokio::spawn({
+            let caller = caller.clone();
+            async move { caller.call(create).await }
+        });
+        let listed = tokio::spawn(async move { caller.call(Verb::ListWorkers).await });
+        let [(_, key), (_, read_key)] = two_requests(&mut link.rx).await;
+        assert!(key.is_some(), "a change goes under a key");
+        assert_eq!(read_key, None, "a read under none");
+        link.conn.close(0_u32.into(), b"restart");
+        let ServerEvent::Unlinked { .. } = next(&mut events).await else { panic!("no drop") };
+
+        let mut again = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("no redial") };
+        let [(id, key_again), (read_id, _)] = two_requests(&mut again.rx).await;
+        assert_eq!(key_again, key, "the same key again");
+        let reply = |id, outcome| FromServer::Reply { id, outcome };
+        again.tx.send(&reply(id, Outcome::Done)).await.unwrap();
+        again.tx.send(&reply(read_id, Outcome::Workers(Vec::new()))).await.unwrap();
+        let answered = tokio::time::timeout(WAIT, asked).await.unwrap().unwrap();
+        assert_eq!(answered, Outcome::Done, "the answer the second link brought");
+        let read = tokio::time::timeout(WAIT, listed).await.unwrap().unwrap();
+        assert_eq!(read, Outcome::Workers(Vec::new()));
+    }
+
     /// The next message a client sent, which must say where the person is.
     async fn said(
         rx: &mut slopty_net::framed::FramedRecv<slopty_proto::server::ToServer>,

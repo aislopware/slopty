@@ -19,7 +19,7 @@ use slopty_core::{ClientId, WorkerId};
 use slopty_net::server::{DialError, ServerLink, connect};
 use slopty_net::{HostAddr, NetError};
 use slopty_proto::RequestId;
-use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
 use slopty_proto::push::PushDevice;
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
 use slopty_proto::thread::attention::Presence;
@@ -38,6 +38,11 @@ const CALL_DEPTH: usize = 64;
 pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often a probe looks for the answer.
 const PROBE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+/// How long after a drop a verb whose answer it lost waits for the next link to go again.
+///
+/// Past it, the verb answers [`ErrorCode::Interrupted`]. It is well within the server's
+/// [`slopty_proto::orchestration::KEY_LIFETIME`], so the repeat still meets its key.
+pub const RESEND_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What the link says.
 #[derive(Debug)]
@@ -99,8 +104,10 @@ impl ServerTask {
 
 /// Sends verbs to the server over the client's one link and hands back each answer.
 ///
-/// A verb goes once: one that changes something is not sent again after a drop, and answers
-/// [`ErrorCode::Interrupted`] instead. While the link is down, a verb answers
+/// A verb that changes something goes under an [`IdempotencyKey`] of its own. One whose answer
+/// a drop lost goes again, under the same key, on the next link within [`RESEND_WITHIN`], so
+/// the server answers it as it answered the first and nothing is done twice; past that, it
+/// answers [`ErrorCode::Interrupted`]. While the link is down, a new verb answers
 /// [`ErrorCode::ServerUnreachable`] at once.
 #[derive(Clone, Debug)]
 pub struct ServerCaller {
@@ -115,7 +122,8 @@ impl ServerCaller {
     /// Send `verb` and wait for the server's answer.
     pub async fn call(&self, verb: Verb) -> Outcome {
         let (reply, answer) = oneshot::channel();
-        if self.calls.send(Call { verb, reply }).await.is_err() {
+        let key = verb.changes().then(|| IdempotencyKey::from_id(uuid::Uuid::new_v4().as_u128()));
+        if self.calls.send(Call { verb, key, reply, until: None }).await.is_err() {
             return unreachable("the link to the server has stopped");
         }
         answer.await.unwrap_or_else(|_dropped| interrupted())
@@ -189,12 +197,21 @@ impl CallQueue {
 #[derive(Debug)]
 struct Call {
     verb: Verb,
+    /// The key it goes under every time, when it changes something.
+    key: Option<IdempotencyKey>,
     reply: oneshot::Sender<Outcome>,
+    /// Once a drop lost its answer, how long it waits for a link to go again.
+    until: Option<tokio::time::Instant>,
 }
 
 impl Call {
     fn answer(self, outcome: Outcome) {
         let _gave_up = self.reply.send(outcome);
+    }
+
+    /// Whether it gave up waiting to go again by `now`.
+    fn lapsed(&self, now: tokio::time::Instant) -> bool {
+        self.until.is_some_and(|until| now >= until)
     }
 }
 
@@ -247,6 +264,8 @@ async fn run(
     mut up: Up,
 ) {
     let mut redial = slopty_net::redial::Redial::default();
+    // The verbs whose answers a drop lost, oldest first, to go again on the next link.
+    let mut carried: Vec<Call> = Vec::new();
     loop {
         let dialled = match first.take() {
             Some(link) => Ok(link),
@@ -256,7 +275,7 @@ async fn run(
         let event = match dialled {
             Ok(link) => {
                 redial.linked(std::time::Instant::now());
-                let Some(why) = pump(link, &tx, &mut up).await else { return };
+                let Some(why) = pump(link, &tx, &mut up, &mut carried).await else { return };
                 ServerEvent::Unlinked { why }
             }
             Err(DialError::Refused(why)) => ServerEvent::Refused(why),
@@ -289,9 +308,12 @@ async fn run(
         let wait = tokio::time::sleep(wait);
         tokio::pin!(wait);
         loop {
+            let due = carried.iter().filter_map(|c| c.until).min();
             tokio::select! {
                 () = &mut wait => break,
                 () = up.resume.notified() => break,
+                () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)),
+                    if due.is_some() => give_up(&mut carried),
                 Some(call) = up.calls.recv() => call.answer(unreachable(&why)),
             }
         }
@@ -308,9 +330,23 @@ struct Up {
     resume: Arc<Notify>,
 }
 
-/// Hand on everything the link carries and send up every verb until it ends; the reason, or
-/// `None` once nobody listens.
-async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> Option<String> {
+/// Answer [`ErrorCode::Interrupted`] to the carried verbs that gave up waiting for a link.
+fn give_up(carried: &mut Vec<Call>) {
+    let now = tokio::time::Instant::now();
+    for call in carried.extract_if(.., |c| c.lapsed(now)) {
+        call.answer(interrupted());
+    }
+}
+
+/// Hand on everything the link carries and send up every verb until it ends, the ones
+/// `carried` from the last link first; the reason, or `None` once nobody listens. The verbs
+/// whose answers it ends without are left in `carried`, to go again on the next.
+async fn pump(
+    link: ServerLink,
+    tx: &mpsc::Sender<ServerEvent>,
+    up: &mut Up,
+    carried: &mut Vec<Call>,
+) -> Option<String> {
     let Up { calls, presence, phone, resume } = up;
     tracing::debug!(server = %link.remote, name = %link.name, "server linked");
     let ServerLink { conn, name, link, tx: mut up, mut rx, .. } = link;
@@ -327,7 +363,20 @@ async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> 
     let mut next: RequestId = 0;
     // A probe on its way: what had arrived when its PING went, and when it gives up.
     let mut probe: Option<(u64, tokio::time::Instant)> = None;
+    give_up(carried);
+    let mut failed = None;
+    for call in carried.drain(..) {
+        if failed.is_some() {
+            next = next.wrapping_add(1);
+            pending.insert(next, call);
+        } else if let Err(e) = send(&mut up, &mut pending, &mut next, call).await {
+            failed = Some(e);
+        }
+    }
     let why = loop {
+        if let Some(why) = failed.take() {
+            break why;
+        }
         tokio::select! {
             () = resume.notified() => {
                 if probe.is_none() {
@@ -386,18 +435,35 @@ async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> 
                 }
             }
             Some(call) = calls.recv() => {
-                next = next.wrapping_add(1);
-                let request = ToServer::Request { id: next, key: None, verb: call.verb.clone() };
-                if let Err(e) = up.send(&request).await {
-                    call.answer(interrupted());
-                    break e.to_string();
+                if let Err(e) = send(&mut up, &mut pending, &mut next, call).await {
+                    break e;
                 }
-                pending.insert(next, call);
             }
         }
     };
-    for (_, call) in pending {
-        call.answer(interrupted());
-    }
+    // In the order they were sent, each waiting from the first drop that lost its answer.
+    let mut lost: Vec<_> = pending.into_iter().collect();
+    lost.sort_unstable_by_key(|(id, _)| *id);
+    let until = tokio::time::Instant::now().checked_add(RESEND_WITHIN);
+    carried.extend(lost.into_iter().map(|(_, mut call)| {
+        call.until = call.until.or(until);
+        call
+    }));
     Some(why)
+}
+
+/// Send `call` up the link as the request after `next`, and hold it in `pending` for its
+/// answer: one that may have gone though the send failed is held all the same, so it goes
+/// again on the next link under its key.
+async fn send(
+    up: &mut slopty_net::framed::FramedSend<ToServer>,
+    pending: &mut HashMap<RequestId, Call>,
+    next: &mut RequestId,
+    call: Call,
+) -> Result<(), String> {
+    *next = next.wrapping_add(1);
+    let request = ToServer::Request { id: *next, key: call.key.clone(), verb: call.verb.clone() };
+    let sent = up.send(&request).await;
+    pending.insert(*next, call);
+    sent.map_err(|e| e.to_string())
 }

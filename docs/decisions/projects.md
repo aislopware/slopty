@@ -2524,3 +2524,28 @@ reordering and edited allows are gone" in `agents.md`.*
     `repo/worktrees.rs`), and the merge across two machines now checks the home branch is gone
     (`a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone`, slopty-cli
     `tests/projects.rs`).
+
+- ✅ **A change the person makes is made once across a drop and a restart** (2026-10-11,
+  readiness 10-11 rank 16).
+  - **The client.** Every verb a client sends that changes something goes under a key of its
+    own (`ServerCaller::call`). One whose answer a drop lost is carried to the next link and sent
+    again under the same key, in the order it was first sent. It used to answer Interrupted at
+    once. A read goes again too, with no key. Past `RESEND_WITHIN` (30 s, well inside the
+    server's 10-minute `KEY_LIFETIME`) the carried verb answers Interrupted, so a long outage
+    still says so.
+  - **The server.** The keys project changes and starts were made under, and the merges waiting
+    for a branch to come home, used to live only in memory. They now go to the projects log as
+    `Keep::Key` and `Keep::Merge` lines beside the changes they belong to, and the snapshot holds
+    them (`ProjectsFile::keys`, `merges`). A key's age goes by the wall clock and is read back
+    as an `Instant` that far in the past; one past its lifetime is let go. The file holds at most
+    `KEYS_KEPT`. A restored merge goes once the Home step the restart takes up again brings the
+    branch home.
+  - **Made once.** A push again and a project let go are now made once under their key as well
+    (`Hub::once`). Before, they ignored it, and a repeated delete answered "unknown project".
+  - **Format.** A `projects.json` from before has no `keys` or `merges` and is set aside as
+    unreadable (pre-release; no default kept for old files).
+  - Tests: `a_keyed_change_sent_again_after_a_restart_is_made_once` and
+    `a_merge_waiting_for_its_branch_outlives_a_restart` (slopty-server `hub/project_tests.rs`),
+    and the store log's replay covering keys and merges (`store.rs`). Also
+    `a_verb_whose_answer_a_drop_lost_goes_again_under_its_key` (slopty-client
+    `tests/server_link.rs`).

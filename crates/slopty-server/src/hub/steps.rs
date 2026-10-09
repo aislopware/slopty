@@ -17,7 +17,8 @@ use slopty_proto::orchestration::{
 use slopty_proto::project::{Commits, ProjectId, StepKind, StepState, Task, TaskId, TaskStep};
 use slopty_proto::terminal::{RepoId, SessionState};
 
-use super::{Hub, State};
+use super::{Hub, State, projects};
+use crate::project::Keep;
 
 /// The most bytes of a bundle read or uploaded in one request.
 const PART: u64 = 4 << 20;
@@ -54,6 +55,19 @@ impl Steps {
     /// its shells' (`facts_of`).
     pub(super) fn made_on(&self, worker: WorkerId) -> &[(String, RepoId)] {
         self.made.get(&worker).map_or(&[], Vec::as_slice)
+    }
+
+    /// The merges the person asked for that wait for their branch to come home.
+    pub(super) fn merges(&self) -> Vec<(ProjectId, TaskId)> {
+        let mut merges: Vec<_> = self.merge_after.iter().cloned().collect();
+        merges.sort();
+        merges
+    }
+
+    /// Take up the merges a store kept waiting: each goes once its branch is home, as the
+    /// step bringing it is taken up again.
+    pub(super) fn adopt_merges(&mut self, merges: impl IntoIterator<Item = (ProjectId, TaskId)>) {
+        self.merge_after.extend(merges);
     }
 }
 
@@ -261,6 +275,10 @@ impl Hub {
                 let mut state = hub.inner.state.lock();
                 if state.steps.homing.remove(&key) != Some(true) {
                     let merge = state.steps.merge_after.remove(&key);
+                    if merge {
+                        let (project, task) = (project.clone(), *task);
+                        projects::keep(&mut state, Keep::Merge { project, task, waits: false });
+                    }
                     if home && merge {
                         hub.merge_asked(&mut state, (project, *task));
                     } else if home {
@@ -284,6 +302,7 @@ impl Hub {
         let away = matches!(route_in(state, project, task, None), Ok(Some(trip)) if !trip.there());
         if away {
             state.steps.merge_after.insert((project.clone(), task));
+            projects::keep(state, Keep::Merge { project: project.clone(), task, waits: true });
             self.bring_home_soon(state, (project.clone(), task), None);
         }
         away
@@ -539,7 +558,7 @@ fn route_in(
     // The orchestrator's own checkout while it is still in the project's repository, else
     // any clone of it on that worker.
     let Some(to_repo) =
-        session_repo(orchestrator).or_else(|| super::projects::clone_on(state, record, to))
+        session_repo(orchestrator).or_else(|| projects::clone_on(state, record, to))
     else {
         let why = "the orchestrator's worker has no clone of the project's repository";
         return Err((to, why.to_owned()));
@@ -548,7 +567,7 @@ fn route_in(
         .worktree
         .clone()
         .or_else(|| session_repo(from))
-        .or_else(|| super::projects::clone_on(state, record, from.worker))
+        .or_else(|| projects::clone_on(state, record, from.worker))
     else {
         let why = format!("no clone of the project's repository is known where {branch} is");
         return Err((to, why));

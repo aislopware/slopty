@@ -59,7 +59,8 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 
 use crate::deliver::Deliveries;
 use crate::project::{
-    Caller, Change, Drove, Keep, Projects, ProjectsFile, Seen, Starting, Watched,
+    Caller, Change, Drove, First, KEYS_REMEMBERED, Keep, KeptKey, Projects, ProjectsFile,
+    Remembered, Seen, StartKept, Starting, Watched,
 };
 
 mod awake;
@@ -100,9 +101,6 @@ pub const EVENTS_PER_ANSWER: usize = 500;
 /// Keyed [`Verb::ForgetWorker`]s remembered, the oldest dropped first. People forget a worker
 /// now and then; this holds far more than [`KEY_LIFETIME`] brings.
 const FORGETS_KEPT: usize = 256;
-/// Keyed project changes remembered, the oldest dropped first: an orchestrator makes a few
-/// tasks a minute, so this outlasts [`KEY_LIFETIME`] with room to spare.
-const PROJECT_KEYS_KEPT: usize = 1024;
 /// The most bytes of events one [`Verb::Events`] answer carries, by their estimate: a
 /// project's change can be tens of kilobytes, and an answer is one frame.
 const EVENTS_BYTES: usize = 8 << 20;
@@ -225,6 +223,7 @@ struct Keyed {
     digest: blake3::Hash,
     answer: Remembered,
     at: tokio::time::Instant,
+    wall: WallMs,
 }
 
 /// A start made under a key: what its caller sent, as a digest, and the start the hub
@@ -238,15 +237,7 @@ struct KeyedStart {
     digest: blake3::Hash,
     first: StartKept,
     at: tokio::time::Instant,
-}
-
-/// What a keyed start keeps for a repeat.
-#[derive(Debug)]
-enum StartKept {
-    /// The start as forwarded, not yet answered for sure.
-    Forwarded(Box<Verb>),
-    /// Its worker's answer.
-    Answered(Outcome),
+    wall: WallMs,
 }
 
 /// What a repeat of a keyed start does.
@@ -255,17 +246,6 @@ enum Again {
     Forward(Verb),
     /// Answer as the first was answered.
     Answer(Outcome),
-}
-
-/// What a keyed change answered, as a repeat of it answers.
-#[derive(Debug)]
-enum Remembered {
-    /// This answer, which is small: done, an error, a terminal.
-    Outcome(Outcome),
-    /// The task as it is when asked again.
-    Task(ProjectId, TaskId),
-    /// The project's status as it is when asked again.
-    Status(ProjectId),
 }
 
 /// Who sends a verb, as the link it came on says: the server tells an agent from the person
@@ -408,6 +388,23 @@ impl Hub {
         let mut state = self.inner.state.lock();
         let now = tokio::time::Instant::now();
         state.watched = file.watched.drain(..).map(|w| (w.term.session, (w, now))).collect();
+        let wall = WallMs::now().as_millis();
+        for kept in file.keys.drain(..) {
+            // How long ago it was used, by the wall clock, is how long before now it was.
+            let age = Duration::from_millis(wall.saturating_sub(kept.at.as_millis()));
+            let Some(at) = now.checked_sub(age).filter(|_| age < KEY_LIFETIME) else { continue };
+            let KeptKey { key, digest, first, at: wall } = kept;
+            let digest = blake3::Hash::from_bytes(digest);
+            match first {
+                First::Change(answer) => {
+                    state.project_keys.push_back(Keyed { key, digest, answer, at, wall });
+                }
+                First::Start(first) => {
+                    state.start_keys.push_back(KeyedStart { key, digest, first, at, wall });
+                }
+            }
+        }
+        state.steps.adopt_merges(file.merges.drain(..));
         state.projects = Projects::restore(file);
     }
 
@@ -417,7 +414,19 @@ impl Hub {
     pub fn projects_file(&self, through: u64) -> ProjectsFile {
         let state = self.inner.state.lock();
         let watched = state.watched.values().map(|(w, _)| *w).collect();
-        state.projects.file(watched, through)
+        let mut file = state.projects.file(watched, through);
+        let changes = state.project_keys.iter().map(|k| KeptKey {
+            key: k.key.clone(),
+            digest: *k.digest.as_bytes(),
+            first: First::Change(k.answer.clone()),
+            at: k.wall,
+        });
+        let starts =
+            state.start_keys.iter().map(|k| start_kept(&k.key, k.digest, &k.first, k.wall));
+        file.keys = changes.chain(starts).collect();
+        file.keys.sort_by_key(|k| k.at);
+        file.merges = state.steps.merges();
+        file
     }
 
     /// Every change to the projects from now on, in order, for the store to keep: what a
@@ -891,11 +900,12 @@ impl Hub {
                 "the server clones and carries branches for tasks itself; task_start and \
                      task_report do it",
             ),
-            Verb::TaskPush { project, task } => self.task_push(caller, (&project, task)).await,
             Verb::ProjectDelete { .. } if caller == Caller::Agent => {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
-            Verb::ProjectDelete { project } => self.project_delete(&project),
+            verb @ (Verb::TaskPush { .. } | Verb::ProjectDelete { .. }) => {
+                self.once(caller, key, verb).await
+            }
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -934,6 +944,25 @@ impl Hub {
             | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
+    }
+
+    /// A push or a project let go, made once under `key`: a repeat answers as the first did.
+    async fn once(&self, caller: Caller, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
+        if let Some(key) = &key {
+            let mut state = self.inner.state.lock();
+            if let Some(answer) = keyed(&mut state, caller, key, &verb) {
+                return answer;
+            }
+        }
+        let outcome = match &verb {
+            Verb::TaskPush { project, task } => self.task_push(caller, (project, *task)).await,
+            Verb::ProjectDelete { project } => self.project_delete(project),
+            _ => error(ErrorCode::Invalid, "only a push or a project let go is made once here"),
+        };
+        if let Some(key) = key {
+            remember(&mut self.inner.state.lock(), caller, key, &verb, &outcome);
+        }
+        outcome
     }
 
     /// The events from `since` (from now when absent) that pass `filter`, waiting up to
@@ -1627,7 +1656,7 @@ fn remember(
     verb: &Verb,
     outcome: &Outcome,
 ) {
-    if state.project_keys.len() >= PROJECT_KEYS_KEPT {
+    if state.project_keys.len() >= KEYS_REMEMBERED {
         state.project_keys.pop_front();
     }
     let project = match verb {
@@ -1637,7 +1666,8 @@ fn remember(
         | Verb::TaskRestart { project, .. }
         | Verb::TaskTell { project, .. }
         | Verb::TaskReport { project, .. }
-        | Verb::TaskMerge { project, .. } => Some(project),
+        | Verb::TaskMerge { project, .. }
+        | Verb::TaskPush { project, .. } => Some(project),
         _ => None,
     };
     let answer = match (outcome, project) {
@@ -1645,8 +1675,15 @@ fn remember(
         (Outcome::Project(status), _) => Remembered::Status(status.project.id.clone()),
         (other, _) => Remembered::Outcome(other.clone()),
     };
-    let at = tokio::time::Instant::now();
-    state.project_keys.push_back(Keyed { key, digest: digest(caller, verb), answer, at });
+    let (at, wall, digest) = (tokio::time::Instant::now(), WallMs::now(), digest(caller, verb));
+    let kept = KeptKey {
+        key: key.clone(),
+        digest: *digest.as_bytes(),
+        first: First::Change(answer.clone()),
+        at: wall,
+    };
+    state.project_keys.push_back(Keyed { key, digest, answer, at, wall });
+    projects::keep(state, Keep::Key(Box::new(kept)));
 }
 
 /// A repeat of a keyed start: what the first start was answered, or the start it forwarded
@@ -1672,12 +1709,19 @@ fn start_again(
 
 /// Keep what a keyed start forwarded for `sent`, for a repeat of it.
 fn keep_start(state: &mut State, key: IdempotencyKey, sent: blake3::Hash, forwarded: &Verb) {
-    if state.start_keys.len() >= PROJECT_KEYS_KEPT {
+    if state.start_keys.len() >= KEYS_REMEMBERED {
         state.start_keys.pop_front();
     }
-    let at = tokio::time::Instant::now();
+    let (at, wall) = (tokio::time::Instant::now(), WallMs::now());
     let first = StartKept::Forwarded(Box::new(forwarded.clone()));
-    state.start_keys.push_back(KeyedStart { key, digest: sent, first, at });
+    let kept = start_kept(&key, sent, &first, wall);
+    state.start_keys.push_back(KeyedStart { key, digest: sent, first, at, wall });
+    projects::keep(state, Keep::Key(Box::new(kept)));
+}
+
+/// A keyed start as the store keeps it.
+fn start_kept(key: &IdempotencyKey, sent: blake3::Hash, first: &StartKept, at: WallMs) -> KeptKey {
+    KeptKey { key: key.clone(), digest: *sent.as_bytes(), first: First::Start(first.clone()), at }
 }
 
 /// Keep the answer a keyed start was given, in place of the start, when it is sure: an
@@ -1686,8 +1730,10 @@ fn start_answered(state: &mut State, key: &IdempotencyKey, outcome: &Outcome) {
     if maybe_lost(outcome) {
         return;
     }
-    if let Some(kept) = state.start_keys.iter_mut().find(|k| k.key == *key) {
-        kept.first = StartKept::Answered(outcome.clone());
+    if let Some(held) = state.start_keys.iter_mut().find(|k| k.key == *key) {
+        held.first = StartKept::Answered(outcome.clone());
+        let kept = start_kept(key, held.digest, &held.first, held.wall);
+        projects::keep(state, Keep::Key(Box::new(kept)));
     }
 }
 

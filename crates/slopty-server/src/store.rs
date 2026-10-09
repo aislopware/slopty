@@ -653,16 +653,20 @@ mod tests {
         assert!(data_dir.join(PROJECTS_FILE).is_dir(), "left as it was");
     }
 
-    /// Changes a hub made: a project, then a task in it, then that task noted, and two
-    /// terminals watched, one of them then no longer.
+    /// Changes a hub made: a project, then a task in it, then that task noted, two terminals
+    /// watched, one of them then no longer, a change and a start made under keys, the start
+    /// then answered, and two merges waiting, one of them then no longer.
     fn changes() -> (Vec<Keep>, ProjectsFile) {
         use std::collections::HashSet;
 
         use slopty_core::{SessionId, WallMs, WorkerId};
-        use slopty_proto::orchestration::TermRef;
+        use slopty_proto::orchestration::{IdempotencyKey, Outcome, TermRef, Verb};
         use slopty_proto::project::{LimitsChange, ProjectId, TaskChange, TaskId, TaskSpec};
 
-        use crate::project::{Caller, Drove, NewProject, Projects, Running, Watched};
+        use crate::project::{
+            Caller, Drove, First, KeptKey, NewProject, Projects, Remembered, Running, StartKept,
+            Watched,
+        };
 
         let now = WallMs::from_millis(1_790_000_000_000);
         let id = ProjectId::new("slopty").unwrap();
@@ -695,8 +699,29 @@ mod tests {
         };
         let (kept_on, gone) = (watched(Some(Drove::Opened { by: None })), watched(None));
         kept.extend([Keep::Watch(gone), Keep::Watch(kept_on), Keep::Unwatch(gone.term.session)]);
+        let key = |name: &str, first| KeptKey {
+            key: IdempotencyKey::new(name).unwrap(),
+            digest: [7; 32],
+            first,
+            at: now,
+        };
+        let forwarded = First::Start(StartKept::Forwarded(Box::new(Verb::ListWorkers)));
+        let answered = First::Start(StartKept::Answered(Outcome::Done));
+        let made = key("make-1", First::Change(Remembered::Task(id.clone(), TaskId(1))));
+        let merge = |task, waits| Keep::Merge { project: id.clone(), task: TaskId(task), waits };
+        kept.extend([
+            Keep::Key(Box::new(made.clone())),
+            Keep::Key(Box::new(key("open-1", forwarded))),
+            Keep::Key(Box::new(key("open-1", answered.clone()))),
+            merge(1, true),
+            merge(2, true),
+            merge(2, false),
+        ]);
         let through = u64::try_from(kept.len()).unwrap();
-        (kept, p.file(vec![kept_on], through))
+        let mut whole = p.file(vec![kept_on], through);
+        whole.keys = vec![made, key("open-1", answered)];
+        whole.merges = vec![(id, TaskId(1))];
+        (kept, whole)
     }
 
     fn line(n: usize, kept: &Keep) -> Vec<u8> {

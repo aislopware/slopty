@@ -629,6 +629,28 @@ async fn a_keyed_project_change_is_made_once() {
     refused(&other, ErrorCode::Invalid);
 }
 
+/// A key outlives a restart of the server: a change sent again under it after one is
+/// answered as the first was and made once.
+#[tokio::test]
+async fn a_keyed_change_sent_again_after_a_restart_is_made_once() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    create(&hub, None).await;
+    let key = IdempotencyKey::new("make-it-once").unwrap();
+    let verb = Verb::TaskCreate {
+        project: project(),
+        spec: Box::new(TaskSpec { title: "A".to_owned(), ..TaskSpec::default() }),
+    };
+    let first = hub.dispatch_keyed(Some(key.clone()), verb.clone()).await;
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    drop(hub);
+
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let again = hub.dispatch_keyed(Some(key), verb).await;
+    assert_eq!(again, first, "answered as the first time");
+    assert_eq!(status(&hub).await.tasks.len(), 1, "and made once");
+}
+
 /// A status read from the project's cursor waits for the next change, and one with news
 /// answers at once.
 #[tokio::test]
@@ -2117,6 +2139,87 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
     .await
     .expect("the second trip ends");
     assert_eq!(failed, nothing);
+}
+
+/// A merge the person asked for while the task's branch was still on its way home outlives a
+/// restart of the server: the trip is taken up again, and once the branch is home the merge
+/// is queued.
+#[tokio::test]
+async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
+    use slopty_proto::project::{Merge, Report};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio_terms =
+        || vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio_terms());
+    let agent = SessionId::new();
+    let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, Some(linux)).await;
+    let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    let start = request(&mut linux_rx).await;
+    let term = opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let branch = format!("worktree-slopty-slopty-{task}");
+    let report = Report {
+        note: "Built it.".to_owned(),
+        artifacts: Vec::new(),
+        branch: Some(branch.clone()),
+        pr: None,
+    };
+    let verb = Verb::TaskReport { project: project(), task, report };
+    let done = hub.dispatch_as(Speaker::Proven(term.session), None, verb).await;
+    assert!(matches!(done, Outcome::Task(_)), "{done:?}");
+    let (_, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "on its way home: {verb:?}");
+    let merged = hub.dispatch(Verb::TaskMerge { project: project(), task }).await;
+    assert!(matches!(merged, Outcome::Task(_)), "{merged:?}");
+    let file = hub.projects_file(0);
+    assert_eq!(file.merges, [(project(), task)]);
+    let known = hub.directory();
+    drop((linux_lease, linux_rx, studio_lease, studio_rx));
+    drop(hub);
+
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let (_, studio_lease, mut studio_rx) =
+        worker_again(&hub, studio, "studio", Os::MacOs, studio_terms());
+    let (_, linux_lease, mut linux_rx) = worker_again(&hub, linux, "box", Os::Linux, linux_terms());
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::BundleBranch { target, .. } = verb else { panic!("taken up again: {verb:?}") };
+    let name = format!("{branch}-4a7aa6d00000.bundle");
+    let path = format!("/home/c/.cache/slopty/bundles/{name}");
+    let head = format!("{}4a7aa", "4a7aa6d".repeat(5));
+    let made = BranchBundle { path, name, size: 6, digest: [3; 32], head, base: None };
+    assert!(target.is_some(), "the fork point first");
+    answer(&linux_lease, id, Outcome::Bundle(Box::new(made)));
+    let (id, _) = request(&mut linux_rx).await;
+    answer(&linux_lease, id, Outcome::File { bytes: b"bundle".to_vec(), offset: 0, size: 6 });
+    for _ in 0..2 {
+        let (id, verb) = request(&mut studio_rx).await;
+        assert!(matches!(verb, Verb::Upload { .. }), "{verb:?}");
+        answer(&studio_lease, id, Outcome::Done);
+    }
+    let (id, verb) = request(&mut studio_rx).await;
+    let Verb::FetchBundle { into, head, .. } = verb else { panic!("{verb:?}") };
+    answer(&studio_lease, id, Outcome::Fetched { branch: into, head });
+    let (id, verb) = request(&mut studio_rx).await;
+    assert!(matches!(verb, Verb::TestDiff { .. }), "{verb:?}");
+    let unread = Outcome::Error { code: ErrorCode::Failed, message: "no".to_owned() };
+    answer(&studio_lease, id, unread);
+    let queued = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(task_now(&hub, task).await.merge, Some(Merge::Queued { .. })) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(queued.is_ok(), "the merge is queued once the branch is home");
+    assert!(hub.projects_file(0).merges.is_empty(), "and waits no longer");
 }
 
 /// Only the person lets a project go. Every client is sent the projects afresh without it, its
