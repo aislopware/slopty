@@ -1,4 +1,4 @@
-# noq-proto, vendored with twenty patches
+# noq-proto, vendored with twenty-two patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -225,6 +225,21 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    as at it. Patch 19 exposed it: A.15 (`probe_up_rediscovers_full_bw_after_10x_increase`) had
    passed only on the filter's decayed `max_bw`. Test:
    `probe_up_goes_on_while_inflight_longterm_holds_it`.
+
+21. `fix(proto): do not coalesce into a too small datagram tail` (upstream #792, `f916a5c5`)
+
+   A CONNECTION_CLOSE during the handshake handed its datagram to the next packet number space
+   without checking that the rest could hold a packet. With an `initial_mtu` above 1200, the
+   Initial close, padded to 1200, left a tail under `MIN_PACKET_SPACE`, and the Handshake close
+   was written past the datagram's end in a release build. Taken before a release has it. Test:
+   `close_during_handshake_does_not_coalesce_into_a_too_small_datagram_tail`.
+
+22. `fix(proto): match unspecified local IP when sending connection close` (upstream #822,
+   `34ec9691`)
+
+   A client's first path has no local IP, while a received packet's has one, so the strict
+   comparison never matched and a client that failed early sent no CONNECTION_CLOSE: the
+   other side waited out its idle timeout. It now compares with `is_probably_same_path`.
 
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a

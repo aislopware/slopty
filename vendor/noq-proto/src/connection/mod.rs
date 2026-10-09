@@ -1472,7 +1472,7 @@ impl Connection {
         // - If coalescing, finish packet without padding to leave space in the datagram.
         // - If not coalescing, complete the datagram:
         //   - Finish packet with padding.
-        //   - Set the transmit segment size if this is the first datagram.
+        //   - Finish the datagram, which sets the segment size if this is the first datagram.
         // - Loop: next iteration will exit the loop if nothing more to send in this space. The
         //   TransmitBuf will contain a started datagram with space if coalescing, or completely
         //   filled datagram if not coalescing.
@@ -1710,15 +1710,18 @@ impl Connection {
                 // Send a close frame in every possible space for robustness, per
                 // RFC9000 "Immediate Close during the Handshake". Don't bother trying
                 // to send anything else.
-                // TODO(flub): This breaks during the handshake if we can not coalesce
-                //    packets due to space reasons: the next space would either fail a
-                //    debug_assert checking for enough packet space or produce an invalid
-                //    packet. We need to keep track of per-space pending CONNECTION_CLOSE to
-                //    be able to send these across multiple calls to poll_transmit. Then
-                //    check for coalescing space here because initial packets need to be in
-                //    padded datagrams. And also add space checks for CONNECTION_CLOSE in
-                //    space_can_send so it would stop a GSO batch if the datagram is too
-                //    small for another CONNECTION_CLOSE packet.
+                // TODO(flub): We need to keep track of per-space pending CONNECTION_CLOSE to
+                //    be able to send these across multiple calls to poll_transmit. And also
+                //    add space checks for CONNECTION_CLOSE in space_can_send so it would
+                //    stop a GSO batch if the datagram is too small for another
+                //    CONNECTION_CLOSE packet.
+
+                // If what is left of this datagram is too small for another packet, finish
+                // it so the next space starts a fresh datagram rather than a packet being
+                // coalesced past its end.
+                if transmit.datagram_remaining_mut() < MIN_PACKET_SPACE {
+                    transmit.finish_datagram();
+                }
                 return PollPathSpaceStatus::WrotePacket {
                     last_packet_number: last_pn,
                     pad_datagram,
@@ -1824,11 +1827,7 @@ impl Connection {
                     builder.finish_and_track(now, self, path_id, pad_datagram);
                 }
 
-                // If this is the first datagram we set the segment size to the size of the
-                // first datagram.
-                if transmit.num_datagrams() == 1 {
-                    transmit.clip_segment_size();
-                }
+                transmit.finish_datagram();
             }
         }
     }
@@ -4500,7 +4499,9 @@ impl Connection {
             if self
                 .paths
                 .get(&path_id)
-                .map(|p| p.data.validated && p.data.network_path == network_path)
+                .map(|p| {
+                    p.data.validated && p.data.network_path.is_probably_same_path(&network_path)
+                })
                 .unwrap_or(false)
             {
                 self.connection_close_pending = true;
