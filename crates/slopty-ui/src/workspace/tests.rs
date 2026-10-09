@@ -1632,6 +1632,7 @@ mod faces;
 mod facts;
 mod focus;
 mod focus_cache;
+mod folder_typing;
 mod folders;
 mod foot;
 mod frame;

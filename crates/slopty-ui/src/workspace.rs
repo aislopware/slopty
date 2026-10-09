@@ -48,6 +48,7 @@ mod context_menus;
 mod desktop;
 mod faces;
 mod facts;
+mod folder_typing;
 mod folders;
 mod foot;
 mod grouping;

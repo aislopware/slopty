@@ -2249,3 +2249,18 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     That belongs to the thread's plan card (`conversation/`), which is lane W's.
   - Tests: `workspace::tests::seating::*`, `slopty_client`'s
     `layout::tiling::tests::a_leads_helpers_arrive_beside_it_in_one_column`.
+- ✅ **A path typed into the folder step completes from the machine's folders** (2026-10-09,
+  readiness R14, its first half).
+  - Typing `~/w` or `/Users/c/work/sl` where a start asks for its folder lists, after the line
+    for the path as typed, up to twelve folders of the path's parent that begin with its last
+    part, in any case (`workspace::folder_typing`).
+  - The parent is asked of the machine once per step with `ClientMsg::ListFolder`, as a folder
+    tile asks, and the lines follow its answer. Typing on in the same folder asks nothing more.
+  - Hidden folders show only for a part that begins with a dot. A trailing `/` lists the
+    folder's own folders.
+  - **Not done: cloning a repository known on another machine.** The server refuses
+    `Verb::CloneRepo` from anyone but its own task starts (`hub.rs`, "the server clones …
+    for tasks itself"). The folder step can offer "Clone <url>" once the person's own caller
+    may ask for a clone, or once a worker takes a clone op.
+  - Tests: `workspace::tests::folder_typing::a_typed_path_completes_from_the_machines_folders`;
+    `workspace::folder_typing::tests::*`.

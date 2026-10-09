@@ -141,6 +141,26 @@ pub(super) struct FolderStep {
     agent: AgentId,
     purpose: For,
     step: gpui::EntityId,
+    /// The folders the machine listed for the paths typed, to complete them
+    /// ([`super::folder_typing`]).
+    typed: super::folder_typing::Listed,
+}
+
+impl FolderStep {
+    /// The machine it starts on.
+    pub(super) const fn worker(&self) -> WorkerKey {
+        self.worker
+    }
+
+    /// Its palette.
+    pub(super) const fn step(&self) -> gpui::EntityId {
+        self.step
+    }
+
+    /// The folders listed for the paths typed in it.
+    pub(super) const fn typed(&self) -> &super::folder_typing::Listed {
+        &self.typed
+    }
 }
 
 impl WorkspaceView {
@@ -390,12 +410,14 @@ impl WorkspaceView {
         let lines = self.folder_lines(agent, worker, purpose, cx);
         self.open_step(lines, PICK_FOLDER, window, cx);
         if let Some(palette) = self.palette.clone() {
-            let typed = agent.clone();
+            let listed = super::folder_typing::Listed::default();
+            let (typed, known) = (agent.clone(), listed.clone());
             palette.update(cx, |p, cx| {
-                p.set_typed(move |text| typed_folder(text, worker, &typed, purpose), cx);
+                p.set_typed(move |text| typed_folder(text, worker, &typed, purpose, &known), cx);
             });
             let step = palette.entity_id();
-            self.folder_step = Some(FolderStep { worker, agent: agent.clone(), purpose, step });
+            let agent = agent.clone();
+            self.folder_step = Some(FolderStep { worker, agent, purpose, step, typed: listed });
         }
         self.ask_past_places(worker, Some(agent));
     }
@@ -745,17 +767,29 @@ impl WorkspaceView {
 }
 
 /// A folder typed from its root in the folder step (`/…`, `~/…`, `~`): the line that starts
-/// `agent` there on `worker`. Anything else adds none; the step's own lines are found by it.
-fn typed_folder(text: &str, worker: WorkerKey, agent: &AgentId, purpose: For) -> Vec<PaletteItem> {
+/// `agent` there on `worker`, then the folders the machine listed that complete it
+/// ([`super::folder_typing`]). Anything else adds none; the step's own lines are found by it.
+fn typed_folder(
+    text: &str,
+    worker: WorkerKey,
+    agent: &AgentId,
+    purpose: For,
+    listed: &super::folder_typing::Listed,
+) -> Vec<PaletteItem> {
     let typed = text.trim();
-    if !(typed.starts_with('/') || typed.starts_with("~/") || typed == "~") {
+    if super::folder_typing::split(typed).is_none() {
         return Vec::new();
     }
     let cwd = if typed == "/" { typed } else { typed.trim_end_matches('/') }.to_owned();
     // As typed: it is the person's own spelling of where.
     let shown = format!("{TYPED_FOLDER} {cwd}");
     let action = start(purpose, worker, agent, cwd, false);
-    vec![PaletteItem::new(&shown, action, &[]).with_icon(Symbol::Folder)]
+    let mut lines = vec![PaletteItem::new(&shown, action, &[]).with_icon(Symbol::Folder)];
+    for path in listed.completing(typed) {
+        let action = start(purpose, worker, agent, path.clone(), false);
+        lines.push(PaletteItem::new(&path, action, &[]).with_icon(Symbol::Folder));
+    }
+    lines
 }
 
 /// The folder step's action for a line: start `agent` on `worker` in `cwd`, as an agent of its

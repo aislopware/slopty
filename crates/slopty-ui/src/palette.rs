@@ -1609,6 +1609,14 @@ impl CommandPalette {
         self.refresh(cx);
     }
 
+    /// Build the typed lines again for the field as it stands: what they read changed
+    /// (the folders a machine listed for a typed path).
+    pub fn retype(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        self.path_items = self.typed_lines(&text);
+        self.refresh(cx);
+    }
+
     /// The lines typed `text` adds: the step's own, else the path lines.
     fn typed_lines(&self, text: &str) -> Vec<PaletteItem> {
         self.typed.as_ref().map_or_else(|| path_items(text), |lines| lines(text))

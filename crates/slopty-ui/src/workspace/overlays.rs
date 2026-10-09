@@ -555,8 +555,9 @@ impl WorkspaceView {
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's
     /// files under the focused shell's directory, or the worker's home; and the workspace's
-    /// own palette asks every linked worker's threads for the words ([`Self::ask_threads`]), and
-    /// the session step its machine's past prompts ([`Self::ask_sessions`]).
+    /// own palette asks every linked worker's threads for the words ([`Self::ask_threads`]), the
+    /// session step its machine's past prompts ([`Self::ask_sessions`]), and the folder step the
+    /// folder a typed path is in ([`Self::ask_typed_folder`]).
     fn palette_changed(
         &mut self,
         palette: &Entity<CommandPalette>,
@@ -573,6 +574,7 @@ impl WorkspaceView {
             self.ask_threads(text, cx);
         }
         self.ask_sessions(palette, text, cx);
+        self.ask_typed_folder(palette, text);
     }
 
     /// A worker found files for the palette's text: they are its `Open <path>` lines.

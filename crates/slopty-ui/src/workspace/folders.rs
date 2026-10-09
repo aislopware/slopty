@@ -112,8 +112,8 @@ impl WorkspaceView {
         self.send(key, ClientMsg::ListFolder { path: path.to_owned() });
     }
 
-    /// `key` listed `path`: a path asked to learn what it is opens now, and every folder tile
-    /// at that path shows the listing.
+    /// `key` listed `path`: a path asked to learn what it is opens now, every folder tile at
+    /// that path shows the listing, and the folder step completes a path typed in it.
     pub fn folder_listed(
         &mut self,
         key: WorkerKey,
@@ -121,6 +121,7 @@ impl WorkspaceView {
         listing: &Listing,
         cx: &mut Context<Self>,
     ) {
+        self.typed_folder_listed(key, path, listing, cx);
         if let Some(at) = self.probes.iter().position(|(k, p, _)| *k == key && p == path) {
             let (_, asked, line) = self.probes.remove(at);
             match listing {
