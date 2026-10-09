@@ -102,6 +102,8 @@ pub struct Read {
 pub struct Lines {
     /// As [`Read::restarted`].
     pub restarted: bool,
+    /// Where in the file [`Self::text`] begins, in bytes.
+    pub start: u64,
     /// The complete lines appended, each with its newline.
     pub text: String,
 }
@@ -165,8 +167,10 @@ impl Tail {
         if restarted {
             *self = Self::default();
         }
+        // What waits in `partial` began this far into the file, and so do the lines read now.
+        let start = self.offset.saturating_sub(self.partial.len().try_into().unwrap_or(u64::MAX));
         if len == self.offset {
-            return Ok(Lines { restarted, text: String::new() });
+            return Ok(Lines { restarted, start, text: String::new() });
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut appended = Vec::new();
@@ -174,11 +178,11 @@ impl Tail {
         self.offset = self.offset.saturating_add(appended.len().try_into().unwrap_or(u64::MAX));
         self.partial.append(&mut appended);
         let Some(end) = self.partial.iter().rposition(|b| *b == b'\n') else {
-            return Ok(Lines { restarted, text: String::new() });
+            return Ok(Lines { restarted, start, text: String::new() });
         };
         let rest = self.partial.split_off(end.saturating_add(1));
         let complete = std::mem::replace(&mut self.partial, rest);
-        Ok(Lines { restarted, text: String::from_utf8_lossy(&complete).into_owned() })
+        Ok(Lines { restarted, start, text: String::from_utf8_lossy(&complete).into_owned() })
     }
 }
 

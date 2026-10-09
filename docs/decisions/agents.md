@@ -2636,3 +2636,22 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Test: `caps::tests::an_agent_installed_while_the_worker_runs_is_found` (slopty-worker): a
     `codex` written into a followed directory shows at the version it says, and goes when
     removed.
+
+- ✅ **The whole of a clipped text is read from its line, off the thread** (2026-10-10,
+  readiness 10-10 rank 16). An expand, or a picture's bytes, read the whole transcript JSONL
+  into a string and searched it. It ran on the blocking pool, but the session's task waited for
+  it, so the followed thread stopped for the read. That read grew with the transcript: about
+  6.5 ms on 40 MiB (MEASUREMENTS, 2026-10-10).
+  - **The index.** `Transcripts` notes, as it reads each file, where every line naming a
+    record by `"uuid"` lies: its file, start and length (`session::Index`). `Tail::read_lines`
+    now says where its lines begin. `Transcripts::locate` gives the lines that may hold a
+    record (`Located`), and `Located::text` / `image` read only those bytes and check the
+    record's own id. A line placed wrong falls back to the file read whole. Such a line can only
+    come after a write that was not UTF-8, whose lossy decoding moved the bytes. A record not
+    read yet is not found, as before.
+  - **Off the thread.** The session hands the `Located` to the blocking pool, which answers the
+    expand itself, and the session goes on with its thread meanwhile (`thread::claude`).
+  - `conversation::full_text_at` is gone, since nothing reads a whole file for one record now.
+  - Tests: `conversation::session::tests::a_clipped_text_is_read_from_its_line_alone`. Every
+    other byte of the file is spoiled at the same length, and the text still reads, a line read
+    in two parts among them. The measurement is `expand_cost`.

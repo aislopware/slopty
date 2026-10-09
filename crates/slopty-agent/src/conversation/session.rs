@@ -6,15 +6,20 @@
 //! file as it stops), feeding one [`Conversation`], so a follower gets one stream of
 //! [`Change`]s for all the threads. Beside them it tails the files background commands write
 //! ([`Outputs`]).
+//!
+//! It notes where each record's line lies in its file as it reads ([`Index`]), so the whole of a
+//! clipped text or a picture is read from that line alone ([`Transcripts::locate`],
+//! [`Located::text`], [`Located::image`]), off the caller's task, however long the transcript.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::output::{self, Outputs};
 use super::{
-    Change, Conversation, Output, Part, TextRef, ThreadId, full_text_at, image_bytes, thread_of,
+    Change, Conversation, Output, Part, TextRef, ThreadId, full_text, image_bytes, thread_of,
 };
-use crate::transcript::Tail;
+use crate::transcript::{Lines, Tail};
 
 /// Where Claude Code writes the subagents of the session whose transcript is `main`.
 #[must_use]
@@ -32,6 +37,118 @@ pub struct Transcripts {
     subagents: BTreeMap<PathBuf, Tail>,
     /// The background commands' output, as far as it was sent.
     outputs: Outputs,
+    /// Where each record's line is.
+    index: Index,
+}
+
+/// Where a line is: its file's place in [`Index::files`], and its start and length in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Spot {
+    file: usize,
+    at: u64,
+    len: u64,
+}
+
+/// Where the line of each record named by a `"uuid"` lies, in the files read.
+#[derive(Debug, Default)]
+struct Index {
+    files: Vec<PathBuf>,
+    by_uuid: HashMap<String, Vec<Spot>>,
+}
+
+/// How a record's id appears in a transcript line, Claude Code writing it compact.
+const UUID_KEY: &str = "\"uuid\":\"";
+
+impl Index {
+    fn file(&mut self, path: &Path) -> usize {
+        if let Some(at) = self.files.iter().position(|p| p == path) {
+            return at;
+        }
+        self.files.push(path.to_path_buf());
+        self.files.len().saturating_sub(1)
+    }
+
+    /// Forget every line of the file at `path`: it is read again from its start.
+    fn forget(&mut self, path: &Path) {
+        let Some(file) = self.files.iter().position(|p| p == path) else { return };
+        for spots in self.by_uuid.values_mut() {
+            spots.retain(|s| s.file != file);
+        }
+        self.by_uuid.retain(|_, spots| !spots.is_empty());
+    }
+
+    /// Note where each line of `lines`, read from `path`, names a record. Every id a line holds
+    /// is noted; the reader checks the record's own.
+    fn note(&mut self, path: &Path, lines: &Lines) {
+        let file = self.file(path);
+        let mut at = lines.start;
+        for line in lines.text.split_inclusive('\n') {
+            let len = u64::try_from(line.len()).unwrap_or(u64::MAX);
+            let mut rest = line;
+            while let Some(found) = rest.find(UUID_KEY) {
+                rest = rest.get(found.saturating_add(UUID_KEY.len())..).unwrap_or_default();
+                let Some(end) = rest.find('"') else { break };
+                let id = rest.get(..end).unwrap_or_default();
+                if !id.is_empty() {
+                    self.by_uuid.entry(id.to_owned()).or_default().push(Spot { file, at, len });
+                }
+            }
+            at = at.saturating_add(len);
+        }
+    }
+}
+
+/// Where to read the whole of a clipped text or a picture from, taken from [`Transcripts`]
+/// so the read can run anywhere ([`Transcripts::locate`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Located {
+    reference: TextRef,
+    /// A background command's output file, read from its end.
+    output: Option<PathBuf>,
+    /// The lines that may hold the record, in the order the thread's files are read.
+    lines: Vec<(PathBuf, u64, u64)>,
+    /// The thread's files, read whole should none of the lines hold the record after all.
+    files: Vec<PathBuf>,
+}
+
+impl Located {
+    /// The whole text, up to [`output::WHOLE`] of a background command's output; `None` when
+    /// it is not there.
+    #[must_use]
+    pub fn text(&self) -> Option<String> {
+        if matches!(self.reference.part, Part::Output { .. }) {
+            return output::read_end(self.output.as_ref()?, output::WHOLE).ok();
+        }
+        self.find(|jsonl| full_text(jsonl, &self.reference))
+    }
+
+    /// The picture's bytes; `None` when it is not there or too large to send.
+    #[must_use]
+    pub fn image(&self) -> Option<Vec<u8>> {
+        self.find(|jsonl| image_bytes(jsonl, &self.reference))
+    }
+
+    /// What `read` finds in the record's line, else in its files read whole (a line the index
+    /// placed wrong, after a write that was not UTF-8); nothing when no line was noted.
+    fn find<T>(&self, read: impl Fn(&str) -> Option<T>) -> Option<T> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let at_line =
+            self.lines.iter().find_map(|(path, at, len)| read(&line_at(path, *at, *len).ok()?));
+        at_line.or_else(|| {
+            self.files.iter().find_map(|path| read(&std::fs::read_to_string(path).ok()?))
+        })
+    }
+}
+
+/// The `len` bytes at `at` in the file at `path`.
+fn line_at(path: &Path, at: u64, len: u64) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(at))?;
+    let mut bytes = Vec::new();
+    file.take(len).read_to_end(&mut bytes)?;
+    String::from_utf8(bytes).map_err(std::io::Error::other)
 }
 
 impl Transcripts {
@@ -50,12 +167,20 @@ impl Transcripts {
             changes.push(Change::Reset { thread: None });
         }
         if let Some((path, tail)) = &mut self.main
-            && let Ok(read) = self.conversation.read(tail, path)
+            && let Ok(lines) = tail.read_lines(path)
         {
+            if lines.restarted {
+                self.index.forget(path);
+            }
+            self.index.note(path, &lines);
+            let read = self.conversation.take_lines(path, &lines);
             if read.iter().any(|change| matches!(change, Change::Reset { thread: None })) {
                 // The decoder dropped every thread: the subagents' files are read again too,
                 // and every output is sent again.
-                self.subagents.values_mut().for_each(|tail| *tail = Tail::default());
+                for (path, tail) in &mut self.subagents {
+                    *tail = Tail::default();
+                    self.index.forget(path);
+                }
                 self.outputs = Outputs::default();
             }
             changes.extend(read);
@@ -69,8 +194,12 @@ impl Transcripts {
             self.subagents.entry(path).or_default();
         }
         for (path, tail) in &mut self.subagents {
-            if let Ok(read) = self.conversation.read(tail, path) {
-                changes.extend(read);
+            if let Ok(lines) = tail.read_lines(path) {
+                if lines.restarted {
+                    self.index.forget(path);
+                }
+                self.index.note(path, &lines);
+                changes.extend(self.conversation.take_lines(path, &lines));
             }
         }
         changes
@@ -88,26 +217,47 @@ impl Transcripts {
         &self.conversation
     }
 
-    /// The whole of a clipped text of `thread`: from the subagent's own file, else from the
-    /// main one (older versions wrote subagents there). `None` when neither has it.
+    /// Where the whole of `reference`, clipped in `thread`, is read from: the record's line in
+    /// the subagent's own file, else in the main one (older versions wrote subagents there),
+    /// as the index has it; a background command's output from its file. Nothing is read
+    /// here, so the caller reads it where it may block ([`Located::text`], [`Located::image`]).
     #[must_use]
-    /// A background command's output is read from the end of its file, up to
-    /// [`output::WHOLE`].
-    pub fn full_text(&self, thread: &ThreadId, reference: &TextRef) -> Option<String> {
-        if let Part::Output { tool_use_id } = &reference.part {
-            let file = output::file_of(&self.conversation, thread, tool_use_id)?;
-            return output::read_end(file, output::WHOLE).ok();
-        }
-        self.files(thread).find_map(|path| full_text_at(path, reference).ok().flatten())
+    pub fn locate(&self, thread: &ThreadId, reference: &TextRef) -> Located {
+        let output = match &reference.part {
+            Part::Output { tool_use_id } => {
+                output::file_of(&self.conversation, thread, tool_use_id).map(Path::to_path_buf)
+            }
+            _ => None,
+        };
+        let files: Vec<PathBuf> = self.files(thread).cloned().collect();
+        let spots =
+            self.index.by_uuid.get(&reference.record).map(Vec::as_slice).unwrap_or_default();
+        let lines = files
+            .iter()
+            .flat_map(|path| {
+                let file = self.index.files.iter().position(|p| p == path);
+                spots
+                    .iter()
+                    .filter(move |s| Some(s.file) == file)
+                    .map(|s| (path.clone(), s.at, s.len))
+            })
+            .collect();
+        Located { reference: reference.clone(), output, lines, files }
     }
 
-    /// The bytes of the picture `reference` names in `thread`; `None` when neither file has
-    /// it, or it is too large to send.
+    /// The whole of a clipped text of `thread`, read now ([`Self::locate`]); `None` when
+    /// neither file has it. A background command's output is read from the end of its file,
+    /// up to [`output::WHOLE`].
+    #[must_use]
+    pub fn full_text(&self, thread: &ThreadId, reference: &TextRef) -> Option<String> {
+        self.locate(thread, reference).text()
+    }
+
+    /// The bytes of the picture `reference` names in `thread`, read now; `None` when neither
+    /// file has it, or it is too large to send.
+    #[must_use]
     pub fn image(&self, thread: &ThreadId, reference: &TextRef) -> Option<Vec<u8>> {
-        self.files(thread).find_map(|path| {
-            let jsonl = std::fs::read_to_string(path).ok()?;
-            image_bytes(&jsonl, reference)
-        })
+        self.locate(thread, reference).image()
     }
 
     /// The files `thread`'s records can be in: a subagent's own, then the main one.
@@ -220,6 +370,87 @@ mod tests {
         assert_eq!(
             ids(&transcripts.read(&main, &[])),
             ["reset None", "Main w1", "Agent(\"a1\") s1:0"]
+        );
+    }
+
+    /// The whole of a clipped text is read from its record's own line, where the reads that
+    /// brought it placed it, a line read in two parts among them: the rest of the file is never
+    /// read, so the cost does not grow with the transcript. A record not read yet is not found.
+    #[test]
+    fn a_clipped_text_is_read_from_its_line_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("s1.jsonl");
+        let long = "x".repeat(4_000);
+        append(&main, &prompt("u1", None, "first"));
+        let second = prompt("u2", Some("u1"), &long);
+        let (head, rest) = second.split_at(100);
+        append(&main, head);
+        let mut transcripts = Transcripts::default();
+        let _read = transcripts.read(&main, &[]);
+        let reference = TextRef { record: "u2".to_owned(), part: Part::Block { index: 0 } };
+        assert_eq!(transcripts.full_text(&ThreadId::Main, &reference), None, "not read yet");
+        append(&main, rest);
+        append(&main, &prompt("u3", Some("u2"), "third"));
+        let _read = transcripts.read(&main, &[]);
+        let located = transcripts.locate(&ThreadId::Main, &reference);
+        assert_eq!(located.text().as_deref(), Some(long.as_str()));
+        // Every other byte of the file spoiled, the same length: the line alone is read.
+        let text = std::fs::read_to_string(&main).expect("read");
+        let at = text.find(second.as_str()).expect("the line");
+        let spoiled: String = text
+            .char_indices()
+            .map(|(i, c)| if (at..at + second.len()).contains(&i) || c == '\n' { c } else { '#' })
+            .collect();
+        std::fs::write(&main, spoiled).expect("spoil");
+        assert_eq!(located.text().as_deref(), Some(long.as_str()), "read from its line");
+        let first = TextRef { record: "u1".to_owned(), part: Part::Block { index: 0 } };
+        assert_eq!(transcripts.full_text(&ThreadId::Main, &first), None, "its line is spoiled");
+    }
+
+    /// What reading the whole of one clipped text costs from a long transcript: from its indexed
+    /// line, and as it was read before, the whole file read and searched. Run with
+    /// `cargo test -p slopty-agent --release --lib expand_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn expand_cost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("s1.jsonl");
+        let records = 20_000_u32;
+        let mut text = String::new();
+        for n in 0..records {
+            let parent = n.checked_sub(1).map(|p| format!("u{p}"));
+            text.push_str(&prompt(&format!("u{n}"), parent.as_deref(), &"word ".repeat(400)));
+        }
+        std::fs::write(&main, &text).expect("write");
+        let mut transcripts = Transcripts::default();
+        let started = std::time::Instant::now();
+        let _read = transcripts.read(&main, &[]);
+        let first_read = started.elapsed();
+        let reference = TextRef { record: "u100".to_owned(), part: Part::Block { index: 0 } };
+        let rounds = 50_u32;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            assert!(transcripts.locate(&ThreadId::Main, &reference).text().is_some());
+        }
+        let indexed = started.elapsed() / rounds;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            let whole = std::fs::read_to_string(&main).expect("read");
+            assert!(full_text(&whole, &reference).is_some());
+        }
+        let whole = started.elapsed() / rounds;
+        let lines = Lines { restarted: false, start: 0, text: text.clone() };
+        let started = std::time::Instant::now();
+        Index::default().note(&main, &lines);
+        let noting = started.elapsed();
+        eprintln!(
+            "expand_cost: {records} records, {} MiB; first read {} ms, the index's part {} ms; \
+             one text from its line {} us, from the whole file {} us",
+            text.len() / (1024 * 1024),
+            first_read.as_millis(),
+            noting.as_millis(),
+            indexed.as_micros(),
+            whole.as_micros()
         );
     }
 

@@ -15775,3 +15775,31 @@ that then judges each line builds every view once more and is left out of the co
 ```sh
 cargo test -p slopty-ui --lib a_shells_output_builds_only_that_shell
 ```
+
+## 2026-10-10 — the whole of a clipped text, from its line or from the whole transcript
+
+A Claude Code thread shows long texts and pictures clipped, and the worker reads the whole of
+one from the session's transcript when someone expands it. It used to read the whole JSONL file
+into memory and search it, on the session's own task, so the followed thread stopped while it
+read. Now the transcripts note where each record's line lies as they are read (an index of
+`"uuid"` to the line's place), and the whole of a text is read from that line alone, on the
+blocking pool, while the session goes on. The test writes 20 000 prompts of 2 000 bytes (40 MiB)
+and reads the 101st prompt's text 50 times each way. Release build, mac-studio, three runs:
+
+| what | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| first read of the session (decode and index) | 160 ms | 372 ms | 203 ms |
+| the index's part of that | 11 ms | 18 ms | 17 ms |
+| one text from its line | 21 µs | 163 µs | 22 µs |
+| one text from the whole file (before) | 6 467 µs | 8 684 µs | 6 580 µs |
+
+- **One expand costs about 300 times less** on this transcript, and its cost no longer grows with
+  the transcript. The old read grew linearly with the file.
+- **The index costs 5 to 9 % of the first read**: one substring scan per line, on lines the
+  decoder reads anyway. The spread between runs is the machine's other load; the ratios hold.
+- **Off the session's task either way now**: the session hands the line's place to the
+  blocking pool and goes on, so a slow disk stalls only the answer.
+
+```sh
+cargo test -p slopty-agent --release --lib expand_cost -- --ignored --nocapture
+```

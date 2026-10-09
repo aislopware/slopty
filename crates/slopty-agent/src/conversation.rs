@@ -69,7 +69,7 @@ use crate::transcript::Tail;
 pub mod media;
 pub mod output;
 mod session;
-pub use session::{Transcripts, subagents_dir};
+pub use session::{Located, Transcripts, subagents_dir};
 
 /// Prose: prompts, answers, thinking, plans, subagent reports, compaction summaries. Long enough
 /// for any answer a person reads through, short of a pasted log.
@@ -257,6 +257,11 @@ impl Conversation {
     /// When the file exists but cannot be read.
     pub fn read(&mut self, tail: &mut Tail, path: &Path) -> std::io::Result<Vec<Change>> {
         let lines = tail.read_lines(path)?;
+        Ok(self.take_lines(path, &lines))
+    }
+
+    /// Decode `lines` a [`Tail`] read from the file at `path`, as [`Self::read`] does.
+    pub fn take_lines(&mut self, path: &Path, lines: &crate::transcript::Lines) -> Vec<Change> {
         let thread = thread_of(path);
         let mut batch = Batch::default();
         if lines.restarted {
@@ -273,7 +278,7 @@ impl Conversation {
             batch.changes.push(Change::Reset { thread: reset });
         }
         self.decode(&thread, &lines.text, &mut batch);
-        Ok(batch.changes)
+        batch.changes
     }
 
     /// Decode complete JSONL lines from a file feeding `thread`.
@@ -1732,15 +1737,6 @@ pub fn image_bytes(jsonl: &str, reference: &TextRef) -> Option<Vec<u8>> {
         .find(|record| str_at(record, "uuid") == Some(reference.record.as_str()))
         .and_then(|record| media::bytes_at(&record, &reference.part))
         .filter(|bytes| bytes.len() <= IMAGE_BYTES)
-}
-
-/// [`full_text`] from the transcript file at `path`.
-///
-/// # Errors
-///
-/// When the file cannot be read.
-pub fn full_text_at(path: &Path, reference: &TextRef) -> std::io::Result<Option<String>> {
-    Ok(full_text(&std::fs::read_to_string(path)?, reference))
 }
 
 fn part_text(record: &Value, part: &Part) -> Option<String> {

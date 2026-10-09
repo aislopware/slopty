@@ -330,9 +330,7 @@ async fn observe(
                     on.title = title;
                 }
                 Some(Input::Permission(event)) => on.permission(&event).await,
-                Some(Input::Expand(content, reply)) => {
-                    let _gone = reply.send(on.expand(&content).await);
-                }
+                Some(Input::Expand(content, reply)) => on.expand(&content, reply),
                 Some(Input::Begin { native, cwd, reply }) => {
                     if on.cwd.is_empty() {
                         on.cwd = cwd;
@@ -644,25 +642,26 @@ impl Session {
 }
 
 impl Session {
-    /// The whole of `content`, read from the transcripts on the blocking pool.
-    async fn expand(&mut self, content: &ContentRef) -> Expanded {
-        let Some((thread, at)) = observed::text_ref(content) else { return Expanded::Gone };
-        let Some(transcripts) = self.transcripts.take() else { return Expanded::Gone };
-        let read = tokio::task::spawn_blocking(move || {
-            let body = if matches!(at.part, Part::Image { .. }) {
-                transcripts.image(&thread, &at).map(Expanded::Bytes)
-            } else {
-                transcripts.full_text(&thread, &at).map(|text| Expanded::Text(clip(text)))
-            };
-            (transcripts, body.unwrap_or(Expanded::Gone))
-        })
-        .await;
-        let Ok((transcripts, body)) = read else {
-            self.transcripts = Some(Transcripts::default());
-            return Expanded::Gone;
+    /// Answer `reply` with the whole of `content`: the record's line, as the transcripts'
+    /// index places it ([`Transcripts::locate`]), read on the blocking pool while the session
+    /// goes on with its thread.
+    fn expand(&self, content: &ContentRef, reply: oneshot::Sender<Expanded>) {
+        let located = observed::text_ref(content).and_then(|(thread, at)| {
+            let image = matches!(at.part, Part::Image { .. });
+            Some((self.transcripts.as_ref()?.locate(&thread, &at), image))
+        });
+        let Some((located, image)) = located else {
+            let _gone = reply.send(Expanded::Gone);
+            return;
         };
-        self.transcripts = Some(transcripts);
-        body
+        drop(tokio::task::spawn_blocking(move || {
+            let body = if image {
+                located.image().map(Expanded::Bytes)
+            } else {
+                located.text().map(|text| Expanded::Text(clip(text)))
+            };
+            let _gone = reply.send(body.unwrap_or(Expanded::Gone));
+        }));
     }
 }
 
