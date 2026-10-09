@@ -681,3 +681,68 @@ fn running_checks_hold_nothing_and_a_merged_pull_request_asks_for_no_fix() {
         assert!(!b.actions(TaskId(n)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(n)));
     }
 }
+
+/// A task an agent has worked on can begin again: "Start fresh" on the agent it ran last, and
+/// "Give to another agent…" among those its machine can start, which goes to the workspace as
+/// that agent. A task that never ran and a merged one offer neither.
+#[gpui::test]
+fn a_task_starts_fresh_or_goes_to_another_agent(cx: &mut gpui::TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::Modifiers;
+    use slopty_proto::thread::AgentId;
+
+    use super::model::TaskAction;
+    use super::view::{ProjectEvent, ProjectView, Seen, WorkerSeen};
+
+    let worker = WorkerId::new();
+    let ran = on(card(3, "Ran", TaskState::Waiting), worker, SessionId::new());
+    let never = card(4, "Never ran", TaskState::Planned);
+    let merged = on(card(5, "Merged", TaskState::Merged), worker, SessionId::new());
+    let mirror = one(vec![ran, never, merged]);
+    let b = board(&mirror);
+    let fresh = [TaskAction::StartFresh, TaskAction::GiveTo];
+    assert!(fresh.iter().all(|a| b.controls(TaskId(3)).contains(a)), "{:?}", b.controls(TaskId(3)));
+    assert!(fresh.iter().all(|a| !b.controls(TaskId(4)).contains(a)), "it never ran");
+    assert!(fresh.iter().all(|a| !b.controls(TaskId(5)).contains(a)), "its work is in");
+
+    let codex = AgentId::named(AgentId::CODEX);
+    let agents = vec![AgentId::named(AgentId::CLAUDE_CODE), codex.clone()];
+    let seen = Seen {
+        board: mirror.get(&fixtures::id("board")).cloned(),
+        workers: [(worker, WorkerSeen { name: "box".to_owned(), os: None, form: None, agents })]
+            .into(),
+        ..Seen::default()
+    };
+    cx.update(gpui_kit::init);
+    let (view, cx) = cx.add_window_view(|_w, cx| {
+        let mut view = ProjectView::new(fixtures::id("board"), slopty_theme::Theme::default(), cx);
+        view.set_seen(seen, cx);
+        view
+    });
+    let heard: Rc<RefCell<Vec<ProjectEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_v, event: &ProjectEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    view.update(cx, |v, cx| v.select_by(1, cx));
+    cx.run_until_parked();
+    let click = |cx: &mut gpui::VisualTestContext, s: &'static str| {
+        let at = cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} drawn")).center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+    };
+    click(cx, "project-card-start-fresh-3");
+    assert_eq!(*heard.borrow(), [ProjectEvent::Act(TaskId(3), TaskAction::StartFresh)]);
+    heard.borrow_mut().clear();
+    click(cx, "project-card-give-to-3");
+    assert!(heard.borrow().is_empty(), "the board picks the agent itself");
+    assert!(cx.debug_bounds("project-card-give-3-0").is_some(), "Claude Code, on box");
+    click(cx, "project-card-give-3-1");
+    assert_eq!(*heard.borrow(), [ProjectEvent::GiveTo(TaskId(3), codex)]);
+    assert!(cx.debug_bounds("project-card-give-3").is_none(), "the picker shuts");
+}

@@ -203,6 +203,12 @@ impl Board {
             .max_by_key(|r| (r.updated_ms, r.id))
     }
 
+    /// The thread whose agent ran or is seated at `term`, there or exited: its id, its agent
+    /// and the folder it worked in.
+    pub(super) fn ran_at(&self, term: TermRef) -> Option<(ThreadId, AgentId, Option<String>)> {
+        self.thread_in(term).map(|r| (r.id, r.agent.clone(), r.cwd.clone()))
+    }
+
     /// The thread whose agent runs or is seated at `term`, hanging from no other.
     pub(super) fn thread_at(&self, term: TermRef) -> Option<ThreadId> {
         self.thread_in(term).map(|r| r.id)

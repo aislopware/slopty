@@ -27,6 +27,7 @@ use slopty_proto::project::{
     NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
+use slopty_proto::thread::AgentId;
 use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
@@ -102,6 +103,8 @@ pub enum ProjectEvent {
     Say(String),
     /// Run the task there, or wherever its placement chooses: the "Run on" picker's choice.
     Pin(TaskId, RunOn),
+    /// Hand the task's work to this agent: the "Give to another agent" picker's choice.
+    GiveTo(TaskId, AgentId),
     /// Close the "Run on" picker.
     CloseRunOn,
     /// Tell the orchestrator this, as the person.
@@ -179,6 +182,9 @@ pub struct WorkerSeen {
     pub os: Option<slopty_proto::server::Os>,
     /// What machine it is, once it has said: the glyph its place wears.
     pub form: Option<slopty_proto::server::Form>,
+    /// The agents it can start, while it is linked: what "Give to another agent" offers for a
+    /// task that ran there.
+    pub agents: Vec<AgentId>,
 }
 
 /// What the workspace hands a board: the project and what the board names it by.
@@ -229,6 +235,8 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
+    /// The task whose "Give to another agent" picker is open.
+    giving: Option<TaskId>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -268,6 +276,7 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
+            giving: None,
             #[cfg(test)]
             renders: 0,
         }
@@ -361,13 +370,15 @@ impl ProjectView {
     }
 
     /// Do `action` to the task the keyboard stands on, or say why not.
-    pub fn act_on_picked(&self, action: TaskAction, cx: &mut Context<Self>) {
+    pub fn act_on_picked(&mut self, action: TaskAction, cx: &mut Context<Self>) {
         let Some(board) = &self.seen.board else { return };
         let Some(Some(task)) = self.picked() else {
             cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
             return;
         };
-        if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
+        if action == TaskAction::GiveTo && board.controls(task).contains(&action) {
+            self.toggle_giving(task, cx);
+        } else if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
             cx.emit(ProjectEvent::Act(task, action));
         } else {
             cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
@@ -618,6 +629,8 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::PushAgain => "push again",
         TaskAction::Cancel => "cancel",
         TaskAction::Stop => "stop",
+        TaskAction::StartFresh => "start fresh",
+        TaskAction::GiveTo => "give to another agent",
     }
 }
 
@@ -814,9 +827,13 @@ impl ProjectView {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             };
-            tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
+            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
-                cx.emit(ProjectEvent::Act(task, action));
+                if action == TaskAction::GiveTo {
+                    this.toggle_giving(task, cx);
+                } else {
+                    cx.emit(ProjectEvent::Act(task, action));
+                }
             }))
         });
         Some(div().flex_none().flex().items_center().gap(px(sp.xxs)).children(buttons))
@@ -1631,6 +1648,7 @@ impl ProjectView {
             .chain(
                 self.run_on_block(card.id, "project-card", cx).map(IntoElement::into_any_element),
             )
+            .chain(self.give_block(card, "project-card", cx).map(IntoElement::into_any_element))
             .collect();
         let arrive = ElementId::Name(format!("{key}-in").into());
         let el = self
@@ -1914,6 +1932,102 @@ impl ProjectView {
             );
         }
         Some(row)
+    }
+
+    /// Open the "Give to another agent" picker under `task`, or shut it there.
+    fn toggle_giving(&mut self, task: TaskId, cx: &mut Context<Self>) {
+        self.giving = if self.giving == Some(task) { None } else { Some(task) };
+        cx.notify();
+    }
+
+    /// The "Give to another agent" picker under `card`, while it is open there: the agents the
+    /// machine it ran on can start. Its work stays where it is, so the next agent goes there.
+    fn give_block(
+        &self,
+        card: &TaskCard,
+        prefix: &str,
+        cx: &Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let task = card.id;
+        if self.giving != Some(task) {
+            return None;
+        }
+        let worker = card.assignment.as_ref().map(|a| a.term.worker)?;
+        let seen = self.seen.workers.get(&worker);
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let key = format!("{prefix}-give-{task}");
+        let close = crate::kit::icon_button(theme, format!("{key}-close"), Symbol::Xmark, "Close")
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.giving = None;
+                cx.notify();
+            }));
+        let machine = seen.map_or_else(|| "its machine".to_owned(), |w| w.name.clone());
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(sp.xs))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(format!("Give #{task} to an agent on {machine}"))),
+            )
+            .child(close);
+        let agents = seen.map(|w| w.agents.as_slice()).unwrap_or_default();
+        let options = agents.iter().enumerate().map(|(i, agent)| {
+            let id = format!("{key}-{i}");
+            let selector = id.clone();
+            let name = crate::conversation::thread::view::agent_label(agent);
+            let pick = agent.clone();
+            let el = div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Give #{task} to {name}")))
+                .px(px(sp.xs))
+                .py(px(sp.xxs))
+                .rounded(px(theme.radii.sm))
+                .cursor_pointer()
+                .text_color(hsla(s.text))
+                .hover(move |el| el.bg(hsla(s.selected)))
+                .child(SharedString::from(name));
+            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.giving = None;
+                cx.emit(ProjectEvent::GiveTo(task, pick.clone()));
+                cx.notify();
+            }))
+        });
+        let options: Vec<_> = options.collect();
+        let none = agents.is_empty().then(|| {
+            div()
+                .px(px(sp.xs))
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(format!("{machine} is not linked here")))
+        });
+        let selector = key.clone();
+        Some(
+            div()
+                .id(SharedString::from(key))
+                .debug_selector(move || selector)
+                .role(Role::Group)
+                .aria_label(SharedString::from(format!("Give #{task} to another agent")))
+                .flex()
+                .flex_col()
+                .gap(px(sp.xxs))
+                .mt(px(sp.xs))
+                .px(px(sp.sm))
+                .py(px(sp.xs))
+                .rounded(px(theme.radii.sm))
+                .bg(hsla(s.ground))
+                .text_size(px(theme.typography.small()))
+                .child(head)
+                .children(options)
+                .children(none),
+        )
     }
 
     /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",

@@ -451,6 +451,13 @@ mod golden_project {
                 launch: launch(pi),
             }),
         );
+        let restart = |agent: Option<AgentId>| Verb::TaskRestart {
+            project: project_id(),
+            task: TaskId(6),
+            agent,
+        };
+        snap("task_restart", &request(restart(None)));
+        snap("task_restart_codex", &request(restart(Some(AgentId::named(AgentId::CODEX)))));
         let script =
             Script { name: "test".to_owned(), command: "cargo test".to_owned(), dir: None };
         snap("script_set", &request(Verb::ScriptSet { project: project_id(), script }));

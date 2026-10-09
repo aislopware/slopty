@@ -394,6 +394,7 @@ impl Orchestrator {
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
+            | Verb::TaskRestart { .. }
             | Verb::WorkerFacts { .. }
             | Verb::TaskGet { .. }
             | Verb::TaskReport { .. }

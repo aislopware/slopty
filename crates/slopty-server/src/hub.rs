@@ -804,6 +804,9 @@ impl Hub {
             Verb::TaskSpawn { project, task, launch } => {
                 self.task_spawn(caller, key, project, task, launch).await
             }
+            Verb::TaskRestart { project, task, agent } => {
+                self.task_restart(caller, key, project, task, agent).await
+            }
             Verb::WorkerFacts { worker } => self.worker_facts(worker),
             Verb::TaskGet { project, task } => self.task_get(&project, task),
             Verb::WorkingOn { session } => self.working_on(session),
@@ -1512,6 +1515,7 @@ fn remember(
         Verb::TaskCreate { project, .. }
         | Verb::TaskUpdate { project, .. }
         | Verb::TaskSpawn { project, .. }
+        | Verb::TaskRestart { project, .. }
         | Verb::TaskTell { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. } => Some(project),
@@ -1644,6 +1648,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskCreate { .. }
         | Verb::TaskUpdate { .. }
         | Verb::TaskSpawn { .. }
+        | Verb::TaskRestart { .. }
         | Verb::TaskTell { .. }
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }

@@ -252,6 +252,11 @@ pub enum TaskAction {
     Cancel,
     /// End its agent's terminal; the task waits for its next start.
     Stop,
+    /// Start its work again with a new run of the agent it ran last, its work so far kept
+    /// ([`slopty_proto::orchestration::Verb::TaskRestart`]).
+    StartFresh,
+    /// Hand its work, as it stands, to another agent, picked on the board.
+    GiveTo,
 }
 
 impl TaskAction {
@@ -269,6 +274,8 @@ impl TaskAction {
             Self::PushAgain => "Push again",
             Self::Cancel => "Cancel task",
             Self::Stop => "Stop its agent",
+            Self::StartFresh => "Start fresh",
+            Self::GiveTo => "Give to another agent\u{2026}",
         }
     }
 
@@ -292,6 +299,8 @@ impl TaskAction {
             Self::PushAgain => "push-again",
             Self::Cancel => "cancel",
             Self::Stop => "stop",
+            Self::StartFresh => "start-fresh",
+            Self::GiveTo => "give-to",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -771,6 +780,10 @@ impl Board {
         if self.terminal(Some(task)).is_some() {
             out.push(TaskAction::Stop);
         }
+        // A task an agent has worked on can begin again, on that agent or another.
+        if card.assignment.is_some() && card.state != TaskState::Merged {
+            out.extend([TaskAction::StartFresh, TaskAction::GiveTo]);
+        }
         if !matches!(card.state, TaskState::Merged | TaskState::Failed) {
             out.push(TaskAction::Cancel);
         }
@@ -844,7 +857,9 @@ impl Board {
             | TaskAction::Retry
             | TaskAction::PushAgain
             | TaskAction::Cancel
-            | TaskAction::Stop => None,
+            | TaskAction::Stop
+            | TaskAction::StartFresh
+            | TaskAction::GiveTo => None,
         }
     }
 

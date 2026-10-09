@@ -2170,3 +2170,31 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_task_s_pipeline_says_each_stage_and_its_open_to_dos` and
     `running_checks_hold_nothing_and_a_merged_pull_request_asks_for_no_fix`. The project goldens
     changed.
+
+- ✅ **A task starts fresh, or goes to another agent** (readiness R22, 2026-10-09). A task whose
+  agent went in circles could only be stopped, or cancelled and planned again, which lost its
+  place on the board. `Verb::TaskRestart { project, task, agent }` begins the work again with a
+  new agent.
+  - **What the server does.** It closes the task's agent if one runs (its terminal, or its
+    thread's seat) and ends that assignment at once rather than waiting for the worker to say
+    so. Then it starts the task again through the usual start (`TaskSpawn`, with its bounds,
+    placement and permission checks). The new agent is `agent`, else the one the task ran last,
+    read from its worker's thread table at the old seat. It is pinned to the worker the task ran
+    on and starts in the folder the earlier agent worked in (its thread's, else the task's
+    worktree), so the work so far is where it was. A task that never ran must name its agent.
+  - **What the new agent is told.** Its first prompt is the task's brief, then one line: an
+    agent worked on this before, its changes are in the worktree, and its thread is read with
+    `slopty agent read --thread <id>`. Nothing of the old session is replayed, so "fresh" means
+    a new context with the files kept. Throwing the work away is Cancel, not this.
+  - **Who may.** The person, and the project's orchestrator for its own tasks. A task's own
+    agent may not restart itself (the same scope rule as `TaskSpawn`).
+  - **The board.** On the task it stands on, after "Stop its agent": "Start fresh", then "Give
+    to another agent…", which opens a short list of the agents the task's machine can start
+    (`WorkerSeen::agents`). Both show only on a task an agent has worked on and that is not
+    merged. The CLI and MCP tools do not expose it yet; the orchestrator restarts a task by
+    stopping and starting it.
+  - Tests: `slopty-server` `hub::thread_tests::a_task_goes_to_another_agent_and_starts_fresh`
+    (pi to Codex, then Codex afresh: closed first, same worker and folder, the brief and the
+    pointer, a never-run task refused, a task's own agent forbidden); `slopty-ui`
+    `project::tests::a_task_starts_fresh_or_goes_to_another_agent`; goldens `task_restart` and
+    `task_restart_codex`.

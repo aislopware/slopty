@@ -919,6 +919,20 @@ pub enum Verb {
         /// The terminal's id, chosen by the server.
         session: SessionId,
     },
+    /// Start a task's work again with a new agent: the one on it now, if one runs, is closed,
+    /// and a new one starts on the worker it ran on, in the task's worktree there, the work so
+    /// far kept. Its first prompt is the task's brief, and a pointer to the earlier agent's
+    /// thread. The agent is `agent` (handing the task to another agent), else the one it ran
+    /// last (a fresh start of the same agent). Answered with [`Outcome::Task`]. An agent may
+    /// restart only its project's tasks, as their orchestrator, never its own task.
+    TaskRestart {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// The agent that takes it; the one it ran last when absent.
+        agent: Option<AgentId>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -991,6 +1005,7 @@ impl Verb {
             | Self::TaskCreate { .. }
             | Self::TaskUpdate { .. }
             | Self::TaskSpawn { .. }
+            | Self::TaskRestart { .. }
             | Self::TaskTell { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }

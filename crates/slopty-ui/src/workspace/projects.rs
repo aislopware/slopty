@@ -485,7 +485,8 @@ impl WorkspaceView {
                 let worker = self.workers.get(&worker_key(id))?;
                 let caps = worker.caps.as_ref();
                 let (os, form) = (caps.map(|c| c.os), caps.map(|c| c.form));
-                Some((id, WorkerSeen { name: worker.name.clone(), os, form }))
+                let agents = self.startable_on(worker_key(id));
+                Some((id, WorkerSeen { name: worker.name.clone(), os, form, agents }))
             })
             .collect();
         let now = crate::clock::now(cx);
@@ -658,6 +659,11 @@ impl WorkspaceView {
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
                 ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
                 ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
+                ProjectEvent::GiveTo(task, agent) => {
+                    let agent = Some(agent.clone());
+                    let verb = Verb::TaskRestart { project: asked.clone(), task: *task, agent };
+                    this.send_to_server(verb, |_, _| (), cx);
+                }
                 ProjectEvent::CloseRecap => {
                     if this.projects.recaps.remove(&asked).is_some() {
                         this.projects_moved(cx);
@@ -691,6 +697,9 @@ impl WorkspaceView {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::PushAgain => Verb::TaskPush { project, task },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
+            TaskAction::StartFresh => Verb::TaskRestart { project, task, agent: None },
+            // The board picks the agent itself, and says so as `ProjectEvent::GiveTo`.
+            TaskAction::GiveTo => return,
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),

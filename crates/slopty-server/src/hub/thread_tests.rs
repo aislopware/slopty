@@ -10,7 +10,7 @@ use slopty_proto::thread::{AgentId, Cursor, Phase, ThreadId};
 
 use super::ladder::tests::{asking, row, snapshot, under};
 use super::project_tests::{
-    answer, claude, create, installed, new_task, project, refused, request, spawn, status,
+    answer, claude, create, installed, new_task, opened, project, refused, request, spawn, status,
     worker_on,
 };
 use super::*;
@@ -260,4 +260,77 @@ async fn a_codex_task_s_card_shows_its_thread_s_failing_pull_request() {
     assert_eq!(said.len(), 1, "told once: {said:?}");
     assert_eq!(said[0].what, Moment::Pull(failing));
     assert_eq!(said[0].task, Some(task));
+}
+
+/// A task is given to another agent, then started fresh on that one: each time the agent on it
+/// is closed first, and the next starts on the worker it ran on, in the folder it worked in,
+/// told the brief and where the earlier agent's thread is. A task that never ran must name
+/// its agent, and a task's own agent restarts nothing.
+#[tokio::test]
+async fn a_task_goes_to_another_agent_and_starts_fresh() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_mac, mac_lease, _mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    mac_lease.handle(ToServer::Facts(installed(&["pi", "codex"])));
+    lease.handle(ToServer::Facts(installed(&["pi", "codex"])));
+    create(&hub, None).await;
+    let task = new_task(&hub, None).await;
+    let pi = AgentId::named(AgentId::PI);
+    let codex = AgentId::named(AgentId::CODEX);
+    let restart = |agent| Verb::TaskRestart { project: project(), task, agent };
+
+    let never = hub.dispatch(restart(None)).await;
+    assert!(refused(&never, ErrorCode::Invalid).contains("name the agent"), "{never:?}");
+
+    let asked = spawn(
+        &hub,
+        Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone(), &[]) },
+    );
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    let first = ThreadId::new();
+    answer(&lease, id, Outcome::ThreadStarted { thread: first, worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let mut seated = row(Phase::Working, 1, None);
+    seated.id = first;
+    seated.agent = pi.clone();
+    seated.cwd = Some("~/src/slopty/crates/x".to_owned());
+    seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    lease.handle(snapshot(vec![seated.clone()]));
+    let own = hub.dispatch_as(Speaker::Proven(seat), None, restart(None)).await;
+    refused(&own, ErrorCode::Forbidden);
+
+    // To Codex: pi's seat closes, then Codex opens where pi worked, on pi's worker.
+    let asked = spawn(&hub, restart(Some(codex.clone())));
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term: TermRef { worker: linux, session: seat } });
+    answer(&lease, id, Outcome::Done);
+    let start = request(&mut rx).await;
+    let Verb::OpenTerminal { worker, cwd, command, .. } = &start.1 else { panic!("{start:?}") };
+    assert_eq!((*worker, cwd.as_deref()), (linux, Some("~/src/slopty/crates/x")));
+    assert_eq!(command.first().map(String::as_str), Some("codex"));
+    let prompt = command.last().expect("its first prompt");
+    assert!(prompt.starts_with("Build it."), "{prompt}");
+    assert!(prompt.contains(&format!("slopty agent read --thread {first}")), "{prompt}");
+    let term = opened(&lease, &start);
+    let Outcome::Task(given) = asked.await.unwrap() else { panic!("not a task") };
+    assert_eq!(given.assignment.map(|a| a.term), Some(term), "Codex's terminal is the task's");
+
+    // Fresh, on the agent it ran last: Codex, from its own row.
+    let mut tui = row(Phase::Idle, 2, Some(term.session));
+    tui.agent = codex.clone();
+    tui.cwd = Some("~/src/slopty/crates/x".to_owned());
+    lease.handle(snapshot(vec![tui.clone()]));
+    let asked = spawn(&hub, restart(None));
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term });
+    answer(&lease, id, Outcome::Done);
+    let start = request(&mut rx).await;
+    let Verb::OpenTerminal { command, .. } = &start.1 else { panic!("{start:?}") };
+    assert_eq!(command.first().map(String::as_str), Some("codex"), "the same agent, afresh");
+    let prompt = command.last().expect("its first prompt");
+    assert!(prompt.contains(&format!("--thread {}", tui.id)), "{prompt}");
+    let again = opened(&lease, &start);
+    let Outcome::Task(fresh) = asked.await.unwrap() else { panic!("not a task") };
+    assert_eq!(fresh.assignment.map(|a| a.term), Some(again));
 }

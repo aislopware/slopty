@@ -1630,7 +1630,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     agent first, then the others the worker can start (`ThreadHub`'s agents, from the link).
     Test: `branching_to_another_agent_carries_the_thread_over`
     (`conversation::thread::tests::carry`). A seated thread's seat does not go with it.
-    **Not built:** a project task's "Restart fresh" or "Give to another agent".
+    A project task starts fresh or goes to another agent from its board: see "A task starts
+    fresh, or goes to another agent" in `docs/decisions/projects.md`.
   - Tests: `a_thread_is_told_whole_when_it_fits`,
     `the_newest_message_stays_when_the_budget_is_tight` and the property test
     `an_account_keeps_within_its_budget` (`slopty_agent::handoff`);

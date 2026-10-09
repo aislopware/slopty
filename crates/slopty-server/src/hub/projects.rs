@@ -16,7 +16,7 @@ use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, T
 use slopty_proto::project::{
     Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
     Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV, Task, TaskId,
-    TaskLaunch, TimelineEntry, WorkerFacts,
+    TaskLaunch, TaskState, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -210,6 +210,7 @@ pub(super) fn agent_scope(
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
+            | Verb::TaskRestart { .. }
             | Verb::TaskTell { .. }
     );
     if !changes {
@@ -266,6 +267,7 @@ pub(super) fn agent_scope(
         }
         Verb::TaskCreate { project, .. }
         | Verb::TaskSpawn { project, .. }
+        | Verb::TaskRestart { project, .. }
         | Verb::TaskTell { project, .. } => {
             in_own(project)?;
             if let Some(own_task) = task_of {
@@ -1442,6 +1444,102 @@ impl Hub {
         started.await.unwrap_or_else(|e| error(ErrorCode::Failed, &format!("the start ended: {e}")))
     }
 
+    /// Start `task`'s work again with a new agent ([`Verb::TaskRestart`]): the one on it now is
+    /// closed, and `agent` (else the one it ran last) starts on the worker it ran on, in the
+    /// folder it worked in there, told its brief and where the earlier agent's thread is.
+    pub(super) async fn task_restart(
+        &self,
+        caller: Caller,
+        key: Option<IdempotencyKey>,
+        project: ProjectId,
+        task: TaskId,
+        agent: Option<AgentId>,
+    ) -> Outcome {
+        let verb = Verb::TaskRestart { project: project.clone(), task, agent: agent.clone() };
+        if let Some(key) = &key
+            && let Some(answer) = keyed(&mut self.inner.state.lock(), caller, key, &verb)
+        {
+            return answer;
+        }
+        let hub = self.clone();
+        let restarted = tokio::spawn(async move {
+            let part = key.as_ref().map(|k| k.part("restart"));
+            let outcome = hub.restart_once(caller, part, project, task, agent).await;
+            if let Some(key) = key {
+                remember(&mut hub.inner.state.lock(), caller, key, &verb, &outcome);
+            }
+            outcome
+        });
+        restarted
+            .await
+            .unwrap_or_else(|e| error(ErrorCode::Failed, &format!("the restart ended: {e}")))
+    }
+
+    /// [`Self::task_restart`], once its key is checked.
+    async fn restart_once(
+        &self,
+        caller: Caller,
+        key: Option<IdempotencyKey>,
+        project: ProjectId,
+        task: TaskId,
+        agent: Option<AgentId>,
+    ) -> Outcome {
+        let earlier = {
+            let mut state = self.inner.state.lock();
+            let t = match state.projects.task(&project, task) {
+                Ok(t) => t.clone(),
+                Err(refused) => return refused,
+            };
+            if t.state == TaskState::Merged {
+                return error(
+                    ErrorCode::Invalid,
+                    &format!("task {task} is merged; make a new task"),
+                );
+            }
+            let (terminals, _) = live(&mut state);
+            let had = t.assignment.as_ref();
+            let ran = had.and_then(|a| state.board.ran_at(a.term));
+            drop(state);
+            let (thread, agent, cwd) = match ran {
+                Some((thread, agent, cwd)) => (Some(thread), Some(agent), cwd),
+                None => (None, None, None),
+            };
+            Earlier {
+                live: had.filter(|a| a.open() && terminals.contains(&a.term)).map(|a| a.term),
+                worker: had.map(|a| a.term.worker),
+                thread,
+                agent,
+                cwd: cwd.or(t.worktree),
+                brief: t.brief,
+            }
+        };
+        let Some(agent) = agent.or(earlier.agent) else {
+            return error(
+                ErrorCode::Invalid,
+                &format!("task {task}'s last agent is not known: name the agent to give it to"),
+            );
+        };
+        if let Some(term) = earlier.live {
+            if let failed @ Outcome::Error { .. } = self.forward(None, Verb::Close { term }).await {
+                return failed;
+            }
+            // Its worker says so in a moment; the task is free for its next agent now.
+            let mut state = self.inner.state.lock();
+            let updates = state.projects.session_ended(term, WallMs::now());
+            self.projects_moved(&mut state, updates);
+            drop(state);
+        }
+        let launch = TaskLaunch {
+            pin: earlier.worker,
+            cwd: earlier.cwd.unwrap_or_default(),
+            run: runner_for(agent, restart_prompt(&earlier.brief, earlier.thread)),
+            env: Vec::new(),
+            size: None,
+            ignore_dependencies: earlier.worker.is_some(),
+        };
+        self.task_spawn(caller, key, project, task, launch).await
+    }
+
     /// Refused when `launch` would loosen its agent's permissions and the person does not let
     /// this project's agents.
     fn loosens(state: &State, project: &ProjectId, launch: &TaskLaunch) -> Result<(), Outcome> {
@@ -1895,6 +1993,52 @@ impl Hub {
         tokio::spawn(async move {
             let _closed = hub.forward(None, Verb::Close { term }).await;
         });
+    }
+}
+
+/// What a task restarted on its earlier worker knew before ([`Hub::task_restart`]).
+struct Earlier {
+    /// Its agent's terminal, or seat, while one runs.
+    live: Option<TermRef>,
+    /// The worker it ran on last.
+    worker: Option<WorkerId>,
+    /// The thread its agent ran as last.
+    thread: Option<ThreadId>,
+    /// That thread's agent.
+    agent: Option<AgentId>,
+    /// Where it worked: that thread's folder, else the task's worktree. A start there takes
+    /// up the work where it is.
+    cwd: Option<String>,
+    /// Its brief.
+    brief: String,
+}
+
+/// How `agent` runs for a task, told `prompt` first: Claude Code and Codex in their own
+/// terminals, as a task's start names them, any other as a thread.
+fn runner_for(agent: AgentId, prompt: Option<String>) -> Runner {
+    if agent.is(AgentId::CLAUDE_CODE) {
+        Runner::Claude { prompt, args: Vec::new() }
+    } else if agent.is(AgentId::CODEX) {
+        Runner::Codex { prompt, args: Vec::new() }
+    } else {
+        Runner::Agent { agent, prompt, model: None, args: Vec::new() }
+    }
+}
+
+/// A restarted task's first prompt: its brief, then where the earlier agent's work and thread
+/// are, for the new agent to read if it helps.
+fn restart_prompt(brief: &str, thread: Option<ThreadId>) -> Option<String> {
+    let earlier = thread.map(|thread| {
+        format!(
+            "An agent worked on this task before you: what it changed is in your worktree. Its \
+             thread is {thread}; read it with `slopty agent read --thread {thread}` if what it \
+             learned helps."
+        )
+    });
+    let brief = Some(brief.trim()).filter(|b| !b.is_empty()).map(str::to_owned);
+    match (brief, earlier) {
+        (Some(brief), Some(earlier)) => Some(format!("{brief}\n\n{earlier}")),
+        (brief, earlier) => brief.or(earlier),
     }
 }
 
