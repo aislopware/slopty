@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 use gpui::Context;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
+use slopty_proto::orchestration::{Outcome, ThreadOf, ThreadView, Verb};
+use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
 use slopty_proto::thread::{AskId, ThreadId};
 
@@ -67,6 +69,8 @@ pub(in crate::workspace) struct Approvals {
     sent: HashMap<ThreadId, AskId>,
     /// Looks at [`Self::tapped`] again when the next of them is due.
     wake: Option<gpui::Task<()>>,
+    /// Verdicts on their way through the server, not answered yet.
+    through_server: usize,
 }
 
 /// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole
@@ -79,7 +83,7 @@ pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
 impl Approvals {
     /// Whether a note's verdict waits for its request.
     pub(in crate::workspace) const fn taps_waiting(&self) -> bool {
-        !self.tapped.is_empty()
+        !self.tapped.is_empty() || self.through_server > 0
     }
 }
 
@@ -154,6 +158,12 @@ impl WorkspaceView {
             {
                 continue;
             }
+            // Its worker not linked here yet, while the server's ladder has its thread waiting
+            // on the person: answered through the server, which holds a pushed phone's yes or no.
+            if let Some(thread) = self.on_servers_ladder(&tap.route, thread) {
+                self.answer_through_server(tap, thread, cx);
+                continue;
+            }
             let answered = thread.is_some_and(|t| self.approvals.sent.get(&t) == Some(&tap.ask));
             let me = self.me(tap.route.worker);
             // How long until the worker's table has surely come, once its link was up.
@@ -174,7 +184,7 @@ impl WorkspaceView {
                 self.approvals.tapped.push(tap);
             }
         }
-        if self.approvals.tapped.is_empty() {
+        if !self.approvals.taps_waiting() {
             cx.emit(WorkspaceEvent::TapsSettled);
         }
         self.approvals.wake = due.map(|due| {
@@ -183,6 +193,80 @@ impl WorkspaceView {
                 let _gone = this.update(cx, Self::settle_taps);
             })
         });
+    }
+
+    /// The thread of `route`'s note, when its worker is not linked here and the server's ladder
+    /// has it waiting on the person, and a server is there to answer it through: `thread` when
+    /// the note named it, else the one the ladder seats in its terminal.
+    fn on_servers_ladder(&self, route: &Route, thread: Option<ThreadId>) -> Option<ThreadId> {
+        self.projects.caller.as_ref()?;
+        if self.workers.get(&route.worker).is_some_and(|w| w.link.is_some()) {
+            return None;
+        }
+        self.thread_stands()
+            .find(|(id, stand)| {
+                let ours = match route.about {
+                    About::Thread(of) => of == *id,
+                    About::Session(session) => {
+                        thread == Some(*id) || stand.terminal == Some(session)
+                    }
+                };
+                ours && stand.worker == route.worker && stand.rung == Rung::NeedsYou
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// Answer `tap` on `thread` through the server: read the thread's open requests there for
+    /// the choice that allows or denies once, then answer with it, once. A request the server no
+    /// longer finds, or a server that refuses, is said as a note's answer that found nothing.
+    fn answer_through_server(&mut self, tap: Tapped, thread: ThreadId, cx: &Context<Self>) {
+        let Some(caller) = self.projects.caller.clone() else { return };
+        if self.approvals.sent.get(&thread) == Some(&tap.ask) {
+            return;
+        }
+        tracing::info!(%thread, ask = tap.ask.0, allow = tap.allow, "answered through the server");
+        self.approvals.sent.insert(thread, tap.ask.clone());
+        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
+        let Tapped { route, ask, allow, .. } = tap;
+        cx.spawn(async move |this, cx| {
+            let read = Verb::ReadThread {
+                of: ThreadOf::Thread(thread),
+                view: ThreadView::Messages,
+                after: None,
+                hold: false,
+            };
+            let choice = match caller.call(read).await {
+                Outcome::Thread(read) => read
+                    .requests
+                    .iter()
+                    .find(|r| r.ask == ask)
+                    .and_then(|r| slopty_proto::thread::once(&r.choices, allow))
+                    .map(|c| c.id.clone()),
+                _ => None,
+            };
+            let answered = match choice {
+                Some(choice) => {
+                    let verb = Verb::AnswerRequest {
+                        of: ThreadOf::Thread(thread),
+                        ask,
+                        choice,
+                        message: None,
+                    };
+                    !matches!(caller.call(verb).await, Outcome::Error { .. })
+                }
+                None => false,
+            };
+            let _gone = this.update(cx, |this, cx| {
+                if !answered {
+                    this.unanswered(route, NO_LONGER_WAITING, cx);
+                }
+                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
+                if !this.approvals.taps_waiting() {
+                    cx.emit(WorkspaceEvent::TapsSettled);
+                }
+            });
+        })
+        .detach();
     }
 
     /// A note's verdict found no request to answer: a toast with the app in front, else the

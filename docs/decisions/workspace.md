@@ -2217,3 +2217,14 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::retained::title_tabs_that_overflow_at_once_are_drawn_as_from_scratch`
     (twelve tabs in one snapshot, as a relaunch lays them out, then a narrower window). It and
     the one-by-one test fail when an element sized from the last frame's scroll is put back.
+- ✅ **A note's yes or no goes through the server while its worker is not linked here**
+  (2026-10-09, the client half of `agents.md`'s "A yes or no waits for a pocketed phone").
+  - A pushed note's Allow or Deny wakes the app, and its link to the worker can take seconds to
+    come up, longer than the system lets a background tap run. While that link is down and the
+    server's ladder has the thread waiting on the person, the tap is answered through the
+    server and does not wait for the worker. `Verb::ReadThread` reads the request's choices,
+    and `Verb::AnswerRequest` answers with the plain allow or deny, once
+    (`slopty_proto::thread::once`). A request the server no longer finds is said as one no
+    longer waiting. The app is told it may sleep (`TapsSettled`) only once the answer is out.
+  - With the worker linked, the answer goes through its thread hub as before.
+  - Tests: `workspace::tests::approvals::a_notes_answer_goes_through_the_server_while_its_worker_is_away`.
