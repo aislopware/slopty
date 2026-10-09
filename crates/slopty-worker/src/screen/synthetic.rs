@@ -1424,7 +1424,14 @@ mod tests {
                     ms(estimate.rtt),
                     stream.stats().encoders_replaced
                 );
-                assert!(p50 <= Duration::from_millis(1), "p50 {p50:?}, {estimate:?}");
+                // The probes cannot see how a round trip's wait past the delay line splits
+                // between the two ways; a loaded machine (a CI runner) adds that wait, so the
+                // median may stray by half of it beyond the millisecond.
+                let unseen = estimate.rtt.saturating_sub(one_way * 2) / 2;
+                assert!(
+                    p50 <= Duration::from_millis(1) + unseen,
+                    "p50 {p50:?}, {unseen:?} unseen, {estimate:?}"
+                );
                 drop(handle);
                 drain.abort();
                 stream.close().await;
