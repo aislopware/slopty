@@ -29,6 +29,8 @@ pub enum Section {
     Terminal,
     /// Keys, the pointer and the clipboard.
     Input,
+    /// The agents beyond those Slopty knows, what projects may run, and notes to the phone.
+    Agents,
     /// Remote windows and desktops.
     Streams,
     /// The server and the workers, and who may connect.
@@ -40,7 +42,22 @@ pub enum Section {
 }
 
 impl Section {
-    /// Every section, in order.
+    /// Every section, in order. An iPhone or an iPad runs no worker or server, whose keys are
+    /// all the Agents page holds (`HOSTS_DAEMONS`), so it lists no such page.
+    #[cfg(not(target_os = "ios"))]
+    pub const ALL: [Self; 8] = [
+        Self::Appearance,
+        Self::Terminal,
+        Self::Input,
+        Self::Agents,
+        Self::Streams,
+        Self::Network,
+        Self::Keyboard,
+        Self::About,
+    ];
+    /// Every section, in order. An iPhone or an iPad runs no worker or server, whose keys are
+    /// all the Agents page holds (`HOSTS_DAEMONS`), so it lists no such page.
+    #[cfg(target_os = "ios")]
     pub const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Terminal,
@@ -58,6 +75,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
             Self::Input => "Input",
+            Self::Agents => "Agents",
             Self::Streams => "Streams",
             Self::Network => "Network",
             Self::Keyboard => "Keyboard",
@@ -76,7 +94,7 @@ impl Section {
     pub const fn group(self) -> Group {
         match self {
             Self::Appearance | Self::Terminal | Self::Input => Group::App,
-            Self::Streams | Self::Network => Group::Machines,
+            Self::Agents | Self::Streams | Self::Network => Group::Machines,
             Self::Keyboard | Self::About => Group::Help,
         }
     }
@@ -89,6 +107,7 @@ impl Section {
             Self::Appearance => Symbol::Palette,
             Self::Terminal => Symbol::Terminal,
             Self::Input => Symbol::Cursorarrow,
+            Self::Agents => crate::icons::AGENT,
             Self::Streams => Symbol::Display,
             Self::Network => Symbol::ServerRack,
             Self::Keyboard => Symbol::Keyboard,
@@ -103,7 +122,7 @@ impl Section {
 pub enum Group {
     /// The theme, the terminal and the input.
     App,
-    /// Remote windows and desktops, the server and the workers.
+    /// The agents the machines run, remote windows and desktops, the server and the workers.
     Machines,
     /// The keymap and the build: the Help menu's Keyboard Shortcuts and About.
     Help,
@@ -184,6 +203,17 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Pointer",
         &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
     ),
+    (Section::Agents, "ACP agents", &["worker.acp"]),
+    (
+        Section::Agents,
+        "Projects",
+        &["server.projects.live_agents", "server.projects.permission_flags"],
+    ),
+    (
+        Section::Agents,
+        "Notes on your phone",
+        &["server.push.relay", "server.push.apns_key", "server.push.key_id", "server.push.team_id"],
+    ),
     (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps"]),
     (Section::Network, THIS_APP, &["client.server", "client.editor"]),
     (
@@ -220,6 +250,10 @@ const FOOTERS: &[(&str, &str)] = &[
     ("Behaviour", "When hidden, the alert sounds only while Slopty is behind other windows"),
     ("Keys", "Secure keyboard entry keeps passwords typed here from other apps, as Terminal does"),
     ("Clipboard", "Off, each machine keeps its own. A paste that would run a command asks first"),
+    (
+        "ACP agents",
+        "Each serves the Agent Client Protocol on stdio; an empty command hides a known one",
+    ),
     ("Remote windows and desktops", "A stream grows toward its ceiling as the link allows"),
     (THIS_APP, "The server lists your machines; it is empty until this app is set up"),
     ("Share this Mac's shells and windows", "Loopback and the tailnet are always let in"),
@@ -240,9 +274,12 @@ pub fn footer(group: &str) -> Option<&'static str> {
 /// The group of the app's own keys, which the system's [`System::OpenAtLogin`] closes.
 const THIS_APP: &str = "This app";
 
-/// The page a key of `table` that [`LAYOUT`] does not name goes on: a nested table's
-/// (`server.projects`) is its root table's.
+/// The page a key of `table` that [`LAYOUT`] does not name goes on: the project bounds' and
+/// the phone's notes' on Agents, any other nested table's (`server.x`) its root table's.
 fn home(table: &str) -> Section {
+    if matches!(table, "server.projects" | "server.push") {
+        return Section::Agents;
+    }
     let root = table.split_once('.').map_or(table, |(root, _)| root);
     match root {
         "theme" | "colors" => Section::Appearance,
@@ -681,11 +718,12 @@ mod tests {
         assert_eq!(figure(3.0, 0.5), "3.0");
     }
 
-    /// A nested table's keys go on the page of the table they sit in: the server's projects
-    /// with the server.
+    /// A nested table's keys go on the page of the table they sit in, but for the projects'
+    /// bounds and the phone's notes, which are the Agents page's.
     #[test]
     fn a_nested_table_is_on_its_roots_page() {
-        assert_eq!(home("server.projects"), Section::Network);
+        assert_eq!(home("server.projects"), Section::Agents);
+        assert_eq!(home("server.push"), Section::Agents);
         assert_eq!(home("server"), Section::Network);
         assert_eq!(home("remote"), Section::Streams);
     }
@@ -821,5 +859,36 @@ mod tests {
         assert!(phone.iter().all(|r| !daemons(r.table())), "{phone:#?}");
         assert!(phone.iter().any(|r| r.table() == "client"), "the app's own stay");
         assert_eq!(rows().iter().any(|r| r.table() == "worker"), HOSTS_DAEMONS);
+        assert!(phone.iter().all(|r| r.section != Section::Agents), "no Agents page there");
+        assert_eq!(Section::ALL.contains(&Section::Agents), HOSTS_DAEMONS, "nor its section");
+    }
+
+    /// The Agents page holds what the machines run agents by: the ACP agents beside the known
+    /// ones, the bounds every project stays under, and how notes reach the phone, each its
+    /// own group in that order.
+    #[test]
+    fn the_agents_page_holds_the_agents_projects_and_notes() {
+        let page: Vec<(&str, String)> = rows()
+            .iter()
+            .filter(|r| r.section == Section::Agents)
+            .map(|r| (r.group, format!("{}.{}", r.table(), r.key())))
+            .collect();
+        let expected: Vec<(&str, String)> = if HOSTS_DAEMONS {
+            [
+                ("ACP agents", "worker.acp"),
+                ("Projects", "server.projects.live_agents"),
+                ("Projects", "server.projects.permission_flags"),
+                ("Notes on your phone", "server.push.relay"),
+                ("Notes on your phone", "server.push.apns_key"),
+                ("Notes on your phone", "server.push.key_id"),
+                ("Notes on your phone", "server.push.team_id"),
+            ]
+            .map(|(g, k)| (g, k.to_owned()))
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(page, expected);
+        assert!(footer("ACP agents").is_some(), "its group says what a command is");
     }
 }

@@ -24,6 +24,7 @@ Tab │ Appearance
 Tab │ Terminal
 Tab │ Input
 Heading │ Machines
+Tab │ Agents
 Tab │ Streams
 Tab │ Network
 Heading │ Help

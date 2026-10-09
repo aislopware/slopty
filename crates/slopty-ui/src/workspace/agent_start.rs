@@ -13,13 +13,14 @@
 //! Its home ends them; after them comes a new worktree of each repository they are in, so
 //! agents can work one repository side by side.
 //!
-//! The folder step ends with "Resume a past session…": the machine lists the agent's sessions
-//! from the agent's own record, the last prompted first (`ThreadRequest::Sessions`), in a step
-//! that opens at once saying it reads them. What the person types there finds the listed ones
-//! at once, and once the field rests the machine is asked too: it searches every prompt the
-//! agent recorded, so a session older than the list is found by what was asked in it. A
-//! session picked opens the thread kept of it, its agent taken up again if it exited, or starts
-//! the agent on it in its own words.
+//! The folder step ends with "Resume a past session…": every machine up that has the agent lists
+//! its sessions from the agent's own record, the last prompted first (`ThreadRequest::Sessions`),
+//! in a step that opens at once saying it reads them. The step's own machine leads, and a
+//! session on another says which machine it is on. What the person types there finds the listed
+//! ones at once, and once the field rests the machines are asked too: each searches every prompt
+//! the agent recorded there, so a session older than the list is found by what was asked in it,
+//! wherever it ran. A session picked opens the thread kept of it, its agent taken up again if it
+//! exited, or starts the agent on it, on its machine, in its own words.
 //!
 //! "New project…" runs the same steps for the agent that will orchestrate the project. It lists
 //! only the agents that run in a terminal, since a project's orchestrator is one, and offers no
@@ -101,26 +102,38 @@ pub(super) const READING_SESSIONS: &str = "Reading past sessions\u{2026}";
 /// The most past sessions the step lists.
 const SESSIONS_LISTED: u32 = 50;
 
-/// The session step that is up, and what its machine said for it. Answers come in any order,
+/// The session step that is up, and what each machine said for it. Answers come in any order,
 /// so the one for the field's words is kept only while they are still the field's; the list
 /// with no words is kept for as long as the step is up.
 pub(super) struct SessionsAsked {
-    /// The machine asked.
-    worker: WorkerKey,
+    /// The machines asked, the step's own first, and what each said.
+    machines: Vec<MachineSessions>,
     /// Whose sessions.
     agent: AgentId,
     /// The step's palette.
     step: gpui::EntityId,
-    /// The sessions the machine listed with no words; `None` while it reads them.
+    /// The field's words last asked for, trimmed; empty while they are too short to ask.
+    words: String,
+    /// The wait before `words` are asked for: dropped, so never sent, when they change first.
+    _asking: Option<Task<()>>,
+}
+
+/// What one machine of the session step said.
+struct MachineSessions {
+    /// The machine.
+    worker: WorkerKey,
+    /// The sessions it listed with no words; `None` while it reads them.
     listed: Option<Vec<PastSession>>,
     /// Why it could list none, when it said.
     absent: Option<String>,
-    /// The field's words last asked for, trimmed; empty while they are too short to ask.
-    words: String,
-    /// The sessions whose prompts hold `words`, once the machine answered for them.
+    /// The sessions whose prompts hold the step's words, once it answered for them.
     found: Option<Vec<PastSession>>,
-    /// The wait before `words` are asked for: dropped, so never sent, when they change first.
-    _asking: Option<Task<()>>,
+}
+
+impl MachineSessions {
+    const fn new(worker: WorkerKey) -> Self {
+        Self { worker, listed: None, absent: None, found: None }
+    }
 }
 
 /// A folder one of an agent's past sessions ran in on a machine, as the machine listed them
@@ -572,8 +585,9 @@ impl WorkspaceView {
         palette.update(cx, |p, cx| p.set_items(lines, cx));
     }
 
-    /// "Resume a past session…": the machine is asked for the agent's sessions, and the step
-    /// that lists them opens at once, saying it reads them.
+    /// "Resume a past session…": the machine, and every other one up that has the agent, is
+    /// asked for the agent's sessions, and the step that lists them opens at once, saying it
+    /// reads them.
     pub(super) fn resume_past_session(
         &mut self,
         ask: &ResumePastSession,
@@ -586,18 +600,23 @@ impl WorkspaceView {
             self.show_notice(text, cx);
             return;
         }
-        self.ask_past_places(worker, Some(&agent));
+        let others = self
+            .workers
+            .keys()
+            .copied()
+            .filter(|key| *key != worker && self.startable_on(*key).contains(&agent));
+        let machines: Vec<WorkerKey> = std::iter::once(worker).chain(others).collect();
+        for key in &machines {
+            self.ask_past_places(*key, Some(&agent));
+        }
         self.open_step(Vec::new(), PICK_SESSION, window, cx);
         if let Some(palette) = self.palette.clone() {
             palette.update(cx, |p, cx| p.set_empty(READING_SESSIONS, cx));
             self.sessions_asked = Some(SessionsAsked {
-                worker,
+                machines: machines.into_iter().map(MachineSessions::new).collect(),
                 agent,
                 step: palette.entity_id(),
-                listed: None,
-                absent: None,
                 words: String::new(),
-                found: None,
                 _asking: None,
             });
         }
@@ -605,8 +624,9 @@ impl WorkspaceView {
 
     /// The session step's field says `text`. The listed sessions it finds show at once; once
     /// the field rests [`find::ASK_AFTER`], words of [`find::ASK_FROM`] characters or more are
-    /// asked of the machine, which searches every prompt the agent recorded. New words drop
-    /// the last answer and the ask still waiting. A machine out of reach by then is not asked.
+    /// asked of each machine, which searches every prompt the agent recorded there. New words
+    /// drop the last answers and the ask still waiting. A machine out of reach by then is not
+    /// asked.
     pub(super) fn ask_sessions(
         &mut self,
         palette: &Entity<CommandPalette>,
@@ -622,7 +642,8 @@ impl WorkspaceView {
         if words == asked.words {
             return;
         }
-        let (worker, agent, step) = (asked.worker, asked.agent.clone(), asked.step);
+        let (agent, step) = (asked.agent.clone(), asked.step);
+        let machines: Vec<WorkerKey> = asked.machines.iter().map(|m| m.worker).collect();
         let query = words.to_owned();
         let asking = (!words.is_empty()).then(|| {
             let (agent, query) = (agent.clone(), query.clone());
@@ -630,26 +651,26 @@ impl WorkspaceView {
                 cx.background_executor().timer(find::ASK_AFTER).await;
                 let _gone = this.update(cx, |this, _cx| {
                     let up = this.palette.as_ref().is_some_and(|p| p.entity_id() == step);
-                    if up && this.workers.get(&worker).is_some_and(super::Worker::is_linked) {
-                        let limit = SESSIONS_LISTED;
-                        let ask =
-                            ThreadRequest::Sessions { agent: Some(agent), cwd: None, query, limit };
+                    for worker in machines
+                        .into_iter()
+                        .filter(|w| up && this.workers.get(w).is_some_and(super::Worker::is_linked))
+                    {
+                        let ask = ThreadRequest::Sessions {
+                            agent: Some(agent.clone()),
+                            cwd: None,
+                            query: query.clone(),
+                            limit: SESSIONS_LISTED,
+                        };
                         this.send(worker, ClientMsg::Thread(ask));
                     }
                 });
             })
         });
-        let (listed, absent) = (asked.listed.take(), asked.absent.take());
-        *asked = SessionsAsked {
-            worker,
-            agent,
-            step,
-            listed,
-            absent,
-            words: query,
-            found: None,
-            _asking: asking,
-        };
+        let mut machines = std::mem::take(&mut asked.machines);
+        for machine in &mut machines {
+            machine.found = None;
+        }
+        *asked = SessionsAsked { machines, agent, step, words: query, _asking: asking };
         self.show_sessions(cx);
     }
 
@@ -667,14 +688,18 @@ impl WorkspaceView {
         let Some(asked) = self.sessions_asked.as_mut() else {
             return;
         };
-        if asked.worker != key || past.agent.as_ref() != Some(&asked.agent) || past.cwd.is_some() {
+        if past.agent.as_ref() != Some(&asked.agent) || past.cwd.is_some() {
             return;
         }
+        let words = asked.words.clone();
+        let Some(machine) = asked.machines.iter_mut().find(|m| m.worker == key) else {
+            return;
+        };
         if past.query.is_empty() {
-            asked.listed = Some(past.sessions);
-            asked.absent = past.absent;
-        } else if past.query == asked.words {
-            asked.found = Some(past.sessions);
+            machine.listed = Some(past.sessions);
+            machine.absent = past.absent;
+        } else if past.query == words {
+            machine.found = Some(past.sessions);
         } else {
             return;
         }
@@ -684,8 +709,9 @@ impl WorkspaceView {
         self.show_sessions(cx);
     }
 
-    /// The session step's lines: the sessions found for the field's words, best first, then
-    /// the listed ones they leave out, for the field to find among.
+    /// The session step's lines: the sessions found for the field's words, best first and the
+    /// step's own machine's first, then the listed ones they leave out, for the field to find
+    /// among. A session on another machine than the step's says which.
     fn show_sessions(&self, cx: &mut Context<Self>) {
         let Some(asked) = &self.sessions_asked else {
             return;
@@ -693,32 +719,47 @@ impl WorkspaceView {
         let Some(palette) = self.palette.clone().filter(|p| p.entity_id() == asked.step) else {
             return;
         };
-        let worker = asked.worker;
-        let found = asked.found.as_deref().unwrap_or_default();
-        let listed = asked.listed.as_deref().unwrap_or_default();
-        let same = |a: &PastSession, b: &PastSession| a.agent == b.agent && a.native == b.native;
-        let left = listed.iter().filter(|l| !found.iter().any(|f| same(f, l)));
+        let Some(own) = asked.machines.first().map(|m| m.worker) else {
+            return;
+        };
         let now = crate::clock::now(cx).as_millis();
-        let home = self.home_of(worker);
-        let lines: Vec<PaletteItem> = found
+        let same = |a: &PastSession, b: &PastSession| a.agent == b.agent && a.native == b.native;
+        let line = |worker: WorkerKey, session: &PastSession| {
+            let machine = (worker != own).then(|| self.worker_name(worker));
+            session_line(worker, session.clone(), self.home_of(worker), machine, now)
+        };
+        let found = asked
+            .machines
             .iter()
-            .chain(left)
-            .map(|session| session_line(worker, session.clone(), home, now))
-            .collect();
-        let reading = asked.listed.is_none() || (!asked.words.is_empty() && asked.found.is_none());
-        let empty = match &asked.absent {
-            Some(absent) => absent.clone(),
+            .flat_map(|m| m.found.iter().flatten().map(move |session| line(m.worker, session)));
+        let left = asked.machines.iter().flat_map(|m| {
+            let found = m.found.as_deref().unwrap_or_default();
+            m.listed
+                .iter()
+                .flatten()
+                .filter(move |l| !found.iter().any(|f| same(f, l)))
+                .map(move |session| line(m.worker, session))
+        });
+        let lines: Vec<PaletteItem> = found.chain(left).collect();
+        let reading = asked.machines.iter().any(|m| {
+            m.absent.is_none()
+                && (m.listed.is_none() || (!asked.words.is_empty() && m.found.is_none()))
+        });
+        let agent = agent_label(&asked.agent);
+        let alone = asked.machines.len() == 1;
+        let absent = asked.machines.iter().map(|m| m.absent.as_ref());
+        let empty = match absent.collect::<Option<Vec<&String>>>() {
+            Some(said) if alone => said.first().map_or_else(String::new, |s| (*s).clone()),
+            Some(_) => format!("No machine has past {agent} sessions"),
             None if reading => READING_SESSIONS.to_owned(),
-            None if asked.words.is_empty() => format!(
-                "{} has no past {} sessions",
-                self.worker_name(worker),
-                agent_label(&asked.agent)
-            ),
-            None => format!(
-                "No past {} prompt on {} says that",
-                agent_label(&asked.agent),
-                self.worker_name(worker)
-            ),
+            None if asked.words.is_empty() && alone => {
+                format!("{} has no past {agent} sessions", self.worker_name(own))
+            }
+            None if asked.words.is_empty() => format!("No machine has past {agent} sessions"),
+            None if alone => {
+                format!("No past {agent} prompt on {} says that", self.worker_name(own))
+            }
+            None => format!("No past {agent} prompt on any machine says that"),
         };
         palette.update(cx, |p, cx| {
             p.set_items(lines, cx);
@@ -809,12 +850,14 @@ fn start(
 }
 
 /// The session step's line for `session` on `worker`: what it is about (its title, else the
-/// last prompt that matched, else its id), where it ran and how long ago, found as well by its
-/// prompts; marked running while a live agent holds it.
+/// last prompt that matched, else its id), where it ran (on `machine`, named when it is not the
+/// step's) and how long ago, found as well by its prompts; marked running while a live agent
+/// holds it.
 fn session_line(
     worker: WorkerKey,
     session: PastSession,
     home: Option<&str>,
+    machine: Option<String>,
     now: u64,
 ) -> PaletteItem {
     let prompt = session.prompts.first().map(|p| crate::kit::first_line(&p.text).to_owned());
@@ -827,6 +870,11 @@ fn session_line(
             format!("Session {}", session.native.chars().take(8).collect::<String>())
         });
     let cwd = session.cwd.as_deref().map(|cwd| super::tile::cwd_tail(cwd, home));
+    let cwd = match (cwd, machine) {
+        (Some(cwd), Some(machine)) => Some(format!("{cwd} on {machine}")),
+        (None, Some(machine)) => Some(format!("on {machine}")),
+        (cwd, None) => cwd,
+    };
     let age =
         session.updated_ms.map(|at| Duration::from_millis(now.saturating_sub(at.as_millis())));
     let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
@@ -868,7 +916,10 @@ mod tests {
         };
         let worker = WorkerKey::new(1);
         let held = [(PAST_RUNNING.to_owned(), "interactive".to_owned())].into();
-        assert_eq!(session_line(worker, session(held), None, 0).status, Some(Status::Running));
-        assert_eq!(session_line(worker, session(BTreeMap::new()), None, 0).status, None);
+        assert_eq!(
+            session_line(worker, session(held), None, None, 0).status,
+            Some(Status::Running)
+        );
+        assert_eq!(session_line(worker, session(BTreeMap::new()), None, None, 0).status, None);
     }
 }

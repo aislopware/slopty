@@ -2488,7 +2488,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
-        assert_eq!(form.read_with(cx, |form, _| form.section), Section::Network);
+        assert_eq!(form.read_with(cx, |form, _| form.section), Section::Agents);
         let field = form.read_with(cx, |form, _| form.fields.get(ix).cloned().flatten());
         let field = field.expect("the relay is typed into");
         assert!(
@@ -2701,7 +2701,7 @@ mod map_tests {
             .iter()
             .position(|r| r.table() == "worker" && r.key() == "acp")
             .expect("the map's row");
-        click(cx, leak(format!("settings-section-{}", Section::Network.index())));
+        click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
         let field = form.read_with(cx, |f, _| {
             f.entries.get(&(ix, "mine".to_owned())).and_then(|p| p.field().cloned())
         });
@@ -2712,5 +2712,42 @@ mod map_tests {
         cx.run_until_parked();
         let text = form.read_with(cx, |f, _| f.text().to_owned());
         assert_eq!(text, "[worker.acp]\nmine = [\"/opt/mine\", \"--acp\"]\n");
+    }
+
+    /// The Agents page writes its keys to their own tables: a step of the live agents to
+    /// `[server.projects]`, a relay typed to `[server.push]`.
+    #[gpui::test]
+    fn the_agents_page_writes_the_projects_and_the_notes_tables(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let ix = |table: &str, key: &str| {
+            rows()
+                .iter()
+                .position(|r| r.table() == table && r.key() == key)
+                .unwrap_or_else(|| panic!("{table}.{key}"))
+        };
+        click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
+        let live = ix("server.projects", "live_agents");
+        let relay = ix("server.push", "relay");
+        for row in [ix("worker", "acp"), live, ix("server.projects", "permission_flags"), relay] {
+            assert!(cx.debug_bounds(leak(format!("settings-row-{row}"))).is_some(), "row {row}");
+        }
+        click(cx, leak(format!("settings-increase-{live}")));
+        cx.executor().advance_clock(SETTLE);
+        cx.run_until_parked();
+        let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
+        assert_eq!(text(cx), "[server.projects]\nlive_agents = 25\n");
+
+        click(cx, leak(format!("settings-field-{relay}")));
+        cx.simulate_input("https://relay.example.dev");
+        cx.executor().advance_clock(SETTLE);
+        cx.run_until_parked();
+        assert_eq!(
+            text(cx),
+            "[server.projects]\nlive_agents = 25\n\n[server.push]\nrelay = \"https://relay.example.dev\"\n"
+        );
     }
 }

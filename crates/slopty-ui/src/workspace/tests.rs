@@ -1652,6 +1652,7 @@ mod page_host;
 mod palette;
 mod palette_threads;
 mod panes;
+mod past_sessions;
 mod pins;
 mod played;
 mod popout;

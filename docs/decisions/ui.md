@@ -9059,3 +9059,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     no project now has its glyph there, as a project has, and its rollup once something waits.
   - Tests: `workspace::tests::frame::a_narrow_window_folds_the_navigator_to_its_rail`,
     `workspace::tests::chrome::the_rail_shows_a_worker_with_its_own_tiles_and_what_waits`.
+
+- ✅ **The settings gain an Agents page** (2026-10-09, readiness item 7, MonoCode audit row 9's
+  missing group).
+  - **What.** First under Machines, before Streams and Network, with the agent glyph: the ACP
+    agents beside the ones Slopty knows (`worker.acp`), the bounds every project stays under
+    (`server.projects`: live agents, looser permissions) and how notes reach a pocketed phone
+    (`server.push`: the relay, or an APNs key with its IDs), each its own group.
+  - **Why.** These keys stood at the foot of Network, under their tables' titles, among the
+    addresses and the server, where nobody looking for an agent's setting would look. The
+    agents are what the app is for, so their page comes first among the machines'.
+  - **Not on an iPhone or iPad.** Every key on it is a worker's or the server's, which a phone
+    or a tablet does not run, so the section is not listed there (`Section::ALL` is the
+    platform's).
+  - Tests: `settings_form::schema::tests::the_agents_page_holds_the_agents_projects_and_notes`,
+    `settings_form::tests::the_agents_page_writes_the_projects_and_the_notes_tables`.

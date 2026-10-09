@@ -2264,3 +2264,19 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     may ask for a clone, or once a worker takes a clone op.
   - Tests: `workspace::tests::folder_typing::a_typed_path_completes_from_the_machines_folders`;
     `workspace::folder_typing::tests::*`.
+
+- ✅ **"Resume a past session…" asks every machine** (2026-10-09, readiness R25; closes
+  `agents.md`'s "Not yet: a search of every machine's prompts at once").
+  - **What.** The session step opened from a machine's folder step asks that machine and every
+    other one up that has the agent, with no words and then for the field's words once it
+    rests. The step's own machine's sessions lead; a session on another names it after its
+    folder ("src/web on laptop"). The sessions found for the words come first, from every
+    machine, then the listed ones they leave out. Picked, a session is taken up on its own
+    machine.
+  - **Why.** The person remembers what was asked, not where. A session started on the laptop
+    was unreachable from a step opened on the studio, and the person had to guess the machine
+    first.
+  - **Empty states** say "No machine has past … sessions" and "No past … prompt on any machine
+    says that" once several were asked; with one, they name it as before. The step reads while
+    any machine that has not said it has none is still answering.
+  - Test: `workspace::tests::past_sessions::a_past_session_is_found_on_every_machine`.
