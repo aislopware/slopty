@@ -332,7 +332,7 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     assert!(ids.contains(&"deny") && ids.contains(&"deny-stop"), "{ids:?}");
     assert_eq!(ids.contains(&"always"), !prompt.suggestions.is_empty());
     let always = request.options.iter().find(|c| c.id == "always").expect("always");
-    assert_eq!(always.scope.as_deref(), Some("/work; accept edits mode"));
+    assert_eq!(always.scope.as_deref(), Some("edits in /work this session"));
     for choice in &request.options {
         let verdict = verdict(&choice.id, Some("no")).expect("a verdict");
         assert_eq!(choice_of(&verdict), choice.id);
@@ -346,14 +346,15 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     assert_eq!((answered.client, choice.as_str()), (Some(by), "allow"));
 }
 
-/// "Always allow" names a mode in words, sentence case over the line, and an unknown mode or
-/// update kind still reads as words.
+/// "Always allow" is followed by what it grants as Claude Code's dialog words it: a mode as
+/// what it lets through, in the folders granted with it, then how long it holds; a command
+/// rule as its commands; an unknown mode or update kind still in words.
 #[test]
-fn always_allow_says_a_mode_in_words() {
-    let said = |granted: Vec<Grant>| {
+fn always_allow_says_what_it_grants_as_claude_code_does() {
+    let said = |granted: Vec<(Grant, Option<&str>)>| {
         let suggestions = granted
             .into_iter()
-            .map(|grant| conv::Suggestion { grant, destination: None })
+            .map(|(grant, kept)| conv::Suggestion { grant, destination: kept.map(str::to_owned) })
             .collect();
         let prompt = PermissionPrompt {
             session: SessionId::nil(),
@@ -372,23 +373,45 @@ fn always_allow_says_a_mode_in_words() {
     };
     let mode = |mode: &str| Grant::Mode { mode: mode.to_owned() };
     let dirs = Grant::Directories { directories: vec!["/work".to_owned()] };
-    let rules = Grant::Rules { behavior: "allow".to_owned(), rules: vec!["Bash(ls:*)".to_owned()] };
-    assert_eq!(said(vec![mode("acceptEdits")]).as_deref(), Some("Accept edits mode"));
+    let rules = |rules: &[&str]| Grant::Rules {
+        behavior: "allow".to_owned(),
+        rules: rules.iter().map(|r| (*r).to_owned()).collect(),
+    };
+    let session = Some("session");
+    let project = Some("localSettings");
+
+    // Directories with a mode, as Claude Code suggests for an edit.
     assert_eq!(
-        said(vec![dirs.clone(), mode("acceptEdits")]).as_deref(),
-        Some("/work; accept edits mode")
+        said(vec![(dirs.clone(), session), (mode("acceptEdits"), session)]).as_deref(),
+        Some("edits in /work this session")
     );
-    assert_eq!(said(vec![rules, mode("plan")]).as_deref(), Some("Bash(ls:*); plan mode"));
+    assert_eq!(said(vec![(mode("acceptEdits"), session)]).as_deref(), Some("edits this session"));
     assert_eq!(
-        said(vec![mode("someFutureMode2X"), dirs]).as_deref(),
-        Some("Some future mode2 x mode; /work")
+        said(vec![(dirs.clone(), project)]).as_deref(),
+        Some("access to /work in this project")
     );
-    assert_eq!(said(vec![mode("auto_review")]).as_deref(), Some("Auto review mode"));
+    // Rules, as its "don't ask again for … commands" words them.
     assert_eq!(
-        said(vec![Grant::Other { kind: "removeRules".to_owned() }]).as_deref(),
-        Some("Remove rules")
+        said(vec![(rules(&["Bash(npm test:*)", "Read"]), project)]).as_deref(),
+        Some("npm test commands, Read in this project")
     );
-    assert_eq!(said(vec![mode(""), mode("  ")]), None);
+    assert_eq!(
+        said(vec![(rules(&["Bash(git status)"]), Some("userSettings"))]).as_deref(),
+        Some("git status in every project")
+    );
+    assert_eq!(
+        said(vec![(rules(&["Bash(ls:*)"]), project), (mode("plan"), session)]).as_deref(),
+        Some("plan mode this session; ls commands in this project")
+    );
+    assert_eq!(
+        said(vec![(mode("someFutureMode2X"), None), (dirs, None)]).as_deref(),
+        Some("some future mode2 x mode in /work")
+    );
+    assert_eq!(
+        said(vec![(Grant::Other { kind: "removeRules".to_owned() }, None)]).as_deref(),
+        Some("remove rules")
+    );
+    assert_eq!(said(vec![(mode(""), None), (mode("  "), None)]), None);
     assert_eq!(said(Vec::new()), None);
 }
 

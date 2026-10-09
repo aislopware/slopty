@@ -164,7 +164,7 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
         stops,
     };
     asks.options = vec![
-        choice("always", "Always allow", Effect::Allow, Some("/work; accept edits mode"), false),
+        choice("always", "Always allow", Effect::Allow, Some("edits in /work this session"), false),
         choice("deny", "Deny", Effect::Deny, None, false),
         choice("stop", "Deny and stop", Effect::Deny, None, true),
         choice("allow", "Allow", Effect::Allow, None, false),

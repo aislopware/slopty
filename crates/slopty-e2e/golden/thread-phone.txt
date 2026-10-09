@@ -20,7 +20,7 @@ Button │ Review
 Button │ Review notes.txt
 Dialog │ Allow Bash?
 Group │ Grants that last
-Button │ Always allow · /work; accept edits mode
+Button │ Always allow edits in /work this session
 Button │ Deny
 Button │ Other ways to deny
 Button │ Allow

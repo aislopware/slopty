@@ -2,7 +2,7 @@
 //! the other ways to deny (and the way back to the agent's own prompt) in a menu named for
 //! them, and any standing grant at its left, its reach written out whole.
 //!
-//! A row of five like buttons ("Always allow /work; accept edits mode", "Deny", "Deny…", "Deny
+//! A row of five like buttons ("Always allow edits in /work this session", "Deny", "Deny…", "Deny
 //! and stop", "Allow") made the person read every one to find the two that matter, and put a
 //! standing grant at the same weight as this once. Now the usual answers are the row's last two,
 //! the solid one last as a dialog's default is, a base unit apart. What turns the request down
@@ -81,6 +81,12 @@ pub(super) fn arrange(options: &[Choice]) -> Arranged<'_> {
 /// already: "Always allow · Bash(cargo test:*)", but "Always allow" for an `always` scope.
 pub(super) fn answer_label(words: &str, scope: Option<&str>) -> String {
     scope.map_or_else(|| words.to_owned(), |scope| format!("{words} \u{b7} {scope}"))
+}
+
+/// A standing grant's words with its reach, read on as one sentence, as its button and the
+/// words after it show it: "Always allow edits in /work this session".
+pub(super) fn standing_label(words: &str, reach: Option<&str>) -> String {
+    reach.map_or_else(|| words.to_owned(), |reach| format!("{words} {reach}"))
 }
 
 /// How far an answer reaches, when its words do not say it already ([`answer_label`]).
@@ -324,7 +330,7 @@ impl ThreadView {
             .children(standing.iter().map(|choice| {
                 let reach = choice.scope.as_deref().map(str::trim).filter(|r| !r.is_empty());
                 let (ask, id) = (request.id.clone(), choice.id.clone());
-                let label = answer_label(&choice.label, reach);
+                let label = standing_label(&choice.label, reach);
                 let button = self
                     .button_frame(
                         format!("answer-{}-{}", request.id.0, choice.id),
@@ -360,7 +366,7 @@ impl ThreadView {
 mod tests {
     use slopty_proto::thread::{Choice, Effect};
 
-    use super::{answer_label, answer_scope, arrange};
+    use super::{answer_label, answer_scope, arrange, standing_label};
     use crate::kit::ButtonKind;
 
     fn choice(id: &str, effect: Effect, scope: Option<&str>, stops: bool) -> Choice {
@@ -382,7 +388,7 @@ mod tests {
     #[test]
     fn allow_and_deny_lead_and_the_rest_go_where_they_belong() {
         let offered = [
-            choice("always", Effect::Allow, Some("/work; accept edits mode"), false),
+            choice("always", Effect::Allow, Some("edits in /work this session"), false),
             choice("deny", Effect::Deny, None, false),
             choice("stop", Effect::Deny, None, true),
             choice("allow", Effect::Allow, None, false),
@@ -445,5 +451,10 @@ mod tests {
             "Always allow \u{b7} Bash(cargo test:*)"
         );
         assert_eq!(said(labelled("Always Allow", Some("always"))), "Always Allow");
+        assert_eq!(
+            standing_label("Always allow", Some("edits in /work this session")),
+            "Always allow edits in /work this session",
+            "a standing grant's reach reads on from its button"
+        );
     }
 }

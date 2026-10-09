@@ -2486,3 +2486,21 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   a session the person kept asking ("Manual") came back looser. `default` is now passed as
   `--permission-mode default` like any other mode. Tests: `resume::tests::the_last_permission_mode_wins`,
   `tests::the_newest_conversation_is_the_one_to_resume`.
+
+- ✅ **"Always allow" says what it grants in Claude Code's words** (readiness rank 10,
+  2026-10-09). The standing grant used to read like settings: "Always allow · /work; accept
+  edits mode". It now reads on from its button as one sentence, the way Claude Code's own
+  dialog says it: "Always allow edits in /work this session".
+  - **Wording** (`observed::grants`):
+    - A mode is said by what it lets through: `acceptEdits` is "edits", any other is named
+      ("plan mode"). The folders granted with it follow ("in /work"). Folders alone are
+      "access to /work".
+    - A command rule is "npm test commands" (`Bash(npm test:*)`), or the whole command; any
+      other rule is said as written.
+    - Each part ends with how long it holds, from where Claude Code keeps it: "this session",
+      "in this project" (local or shared settings), "in every project". Parts join with "; ".
+  - **On the card.** The button stays "Always allow", and the reach follows it in words. Its
+    accessible label is the two read on as one sentence (`decision::standing_label`), with no
+    "·" between them.
+  - Tests: `observed::tests::always_allow_says_what_it_grants_as_claude_code_does`,
+    `decision::tests::a_scoped_answer_says_how_far_it_reaches`; golden `thread-phone`.

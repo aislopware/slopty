@@ -1922,36 +1922,96 @@ fn answerer(by: ClientId) -> Answerer {
     Answerer { client: Some(by), name: String::new() }
 }
 
-/// What "allow always" grants: rules and paths as Claude Code writes them, a mode or an
-/// update of an unknown kind in words. The line is in sentence case, so it reads
-/// "/work; accept edits mode", or "Accept edits mode" when the mode comes first.
+/// What "allow always" grants, worded as Claude Code's own dialog words it, to follow the
+/// button's "Always allow": "edits in /work this session", "access to /work in this project",
+/// "npm test commands in this project". A mode leads, in the folders granted with it; rules
+/// follow; an update of a kind this worker does not know is said in words. Each part ends with
+/// how long it holds, from where Claude Code keeps it.
 fn grants(prompt: &PermissionPrompt) -> Option<String> {
-    let mut line = String::new();
+    let (mut mode, mut dirs, mut rules, mut others) = (None, Vec::new(), Vec::new(), Vec::new());
+    let (mut held, mut rules_held) = (None, None);
     for suggestion in &prompt.suggestions {
-        let (part, prose) = match &suggestion.grant {
-            Grant::Rules { rules, .. } => (rules.join(", "), false),
-            Grant::Mode { mode } => {
-                let mode = words(mode);
-                (if mode.is_empty() { mode } else { format!("{mode} mode") }, true)
+        let kept = suggestion.destination.as_deref();
+        match &suggestion.grant {
+            Grant::Mode { mode: m } => {
+                let said = mode_words(m);
+                if mode.is_none() && !said.is_empty() {
+                    mode = Some(said);
+                    held = held.or(kept);
+                }
             }
-            Grant::Directories { directories } => (directories.join(", "), false),
-            Grant::Other { kind } => (words(kind), true),
-        };
-        if part.is_empty() {
-            continue;
-        }
-        if line.is_empty() && prose {
-            let mut chars = part.chars();
-            line.extend(chars.next().into_iter().flat_map(char::to_uppercase));
-            line.push_str(chars.as_str());
-        } else {
-            if !line.is_empty() {
-                line.push_str("; ");
+            Grant::Directories { directories } => {
+                let named: Vec<&str> =
+                    directories.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
+                if !named.is_empty() {
+                    dirs.extend(named);
+                    held = held.or(kept);
+                }
             }
-            line.push_str(&part);
+            Grant::Rules { rules: r, .. } => {
+                let said: Vec<String> = r.iter().filter_map(|rule| rule_words(rule)).collect();
+                if !said.is_empty() {
+                    rules.extend(said);
+                    rules_held = rules_held.or(kept);
+                }
+            }
+            Grant::Other { kind } => others.push(words(kind)),
         }
     }
-    (!line.is_empty()).then_some(line)
+    let subject = match (mode, dirs.is_empty()) {
+        (Some(mode), true) => Some(mode),
+        (Some(mode), false) => Some(format!("{mode} in {}", dirs.join(", "))),
+        (None, false) => Some(format!("access to {}", dirs.join(", "))),
+        (None, true) => None,
+    };
+    let parts: Vec<String> = subject
+        .map(|subject| format!("{subject}{}", for_how_long(held)))
+        .into_iter()
+        .chain(
+            (!rules.is_empty())
+                .then(|| format!("{}{}", rules.join(", "), for_how_long(rules_held))),
+        )
+        .chain(others.into_iter().filter(|o| !o.is_empty()))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// A permission mode as what it lets through: `acceptEdits` is "edits", as Claude Code's
+/// "allow all edits during this session" says it; any other mode is named ("plan mode").
+fn mode_words(mode: &str) -> String {
+    match mode.trim() {
+        "acceptEdits" => "edits".to_owned(),
+        mode => {
+            let said = words(mode);
+            if said.is_empty() { said } else { format!("{said} mode") }
+        }
+    }
+}
+
+/// A permission rule as Claude Code's dialog says it: a command prefix as "npm test commands",
+/// a whole command as itself, any other rule as written. `None` for an empty rule.
+fn rule_words(rule: &str) -> Option<String> {
+    let rule = rule.trim();
+    let command = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')).map(str::trim);
+    let said = match command {
+        Some(command) => match command.strip_suffix(":*").or_else(|| command.strip_suffix(" *")) {
+            Some(prefix) => format!("{} commands", prefix.trim()),
+            None => command.to_owned(),
+        },
+        None => rule.to_owned(),
+    };
+    (!said.is_empty()).then_some(said)
+}
+
+/// How long a grant kept at `destination` holds, as words that end its line: the session's,
+/// this project's (its local or shared settings), every project's.
+fn for_how_long(destination: Option<&str>) -> &'static str {
+    match destination {
+        Some("session") => " this session",
+        Some("localSettings" | "projectSettings") => " in this project",
+        Some("userSettings") => " in every project",
+        _ => "",
+    }
 }
 
 /// An open name (a mode, an update's kind) in lower-case words: `acceptEdits` and
