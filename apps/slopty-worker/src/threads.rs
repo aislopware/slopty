@@ -60,6 +60,14 @@ impl Sources for Observed {
     fn seen(&self, session: SessionId) -> watch::Receiver<Seen> {
         self.0.follows.lock().board.watch(session)
     }
+
+    fn standing(&self) -> Vec<slopty_agent::status::AgentEvent> {
+        self.0.agents.lock().snapshot()
+    }
+
+    fn open(&self, session: SessionId) -> bool {
+        self.0.worker.get(session).is_ok()
+    }
 }
 
 /// The daemon's terminals and agents, as the composer types into them.

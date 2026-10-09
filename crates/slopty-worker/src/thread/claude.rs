@@ -62,6 +62,12 @@ pub trait Sources: Send + Sync {
     fn sources(&self, session: SessionId) -> crate::orchestrate::Sources;
     /// What the hooks and the mod said of the session, as it changes.
     fn seen(&self, session: SessionId) -> watch::Receiver<Seen>;
+    /// Every agent's status as the daemon's table holds it now: told again when reports were
+    /// missed, since a session's last word may be among them.
+    fn standing(&self) -> Vec<AgentEvent>;
+    /// Whether terminal `session` is still open: what is kept of one whose close was missed
+    /// is let go.
+    fn open(&self, session: SessionId) -> bool;
 }
 
 /// Which terminal holds each Claude Code session id it observes, so a second terminal on the
@@ -141,47 +147,48 @@ pub fn spawn(
     Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut sessions: HashMap<SessionId, mpsc::UnboundedSender<Input>> = HashMap::new();
-        let mut cwds: HashMap<SessionId, String> = HashMap::new();
-        let mut titles: HashMap<SessionId, String> = HashMap::new();
-        let claims = Claims::default();
+        let mut on = Observers {
+            host,
+            sources,
+            sessions: HashMap::new(),
+            cwds: HashMap::new(),
+            titles: HashMap::new(),
+            claims: Claims::default(),
+        };
         loop {
-            let (session, input) = tokio::select! {
+            tokio::select! {
                 report = heard.recv() => match report {
-                    Ok(event) => (event.session, Input::Status(Box::new(event))),
-                    // A status missed is told again with the next change.
+                    Ok(event) => on.send(event.session, Input::Status(Box::new(event))),
+                    // A session's last status may be among those missed, and no change may
+                    // follow it: the table's are told again.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::debug!(missed, "the observed sessions missed agent reports");
-                        continue;
+                        on.told_again();
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 heard_of = events.recv() => match heard_of {
-                    Ok(WorkerMsg::SessionClosed { session, .. }) => {
-                        sessions.remove(&session);
-                        cwds.remove(&session);
-                        titles.remove(&session);
-                        continue;
-                    }
+                    Ok(WorkerMsg::SessionClosed { session, .. }) => on.closed(session),
                     Ok(
                         WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
                     ) => {
-                        if let Some(tx) = sessions.get(&summary.id) {
+                        if let Some(tx) = on.sessions.get(&summary.id) {
                             let _gone = tx.send(Input::Title(summary.title.clone()));
                         }
-                        titles.insert(summary.id, summary.title);
+                        on.titles.insert(summary.id, summary.title);
                         let Some(cwd) = summary.cwd else { continue };
-                        cwds.insert(summary.id, cwd.clone());
-                        if let Some(tx) = sessions.get(&summary.id) {
+                        on.cwds.insert(summary.id, cwd.clone());
+                        if let Some(tx) = on.sessions.get(&summary.id) {
                             let _gone = tx.send(Input::Cwd(cwd));
                         }
-                        continue;
                     }
-                    Ok(_) => continue,
-                    // A title or folder missed is told again with the next change.
+                    Ok(_) => {}
+                    // A title or folder missed is told again with the next change; a close
+                    // missed would keep what is held of its session for good, so every session
+                    // is looked at.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::debug!(missed, "the observed sessions missed events");
-                        continue;
+                        on.closed_unheard();
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
@@ -189,34 +196,78 @@ pub fn spawn(
                 // begin, or a prompt held, is what starts observing it.
                 Some((session, input)) = asks.recv() => {
                     if matches!(input, Input::Begin { .. } | Input::Permission(_)) {
-                        (session, input)
-                    } else {
-                        if let Some(tx) = sessions.get(&session)
-                            && tx.send(input).is_err()
-                        {
-                            sessions.remove(&session);
-                        }
-                        continue;
+                        on.send(session, input);
+                    } else if let Some(tx) = on.sessions.get(&session)
+                        && tx.send(input).is_err()
+                    {
+                        on.sessions.remove(&session);
                     }
                 }
-            };
-            let tx = sessions.entry(session).or_insert_with(|| {
-                let (tx, rx) = mpsc::unbounded_channel();
-                if let Some(cwd) = cwds.get(&session) {
-                    let _queued = tx.send(Input::Cwd(cwd.clone()));
-                }
-                if let Some(title) = titles.get(&session) {
-                    let _queued = tx.send(Input::Title(title.clone()));
-                }
-                let claims = Arc::clone(&claims);
-                tokio::spawn(observe(host.clone(), session, Arc::clone(&sources), claims, rx));
-                tx
-            });
-            if tx.send(input).is_err() {
-                sessions.remove(&session);
             }
         }
     })
+}
+
+/// The observed sessions' tasks, and what the daemon's events said of each terminal.
+struct Observers {
+    host: Host,
+    sources: Arc<dyn Sources>,
+    sessions: HashMap<SessionId, mpsc::UnboundedSender<Input>>,
+    cwds: HashMap<SessionId, String>,
+    titles: HashMap<SessionId, String>,
+    claims: Claims,
+}
+
+impl Observers {
+    /// Tell `session`'s task `input`, starting one when none observes it.
+    fn send(&mut self, session: SessionId, input: Input) {
+        let tx = self.sessions.entry(session).or_insert_with(|| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            if let Some(cwd) = self.cwds.get(&session) {
+                let _queued = tx.send(Input::Cwd(cwd.clone()));
+            }
+            if let Some(title) = self.titles.get(&session) {
+                let _queued = tx.send(Input::Title(title.clone()));
+            }
+            let claims = Arc::clone(&self.claims);
+            let sources = Arc::clone(&self.sources);
+            tokio::spawn(observe(self.host.clone(), session, sources, claims, rx));
+            tx
+        });
+        if tx.send(input).is_err() {
+            self.sessions.remove(&session);
+        }
+    }
+
+    /// Terminal `session` closed: its task ends, and what was kept of it goes.
+    fn closed(&mut self, session: SessionId) {
+        self.sessions.remove(&session);
+        self.cwds.remove(&session);
+        self.titles.remove(&session);
+    }
+
+    /// Every status the table holds, told again: to the sessions observed, and to any other
+    /// whose agent is there, as a status heard would start it.
+    fn told_again(&mut self) {
+        for event in self.sources.standing() {
+            if self.sessions.contains_key(&event.session) || event.status != AgentStatus::None {
+                self.send(event.session, Input::Status(Box::new(event)));
+            }
+        }
+    }
+
+    /// Each terminal no longer open, whose close went unheard, closed.
+    fn closed_unheard(&mut self) {
+        let mut known: Vec<SessionId> = self.sessions.keys().copied().collect();
+        known.extend(self.cwds.keys().chain(self.titles.keys()));
+        known.sort_unstable();
+        known.dedup();
+        for session in known {
+            if !self.sources.open(session) {
+                self.closed(session);
+            }
+        }
+    }
 }
 
 /// One terminal session's Claude Code, until the session goes.

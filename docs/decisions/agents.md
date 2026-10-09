@@ -2584,3 +2584,18 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     question held for an approver, answered once it follows, released with the last
     approver) and `threads::hold::tests::a_followed_thread_keeps_its_prompt_past_the_approvers_hold`
     (slopty-workerd).
+
+- ✅ **What an observer misses in a lag is read again** (2026-10-10, readiness 10-10 rank 23).
+  The worker's Claude Code observer skipped a lag on the daemon's agent reports or its terminal
+  events, expecting the next change to tell it again. A lag keeps the newest messages, but one
+  session's last status can sit behind a flood from others, and no change may follow it. Its
+  thread then stayed shown working. A missed `SessionClosed` kept the terminal's task, folder
+  and title for good, and its provisional thread with them.
+  - After missed reports, the observer reads every agent's status from the daemon's table
+    (`Sources::standing`, `AgentTable::snapshot`) and tells each again, as
+    `orchestrate::wait` does for a wait.
+  - After missed events, it lets go of every terminal it knows that is no longer open
+    (`Sources::open`).
+  - Test: `claude_threads::what_a_lag_loses_is_read_again` (slopty-worker): a final status
+    lost behind 80 reports of other terminals is read from the table, and a close lost behind
+    80 events takes its provisional thread.

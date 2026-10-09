@@ -41,18 +41,33 @@ mod claude_threads {
     }
 
     struct Fake {
+        /// The terminal whose agent writes the transcript.
+        terminal: SessionId,
         /// The main transcript, once the agent has written one.
         main: watch::Sender<Option<PathBuf>>,
         seen: watch::Sender<Seen>,
+        /// What the daemon's table holds of each agent.
+        standing: parking_lot::Mutex<Vec<AgentEvent>>,
+        /// The terminals closed.
+        closed: parking_lot::Mutex<Vec<SessionId>>,
     }
 
     impl Sources for Fake {
-        fn sources(&self, _session: SessionId) -> orchestrate::Sources {
-            orchestrate::Sources { main: self.main.borrow().clone(), ..Default::default() }
+        fn sources(&self, session: SessionId) -> orchestrate::Sources {
+            let main = self.main.borrow().clone().filter(|_| session == self.terminal);
+            orchestrate::Sources { main, ..Default::default() }
         }
 
         fn seen(&self, _session: SessionId) -> watch::Receiver<Seen> {
             self.seen.subscribe()
+        }
+
+        fn standing(&self) -> Vec<AgentEvent> {
+            self.standing.lock().clone()
+        }
+
+        fn open(&self, session: SessionId) -> bool {
+            !self.closed.lock().contains(&session)
         }
     }
 
@@ -71,12 +86,16 @@ mod claude_threads {
             let main = dir.path().join("projects").join(format!("{NATIVE}.jsonl"));
             std::fs::create_dir_all(main.parent().unwrap()).unwrap();
             std::fs::write(&main, "").unwrap();
+            let terminal = SessionId::new();
             let seen = Arc::new(Fake {
+                terminal,
                 main: watch::Sender::new(Some(main.clone())),
                 seen: watch::Sender::new(Seen::default()),
+                standing: parking_lot::Mutex::new(Vec::new()),
+                closed: parking_lot::Mutex::new(Vec::new()),
             });
             let (events, heard) = (broadcast::Sender::new(64), broadcast::Sender::new(64));
-            Self { dir, main, terminal: SessionId::new(), events, heard, seen }
+            Self { dir, main, terminal, events, heard, seen }
         }
 
         fn host(&self) -> Host {
@@ -97,17 +116,16 @@ mod claude_threads {
 
         /// The tracker says `status`, heard from `source`, with the session id it knows.
         fn tracked(&self, status: AgentStatus, native: Option<&str>, source: AgentSource) {
-            let event = AgentEvent {
-                session: self.terminal,
-                status,
-                agent_session: native.map(str::to_owned),
-                detail: None,
-                attention: false,
-                source,
-                since_ms: WallMs::from_millis(1),
-                mode: None,
-            };
-            self.heard.send(event).unwrap();
+            self.heard.send(said(self.terminal, status, native, source)).unwrap();
+        }
+
+        /// More reports of other terminals than the broadcast holds, so the observer falls
+        /// behind and misses what came before them.
+        fn flood(&self) {
+            for _ in 0..80 {
+                let other = said(SessionId::new(), AgentStatus::Idle, None, AgentSource::Process);
+                self.heard.send(other).unwrap();
+            }
         }
 
         /// The agent writes `scenario`'s transcripts, and a hook fires.
@@ -156,6 +174,25 @@ mod claude_threads {
                 program: Vec::new(),
             };
             self.events.send(WorkerMsg::SessionChanged(summary)).unwrap();
+        }
+    }
+
+    /// What the tracker says of `session`'s agent.
+    fn said(
+        session: SessionId,
+        status: AgentStatus,
+        native: Option<&str>,
+        source: AgentSource,
+    ) -> AgentEvent {
+        AgentEvent {
+            session,
+            status,
+            agent_session: native.map(str::to_owned),
+            detail: None,
+            attention: false,
+            source,
+            since_ms: WallMs::from_millis(1),
+            mode: None,
         }
     }
 
@@ -433,6 +470,39 @@ mod claude_threads {
         other.tracked(AgentStatus::Idle, None, AgentSource::Process);
         until(&host, provisional, |_| true).await;
         other.tracked(AgentStatus::None, None, AgentSource::Process);
+        gone(&host, provisional).await;
+    }
+
+    /// A session's last status lost when the observer fell behind the daemon's reports is read
+    /// again from the table, so its thread does not stay working; a terminal whose close was
+    /// lost the same way is let go, its provisional thread with it.
+    #[tokio::test]
+    async fn what_a_lag_loses_is_read_again() {
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        until(&host, thread, |s| s.status.phase == Phase::Working).await;
+        let idle = said(rig.terminal, AgentStatus::Idle, Some(NATIVE), AgentSource::Hook);
+        rig.seen.standing.lock().push(idle);
+        rig.status(AgentStatus::Idle);
+        rig.flood();
+        until(&host, thread, |s| s.status.phase == Phase::Idle).await;
+
+        let other = Rig::new();
+        other.seen.main.send_replace(None);
+        let host = other.host();
+        let _observer = other.observe(&host);
+        let provisional = terminal_thread(other.terminal);
+        other.tracked(AgentStatus::Idle, None, AgentSource::Process);
+        until(&host, provisional, |_| true).await;
+        other.seen.closed.lock().push(other.terminal);
+        let reason = slopty_proto::terminal::CloseReason::Exited;
+        other.events.send(WorkerMsg::SessionClosed { session: other.terminal, reason }).unwrap();
+        for _ in 0..80 {
+            other.events.send(WorkerMsg::Load(0.0)).unwrap();
+        }
         gone(&host, provisional).await;
     }
 

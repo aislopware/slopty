@@ -94,6 +94,14 @@ mod claude_start {
         fn seen(&self, _session: SessionId) -> watch::Receiver<Seen> {
             self.seen.subscribe()
         }
+
+        fn standing(&self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn open(&self, _session: SessionId) -> bool {
+            true
+        }
     }
 
     struct Rig {
