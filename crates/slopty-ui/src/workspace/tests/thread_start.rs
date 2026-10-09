@@ -358,10 +358,11 @@ fn the_plus_menus_machine_is_not_asked_again(cx: &mut TestAppContext) {
 }
 
 /// A start's tile waits for its first message with nothing sent, and ⌘W takes it away with
-/// nothing started. Once sent, a link that goes takes the tile with it and says so, since the
-/// answer may never come; a tile still waiting for its first message stays.
+/// nothing started. Once sent, a link that goes leaves the tile waiting, since the start goes
+/// on on the machine: the link back sends it again as it went, under its own intent, and its
+/// answer fills the tile. A tile still waiting for its first message stays as it was.
 #[gpui::test]
-fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
+fn a_start_on_its_way_closes_and_outlives_its_link(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let Two { mut studio, .. } = two_machines(&view, cx);
     let key = studio.key;
@@ -398,15 +399,29 @@ fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.start_thread(key, codex, "~".into(), None, cx));
     settle(cx);
     let sent = starting_tile(&view, cx).expect("a start sent");
-    assert_eq!(starts(&mut studio).len(), 1);
+    let first = starts(&mut studio);
+    let [(intent, ..)] = first.as_slice() else { panic!("one start: {first:?}") };
     view.update_in(cx, |v, _w, cx| v.threads_unlinked(key, cx));
     settle(cx);
-    let (sent_gone, unsent_kept) =
-        view.read_with(cx, |v, _| (!v.layout.contains(sent), v.layout.contains(unsent)));
-    assert!(sent_gone, "a sent start goes with its link");
+    let (sent_kept, unsent_kept) =
+        view.read_with(cx, |v, _| (v.layout.contains(sent), v.layout.contains(unsent)));
+    assert!(sent_kept, "a sent start waits through its link going");
     assert!(unsent_kept, "a start not sent keeps its field");
-    let said = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
-    assert!(said.starts_with("studio went out of reach before Codex started"), "{said}");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "nothing to say yet");
+
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    settle(cx);
+    let again = starts(&mut studio);
+    assert_eq!(again, first, "the link back sends the same start again, under its intent");
+    let thread = ThreadId::new();
+    let started = IntentDone { id: *intent, outcome: Outcome::Started { thread } };
+    view.update_in(cx, |v, _w, cx| v.thread_done(key, &started, cx));
+    settle(cx);
+    let filled = studio.drain().into_iter().any(|m| {
+        matches!(m, ClientMsg::Items(ItemOp::Add(item))
+            if item.id == sent.item && item.kind == ItemKind::Thread { thread })
+    });
+    assert!(filled, "the answer fills the start's own tile");
 }
 
 /// A worker's thread hub knows what that machine can start ("Continue in…"): from its link's
@@ -540,6 +555,8 @@ fn a_past_session_is_found_and_taken_up_again(cx: &mut TestAppContext) {
         };
         v.thread_table(key, &table, cx);
     });
+    // The link coming up sends the start above again, still unanswered; nothing else.
+    assert_eq!(starts(&mut studio).len(), 1, "the unanswered start, again");
     let pick = ResumeSession {
         worker: key,
         session: Box::new(session("019b", None, "port the CLI", Some(running))),

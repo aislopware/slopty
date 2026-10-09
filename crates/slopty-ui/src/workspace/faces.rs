@@ -184,9 +184,10 @@ pub(super) struct ThreadFaces {
     server: HashMap<ThreadId, ThreadStand>,
     /// Each machine's plan windows as its agents' rows last said them, for the title bar.
     meters: slopty_client::meters::PlanMeters,
-    /// Starts sent and not yet answered: the worker each went to, its agent, and the tile it
-    /// fills.
-    starts: HashMap<IntentId, (WorkerKey, AgentId, ItemId)>,
+    /// Starts sent and not yet answered: the worker each went to, the start as it went, and
+    /// the tile it fills. One whose link goes is sent again, as it was, when the link comes
+    /// back: the worker's start outlived the link, and is taken up again.
+    starts: HashMap<IntentId, (WorkerKey, Box<Start>, ItemId)>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
     /// The view of a thread tile that became its terminal's, for that terminal's face to take
@@ -501,8 +502,9 @@ impl WorkspaceView {
         let id = IntentId::new();
         tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.starting.kept_start(item, start.clone());
-        self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));
-        self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
+        let start = Box::new(start);
+        self.faces.threads.starts.insert(id, (key, start.clone(), item));
+        self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start }));
         self.starting_sent(item, cx);
     }
 
@@ -830,12 +832,26 @@ impl WorkspaceView {
         hub.update(cx, |hub, cx| hub.git_done(request, outcome, cx));
     }
 
-    /// The link to `key` is up: its threads catch up from where they stand, its drafts ask for
-    /// their folders' branches, and the folders its agents' past sessions ran in are asked
-    /// for, for the starts to offer.
+    /// The link to `key` is up: its threads catch up from where they stand, the starts sent
+    /// there and not answered are sent again as they were, to be taken up where they stand,
+    /// its drafts ask for their folders' branches, and the folders its agents' past sessions
+    /// ran in are asked for, for the starts to offer.
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+        let again: Vec<ClientMsg> = self
+            .faces
+            .threads
+            .starts
+            .iter()
+            .filter(|(_, (at, ..))| *at == key)
+            .map(|(id, (_, start, _))| {
+                ClientMsg::Thread(ThreadRequest::Start { id: *id, start: start.clone() })
+            })
+            .collect();
+        for msg in again {
+            self.send(key, msg);
+        }
         self.starting.linked(key, cx);
         self.ask_past_places(key, None);
     }
@@ -869,13 +885,12 @@ impl WorkspaceView {
         Some(self.faces.threads.hubs.get(&key)?.read(cx).agents().to_vec())
     }
 
-    /// The link to `key` went: its thread views show what they last knew.
-    pub fn threads_unlinked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+    /// The link to `key` went: its thread views show what they last knew. A start sent there
+    /// goes on on the machine, and is kept to be taken up when the link is back.
+    pub fn threads_unlinked(&self, key: WorkerKey, cx: &mut App) {
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, ThreadHub::disconnected);
         }
-        self.faces.threads.starts.retain(|_, (at, ..)| *at != key);
-        self.starts_unlinked(key, cx);
     }
 
     /// A frame of `key`'s thread table.
@@ -900,9 +915,10 @@ impl WorkspaceView {
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
         if self.faces.threads.starts.get(&done.id).is_some_and(|(at, ..)| *at == key) {
-            let Some((_, agent, item)) = self.faces.threads.starts.remove(&done.id) else {
+            let Some((_, start, item)) = self.faces.threads.starts.remove(&done.id) else {
                 return;
             };
+            let agent = start.agent;
             match &done.outcome {
                 Outcome::Started { thread } => self.start_landed(key, item, *thread, &agent, cx),
                 Outcome::Refused { reason } => self.start_failed(key, item, reason.clone(), cx),

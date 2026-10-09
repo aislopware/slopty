@@ -696,26 +696,6 @@ impl WorkspaceView {
         self.send_start_as(item, start, cx);
     }
 
-    /// The link to `key` went: a start sent there may never be answered, so its tile goes and
-    /// says so; one not sent yet stays, its field kept.
-    pub(super) fn starts_unlinked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let lost: Vec<(ItemId, AgentId)> = self
-            .starting
-            .tiles
-            .iter()
-            .filter(|(_, s)| s.worker == key && s.sent)
-            .map(|(item, s)| (*item, s.agent.clone()))
-            .collect();
-        for (item, agent) in lost {
-            let why = format!(
-                "{} went out of reach before {} started: start it again once it is back",
-                self.worker_name(key),
-                agent_label(&agent)
-            );
-            self.start_failed(key, item, why, cx);
-        }
-    }
-
     /// ⌘W on a thread on its way: its tile goes. A start already sent still makes its thread,
     /// which is said when it comes.
     pub(super) fn close_starting(&mut self, tile: TileRef, cx: &mut Context<Self>) {

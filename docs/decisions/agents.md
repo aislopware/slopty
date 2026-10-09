@@ -1234,10 +1234,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     tile's own id, so the thread takes its place with nothing moving, and its composer takes
     the keyboard. A refusal or an answer with no thread takes the tile away and says why.
   - The tile is the layout's alone until then (`workspace/starting.rs`): a worker's snapshot
-    keeps it, ⌘W closes it, and a link that drops after the start was sent takes it away and
-    says the answer may never come. A start not sent yet keeps its field.
+    keeps it, and ⌘W closes it. A link that drops after the start was sent leaves it waiting
+    (since 2026-10-10; see "A start outlives its link"). A start not sent yet keeps its field.
   - Tests: `a_started_thread_opens_as_a_tile_and_a_refusal_is_said`,
-    `a_start_on_its_way_closes_and_goes_with_its_link` and
+    `a_start_on_its_way_closes_and_outlives_its_link` and
     `new_agent_opens_the_picker_with_the_last_choices` (the prompt) in
     `workspace/tests/thread_start.rs`.
 
@@ -2655,3 +2655,24 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `conversation::session::tests::a_clipped_text_is_read_from_its_line_alone`. Every
     other byte of the file is spoiled at the same length, and the text still reads, a line read
     in two parts among them. The measurement is `expand_cost`.
+
+- ✅ **A start outlives its link** (2026-10-10, readiness 10-10 rank 17). A start, its
+  worktree's setup included, ran on the asking connection's tasks. A Mac going to sleep or a
+  link that blipped killed a setup halfway, and the client dropped the start's tile, saying the
+  answer might never come.
+  - **On the worker.** A start runs on the daemon's runtime, keyed by its intent id
+    (`apps/slopty-worker/src/threads/starts.rs`). A connection only follows it: the setup's
+    latest words, then the outcome. The same start asked again follows the one under way, or
+    is answered by one finished in the last ten minutes. Every outcome, a failed setup or a
+    refusal included, goes into the host's record of starts, so a repeat after that is answered
+    from the record and nothing is set up twice.
+  - **On the client.** A start sent and not answered is kept with its whole request. A link
+    that goes leaves its tile waiting, and the link back sends the same start again under the
+    same intent, which takes the worker's start up where it stands. ⌘W still closes the tile,
+    and a thread that lands after that is said, as before.
+  - Tests: `a_start_outlives_its_link_and_the_relinked_client_takes_it_up`
+    (apps/slopty-worker `tests/threads.rs`). A worktree's setup waits on a pipe while the
+    client's link goes; the pipe is written, and the client back on a new link asks the same
+    start and gets the thread, with the setup run once. Also
+    `a_start_on_its_way_closes_and_outlives_its_link` (slopty-ui): the tile waits, the link
+    back resends the same intent, and the answer fills the tile.

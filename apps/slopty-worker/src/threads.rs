@@ -48,6 +48,7 @@ use tokio::task::{AbortHandle, JoinSet};
 use crate::Daemon;
 
 pub mod hold;
+mod starts;
 
 /// What an observed session needs of the daemon.
 struct Observed(Daemon);
@@ -113,6 +114,7 @@ pub struct Threads {
     authors: Authorship,
     history: History,
     worker: Worker,
+    starts: starts::Starts,
 }
 
 /// Open the threads kept under `dir`, and what [`start`] needs to observe into them.
@@ -166,6 +168,7 @@ pub fn open(
                 authors,
                 history,
                 worker,
+                starts: starts::Starts::default(),
             };
             Some((threads, observing))
         }
@@ -597,27 +600,18 @@ impl Following {
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
             // An agent is looked for and starts, in a terminal or not, in the worktree it
-            // names once that is made and set up, the setup said as it goes: on a task of its
-            // own.
-            ThreadRequest::Start { id, mut start } => {
+            // names once that is made and set up, the setup said as it goes: on the daemon's
+            // own task, which outlives this link, and is followed from here. The same start
+            // asked again, after a relink, follows the one under way or gets its outcome.
+            ThreadRequest::Start { id, start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
-                let out = at.out.clone();
-                at.tasks.spawn(async move {
-                    // What a setup says is drawn over again, so one lost to a full link is not
-                    // missed.
-                    let said = |setup: &Setup| {
-                        let msg = WorkerMsg::SettingUp { id, setup: setup.clone() };
-                        let _full = out.try_send(msg);
-                    };
-                    let outcome = match worktrees::enter(&mut start, &said).await {
-                        Ok(_) => begin(&threads, id, start).await,
-                        Err(worktrees::Failed::Setup(failed)) => {
-                            Outcome::SetupFailed { setup: failed.setup, code: failed.code }
-                        }
-                        Err(failed) => refused(failed.to_string()),
-                    };
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
+                if let Some(outcome) = threads.host.started(id) {
+                    at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
+                    return;
+                }
+                let followed =
+                    threads.starts.clone().take_up(id, |said| run_start(threads, id, start, said));
+                at.tasks.spawn(starts::follow(id, followed, at.out.clone()));
             }
             // An agent is asked, or its session directory listed: on a task of its own.
             ThreadRequest::Sessions { agent, cwd, query, limit } => {
@@ -656,6 +650,29 @@ impl Following {
             }
         }
     }
+}
+
+/// Start a thread for intent `id` as `start` says, in the worktree it names once that is made
+/// and set up, telling `said` what the setup says as it goes. Its outcome is recorded with the
+/// host's starts, so a repeat of the id long after gets it back and sets nothing up again.
+async fn run_start(
+    threads: Threads,
+    id: IntentId,
+    mut start: Box<Start>,
+    said: watch::Sender<Option<Setup>>,
+) -> Outcome {
+    // What a setup says is drawn over again, so one lost to a full link is not missed.
+    let say = |setup: &Setup| {
+        said.send_replace(Some(setup.clone()));
+    };
+    let outcome = match worktrees::enter(&mut start, &say).await {
+        Ok(_) => begin(&threads, id, start).await,
+        Err(worktrees::Failed::Setup(failed)) => {
+            Outcome::SetupFailed { setup: failed.setup, code: failed.code }
+        }
+        Err(failed) => refused(failed.to_string()),
+    };
+    threads.host.record_start(id, outcome)
 }
 
 /// Start a thread for intent `id` as `start` says, once, on its agent's adapter: pi and an

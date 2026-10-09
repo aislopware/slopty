@@ -1443,6 +1443,85 @@ mod threads {
         assert!(clone.join(".git").is_dir(), "the clone stays");
     }
 
+    /// A start outlives the link that asked for it: its worktree's setup goes on while the
+    /// client is gone, and the client back on a new link, asking the same start again, takes
+    /// it up and is answered with the thread, the setup run once.
+    #[tokio::test]
+    async fn a_start_outlives_its_link_and_the_relinked_client_takes_it_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (daemons, record) = with_claude(&root).await;
+        let clone = root.join("atlas");
+        std::fs::create_dir_all(&clone).unwrap();
+        // The setup says it is under way, then waits on a pipe the test writes to once the
+        // link has gone.
+        let go = root.join("go");
+        let made = std::process::Command::new("mkfifo").arg(&go).status().unwrap();
+        assert!(made.success(), "mkfifo");
+        let setup = format!(
+            r#"{{"scripts":{{"setup":"echo run >> \"$SLOPTY_ROOT_PATH/runs\"\necho waiting\nread line < {}"}}}}"#,
+            go.display()
+        );
+        std::fs::write(clone.join("conductor.json"), setup).unwrap();
+        std::fs::write(clone.join(".gitignore"), "runs\n").unwrap();
+        for args in
+            [&["init", "-q", "-b", "main"][..], &["add", "."], &["commit", "-q", "-m", "c0"]]
+        {
+            let done = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(done.success(), "git {args:?}");
+        }
+        let start = Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: clone.to_string_lossy().into_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
+            args: Vec::new(),
+            worktree: Some(NewWorktree::named("claude-5ea7ed")),
+        };
+        let client = ClientId::new();
+        let id = IntentId::new();
+        let mut a = Client::connect(&daemons, client).await;
+        a.send(ThreadRequest::Start { id, start: Box::new(start.clone()) }).await;
+        a.heard(|msg| match msg {
+            WorkerMsg::SettingUp { id: at, setup } if at == id => {
+                setup.tail.iter().any(|line| line == "waiting").then_some(())
+            }
+            _ => None,
+        })
+        .await;
+        a.leave().await;
+
+        tokio::task::spawn_blocking(move || std::fs::write(go, "go\n")).await.unwrap().unwrap();
+        let mut b = Client::connect(&daemons, client).await;
+        b.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+        let outcome = b
+            .heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let runs = std::fs::read_to_string(clone.join("runs")).unwrap();
+        assert_eq!(runs, "run\n", "the setup ran once, through the drop");
+        let tree = clone.join(".claude/worktrees/claude-5ea7ed");
+        let seen = recorded(&record).await;
+        assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
+    }
+
     /// The palette's start: no first message and a folder under the worker's home spelled
     /// with `~`, as a client that knows no home writes it. Claude Code opens in the home with
     /// nothing on its command line after its own flags, waiting for the person. The terminal it
