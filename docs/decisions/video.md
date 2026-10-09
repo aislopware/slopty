@@ -2783,3 +2783,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the worker's exit, or a test's end, until something killed it.
   - Tests: `a_call_that_has_not_returned_keeps_the_engines_busy` (`engines`),
     `the_engines_are_timed_only_where_they_are_idle` (`stripes`).
+
+- ✅ **A session build that never comes back is given up** (2026-10-09). CI run 37929905806
+  timed out `a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on` at 60 s after
+  two replacement builds and no stall line. The tests' geometry tick awaited its build inside
+  the select arm, so the 10 s stall clock never ran (and every wake restarted it); the second
+  build never answered, and the run was cut off without a word. The worker had the same wait:
+  its stream task skips the geometry probe while a build is in flight, so a build that never
+  came back froze window following and the input's bounds for good, and the build sat on the
+  runtime's blocking pool, which holds the runtime's shutdown until it returns.
+  - A build runs on a thread of its own (`slopty-build-encoder`), and its wait is charged on
+    the worker's own time as an encode's is: a look every beat, each charged at most
+    `STUCK_CREDIT`. Past `BUILD_STUCK` it answers `ScreenError::BuildStuck`, which the stream
+    takes as any failed build, and the next geometry tick builds again. The thread is left
+    inside VideoToolbox and drops what it made if it ever comes back.
+  - `BUILD_STUCK` is a minute. A warm build takes 3.5–42 ms and a fresh process codes its
+    first keyframe in 0.28–0.34 s through the test runner's directory, but with other
+    processes coding on this Mac's engines a first build passed 10 s (a 10 s patience failed
+    an open in one of three runs of the group) and the one-keyframe codec probe took 20.7 s. A
+    minute is past the slowest seen, and past the bound every CI test is cut at, so a test
+    never meets the give-up; its waits name the build instead (below).
+  - A process's first low-latency session does more than it looks: `VTCompressionSessionCreate`
+    starts a reaction observer (`VCPReactionObserverCreate`), which lists the audio and camera
+    devices through CoreAudio's HAL and CoreMediaIO, besides Metal's device list. It is once per
+    process, and in the 0.3 s above.
+  - The stream tests run the stall clock from the last picture, whatever woke the tick, and a
+    build they wait on is named each 10 s with how long it has been inside. The first time, a
+    thread of the test's own prints the build thread's stack as `/usr/bin/sample` reads it,
+    given up after 10 s, so the next such failure names the call. Read inside the wait, the
+    stack held the words back: on this loaded Mac a run of the group was cut off at 120 s with
+    the build started and nothing after it.
+  - Not proven: which VideoToolbox call that build was in on the runner, and why the stream's
+    sessions were being replaced at all on a runner whose other 75 tests ran at speed. The probe
+    after the run found the runner's encoder coding in a fresh process.
+  - Tests: `a_build_that_never_comes_back_is_given_up_and_holds_nothing` and
+    `a_build_wait_charges_only_the_time_it_ran_on_time` (`screen`).
+
+- ✅ **The seam test compares only the seam** (2026-10-09). CI run 37931699857 timed out
+  `two_stripes_meet_at_the_seam_row_for_row` at 60 s with 9 of its 12 pairs compared and the
+  pictures still coming. The cost was the test's own: unoptimised, a pair took 195 ms of its
+  thread (80 ms copying both stripes' whole luma planes, 57 ms for each of its two shift
+  curves), and that runner ran CPU-bound work 15 times slower (`clock_drift_is_absorbed_by_slices`
+  47.6 s against 3.1 s). It now copies the 128 rows both stripes code and the lower picture's
+  rows a shift reaches, and sums each row pairing once for both curves, which are the same sums.
+  The test took 4.5–6.6 s of CPU here and takes 1.4–2.2 s; on background QoS, throttled to the
+  efficiency cores as a stand-in for that runner, 25–69 s and now 6–10 s. It still compares 12
+  pairs, from the first frames after the keyframe on.

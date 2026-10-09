@@ -52,7 +52,7 @@
 //! taken alone.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -212,6 +212,13 @@ pub enum ScreenError {
     /// The stream's encode thread could not be started.
     #[error("the encode thread would not start: {0}")]
     EncodeThread(std::io::Error),
+    /// A session build stayed inside VideoToolbox past its patience (`BUILD_STUCK`) and was
+    /// given up on; its thread is left there.
+    #[error("VideoToolbox did not answer a session build in {0:?}")]
+    BuildStuck(Duration),
+    /// A session build's thread ended without an answer: it would not start, or it panicked.
+    #[error("the session build's thread ended without an answer")]
+    BuildLost,
 }
 
 impl ScreenError {
@@ -1458,6 +1465,21 @@ const STUCK_CREDIT: Duration = Duration::from_millis(100);
 /// frame: each one given up on leaves a thread waiting inside the encoder.
 const ENCODE_STUCK_MAX: Duration = Duration::from_secs(32);
 
+/// How long a session build may stay inside VideoToolbox, on the worker's own time, before the
+/// wait for it is given up ([`Building::built`]). A build takes 3.5–42 ms (MEASUREMENTS.md,
+/// "encoder sessions off the runtime"), and a process's first one, which also starts Metal's
+/// device list, IOSurface's connection and, for the low-latency rate control's reaction
+/// observer, the audio and camera device lists (`VCPReactionObserverCreate` under
+/// `VTCompressionSessionCreate`), codes its first keyframe in 0.28–0.34 s. But while other
+/// processes kept this Mac's engines busy, a first build passed 10 s and a test of one build
+/// and one keyframe took 20.7 s, so a build is given up on only once nothing else could be
+/// what holds it: a minute, past the slowest seen and past any test's bound on CI.
+const BUILD_STUCK: Duration = Duration::from_secs(60);
+
+/// How often the wait for a build looks at it, charging each look at most [`STUCK_CREDIT`]: the
+/// beat's period, so a starved machine's late looks charge no more than the encode watch's do.
+const BUILD_LOOK: Duration = HEARTBEAT_AFTER;
+
 /// The one encode at a time, from reading its requests to the end of its submits: what keeps the
 /// presentation times the encoder sees in order and a rebuild wholly before or after a frame.
 ///
@@ -1704,12 +1726,12 @@ struct Shared<P: Platform = Native> {
     give_way_until_us: AtomicU64,
     /// The watch's windows closed since the others last gave way for this stream: it asks
     /// again only after [`engines::SETTLE_WINDOWS`].
-    windows_since_gave: std::sync::atomic::AtomicU32,
+    windows_since_gave: AtomicU32,
     /// Frames a second the encoder was fed over the last window at the rung in force, `0` until
     /// one closes ([`Fed`]): what the congestion guard budgets a frame from.
     fed_fps: std::sync::atomic::AtomicU16,
     /// The bitrate the encoder is to be told at its next frame ([`Self::apply_bitrate`]).
-    encoder_bps: std::sync::atomic::AtomicU32,
+    encoder_bps: AtomicU32,
     /// The presentation time of the last frame handed to a session; the next must be later.
     /// Every coder of one capture codes it under one stamp, which names the capture on the wire.
     last_encoded_us: AtomicU64,
@@ -1842,9 +1864,9 @@ impl<P: Platform> Shared<P> {
             watch: Mutex::new(EncoderWatch::default()),
             focused: AtomicBool::new(false),
             give_way_until_us: AtomicU64::new(0),
-            windows_since_gave: std::sync::atomic::AtomicU32::new(engines::SETTLE_WINDOWS),
+            windows_since_gave: AtomicU32::new(engines::SETTLE_WINDOWS),
             fed_fps: std::sync::atomic::AtomicU16::new(0),
-            encoder_bps: std::sync::atomic::AtomicU32::new(0),
+            encoder_bps: AtomicU32::new(0),
             last_encoded_us: AtomicU64::new(0),
             pace_us: AtomicU64::new(0),
             sessions: AtomicU64::new(0),
@@ -3318,7 +3340,7 @@ impl<P: Platform> std::fmt::Debug for Built<P> {
     }
 }
 
-/// Build the sessions whose packets flow back into `shared`, on the blocking pool: creating a
+/// Build the sessions whose packets flow back into `shared`, off the runtime: creating a
 /// VideoToolbox session holds the calling thread for milliseconds, which on a runtime worker
 /// holds up every task queued behind it (MEASUREMENTS.md, "encoder sessions off the runtime").
 async fn build_encoder<P: Platform>(
@@ -3328,29 +3350,31 @@ async fn build_encoder<P: Platform>(
     sessions: [u64; 2],
     layout: Option<[CodedStripe; 2]>,
 ) -> Result<Built<P>, ScreenError> {
-    start_encoder(shared, config, shown, sessions, layout)
-        .await
-        .map_err(|_cancelled| ScreenError::Closed)?
-        .map_err(Into::into)
+    start_encoder(shared, config, shown, sessions, layout).built().await
 }
 
-/// [`build_encoder`] without waiting for it: the build runs on the blocking pool from here on.
-/// Its packets are the stream's once it is installed under `sessions` ([`Shared::install`]).
+/// [`build_encoder`] without waiting for it: the build runs on a thread of its own from here
+/// on. Its packets are the stream's once it is installed under `sessions` ([`Shared::install`]).
 ///
 /// The sessions code the capture's padded surface ([`CaptureConfig::surface`]); each keyframe's
 /// SPS is rewritten to show the picture's own `shown` size, so the client decodes that size and
 /// never sees the padding ([`slopty_codec::conformance`]). With a `layout`, one session codes
 /// each stripe's rows, both built at once, and the lower one shows the picture's rows down to
 /// its last.
+///
+/// The thread is not the runtime's blocking pool: a runtime waits for its blocking tasks as it
+/// shuts down, so a build that never came back from VideoToolbox would hold the worker's exit,
+/// or a test's end, for good.
 fn start_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
     shown: (u32, u32),
     sessions: [u64; 2],
     layout: Option<[CodedStripe; 2]>,
-) -> JoinHandle<Result<Built<P>, CodecError>> {
+) -> Building<P> {
     let weak = Weak::clone(shared);
-    tokio::task::spawn_blocking(move || {
+    let (answer_tx, answer) = oneshot::channel();
+    let build = move || {
         let [top_session, lower_session] = sessions;
         let Some([top, lower]) = layout else {
             let top = open_session(&weak, config, shown, top_session, 0, None)?;
@@ -3359,18 +3383,116 @@ fn start_encoder<P: Platform>(
         let rows =
             |stripe: CodedStripe| shown.1.saturating_sub(stripe.coded_top).min(stripe.coded_rows);
         let (built_top, built_lower) = std::thread::scope(|scope| {
-            let lower = scope.spawn(|| {
-                open_session(&weak, config, (shown.0, rows(lower)), lower_session, 1, Some(lower))
-            });
+            let lower = std::thread::Builder::new()
+                .name(format!("{BUILD_THREAD}-lower"))
+                .spawn_scoped(scope, || {
+                    open_session(
+                        &weak,
+                        config,
+                        (shown.0, rows(lower)),
+                        lower_session,
+                        1,
+                        Some(lower),
+                    )
+                });
             let built_top =
                 open_session(&weak, config, (shown.0, rows(top)), top_session, 0, Some(top));
-            let built_lower = lower
-                .join()
-                .unwrap_or(Err(CodecError::Os { call: "the lower stripe's build", status: -1 }));
+            let built_lower = match lower {
+                Ok(lower) => lower.join().unwrap_or(Err(CodecError::Os {
+                    call: "the lower stripe's build",
+                    status: -1,
+                })),
+                Err(_spawn) => {
+                    Err(CodecError::Os { call: "the lower stripe's thread", status: -1 })
+                }
+            };
             (built_top, built_lower)
         });
         Ok(Built { top: built_top?, lower: Some(built_lower?), layout })
-    })
+    };
+    let spawned = std::thread::Builder::new().name(BUILD_THREAD.to_owned()).spawn(move || {
+        // A wait given up on is gone: what the build made is dropped here, on its own thread,
+        // as a replaced session is ([`retire`]).
+        if let Err(unclaimed) = answer_tx.send(build()) {
+            let _inside = engines::ENGINES.enter();
+            drop(unclaimed);
+        }
+    });
+    if let Err(e) = spawned {
+        // The answer's sender went with the closure: the wait answers `BuildLost`.
+        tracing::warn!(error = %e, "no thread to build an encoder session on");
+    }
+    let stream = shared.upgrade().map(|shared| shared.id);
+    Building { answer, stream, patience: BUILD_STUCK, charged: Duration::ZERO, looked_us: None }
+}
+
+/// The name of a session build's thread ([`start_encoder`]), for a stack read when one stays.
+const BUILD_THREAD: &str = "slopty-build-encoder";
+
+/// Sessions being built on their thread ([`start_encoder`]), and the wait for them: how long it
+/// has been charged on the worker's own time, against its patience ([`BUILD_STUCK`]).
+struct Building<P: Platform> {
+    answer: oneshot::Receiver<Result<Built<P>, CodecError>>,
+    /// The stream it builds for, to name in the log.
+    stream: Option<StreamId>,
+    patience: Duration,
+    /// The worker's own time the wait has been charged, a look at most [`STUCK_CREDIT`] each.
+    charged: Duration,
+    /// When the wait last looked, `None` before its first look.
+    looked_us: Option<u64>,
+}
+
+impl<P: Platform> Building<P> {
+    /// The sessions once they are built. Cancel-safe: a dropped call leaves the build running,
+    /// and its charge, for the next one.
+    ///
+    /// A build still inside VideoToolbox once its patience is charged is given up on, as the beat
+    /// gives up an encode ([`Shared::unstick`]): its thread is left there, holding nothing anyone
+    /// waits on, and drops what it made if it ever comes back. Only the time the wait itself ran
+    /// on time is charged, so a starved machine that holds the worker for seconds does not give
+    /// up a build that was only waiting with it.
+    ///
+    /// # Errors
+    ///
+    /// When VideoToolbox refuses a session or never answers, or the build's thread died.
+    async fn built(&mut self) -> Result<Built<P>, ScreenError> {
+        loop {
+            tokio::select! {
+                biased;
+                answer = &mut self.answer => {
+                    return Ok(answer.map_err(|_died| ScreenError::BuildLost)??);
+                }
+                () = tokio::time::sleep(BUILD_LOOK) => {
+                    if self.look(now::<P>()) {
+                        tracing::warn!(
+                            stream = ?self.stream,
+                            patience = ?self.patience,
+                            "a session build has not come back from VideoToolbox: given up"
+                        );
+                        return Err(ScreenError::BuildStuck(self.patience));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Charge the wait for a look at `now_us`: whether its patience has run out.
+    fn look(&mut self, now_us: u64) -> bool {
+        let ran = self.looked_us.map_or(0, |looked| now_us.saturating_sub(looked));
+        self.looked_us = Some(now_us);
+        self.charged = self.charged.saturating_add(Duration::from_micros(ran).min(STUCK_CREDIT));
+        self.charged >= self.patience
+    }
+}
+
+impl<P: Platform> Drop for Building<P> {
+    /// Sessions built and never taken are dropped off the runtime ([`retire`]): invalidating one
+    /// waits for its callbacks. A build still under way drops its own once it is done.
+    fn drop(&mut self) {
+        if let Ok(Ok(built)) = self.answer.try_recv() {
+            retire(Some(built));
+        }
+    }
 }
 
 /// Coder `index`'s session for [`start_encoder`], made on the calling thread, which it holds
@@ -3412,7 +3534,7 @@ fn open_session<P: Platform>(
 /// "input behind a quality change"). [`Pipeline::finish_rebuild`] puts it in; until then the
 /// stream goes on at its old size.
 pub struct Rebuild<P: Platform> {
-    encoder: JoinHandle<Result<Built<P>, CodecError>>,
+    encoder: Building<P>,
     /// The numbers the sessions are built under, to install them as.
     sessions: [u64; 2],
     native: (u32, u32),
@@ -3437,17 +3559,16 @@ impl<P: Platform> Rebuild<P> {
     /// The new sessions once they are built. Cancel-safe: a dropped call leaves the build
     /// running for the next one. Not to be called again once it has answered.
     ///
+    /// A build that stays inside VideoToolbox past its patience (`BUILD_STUCK`) answers
+    /// [`ScreenError::BuildStuck`]: the caller goes on as for any failed build
+    /// ([`Pipeline::rebuild_failed`]), and the geometry tick builds again where sessions are
+    /// still wanted.
+    ///
     /// # Errors
     ///
-    /// When VideoToolbox refuses a session, or the build was cancelled.
+    /// When VideoToolbox refuses a session or does not answer, or the build's thread died.
     pub async fn built(&mut self) -> Result<Built<P>, ScreenError> {
-        (&mut self.encoder).await.map_err(|_cancelled| ScreenError::Closed)?.map_err(Into::into)
-    }
-
-    /// Give the build up for a newer one: the sessions it makes are dropped on the blocking
-    /// pool once they are made, as replaced ones are ([`retire`]).
-    fn abandon(self) {
-        drop(tokio::task::spawn_blocking(move || drop(self.encoder)));
+        self.encoder.built().await
     }
 }
 
@@ -4481,9 +4602,8 @@ impl<P: Platform> Pipeline<P> {
             return None;
         }
         let resized = pending.as_ref().is_some_and(|rebuild| rebuild.resized);
-        if let Some(superseded) = pending {
-            superseded.abandon();
-        }
+        // A build under way for an older ask is dropped: it drops its sessions once made.
+        drop(pending);
         self.map_at(native);
         let mut rebuild = self.start_rebuild(native, desired, encoder_config);
         rebuild.resized = resized;
@@ -7750,6 +7870,122 @@ mod tests {
         release.send(()).unwrap();
         let built = tokio::time::timeout(Duration::from_secs(5), rebuild.built()).await.unwrap();
         built.unwrap();
+    }
+
+    /// A platform whose encoder sessions are built only once the test lets them
+    /// ([`WEDGE_OPEN`]), as a build that never came back from VideoToolbox on a hosted virtual
+    /// Mac (CI run 37929905806), and counted as they are dropped.
+    enum Wedge {}
+
+    impl Platform for Wedge {
+        type Audio = slopty_codec::Opus;
+        type Capture = slopty_capture::ScreenCaptureKit;
+        type Input = slopty_input::CgEvents;
+        type Video = Wedged;
+    }
+
+    static WEDGE_OPEN: Mutex<bool> = Mutex::new(false);
+    static WEDGE_OPENED: parking_lot::Condvar = parking_lot::Condvar::new();
+    static WEDGED_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+    struct Wedged;
+
+    impl Drop for Wedged {
+        fn drop(&mut self) {
+            WEDGED_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl slopty_codec::VideoEncoder for Wedged {
+        type Image = slopty_codec::PixelBuffer;
+
+        fn new(
+            _config: EncoderConfig,
+            _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, CodecError> {
+            let mut open = WEDGE_OPEN.lock();
+            while !*open {
+                WEDGE_OPENED.wait(&mut open);
+            }
+            Ok(Self)
+        }
+
+        fn encode(&self, _: &Self::Image, _: u64, _: &FrameOptions) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
+            Ok(())
+        }
+    }
+
+    /// A build that stays inside VideoToolbox is given up once its patience is charged, and
+    /// answers what it waited on. Nothing waits on the thread left inside: the runtime shuts
+    /// down at once, where a build on its blocking pool held the shutdown for as long as
+    /// VideoToolbox did, and the sessions a build makes once it comes back, given up on or
+    /// dropped unanswered, are dropped on its own thread.
+    #[test]
+    fn a_build_that_never_comes_back_is_given_up_and_holds_nothing() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let sink: Arc<dyn DatagramSink> = Wire::new();
+        let shared = Arc::new(Shared::<Wedge>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let (_capture, config) = configs((1280, 800), &Quality::default(), None);
+        let weak = Arc::downgrade(&shared);
+        let patience = Duration::from_millis(300);
+        let (waited, next) = runtime.block_on(async {
+            let mut building = start_encoder(&weak, config, (1280, 800), [1, 0], None);
+            assert_eq!(building.patience, BUILD_STUCK);
+            building.patience = patience;
+            let started = Instant::now();
+            let answer = building.built().await;
+            let waited = started.elapsed();
+            assert!(
+                matches!(answer, Err(ScreenError::BuildStuck(given)) if given == patience),
+                "{answer:?}"
+            );
+            let next = start_encoder(&weak, config, (1280, 800), [2, 0], None);
+            (waited, next)
+        });
+        assert!(waited >= patience && waited < patience * 10, "given up after {waited:?}");
+        drop(next);
+
+        let shutdown = Instant::now();
+        drop(runtime);
+        assert!(shutdown.elapsed() < Duration::from_secs(1), "{:?}", shutdown.elapsed());
+
+        *WEDGE_OPEN.lock() = true;
+        WEDGE_OPENED.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while WEDGED_DROPPED.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(WEDGED_DROPPED.load(Ordering::Relaxed), 2, "both builds' sessions dropped");
+    }
+
+    /// The wait for a build charges a look at most [`STUCK_CREDIT`], however late it came: a
+    /// worker held up for seconds by a starved machine has not seen VideoToolbox stop.
+    #[test]
+    fn a_build_wait_charges_only_the_time_it_ran_on_time() {
+        let (_answer_tx, answer) = oneshot::channel();
+        let mut building = Building::<Wedge> {
+            answer,
+            stream: None,
+            patience: Duration::from_millis(200),
+            charged: Duration::ZERO,
+            looked_us: None,
+        };
+        assert!(!building.look(1_000_000), "the first look charges nothing");
+        assert!(!building.look(1_025_000));
+        assert_eq!(building.charged, Duration::from_millis(25));
+        assert!(!building.look(6_025_000), "five seconds late");
+        assert_eq!(building.charged, Duration::from_millis(125), "charged the credit");
+        assert!(!building.look(6_050_000));
+        assert!(!building.look(6_075_000));
+        assert!(building.look(6_100_000), "200 ms charged: given up");
     }
 
     /// The window server's cursor as [`the_shape_loop_reads_the_picture_only_when_the_seed_moves`]

@@ -972,20 +972,126 @@ mod tests {
     const STALLED: Duration = Duration::from_secs(10);
 
     /// One geometry tick, as the app's loop runs it when the stream wakes it: the probe read
-    /// off the runtime, and a build it starts waited for and put in.
-    async fn follow<P: Platform>(stream: &mut Pipeline<P>) {
-        let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
-        let Some(mut rebuild) = stream.check_geometry(&probe) else { return };
-        eprintln!("the geometry tick builds new sessions");
-        match rebuild.built().await {
-            Ok(built) => {
-                let _told = stream.finish_rebuild(rebuild, built);
-            }
-            Err(e) => {
-                eprintln!("the geometry tick's build failed: {e}");
-                stream.rebuild_failed(&rebuild);
+    /// off the runtime, and a build it starts waited for and put in, or given up on as the app
+    /// gives it up ([`Pipeline::rebuild_failed`]). A build given up on inside VideoToolbox is
+    /// followed by the next tick at once, as the app's next one follows it within a second.
+    ///
+    /// The wait for a build is a wait on VideoToolbox, not on the stream, and it keeps the
+    /// stall clock of [`next_or_stopped`] (`stalled_at`, `what`): each [`STALLED`] it says how
+    /// long the build has been inside, so a run its runner cuts off names what it waited on.
+    /// The first time, the stack of the build's thread follows from a thread of its own
+    /// ([`stacks`]), which neither the wait nor the words wait for: a stack read has taken
+    /// minutes on a loaded Mac. The build itself gives up past its patience
+    /// ([`crate::screen::BUILD_STUCK`]).
+    async fn follow<P: Platform>(
+        stream: &mut Pipeline<P>,
+        stalled_at: &mut tokio::time::Instant,
+        what: &dyn Fn() -> String,
+    ) {
+        loop {
+            let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+            let Some(mut rebuild) = stream.check_geometry(&probe) else { return };
+            eprintln!("the geometry tick builds new sessions");
+            let started = Instant::now();
+            let mut looked = false;
+            let built = loop {
+                tokio::select! {
+                    built = rebuild.built() => break built,
+                    () = tokio::time::sleep_until(*stalled_at) => {
+                        *stalled_at += STALLED;
+                        eprintln!(
+                            "no picture for {STALLED:?} {}: a session build inside VideoToolbox for {:?} of the clock, waiting on it: worker {:?}",
+                            what(),
+                            started.elapsed(),
+                            stream.stats()
+                        );
+                        if !looked {
+                            looked = true;
+                            std::thread::spawn(|| {
+                                let stack = stacks(crate::screen::BUILD_THREAD);
+                                eprintln!("the session build's thread, as sampled:\n{stack}");
+                            });
+                        }
+                    }
+                }
+            };
+            match built {
+                Ok(built) => {
+                    let _told = stream.finish_rebuild(rebuild, built);
+                    return;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "the geometry tick's build failed after {:?}: {e}",
+                        started.elapsed()
+                    );
+                    stream.rebuild_failed(&rebuild);
+                    if !matches!(e, crate::screen::ScreenError::BuildStuck(_)) {
+                        return;
+                    }
+                }
             }
         }
+    }
+
+    /// The stacks of this process's threads whose names start with `name`, as `/usr/bin/sample`
+    /// reads them over a second: the calls a thread that has not come back is inside, outermost
+    /// first, each with how many of the samples found it there. Blocking, and given up after
+    /// [`STALLED`]; for a failure's words only.
+    fn stacks(name: &str) -> String {
+        let pid = std::process::id().to_string();
+        let file = std::env::temp_dir().join(format!("slopty-stacks-{pid}-{name}.txt"));
+        let spawned = std::process::Command::new("/usr/bin/sample")
+            .args([pid.as_str(), "1", "10", "-file"])
+            .arg(&file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut sample = match spawned {
+            Ok(sample) => sample,
+            Err(e) => return format!("no stacks: {e}"),
+        };
+        let deadline = Instant::now() + STALLED;
+        let ended = loop {
+            match sample.try_wait() {
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::park_timeout(Duration::from_millis(100));
+                }
+                Ok(Some(status)) => break status.success(),
+                Ok(None) | Err(_) => break false,
+            }
+        };
+        if !ended {
+            let _killed = sample.kill();
+            let _reaped = sample.wait();
+        }
+        let read = std::fs::read_to_string(&file);
+        let _removed = std::fs::remove_file(&file);
+        let text = match read {
+            Ok(text) if ended => text,
+            Ok(_) | Err(_) => return format!("no stacks: sample did not answer in {STALLED:?}"),
+        };
+        let mut kept = Vec::new();
+        let mut inside = false;
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            let (first, second) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+            if first.parse::<u64>().is_ok() && second.starts_with("Thread_") {
+                inside = line.contains(&format!(": {name}"));
+            } else if !line.starts_with("    ") {
+                inside = false;
+            }
+            if inside {
+                // A frame's symbol and its library, without the offset and the address.
+                let frame = line.trim_start_matches(|c: char| " +!:|".contains(c));
+                let frame = frame.split("  [0x").next().unwrap_or(frame);
+                kept.push(frame.chars().take(180).collect::<String>());
+            }
+        }
+        if kept.is_empty() {
+            return format!("no thread named {name} in the sample");
+        }
+        kept.join("\n")
     }
 
     /// Geometry ticks, each build waited for and put in, until the stream codes `chroma` or a
@@ -1022,6 +1128,8 @@ mod tests {
     /// stopped. A frame inside VideoToolbox counts as the machine's only until the worker's
     /// beat has charged it its patience (`ENCODE_STUCK`): past that the beat should have
     /// given it up and new sessions taken over, so one still inside has stopped the stream.
+    /// A session build the geometry tick waits on is named as such ([`follow`]), and the stall
+    /// clock runs from the last picture, whatever woke the tick meanwhile.
     /// `false` once the client's stream has ended.
     async fn next_or_stopped<P: Platform>(
         frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
@@ -1032,11 +1140,14 @@ mod tests {
         let wake = stream.geometry_wake();
         let ran = |stream: &Pipeline<P>| (stream.stats().captured, handle.stats().datagrams);
         let mut since = ran(stream);
+        // A wake does not put the stall off: only a picture does.
+        let mut stalled_at = tokio::time::Instant::now() + STALLED;
         loop {
             tokio::select! {
                 changed = frames.changed() => return changed.is_ok(),
-                () = wake.notified() => follow(stream).await,
-                () = tokio::time::sleep(STALLED) => {
+                () = wake.notified() => follow(stream, &mut stalled_at, &what).await,
+                () = tokio::time::sleep_until(stalled_at) => {
+                    stalled_at += STALLED;
                     let coding = stream.shared.coding();
                     // The beat gives an encode up once it has charged its patience; one charged
                     // well past it was not given up on, and the stream has stopped there.
@@ -1544,7 +1655,11 @@ mod tests {
             let deadline = tokio::time::Instant::now() + watched;
             loop {
                 tokio::select! {
-                    () = wake.notified() => follow(&mut stream).await,
+                    () = wake.notified() => {
+                        let mut stalled_at = tokio::time::Instant::now() + STALLED;
+                        let what = || "replacing lost sessions".to_owned();
+                        follow(&mut stream, &mut stalled_at, &what).await;
+                    }
                     () = tokio::time::sleep_until(deadline) => break,
                 }
             }
@@ -2031,8 +2146,13 @@ mod tests {
         });
     }
 
-    /// A decoded picture's luma plane, row by row with no stride padding, and its width.
-    fn luma(image: &objc2_core_video::CVPixelBuffer) -> (usize, Vec<u8>) {
+    /// Rows `rows` of a decoded picture's luma plane (those of them it has), row by row with no
+    /// stride padding, and its width. Only the rows asked for are copied: the whole plane of a
+    /// stripe was 40 ms of the test's own time a picture, unoptimised.
+    fn luma(
+        image: &objc2_core_video::CVPixelBuffer,
+        rows: std::ops::Range<usize>,
+    ) -> (usize, Vec<u8>) {
         use objc2_core_video::{
             CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
             CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -2047,46 +2167,70 @@ mod tests {
         let base = CVPixelBufferGetBaseAddressOfPlane(image, 0).cast::<u8>();
         // SAFETY: the buffer is locked, so its luma plane is mapped for `stride * h` bytes.
         let plane = unsafe { std::slice::from_raw_parts(base, stride * h) };
-        let rows = plane.chunks(stride).flat_map(|row| &row[..w]).copied().collect();
+        let rows = rows.start.min(h)..rows.end.min(h);
+        let mut copied = Vec::with_capacity(rows.len() * w);
+        for y in rows {
+            copied.extend_from_slice(&plane[y * stride..][..w]);
+        }
         // SAFETY: matches the lock above.
         let _unlocked =
             unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
-        (w, rows)
+        (w, copied)
     }
 
-    /// Mean absolute luma difference between the rows both stripes code, the lower stripe's
-    /// picture moved `shift` rows against the top one's: row `y` of the picture is the top
-    /// picture's row `y` and the lower picture's row `y - lower_top`.
-    fn overlap_error(
-        top: &[u8],
-        lower: &[u8],
-        width: usize,
-        lower_top: usize,
-        shift: isize,
-    ) -> f64 {
-        let (top_rows, lower_rows) = (top.len() / width, lower.len() / width);
-        let (mut sum, mut n) = (0_u64, 0_u64);
-        for y in lower_top..top_rows {
-            let Some(from) = (y - lower_top).checked_add_signed(shift) else { continue };
-            if from >= lower_rows {
-                continue;
-            }
-            let (a, b) = (&top[y * width..][..width], &lower[from * width..][..width]);
-            sum += a.iter().zip(b).map(|(a, b)| u64::from(a.abs_diff(*b))).sum::<u64>();
-            n += width as u64;
-        }
-        sum as f64 / n.max(1) as f64
+    /// The most rows [`overlap_errors`] moves the lower stripe's picture either way.
+    const SHIFTS: isize = 6;
+
+    /// The summed absolute luma difference of each row both stripes code against the lower
+    /// picture's rows near it: `top` is the top picture's rows from the lower stripe's first
+    /// coded row down, `lower` the lower picture's first rows. Entry `[i][k]` compares top row
+    /// `i` with lower row `i + k - SHIFTS - 1`, `None` where that row is not there: every
+    /// pairing [`overlap_errors`] reads, each summed once for both of the test's curves.
+    fn row_differences(top: &[u8], lower: &[u8], width: usize) -> Vec<Vec<Option<u64>>> {
+        let lower_rows = lower.len() / width;
+        top.chunks_exact(width)
+            .enumerate()
+            .map(|(i, a)| {
+                (-SHIFTS - 1..=SHIFTS)
+                    .map(|offset| {
+                        let from =
+                            i.checked_add_signed(offset).filter(|&from| from < lower_rows)?;
+                        let b = &lower[from * width..][..width];
+                        let mut sum = 0_u64;
+                        for x in 0..width {
+                            sum += u64::from(a[x].abs_diff(b[x]));
+                        }
+                        Some(sum)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
-    /// The overlap error of a capture's two stripe pictures at every shift from −6 to 6 rows,
-    /// the lower stripe's coded from `lower_top`.
+    /// The overlap error at every shift from −[`SHIFTS`] to [`SHIFTS`] rows: the mean absolute
+    /// luma difference between the rows both stripes code, the lower stripe's picture moved
+    /// `shift` rows against the top one's, and taken to be coded from `skip` rows below where
+    /// it is. Row `i` of the top picture's overlap, from `skip`, meets the lower picture's row
+    /// `i - skip + shift` ([`row_differences`]).
     fn overlap_errors(
-        top: &[u8],
-        lower: &[u8],
+        differences: &[Vec<Option<u64>>],
         width: usize,
-        lower_top: usize,
+        skip: usize,
     ) -> Vec<(isize, f64)> {
-        (-6..=6).map(|shift| (shift, overlap_error(top, lower, width, lower_top, shift))).collect()
+        let skip_rows = isize::try_from(skip).unwrap();
+        (-SHIFTS..=SHIFTS)
+            .map(|shift| {
+                let column = usize::try_from(shift - skip_rows + SHIFTS + 1).unwrap();
+                let (mut sum, mut n) = (0_u64, 0_u64);
+                for row in differences.iter().skip(skip) {
+                    if let Some(difference) = row[column] {
+                        sum += difference;
+                        n += width as u64;
+                    }
+                }
+                (shift, sum as f64 / n.max(1) as f64)
+            })
+            .collect()
     }
 
     /// Whether the stripes meet unshifted: no shift matches as well as none, by a quarter.
@@ -2200,14 +2344,17 @@ mod tests {
                 let pts = top_picture.pts_us;
                 let lower_picture = lowers.iter().find(|l| l.pts_us == pts).unwrap();
                 last = Some(pts);
-                let (w, top_luma) = luma(top_picture.image.as_cv());
-                let (lower_w, lower_luma) = luma(lower_picture.image.as_cv());
+                // The rows both stripes code, and the lower picture's as far as a shift reads.
+                let (w, top_luma) = luma(top_picture.image.as_cv(), lower_top..usize::MAX);
+                let reach = top_luma.len() / w + usize::try_from(SHIFTS).unwrap() + 1;
+                let (lower_w, lower_luma) = luma(lower_picture.image.as_cv(), 0..reach);
                 assert_eq!(w, lower_w);
-                let errors = overlap_errors(&top_luma, &lower_luma, w, lower_top);
+                let differences = row_differences(&top_luma, &lower_luma, w);
+                let errors = overlap_errors(&differences, w, 0);
                 let at = |shift| errors.iter().find(|e| e.0 == shift).map_or(f64::NAN, |e| e.1);
                 eprintln!("seam: unshifted {:.2}, a row off {:.2} / {:.2}", at(0), at(-1), at(1));
                 assert!(meets_unshifted(&errors), "the stripes meet unshifted: {errors:?}");
-                let a_row_off = overlap_errors(&top_luma, &lower_luma, w, lower_top + 1);
+                let a_row_off = overlap_errors(&differences, w, 1);
                 assert!(!meets_unshifted(&a_row_off), "a stripe a row off: {a_row_off:?}");
                 checked += 1;
             }
