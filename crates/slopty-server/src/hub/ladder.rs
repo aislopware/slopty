@@ -16,7 +16,9 @@
 //! When a notice finds the person at none of their clients, it is pushed as well to every phone
 //! that gave the server a device and is not listening on a live link ([`Phones`],
 //! `slopty_proto::push`): sealed to the phone, through the relay or straight to APNs
-//! ([`crate::push`]).
+//! ([`crate::push`]). Once a thread a phone was pushed an ask about stops needing the person
+//! (answered at another client, or in its terminal), the note is taken back with a background
+//! push ([`Phones::take_back`]).
 //!
 //! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
 //! request (as its thread's row names it) failing a check, asked to change or conflicting, its
@@ -46,7 +48,7 @@ use tokio::sync::{Notify, broadcast, mpsc, watch};
 use super::awake::{Awake, Hold, Policy as KeepAwake};
 use super::{Hub, State, WeakHub};
 use crate::project::{Kept, Projects};
-use crate::push::Outgoing;
+use crate::push::{Outgoing, Sending};
 
 /// The rows every worker published, the ladder made of them, and the clients the person may
 /// be at.
@@ -93,6 +95,9 @@ struct Phones {
     /// [`Self::answerable`], as every worker's link sends it: a word each link takes the
     /// latest of, so none is dropped behind a full queue.
     said: watch::Sender<bool>,
+    /// The threads each phone was last pushed a note about that needs the person, to take back
+    /// once they no longer do ([`Self::take_back`]).
+    asked: BTreeMap<ClientId, std::collections::BTreeSet<ThreadAt>>,
 }
 
 /// The phones the server may push to, by their clients.
@@ -114,7 +119,7 @@ impl Phones {
     /// Push `notice` to every phone not listening on a live link among `seats`, with `ask`,
     /// the request its note's buttons answer; a finished turn shorter than a phone's quiet
     /// time is not pushed to it, as that phone would not post it.
-    fn push(&self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
+    fn push(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
         let Some(out) = &self.out else { return };
         for (client, device) in &self.devices {
             let listening = seats.values().any(|s| {
@@ -126,11 +131,71 @@ impl Phones {
                 continue;
             }
             let body = PushBody { notice: notice.clone(), ask: ask.cloned() };
-            let push = Outgoing { client: *client, device: device.clone(), body };
+            let what = Sending::Note(body);
+            let push = Outgoing { client: *client, device: device.clone(), what };
             if out.try_send(push).is_err() {
                 tracing::debug!(%client, "a push found its queue full or gone");
+                continue;
+            }
+            // The phone shows one note per thread: this one replaced whatever was up.
+            if let Subject::Thread(at) = notice.about {
+                let asked = self.asked.entry(*client).or_default();
+                if notice.kind == NoticeKind::NeedsYou {
+                    asked.insert(at);
+                } else {
+                    asked.remove(&at);
+                }
             }
         }
+        self.asked.retain(|_, asked| !asked.is_empty());
+    }
+
+    /// Take back each phone's pushed asks whose threads no longer need the person in `ladder`:
+    /// answered at another client or in the terminal, or ended. A thread on a worker that is
+    /// not linked now is left until it is, since nobody can tell. A phone that is listening
+    /// again, or forgotten, takes back its own on coming to the front ([`Self::listening`]).
+    fn take_back(
+        &mut self,
+        ladder: &Ladder,
+        tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>,
+    ) {
+        let Some(out) = &self.out else {
+            self.asked.clear();
+            return;
+        };
+        let devices = &self.devices;
+        self.asked.retain(|client, asked| {
+            let Some(device) = devices.get(client) else { return false };
+            let answered: Vec<ThreadAt> = asked
+                .iter()
+                .filter(|at| tables.contains_key(&at.worker))
+                .filter(|at| {
+                    let found = ladder.threads.binary_search_by_key(*at, |r| r.at).ok();
+                    found
+                        .and_then(|i| ladder.threads.get(i))
+                        .is_none_or(|r| r.rung != Rung::NeedsYou)
+                })
+                .copied()
+                .collect();
+            for at in &answered {
+                asked.remove(at);
+            }
+            for chunk in answered.chunks(slopty_push::apns::MAX_TAKE_BACK) {
+                let about = chunk.iter().map(|at| Subject::Thread(*at)).collect();
+                let what = Sending::TakeBack(about);
+                let push = Outgoing { client: *client, device: device.clone(), what };
+                if out.try_send(push).is_err() {
+                    tracing::debug!(%client, "a take-back found its queue full or gone");
+                }
+            }
+            !asked.is_empty()
+        });
+    }
+
+    /// The phone of `client` listens on its link again: back in front, it takes back its own
+    /// notes, so none is left for a push to.
+    fn listening(&mut self, client: ClientId) {
+        self.asked.remove(&client);
     }
 }
 
@@ -509,9 +574,13 @@ impl Hub {
     /// Where the person is on the client of `link`.
     pub fn presence(&self, link: u64, presence: Presence) {
         let mut state = self.inner.state.lock();
-        let Some(seat) = state.board.seats.get_mut(&link) else { return };
+        let board = &mut state.board;
+        let Some(seat) = board.seats.get_mut(&link) else { return };
         if seat.presence.as_ref() == Some(&presence) {
             return;
+        }
+        if let Some(client) = seat.client.filter(|_| presence.listening) {
+            board.phones.listening(client);
         }
         seat.presence = Some(presence);
         self.announce(FromServer::Present(state.board.present()));
@@ -638,14 +707,16 @@ impl Hub {
         state.board.tables.retain(|worker, _| live.contains_key(worker));
         state.board.settle_awake();
         let ladder = ladder(&state.board.tables, &state.projects);
-        if ladder == state.board.published {
+        let board = &mut state.board;
+        board.phones.take_back(&ladder, &board.tables);
+        if ladder == board.published {
             return;
         }
-        let notices = moved(&mut state.board, &ladder, &state.projects);
+        let notices = moved(board, &ladder, &state.projects);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
         for (notice, ask) in notices {
-            tell(&state.board, &notice, ask.as_ref());
+            tell(&mut state.board, &notice, ask.as_ref());
         }
         drop(guard);
     }
@@ -667,16 +738,16 @@ impl Board {
 }
 
 /// A project's change that holds its work up goes to the person as a notice, where they are.
-pub(super) fn tell_project(state: &State, kept: &Kept) {
+pub(super) fn tell_project(state: &mut State, kept: &Kept) {
     if let Some(notice) = project_notice(&state.projects, kept) {
-        tell(&state.board, &notice, None);
+        tell(&mut state.board, &notice, None);
     }
 }
 
 /// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
 /// phones when it finds the person at none of them, with `ask`, the request its note's buttons
 /// answer.
-fn tell(board: &Board, notice: &Notice, ask: Option<&AskId>) {
+fn tell(board: &mut Board, notice: &Notice, ask: Option<&AskId>) {
     let reach = route(&board.seats, notice);
     for link in &reach.links {
         let Some(seat) = board.seats.get(link) else { continue };

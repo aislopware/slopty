@@ -3,7 +3,8 @@
 //! through a stand-in relay running the relay's own checks, which forwards it to a stand-in
 //! APNs; and, for a self-builder, straight to that APNs with their own key. Both stand-ins
 //! speak HTTP/2 over TLS on loopback, as the real ones do. What APNs got opens with the phone's
-//! key to the notice's words, and carries none of them in the clear.
+//! key to the notice's words, and carries none of them in the clear. Once the ask is answered
+//! elsewhere, a background push takes the note back by the id APNs showed it under.
 
 #[cfg(test)]
 mod tests {
@@ -221,12 +222,13 @@ mod tests {
     }
 
     /// A server pushing through `pusher`; a phone that registers with it and then stops
-    /// listening; a worker whose thread comes to need the person for a yes or no. What APNs
-    /// got, read off `got`, with the phone's key and token.
+    /// listening; a worker whose thread comes to need the person for a yes or no, which is
+    /// then answered elsewhere. What APNs got, read off `got`: the note and its take-back, with
+    /// the phone's key and token.
     async fn a_phone_is_pushed(
         pusher: Arc<dyn Pusher>,
         got: &mut mpsc::UnboundedReceiver<Got>,
-    ) -> (Got, DeviceKey, String) {
+    ) -> (Got, Got, DeviceKey, String) {
         let dir = tempfile::tempdir().unwrap();
         let server = Server::start(Config {
             name: "test-server".to_owned(),
@@ -308,8 +310,29 @@ mod tests {
             TableFrame::Delta { cursor: Cursor::default(), rows: vec![asking], removed: vec![] };
         link.tx.send(&ToServer::Threads(delta)).await.unwrap();
         let pushed = tokio::time::timeout(PATIENCE, got.recv()).await.unwrap().unwrap();
+        let answered = row(thread, Phase::Working, 3_000, shell);
+        let delta =
+            TableFrame::Delta { cursor: Cursor::default(), rows: vec![answered], removed: vec![] };
+        link.tx.send(&ToServer::Threads(delta)).await.unwrap();
+        let taken_back = tokio::time::timeout(PATIENCE, got.recv()).await.unwrap().unwrap();
         server.shutdown().await;
-        (pushed, key, token)
+        (pushed, taken_back, key, token)
+    }
+
+    /// What APNs got once the ask was answered elsewhere: a background push to the same phone,
+    /// showing nothing, naming the id the note was shown under and nothing else.
+    fn takes_the_note_back(got: &Got, note: &Got, topic: &str) {
+        assert_eq!(got.path, note.path);
+        let header = |name: &str| got.headers.get(name).map(String::as_str);
+        assert_eq!(header("apns-topic"), Some(topic));
+        assert_eq!(header("apns-push-type"), Some("background"));
+        assert_eq!(header("apns-priority"), Some("5"));
+        let shown_as = &note.headers["apns-collapse-id"];
+        let payload: serde_json::Value = serde_json::from_slice(&got.body).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({ "aps": { "content-available": 1 }, "w": [shown_as] })
+        );
     }
 
     /// What APNs got is an urgent alert to the phone's token in fixed words, with the notice
@@ -345,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_notice_reaches_the_phone_through_the_relay() {
+    async fn a_notice_reaches_the_phone_through_the_relay_and_is_taken_back() {
         let (apns_origin, apns_der, mut got) = apns().await;
         let pem =
             rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap().serialize_pem();
@@ -356,13 +379,15 @@ mod tests {
         let install = InstallKey::generate().unwrap();
         let https = Https::trusting(relay_der).unwrap();
         let through = Arc::new(RelayPusher::new(&relay_origin, install, https));
-        let (pushed, key, token) = a_phone_is_pushed(through, &mut got).await;
+        let (pushed, back, key, token) = a_phone_is_pushed(through, &mut got).await;
         opens_to_the_notice(&pushed, &key, &token, RELAY_TOPIC);
+        takes_the_note_back(&back, &pushed, RELAY_TOPIC);
 
         // A self-builder's server goes straight to APNs, for the app the phone names.
         let https = Https::trusting(apns_der).unwrap();
         let direct = Arc::new(DirectPusher::new(Arc::new(provider()), https).at(&apns_origin));
-        let (pushed, key, token) = a_phone_is_pushed(direct, &mut got).await;
+        let (pushed, back, key, token) = a_phone_is_pushed(direct, &mut got).await;
         opens_to_the_notice(&pushed, &key, &token, PHONE_TOPIC);
+        takes_the_note_back(&back, &pushed, PHONE_TOPIC);
     }
 }

@@ -6,6 +6,9 @@
 //! ([`RelayPusher`]) or straight to APNs with their own key ([`DirectPusher`]), over one HTTPS
 //! client ([`Https`]): rustls on ring, which builds for the Linux server too, checking
 //! certificates as the system does. A phone APNs says is gone is forgotten.
+//!
+//! A pushed ask answered on another client is taken back ([`Sending::TakeBack`]): a background
+//! push naming the note's opaque collapse id, which iOS made the shown note's identifier.
 
 use std::fmt;
 use std::future::Future;
@@ -70,15 +73,24 @@ impl PushConfig {
     }
 }
 
-/// One push to make: a notice for a phone, not sealed yet.
+/// One push to make: a notice for a phone, not sealed yet, or notes to take back.
 #[derive(Clone, Debug)]
 pub struct Outgoing {
     /// The phone's client.
     pub client: ClientId,
     /// The phone.
     pub device: PushDevice,
-    /// What is sealed to it.
-    pub body: PushBody,
+    /// What it does there.
+    pub what: Sending,
+}
+
+/// What a push does on the phone.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Sending {
+    /// Show the note this body makes, sealed to the phone.
+    Note(PushBody),
+    /// Take back the notes pushed about these, by the collapse ids they were pushed under.
+    TakeBack(Vec<Subject>),
 }
 
 /// What a [`Pusher`] returns.
@@ -298,38 +310,51 @@ pub enum SealError {
     Seal(#[from] slopty_push::PushError),
 }
 
-/// `out` as APNs carries it: the body cut to fit and sealed to the phone, with the ids notes
-/// stack and replace by, opaque and the phone's own.
+/// `out` as APNs carries it: a body cut to fit and sealed to the phone, with the ids notes
+/// stack and replace by, opaque and the phone's own; or a take-back naming those ids.
 ///
 /// # Errors
 /// [`SealError`] when the body does not encode or seal.
 pub fn sealed(out: &Outgoing) -> Result<apns::Push, SealError> {
-    let mut body = out.body.clone();
+    let device = &out.device;
+    let what = match &out.what {
+        Sending::Note(body) => apns::What::Note(note(device, body)?),
+        Sending::TakeBack(about) => apns::What::TakeBack(
+            about.iter().map(|about| opaque(&device.key, &collapse_of(about))).collect(),
+        ),
+    };
+    Ok(apns::Push { token: device.token.clone(), sandbox: device.sandbox, what })
+}
+
+/// The note `body` makes for `device`: cut to fit and sealed to it.
+fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
+    let mut body = body.clone();
     cut(&mut body.notice.title, TITLE_BYTES);
     cut(&mut body.notice.text, TEXT_BYTES);
     if let Some(via) = &mut body.notice.via {
         cut(&mut via.title, TITLE_BYTES);
     }
     let bytes = slopty_proto::codec::encode_body(&body)?;
-    let device = &out.device;
     let sealed = slopty_push::seal::seal(&device.key, &device.token, &bytes)?;
-    let (thread, collapse) = match &body.notice.about {
-        Subject::Thread(at) => {
-            let thread = format!("thread {} {}", at.worker, at.thread);
-            (thread.clone(), thread)
-        }
-        Subject::Project { project, entry } => {
-            (format!("project {project}"), format!("project {project} {entry}"))
-        }
+    let thread = match &body.notice.about {
+        Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
+        Subject::Project { project, .. } => format!("project {project}"),
     };
-    Ok(apns::Push {
-        token: device.token.clone(),
-        sandbox: device.sandbox,
+    Ok(apns::Note {
         urgent: body.notice.kind == NoticeKind::NeedsYou,
         thread: opaque(&device.key, &thread),
-        collapse: opaque(&device.key, &collapse),
+        collapse: opaque(&device.key, &collapse_of(&body.notice.about)),
         sealed,
     })
+}
+
+/// What a note about `about` replaces, before it is made opaque: a thread's last note, or a
+/// project's at one timeline entry.
+fn collapse_of(about: &Subject) -> String {
+    match about {
+        Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
+        Subject::Project { project, entry } => format!("project {project} {entry}"),
+    }
 }
 
 /// `what` as an id Apple sees: a hash keyed by the phone's key, so it names nothing and is the
@@ -418,7 +443,8 @@ mod tests {
     }
 
     /// However long a notice's words, its push fits APNs' 4 KB, and its ids are opaque, the
-    /// same for one thread and another for the next phone.
+    /// same for one thread and another for the next phone. A take-back names the note's own
+    /// collapse id.
     #[test]
     fn a_long_notice_still_fits_apns() {
         use slopty_core::{SessionId, WorkerId};
@@ -443,17 +469,28 @@ mod tests {
             topic: "dev.aislopware.slopty".to_owned(),
             quiet_ms: 0,
         };
+        let about = notice.about.clone();
         let out = Outgoing {
             client: ClientId::new(),
             device: device.clone(),
-            body: PushBody { notice, ask: None },
+            what: Sending::Note(PushBody { notice, ask: None }),
         };
         let push = sealed(&out).unwrap();
         let request = apns::request(&push, &device.topic, "token").unwrap();
         assert!(request.body.len() <= apns::MAX_PAYLOAD, "{} bytes", request.body.len());
-        assert!(!push.urgent);
-        assert_eq!(sealed(&out).unwrap().thread, push.thread, "one thread, one stack");
-        let other = Outgoing { device: PushDevice { key: [9; 32], ..device }, ..out };
-        assert_ne!(sealed(&other).unwrap().thread, push.thread, "another phone, another id");
+        let note = |push: apns::Push| match push.what {
+            apns::What::Note(note) => note,
+            apns::What::TakeBack(_) => panic!("a take-back"),
+        };
+        let shown = note(push);
+        assert!(!shown.urgent);
+        assert_eq!(note(sealed(&out).unwrap()).thread, shown.thread, "one thread, one stack");
+        let other = Outgoing { device: PushDevice { key: [9; 32], ..device.clone() }, ..out };
+        assert_ne!(note(sealed(&other).unwrap()).thread, shown.thread, "another phone, another id");
+
+        let back = Outgoing { what: Sending::TakeBack(vec![about]), ..other };
+        let back = Outgoing { device, ..back };
+        let taken = sealed(&back).unwrap().what;
+        assert_eq!(taken, apns::What::TakeBack(vec![shown.collapse]), "the note's own id");
     }
 }

@@ -573,6 +573,22 @@ async fn the_workers_hear_whether_a_pocketed_phone_can_answer() {
     assert_eq!((told(&mut first), told(&mut second)), (Some(false), Some(false)), "no phone now");
 }
 
+/// The note `push` shows.
+fn body(push: &Outgoing) -> &PushBody {
+    match &push.what {
+        Sending::Note(body) => body,
+        Sending::TakeBack(_) => panic!("a take-back"),
+    }
+}
+
+/// Whether `push` is Time Sensitive.
+fn urgent(push: &Outgoing) -> bool {
+    match crate::push::sealed(push).unwrap().what {
+        slopty_push::apns::What::Note(note) => note.urgent,
+        slopty_push::apns::What::TakeBack(_) => false,
+    }
+}
+
 /// A notice that finds the person at no client is pushed to a phone whose link is gone, once
 /// per moment: a thread needing them for a plain yes or no carries its ask, urgent. Nothing is
 /// pushed while they are at a desk, nor to a phone still listening on its link, but one that
@@ -652,15 +668,22 @@ async fn needs_you_pushes_once_per_ask() {
     assert_eq!(first.len(), 1, "a phone that stopped listening is pushed to");
     let push = &first[0];
     assert_eq!((push.client, &push.device), (client, &device));
-    assert_eq!(push.body.notice.kind, NoticeKind::NeedsYou);
-    assert_eq!(push.body.notice.text, "Run cargo test?");
-    assert_eq!(push.body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
-    assert!(crate::push::sealed(push).unwrap().urgent);
+    let pushed_body = body(push);
+    assert_eq!(pushed_body.notice.kind, NoticeKind::NeedsYou);
+    assert_eq!(pushed_body.notice.text, "Run cargo test?");
+    assert_eq!(pushed_body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
+    assert!(urgent(push));
     hub.rank_ladder();
     rank(vec![needs.clone()]);
     assert!(pushes().is_empty(), "nothing moved, nothing pushed");
 
     rank(vec![moved(&thread, Phase::Working, 4_000)]);
+    let back = pushes();
+    assert_eq!(back.len(), 1, "answered elsewhere, the note is taken back");
+    let about = Subject::Thread(ThreadAt { worker, thread: thread.id });
+    assert_eq!(back[0].what, Sending::TakeBack(vec![about]));
+    rank(vec![moved(&thread, Phase::Working, 4_500)]);
+    assert!(pushes().is_empty(), "taken back once");
     mac.at(&hub, Seat::Desk, true, Vec::new());
     rank(vec![needs.clone()]);
     assert!(pushes().is_empty(), "the person at a desk hears it there");
@@ -673,9 +696,9 @@ async fn needs_you_pushes_once_per_ask() {
     rank(vec![moved(&thread, Phase::Done, 200_000)]);
     let finished = pushes();
     assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0].body.notice.kind, NoticeKind::Finished);
-    assert_eq!(finished[0].body.ask, None);
-    assert!(!crate::push::sealed(&finished[0]).unwrap().urgent);
+    assert_eq!(body(&finished[0]).notice.kind, NoticeKind::Finished);
+    assert_eq!(body(&finished[0]).ask, None);
+    assert!(!urgent(&finished[0]));
 
     drop(phone);
     rank(vec![needs.clone()]);
@@ -705,4 +728,79 @@ async fn needs_you_pushes_once_per_ask() {
     hub.push_device(again.seated.link(), client, Some(device));
     hub.push_device(Client::sit(&hub, "other link").seated.link(), client, None);
     assert!(hub.devices().is_empty(), "a phone withdraws on any link");
+}
+
+/// A pushed ask is taken back once its thread no longer needs the person, by the thread, once:
+/// answered and finished at once, or ended. A phone listening on its link again sweeps its own
+/// notes, so nothing is taken back for it. A thread on a worker that dropped its link may still
+/// ask, so its note stays.
+#[tokio::test]
+async fn a_pushed_ask_answered_elsewhere_is_taken_back() {
+    use slopty_proto::push::PushDevice;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(16);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push.what);
+        }
+        out
+    };
+    let phone = Client::sit(&hub, "phone");
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 0,
+    };
+    hub.push_device(phone.seated.link(), ClientId::new(), Some(device));
+    let pocketed = Presence {
+        seat: Seat::Handheld,
+        active: false,
+        workspace: None,
+        showing: Vec::new(),
+        focus: None,
+        listening: false,
+    };
+    hub.presence(phone.seated.link(), pocketed.clone());
+
+    let (one, two) = (row(Phase::Working, 1_000, None), row(Phase::Working, 1_000, None));
+    lease.handle(snapshot(vec![one.clone(), two.clone()]));
+    hub.rank_ladder();
+    let at = |row: &ThreadRow| Subject::Thread(ThreadAt { worker, thread: row.id });
+    let ask = |row: &ThreadRow, since| asking(moved(row, Phase::NeedsYou, since), "Allow?");
+    lease.handle(delta(vec![ask(&one, 2_000), ask(&two, 2_000)]));
+    hub.rank_ladder();
+    assert_eq!(pushes().len(), 2, "two asks pushed");
+
+    lease.handle(delta(vec![moved(&one, Phase::Done, 3_000)]));
+    hub.rank_ladder();
+    assert_eq!(pushes(), [Sending::TakeBack(vec![at(&one)])], "answered and done at once");
+    let ended =
+        TableFrame::Delta { cursor: Cursor::default(), rows: vec![], removed: vec![two.id] };
+    lease.handle(ToServer::Threads(ended));
+    hub.rank_ladder();
+    assert_eq!(pushes(), [Sending::TakeBack(vec![at(&two)])], "its thread ended");
+
+    lease.handle(delta(vec![ask(&one, 4_000)]));
+    hub.rank_ladder();
+    assert_eq!(pushes().len(), 1);
+    phone.at(&hub, Seat::Handheld, true, Vec::new());
+    hub.presence(phone.seated.link(), pocketed);
+    lease.handle(delta(vec![moved(&one, Phase::Working, 5_000)]));
+    hub.rank_ladder();
+    assert!(pushes().is_empty(), "back in front, the phone swept its own");
+
+    lease.handle(delta(vec![ask(&one, 6_000)]));
+    hub.rank_ladder();
+    assert_eq!(pushes().len(), 1);
+    drop(lease);
+    hub.rank_ladder();
+    assert!(pushes().is_empty(), "a worker away may still be asking");
 }

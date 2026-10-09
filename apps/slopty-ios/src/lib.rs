@@ -19,9 +19,9 @@ use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{ClassType as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSData, NSDictionary, NSError, NSObject, NSSet, NSString};
 use objc2_ui_kit::{
-    UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext,
-    UIResponder, UIScene, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIWindowScene,
-    UIWindowSceneDelegate,
+    UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIBackgroundFetchResult,
+    UIOpenURLContext, UIResponder, UIScene, UISceneConnectionOptions, UISceneDelegate,
+    UISceneSession, UIWindowScene, UIWindowSceneDelegate,
 };
 
 /// The process entry point: the bundle has no other code, so the linker takes this `main`.
@@ -81,6 +81,27 @@ define_class!(
         #[unsafe(method(application:didFailToRegisterForRemoteNotificationsWithError:))]
         fn did_fail_to_register_for_pushes(&self, _application: &UIApplication, error: &NSError) {
             tracing::info!(error = %error.localizedDescription(), "no device token for pushes");
+        }
+
+        /// A background push: the server taking back notes answered on another device
+        /// (`slopty_platform::notify::pushed::take_back_of`). UIKit wakes, or launches, the app
+        /// for it with no scene, so GPUI does not start; the notes go, and the handler is
+        /// called once the removal is out.
+        #[unsafe(method(application:didReceiveRemoteNotification:fetchCompletionHandler:))]
+        fn did_receive_push(
+            &self,
+            _application: &UIApplication,
+            info: &NSDictionary,
+            done: &block2::DynBlock<dyn Fn(UIBackgroundFetchResult)>,
+        ) {
+            let ids = slopty_platform::notify::pushed::take_back_of(info);
+            let result = if ids.is_empty() {
+                UIBackgroundFetchResult::NoData
+            } else {
+                UIBackgroundFetchResult::NewData
+            };
+            let done = Handler(done.copy());
+            slopty_platform::notify::take_back(&ids, move || done.call(result));
         }
 
         #[unsafe(method(applicationDidReceiveMemoryWarning:))]
@@ -277,5 +298,25 @@ mod cgl_stubs {
         _plane: u32,
     ) -> c_int {
         missing("CGLTexImageIOSurface2D")
+    }
+}
+
+/// A background push's completion handler, called from whichever queue the Notification
+/// Centre answers on.
+struct Handler(block2::RcBlock<dyn Fn(UIBackgroundFetchResult)>);
+
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the block is called once, from one thread, as the safety comment says"
+)]
+// SAFETY: Blocks runtime rule: a heap block's retain and release (`Block_copy`,
+// `Block_release`) are atomic. UIKit's rule for the fetch completion handler: it is called once,
+// and from any thread; here it is called once, from the queue the Notification Centre answers on.
+unsafe impl Send for Handler {}
+
+impl Handler {
+    /// Tell UIKit the push was handled, with `result`.
+    fn call(&self, result: UIBackgroundFetchResult) {
+        self.0.call((result,));
     }
 }

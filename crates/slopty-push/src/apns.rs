@@ -5,6 +5,12 @@
 //! extension (`mutable-content`) puts them in. If the extension fails or runs out of time, the
 //! person still sees that an agent wants them. Only an agent that needs the person is Time
 //! Sensitive, at the highest priority; the rest wait in the summary like any app's.
+//!
+//! A note answered elsewhere is taken back with a background push ([`What::TakeBack`]): no
+//! alert, only the opaque ids the notes were pushed under ([`TAKE_BACK`]), which wake the app
+//! for the moment it takes to remove them. iOS throttles such pushes and drops them for an app
+//! the person force-quit, so the app's own sweep when it next comes to the front stays the one
+//! that always holds.
 
 use serde::Serialize;
 
@@ -24,23 +30,46 @@ pub const MAX_PAYLOAD: usize = 4096;
 /// collapse id.
 pub const MAX_ID: usize = 64;
 
+/// The payload key of a take-back's note ids: the collapse ids they were pushed under, which
+/// iOS makes their identifiers.
+pub const TAKE_BACK: &str = "w";
+/// The most notes one take-back names.
+pub const MAX_TAKE_BACK: usize = 16;
+
 /// APNs in production.
 pub const PRODUCTION: &str = "api.push.apple.com";
 /// APNs for development builds.
 pub const SANDBOX: &str = "api.sandbox.push.apple.com";
 
-/// One push, as it goes to APNs: to whom, how urgent, and the sealed body.
+/// One push, as it goes to APNs: to whom, and what.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Push {
     /// The device token, in hex.
     pub token: String,
     /// A development build's token, which only the sandbox knows.
     pub sandbox: bool,
+    /// A note to show, or notes to take back.
+    pub what: What,
+}
+
+/// What a push does on the phone.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum What {
+    /// Show a note.
+    Note(Note),
+    /// Take back the notes pushed under these collapse ids: a background push, shown nothing.
+    TakeBack(Vec<String>),
+}
+
+/// A note to show: how urgent, its ids, and its sealed body.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Note {
     /// An agent that needs the person: Time Sensitive.
     pub urgent: bool,
     /// What notes stack under, opaque: a hash of the thread, never its name.
     pub thread: String,
-    /// What a later push replaces, opaque: a hash of the note's id.
+    /// What a later push replaces, opaque: a hash of the note's id. iOS makes it the shown
+    /// note's identifier, which a take-back names.
     pub collapse: String,
     /// The note, sealed to the device.
     pub sealed: Sealed,
@@ -89,6 +118,18 @@ struct Payload<'a> {
 }
 
 #[derive(Serialize)]
+struct Background<'a> {
+    aps: Wake,
+    w: &'a [String],
+}
+
+#[derive(Serialize)]
+struct Wake {
+    #[serde(rename = "content-available")]
+    content_available: u8,
+}
+
+#[derive(Serialize)]
 struct Aps<'a> {
     alert: Alert<'a>,
     sound: &'a str,
@@ -123,40 +164,58 @@ pub fn is_id(id: &str) -> bool {
 /// `push` as APNs takes it, under the provider token `bearer` for the app `topic`.
 ///
 /// # Errors
-/// [`Unfit`] when the token or an id is not one, or the payload would be too large.
+/// [`Unfit`] when the token or an id is not one, a take-back names no note or more than
+/// [`MAX_TAKE_BACK`], or the payload would be too large.
 pub fn request(push: &Push, topic: &str, bearer: &str) -> Result<Request, Unfit> {
     if !is_token(&push.token) {
         return Err(Unfit::Token);
     }
-    if !is_id(&push.thread) || !is_id(&push.collapse) {
-        return Err(Unfit::Id);
-    }
-    let payload = Payload {
-        aps: Aps {
-            alert: Alert { title: TITLE, body: if push.urgent { URGENT } else { NEWS } },
-            sound: "default",
-            mutable_content: 1,
-            thread_id: &push.thread,
-            interruption_level: push.urgent.then_some("time-sensitive"),
-        },
-        e: push.sealed.enc_text(),
-        s: push.sealed.ct_text(),
+    let (body, kind, priority, collapse) = match &push.what {
+        What::Note(note) => {
+            if !is_id(&note.thread) || !is_id(&note.collapse) {
+                return Err(Unfit::Id);
+            }
+            let payload = Payload {
+                aps: Aps {
+                    alert: Alert { title: TITLE, body: if note.urgent { URGENT } else { NEWS } },
+                    sound: "default",
+                    mutable_content: 1,
+                    thread_id: &note.thread,
+                    interruption_level: note.urgent.then_some("time-sensitive"),
+                },
+                e: note.sealed.enc_text(),
+                s: note.sealed.ct_text(),
+            };
+            let body = serde_json::to_vec(&payload).map_err(|_json| Unfit::TooLarge)?;
+            let priority = if note.urgent { "10" } else { "5" };
+            (body, "alert", priority, Some(note.collapse.clone()))
+        }
+        What::TakeBack(notes) => {
+            if notes.is_empty() || notes.len() > MAX_TAKE_BACK || !notes.iter().all(|n| is_id(n)) {
+                return Err(Unfit::Id);
+            }
+            let payload = Background { aps: Wake { content_available: 1 }, w: notes };
+            let body = serde_json::to_vec(&payload).map_err(|_json| Unfit::TooLarge)?;
+            // APNs refuses a background push at any other priority.
+            (body, "background", "5", None)
+        }
     };
-    let body = serde_json::to_vec(&payload).map_err(|_json| Unfit::TooLarge)?;
     if body.len() > MAX_PAYLOAD {
         return Err(Unfit::TooLarge);
     }
-    let priority = if push.urgent { "10" } else { "5" };
+    let mut headers = vec![
+        ("authorization", format!("bearer {bearer}")),
+        ("apns-topic", topic.to_owned()),
+        ("apns-push-type", kind.to_owned()),
+        ("apns-priority", priority.to_owned()),
+    ];
+    if let Some(collapse) = collapse {
+        headers.push(("apns-collapse-id", collapse));
+    }
     Ok(Request {
         host: if push.sandbox { SANDBOX } else { PRODUCTION },
         path: format!("/3/device/{}", push.token),
-        headers: vec![
-            ("authorization", format!("bearer {bearer}")),
-            ("apns-topic", topic.to_owned()),
-            ("apns-push-type", "alert".to_owned()),
-            ("apns-priority", priority.to_owned()),
-            ("apns-collapse-id", push.collapse.clone()),
-        ],
+        headers,
         body,
     })
 }
@@ -193,15 +252,17 @@ pub fn outcome(status: u16, body: &[u8]) -> Outcome {
 mod tests {
     use super::*;
 
-    fn push(urgent: bool) -> Push {
-        Push {
-            token: "ab".repeat(32),
-            sandbox: false,
+    fn note(urgent: bool) -> Note {
+        Note {
             urgent,
             thread: "t-1".to_owned(),
             collapse: "c_2".to_owned(),
             sealed: Sealed { enc: [7; 32], ct: vec![1, 2, 3] },
         }
+    }
+
+    fn push(urgent: bool) -> Push {
+        Push { token: "ab".repeat(32), sandbox: false, what: What::Note(note(urgent)) }
     }
 
     /// Only an agent that needs the person is Time Sensitive at the highest priority; anything
@@ -221,15 +282,40 @@ mod tests {
         assert_eq!(json["aps"]["alert"]["body"], NEWS);
         assert!(news.headers.contains(&("apns-priority", "5".to_owned())));
 
-        let mut large = push(true);
+        let mut large = note(true);
         large.sealed.ct = vec![0; MAX_PAYLOAD];
+        let large = Push { what: What::Note(large), ..push(true) };
         assert_eq!(request(&large, "t", "jwt"), Err(Unfit::TooLarge));
         let mut token = push(true);
         token.token = "not hex".to_owned();
         assert_eq!(request(&token, "t", "jwt"), Err(Unfit::Token));
-        let mut id = push(true);
+        let mut id = note(true);
         id.thread = "a thread's title".to_owned();
+        let id = Push { what: What::Note(id), ..push(true) };
         assert_eq!(request(&id, "t", "jwt"), Err(Unfit::Id));
+    }
+
+    /// A take-back is a background push: no alert, no sound and no collapse id, at the low
+    /// priority APNs demands of one, naming the notes' collapse ids and nothing else. One that
+    /// names no note, too many, or an id that is not one is no request.
+    #[test]
+    fn a_take_back_wakes_the_app_and_shows_nothing() {
+        let notes = vec!["c_2".to_owned(), "c_3".to_owned()];
+        let back = Push { what: What::TakeBack(notes.clone()), ..push(true) };
+        let asked = request(&back, "dev.aislopware.slopty", "jwt").unwrap();
+        assert!(asked.headers.contains(&("apns-push-type", "background".to_owned())));
+        assert!(asked.headers.contains(&("apns-priority", "5".to_owned())));
+        assert!(asked.headers.iter().all(|(name, _)| *name != "apns-collapse-id"));
+        let json: serde_json::Value = serde_json::from_slice(&asked.body).unwrap();
+        assert_eq!(json, serde_json::json!({ "aps": { "content-available": 1 }, "w": notes }));
+
+        let none = Push { what: What::TakeBack(Vec::new()), ..push(true) };
+        assert_eq!(request(&none, "t", "jwt"), Err(Unfit::Id));
+        let many = vec!["c".to_owned(); MAX_TAKE_BACK + 1];
+        let many = Push { what: What::TakeBack(many), ..push(true) };
+        assert_eq!(request(&many, "t", "jwt"), Err(Unfit::Id));
+        let odd = Push { what: What::TakeBack(vec!["a title".to_owned()]), ..push(true) };
+        assert_eq!(request(&odd, "t", "jwt"), Err(Unfit::Id));
     }
 
     /// APNs' answers: taken, a device gone, a reason to try later, a refusal with its reason.

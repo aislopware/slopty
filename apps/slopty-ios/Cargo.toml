@@ -21,6 +21,8 @@ path = "src/lib.rs"
 crate-type = [ "staticlib", "rlib" ]
 
 [target.'cfg(target_os = "ios")'.dependencies]
+# The completion handler of a background push (`application:didReceiveRemoteNotification:…`).
+block2.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 gpui_ios.workspace = true
@@ -34,8 +36,9 @@ objc2-foundation = { workspace = true, features = [
     "NSSet",
     "NSURL",
 ] }
-# The app and scene delegates, and `UIApplicationMain`.
+# The app and scene delegates, and `UIApplicationMain`; `block2` for a background push's handler.
 objc2-ui-kit = { workspace = true, features = [
+    "block2",
     "UIApplication",
     "UIOpenURLContext",
     "UIResponder",

@@ -932,8 +932,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     machine is set up there, so no line shows for one. The line holds no panel open. The
     flow's Done moved to the panel's foot, where Cancel stood, so a checklist one line longer
     still ends with its last word in view at 700 pt.
-  - Not yet: taking a pushed note back once it is answered elsewhere, by a background push
-    (after the main path is green end to end).
+  - Taking a pushed note back once it is answered elsewhere: see "A note answered elsewhere
+    leaves a pocketed phone" (2026-10-10).
   - Tests:
     - `slopty-push`: the seal opens only with the phone's key and token; the relay's checks
       and the APNs request it builds;
@@ -973,14 +973,58 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     anywhere.
   - The app then asks the system for every note it shows (`notify::delivered`) and hands their
     ids to `Attention::delivered`. Pushed notes use the same ids as posted ones
-    (`notify::pushed::note_id`). A pushed ask that is still live is adopted as the app's own,
+    (`notify::pushed::note_id`), carried in the note's `info::NOTE` (corrected 2026-10-10:
+    iOS shows a pushed note under its `apns-collapse-id`, so the identifier alone never
+    matched). A pushed ask that is still live is adopted as the app's own,
     so its answer takes it down. Every other note is withdrawn. The test notifier keeps the
     list the same way the system does, so the behaviour is tested on the host.
-  - **Deferred: taking a note down while the phone stays pocketed.** That needs a background
-    push from the server when an ask is answered on another client. It also needs a second
-    push type through `slopty-push` and the relay, and the iOS delegate's
-    `didReceiveRemoteNotification` handler. iOS throttles such pushes and skips them once the
-    app has been force-quit, so the moment the app comes back is the one that holds. A stale
-    pocketed note answered elsewhere now lasts only until the app is next opened.
+  - Taking a note down while the phone stays pocketed came on 2026-10-10 ("A note answered
+    elsewhere leaves a pocketed phone").
   - Tests: `slopty-platform` `notify::tests::memory_keeps_what_the_notification_centre_shows`;
     `slopty-ui` `workspace::tests::attention::back_in_front_stale_pushed_notes_go_and_a_live_ask_stays`.
+
+- ✅ **A note answered elsewhere leaves a pocketed phone** (2026-10-10, readiness R4's M
+  part). A pushed ask stayed on the phone's lock screen after the person answered it at the
+  Mac or in the terminal, until the app was next opened. Its Allow then answered nothing.
+  - **What iOS names a pushed note.** A remote note's identifier is the push's
+    `apns-collapse-id`. Apple's `UNNotificationRequest.identifier` page says: "For remote
+    notifications, the system sets this property to the value of the `apns-collapse-id` key".
+    The server's collapse id is opaque, a hash keyed by the phone's key, so the identifier
+    tells the app nothing. The extension now writes the note's own id into its `userInfo`
+    (`info::NOTE`, set by `notify::content_of` for every note). `notify::delivered` and a tap
+    report that id. The notifier remembers the identifier each note is shown under, so
+    `Notifier::withdraw` by the app's id takes the pushed note down too.
+  - **The server takes it back.** `Phones` keeps, per phone, the threads it was last pushed
+    an ask about. A later note for the same thread replaces it under the same collapse id, and
+    then the entry goes. On every ranking, before the ladder is compared, an ask whose thread
+    no longer needs the person, or has ended, is taken back (`Phones::take_back`). A thread on
+    a worker that is not linked is left alone, since it may still be asking. A phone that
+    listens on its link again forgets its entries, since the app sweeps its own notes when it
+    comes to the front.
+  - **The push.** `Sending::TakeBack` names the subjects. `push::sealed` turns each into the
+    collapse id its note was pushed under. `apns::What::TakeBack` is a background push:
+    `apns-push-type: background`, priority 5 (APNs takes no other for it), no collapse id,
+    and the payload `{"aps":{"content-available":1},"w":[ids]}` with at most
+    `MAX_TAKE_BACK` (16) ids. Nothing of the note is in it, and the ids are the ones Apple
+    already saw. The relay takes it through the same signature, binding and limits
+    (`RelayWhat::TakeBack`) and checks that every id is opaque.
+  - **The phone.** `UIBackgroundModes` gains `remote-notification`. The app delegate's
+    `application:didReceiveRemoteNotification:fetchCompletionHandler:` reads the ids
+    (`pushed::take_back_of`) and calls `notify::take_back`. That removes them, then asks for a
+    listing and calls the handler on its answer, so the app is not suspended before the
+    removal is out. UIKit wakes or launches the app with no scene for it, so GPUI does not
+    start.
+  - **Limits.** iOS budgets background pushes and drops them for an app the person
+    force-quit, so the sweep when the app comes back to the front is the one that always
+    holds. An ask answered on the phone's own note gets a take-back for a note already gone,
+    which spends one push of that budget.
+  - Tests: `slopty-push` `a_take_back_wakes_the_app_and_shows_nothing` and
+    `a_take_back_goes_through_as_a_background_push`; `slopty-server`
+    `hub::ladder::tests::a_pushed_ask_answered_elsewhere_is_taken_back` (answered and done at
+    once, ended, swept by a phone back in front, kept for a worker away), the take-back step
+    of `needs_you_pushes_once_per_ask`, and `tests/push.rs`
+    `a_notice_reaches_the_phone_through_the_relay_and_is_taken_back` (through the stand-in
+    relay and straight to the stand-in APNs, the take-back naming the `apns-collapse-id` the
+    note was shown under); `slopty-platform` `a_take_back_names_only_opaque_ids`. The app
+    delegate's half is proved only on a device, or by a simulator test sending `simctl push`,
+    which is still to be written.

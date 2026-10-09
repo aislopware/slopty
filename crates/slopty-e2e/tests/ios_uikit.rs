@@ -377,14 +377,13 @@ mod tests {
         };
         let body = slopty_proto::codec::encode_body(&PushBody { notice, ask: None }).unwrap();
         let sealed = slopty_push::seal::seal(&key, &hex, &body).unwrap();
-        let push = apns::Push {
-            token: hex,
-            sandbox: true,
+        let note = apns::Note {
             urgent: true,
             thread: "e2e-thread".to_owned(),
             collapse: "e2e-note".to_owned(),
             sealed,
         };
+        let push = apns::Push { token: hex, sandbox: true, what: apns::What::Note(note) };
         let request = apns::request(&push, &bundle, "e2e").unwrap();
         let payload = stack.path("push.apns");
         std::fs::write(&payload, &request.body).unwrap();

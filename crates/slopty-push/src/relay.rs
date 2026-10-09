@@ -8,7 +8,8 @@
 //! works, and a stranger who learned a token cannot push to it.
 //!
 //! The relay never reads the note: it gets the device's token, whether the push is urgent, two
-//! opaque ids and the sealed body, and builds APNs' alert from its own words ([`forward`]).
+//! opaque ids and the sealed body, and builds APNs' alert from its own words ([`forward`]). A
+//! take-back carries only the opaque ids of the notes it takes back.
 //! What it keeps is the binding and its rate limits, both the Worker's to store.
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
@@ -44,31 +45,49 @@ pub struct RelayPush {
     pub token: String,
     /// A development build's token.
     pub sandbox: bool,
-    /// An agent that needs the person.
-    pub urgent: bool,
-    /// What notes stack under, opaque.
-    pub thread: String,
-    /// What a later push replaces, opaque.
-    pub collapse: String,
-    /// The sealed body's encapsulated key, in base64.
-    pub e: String,
-    /// The sealed body's ciphertext, in base64.
-    pub s: String,
+    /// A note, or a take-back.
+    pub what: RelayWhat,
+}
+
+/// What a [`RelayPush`] does on the phone ([`apns::What`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayWhat {
+    /// Show a note.
+    Note {
+        /// An agent that needs the person.
+        urgent: bool,
+        /// What notes stack under, opaque.
+        thread: String,
+        /// What a later push replaces, opaque.
+        collapse: String,
+        /// The sealed body's encapsulated key, in base64.
+        e: String,
+        /// The sealed body's ciphertext, in base64.
+        s: String,
+    },
+    /// Take back the notes pushed under these collapse ids.
+    TakeBack {
+        /// Their collapse ids.
+        notes: Vec<String>,
+    },
 }
 
 impl RelayPush {
     /// `push` as a server asks it of the relay.
     #[must_use]
     pub fn of(push: &apns::Push) -> Self {
-        Self {
-            token: push.token.clone(),
-            sandbox: push.sandbox,
-            urgent: push.urgent,
-            thread: push.thread.clone(),
-            collapse: push.collapse.clone(),
-            e: push.sealed.enc_text(),
-            s: push.sealed.ct_text(),
-        }
+        let what = match &push.what {
+            apns::What::Note(note) => RelayWhat::Note {
+                urgent: note.urgent,
+                thread: note.thread.clone(),
+                collapse: note.collapse.clone(),
+                e: note.sealed.enc_text(),
+                s: note.sealed.ct_text(),
+            },
+            apns::What::TakeBack(notes) => RelayWhat::TakeBack { notes: notes.clone() },
+        };
+        Self { token: push.token.clone(), sandbox: push.sandbox, what }
     }
 }
 
@@ -235,18 +254,26 @@ pub fn admit(incoming: &Incoming<'_>, now: u64) -> Result<Admitted, Refusal> {
         .map_err(|_bad| Refusal::Forged)?;
     let asked: RelayPush =
         serde_json::from_slice(incoming.body).map_err(|_bad| Refusal::Malformed)?;
-    let sealed = Sealed::from_text(&asked.e, &asked.s).ok_or(Refusal::Malformed)?;
-    let push = apns::Push {
-        token: asked.token,
-        sandbox: asked.sandbox,
-        urgent: asked.urgent,
-        thread: asked.thread,
-        collapse: asked.collapse,
-        sealed,
+    let what = match asked.what {
+        RelayWhat::Note { urgent, thread, collapse, e, s } => {
+            let sealed = Sealed::from_text(&e, &s).ok_or(Refusal::Malformed)?;
+            if !apns::is_id(&thread) || !apns::is_id(&collapse) {
+                return Err(Refusal::Malformed);
+            }
+            apns::What::Note(apns::Note { urgent, thread, collapse, sealed })
+        }
+        RelayWhat::TakeBack { notes } => {
+            let fits = (1..=apns::MAX_TAKE_BACK).contains(&notes.len());
+            if !fits || !notes.iter().all(|n| apns::is_id(n)) {
+                return Err(Refusal::Malformed);
+            }
+            apns::What::TakeBack(notes)
+        }
     };
-    if !apns::is_token(&push.token) || !apns::is_id(&push.thread) || !apns::is_id(&push.collapse) {
+    if !apns::is_token(&asked.token) {
         return Err(Refusal::Malformed);
     }
+    let push = apns::Push { token: asked.token, sandbox: asked.sandbox, what };
     Ok(Admitted { push, key })
 }
 
@@ -325,10 +352,12 @@ mod tests {
         RelayPush::of(&apns::Push {
             token,
             sandbox: true,
-            urgent,
-            thread: "dGhyZWFk".to_owned(),
-            collapse: "bm90ZQ".to_owned(),
-            sealed,
+            what: apns::What::Note(apns::Note {
+                urgent,
+                thread: "dGhyZWFk".to_owned(),
+                collapse: "bm90ZQ".to_owned(),
+                sealed,
+            }),
         })
     }
 
@@ -342,6 +371,7 @@ mod tests {
         let provider = ProviderKey::from_p8(TEST_P8, "ABC123DEFG", "DEF123GHIJ").unwrap();
         let words = br#"{"title":"Fix the login bug","body":"Allow Bash? touch refused.txt"}"#;
         let push = asked(&phone, words, true);
+        let RelayWhat::Note { thread, collapse, e, s, .. } = &push.what else { panic!("a note") };
         let signed = install.sign(&push, NOW);
 
         let admitted = admit(&incoming(&signed), NOW + 3).unwrap();
@@ -361,14 +391,14 @@ mod tests {
         assert_eq!(header("apns-topic"), TOPIC);
         assert_eq!(header("apns-push-type"), "alert");
         assert_eq!(header("apns-priority"), "10");
-        assert_eq!(header("apns-collapse-id"), push.collapse);
+        assert_eq!(&header("apns-collapse-id"), collapse);
 
         let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(payload["e"], push.e, "the encapsulated key, byte for byte");
-        assert_eq!(payload["s"], push.s, "the ciphertext, byte for byte");
+        assert_eq!(payload["e"], *e, "the encapsulated key, byte for byte");
+        assert_eq!(payload["s"], *s, "the ciphertext, byte for byte");
         assert_eq!(payload["aps"]["alert"]["title"], apns::TITLE);
         assert_eq!(payload["aps"]["interruption-level"], "time-sensitive");
-        assert_eq!(payload["aps"]["thread-id"], push.thread);
+        assert_eq!(payload["aps"]["thread-id"], *thread);
         let carried = [
             request.body.clone(),
             request.path.clone().into_bytes(),
@@ -411,10 +441,15 @@ mod tests {
         assert_eq!(admit(&base, NOW - SKEW_SECONDS - 1), Err(Refusal::Stale));
         let huge = vec![b' '; MAX_BODY + 1];
         assert_eq!(admit(&Incoming { body: &huge, ..base }, NOW), Err(Refusal::TooLarge));
-        let mut odd = push;
+        let mut odd = push.clone();
         odd.token = "a thread's title".to_owned();
         let odd = install.sign(&odd, NOW);
         assert_eq!(admit(&incoming(&odd), NOW), Err(Refusal::Malformed));
+        for notes in [Vec::new(), vec!["a title".to_owned()], vec!["c".to_owned(); 17]] {
+            let back = RelayPush { what: RelayWhat::TakeBack { notes }, ..push.clone() };
+            let back = install.sign(&back, NOW);
+            assert_eq!(admit(&incoming(&back), NOW), Err(Refusal::Malformed), "no take-back");
+        }
 
         let full: Vec<PublicKey> = (1..=4_u8).map(|n| [n; 32]).collect();
         assert_eq!(bind(install.public(), &full), Err(Refusal::NotBound), "a fifth install");
@@ -425,5 +460,24 @@ mod tests {
         assert_eq!(Refusal::NotBound.status(), 403);
         assert_eq!(Refusal::Forged.status(), 401);
         assert_eq!(key_of_text(&key_text(&install.public())), Some(install.public()));
+    }
+
+    /// A take-back goes through the relay's same checks and binding, and on to APNs as a
+    /// background push naming only the opaque ids it was given.
+    #[test]
+    fn a_take_back_goes_through_as_a_background_push() {
+        let install = InstallKey::generate().unwrap();
+        let provider = ProviderKey::from_p8(TEST_P8, "ABC123DEFG", "DEF123GHIJ").unwrap();
+        let notes = vec!["bm90ZQ".to_owned()];
+        let what = RelayWhat::TakeBack { notes: notes.clone() };
+        let back = RelayPush { token: "0f".repeat(32), sandbox: true, what };
+        let signed = install.sign(&back, NOW);
+        let admitted = admit(&incoming(&signed), NOW).unwrap();
+        assert_eq!(admitted.push.what, apns::What::TakeBack(notes.clone()));
+        let request = forward(&admitted, &provider, TOPIC, NOW).unwrap();
+        assert!(request.headers.contains(&("apns-push-type", "background".to_owned())));
+        let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(payload[apns::TAKE_BACK], serde_json::json!(notes));
+        assert!(payload["aps"].get("alert").is_none(), "nothing shown");
     }
 }

@@ -7,6 +7,9 @@
 //! ([`note_of`]), which the system shows as the app's own ([`super::content_of`]); a tap routes
 //! as one on a local note does, since it carries the same [`super::info`] keys.
 //!
+//! A note answered elsewhere is taken back by a background push naming the ids it was shown
+//! under ([`taken_back`]), which the app delegate hands to [`super::take_back`].
+//!
 //! The phone's side of the registration lives here too: the device token APNs gives the app
 //! ([`token_arrived`], [`tokens`]), and, on iOS, the key and the token kept in the Keychain
 //! where the extension reads them (`device_key`, `stored`, iOS only).
@@ -95,6 +98,32 @@ pub fn note_of(body: &PushBody) -> Note {
         silent: false,
         urgent: notice.kind == NoticeKind::NeedsYou,
     }
+}
+
+/// The notes a background push takes back, from the ids under its
+/// [`slopty_push::apns::TAKE_BACK`] key as `list` gives them.
+///
+/// Each is an opaque id as the server makes them, at most
+/// [`slopty_push::apns::MAX_TAKE_BACK`]. Anything else in it is passed over.
+#[must_use]
+pub fn taken_back(list: impl IntoIterator<Item = String>) -> Vec<String> {
+    list.into_iter()
+        .filter(|id| slopty_push::apns::is_id(id))
+        .take(slopty_push::apns::MAX_TAKE_BACK)
+        .collect()
+}
+
+/// The ids a background push's `userInfo` names to take back ([`taken_back`]); none when it
+/// is no take-back.
+#[cfg(target_os = "ios")]
+#[must_use]
+pub fn take_back_of(info: &objc2_foundation::NSDictionary) -> Vec<String> {
+    use objc2_foundation::{NSArray, NSString};
+    let Some(list) = info.objectForKey(&NSString::from_str(slopty_push::apns::TAKE_BACK)) else {
+        return Vec::new();
+    };
+    let Ok(list) = list.downcast::<NSArray>() else { return Vec::new() };
+    taken_back(list.iter().filter_map(|id| id.downcast::<NSString>().ok().map(|id| id.to_string())))
 }
 
 /// Why a push did not open.
@@ -447,5 +476,15 @@ mod tests {
         assert!(matches!(opened(&enc, &ct, &token, &other), Err(OpenError::Seal(_))));
         assert!(matches!(opened(&enc, &ct, &"1f".repeat(32), &key), Err(OpenError::Seal(_))));
         assert!(matches!(opened("!", &ct, &token, &key), Err(OpenError::NotSealed)));
+    }
+
+    /// A take-back names the opaque ids the server pushed notes under, and nothing else: a
+    /// note's words, an empty id or more than a push may carry are passed over.
+    #[test]
+    fn a_take_back_names_only_opaque_ids() {
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(taken_back(ids(&["a1_b", "Allow Bash?", "", "c-2"])), ids(&["a1_b", "c-2"]));
+        let many = vec!["c".to_owned(); slopty_push::apns::MAX_TAKE_BACK + 4];
+        assert_eq!(taken_back(many).len(), slopty_push::apns::MAX_TAKE_BACK);
     }
 }

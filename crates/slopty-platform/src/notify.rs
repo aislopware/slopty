@@ -50,6 +50,9 @@ pub mod info {
     pub const THREAD: &str = "thread";
     /// The thread's request an approval note answers.
     pub const ASK: &str = "ask";
+    /// The note's own identifier ([`super::Note::id`]). A pushed note is shown under the
+    /// opaque collapse id it was pushed with, so this is how the app knows it as its own.
+    pub const NOTE: &str = "note";
 }
 
 /// One notification.
@@ -83,7 +86,8 @@ pub struct Note {
 /// one the notification extension opened from a push.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Delivered {
-    /// Its identifier.
+    /// Its own identifier ([`Note::id`]), which a pushed note carries in [`info::NOTE`] as it
+    /// is shown under its collapse id; [`Notifier::withdraw`] takes it back by this.
     pub id: String,
     /// The first line.
     pub title: String,
@@ -314,8 +318,8 @@ impl Notifier for Memory {
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{
-    System, ask, ask_quietly, content_of, delivered, install, open_settings, settings, taps,
-    taps_finished,
+    System, ask, ask_quietly, content_of, delivered, install, open_settings, settings, take_back,
+    taps, taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -381,6 +385,19 @@ mod apple {
     /// The process's one inbox: the delegate is installed before anything listens, and the tap
     /// that launched the app arrives in between. The delegate may run off the main thread.
     static INBOX: Mutex<Inbox> = Mutex::new(Inbox::Held(Vec::new()));
+
+    /// The identifier the system shows a note under, by the note's own id, where the two
+    /// differ: a pushed note is shown under its collapse id. Each listing ([`delivered`])
+    /// replaces it, so it holds no more than the Notification Centre does.
+    static SHOWN_AS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+    /// The note `request` is, by its own id ([`super::info::NOTE`]), else by the identifier
+    /// it was shown under; and that identifier.
+    fn ids_of(request: &UNNotificationRequest) -> (String, String) {
+        let shown = request.identifier().to_string();
+        let own = strings(&request.content().userInfo()).remove(super::info::NOTE);
+        (own.unwrap_or_else(|| shown.clone()), shown)
+    }
 
     /// Hand `tap` to the app, or hold it until the app listens.
     pub(super) fn deliver(tap: Tap) {
@@ -731,18 +748,24 @@ mod apple {
             // SAFETY: UserNotifications rule: the array handed to the completion handler is a
             // valid object for the duration of the call.
             let notes = unsafe { notes.as_ref() };
+            let mut shown_as = BTreeMap::new();
             let notes: Vec<super::Delivered> = notes
                 .iter()
                 .map(|note| {
                     let request = note.request();
                     let content = request.content();
+                    let (id, shown) = ids_of(&request);
+                    if id != shown {
+                        shown_as.insert(id.clone(), shown);
+                    }
                     super::Delivered {
-                        id: request.identifier().to_string(),
+                        id,
                         title: content.title().to_string(),
                         body: content.body().to_string(),
                     }
                 })
                 .collect();
+            *SHOWN_AS.lock() = shown_as;
             let tx = tx.lock().take();
             if let Some(tx) = tx {
                 let _unheard = tx.send(notes);
@@ -751,6 +774,30 @@ mod apple {
         UNUserNotificationCenter::currentNotificationCenter()
             .getDeliveredNotificationsWithCompletionHandler(&listed);
         rx.await.unwrap_or_default()
+    }
+
+    /// Take down the notes shown under `ids`, then call `done`: a background push's take-back
+    /// ([`super::pushed::taken_back`]), while the app has only the moments iOS gives it.
+    ///
+    /// The removal goes out first, then a listing is asked, and `done` waits for its answer,
+    /// so the app is not suspended with the removal still unsent. Outside an app bundle, or
+    /// with nothing to take down, `done` runs at once.
+    pub fn take_back(ids: &[String], done: impl FnOnce() + Send + 'static) {
+        if ids.is_empty() || !in_bundle() {
+            done();
+            return;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let ids: Vec<Retained<NSString>> = ids.iter().map(|id| NSString::from_str(id)).collect();
+        center.removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&ids));
+        let done = Mutex::new(Some(done));
+        let listed = RcBlock::new(move |_notes: std::ptr::NonNull<NSArray<UNNotification>>| {
+            let done = done.lock().take();
+            if let Some(done) = done {
+                done();
+            }
+        });
+        center.getDeliveredNotificationsWithCompletionHandler(&listed);
     }
 
     /// Open the system's settings at Slopty's notifications, where the person turns them on.
@@ -821,7 +868,10 @@ mod apple {
                 waiting.retain(|n| n.id != id);
             }
             let Some(center) = &self.center else { return };
-            let ids = NSArray::from_retained_slice(&[NSString::from_str(id)]);
+            let shown = SHOWN_AS.lock().remove(id);
+            let ids: Vec<Retained<NSString>> =
+                std::iter::once(id).chain(shown.as_deref()).map(NSString::from_str).collect();
+            let ids = NSArray::from_retained_slice(&ids);
             center.removePendingNotificationRequestsWithIdentifiers(&ids);
             center.removeDeliveredNotificationsWithIdentifiers(&ids);
         }
@@ -924,10 +974,11 @@ mod apple {
         if let Some(thread) = &note.thread {
             content.setThreadIdentifier(&NSString::from_str(thread));
         }
-        let keys: Vec<Retained<NSString>> =
-            note.info.keys().map(|k| NSString::from_str(k)).collect();
+        let mut info = note.info.clone();
+        info.insert(super::info::NOTE.to_owned(), note.id.clone());
+        let keys: Vec<Retained<NSString>> = info.keys().map(|k| NSString::from_str(k)).collect();
         let values: Vec<Retained<NSString>> =
-            note.info.values().map(|v| NSString::from_str(v)).collect();
+            info.values().map(|v| NSString::from_str(v)).collect();
         let keys: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
         let values: Vec<&NSString> = values.iter().map(|v| &**v).collect();
         let info = NSDictionary::<NSString, NSString>::from_slices(&keys, &values);
@@ -984,8 +1035,12 @@ mod apple {
                         UNNotificationDismissActionIdentifier.to_string(),
                     )
                 };
+                let (id, shown) = ids_of(&request);
+                if id != shown {
+                    SHOWN_AS.lock().insert(id.clone(), shown);
+                }
                 let tap = super::tap_of(
-                    request.identifier().to_string(),
+                    id,
                     strings(&request.content().userInfo()),
                     &response.actionIdentifier().to_string(),
                     (&system.0, &system.1),

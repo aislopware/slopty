@@ -396,8 +396,11 @@ settings:
         # A transfer asks to go on off screen as a continued-processing task, one per transfer.
         BGTaskSchedulerPermittedIdentifiers:
           - "{BUNDLE_ID}.transfer.*"
+        # `remote-notification`: a background push from the server takes back a note answered on
+        # another device.
         UIBackgroundModes:
           - processing
+          - remote-notification
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}
