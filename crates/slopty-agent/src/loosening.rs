@@ -55,8 +55,9 @@ const SAFE_SETTINGS: [&str; 14] = [
 ];
 
 /// The `permissions` a `--settings` document may hold and loosen nothing: rules that deny or
-/// ask, bypass locked off, and the mode it starts in when that mode asks.
-const SAFE_PERMISSIONS: [&str; 4] = ["deny", "ask", "disableBypassPermissionsMode", "defaultMode"];
+/// ask, bypass and auto mode locked off, and the mode it starts in when that mode asks.
+const SAFE_PERMISSIONS: [&str; 5] =
+    ["deny", "ask", "disableBypassPermissionsMode", "disableAutoMode", "defaultMode"];
 
 /// What the worker adds to every agent it starts, which is its own and loosens nothing.
 ///
@@ -343,9 +344,10 @@ mod tests {
         assert_eq!(loose(&sh(&line), cwd).len(), 1, "{line}");
     }
 
-    /// The worker's own `--settings` (its hooks and status line, bypass locked off) loosens
-    /// nothing. One that allows tools, starts loose, carries an environment or a helper, or
-    /// registers any hook or status line of its own does, and so does one that cannot be read.
+    /// The worker's own `--settings` (its hooks and status line, bypass and auto mode locked
+    /// off) loosens nothing. One that allows tools, starts loose, carries an environment or a
+    /// helper, or registers any hook or status line of its own does, and so does one that
+    /// cannot be read.
     #[test]
     fn a_settings_document_loosens_by_what_it_holds() {
         let dir = tempfile::tempdir().unwrap();
@@ -362,6 +364,10 @@ mod tests {
             "model": "opus",
         });
         assert_eq!(loose(&argv(&ours), cwd), Vec::<String>::new());
+        // The lock the worker puts on an agent held to asking loosens nothing either.
+        let held = crate::hooks::held_to_asking(Vec::new(), cwd);
+        let held: Vec<String> = std::iter::once("claude".to_owned()).chain(held).collect();
+        assert_eq!(loose(&held, cwd), Vec::<String>::new(), "{held:?}");
         let judged = |doc: Value| loose(&argv(&doc), cwd);
         assert_eq!(
             judged(json!({ "permissions": { "allow": ["Bash(rm:*)"] } })),
