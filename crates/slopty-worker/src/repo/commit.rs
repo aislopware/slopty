@@ -94,7 +94,8 @@ pub async fn apply(
         GitOp::Commit { paths, message } => commit(git, &root, &paths, &message).await,
         GitOp::Push => push(git, programs, &root).await,
         GitOp::PullRequest { title, body, base, draft } => {
-            super::pull::create(programs, &root, (&title, &body), base.as_deref(), draft).await
+            let text = (title.as_str(), body.as_str());
+            pull_request((git, programs), &root, text, base.as_deref(), draft).await
         }
         GitOp::PullStatus => super::pull::status_done(programs, &root).await,
         GitOp::Merge { method, head, delete_branch } => {
@@ -262,6 +263,29 @@ async fn current_branch(git: &Path, root: &Path) -> Option<String> {
 /// Push the branch checked out: to its upstream, or setting one on the repository's only
 /// remote, else `origin`.
 async fn push(git: &Path, programs: &Programs, root: &Path) -> Result<GitDone, GitOutcome> {
+    let (remote, branch, upstream_set) = push_branch(git, root).await?;
+    let pull = pushed_pull(programs, root).await;
+    Ok(GitDone::Pushed { remote, branch, upstream_set, pull })
+}
+
+/// Push the branch checked out as [`push`] does, then open its pull request
+/// ([`super::pull::create`]): the forge opens one only for a branch it has, and a fresh agent
+/// worktree's branch is on no remote yet.
+async fn pull_request(
+    (git, programs): (&Path, &Programs),
+    root: &Path,
+    text: (&str, &str),
+    base: Option<&str>,
+    draft: bool,
+) -> Result<GitDone, GitOutcome> {
+    let forge = super::forge_of(root).unwrap_or(slopty_proto::git::Forge::GitHub);
+    super::pull::program(programs, forge)?;
+    push_branch(git, root).await?;
+    super::pull::create(programs, root, text, base, draft).await
+}
+
+/// Push the branch checked out: the remote and the branch, and whether its upstream was set.
+async fn push_branch(git: &Path, root: &Path) -> Result<(String, String, bool), GitOutcome> {
     let Some(branch) = current_branch(git, root).await else {
         return Err(GitOutcome::Refused {
             why: "HEAD is detached: check out a branch to push".to_owned(),
@@ -282,8 +306,7 @@ async fn push(git: &Path, programs: &Programs, root: &Path) -> Result<GitDone, G
     if let Some(tracked) = tracked {
         run(git, root, &["push", "--porcelain"], None, REMOTE).await?;
         let remote = tracked.split_once('/').map_or(tracked.as_str(), |(r, _)| r).to_owned();
-        let pull = pushed_pull(programs, root).await;
-        return Ok(GitDone::Pushed { remote, branch, upstream_set: false, pull });
+        return Ok((remote, branch, false));
     }
     let remotes = run(git, root, &["remote"], None, LOCAL).await?;
     let remotes: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
@@ -307,8 +330,7 @@ async fn push(git: &Path, programs: &Programs, root: &Path) -> Result<GitDone, G
     };
     run(git, root, &["push", "--porcelain", "--set-upstream", &remote, &branch], None, REMOTE)
         .await?;
-    let pull = pushed_pull(programs, root).await;
-    Ok(GitDone::Pushed { remote, branch, upstream_set: true, pull })
+    Ok((remote, branch, true))
 }
 
 /// The branch's pull request after a push, so its checks read as started: none when the

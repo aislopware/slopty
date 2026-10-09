@@ -34,6 +34,7 @@ fn stand_in(dir: &Path, mode: &str) -> PathBuf {
          'pr merge') if [ {mode} = refuse ]; then echo 'Pull request #7 is not mergeable: the base branch policy prohibits the merge.' >&2; exit 1; fi\n\
            echo '✓ Squashed and merged pull request #7 (Keep it)' ;;\n\
          'api graphql'*) cat \"{dir}/review.json\" ;;\n\
+         'pr create') echo 'https://github.com/o/demo/pull/7' ;;\n\
          *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
          esac\n",
         dir = dir.display()
@@ -326,15 +327,55 @@ async fn a_branch_s_merged_request_is_read_and_none_is_none() {
     );
 }
 
-/// A merge request is opened and merged with glab as a pull request is with gh: its title,
-/// description, target and draft as asked and never a prompt; its merge now (never left to
-/// merge itself later), by the method named, at the head the person looked at, removing the
+/// A repository at `work` with a commit on `feature`, whose pushes go to a bare forge in `dir`
+/// while its `origin` reads as it was set: the forge's path.
+fn pushing_to_a_forge(dir: &Path, work: &Path) -> PathBuf {
+    let git = crate::changes::git().expect("git");
+    let in_dir = |at: &Path, args: &[&str]| {
+        let ran = std::process::Command::new(git)
+            .arg("-C")
+            .arg(at)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "{args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    };
+    in_dir(work, &["commit", "-q", "--allow-empty", "-m", "the agent's work"]);
+    in_dir(dir, &["init", "-q", "--bare", "forge.git"]);
+    let forge = dir.join("forge.git");
+    in_dir(work, &["config", "remote.origin.pushurl", &forge.to_string_lossy()]);
+    forge
+}
+
+/// The commit `feature` is at in the repository at `at`, if it has the branch.
+fn feature_at(at: &Path) -> Option<String> {
+    let ran = std::process::Command::new(crate::changes::git()?)
+        .arg("-C")
+        .arg(at)
+        .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .ok()?;
+    ran.status.success().then(|| String::from_utf8_lossy(&ran.stdout).trim().to_owned())
+}
+
+/// A merge request is opened and merged with glab as a pull request is with gh: the branch, on
+/// no remote yet as a fresh agent worktree's is, goes up first with its upstream set; then its
+/// title, description, target and draft as asked and never a prompt; its merge now (never left
+/// to merge itself later), by the method named, at the head the person looked at, removing the
 /// branch when asked.
 #[tokio::test]
 async fn a_merge_request_is_opened_and_merged_with_glab() {
     let dir = tempfile::tempdir().expect("temp");
-    let work = gitlab_repo(dir.path()).to_string_lossy().into_owned();
-    let programs = with_glab(stand_in_glab(dir.path(), "open"));
+    let root = std::fs::canonicalize(dir.path()).expect("real");
+    let work = gitlab_repo(&root);
+    let forge = pushing_to_a_forge(&root, &work);
+    assert_eq!(feature_at(&forge), None, "not on the forge yet");
+    let work = work.to_string_lossy().into_owned();
+    let programs = with_glab(stand_in_glab(&root, "open"));
     let open = GitOp::PullRequest {
         title: "Keep it".to_owned(),
         body: "Why.".to_owned(),
@@ -347,6 +388,7 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
             url: "https://gitlab.example.com/o/demo/-/merge_requests/12".to_owned()
         })
     );
+    assert_eq!(feature_at(&forge), feature_at(Path::new(&work)), "the branch went up first");
     let merge = GitOp::Merge {
         method: "squash".to_owned(),
         head: Some("0123abcd".to_owned()),
@@ -357,7 +399,7 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
         panic!("not merged")
     };
     assert_eq!(pull.map(|p| p.number), Some(12));
-    let calls = asked(dir.path());
+    let calls = asked(&root);
     assert_eq!(
         calls.get(..2),
         Some(
@@ -581,4 +623,50 @@ async fn work_on_a_protected_gitlab_target_goes_up_as_a_merge_request() {
         calls.iter().any(|a| a.contains("--source-branch slopty/demo/3 --target-branch main")),
         "the open one is looked for by its branches: {calls:?}"
     );
+}
+
+/// "Open pull request" on a branch no remote has, as a fresh agent worktree's is: the branch
+/// goes up first, its upstream set, and then gh opens the pull request, which it could not do
+/// for a branch the forge lacks. Without gh nothing goes up, and the refusal names gh.
+#[tokio::test]
+async fn a_pull_request_is_opened_once_its_branch_went_up() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(dir.path()).expect("real");
+    let work = repo(&root);
+    let git = crate::changes::git().expect("git");
+    let added = std::process::Command::new(git)
+        .arg("-C")
+        .arg(&work)
+        .args(["remote", "add", "origin", "https://github.com/o/demo.git"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(added.status.success());
+    let forge = pushing_to_a_forge(&root, &work);
+    let work_text = work.to_string_lossy().into_owned();
+    let open = || GitOp::PullRequest {
+        title: "Keep it".to_owned(),
+        body: "Why.".to_owned(),
+        base: None,
+        draft: false,
+    };
+
+    let no_gh = Programs { git: Some(git.to_path_buf()), gh: None, glab: None };
+    let refused = apply(&no_gh, &work_text, open(), &[]).await;
+    assert!(
+        matches!(&refused, GitOutcome::Unavailable { program, .. } if program == "gh"),
+        "{refused:?}"
+    );
+    assert_eq!(feature_at(&forge), None, "nothing went up without gh to open it");
+
+    let programs =
+        Programs { git: Some(git.to_path_buf()), gh: Some(stand_in(&root, "open")), glab: None };
+    assert_eq!(
+        apply(&programs, &work_text, open(), &[]).await,
+        GitOutcome::Done(GitDone::PullRequest {
+            url: "https://github.com/o/demo/pull/7".to_owned()
+        })
+    );
+    assert_eq!(feature_at(&forge), feature_at(&work), "the branch went up first");
+    assert_eq!(asked(&root), ["pr create --title Keep it --body Why."]);
 }

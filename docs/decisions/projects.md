@@ -1815,6 +1815,14 @@ reordering and edited allows are gone" in `agents.md`.*
     remotes there are.
   - A pull request is `gh pr create`. An empty title becomes `--fill`, so gh writes it from the
     commits, never Slopty. The URL is the one gh prints.
+  - The branch is pushed first, as a push pushes it, and the pull request is opened only once
+    it went up (2026-10-10, readiness 10-10 rank 4). gh opens one only for a branch the forge
+    has, and a fresh agent worktree's branch is on no remote yet, so "Open pull request" beside
+    "Push" failed until the person pushed by hand. A worker without the forge's command line
+    pushes nothing. The thread says "Pushing and opening the pull request" meanwhile. Tests:
+    `repo::pull::tests::a_pull_request_is_opened_once_its_branch_went_up` (a stand-in gh, a
+    bare forge on disk, nothing pushed without gh) and
+    `a_merge_request_is_opened_and_merged_with_glab` (the same through glab).
 - **The person's binaries, their words.** git is found as everywhere else (`changes::git`).
   gh is found on `PATH` or where Homebrew and the system put it. Each runs with the person's
   config, hooks and credential helpers as they are. `GIT_TERMINAL_PROMPT=0`,

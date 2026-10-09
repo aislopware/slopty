@@ -54,7 +54,9 @@ pub enum GitOp {
     /// Push the branch checked out to its upstream, or to the repository's one remote (or
     /// `origin`), setting it as the upstream, when it has none.
     Push,
-    /// Open a pull request for the branch checked out, through the person's own `gh`.
+    /// Open a pull request for the branch checked out, through the person's own `gh` (a merge
+    /// request through `glab` on a GitLab): pushed first, as [`GitOp::Push`] pushes it, since
+    /// the forge opens one only for a branch it has.
     PullRequest {
         /// Its title; `gh` takes it and the body from the commits when empty (`--fill`).
         title: String,

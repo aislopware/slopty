@@ -1145,8 +1145,12 @@ impl CommitSheet {
                 GitOp::PullRequest { .. } => {
                     let forge = self.state(cx).map_or(Forge::GitHub, Repo::forge);
                     return Some(
-                        self.quiet("commit-busy", format!("Opening the {}\u{2026}", forge.noun()))
-                            .into_any_element(),
+                        // The branch goes up first: the forge opens one only for a branch it has.
+                        self.quiet(
+                            "commit-busy",
+                            format!("Pushing and opening the {}\u{2026}", forge.noun()),
+                        )
+                        .into_any_element(),
                     );
                 }
                 GitOp::Merge { .. } => "Merging\u{2026}",
