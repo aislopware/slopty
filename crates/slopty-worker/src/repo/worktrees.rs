@@ -180,7 +180,8 @@ pub async fn make(
 /// The head of `origin`'s pull request `number`, fetched, and the ref its branch tracks: the
 /// branch of `origin` it comes from when one is at its head commit (a pull request from
 /// `origin` itself, so a pull and gh read it there), else `refs/pull/<number>/head` (a fork's,
-/// as `gh pr checkout` tracks it). Both make gh find the pull request from the worktree.
+/// as `gh pr checkout` tracks it). Both make gh find the pull request from the worktree. A
+/// GitLab `origin`'s merge request is `refs/merge-requests/<number>/head`.
 ///
 /// # Errors
 /// [`Failed::NotOne`] for a pull request `origin` has not, [`Failed::Other`] for an `origin`
@@ -190,14 +191,19 @@ async fn pull_head(
     clone: &Path,
     number: u32,
 ) -> Result<(String, Option<String>), Failed> {
-    let head = format!("refs/pull/{number}/head");
+    let head = match super::forge_of(clone) {
+        Some(slopty_proto::git::Forge::GitLab) => format!("refs/merge-requests/{number}/head"),
+        _ => format!("refs/pull/{number}/head"),
+    };
     let (heads, pull) =
         (["ls-remote", "--heads", "--refs", "origin"], ["ls-remote", "origin", head.as_str()]);
     let (listed, pulled) =
         tokio::join!(bundle::run(git, clone, &heads), bundle::run(git, clone, &pull));
     let at = pulled?.split_whitespace().next().map(str::to_owned);
     let Some(at) = at else {
-        return Err(Failed::NotOne(format!("origin has no pull request #{number}")));
+        let forge = super::forge_of(clone).unwrap_or(slopty_proto::git::Forge::GitHub);
+        let (noun, mark) = (forge.noun(), forge.mark());
+        return Err(Failed::NotOne(format!("origin has no {noun} {mark}{number}")));
     };
     let fetched = format!("refs/remotes/origin/pull/{number}");
     let spec = format!("+{head}:{fetched}");
@@ -489,15 +495,15 @@ pub async fn remove(
 ///
 /// What counts as landed is read from its clone: `origin`'s default branch and the branch the
 /// clone has checked out. A squash or a rebase merge leaves no commit `git cherry` matches, so a
-/// branch whose pull request merged at the commit it ends at, as the person's own `gh` says, counts
-/// as landed too. gh is asked only when the commits alone do not say so; without it the branch
-/// stays.
+/// branch whose pull request merged at the commit it ends at, as the person's own `gh` (or
+/// `glab`, for a GitLab merge request) says, counts as landed too. It is asked only when the
+/// commits alone do not say so; without it the branch stays.
 ///
 /// # Errors
 /// As [`remove`].
 pub async fn free(
     git: &Path,
-    gh: Option<&Path>,
+    programs: &super::commit::Programs,
     worktree: &Path,
     terminals: &[PathBuf],
 ) -> Result<Removed, Failed> {
@@ -508,9 +514,9 @@ pub async fn free(
             .map_err(|e| Failed::Other(e.to_string()))??
     };
     let mut landed = vec![DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
-    if let Some(branch) = branch.filter(|_| gh.is_some())
+    if let Some(branch) = branch.filter(|_| programs.has_forge())
         && !landed_in(git, &clone, &branch, &landed).await
-        && merged_at_tip(git, gh, &tree).await
+        && merged_at_tip(git, programs, &tree).await
     {
         landed.push(branch);
     }
@@ -521,10 +527,10 @@ pub async fn free(
 const DEFAULT_BRANCH: &str = "origin/HEAD";
 
 /// Whether the pull request of the branch checked out at `tree` merged at the commit the
-/// branch ends at, as `gh` reads it. Anything gh cannot say is a no.
-async fn merged_at_tip(git: &Path, gh: Option<&Path>, tree: &Path) -> bool {
+/// branch ends at, as its forge's command line reads it. Anything it cannot say is a no.
+async fn merged_at_tip(git: &Path, programs: &super::commit::Programs, tree: &Path) -> bool {
     let Ok(tip) = bundle::run(git, tree, &["rev-parse", "HEAD"]).await else { return false };
-    let Ok(Some(pull)) = super::pull::status(gh, tree).await else { return false };
+    let Ok(Some(pull)) = super::pull::status(programs, tree).await else { return false };
     pull.state == "MERGED" && pull.head_commit == tip.trim()
 }
 
@@ -730,6 +736,38 @@ mod tests {
         assert_eq!(none, Err(Failed::NotOne("origin has no pull request #9".to_owned())));
         let again = make(git, &clone, "pr-7", None, Some(8)).await.expect("reopened");
         assert_eq!(git_in(&again.path, &["rev-parse", "HEAD"]), fork, "as it was");
+    }
+
+    /// A worktree of a GitLab merge request checks out its head where GitLab keeps it,
+    /// `refs/merge-requests/<n>/head`, and tracks it there, so glab finds the merge request from
+    /// the worktree. One `origin` has not is refused in a merge request's words. The clone's
+    /// `origin` names a GitLab host and is read from a bare repository standing in for it.
+    #[tokio::test]
+    async fn a_worktree_of_a_merge_request_checks_out_its_head_and_tracks_it() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let (origin, clone, other) =
+            (tmp.path().join("origin.git"), tmp.path().join("clone"), tmp.path().join("other"));
+        git_in(tmp.path(), &["init", "-q", "--bare", "-b", "main", &origin.to_string_lossy()]);
+        git_in(tmp.path(), &["clone", "-q", &origin.to_string_lossy(), &clone.to_string_lossy()]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        git_in(&clone, &["push", "-q", "origin", "main"]);
+        let gitlab = "https://gitlab.example.com/o/demo.git";
+        git_in(&clone, &["remote", "set-url", "origin", gitlab]);
+        let instead = format!("url.{}.insteadOf", origin.to_string_lossy());
+        git_in(&clone, &["config", &instead, gitlab]);
+        git_in(tmp.path(), &["clone", "-q", &origin.to_string_lossy(), &other.to_string_lossy()]);
+        git_in(&other, &["commit", "-q", "--allow-empty", "-m", "from a fork"]);
+        let head = git_in(&other, &["rev-parse", "HEAD"]);
+        git_in(&other, &["push", "-q", "origin", "HEAD:refs/merge-requests/3/head"]);
+
+        let made = make(git, &clone, "mr-3", None, Some(3)).await.expect("made");
+        assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), head);
+        let key = |k: &str| format!("branch.worktree-mr-3.{k}");
+        assert_eq!(git_in(&clone, &["config", &key("merge")]), "refs/merge-requests/3/head");
+        assert_eq!(git_in(&clone, &["config", &key("remote")]), "origin");
+        let none = make(git, &clone, "mr-9", None, Some(9)).await;
+        assert_eq!(none, Err(Failed::NotOne("origin has no merge request !9".to_owned())));
     }
 
     /// A new worktree starts from its branch as `origin` has it, fetched first, unless the
@@ -980,7 +1018,11 @@ mod tests {
         }
         std::fs::write(tmp.path().join("tip"), git_in(&tree, &["rev-parse", "HEAD"]))
             .expect("write");
-        let programs = Programs { git: Some(git.to_path_buf()), gh: Some(stand_in_gh(tmp.path())) };
+        let programs = Programs {
+            git: Some(git.to_path_buf()),
+            gh: Some(stand_in_gh(tmp.path())),
+            glab: None,
+        };
         let at = tree.to_string_lossy().into_owned();
         let free = |terminals: Vec<PathBuf>| {
             let (programs, at) = (programs.clone(), at.clone());
@@ -1021,7 +1063,7 @@ mod tests {
         assert!(!has_branch(&clone, &made.branch));
 
         let (open, open_branch) = agent_tree(&clone, "half-done");
-        let alone = Programs { git: Some(git.to_path_buf()), gh: None };
+        let alone = Programs { git: Some(git.to_path_buf()), gh: None, glab: None };
         let kept = apply(&alone, &open.to_string_lossy(), GitOp::RemoveWorktree, &[]).await;
         let GitOutcome::Done(GitDone::WorktreeRemoved { branch_removed, .. }) = kept else {
             panic!("not freed: {kept:?}")

@@ -354,6 +354,7 @@ async fn a_resting_thread_s_pull_request_lifts_it() {
     let mut desk = Client::sit(&hub, "mac");
     desk.at(&hub, Seat::Desk, true, Vec::new());
     let pull = |stands| PullSeen {
+        forge: slopty_proto::git::Forge::GitHub,
         number: 42,
         url: "https://github.com/o/r/pull/42".to_owned(),
         title: "Fix the login".to_owned(),

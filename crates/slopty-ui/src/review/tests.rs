@@ -591,6 +591,7 @@ fn the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet(cx: &mut 
         .collect();
     assert_eq!(reads.len(), 1, "asked once, never polled");
     let pull = PullStatus {
+        forge: slopty_proto::git::Forge::GitHub,
         number: 12,
         url: "https://github.com/o/r/pull/12".to_owned(),
         title: "Refresh tokens".to_owned(),
@@ -1000,6 +1001,7 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
     assert_eq!(status.len(), 1, "the root is asked once, as the tile opens");
     let root = GitStatus {
         root: "/r".to_owned(),
+        forge: None,
         branch: Some("main".to_owned()),
         head: None,
         upstream: None,

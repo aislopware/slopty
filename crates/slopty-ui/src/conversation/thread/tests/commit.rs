@@ -34,6 +34,7 @@ fn status() -> GitStatus {
         |xy: &str, path: &str| GitFile { path: path.to_owned(), from: None, xy: xy.to_owned() };
     GitStatus {
         root: "/w".to_owned(),
+        forge: None,
         branch: Some("feature".to_owned()),
         head: Some("abc".to_owned()),
         upstream: Some("origin/feature".to_owned()),
@@ -46,6 +47,7 @@ fn status() -> GitStatus {
 
 fn pull(merge_state: &str, checks: &[&str]) -> PullStatus {
     PullStatus {
+        forge: slopty_proto::git::Forge::GitHub,
         number: 7,
         url: "https://github.com/o/r/pull/7".to_owned(),
         title: "Add the sheet".to_owned(),
@@ -169,6 +171,41 @@ fn a_merge_is_offered_only_while_ready_for_the_head_on_show(cx: &mut TestAppCont
             head: Some("c0ffee".to_owned()),
             delete_branch: false,
         })
+    );
+}
+
+/// A repository whose `origin` is on GitLab speaks of merge requests: before one is open the
+/// sheet offers to open a merge request, and once one is, its number is written `!12`, in the
+/// sheet and in the composer, and read as a merge request.
+#[gpui::test]
+fn a_gitlab_repository_s_sheet_speaks_of_merge_requests(cx: &mut TestAppContext) {
+    use slopty_proto::git::Forge;
+
+    let (hub, sent, cx) = opened(cx);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    let gitlab = GitStatus { forge: Some(Forge::GitLab), ..status() };
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(gitlab)));
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(None));
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Button", Some("Open merge request"))),
+        "the way to open one, in GitLab's words"
+    );
+    let mr = PullStatus {
+        forge: Forge::GitLab,
+        number: 12,
+        url: "https://gitlab.example.com/o/r/-/merge_requests/12".to_owned(),
+        ..pull("CLEAN", &["SUCCESS"])
+    };
+    hub.update(cx, |hub, cx| {
+        let _asked = hub.git_op("/w", GitOp::PullStatus, cx);
+    });
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(mr))));
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Link", Some("Merge request 12"))), "{tree:#?}");
+    assert!(
+        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Merge request 12,"))),
+        "the composer's chip reads it too"
     );
 }
 

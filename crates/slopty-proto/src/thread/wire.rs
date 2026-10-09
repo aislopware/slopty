@@ -731,6 +731,8 @@ pub struct ThreadRow {
 /// reads, the worker's summary of the forge's own answer ([`crate::git::PullStatus`]).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PullSeen {
+    /// Where it lives, which says what it is called and how its number is written.
+    pub forge: crate::git::Forge,
     /// Its number.
     pub number: u32,
     /// Its page.
@@ -783,26 +785,32 @@ impl PullStands {
 }
 
 impl PullSeen {
-    /// What it says of itself in a line: "#42: lint failed", "#42 is ready to merge".
+    /// Its number as its forge writes it: `#42`, a merge request's `!42`.
+    #[must_use]
+    pub fn named(&self) -> String {
+        format!("{}{}", self.forge.mark(), self.number)
+    }
+
+    /// What it says of itself in a line: "#42: lint failed", "!42 is ready to merge".
     #[must_use]
     pub fn line(&self) -> String {
-        let n = self.number;
+        let n = self.named();
         match self.stands {
-            PullStands::Merged => format!("#{n} merged"),
-            PullStands::Closed => format!("#{n} closed"),
-            PullStands::Draft => format!("#{n} is a draft"),
-            PullStands::Conflicted => format!("#{n} conflicts with its base"),
+            PullStands::Merged => format!("{n} merged"),
+            PullStands::Closed => format!("{n} closed"),
+            PullStands::Draft => format!("{n} is a draft"),
+            PullStands::Conflicted => format!("{n} conflicts with its base"),
             PullStands::ChecksFailed => match (&self.failed_first, self.failed) {
-                (Some(first), 1) => format!("#{n}: {first} failed"),
+                (Some(first), 1) => format!("{n}: {first} failed"),
                 (Some(first), more) => {
-                    format!("#{n}: {first} and {} more failed", more.saturating_sub(1))
+                    format!("{n}: {first} and {} more failed", more.saturating_sub(1))
                 }
-                (None, more) => format!("#{n}: {more} checks failed"),
+                (None, more) => format!("{n}: {more} checks failed"),
             },
-            PullStands::ChangesRequested => format!("#{n}: changes requested"),
-            PullStands::Running => format!("#{n}: checks running"),
-            PullStands::Waiting => format!("#{n} waits on a review"),
-            PullStands::Ready => format!("#{n} is ready to merge"),
+            PullStands::ChangesRequested => format!("{n}: changes requested"),
+            PullStands::Running => format!("{n}: checks running"),
+            PullStands::Waiting => format!("{n} waits on a review"),
+            PullStands::Ready => format!("{n} is ready to merge"),
         }
     }
 }

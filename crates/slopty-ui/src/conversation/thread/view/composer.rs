@@ -301,7 +301,8 @@ impl ThreadView {
                     .debug_selector(|| "thread-pull".to_owned())
                     .role(Role::Button)
                     .aria_label(SharedString::from(format!(
-                        "Pull request {}, {words}",
+                        "{} {}, {words}",
+                        pull.forge.title(),
                         pull.number
                     )))
                     .flex_none()
@@ -316,9 +317,11 @@ impl ThreadView {
                         crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
                             .size(px(theme.typography.icon())),
                     )
-                    .child(
-                        kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))),
-                    )
+                    .child(kit::tabular(div()).child(SharedString::from(format!(
+                        "{}{}",
+                        pull.forge.mark(),
+                        pull.number
+                    ))))
                     .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
                 s.focus,
             )

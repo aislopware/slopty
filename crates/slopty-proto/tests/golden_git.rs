@@ -5,7 +5,8 @@
 #[cfg(test)]
 mod golden_git {
     use slopty_proto::git::{
-        Branch, Branches, GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus,
+        Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck,
+        PullStatus,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
@@ -42,6 +43,7 @@ mod golden_git {
     fn status() -> GitDone {
         GitDone::Status(Box::new(GitStatus {
             root: "/Users/c/src/demo".to_owned(),
+            forge: Some(Forge::GitHub),
             branch: Some("feature".to_owned()),
             head: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
             upstream: Some("origin/feature".to_owned()),
@@ -62,6 +64,7 @@ mod golden_git {
 
     fn pull() -> PullStatus {
         PullStatus {
+            forge: Forge::GitHub,
             number: 7,
             url: "https://github.com/o/demo/pull/7".to_owned(),
             title: "Keep what matters".to_owned(),
@@ -131,6 +134,13 @@ mod golden_git {
         let read = GitDone::PullStatus(Some(Box::new(pull())));
         snap("worker_git_pull_status", &done(7, GitOutcome::Done(read)));
         snap("worker_git_no_pull", &done(7, GitOutcome::Done(GitDone::PullStatus(None))));
+        let merge_request = PullStatus {
+            forge: Forge::GitLab,
+            url: "https://gitlab.example.com/o/demo/-/merge_requests/7".to_owned(),
+            ..pull()
+        };
+        let read = GitDone::PullStatus(Some(Box::new(merge_request)));
+        snap("worker_git_merge_request_status", &done(7, GitOutcome::Done(read)));
         let merged = GitDone::Merged {
             said: "Squashed and merged pull request #7".to_owned(),
             pull: Some(Box::new(PullStatus { state: "MERGED".to_owned(), ..pull() })),

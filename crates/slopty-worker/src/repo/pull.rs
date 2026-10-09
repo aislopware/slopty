@@ -1,15 +1,20 @@
-//! The branch's pull request as the person's own gh reads it, and its merge on their word
-//! ([`slopty_proto::git::PullStatus`]).
+//! The branch's pull request as the person's own forge command line reads it, its opening and
+//! its merge on their word ([`slopty_proto::git::PullStatus`]).
 //!
-//! gh runs as the worker's user, signed in as they signed it in, with prompts off; nothing of
-//! the sign-in is read or passed. What the forge reports is kept in its own words.
+//! The forge is the one the repository's `origin` names ([`crate::repo::forge_of`]): GitHub's
+//! pull requests go through `gh`, a GitLab's merge requests through `glab` ([`gitlab`]). Either
+//! runs as the worker's user, signed in as they signed it in, with prompts off; nothing of the
+//! sign-in is read or passed. What the forge reports is kept in GitHub's words, a merge
+//! request's put in them.
 
 use std::path::Path;
 
 use serde_json::Value;
-use slopty_proto::git::{CHECKS_MAX, GitDone, GitOutcome, PullCheck, PullStatus};
+use slopty_proto::git::{CHECKS_MAX, Forge, GitDone, GitOutcome, PullCheck, PullStatus};
 
-use super::commit::{REMOTE, run};
+use super::commit::{Programs, REMOTE, run};
+
+mod gitlab;
 
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,\
@@ -18,26 +23,45 @@ const FIELDS: &str = "number,url,title,state,isDraft,headRefName,headRefOid,base
 /// How gh says the branch has no pull request.
 const NONE_FOUND: &str = "no pull requests found";
 
-/// The merge methods gh takes, by the flag each is.
+/// The merge methods gh and glab take, by the flag each is.
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
 
-/// `gh`, or the refusal for a worker without it.
-pub(super) fn gh(gh: Option<&Path>) -> Result<&Path, GitOutcome> {
-    gh.ok_or_else(|| GitOutcome::Unavailable {
-        program: "gh".to_owned(),
-        why: "gh, GitHub's command line, is not on this worker, so it opens, reads and merges \
-              no pull request"
-            .to_owned(),
+/// The forge of the repository rooted at `root`: GitHub's when its `origin` names no other.
+fn forge(root: &Path) -> Forge {
+    crate::repo::forge_of(root).unwrap_or(Forge::GitHub)
+}
+
+/// `forge`'s command line among `programs`, or the refusal for a worker without it.
+pub(super) fn program(programs: &Programs, forge: Forge) -> Result<&Path, GitOutcome> {
+    let (found, why) = match forge {
+        Forge::GitHub => (
+            programs.gh.as_deref(),
+            "gh, GitHub's command line, is not on this worker, so it opens, reads and merges \
+             no pull request",
+        ),
+        Forge::GitLab => (
+            programs.glab.as_deref(),
+            "glab, GitLab's command line, is not on this worker, so it opens, reads and merges \
+             no merge request",
+        ),
+    };
+    found.ok_or_else(|| GitOutcome::Unavailable {
+        program: forge.program().to_owned(),
+        why: why.to_owned(),
     })
 }
 
 /// The pull request for the branch checked out at `root`; none when it has none.
 ///
 /// # Errors
-/// gh is missing, or says something other than its answer.
-pub async fn status(gh: Option<&Path>, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
-    let gh = self::gh(gh)?;
-    match run(gh, root, &["pr", "view", "--json", FIELDS], None, REMOTE).await {
+/// The forge's command line is missing, or says something other than its answer.
+pub async fn status(programs: &Programs, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    if forge == Forge::GitLab {
+        return gitlab::status(program, root).await;
+    }
+    match run(program, root, &["pr", "view", "--json", FIELDS], None, REMOTE).await {
         Ok(out) => parse(&out).map(Some),
         Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => Ok(None),
         Err(other) => Err(other),
@@ -45,16 +69,66 @@ pub async fn status(gh: Option<&Path>, root: &Path) -> Result<Option<PullStatus>
 }
 
 /// [`status`], as a done op.
-pub async fn status_done(gh: Option<&Path>, root: &Path) -> Result<GitDone, GitOutcome> {
-    Ok(GitDone::PullStatus(status(gh, root).await?.map(Box::new)))
+pub async fn status_done(programs: &Programs, root: &Path) -> Result<GitDone, GitOutcome> {
+    Ok(GitDone::PullStatus(status(programs, root).await?.map(Box::new)))
+}
+
+/// Open a pull request for the branch checked out: with `title` and `body`, or both from the
+/// commits when the title is empty; into `base`, else the repository's default; as a draft.
+///
+/// # Errors
+/// The body is too long, the forge's command line is missing, or it refused, in its words.
+pub async fn create(
+    programs: &Programs,
+    root: &Path,
+    (title, body): (&str, &str),
+    base: Option<&str>,
+    draft: bool,
+) -> Result<GitDone, GitOutcome> {
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    if body.len() > slopty_proto::git::MESSAGE_MAX {
+        return Err(GitOutcome::Refused {
+            why: format!(
+                "a {}'s description is at most {} bytes",
+                forge.noun(),
+                slopty_proto::git::MESSAGE_MAX
+            ),
+        });
+    }
+    let base = base.filter(|b| !b.trim().is_empty());
+    let args = match forge {
+        Forge::GitHub => {
+            let mut args = vec!["pr", "create"];
+            if title.trim().is_empty() {
+                args.push("--fill");
+            } else {
+                args.extend(["--title", title.trim(), "--body", body]);
+            }
+            if let Some(base) = base {
+                args.extend(["--base", base]);
+            }
+            if draft {
+                args.push("--draft");
+            }
+            args
+        }
+        Forge::GitLab => gitlab::create_args((title, body), base, draft),
+    };
+    let out = run(program, root, &args, None, REMOTE).await?;
+    let url = out.split_whitespace().rev().find(|w| w.starts_with("http"));
+    url.map(|u| GitDone::PullRequest { url: u.to_owned() }).ok_or_else(|| GitOutcome::Failed {
+        said: format!("{} opened no {} it named: {}", forge.program(), forge.noun(), out.trim()),
+    })
 }
 
 /// Merge the branch's pull request by `method`, only while it ends at `head` when given.
 ///
 /// # Errors
-/// The method is none gh takes, gh is missing, or gh refused, in its words.
+/// The method is none the forge takes, its command line is missing, or it refused, in its
+/// words.
 pub async fn merge(
-    gh: Option<&Path>,
+    programs: &Programs,
     root: &Path,
     method: &str,
     head: Option<&str>,
@@ -66,17 +140,26 @@ pub async fn merge(
             why: format!("a merge is by {}; {method:?} is none of them", METHODS.join(", ")),
         });
     }
-    let program = self::gh(gh)?;
-    let flag = format!("--{method}");
-    let mut args = vec!["pr", "merge", flag.as_str()];
-    if let Some(head) = head.filter(|h| !h.trim().is_empty()) {
-        args.extend(["--match-head-commit", head]);
-    }
-    if delete_branch {
-        args.push("--delete-branch");
-    }
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    let head = head.filter(|h| !h.trim().is_empty());
+    let args = match forge {
+        Forge::GitHub => {
+            let flag = format!("--{method}");
+            let mut args = vec!["pr".to_owned(), "merge".to_owned(), flag];
+            if let Some(head) = head {
+                args.extend(["--match-head-commit".to_owned(), head.to_owned()]);
+            }
+            if delete_branch {
+                args.push("--delete-branch".to_owned());
+            }
+            args
+        }
+        Forge::GitLab => gitlab::merge_args(&method, head, delete_branch),
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let said = run(program, root, &args, None, REMOTE).await?;
-    let pull = status(gh, root).await.ok().flatten().map(Box::new);
+    let pull = status(programs, root).await.ok().flatten().map(Box::new);
     Ok(GitDone::Merged { said: said.trim().to_owned(), pull })
 }
 
@@ -96,6 +179,7 @@ fn parse(out: &str) -> Result<PullStatus, GitOutcome> {
     let all: Vec<PullCheck> = rollup.into_iter().flatten().filter_map(check).collect();
     let more = u32::try_from(all.len().saturating_sub(CHECKS_MAX)).unwrap_or(u32::MAX);
     Ok(PullStatus {
+        forge: Forge::GitHub,
         number,
         url: text("url"),
         title: text("title"),

@@ -685,6 +685,7 @@ mod golden_thread {
     /// A branch's pull request with a failed check, as the worker sums it up.
     fn pull_seen() -> PullSeen {
         PullSeen {
+            forge: slopty_proto::git::Forge::GitHub,
             number: 42,
             url: "https://github.com/o/r/pull/42".to_owned(),
             title: "Fix the login".to_owned(),

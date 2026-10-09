@@ -116,6 +116,19 @@ pub struct Repo {
     pub branches: Option<Arc<Branches>>,
 }
 
+impl Repo {
+    /// Where its pull requests live: its pull request's forge once read, else what its
+    /// `origin` names, else GitHub.
+    #[must_use]
+    pub fn forge(&self) -> slopty_proto::git::Forge {
+        self.pull
+            .status()
+            .map(|p| p.forge)
+            .or_else(|| self.status.as_ref().and_then(|s| s.forge))
+            .unwrap_or(slopty_proto::git::Forge::GitHub)
+    }
+}
+
 /// An op on its way.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Asked {
@@ -440,6 +453,7 @@ mod tests {
     fn status(files: &[(&str, &str)]) -> GitStatus {
         GitStatus {
             root: "/w/r".to_owned(),
+            forge: None,
             branch: Some("feature".to_owned()),
             head: Some("abc".to_owned()),
             upstream: Some("origin/feature".to_owned()),
@@ -459,6 +473,7 @@ mod tests {
 
     fn pull() -> PullStatus {
         PullStatus {
+            forge: slopty_proto::git::Forge::GitHub,
             number: 7,
             url: "https://github.com/o/r/pull/7".to_owned(),
             title: "Add the sheet".to_owned(),

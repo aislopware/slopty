@@ -29,7 +29,9 @@ use gpui_kit::component::input::{self, Input, InputState, Textarea, TextareaStat
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::threads::Mirror;
 use slopty_proto::RequestId;
-use slopty_proto::git::{CheckBucket, GitOp, GitStatus, PullCheck, PullStanding, PullStatus};
+use slopty_proto::git::{
+    CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullStanding, PullStatus,
+};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, Delivery, IntentId, ThreadId, TurnState};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
@@ -470,9 +472,10 @@ impl CommitSheet {
         let theme = &self.theme;
         let s = theme.surfaces;
         let status = self.state(cx).and_then(|r| r.status.as_deref());
+        let forge = self.state(cx).map_or(Forge::GitHub, Repo::forge);
         let title = match self.page {
-            Page::Commit => "Commit",
-            Page::Open => "Open pull request",
+            Page::Commit => "Commit".to_owned(),
+            Page::Open => format!("Open {}", forge.noun()),
         };
         kit::inset_x(div(), theme)
             .w_full()
@@ -538,11 +541,15 @@ impl CommitSheet {
                     .items_center()
                     .gap(px(theme.spacing.xs))
                     .child(self.icon(Symbol::ArrowTrianglePull, s.text_muted))
-                    .child(self.quiet("commit-no-pull", "No pull request for this branch")),
+                    .child(self.quiet(
+                        "commit-no-pull",
+                        format!("No {} for this branch", repo.forge().noun()),
+                    )),
             ),
-            (Pull::Unknown, None) if reading => {
-                part.child(self.quiet("commit-pull-reading", "Reading the pull request\u{2026}"))
-            }
+            (Pull::Unknown, None) if reading => part.child(self.quiet(
+                "commit-pull-reading",
+                format!("Reading the {}\u{2026}", repo.forge().noun()),
+            )),
             (Pull::Unknown, None) => return None,
         };
         let merge = repo.pull.status().and_then(|pull| self.merge_row(pull, repo, cx));
@@ -571,12 +578,16 @@ impl CommitSheet {
                     .id("commit-pull-number")
                     .debug_selector(|| "commit-pull-number".to_owned())
                     .role(Role::Link)
-                    .aria_label(SharedString::from(format!("Pull request {}", pull.number)))
+                    .aria_label(SharedString::from(format!(
+                        "{} {}",
+                        pull.forge.title(),
+                        pull.number
+                    )))
                     .flex_none()
                     .cursor_pointer()
                     .text_color(hsla(s.text_secondary))
                     .hover(gpui::Styled::underline)
-                    .child(SharedString::from(format!("#{}", pull.number)))
+                    .child(SharedString::from(format!("{}{}", pull.forge.mark(), pull.number)))
                     .on_click(move |_ev, _w, cx| cx.open_url(&url)),
             )
             .child(
@@ -907,6 +918,7 @@ impl CommitSheet {
                 .is_some_and(|st| st.branch.is_some() && (st.ahead > 0 || st.upstream.is_none()));
         let no_pull = repo.is_some_and(|r| matches!(r.pull, Pull::None));
         let no_gh = repo.is_some_and(|r| r.no_gh.is_some());
+        let open_words = format!("Open {}", repo.map_or(Forge::GitHub, Repo::forge).noun());
         let asker = self.asker(cx);
         let asked = self.asked.is_some();
         let second = if push_only {
@@ -943,7 +955,7 @@ impl CommitSheet {
                         el.child(
                             self.button(
                                 "commit-open-pull",
-                                "Open pull request",
+                                open_words,
                                 ButtonKind::Ghost,
                                 no_gh || busy,
                             )
@@ -1047,7 +1059,7 @@ impl CommitSheet {
                     .child(
                         self.button(
                             "commit-open",
-                            "Open pull request",
+                            format!("Open {}", repo.map_or(Forge::GitHub, Repo::forge).noun()),
                             ButtonKind::Primary,
                             busy || repo.is_some_and(|r| r.no_gh.is_some()),
                         )
@@ -1066,7 +1078,13 @@ impl CommitSheet {
             let words = match op {
                 GitOp::Commit { .. } => "Committing\u{2026}",
                 GitOp::Push => "Pushing\u{2026}",
-                GitOp::PullRequest { .. } => "Opening the pull request\u{2026}",
+                GitOp::PullRequest { .. } => {
+                    let forge = self.state(cx).map_or(Forge::GitHub, Repo::forge);
+                    return Some(
+                        self.quiet("commit-busy", format!("Opening the {}\u{2026}", forge.noun()))
+                            .into_any_element(),
+                    );
+                }
                 GitOp::Merge { .. } => "Merging\u{2026}",
                 GitOp::RemoveWorktree => "Removing the worktree\u{2026}",
                 GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. } | GitOp::Branches => {

@@ -41,7 +41,7 @@ fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 /// The worker's git and no gh, so no test reaches the person's own GitHub sign-in.
 fn git_only() -> Programs {
-    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None }
+    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None, glab: None }
 }
 
 async fn done(repo: &Path, op: GitOp) -> GitDone {

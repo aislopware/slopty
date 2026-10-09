@@ -1863,7 +1863,11 @@ impl ReviewView {
                 .id("review-pull")
                 .debug_selector(|| "review-pull".to_owned())
                 .role(Role::Button)
-                .aria_label(SharedString::from(format!("Pull request {}, {words}", pull.number)))
+                .aria_label(SharedString::from(format!(
+                    "{} {}, {words}",
+                    pull.forge.title(),
+                    pull.number
+                )))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -1875,7 +1879,11 @@ impl ReviewView {
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(self.icon(Symbol::ArrowTrianglePull, tone))
-                .child(kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))))
+                .child(kit::tabular(div()).child(SharedString::from(format!(
+                    "{}{}",
+                    pull.forge.mark(),
+                    pull.number
+                ))))
                 .child(div().text_color(hsla(tone)).child(SharedString::from(words)))
                 .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
         });

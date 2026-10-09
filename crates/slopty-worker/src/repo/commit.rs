@@ -20,24 +20,35 @@ const LOCAL: Duration = Duration::from_mins(5);
 /// How long a push or a pull request may take.
 pub(super) const REMOTE: Duration = Duration::from_mins(10);
 
-/// The person's programs an op runs: git, and gh for a pull request.
+/// The person's programs an op runs: git, and the forge's own command line for a pull request
+/// (gh for GitHub, glab for GitLab).
 #[derive(Clone, Debug, Default)]
 pub struct Programs {
     /// git, when the worker has it.
     pub git: Option<PathBuf>,
     /// gh, when the worker has it.
     pub gh: Option<PathBuf>,
+    /// glab, when the worker has it.
+    pub glab: Option<PathBuf>,
 }
 
 impl Programs {
     /// The ones this worker has: git as everything else finds it ([`crate::changes::git`]),
-    /// gh on `PATH` or where Homebrew and the system put it ([`super::checks::find`]).
+    /// gh and glab on `PATH` or where Homebrew and the system put them ([`super::checks::find`]).
     #[must_use]
     pub fn here() -> Self {
+        let path = std::env::var_os("PATH");
         Self {
             git: crate::changes::git().map(Path::to_path_buf),
-            gh: super::checks::find("gh", std::env::var_os("PATH").as_deref()),
+            gh: super::checks::find("gh", path.as_deref()),
+            glab: super::checks::find("glab", path.as_deref()),
         }
+    }
+
+    /// Whether it has a forge's command line, so pull requests can be read at all.
+    #[must_use]
+    pub const fn has_forge(&self) -> bool {
+        self.gh.is_some() || self.glab.is_some()
     }
 }
 
@@ -50,7 +61,6 @@ pub async fn apply(
     op: GitOp,
     terminals: &[PathBuf],
 ) -> GitOutcome {
-    let gh = programs.gh.as_deref();
     let Some(git) = programs.git.as_deref() else {
         return GitOutcome::Unavailable {
             program: "git".to_owned(),
@@ -67,13 +77,13 @@ pub async fn apply(
     let done = match op {
         GitOp::Status => status(git, &root).await.map(|s| GitDone::Status(Box::new(s))),
         GitOp::Commit { paths, message } => commit(git, &root, &paths, &message).await,
-        GitOp::Push => push(git, gh, &root).await,
+        GitOp::Push => push(git, programs, &root).await,
         GitOp::PullRequest { title, body, base, draft } => {
-            pull_request(gh, &root, (&title, &body), base.as_deref(), draft).await
+            super::pull::create(programs, &root, (&title, &body), base.as_deref(), draft).await
         }
-        GitOp::PullStatus => super::pull::status_done(gh, &root).await,
+        GitOp::PullStatus => super::pull::status_done(programs, &root).await,
         GitOp::Merge { method, head, delete_branch } => {
-            super::pull::merge(gh, &root, &method, head.as_deref(), delete_branch).await
+            super::pull::merge(programs, &root, &method, head.as_deref(), delete_branch).await
         }
         GitOp::Changes { against } => super::snapshot::working_tree(git, &root, against)
             .await
@@ -84,7 +94,7 @@ pub async fn apply(
         }
         GitOp::RemoveWorktree => {
             use super::worktrees::{Failed, Removed, free};
-            match free(git, gh, &root, terminals).await {
+            match free(git, programs, &root, terminals).await {
                 Ok(Removed { branch, branch_removed }) => {
                     Ok(GitDone::WorktreeRemoved { branch, branch_removed })
                 }
@@ -100,7 +110,9 @@ pub async fn apply(
 async fn status(git: &Path, root: &Path) -> Result<GitStatus, GitOutcome> {
     let args = ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"];
     let out = run(git, root, &args, None, LOCAL).await?;
-    Ok(parse_status(&root.to_string_lossy(), &out))
+    let mut status = parse_status(&root.to_string_lossy(), &out);
+    status.forge = crate::repo::forge_of(root);
+    Ok(status)
 }
 
 /// `git status --porcelain=v2 --branch -z` read: its branch headers, then one record per
@@ -108,6 +120,7 @@ async fn status(git: &Path, root: &Path) -> Result<GitStatus, GitOutcome> {
 fn parse_status(root: &str, out: &str) -> GitStatus {
     let mut status = GitStatus {
         root: root.to_owned(),
+        forge: None,
         branch: None,
         head: None,
         upstream: None,
@@ -220,7 +233,7 @@ async fn current_branch(git: &Path, root: &Path) -> Option<String> {
 
 /// Push the branch checked out: to its upstream, or setting one on the repository's only
 /// remote, else `origin`.
-async fn push(git: &Path, gh: Option<&Path>, root: &Path) -> Result<GitDone, GitOutcome> {
+async fn push(git: &Path, programs: &Programs, root: &Path) -> Result<GitDone, GitOutcome> {
     let Some(branch) = current_branch(git, root).await else {
         return Err(GitOutcome::Refused {
             why: "HEAD is detached: check out a branch to push".to_owned(),
@@ -241,7 +254,7 @@ async fn push(git: &Path, gh: Option<&Path>, root: &Path) -> Result<GitDone, Git
     if let Some(tracked) = tracked {
         run(git, root, &["push", "--porcelain"], None, REMOTE).await?;
         let remote = tracked.split_once('/').map_or(tracked.as_str(), |(r, _)| r).to_owned();
-        let pull = pushed_pull(gh, root).await;
+        let pull = pushed_pull(programs, root).await;
         return Ok(GitDone::Pushed { remote, branch, upstream_set: false, pull });
     }
     let remotes = run(git, root, &["remote"], None, LOCAL).await?;
@@ -266,47 +279,15 @@ async fn push(git: &Path, gh: Option<&Path>, root: &Path) -> Result<GitDone, Git
     };
     run(git, root, &["push", "--porcelain", "--set-upstream", &remote, &branch], None, REMOTE)
         .await?;
-    let pull = pushed_pull(gh, root).await;
+    let pull = pushed_pull(programs, root).await;
     Ok(GitDone::Pushed { remote, branch, upstream_set: true, pull })
 }
 
-/// The branch's pull request after a push, so its checks read as started: none when gh is
-/// missing, says the branch has none, or fails, since the push itself went.
-async fn pushed_pull(gh: Option<&Path>, root: &Path) -> Option<Box<PullStatus>> {
-    super::pull::status(gh, root).await.ok().flatten().map(Box::new)
-}
-
-/// Open a pull request for the branch checked out with the person's own gh.
-async fn pull_request(
-    gh: Option<&Path>,
-    root: &Path,
-    (title, body): (&str, &str),
-    base: Option<&str>,
-    draft: bool,
-) -> Result<GitDone, GitOutcome> {
-    let gh = super::pull::gh(gh)?;
-    if body.len() > MESSAGE_MAX {
-        return Err(GitOutcome::Refused {
-            why: format!("a pull request's description is at most {MESSAGE_MAX} bytes"),
-        });
-    }
-    let mut args = vec!["pr", "create"];
-    if title.trim().is_empty() {
-        args.push("--fill");
-    } else {
-        args.extend(["--title", title.trim(), "--body", body]);
-    }
-    if let Some(base) = base.filter(|b| !b.trim().is_empty()) {
-        args.extend(["--base", base]);
-    }
-    if draft {
-        args.push("--draft");
-    }
-    let out = run(gh, root, &args, None, REMOTE).await?;
-    let url = out.lines().rev().map(str::trim).find(|l| l.starts_with("http"));
-    url.map(|u| GitDone::PullRequest { url: u.to_owned() }).ok_or_else(|| GitOutcome::Failed {
-        said: format!("gh opened no pull request it named: {}", out.trim()),
-    })
+/// The branch's pull request after a push, so its checks read as started: none when the
+/// forge's command line is missing, says the branch has none, or fails, since the push itself
+/// went.
+async fn pushed_pull(programs: &Programs, root: &Path) -> Option<Box<PullStatus>> {
+    super::pull::status(programs, root).await.ok().flatten().map(Box::new)
 }
 
 /// `program args…` in `root`, with `input` on its stdin, within `within`: its stdout when it
@@ -324,6 +305,8 @@ pub(super) async fn run(
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_PROMPT", "1")
+        .env("NO_COLOR", "1")
         .env("GIT_EDITOR", "true")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())

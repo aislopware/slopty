@@ -2300,3 +2300,33 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (a daemon with no client link and the server's flag set),
     `ladder::tests::the_workers_hear_whether_a_pocketed_phone_can_answer`, and the
     `push_answerable` golden.
+
+- ✅ **GitLab merge requests work wherever a GitHub pull request does** (2026-10-09,
+  `.research/readiness-2026-10-08.md` rank 8; wire change). Every pull request path ran the
+  person's `gh`, so a repository on GitLab had no pull request to read, open, merge, watch or
+  start a worktree from. Only a project task's checks knew `glab`.
+  - *The forge* is chosen by the host of the repository's `origin` (`Forge::of_host`). A host
+    with a `gitlab` label (`gitlab.com`, `gitlab.example.com`) is GitLab. Any other is GitHub,
+    so a GitHub Enterprise host still goes to gh. The config file is read directly; git is not
+    run for it.
+  - *On the worker* (`repo::pull`, `repo::pull::gitlab`): `glab mr view --output json` reads
+    the branch's open merge request, and `glab mr list --merged` finds a merged one when none
+    is open, as gh's view does. The head pipeline's jobs are its checks, read with
+    `glab api projects/:id/pipelines/<id>/jobs`. A failure allowed to fail is neutral, and a
+    manual job never started counts as skipped. When the jobs cannot be read, the pipeline
+    counts as one check. Everything is put in a pull request's words (`OPEN`, `MERGEABLE`,
+    `CLEAN`, `REVIEW_REQUIRED`), so the ladder, the watcher and the sheet read both forges
+    alike. `glab mr create --yes` opens one, and `glab mr merge --yes --auto-merge=false`
+    merges it now, at the head the person saw (`--sha`). A merge request's worktree checks out
+    `refs/merge-requests/<n>/head`. Freeing a worktree asks the forge whether its branch merged
+    at its tip. The watcher runs where either gh or glab is installed.
+  - *On the wire*: `Forge` on `PullStatus`, `PullSeen` and `GitStatus`, so a client says
+    "merge request" and writes `!12` (`PullSeen::named`, `Forge::mark`). It knows this before
+    any merge request exists, since the status names the forge.
+  - Tests: `repo::pull::tests::{a_merge_request_is_read_in_a_pull_request_s_words,
+    a_branch_s_merged_request_is_read_and_none_is_none, a_merge_request_is_opened_and_merged_with_glab}`
+    (a stub `glab` replaying JSON shaped like the API's),
+    `worktrees::tests::a_worktree_of_a_merge_request_checks_out_its_head_and_tracks_it` (a bare
+    remote behind a GitLab URL), `pulls::tests`,
+    `thread::tests::commit::a_gitlab_repository_s_sheet_speaks_of_merge_requests`, and the
+    `worker_git_merge_request_status` golden.

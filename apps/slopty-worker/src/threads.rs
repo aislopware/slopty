@@ -294,13 +294,14 @@ pub struct Observing {
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
 /// threads, start Claude Code threads in its terminals, serve the pi and ACP threads it starts,
 /// snapshot each turn, name the screens each agent drives, and watch each thread's pull
-/// request where gh is installed.
+/// request where gh or glab is installed.
 pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     drop(Screens::new(threads.host.clone()).spawn());
-    if let Some(gh) = slopty_worker::repo::commit::Programs::here().gh {
-        drop(slopty_worker::thread::pulls::spawn(threads.host.clone(), gh));
+    let programs = slopty_worker::repo::commit::Programs::here();
+    if programs.has_forge() {
+        drop(slopty_worker::thread::pulls::spawn(threads.host.clone(), programs));
     }
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));

@@ -1,7 +1,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
-use slopty_proto::git::{GitOp, PullStanding};
+use slopty_proto::git::{Forge, GitOp, PullStanding};
 
 use super::*;
 use crate::repo::commit::{Programs, apply};
@@ -70,6 +70,7 @@ async fn a_pull_request_s_status_is_read_in_the_forge_s_words() {
     let programs = Programs {
         git: crate::changes::git().map(Path::to_path_buf),
         gh: Some(stand_in(dir.path(), "open")),
+        glab: None,
     };
     let work = repo(dir.path());
     let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
@@ -105,10 +106,10 @@ async fn a_branch_with_no_pull_request_reads_as_none() {
     let dir = tempfile::tempdir().expect("temp");
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
-    let none = Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "none")) };
+    let none = Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "none")), glab: None };
     let read = apply(&none, &work, GitOp::PullStatus, &[]).await;
     assert_eq!(read, GitOutcome::Done(GitDone::PullStatus(None)));
-    let without = Programs { git, gh: None };
+    let without = Programs { git, gh: None, glab: None };
     let missing = apply(&without, &work, GitOp::PullStatus, &[]).await;
     assert!(
         matches!(&missing, GitOutcome::Unavailable { program, .. } if program == "gh"),
@@ -124,7 +125,8 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
     let dir = tempfile::tempdir().expect("temp");
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
-    let programs = Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "open")) };
+    let programs =
+        Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "open")), glab: None };
     let merge = |method: &str| GitOp::Merge {
         method: method.to_owned(),
         head: Some("0123abcd".to_owned()),
@@ -150,10 +152,218 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
     );
     assert_eq!(asked(dir.path()).len(), calls.len(), "gh not asked");
 
-    let strict = Programs { git, gh: Some(stand_in(dir.path(), "refuse")) };
+    let strict = Programs { git, gh: Some(stand_in(dir.path(), "refuse")), glab: None };
     let said = apply(&strict, &work, merge("merge"), &[]).await;
     assert!(
         matches!(&said, GitOutcome::Failed { said } if said.contains("base branch policy")),
         "{said:?}"
+    );
+}
+
+/// What the stand-in glab answers `glab mr view --output json` with: the API's merge request,
+/// its fields as GitLab 18 sends them, cut to what is read and a few beside, names made up.
+const MR_VIEW: &str = r#"{"id":91,"iid":12,"project_id":4,"title":"Keep it","description":"Why.",
+"state":"opened","draft":false,"work_in_progress":false,"source_branch":"feature",
+"target_branch":"main","sha":"0123abcd","merge_status":"can_be_merged",
+"detailed_merge_status":"ci_still_running","has_conflicts":false,
+"web_url":"https://gitlab.example.com/o/demo/-/merge_requests/12",
+"head_pipeline":{"id":77,"iid":5,"project_id":4,"sha":"0123abcd","ref":"feature",
+"status":"failed","source":"merge_request_event",
+"web_url":"https://gitlab.example.com/o/demo/-/pipelines/77",
+"detailed_status":{"group":"failed"}}}"#;
+
+/// The jobs of pipeline 77, as `GET projects/:id/pipelines/77/jobs` lists them: one passed,
+/// one failed, one allowed to fail, one running and a manual one never started.
+const MR_JOBS: &str = r#"[
+{"id":1,"name":"test","stage":"test","status":"success","allow_failure":false,
+ "web_url":"https://gitlab.example.com/o/demo/-/jobs/1"},
+{"id":2,"name":"lint","stage":"test","status":"failed","allow_failure":false,
+ "web_url":"https://gitlab.example.com/o/demo/-/jobs/2"},
+{"id":3,"name":"audit","stage":"test","status":"failed","allow_failure":true,
+ "web_url":"https://gitlab.example.com/o/demo/-/jobs/3"},
+{"id":4,"name":"build","stage":"build","status":"running","allow_failure":false,
+ "web_url":"https://gitlab.example.com/o/demo/-/jobs/4"},
+{"id":5,"name":"deploy","stage":"deploy","status":"manual","allow_failure":true,
+ "web_url":"https://gitlab.example.com/o/demo/-/jobs/5"}]"#;
+
+/// Merge request !5, merged, with no pipeline.
+const MR_MERGED: &str = r#"{"id":80,"iid":5,"project_id":4,"title":"Kept","state":"merged",
+"draft":false,"source_branch":"feature","target_branch":"main","sha":"89abcdef",
+"merge_status":"can_be_merged","detailed_merge_status":"not_open","has_conflicts":false,
+"web_url":"https://gitlab.example.com/o/demo/-/merge_requests/5","head_pipeline":null}"#;
+
+/// A stand-in for glab in `dir` that records each call's arguments and answers as `mode`
+/// says: `open` with [`MR_VIEW`] and [`MR_JOBS`]; `merged` with no open merge request but the
+/// merged [`MR_MERGED`]; `none` with neither. No real glab runs, so no one's GitLab sign-in is
+/// reached.
+fn stand_in_glab(dir: &Path, mode: &str) -> PathBuf {
+    let glab = dir.join("glab");
+    std::fs::write(dir.join("mr.json"), MR_VIEW).expect("written");
+    std::fs::write(dir.join("jobs.json"), MR_JOBS).expect("written");
+    std::fs::write(dir.join("merged.json"), MR_MERGED).expect("written");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
+         case \"$*\" in\n\
+         'mr view --output json') if [ {mode} = open ]; then cat \"{dir}/mr.json\"; else \
+           echo 'no open merge request available for \"feature\"' >&2; exit 1; fi ;;\n\
+         'mr list --merged'*) if [ {mode} = merged ]; then echo '[{{\"iid\":5}}]'; else echo '[]'; fi ;;\n\
+         'mr view 5 --output json') cat \"{dir}/merged.json\" ;;\n\
+         'api projects/:id/pipelines/77/jobs?per_page=100') cat \"{dir}/jobs.json\" ;;\n\
+         'mr create'*) echo 'Creating merge request for feature into main in o/demo'; \
+           echo '!12 Keep it (feature)'; echo ' https://gitlab.example.com/o/demo/-/merge_requests/12' ;;\n\
+         'mr merge'*) echo '✓ Merged!' ;;\n\
+         *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+         esac\n",
+        dir = dir.display()
+    );
+    std::fs::write(&glab, script).expect("written");
+    std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    glab
+}
+
+/// A repository on branch `feature` whose `origin` is on a GitLab host.
+fn gitlab_repo(dir: &Path) -> PathBuf {
+    let work = repo(dir);
+    let git = crate::changes::git().expect("git");
+    let url = "https://gitlab.example.com/o/demo.git";
+    let ran = std::process::Command::new(git)
+        .arg("-C")
+        .arg(&work)
+        .args(["remote", "add", "origin", url])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(ran.status.success());
+    work
+}
+
+fn with_glab(glab: PathBuf) -> Programs {
+    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None, glab: Some(glab) }
+}
+
+/// A repository whose `origin` is on a GitLab host has merge requests, read with glab in a pull
+/// request's words: its pipeline's jobs are its checks (a failure allowed to fail is neutral, a
+/// manual job skipped), and it stands on its failed job. gh is never asked.
+#[tokio::test]
+async fn a_merge_request_is_read_in_a_pull_request_s_words() {
+    let dir = tempfile::tempdir().expect("temp");
+    let work = gitlab_repo(dir.path());
+    let programs = Programs {
+        gh: Some(stand_in(dir.path(), "open")),
+        ..with_glab(stand_in_glab(dir.path(), "open"))
+    };
+    let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
+        apply(&programs, &work.to_string_lossy(), GitOp::PullStatus, &[]).await
+    else {
+        panic!("no merge request read")
+    };
+    assert_eq!(pull.forge, Forge::GitLab);
+    assert_eq!(
+        (pull.number, pull.state.as_str(), pull.head.as_str(), pull.base.as_str()),
+        (12, "OPEN", "feature", "main")
+    );
+    assert_eq!(pull.url, "https://gitlab.example.com/o/demo/-/merge_requests/12");
+    assert_eq!((pull.mergeable.as_str(), pull.merge_state.as_str()), ("MERGEABLE", "BLOCKED"));
+    let checks: Vec<(&str, Option<&str>, &str)> = pull
+        .checks
+        .iter()
+        .map(|c| (c.name.as_str(), c.workflow.as_deref(), c.state.as_str()))
+        .collect();
+    assert_eq!(
+        checks,
+        [
+            ("test", Some("test"), "SUCCESS"),
+            ("lint", Some("test"), "FAILURE"),
+            ("audit", Some("test"), "NEUTRAL"),
+            ("build", Some("build"), "IN_PROGRESS"),
+            ("deploy", Some("deploy"), "SKIPPED"),
+        ]
+    );
+    assert_eq!(pull.standing(), PullStanding::Failing);
+    let seen = crate::thread::pulls::seen(&pull);
+    assert_eq!(seen.line(), "!12: lint failed");
+    assert_eq!(
+        asked(dir.path()),
+        ["mr view --output json", "api projects/:id/pipelines/77/jobs?per_page=100"],
+        "glab alone"
+    );
+}
+
+/// A branch with no open merge request reads its merged one, as gh's view finds a merged pull
+/// request; with neither, none. A worker without glab says so.
+#[tokio::test]
+async fn a_branch_s_merged_request_is_read_and_none_is_none() {
+    let dir = tempfile::tempdir().expect("temp");
+    let work = gitlab_repo(dir.path()).to_string_lossy().into_owned();
+    let merged = with_glab(stand_in_glab(dir.path(), "merged"));
+    let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
+        apply(&merged, &work, GitOp::PullStatus, &[]).await
+    else {
+        panic!("no merged request read")
+    };
+    assert_eq!((pull.number, pull.state.as_str(), pull.checks.len()), (5, "MERGED", 0));
+    assert_eq!(pull.standing(), PullStanding::Merged);
+    let calls = asked(dir.path());
+    assert_eq!(
+        calls.get(1).map(String::as_str),
+        Some("mr list --merged --source-branch feature --per-page 1 --output json")
+    );
+
+    let none = with_glab(stand_in_glab(dir.path(), "none"));
+    assert_eq!(
+        apply(&none, &work, GitOp::PullStatus, &[]).await,
+        GitOutcome::Done(GitDone::PullStatus(None))
+    );
+    let without = Programs { glab: None, gh: Some(stand_in(dir.path(), "open")), ..none };
+    let missing = apply(&without, &work, GitOp::PullStatus, &[]).await;
+    assert!(
+        matches!(&missing, GitOutcome::Unavailable { program, .. } if program == "glab"),
+        "{missing:?}"
+    );
+}
+
+/// A merge request is opened and merged with glab as a pull request is with gh: its title,
+/// description, target and draft as asked and never a prompt; its merge now (never left to
+/// merge itself later), by the method named, at the head the person looked at, removing the
+/// branch when asked.
+#[tokio::test]
+async fn a_merge_request_is_opened_and_merged_with_glab() {
+    let dir = tempfile::tempdir().expect("temp");
+    let work = gitlab_repo(dir.path()).to_string_lossy().into_owned();
+    let programs = with_glab(stand_in_glab(dir.path(), "open"));
+    let open = GitOp::PullRequest {
+        title: "Keep it".to_owned(),
+        body: "Why.".to_owned(),
+        base: Some("main".to_owned()),
+        draft: true,
+    };
+    assert_eq!(
+        apply(&programs, &work, open, &[]).await,
+        GitOutcome::Done(GitDone::PullRequest {
+            url: "https://gitlab.example.com/o/demo/-/merge_requests/12".to_owned()
+        })
+    );
+    let merge = GitOp::Merge {
+        method: "squash".to_owned(),
+        head: Some("0123abcd".to_owned()),
+        delete_branch: true,
+    };
+    let GitOutcome::Done(GitDone::Merged { pull, .. }) = apply(&programs, &work, merge, &[]).await
+    else {
+        panic!("not merged")
+    };
+    assert_eq!(pull.map(|p| p.number), Some(12));
+    let calls = asked(dir.path());
+    assert_eq!(
+        calls.get(..2),
+        Some(
+            [
+                "mr create --yes --title Keep it --description Why. --target-branch main --draft"
+                    .to_owned(),
+                "mr merge --yes --auto-merge=false --squash --sha 0123abcd --remove-source-branch"
+                    .to_owned(),
+            ]
+            .as_slice()
+        )
     );
 }

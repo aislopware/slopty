@@ -106,6 +106,15 @@ pub fn origin_of(root: &Path) -> Option<String> {
     normalize_origin(&origin_url(root)?)
 }
 
+/// Where the pull requests of the repository rooted at `root` live, as its `origin`'s host
+/// says ([`Forge::of_host`]); none for a repository with no remote another machine can see.
+#[must_use]
+pub fn forge_of(root: &Path) -> Option<slopty_proto::git::Forge> {
+    let origin = origin_of(root)?;
+    let host = origin.split('/').next()?;
+    Some(slopty_proto::git::Forge::of_host(host))
+}
+
 /// The fetch URL of the repository rooted at `root` as its config spells it: its `origin`
 /// remote's, else the first remote's.
 fn origin_url(root: &Path) -> Option<String> {

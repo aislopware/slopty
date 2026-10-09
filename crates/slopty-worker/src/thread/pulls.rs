@@ -5,9 +5,10 @@
 //! request is watched").
 //!
 //! The pull request is the one of the branch the thread's folder has checked out, as the
-//! person's own gh reads it ([`crate::repo::pull::status`]). Threads that share a checkout share
-//! one read. A checkout on its repository's default branch, a thread that ended days ago and
-//! a worker without gh are never asked about. What the forge said is summed up in a
+//! person's own forge command line reads it ([`crate::repo::pull::status`]): gh for GitHub,
+//! glab for a GitLab merge request. Threads that share a checkout share one read. A checkout on
+//! its repository's default branch, a thread that ended days ago and a worker without the
+//! forge's command line are never asked about. What the forge said is summed up in a
 //! [`PullSeen`] and put on the thread with [`Action::PullSeen`] when it changed, so its row
 //! carries it to every client and to the server's attention ladder.
 
@@ -22,6 +23,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::Host;
+use crate::repo::commit::Programs;
 
 /// How often the watcher looks for reads falling due.
 const TICK: Duration = Duration::from_secs(15);
@@ -30,7 +32,7 @@ const TICK: Duration = Duration::from_secs(15);
 const LIVELY: Duration = Duration::from_secs(60);
 /// How soon once it has settled and its threads rest.
 const SETTLED: Duration = Duration::from_mins(5);
-/// How soon after the branch had none, or gh could not answer.
+/// How soon after the branch had none, or the forge could not answer.
 const QUIET: Duration = Duration::from_mins(10);
 /// How long after a thread ended its pull request is still watched.
 const ENDED_FOR: Duration = Duration::from_hours(72);
@@ -38,14 +40,15 @@ const ENDED_FOR: Duration = Duration::from_hours(72);
 /// A checkout and the branch it has checked out: one read serves every thread in it.
 type Key = (PathBuf, String);
 
-/// Watch the pull requests of `host`'s threads with `gh` until the host is gone.
+/// Watch the pull requests of `host`'s threads with the forges' `programs` until the host is
+/// gone.
 #[must_use]
-pub fn spawn(host: Host, gh: PathBuf) -> JoinHandle<()> {
+pub fn spawn(host: Host, programs: Programs) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut due: HashMap<Key, Instant> = HashMap::new();
         loop {
             tokio::time::sleep(TICK).await;
-            round(&host, &gh, &mut due).await;
+            round(&host, &programs, &mut due).await;
         }
     })
 }
@@ -60,7 +63,7 @@ struct Watched {
 
 /// One round: read every pull request that falls due, put what changed on its threads, and
 /// say when each is due again.
-async fn round(host: &Host, gh: &Path, due: &mut HashMap<Key, Instant>) {
+async fn round(host: &Host, programs: &Programs, due: &mut HashMap<Key, Instant>) {
     let now_ms = slopty_core::WallMs::now().as_millis();
     let watched = host.visit(|state| {
         let ended = match state.status.liveness {
@@ -87,7 +90,7 @@ async fn round(host: &Host, gh: &Path, due: &mut HashMap<Key, Instant>) {
         if due.get(key).is_some_and(|when| *when > now) {
             continue;
         }
-        let read = crate::repo::pull::status(Some(gh), &key.0).await;
+        let read = crate::repo::pull::status(programs, &key.0).await;
         let seen = match read {
             Ok(status) => status.map(|s| seen(&s)),
             Err(failed) => {
@@ -158,6 +161,7 @@ pub fn seen(status: &PullStatus) -> PullSeen {
     };
     let n = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     PullSeen {
+        forge: status.forge,
         number: status.number,
         url: status.url.clone(),
         title: status.title.clone(),
@@ -171,7 +175,7 @@ pub fn seen(status: &PullStatus) -> PullSeen {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::git::PullCheck;
+    use slopty_proto::git::{Forge, PullCheck};
 
     use super::*;
 
@@ -183,6 +187,7 @@ mod tests {
             link: None,
         };
         let mut status = PullStatus {
+            forge: Forge::GitHub,
             number: 42,
             url: "https://github.com/o/r/pull/42".to_owned(),
             title: "Fix the login".to_owned(),
@@ -226,6 +231,8 @@ mod tests {
         assert_eq!((failed.failed, failed.failed_first.as_deref()), (2, Some("test")));
         assert_eq!(failed.line(), "#42: test and 1 more failed");
         assert_eq!(seen(&status(|_| {})).line(), "#42 is ready to merge");
+        let merge_request = seen(&status(|s| s.forge = Forge::GitLab));
+        assert_eq!(merge_request.line(), "!42 is ready to merge", "a merge request's mark");
     }
 
     /// A checkout on a branch other than its repository's default is watched; one on the

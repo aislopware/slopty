@@ -350,7 +350,7 @@ mod review {
         std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
         std::fs::write(repo.join("new.txt"), "not added\n").unwrap();
         let index = std::fs::read(repo.join(".git/index")).unwrap();
-        let programs = Programs { git: Some(git()), gh: None };
+        let programs = Programs { git: Some(git()), gh: None, glab: None };
         let folder = repo.to_string_lossy().into_owned();
         let changes = async |against| match apply(
             &programs,

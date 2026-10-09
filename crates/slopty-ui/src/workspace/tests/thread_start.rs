@@ -1847,6 +1847,7 @@ fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppC
     settle(cx);
     assert_eq!(asks(&mut studio), [ReviewScope::WorkingTree(Against::Base)], "a guessed base");
     let pull = PullSeen {
+        forge: slopty_proto::git::Forge::GitHub,
         number: 123,
         url: "https://github.com/o/atlas/pull/123".to_owned(),
         title: "Fix the build".to_owned(),

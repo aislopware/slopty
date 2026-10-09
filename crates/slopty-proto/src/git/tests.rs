@@ -7,6 +7,7 @@ fn check(state: &str) -> PullCheck {
 
 fn open(checks: &[&str]) -> PullStatus {
     PullStatus {
+        forge: Forge::GitHub,
         number: 7,
         url: "https://github.com/o/r/pull/7".to_owned(),
         title: "t".to_owned(),

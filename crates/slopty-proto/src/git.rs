@@ -1,8 +1,9 @@
 //! A folder's git repository, as the person works it from a thread or a review.
 //!
 //! Its changed files, a commit of the files they chose with their own message, a push of the
-//! branch, and a pull request through their own `gh` (`docs/decisions/projects.md`, "The
-//! person commits, pushes and opens a pull request from any thread").
+//! branch, and a pull request through their own `gh`, or a GitLab merge request through their
+//! own `glab` ([`Forge`]; `docs/decisions/projects.md`, "The person commits, pushes and opens a
+//! pull request from any thread").
 //!
 //! Asked of the worker straight (`ClientMsg::Git`, answered with `WorkerMsg::GitDone`), by
 //! the app alone: an agent commits with its own git. The worker runs the person's own
@@ -170,11 +171,76 @@ pub struct Branch {
     pub committed: i64,
 }
 
-/// A pull request as its forge reports it through gh. The forge's words are kept as it spells
-/// them, so a state it adds later is carried, not refused: only [`PullStatus::standing`] reads
-/// them, to rank.
+/// Where a repository's pull requests live, as its `origin`'s host says: a GitLab host's are
+/// merge requests, read and made with `glab`; any other's are GitHub's, with `gh`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Forge {
+    /// GitHub, or a GitHub Enterprise host: `gh`, pull requests, `#42`.
+    GitHub,
+    /// GitLab, on gitlab.com or the person's own host: `glab`, merge requests, `!42`.
+    GitLab,
+}
+
+impl Forge {
+    /// The forge of a remote on `host`: GitLab when the host names it (`gitlab.com`,
+    /// `gitlab.example.com`), else GitHub.
+    #[must_use]
+    pub fn of_host(host: &str) -> Self {
+        let host = host.to_ascii_lowercase();
+        if host.split(['.', '-']).any(|part| part == "gitlab") {
+            Self::GitLab
+        } else {
+            Self::GitHub
+        }
+    }
+
+    /// What its requests are called, in a sentence: "pull request", "merge request".
+    #[must_use]
+    pub const fn noun(self) -> &'static str {
+        match self {
+            Self::GitHub => "pull request",
+            Self::GitLab => "merge request",
+        }
+    }
+
+    /// [`Self::noun`] at the head of a sentence or a label.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::GitHub => "Pull request",
+            Self::GitLab => "Merge request",
+        }
+    }
+
+    /// What goes before a request's number: `#42`, `!42`.
+    #[must_use]
+    pub const fn mark(self) -> char {
+        match self {
+            Self::GitHub => '#',
+            Self::GitLab => '!',
+        }
+    }
+
+    /// Its command line, which reads and makes its requests as the person signed it in.
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        match self {
+            Self::GitHub => "gh",
+            Self::GitLab => "glab",
+        }
+    }
+}
+
+/// A pull request (a GitLab merge request) as its forge reports it through its own command
+/// line.
+///
+/// The forge's words are kept as GitHub spells them, so a state it adds later is carried,
+/// not refused: only [`PullStatus::standing`] reads them, to rank. A merge request's are put in
+/// those words where the worker reads it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PullStatus {
+    /// Where it lives.
+    pub forge: Forge,
     /// Its number.
     pub number: u32,
     /// Its page.
@@ -307,6 +373,8 @@ impl PullStatus {
 pub struct GitStatus {
     /// The repository's root on the worker.
     pub root: String,
+    /// Where its pull requests live, as its `origin` says; none without one.
+    pub forge: Option<Forge>,
     /// The branch checked out; none on a detached `HEAD`.
     pub branch: Option<String>,
     /// The commit `HEAD` is at, in hex; none before the first commit.
