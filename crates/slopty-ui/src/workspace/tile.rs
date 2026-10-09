@@ -1982,8 +1982,8 @@ impl WorkspaceView {
     /// every agent alike: its glyph by where it stands in that state's ink (open green, merged
     /// violet, closed red, a draft grey, as GitHub's), then its number in the quiet tier. A
     /// click opens its page; the pointer and a screen reader have its line ("#42: lint
-    /// failed") and its title. It stays while the title narrows; the worktree's name goes
-    /// first.
+    /// failed", a merge request's "!42: lint failed") and its title. It stays while the title
+    /// narrows; the worktree's name goes first.
     fn pull_chip(&self, item: &Item) -> Option<(&'static str, kit::Priority, gpui::AnyElement)> {
         let id = item.id;
         let pull = self.tile_pull(item)?;
@@ -2018,7 +2018,7 @@ impl WorkspaceView {
                 crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
                     .size(px(IconSize::Inline.slot(theme))),
             )
-            .child(ChromeText::new(format!("#{}", pull.number), px(theme.typography.small())));
+            .child(ChromeText::new(pull.named(), px(theme.typography.small())));
         let chip = tab_stop(chip, s.focus).on_click(move |_ev, _window, cx| cx.open_url(&url));
         Some(("pr", PR_PRIORITY, chip.into_any_element()))
     }

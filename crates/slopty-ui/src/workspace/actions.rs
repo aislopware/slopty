@@ -261,6 +261,8 @@ pub struct ReviewPullNumber {
     pub repo: String,
     /// The pull request's number.
     pub number: u32,
+    /// The forge the number was typed for, where the text said which (`!12`, a page).
+    pub forge: Option<slopty_proto::git::Forge>,
 }
 
 /// "Remove `<machine>`…": its confirm, then the worker and everything else of Slopty's off it.

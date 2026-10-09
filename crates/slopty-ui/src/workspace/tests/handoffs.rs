@@ -457,6 +457,17 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
     pulled(&view, cx, studio.key, Some((&state, Some(pull(7, PullStands::ChecksFailed)))));
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a new one");
 
+    // A GitLab merge request is written as its forge writes it, on the chip and the row alike.
+    let merge = PullSeen {
+        forge: slopty_proto::git::Forge::GitLab,
+        url: "https://gitlab.com/o/r/-/merge_requests/12".to_owned(),
+        ..pull(12, PullStands::Ready)
+    };
+    pulled(&view, cx, studio.key, Some((&state, Some(merge))));
+    let said: Vec<String> = tree(cx).into_iter().filter_map(|n| n.label).collect();
+    let line = "!12 is ready to merge";
+    assert_eq!(said.iter().filter(|l| *l == line).count(), 2, "chip and row: {said:?}");
+    assert!(!said.iter().any(|l| l.contains("#12")), "never a pull request's mark");
     pulled(&view, cx, studio.key, None);
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "gone with the agent");
 }

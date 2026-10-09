@@ -8,11 +8,13 @@
 //! The repositories are those the focused tile is in, then every one a shell or a thread
 //! stands in, on each machine that can start an agent, each clone once: a thread in one of
 //! the clone's worktrees names the clone. With one, the number step comes at once. The number
-//! is typed: `123`, `#123`, or the pull request's page.
+//! is typed: `123`, `#123`, or the pull request's page; a GitLab merge request's `!123` or its
+//! page, which its words then name as one ("Review merge request !123").
 
 use gpui::{Context, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
+use slopty_proto::git::Forge;
 use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
@@ -46,18 +48,42 @@ pub(super) fn worktree_of(number: u32, item: ItemId) -> String {
 }
 
 /// The pull request `text` names: its number, `#` and its number, or its page's address,
-/// which ends in `/pull/<number>` (and maybe a tab of it, `/files`). `None` for anything else
-/// and for 0.
+/// which ends in `/pull/<number>` (and maybe a tab of it, `/files`); a GitLab merge request's
+/// `!` and its number, or its page's `/merge_requests/<number>`. `None` for anything else and
+/// for 0.
+#[cfg(test)]
 pub(super) fn pull_number(text: &str) -> Option<u32> {
+    typed_pull(text).map(|(number, _)| number)
+}
+
+/// [`pull_number`], with the forge the text says it is on: GitLab for `!12` or a merge
+/// request's page, the page's host's for a pull request's page, and none for a bare number,
+/// which either forge's repository may hold.
+pub(super) fn typed_pull(text: &str) -> Option<(u32, Option<Forge>)> {
     let typed = text.trim();
-    let digits = typed.strip_prefix('#').unwrap_or(typed);
-    let number = if digits.bytes().all(|b| b.is_ascii_digit()) {
-        digits
-    } else {
-        let (_, after) = typed.rsplit_once("/pull/")?;
-        after.split(['/', '#', '?']).next()?
+    let (digits, forge) = match (typed.strip_prefix('#'), typed.strip_prefix('!')) {
+        (Some(digits), _) => (digits, None),
+        (_, Some(digits)) => (digits, Some(Forge::GitLab)),
+        _ => (typed, None),
     };
-    number.parse::<u32>().ok().filter(|n| *n > 0)
+    let (number, forge) = if digits.bytes().all(|b| b.is_ascii_digit()) {
+        (digits, forge)
+    } else if let Some((_, after)) = typed.rsplit_once("/merge_requests/") {
+        (after.split(['/', '#', '?']).next()?, Some(Forge::GitLab))
+    } else {
+        let (before, after) = typed.rsplit_once("/pull/")?;
+        let host = before.split("://").nth(1).and_then(|rest| rest.split('/').next());
+        (after.split(['/', '#', '?']).next()?, host.map(Forge::of_host))
+    };
+    let number = number.parse::<u32>().ok().filter(|n| *n > 0)?;
+    Some((number, forge))
+}
+
+/// What the start's composer asks of a request typed as `number` on `forge`: its forge's noun
+/// and mark where the text said which, a pull request's where it did not.
+pub(super) fn review_words(number: u32, forge: Option<Forge>) -> String {
+    let forge = forge.unwrap_or(Forge::GitHub);
+    format!("Review {} {}{number}", forge.noun(), forge.mark())
 }
 
 impl WorkspaceView {
@@ -111,7 +137,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ReviewPullNumber { worker, repo, number } = pick.clone();
+        let ReviewPullNumber { worker, repo, number, forge } = pick.clone();
         if !self.workers.get(&worker).is_some_and(super::Worker::is_linked) {
             let text = format!("{} is out of reach", self.worker_name(worker));
             self.show_notice(text, cx);
@@ -123,7 +149,7 @@ impl WorkspaceView {
         };
         let start = StartThread { worker, agent, cwd: repo, worktree: true };
         let item = self.begin_start(start, window, cx);
-        let words = format!("Review pull request #{number}");
+        let words = review_words(number, forge);
         self.start_on_pull(item, number, &words, window, cx);
     }
 
@@ -155,10 +181,15 @@ impl WorkspaceView {
                 p.set_empty(TYPE_NUMBER, cx);
                 p.set_typed(
                     move |text| {
-                        let Some(number) = pull_number(text) else { return Vec::new() };
-                        let shown = format!("Review #{number} in {name}");
-                        let action =
-                            Box::new(ReviewPullNumber { worker, repo: repo.clone(), number });
+                        let Some((number, forge)) = typed_pull(text) else { return Vec::new() };
+                        let mark = forge.unwrap_or(Forge::GitHub).mark();
+                        let shown = format!("Review {mark}{number} in {name}");
+                        let action = Box::new(ReviewPullNumber {
+                            worker,
+                            repo: repo.clone(),
+                            number,
+                            forge,
+                        });
                         vec![PaletteItem::new(&shown, action, &[])]
                     },
                     cx,
@@ -231,5 +262,28 @@ impl WorkspaceView {
             crate::palette::CommandPalette::pick_step(lines, placeholder, theme, window, cx)
         });
         self.show_palette(palette, window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::git::Forge;
+
+    use super::{review_words, typed_pull};
+
+    /// A GitLab merge request is typed as `!12` or its page and named as one; a pull request's
+    /// page says its host's forge; a bare number names none and reads as a pull request.
+    #[test]
+    fn a_merge_request_is_typed_and_named_as_gitlab_writes_it() {
+        assert_eq!(typed_pull("!12"), Some((12, Some(Forge::GitLab))));
+        let page = "https://gitlab.example.com/o/atlas/-/merge_requests/12/diffs";
+        assert_eq!(typed_pull(page), Some((12, Some(Forge::GitLab))));
+        let github = "https://github.com/o/atlas/pull/9#discussion";
+        assert_eq!(typed_pull(github), Some((9, Some(Forge::GitHub))));
+        assert_eq!(typed_pull(" #123 "), Some((123, None)));
+        assert_eq!(typed_pull("!0"), None);
+        assert_eq!(typed_pull("!x"), None);
+        assert_eq!(review_words(12, Some(Forge::GitLab)), "Review merge request !12");
+        assert_eq!(review_words(12, None), "Review pull request #12");
     }
 }
