@@ -196,8 +196,8 @@ mod pi {
         fn intent(&self, pi: &Pi, thread: ThreadId, intent: &Intent) -> (IntentId, Outcome) {
             let id = IntentId::new();
             let decided = self.host.intent(thread, id, |state| {
-                if !state.meta.can(intent.needs()) {
-                    return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());
+                if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+                    return (intent.unsupported(), Vec::new());
                 }
                 (pi.decide(state, id, intent, self.by()), Vec::new())
             });

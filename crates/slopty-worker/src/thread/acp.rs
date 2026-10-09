@@ -309,7 +309,7 @@ impl Acp {
                 }
                 ThreadAsk::SetEffort { effort: effort.clone() }
             }
-            other => return Outcome::Unsupported { cap: Cap::named(other.needs()) },
+            other => return other.unsupported(),
         };
         if !live && !matches!(asked, ThreadAsk::Send { .. }) {
             return refused("The agent is not running");

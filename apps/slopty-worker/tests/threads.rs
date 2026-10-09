@@ -1269,9 +1269,11 @@ mod threads {
 
     /// A start naming a worktree opens its agent in it: the worker makes it from the clone the
     /// start's folder is in, where Claude Code would, and the agent starts there. A start in a
-    /// folder that is in no repository is refused in words, and nothing opens.
+    /// folder that is in no repository is refused in words, and nothing opens. Closed for good
+    /// (a run the person did not keep), the thread goes and its worktree with it, the work in
+    /// it not committed and all.
     #[tokio::test]
-    async fn a_start_in_a_worktree_opens_its_agent_there() {
+    async fn a_start_in_a_worktree_opens_its_agent_there_and_a_close_takes_it_away() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let (daemons, record) = with_claude(&root).await;
@@ -1325,11 +1327,26 @@ mod threads {
         );
 
         let outcome = answer(&mut a, start(&clone)).await;
-        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
         let tree = clone.join(".claude/worktrees/claude-c0ffee");
         assert!(tree.join(".git").is_file(), "a worktree of the clone");
         let seen = recorded(&record).await;
         assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
+
+        std::fs::write(tree.join("draft.txt"), "half done").unwrap();
+        let id = IntentId::new();
+        a.send(ThreadRequest::Intent { id, thread, intent: Intent::Discard }).await;
+        let closed = a
+            .heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await;
+        assert_eq!(closed, Outcome::Done);
+        assert!(!tree.exists(), "its worktree went with it");
+        assert!(clone.join(".git").is_dir(), "the clone stays");
     }
 
     /// The palette's start: no first message and a folder under the worker's home spelled

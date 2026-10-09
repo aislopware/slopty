@@ -539,7 +539,7 @@ impl Following {
                 });
             }
             ThreadRequest::Intent { id, thread, intent: Intent::Discard } => {
-                tracing::info!(client = %at.client, %id, %thread, "discard an aside");
+                tracing::info!(client = %at.client, %id, %thread, "close a thread for good");
                 let out = at.out.clone();
                 at.tasks.spawn(async move {
                     let outcome = discard(&threads, thread, id).await;
@@ -692,9 +692,11 @@ async fn aside(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
     outcome
 }
 
-/// Close aside `thread` for intent `id`, once: its agent ends as a settled task's does, its
-/// session kept where the agent keeps it, and the worker forgets the thread. A thread that is
-/// no aside is refused.
+/// Close `thread` for good for intent `id`, once: an aside put away, or a run of a message the
+/// person did not keep. Its agent ends as a settled task's does, its session kept where the
+/// agent keeps it, and the worker forgets the thread. Then the agent's worktree it worked in
+/// goes ([`worktrees::discard`]) unless another thread or a live terminal works in it: an
+/// aside shares its thread's folder, so it never takes it.
 async fn discard(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
     // Answered once, though the thread is gone after: kept with the worker's starts.
     if let Some(first) = threads.host.started(id) {
@@ -703,19 +705,53 @@ async fn discard(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
     let Some((state, _)) = threads.host.state(thread) else {
         return refused("no such thread".to_owned());
     };
-    let outcome = if state.meta.aside_of().is_none() {
-        refused("Only an aside is closed for good".to_owned())
-    } else {
-        if let Err(e) = threads.end(&state).await {
-            tracing::warn!(%thread, "an aside's agent did not end: {e}");
+    if let Err(e) = threads.end(&state).await {
+        tracing::warn!(%thread, "a closed thread's agent did not end: {e}");
+    }
+    threads.snapshots.forget(&state).await;
+    if let Err(e) = threads.host.remove(thread) {
+        tracing::warn!(%thread, "a closed thread's log stayed: {e}");
+    }
+    free_worktree(threads, &state).await;
+    threads.host.record_start(id, Outcome::Done)
+}
+
+/// Take away the agent's worktree closed thread `state` worked in, when it worked in one and
+/// nothing else does: no other thread held, and no live terminal. A folder that is no agent's
+/// worktree is left as it is.
+async fn free_worktree(threads: &Threads, state: &ThreadState) {
+    let Some(git) = slopty_worker::changes::git() else { return };
+    if state.meta.cwd.is_empty() {
+        return;
+    }
+    let tree = slopty_worker::file::expand_home(Path::new(&state.meta.cwd));
+    let others = threads.host.visit(|other| {
+        let cwd = &other.meta.cwd;
+        (!cwd.is_empty()).then(|| slopty_worker::file::expand_home(Path::new(cwd)))
+    });
+    let terminals = threads
+        .worker
+        .summaries()
+        .await
+        .into_iter()
+        .filter(|s| matches!(s.state, slopty_proto::terminal::SessionState::Running))
+        .filter(|s| Some(s.id) != state.meta.terminal)
+        .filter_map(|s| s.cwd)
+        .map(|cwd| slopty_worker::file::expand_home(Path::new(&cwd)));
+    let cwds: Vec<PathBuf> = others.into_iter().chain(terminals).collect();
+    match worktrees::discard(git, &tree, &cwds).await {
+        Ok(removed) => tracing::info!(
+            thread = %state.meta.id,
+            tree = %tree.display(),
+            branch = ?removed.branch,
+            branch_removed = removed.branch_removed,
+            "a closed thread's worktree went"
+        ),
+        Err(worktrees::Failed::NotOne(_)) => {}
+        Err(kept) => {
+            tracing::info!(thread = %state.meta.id, "a closed thread's worktree stayed: {kept}");
         }
-        threads.snapshots.forget(&state).await;
-        if let Err(e) = threads.host.remove(thread) {
-            tracing::warn!(%thread, "an aside's log stayed: {e}");
-        }
-        Outcome::Done
-    };
-    threads.host.record_start(id, outcome)
+    }
 }
 
 /// What Codex calls the change it reviews ([`Codex::review`]).
@@ -989,9 +1025,8 @@ fn decide(
     id: IntentId,
     intent: &Intent,
 ) -> (Outcome, Vec<Action>) {
-    let needs = intent.needs();
-    if !state.meta.can(needs) {
-        return (Outcome::Unsupported { cap: Cap::named(needs) }, Vec::new());
+    if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+        return (intent.unsupported(), Vec::new());
     }
     if let Intent::Send { text, attachments, delivery: Delivery::Interrupt } = intent {
         // "Now" goes by the agent's own steer where it has one. Only an agent without one is
@@ -1042,7 +1077,7 @@ fn decide(
             None if asked_in_terminal(state, ask) => Outcome::Done,
             None => refused(format!("no request {}", ask.0)),
         },
-        _ => Outcome::Unsupported { cap: Cap::named(needs) },
+        _ => intent.unsupported(),
     };
     (outcome, Vec::new())
 }
@@ -1142,7 +1177,7 @@ fn shared(
             codex.set(thread, Setting::Mode(mode.clone()));
             Outcome::Done
         }
-        other => Outcome::Unsupported { cap: Cap::named(other.needs()) },
+        other => other.unsupported(),
     }
 }
 
@@ -1418,8 +1453,8 @@ impl Threads {
         let decided = self.host.intent(thread, id, |state| {
             let delivery = state.meta.delivery_after_turn();
             let intent = Intent::Send { text: text.to_owned(), delivery, attachments: Vec::new() };
-            if !state.meta.can(intent.needs()) {
-                return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());
+            if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+                return (intent.unsupported(), Vec::new());
             }
             let by = Answerer { client: None, name: "Slopty".to_owned() };
             let outcome = if codex::is_shared(state) {

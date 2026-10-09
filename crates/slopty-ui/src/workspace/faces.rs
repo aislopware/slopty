@@ -260,6 +260,23 @@ impl Face {
 }
 
 impl WorkspaceView {
+    /// Keep `thread`, a run of its first message on `key`, and close every other run for good:
+    /// each one's agent ends and its worktree goes, as the worker does for a closed thread
+    /// (`Intent::Discard`). The person's own press, named in the menu line with how many go.
+    pub(super) fn keep_run(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        let rows: Vec<ThreadRow> = hub.read(cx).threads().rows().rows.values().cloned().collect();
+        let others: Vec<ThreadId> =
+            super::reviews::runs_of(&rows, thread).into_iter().filter(|t| *t != thread).collect();
+        tracing::info!(%thread, closed = others.len(), "keep a run");
+        hub.update(cx, |hub, cx| {
+            for run in others {
+                let _id = hub.intent(run, thread::wire::Intent::Discard, cx);
+            }
+        });
+        cx.notify();
+    }
+
     /// The faces `session`'s tile can show, in the switch's order: the thread while an agent
     /// runs in it and its worker's table names its thread, the terminal always, the board
     /// while it orchestrates a project.
@@ -1411,6 +1428,7 @@ impl WorkspaceView {
                 cx.notify();
             }
             ThreadViewEvent::ReviewRuns { thread } => self.review_runs(key, thread, cx),
+            ThreadViewEvent::KeepRun { thread } => self.keep_run(key, thread, cx),
             ThreadViewEvent::Attach { id, what } => {
                 let tile = self.tile_of(item);
                 self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
@@ -1485,6 +1503,11 @@ impl WorkspaceView {
             ThreadViewEvent::ReviewRuns { thread } => {
                 if let Some(key) = self.worker_of_session(session) {
                     self.review_runs(key, thread, cx);
+                }
+            }
+            ThreadViewEvent::KeepRun { thread } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.keep_run(key, thread, cx);
                 }
             }
             ThreadViewEvent::Attach { id, what } => {

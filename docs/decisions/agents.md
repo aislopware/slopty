@@ -1899,8 +1899,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       as its first message.
     - `Intent::KeepAside` drops the fact, so the thread becomes an ordinary thread of its own.
     - `Intent::Discard` ends the aside's agent as a settled task's is ended, and the worker
-      forgets the thread and its log. Discard is refused for a thread that is not an aside. It
-      is answered once with the worker's starts, since the thread is gone after.
+      forgets the thread and its log. It is answered once with the worker's starts, since the
+      thread is gone after. (Since 2026-10-09 it closes any thread; see "Keep this run".)
   - **The agent's session stays** wherever the agent keeps it, as every session does. Nothing
     is written into the main thread's session.
   - **Not sleep.** The study's sketch put a closed aside to sleep. Sleep was deleted the same
@@ -2369,3 +2369,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `the_sheet_asks_the_agent_to_address_the_review_and_to_catch_up` and
       `no_next_step_without_an_agent_to_take_it`.
     - The goldens `client_git_pull_comments` and `worker_git_pull_comments`.
+
+- ✅ **Keep this run** (2026-10-09, `.research/readiness-2026-10-08.md` R11). One message run on
+  several agents, each in a worktree of its own, could be reviewed side by side. Keeping the
+  best one left the others running and their worktrees on disk, to be closed one by one.
+  - *The line.* A thread with runs offers "Keep this run, close the other N" in its composer's
+    "+" menu, under "Review the N runs side by side". It sends `Intent::Discard` for each other
+    run, found the way the review finds them (`workspace::reviews::runs_of`): a worktree of
+    the same clone named by the same words. The kept run, threads of other messages and runs
+    of the same words in another clone are left alone. The line names how many go, which
+    stands in for a confirmation.
+  - *`Intent::Discard` widened.* It closed only an aside. Now it closes any thread for good:
+    - Its agent ends, the worker forgets the thread, and the agent's session stays wherever
+      the agent keeps it.
+    - It needs no capability of the agent: `Intent::needs` is `None` for it, and
+      `Intent::unsupported` answers for an agent that lacks the capability an intent needs.
+    - Then the worktree the thread worked in goes (`repo::worktrees::discard`), as long as it
+      is one an agent made under its clone's `.claude/worktrees/`, and no other thread the
+      worker holds and no live terminal works in it. An aside shares its thread's folder, so it
+      never takes it.
+    - The worktree goes with its uncommitted changes (`git worktree remove --force`), since the
+      person let the run go. Its branch goes only once every commit on it is in `origin`'s
+      default branch or the clone's checked-out one, so a commit the run made stays on its
+      branch.
+  - Tests: `repo::worktrees::tests::a_discarded_run_s_worktree_goes_and_its_commits_stay`,
+    the daemon's
+    `threads::a_start_in_a_worktree_opens_its_agent_there_and_a_close_takes_it_away`, and
+    `workspace::tests::agent_tile::keeping_a_run_closes_the_message_s_other_runs`.

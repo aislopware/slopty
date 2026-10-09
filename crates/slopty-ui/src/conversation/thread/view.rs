@@ -167,6 +167,13 @@ pub enum ThreadViewEvent {
         /// The thread.
         thread: ThreadId,
     },
+    /// Keep this run of the thread's first message and close the others for good, their agents
+    /// and their worktrees with them
+    /// ([`Intent::Discard`](slopty_proto::thread::wire::Intent::Discard)).
+    KeepRun {
+        /// The run kept.
+        thread: ThreadId,
+    },
     /// Show the system's picker; the files picked are attached as a drop on the tile is.
     PickFiles,
     /// Show the Photos picker (iOS); the photos and videos picked are attached as a drop on

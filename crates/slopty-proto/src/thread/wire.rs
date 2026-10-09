@@ -435,8 +435,11 @@ pub enum Intent {
     /// stays out of this thread and shares its context ([`Cap::FORK`]). Answered with
     /// [`Outcome::Started`] and the aside, which takes the question as its first message.
     Aside,
-    /// Close an aside for good: its agent ends and the worker forgets it. Its agent's session
-    /// stays wherever the agent keeps it. Refused for a thread that is not an aside.
+    /// Close a thread for good: an aside put away, or the runs of a message the person did not
+    /// keep. Its agent ends and the worker forgets it; the agent's session stays wherever the
+    /// agent keeps it. A worktree an agent works in under its clone's `.claude/worktrees/` goes
+    /// too, changes not committed and all, unless another thread or a terminal works in it; its
+    /// branch goes only once every commit on it has landed, so no commit is lost.
     Discard,
     /// Keep an aside as an ordinary thread of its own: it shows from then on.
     KeepAside,
@@ -467,12 +470,14 @@ pub struct Pick {
 }
 
 impl Intent {
-    /// The capability a thread needs for this intent.
+    /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`]),
+    /// which the worker does whatever its agent can.
     ///
     /// A send by interrupt ([`Delivery::Interrupt`]) needs [`Cap::QUEUE`] too.
     #[must_use]
-    pub const fn needs(&self) -> &'static str {
-        match self {
+    pub const fn needs(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Discard => return None,
             Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
             Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
@@ -486,12 +491,21 @@ impl Intent {
             Self::SetEffort { .. } => Cap::SET_EFFORT,
             Self::Compact => Cap::COMPACT,
             Self::Handoff | Self::TakeBack => Cap::HANDOFF,
-            Self::Fork { .. } | Self::Aside | Self::Discard | Self::KeepAside => Cap::FORK,
+            Self::Fork { .. } | Self::Aside | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Review { .. } => Cap::REVIEW,
             Self::Continue { .. } => Cap::CONTINUE,
             Self::Rewind { .. } => Cap::REWIND,
-        }
+        })
+    }
+
+    /// The answer to this intent from an agent that cannot do it: the capability it lacks.
+    #[must_use]
+    pub fn unsupported(&self) -> Outcome {
+        self.needs().map_or_else(
+            || Outcome::Refused { reason: "not something this agent does".to_owned() },
+            |cap| Outcome::Unsupported { cap: Cap::named(cap) },
+        )
     }
 }
 

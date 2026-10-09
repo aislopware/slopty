@@ -571,6 +571,7 @@ impl WorkspaceView {
             | ThreadViewEvent::OpenFile { .. }
             | ThreadViewEvent::Review { .. }
             | ThreadViewEvent::ReviewRuns { .. }
+            | ThreadViewEvent::KeepRun { .. }
             | ThreadViewEvent::Watch { .. }
             | ThreadViewEvent::RemoveWorktree(_) => {}
         }

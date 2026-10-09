@@ -1027,6 +1027,21 @@ impl ThreadView {
                     });
                 },
             ));
+            let to = this.clone();
+            let others = self.runs.saturating_sub(1);
+            let closed =
+                if others == 1 { "the other".to_owned() } else { format!("the other {others}") };
+            menu.push(kit::MenuItem::new(
+                "keep-run",
+                format!("Keep this run, close {closed}"),
+                move |_w, cx| {
+                    let _gone = to.update(cx, |this, cx| {
+                        this.add_open = false;
+                        cx.emit(ThreadViewEvent::KeepRun { thread });
+                        cx.notify();
+                    });
+                },
+            ));
         }
         // The mode and the effort switch here while their chips are away (the default, or one
         // the agent names none of), and beside them as well.

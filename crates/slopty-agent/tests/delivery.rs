@@ -23,7 +23,7 @@ mod tests {
     /// Whether the worker lets `delivery` through to a thread of `meta`.
     fn taken(meta: &ThreadMeta, delivery: Delivery) -> bool {
         let send = Intent::Send { text: "go on".to_owned(), delivery, attachments: Vec::new() };
-        meta.can(send.needs())
+        send.needs().is_none_or(|needs| meta.can(needs))
     }
 
     #[test]

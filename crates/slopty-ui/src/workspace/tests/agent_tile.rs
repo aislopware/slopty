@@ -556,3 +556,75 @@ fn a_thread_is_titled_by_its_work_else_by_its_agent(cx: &mut TestAppContext) {
     table(&view, cx, key, 2, &[&codex]);
     assert_eq!(title(cx), "Fix the parser's error spans", "then by its work");
 }
+
+/// "Keep this run" on one run of a message closes the others for good: each goes to its worker
+/// as `Intent::Discard`, which ends its agent and takes its worktree. The kept run, a thread of
+/// another message and a run of the same words in another clone are left alone.
+#[gpui::test]
+fn keeping_a_run_closes_the_message_s_other_runs(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::Intent;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let row = |dir: &str, agent: &str, terminal: Option<SessionId>| {
+        let mut state = crate::conversation::thread::fixtures::thread("edit");
+        state.meta.id = ThreadId::new();
+        state.meta.terminal = terminal;
+        state.meta.agent = AgentId::named(agent);
+        let mut row = state.row(WallMs::ZERO);
+        row.cwd = Some(format!("/w/{dir}"));
+        row.repo = Some(format!("/w/{dir}"));
+        row
+    };
+    let rows = vec![
+        row("atlas/.claude/worktrees/try-the-layout-1a2b", AgentId::CODEX, Some(session)),
+        row("atlas/.claude/worktrees/try-the-layout-3c4d", AgentId::CLAUDE_CODE, None),
+        row("atlas/.claude/worktrees/try-the-layout-5e6f", AgentId::PI, None),
+        row("atlas/.claude/worktrees/fix-the-login-7a8b", AgentId::PI, None),
+        row("other/.claude/worktrees/try-the-layout-9c0d", AgentId::PI, None),
+    ];
+    let (mine, mut closed) = (rows[0].id, [rows[1].id, rows[2].id]);
+    closed.sort();
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.id = mine;
+    state.meta.terminal = Some(session);
+    let frame = slopty_proto::thread::wire::ThreadFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        state: Box::new(state),
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.thread_table(key, &table, cx);
+        v.focus_tile(agent, cx);
+    });
+    settle(cx);
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, mine, frame, cx));
+    settle(cx);
+    studio.drain();
+
+    let at = cx.debug_bounds("thread-attach").expect("the + button");
+    cx.simulate_click(at.center(), Modifiers::none());
+    settle(cx);
+    let keep = cx.debug_bounds("thread-add-menu-keep-run").expect("the keep line");
+    cx.simulate_click(keep.center(), Modifiers::none());
+    settle(cx);
+    let mut discarded: Vec<ThreadId> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                thread, intent: Intent::Discard, ..
+            }) => Some(thread),
+            _ => None,
+        })
+        .collect();
+    discarded.sort();
+    assert_eq!(discarded, closed, "the message's other runs, and nothing else");
+}

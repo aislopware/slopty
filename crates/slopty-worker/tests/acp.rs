@@ -111,8 +111,8 @@ mod acp {
         fn intent(&self, acp: &Acp, thread: ThreadId, intent: &Intent) -> (IntentId, Outcome) {
             let id = IntentId::new();
             let decided = self.host.intent(thread, id, |state| {
-                if !state.meta.can(intent.needs()) {
-                    return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());
+                if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+                    return (intent.unsupported(), Vec::new());
                 }
                 (acp.decide(state, id, intent, self.by()), Vec::new())
             });
@@ -252,7 +252,7 @@ mod acp {
             delivery: Delivery::Interrupt,
             attachments: vec![],
         };
-        assert_eq!(now("Say hello instead.").needs(), Cap::INTERRUPT);
+        assert_eq!(now("Say hello instead.").needs(), Some(Cap::INTERRUPT));
 
         rig.send(&acp, thread, "Remove it again.");
         rig.until(thread, "the call's ask", asking(1)).await;
@@ -297,7 +297,7 @@ mod acp {
             rig.host.intent(thread, id, decide).unwrap()
         };
         let promote = |pending| Intent::Promote { pending };
-        assert_eq!(promote(IntentId::new()).needs(), Cap::QUEUE);
+        assert_eq!(promote(IntentId::new()).needs(), Some(Cap::QUEUE));
 
         rig.send(&acp, thread, "Remove it again.");
         rig.until(thread, "the call's ask", asking(1)).await;

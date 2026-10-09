@@ -473,12 +473,51 @@ pub async fn remove(
             lines.join("; ")
         )));
     }
+    take_out(git, (&tree, &clone, branch), landed, false).await
+}
+
+/// Remove the worktree at `worktree` for good, changes not committed and all.
+///
+/// It is the run of a message the person let go. Only one an agent made under its clone's
+/// `.claude/worktrees/`, and never while a terminal or another thread works in it (`cwds`). Its
+/// branch goes only once every commit on it landed in `origin`'s default branch or the one the
+/// clone has checked out, so a commit of the run stays on its branch.
+///
+/// # Errors
+/// As [`remove`], but for anything not committed, which goes.
+pub async fn discard(git: &Path, worktree: &Path, cwds: &[PathBuf]) -> Result<Removed, Failed> {
+    let (tree, clone, branch) = {
+        let worktree = worktree.to_path_buf();
+        tokio::task::spawn_blocking(move || agent_worktree(&worktree))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))??
+    };
+    if let Some(cwd) = cwds.iter().find(|cwd| inside(cwd, &tree)) {
+        return Err(Failed::Busy(format!("{} is in use ({})", tree.display(), cwd.display())));
+    }
+    let landed = [DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+    take_out(git, (&tree, &clone, branch), &landed, true).await
+}
+
+/// Take worktree `tree` out of `clone`, by force when `force` (its changes go), and its branch
+/// with it once every commit on it is in one of `landed`.
+async fn take_out(
+    git: &Path,
+    (tree, clone, branch): (&Path, &Path, Option<String>),
+    landed: &[String],
+    force: bool,
+) -> Result<Removed, Failed> {
     let tree_text = tree.to_string_lossy();
-    bundle::run(git, &clone, &["worktree", "remove", "--end-of-options", &tree_text]).await?;
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.extend(["--end-of-options", &tree_text]);
+    bundle::run(git, clone, &args).await?;
     let branch_removed = match &branch {
-        Some(branch) if landed_in(git, &clone, branch, landed).await => {
+        Some(branch) if landed_in(git, clone, branch, landed).await => {
             let args = ["branch", "-D", "--end-of-options", branch.as_str()];
-            match bundle::run(git, &clone, &args).await {
+            match bundle::run(git, clone, &args).await {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::info!(%branch, error = %e, "a landed branch not removed");
@@ -963,6 +1002,47 @@ mod tests {
         let refused = remove(git, &elsewhere, &landed, &[]).await;
         assert!(matches!(refused, Err(Failed::NotOne(_))), "the person's own: {refused:?}");
         assert!(elsewhere.exists());
+    }
+
+    /// A run the person let go takes its worktree with it, changes not committed and all, but
+    /// never a commit: its branch stays while it holds one `main` lacks, and goes once it holds
+    /// none. One in use is kept, and a folder that is no agent's worktree is never touched.
+    #[tokio::test]
+    async fn a_discarded_run_s_worktree_goes_and_its_commits_stay() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let (worked, worked_branch) = agent_tree(&clone, "try-it-1a2b");
+        let idle = clone.join(".claude/worktrees/try-it-3c4d");
+        let idle_text = idle.to_string_lossy().into_owned();
+        git_in(
+            &clone,
+            &["worktree", "add", "-q", "-b", "worktree-try-it-3c4d", &idle_text, "main"],
+        );
+        std::fs::write(worked.join("draft.txt"), "half done").expect("write");
+        std::fs::write(idle.join("draft.txt"), "half done").expect("write");
+
+        let deep = worked.join("src");
+        std::fs::create_dir_all(&deep).expect("mkdir");
+        let busy = discard(git, &worked, &[deep]).await;
+        assert!(matches!(busy, Err(Failed::Busy(_))), "{busy:?}");
+        assert!(worked.join("draft.txt").exists(), "kept while in use");
+
+        let gone = discard(git, &worked, &[]).await.expect("discarded");
+        assert_eq!(gone, Removed { branch: Some(worked_branch.clone()), branch_removed: false });
+        assert!(!worked.exists(), "its changes went with it");
+        assert!(has_branch(&clone, &worked_branch), "its commit stays on its branch");
+
+        let gone = discard(git, &idle, &[]).await.expect("discarded");
+        assert!(gone.branch_removed, "a branch with no work of its own goes");
+        assert!(!idle.exists() && !has_branch(&clone, "worktree-try-it-3c4d"));
+
+        let refused = discard(git, &clone, &[]).await;
+        assert!(matches!(refused, Err(Failed::NotOne(_))), "the clone itself: {refused:?}");
+        assert!(clone.join(".git").exists());
     }
 
     /// A stand-in for gh in `dir`, as gh 2.102 answers from inside a linked worktree: `pr merge`

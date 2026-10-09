@@ -44,7 +44,7 @@ use slopty_agent::queue::Queue;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, Outcome, PastSession, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Cap, Delivery, Drive, Fork, IntentId, Liveness, Phase,
+    Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, Liveness, Phase,
     RequestState, ThreadId, ThreadState, TurnId,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -289,7 +289,7 @@ impl Pi {
                 ThreadAsk::SetEffort { effort: effort.clone() }
             }
             Intent::Compact => ThreadAsk::Compact,
-            other => return Outcome::Unsupported { cap: Cap::named(other.needs()) },
+            other => return other.unsupported(),
         };
         let waits = matches!(asked, ThreadAsk::Handoff | ThreadAsk::TakeBack);
         // What is held is the thread's record, answered whether pi runs or not.

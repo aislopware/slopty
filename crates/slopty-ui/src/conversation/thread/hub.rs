@@ -716,7 +716,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Rewind { .. } => "Couldn't go back to that turn".to_owned(),
         Intent::SetEffort { effort } => format!("Couldn't set the effort to {effort}"),
         Intent::Aside => "Couldn't ask aside".to_owned(),
-        Intent::Discard => "Couldn't close the aside".to_owned(),
+        Intent::Discard => "Couldn't close the thread".to_owned(),
         Intent::KeepAside => "Couldn't keep the aside".to_owned(),
         Intent::Review { .. } => "The review didn't start".to_owned(),
     };
