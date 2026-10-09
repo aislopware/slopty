@@ -2283,3 +2283,32 @@ reordering and edited allows are gone" in `agents.md`.*
     `slopty-server` `hub::project_tests::an_agent_looser_than_allowed_is_closed` (the
     variable on an agent's terminal, none on the person's, the closing and refusing words for
     auto).
+
+- ✅ **A clone's worktrees are listed with how each stands, and the merged ones go at once**
+  (readiness R13, 2026-10-09). Agents leave a worktree under `.claude/worktrees/` for every
+  task, so a long project fills the disk. Freeing them one at a time ("Remove this worktree",
+  `docs/decisions/workspace.md`) needed a look at each.
+  - **The listing** (`GitOp::Worktrees`, answered `GitDone::Worktrees`). The worker lists every
+    linked worktree of the clone the folder is in that sits under `.claude/worktrees/` and is
+    still there. For each it gives:
+    - the files not committed;
+    - whether a live terminal works in it;
+    - its commits not yet in `origin`'s default branch or the clone's checked-out branch,
+      matched by patch (`git cherry`), as removal judges them;
+    - whether it is merged.
+    It is merged when no commit is ahead. A squash or rebase merge leaves no commit that
+    matches, so for a branch whose commits leave the question open, the person's own `gh` or
+    `glab` is asked whether its pull request merged at its tip. Those asks run at once, and
+    only for those worktrees. The newest commit comes first, with at most `WORKTREES_MAX`
+    entries. Nothing is fetched or moved.
+  - **"Remove merged worktrees"** is in the palette wherever "Review changes" applies (a folder
+    in a clone, or a shell standing in one). Every merged worktree with nothing uncommitted, no
+    terminal and no live agent in it is asked to go through the same `GitOp::RemoveWorktree`
+    as one alone. The worker still refuses whatever is not safe. The others are passed over and
+    counted. Once every answer is in, one notice says how many went, why any stayed, and how
+    many were passed over. The folder tiles in a worktree that went close.
+  - Tests: `repo::worktrees::tests::a_clones_worktrees_are_listed_with_how_each_stands`
+    (slopty-worker: real git, a stand-in `gh`); `workspace::tests::worktrees::remove_merged_takes_only_the_landed_worktrees_nothing_works_in`
+    and `remove_merged_says_when_there_is_nothing_to_take` (slopty-ui); goldens
+    `client_git_worktrees`, `worker_git_worktrees`, and the e2e `settings-keyboard` (the new
+    palette line).

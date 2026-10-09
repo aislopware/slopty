@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use slopty_proto::git::{
     Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStanding, PullStatus,
+    Worktrees,
 };
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
@@ -117,6 +118,8 @@ pub struct Repo {
     /// Its open pull request's review still open, as last read: asked whenever the pull request
     /// is read open.
     pub comments: Option<Arc<PullComments>>,
+    /// The agents' worktrees of its clone, each as it stands, as last read.
+    pub worktrees: Option<Arc<Worktrees>>,
 }
 
 impl Repo {
@@ -189,6 +192,12 @@ impl GitBook {
     #[must_use]
     pub fn busy(&self, repo: &str) -> Option<&GitOp> {
         self.asked.values().find(|a| a.repo == repo && changes(&a.op)).map(|a| &a.op)
+    }
+
+    /// Whether `op` is on its way to `repo`.
+    #[must_use]
+    pub fn asking(&self, repo: &str, op: &GitOp) -> bool {
+        self.asked.values().any(|a| a.repo == repo && a.op == *op)
     }
 
     /// Whether a read of `repo`'s status, or of its pull request with `pull`, is on its way.
@@ -311,6 +320,7 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             }
         }
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
+        GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {
@@ -355,6 +365,12 @@ fn missed(
         // A review that could not be read offers nothing to address; the sheet shows the pull
         // request as it is.
         GitOp::PullComments { .. } => repo.comments = None,
+        // Worktrees that could not be listed leave the last listing gone; why is said where
+        // the listing was asked.
+        GitOp::Worktrees => {
+            repo.worktrees = None;
+            repo.said = Some((request, said(words)));
+        }
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -372,6 +388,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::PullComments { .. }
             | GitOp::Changes { .. }
             | GitOp::Branches
+            | GitOp::Worktrees
     )
 }
 

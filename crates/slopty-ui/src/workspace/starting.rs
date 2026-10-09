@@ -760,8 +760,9 @@ impl WorkspaceView {
         let title = SharedString::from(format!("New {label} thread"));
         let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);
-        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`).
-        let header =
+        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`); none
+        // for a tab's one tile, which the title bar's tab names.
+        let header = (!placed.lone).then(|| {
             super::tab_look::row(theme, div().id("title"))
                 .debug_selector(move || format!("title-{}", id.as_uuid()))
                 .role(Role::Heading)
@@ -794,7 +795,8 @@ impl WorkspaceView {
                     el.child(tab).children(status.map(|st| {
                         div().ml_auto().child(crate::icons::status_mark(theme, Some(st)))
                     }))
-                });
+                })
+        });
         // The new worktree's setup, while it runs in place of the rest, and once it failed over
         // the draft given back.
         let setup = starting.setup.as_ref().map(|seen| {
@@ -880,7 +882,7 @@ impl WorkspaceView {
                 })
                 .map(|el| {
                     let inside =
-                        div().flex().flex_col().child(header).children(failed).children(body);
+                        div().flex().flex_col().children(header).children(failed).children(body);
                     el.child(inside.relative().size_full().overflow_hidden())
                 })
                 .into_any_element(),

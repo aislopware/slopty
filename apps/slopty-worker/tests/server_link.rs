@@ -409,6 +409,11 @@ mod tests {
         let thread = slopty_agent::observed::thread_of("s1");
         peer.heard(|m| row_at(m, term.session, |r| r.id == thread)).await;
         peer.tx.send(&FromServer::Pushes(true)).await.unwrap();
+        // The word comes over the server's link and the prompt over the control socket, so
+        // nothing orders them. The link reads in order: a verb answered after the word means
+        // it was taken before the prompt is asked.
+        let status = peer.ask(Verb::AgentStatus { term }).await;
+        assert!(matches!(status, Outcome::Agent(_)), "{status:?}");
 
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/slopty-agent/tests/fixtures/conversation/permission/hooks.jsonl");

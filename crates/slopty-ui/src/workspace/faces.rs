@@ -1472,6 +1472,18 @@ impl WorkspaceView {
         }
     }
 
+    /// The repositories threads work in, each with its machine and clone's root, as their table
+    /// last said: a thread with no terminal names one no shell stands in.
+    pub(super) fn thread_repos(
+        &self,
+    ) -> impl Iterator<Item = (WorkerKey, &str, &slopty_proto::terminal::RepoId)> {
+        let threads = &self.faces.threads;
+        threads.places.iter().filter_map(|(t, p)| {
+            let worker = threads.stands.get(t)?.worker;
+            Some((worker, p.repo.as_deref()?, p.repo_id.as_ref()?))
+        })
+    }
+
     /// The other machines with a clone of `thread`'s repository, linked and able to start an
     /// agent, where it can go on: each in the thread's folder within its clone there, its
     /// agents the thread's own first.
@@ -1488,10 +1500,7 @@ impl WorkspaceView {
                 .values()
                 .filter_map(move |s| Some((*w, s.repo.as_deref()?, s.repo_id.as_ref()?)))
         });
-        let rows = threads.places.iter().filter_map(|(t, p)| {
-            let worker = threads.stands.get(t)?.worker;
-            Some((worker, p.repo.as_deref()?, p.repo_id.as_ref()?))
-        });
+        let rows = self.thread_repos();
         let own = threads.agents.get(&thread);
         let mut out: Vec<Elsewhere> = clones_elsewhere(id, key, sessions.chain(rows))
             .into_iter()

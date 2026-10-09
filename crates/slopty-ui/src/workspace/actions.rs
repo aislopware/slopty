@@ -57,6 +57,9 @@ actions!(
         /// Free the worktree the focused work is in: a folder's, or a thread's whose agent
         /// has exited.
         RemoveWorktree,
+        /// Free every agent's worktree of the focused folder's clone whose work has landed and
+        /// that nothing works in.
+        RemoveMerged,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -444,6 +447,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
         w(super::pull_review::REVIEW_PULL, Box::new(ReviewPull)),
         w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
+        w(super::worktrees::REMOVE_MERGED, Box::new(RemoveMerged)),
         w("Enclosing folder", Box::new(crate::folder::OpenParent)),
         w("Save file", Box::new(crate::file::SaveFile)),
         w("Done with this file", Box::new(crate::file::FinishEdit)),

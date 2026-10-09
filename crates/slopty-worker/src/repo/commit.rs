@@ -67,8 +67,9 @@ pub fn find(program: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
 }
 
 /// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs`.
+///
 /// `terminals` holds the directory of every terminal live on the worker, which a worktree's
-/// removal never pulls out from under.
+/// removal never pulls out from under and a listing says are worked in.
 pub async fn apply(
     programs: &Programs,
     repo: &str,
@@ -107,6 +108,11 @@ pub async fn apply(
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
         }
         GitOp::PullComments { number } => super::pull::comments(programs, &root, number).await,
+        GitOp::Worktrees => match super::worktrees::list(git, programs, &root, terminals).await {
+            Ok(listed) => Ok(GitDone::Worktrees(Box::new(listed))),
+            Err(super::worktrees::Failed::Other(said)) => Err(GitOutcome::Failed { said }),
+            Err(refused) => Err(GitOutcome::Refused { why: refused.to_string() }),
+        },
         GitOp::RemoveWorktree => {
             use super::worktrees::{Failed, Removed, free};
             match free(git, programs, &root, terminals).await {

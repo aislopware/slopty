@@ -8,6 +8,11 @@
 //! protocol has no terminal for the worker to see, and on the worker while a terminal works in it
 //! or anything in it is not committed. What went and what stayed is said in a notice, and the
 //! folder tiles left showing it close.
+//!
+//! "Remove merged worktrees" sweeps the clone the focus is in (`GitOp::Worktrees`): every agent's
+//! worktree whose work has landed, with nothing in it not committed, no terminal in it and no
+//! agent that has not exited working there, is asked to go as one would be alone. One notice
+//! says how many went and why any stayed, once every answer is in.
 
 use std::collections::HashSet;
 
@@ -17,18 +22,40 @@ use slopty_proto::git::GitOp;
 use slopty_proto::items::{ItemKind, ItemOp};
 
 use super::WorkspaceView;
-use super::actions::RemoveWorktree;
+use super::actions::{RemoveMerged, RemoveWorktree};
 use crate::conversation::thread::git::Said;
 
 /// The palette's line.
 pub(crate) const REMOVE_WORKTREE: &str = "Remove this worktree";
+/// The palette's line for the sweep.
+pub(crate) const REMOVE_MERGED: &str = "Remove merged worktrees";
 
 /// Where an agent's worktrees are, under their clone's root.
 const UNDER: &str = "/.claude/worktrees/";
 
-/// The removals asked and not yet answered: each worktree's root, on its machine.
+/// What was asked of the worktrees and is not yet answered.
 #[derive(Default)]
-pub(super) struct Asked(HashSet<(WorkerKey, String)>);
+pub(super) struct Asked {
+    /// The removals: each worktree's root, on its machine.
+    removals: HashSet<(WorkerKey, String)>,
+    /// The sweeps' listings: each folder they were asked in, on its machine.
+    listings: HashSet<(WorkerKey, String)>,
+    /// Each sweep whose removals are not all answered.
+    sweeps: Vec<Sweep>,
+}
+
+/// A sweep's removals, as they are answered.
+struct Sweep {
+    key: WorkerKey,
+    /// The worktrees not answered yet.
+    waiting: HashSet<String>,
+    /// How many went.
+    went: usize,
+    /// Why each that stayed did, in the worker's words.
+    kept: Vec<String>,
+    /// How many of the merged ones were left alone: in use, or with changes not committed.
+    passed: usize,
+}
 
 /// The root of the agent's worktree `path` is in or at, under its clone's
 /// `.claude/worktrees/`; `None` for a path in none.
@@ -37,6 +64,11 @@ pub(crate) fn worktree_root(path: &str) -> Option<String> {
     let (clone, rest) = path.split_once(UNDER)?;
     let name = rest.split('/').next().filter(|name| !name.is_empty())?;
     Some(format!("{clone}{UNDER}{name}"))
+}
+
+/// `n` worktrees, in words: "1 worktree", "3 worktrees".
+fn count(n: usize) -> String {
+    if n == 1 { "1 worktree".to_owned() } else { format!("{n} worktrees") }
 }
 
 /// Whether `path` is `root` or under it.
@@ -85,16 +117,35 @@ impl WorkspaceView {
             return;
         }
         tracing::info!(%key, %root, "remove worktree");
-        self.worktrees.0.insert((key, root.to_owned()));
+        self.worktrees.removals.insert((key, root.to_owned()));
         let hub = self.thread_hub(key, cx);
         let _asked = hub.update(cx, |hub, cx| hub.git_op(root, GitOp::RemoveWorktree, cx));
     }
 
-    /// `key`'s repository `repo` moved: a removal asked of it that has its answer is said, and
+    /// "Remove merged worktrees": the agents' worktrees of the clone the focus is in, listed with
+    /// their state, so the merged ones can go.
+    pub(super) fn remove_merged(
+        &mut self,
+        _: &RemoveMerged,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((key, path)) = self.changes_here() else { return };
+        tracing::info!(%key, %path, "remove merged worktrees");
+        self.worktrees.listings.insert((key, path.clone()));
+        let hub = self.thread_hub(key, cx);
+        let _asked = hub.update(cx, |hub, cx| hub.git_op(&path, GitOp::Worktrees, cx));
+    }
+
+    /// `key`'s repository `repo` moved: a sweep's listing that has its answer asks each merged
+    /// worktree free to go; a removal that has its answer is said (or counted in its sweep), and
     /// once it went, the folder tiles in it close.
     pub(super) fn worktree_heard(&mut self, key: WorkerKey, repo: &str, cx: &mut Context<Self>) {
         let asked = (key, repo.to_owned());
-        if !self.worktrees.0.contains(&asked) {
+        if self.worktrees.listings.contains(&asked) {
+            self.listing_heard(key, repo, cx);
+        }
+        if !self.worktrees.removals.contains(&asked) {
             return;
         }
         let Some(hub) = self.held_hub(key) else { return };
@@ -103,7 +154,13 @@ impl WorkspaceView {
             return;
         }
         let said = git.repo(repo).and_then(|r| r.said.as_ref()).map(|(_, said)| said.clone());
-        self.worktrees.0.remove(&asked);
+        self.worktrees.removals.remove(&asked);
+        if let Some(at) =
+            self.worktrees.sweeps.iter().position(|s| s.key == key && s.waiting.contains(repo))
+        {
+            self.swept(at, repo, said, cx);
+            return;
+        }
         match said {
             Some(Said::Freed { said }) => {
                 self.show_notice(said, cx);
@@ -116,6 +173,89 @@ impl WorkspaceView {
                 self.show_failure(format!("The worktree was not removed: {said}"), cx);
             }
             _ => {}
+        }
+    }
+
+    /// A sweep's listing of `repo` on `key` came: each merged worktree free to go is asked to,
+    /// and one with changes not committed, a terminal in it or an agent working there is passed
+    /// over. With none to remove, that is said at once.
+    fn listing_heard(&mut self, key: WorkerKey, repo: &str, cx: &mut Context<Self>) {
+        let Some(hub) = self.held_hub(key) else { return };
+        let git = hub.read(cx).git();
+        if git.asking(repo, &GitOp::Worktrees) {
+            return;
+        }
+        let found = git.repo(repo);
+        let listed = found.and_then(|r| r.worktrees.clone());
+        let why = found.and_then(|r| r.said.as_ref()).and_then(|(_, said)| match said {
+            Said::Refused { why } | Said::Failed { said: why } => Some(why.clone()),
+            _ => None,
+        });
+        self.worktrees.listings.remove(&(key, repo.to_owned()));
+        let Some(listed) = listed else {
+            let why = why.unwrap_or_else(|| "the machine did not answer".to_owned());
+            self.show_failure(format!("The worktrees could not be listed: {why}"), cx);
+            return;
+        };
+        let (free, held): (Vec<_>, Vec<_>) = listed
+            .list
+            .iter()
+            .filter(|w| w.merged)
+            .partition(|w| w.removable() && self.threads_working_in(key, &w.path).is_empty());
+        if free.is_empty() {
+            let said = match held.len() {
+                0 => "No merged worktree to remove".to_owned(),
+                n => format!("No merged worktree to remove; {} in use or not committed", count(n)),
+            };
+            self.show_notice(said, cx);
+            return;
+        }
+        let waiting: HashSet<String> = free.iter().map(|w| w.path.clone()).collect();
+        let sweep =
+            Sweep { key, waiting: waiting.clone(), went: 0, kept: Vec::new(), passed: held.len() };
+        self.worktrees.sweeps.push(sweep);
+        for path in waiting {
+            self.worktrees.removals.insert((key, path.clone()));
+            let hub = self.thread_hub(key, cx);
+            let _asked = hub.update(cx, |hub, cx| hub.git_op(&path, GitOp::RemoveWorktree, cx));
+        }
+    }
+
+    /// Sweep `at`'s removal of `repo` was answered `said`; once it was the last, one notice says
+    /// how the sweep went.
+    fn swept(&mut self, at: usize, repo: &str, said: Option<Said>, cx: &mut Context<Self>) {
+        let Some(sweep) = self.worktrees.sweeps.get_mut(at) else { return };
+        sweep.waiting.remove(repo);
+        let key = sweep.key;
+        let went = matches!(said, Some(Said::Freed { .. }));
+        match said {
+            Some(Said::Freed { .. }) => sweep.went = sweep.went.saturating_add(1),
+            Some(Said::Refused { why } | Said::Failed { said: why }) => sweep.kept.push(why),
+            _ => sweep.kept.push("the machine did not answer".to_owned()),
+        }
+        let done = sweep.waiting.is_empty();
+        if went {
+            self.close_tiles_in(key, repo, cx);
+        }
+        if !done {
+            return;
+        }
+        let sweep = self.worktrees.sweeps.remove(at);
+        let mut said = match sweep.went {
+            0 => "Removed no merged worktree".to_owned(),
+            1 => "Removed 1 merged worktree".to_owned(),
+            n => format!("Removed {n} merged worktrees"),
+        };
+        if let Some(first) = sweep.kept.first() {
+            said = format!("{said}; kept {}: {first}", count(sweep.kept.len()));
+        }
+        if sweep.passed > 0 {
+            said = format!("{said}; {} in use or not committed", count(sweep.passed));
+        }
+        if sweep.went == 0 {
+            self.show_failure(said, cx);
+        } else {
+            self.show_notice(said, cx);
         }
     }
 

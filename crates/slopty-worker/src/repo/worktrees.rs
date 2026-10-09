@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use slopty_proto::agent::Worktree;
+use slopty_proto::git::{AgentWorktree, WORKTREES_MAX, Worktrees};
 use slopty_proto::thread::wire::{NewWorktree, Setup, Start};
 
 use super::bundle::{self, branch_ref};
@@ -430,6 +431,120 @@ fn clone_of(cwd: &Path) -> Result<(PathBuf, PathBuf), Failed> {
         .filter(|common| common.file_name().is_some_and(|name| name == ".git"))
         .and_then(|common| common.parent().map(Path::to_path_buf));
     Ok((main.unwrap_or(root), within))
+}
+
+/// The agents' worktrees of the clone `root` is in, each as it stands
+/// ([`slopty_proto::git::GitOp::Worktrees`]).
+///
+/// Those `git worktree list` names under the clone's `.claude/worktrees/` whose folder is
+/// there. For each: the files not committed in it, whether one of `terminals` works in it, its
+/// commits not in what counts as landed (as [`free`] reads it), and, only when those do not say
+/// it landed, whether its pull request merged at its tip, asked of the forge for each such
+/// worktree at once.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a `root` in no repository, [`Failed::Other`] for a git that failed.
+pub async fn list(
+    git: &Path,
+    programs: &super::commit::Programs,
+    root: &Path,
+    terminals: &[PathBuf],
+) -> Result<Worktrees, Failed> {
+    let clone = {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || clone_of(&root))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))??
+            .0
+    };
+    let clone = std::fs::canonicalize(&clone).unwrap_or(clone);
+    let place = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part));
+    let listed = bundle::run(git, &clone, &["worktree", "list", "--porcelain"]).await?;
+    let landed = [DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+    let mut list = Vec::new();
+    for (tree, branch) in linked_trees(&listed) {
+        let tree = std::fs::canonicalize(&tree).unwrap_or(tree);
+        if tree.parent() != Some(place.as_path()) || !tree.is_dir() {
+            continue;
+        }
+        let status = bundle::run(git, &tree, &["status", "--porcelain"]).await?;
+        let committed = bundle::run(git, &tree, &["log", "-1", "--format=%ct", "HEAD"]).await;
+        let ahead = ahead_of(git, &clone, &tree, &landed).await;
+        list.push(AgentWorktree {
+            path: tree.to_string_lossy().into_owned(),
+            branch,
+            changed: u32::try_from(status.lines().count()).unwrap_or(u32::MAX),
+            busy: terminals.iter().any(|cwd| inside(cwd, &tree)),
+            ahead,
+            merged: ahead == 0,
+            committed: committed.ok().and_then(|c| c.trim().parse().ok()).unwrap_or_default(),
+        });
+    }
+    // The forge is asked only for what the commits leave open, each worktree's at once: a
+    // squash or a rebase merge leaves no commit `git cherry` matches.
+    if programs.has_forge() {
+        let asks = list.iter().map(|w| {
+            let open = !w.merged && w.branch.is_some();
+            async move { open && merged_at_tip(git, programs, Path::new(&w.path)).await }
+        });
+        let said = futures_util::future::join_all(asks).await;
+        for (worktree, merged) in list.iter_mut().zip(said) {
+            worktree.merged |= merged;
+        }
+    }
+    list.sort_by(|a, b| b.committed.cmp(&a.committed).then_with(|| a.path.cmp(&b.path)));
+    let more = list.len().saturating_sub(WORKTREES_MAX);
+    list.truncate(WORKTREES_MAX);
+    Ok(Worktrees {
+        clone: clone.to_string_lossy().into_owned(),
+        list,
+        more: u32::try_from(more).unwrap_or(u32::MAX),
+    })
+}
+
+/// The linked worktrees `git worktree list --porcelain` names, each with the branch it has
+/// checked out. The first record is the main checkout, never an agent's.
+fn linked_trees(listed: &str) -> Vec<(PathBuf, Option<String>)> {
+    listed
+        .split("\n\n")
+        .skip(1)
+        .filter_map(|record| {
+            let mut lines = record.lines();
+            let tree = lines.next()?.strip_prefix("worktree ")?;
+            let branch = lines
+                .find_map(|line| line.strip_prefix("branch refs/heads/"))
+                .filter(|b| branch_ref(b).is_ok())
+                .map(str::to_owned);
+            Some((PathBuf::from(tree), branch))
+        })
+        .collect()
+}
+
+/// How many commits of `tree`'s `HEAD` are in none of `landed`, by patch: the fewest any one
+/// that resolves leaves; all of them when none resolves.
+async fn ahead_of(git: &Path, clone: &Path, tree: &Path, landed: &[String]) -> u32 {
+    let Ok(head) = bundle::run(git, tree, &["rev-parse", "HEAD"]).await else { return 0 };
+    let head = head.trim();
+    let mut fewest: Option<usize> = None;
+    for upstream in landed {
+        let spec = format!("{upstream}^{{commit}}");
+        let resolve = ["rev-parse", "--verify", "--quiet", "--end-of-options", &spec];
+        let Ok(commit) = bundle::run(git, clone, &resolve).await else { continue };
+        let Ok(cherry) = bundle::run(git, clone, &["cherry", commit.trim(), head]).await else {
+            continue;
+        };
+        let ahead = cherry.lines().filter(|line| line.starts_with('+')).count();
+        fewest = Some(fewest.map_or(ahead, |f| f.min(ahead)));
+    }
+    let ahead = match fewest {
+        Some(ahead) => ahead,
+        None => bundle::run(git, tree, &["rev-list", "--count", "HEAD"])
+            .await
+            .ok()
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_default(),
+    };
+    u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
 /// Remove the worktree at `worktree` from its clone.
@@ -1151,5 +1266,84 @@ mod tests {
         assert!(!branch_removed);
         assert!(!open.exists());
         assert!(has_branch(&clone, &open_branch), "its commit is on its branch alone");
+    }
+
+    /// A clone's agents' worktrees are listed with how each stands: one whose work landed on
+    /// `main` by patch is merged; one squash-merged on the forge at its tip is merged as gh
+    /// says, though a commit is ahead by patch; one with a commit `main` lacks is not; one with a
+    /// file not committed, or with a terminal in it, is merged but not for "Remove merged" to
+    /// take. A worktree outside `.claude/worktrees/` is no agent's and is not listed, and the
+    /// newest commit comes first.
+    #[tokio::test]
+    async fn a_clones_worktrees_are_listed_with_how_each_stands() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+
+        use crate::repo::commit::{Programs, apply};
+
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let (landed, landed_branch) = agent_tree(&clone, "landed");
+        let (open, _) = agent_tree(&clone, "open");
+        let (dirty, dirty_branch) = agent_tree(&clone, "dirty");
+        let (busy, busy_branch) = agent_tree(&clone, "busy");
+        let (squashed, squashed_branch) = agent_tree(&clone, "squashed");
+        // Two commits squashed into one leave no patch `git cherry` matches.
+        std::fs::write(squashed.join("more.txt"), "more").expect("write");
+        git_in(&squashed, &["add", "."]);
+        git_in(&squashed, &["commit", "-q", "-m", "more"]);
+        for branch in [&landed_branch, &dirty_branch, &busy_branch] {
+            git_in(&clone, &["cherry-pick", branch]);
+        }
+        git_in(&clone, &["merge", "-q", "--squash", &squashed_branch]);
+        git_in(&clone, &["commit", "-q", "-m", "Squashed (#7)"]);
+        std::fs::write(dirty.join("draft.txt"), "half done").expect("write");
+        std::fs::create_dir_all(busy.join("src")).expect("mkdir");
+        let elsewhere = tmp.path().join("elsewhere").to_string_lossy().into_owned();
+        git_in(&clone, &["worktree", "add", "-q", "-b", "elsewhere", &elsewhere, "main"]);
+        std::fs::write(tmp.path().join("tip"), git_in(&squashed, &["rev-parse", "HEAD"]))
+            .expect("write");
+        let gh = stand_in_gh(tmp.path());
+        std::fs::write(tmp.path().join("state"), "MERGED").expect("write");
+        let programs = Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None };
+
+        let at = clone.to_string_lossy().into_owned();
+        let listed = apply(&programs, &at, GitOp::Worktrees, &[busy.join("src")]).await;
+        let GitOutcome::Done(GitDone::Worktrees(listed)) = listed else {
+            panic!("not listed: {listed:?}")
+        };
+        let real =
+            |p: &Path| std::fs::canonicalize(p).expect("there").to_string_lossy().into_owned();
+        assert_eq!(listed.clone, real(&clone));
+        assert_eq!(listed.more, 0);
+        let newest_first = listed.list.is_sorted_by(|a, b| a.committed >= b.committed);
+        assert!(newest_first, "the newest commit first: {:?}", listed.list);
+        let by = |tree: &Path| {
+            let path = real(tree);
+            let found = listed.list.iter().find(|w| w.path == path).cloned();
+            found.unwrap_or_else(|| panic!("{path} not in {:?}", listed.list))
+        };
+        let stands = |tree: &Path| {
+            let w = by(tree);
+            (w.merged, w.ahead, w.changed, w.busy, w.removable())
+        };
+        assert_eq!(stands(&landed), (true, 0, 0, false, true), "landed by patch");
+        assert_eq!(by(&landed).branch.as_deref(), Some(landed_branch.as_str()));
+        assert_eq!(stands(&open), (false, 1, 0, false, false), "a commit main lacks");
+        assert_eq!(stands(&dirty), (true, 0, 1, false, false), "a file not committed");
+        assert_eq!(stands(&busy), (true, 0, 0, true, false), "a terminal works in it");
+        let squashed_stands = stands(&squashed);
+        assert_eq!(squashed_stands, (true, 2, 0, false, true), "merged at its tip, as gh says");
+        assert_eq!(listed.list.len(), 5, "the worktree elsewhere is no agent's");
+        assert!(by(&landed).committed > 0);
+        let asked = std::fs::read_to_string(tmp.path().join("asked")).expect("asked");
+        let mut asked_in: Vec<&str> = asked.lines().filter_map(|l| l.split(": ").next()).collect();
+        asked_in.sort_unstable();
+        let mut want = [real(&open), real(&squashed)];
+        want.sort_unstable();
+        assert_eq!(asked_in, want, "the forge is asked only where the commits leave it open");
     }
 }

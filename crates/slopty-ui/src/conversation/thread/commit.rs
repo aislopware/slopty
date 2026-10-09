@@ -1155,7 +1155,8 @@ impl CommitSheet {
                 | GitOp::PullStatus
                 | GitOp::PullComments { .. }
                 | GitOp::Changes { .. }
-                | GitOp::Branches => return None,
+                | GitOp::Branches
+                | GitOp::Worktrees => return None,
             };
             return Some(self.quiet("commit-busy", words).into_any_element());
         }

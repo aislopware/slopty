@@ -224,9 +224,13 @@ pub async fn git_op(
         GitOp::RemoveWorktree => "remove worktree",
         GitOp::Branches => "branches",
         GitOp::PullComments { .. } => "pull request comments",
+        GitOp::Worktrees => "worktrees",
     };
-    let terminals =
-        if matches!(op, GitOp::RemoveWorktree) { terminal_dirs(worker).await } else { Vec::new() };
+    let terminals = if matches!(op, GitOp::RemoveWorktree | GitOp::Worktrees) {
+        terminal_dirs(worker).await
+    } else {
+        Vec::new()
+    };
     let outcome = slopty_worker::repo::commit::apply(
         &slopty_worker::repo::commit::Programs::here(),
         &repo,

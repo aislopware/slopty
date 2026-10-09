@@ -5,8 +5,8 @@
 #[cfg(test)]
 mod golden_git {
     use slopty_proto::git::{
-        Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck,
-        PullComments, PullNote, PullStatus, PullThread,
+        AgentWorktree, Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus,
+        PullCheck, PullComments, PullNote, PullStatus, PullThread, Worktrees,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
@@ -111,6 +111,7 @@ mod golden_git {
         snap("client_git_remove_worktree", &free);
         snap("client_git_branches", &ask(10, GitOp::Branches));
         snap("client_git_pull_comments", &ask(11, GitOp::PullComments { number: 7 }));
+        snap("client_git_worktrees", &ask(12, GitOp::Worktrees));
     }
 
     #[test]
@@ -178,6 +179,25 @@ mod golden_git {
             more: 3,
         }));
         snap("worker_git_branches", &done(10, GitOutcome::Done(branches)));
+        let tree = |name: &str, merged: bool, changed: u32, busy: bool| AgentWorktree {
+            path: format!("/Users/ada/src/demo/.claude/worktrees/{name}"),
+            branch: Some(format!("worktree-{name}")),
+            changed,
+            busy,
+            ahead: u32::from(!merged),
+            merged,
+            committed: 1_700_000_300,
+        };
+        let worktrees = GitDone::Worktrees(Box::new(Worktrees {
+            clone: "/Users/ada/src/demo".to_owned(),
+            list: vec![
+                tree("fix-login", true, 0, false),
+                tree("draft", true, 2, true),
+                AgentWorktree { branch: None, ..tree("open", false, 0, false) },
+            ],
+            more: 1,
+        }));
+        snap("worker_git_worktrees", &done(12, GitOutcome::Done(worktrees)));
         let note = |author: &str, body: &str| PullNote {
             author: author.to_owned(),
             body: body.to_owned(),

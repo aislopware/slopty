@@ -26,6 +26,9 @@ pub const CHECKS_MAX: usize = 200;
 /// The most branches a listing names, the newest first; the rest are counted
 /// ([`Branches::more`]).
 pub const BRANCHES_MAX: usize = 500;
+/// The most worktrees a listing names, the newest commit first; the rest are counted
+/// ([`Worktrees::more`]).
+pub const WORKTREES_MAX: usize = 200;
 /// The most review threads a pull request's comments name; the rest are counted
 /// ([`PullComments::more`]).
 pub const COMMENTS_MAX: usize = 100;
@@ -99,6 +102,12 @@ pub enum GitOp {
         /// Its number.
         number: u32,
     },
+    /// The agents' worktrees of the clone the folder is in or of, under its
+    /// `.claude/worktrees/`, each with its state ([`GitDone::Worktrees`]): what is not
+    /// committed in it, whether a terminal works in it, and whether its work has landed. Nothing
+    /// is fetched or moved; a pull request is asked of the forge only for a branch whose commits
+    /// alone do not say it landed.
+    Worktrees,
 }
 
 /// What a [`GitOp`] did.
@@ -155,6 +164,8 @@ pub enum GitDone {
     Branches(Box<Branches>),
     /// A pull request's review still open.
     PullComments(Box<PullComments>),
+    /// The agents' worktrees of a clone.
+    Worktrees(Box<Worktrees>),
 }
 
 /// The branches of a repository, as a start offers them for a new worktree's base.
@@ -185,6 +196,47 @@ pub struct Branch {
     /// When its newest commit was made, the later of the two where both have it: seconds since
     /// the Unix epoch, as git keeps them.
     pub committed: i64,
+}
+
+/// The agents' worktrees of a clone, each with its state.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Worktrees {
+    /// The clone's root.
+    pub clone: String,
+    /// Each worktree, the newest commit first, at most [`WORKTREES_MAX`].
+    pub list: Vec<AgentWorktree>,
+    /// How many more there are.
+    pub more: u32,
+}
+
+/// One agent's worktree and how it stands.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AgentWorktree {
+    /// Where it is: the path [`GitOp::RemoveWorktree`] is asked in.
+    pub path: String,
+    /// The branch it has checked out; none on a detached `HEAD`.
+    pub branch: Option<String>,
+    /// How many files in it are not committed, new ones too.
+    pub changed: u32,
+    /// A terminal works in it.
+    pub busy: bool,
+    /// Its commits not yet in `origin`'s default branch or the one the clone has checked out,
+    /// by patch, as `git cherry` reads them.
+    pub ahead: u32,
+    /// Its work has landed: no commit is ahead, or its pull request merged at the commit it
+    /// ends at, as the forge says. A removal then takes its branch too.
+    pub merged: bool,
+    /// When its newest commit was made: seconds since the Unix epoch, as git keeps them.
+    pub committed: i64,
+}
+
+impl AgentWorktree {
+    /// Whether "Remove merged" takes it: its work landed, nothing in it is not committed, and
+    /// no terminal works in it.
+    #[must_use]
+    pub const fn removable(&self) -> bool {
+        self.merged && self.changed == 0 && !self.busy
+    }
 }
 
 /// A pull request's review still open: what its agent is to address.

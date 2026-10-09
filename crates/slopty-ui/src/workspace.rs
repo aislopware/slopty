@@ -2153,7 +2153,10 @@ impl gpui::Render for WorkspaceView {
                 el.on_action(cx.listener(Self::move_to_project))
                     .on_action(cx.listener(Self::move_to_project_of))
             })
-            .when(applies.changes, |el| el.on_action(cx.listener(Self::review_changes)))
+            .when(applies.changes, |el| {
+                el.on_action(cx.listener(Self::review_changes))
+                    .on_action(cx.listener(Self::remove_merged))
+            })
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
             .when(applies.screen, |el| {

@@ -184,3 +184,143 @@ fn the_exited_thread_and_the_folder_in_a_worktree_offer_its_removal(cx: &mut Tes
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
 }
+
+/// One of the clone's worktrees as the worker lists it.
+fn listed(name: &str, merged: bool, changed: u32) -> slopty_proto::git::AgentWorktree {
+    slopty_proto::git::AgentWorktree {
+        path: format!("/w/atlas/.claude/worktrees/{name}"),
+        branch: Some(format!("worktree-{name}")),
+        changed,
+        busy: false,
+        ahead: u32::from(!merged),
+        merged,
+        committed: 1,
+    }
+}
+
+/// "Remove merged worktrees", offered in a folder of a clone, lists the clone's worktrees and
+/// asks to remove each merged one that is clean, with no terminal and no live agent in it; a
+/// merged one with changes not committed, or a live agent's, is passed over, and one not merged
+/// is left alone. Once every removal is answered, one notice says what went and what stayed,
+/// and the folder tile in the worktree that went closes.
+#[gpui::test]
+fn remove_merged_takes_only_the_landed_worktrees_nothing_works_in(cx: &mut TestAppContext) {
+    use slopty_proto::git::Worktrees;
+
+    use crate::workspace::actions::RemoveMerged;
+    use crate::workspace::worktrees::REMOVE_MERGED;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.cwd = "/w/atlas/.claude/worktrees/agent-busy".to_owned();
+    let rows = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &rows, cx));
+    let gone = ItemKind::Folder { path: "/w/atlas/.claude/worktrees/landed/src".into() };
+    let gone = arrives(&view, cx, &studio, gone, 1);
+    let clone = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(clone, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let offered = view.update_in(cx, |v, window, cx| v.offered_lines(window, cx));
+    assert!(offered.iter().any(|l| l.label == REMOVE_MERGED), "in a clone's folder");
+
+    studio.drain();
+    cx.dispatch_action(RemoveMerged);
+    cx.run_until_parked();
+    let asked: Vec<_> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Git { request, repo, op: GitOp::Worktrees } => Some((request, repo)),
+            _ => None,
+        })
+        .collect();
+    let [(request, repo)] = asked.as_slice() else { panic!("one listing: {asked:?}") };
+    assert_eq!(repo, "/w/atlas");
+    let list = vec![
+        listed("landed", true, 0),
+        listed("agent-busy", true, 0),
+        listed("draft", true, 2),
+        listed("open", false, 0),
+    ];
+    let worktrees = Worktrees { clone: "/w/atlas".to_owned(), list, more: 0 };
+    let done = GitOutcome::Done(GitDone::Worktrees(Box::new(worktrees)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    cx.run_until_parked();
+    let asked = removals(&mut studio);
+    let [(request, repo)] = asked.as_slice() else { panic!("one removal: {asked:?}") };
+    assert_eq!(repo, "/w/atlas/.claude/worktrees/landed", "only the one free to go");
+
+    let done = GitOutcome::Done(GitDone::WorktreeRemoved {
+        branch: Some("worktree-landed".to_owned()),
+        branch_removed: true,
+    });
+    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    cx.run_until_parked();
+    let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert_eq!(told, "Removed 1 merged worktree; 2 worktrees in use or not committed");
+    let closed: Vec<ItemOp> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(op @ ItemOp::Remove(_)) => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closed, [ItemOp::Remove(gone.item)], "the folder in the worktree that went");
+}
+
+/// A sweep with nothing merged to take says so at once and asks nothing to go; a listing the
+/// worker refused says why.
+#[gpui::test]
+fn remove_merged_says_when_there_is_nothing_to_take(cx: &mut TestAppContext) {
+    use slopty_proto::git::Worktrees;
+
+    use crate::workspace::actions::RemoveMerged;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let clone = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(clone, cx));
+    cx.run_until_parked();
+    let mut ask = |cx: &mut VisualTestContext| {
+        studio.drain();
+        cx.dispatch_action(RemoveMerged);
+        cx.run_until_parked();
+        let asked: Vec<RequestId> = studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Git { request, op: GitOp::Worktrees, .. } => Some(request),
+                _ => None,
+            })
+            .collect();
+        let [request] = asked.as_slice() else { panic!("one listing: {asked:?}") };
+        *request
+    };
+
+    let request = ask(cx);
+    let list = vec![listed("open", false, 0)];
+    let worktrees = Worktrees { clone: "/w/atlas".to_owned(), list, more: 0 };
+    let done = GitOutcome::Done(GitDone::Worktrees(Box::new(worktrees)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, request, done, cx));
+    cx.run_until_parked();
+    let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert_eq!(told, "No merged worktree to remove");
+
+    let request = ask(cx);
+    let refused = GitOutcome::Refused { why: "/w/atlas is in no git repository".to_owned() };
+    view.update_in(cx, |v, _w, cx| v.git_done(key, request, refused, cx));
+    cx.run_until_parked();
+    let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert_eq!(told, "The worktrees could not be listed: /w/atlas is in no git repository");
+}
