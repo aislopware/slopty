@@ -26,6 +26,13 @@ pub const CHECKS_MAX: usize = 200;
 /// The most branches a listing names, the newest first; the rest are counted
 /// ([`Branches::more`]).
 pub const BRANCHES_MAX: usize = 500;
+/// The most review threads a pull request's comments name; the rest are counted
+/// ([`PullComments::more`]).
+pub const COMMENTS_MAX: usize = 100;
+/// The most notes of one review thread kept: the first, where the ask is, and the replies after.
+pub const NOTES_MAX: usize = 20;
+/// The longest note kept, in bytes: its start.
+pub const NOTE_MAX: usize = 4000;
 
 /// What to do in the repository.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -85,6 +92,13 @@ pub enum GitOp {
     /// the newest commit first ([`GitDone::Branches`]). Nothing is fetched; it lists what the
     /// clone knows.
     Branches,
+    /// The review still open on pull request `number`, as the forge's own command line reads it
+    /// ([`GitDone::PullComments`]): its review threads not resolved, and the last words of each
+    /// reviewer whose latest review asked for changes or commented. Nothing on the forge moves.
+    PullComments {
+        /// Its number.
+        number: u32,
+    },
 }
 
 /// What a [`GitOp`] did.
@@ -139,6 +153,8 @@ pub enum GitDone {
     },
     /// The branches a new worktree could start from.
     Branches(Box<Branches>),
+    /// A pull request's review still open.
+    PullComments(Box<PullComments>),
 }
 
 /// The branches of a repository, as a start offers them for a new worktree's base.
@@ -169,6 +185,43 @@ pub struct Branch {
     /// When its newest commit was made, the later of the two where both have it: seconds since
     /// the Unix epoch, as git keeps them.
     pub committed: i64,
+}
+
+/// A pull request's review still open: what its agent is to address.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PullComments {
+    /// The pull request's number.
+    pub number: u32,
+    /// Each reviewer's open word, then each review thread not resolved, in the forge's order;
+    /// at most [`COMMENTS_MAX`].
+    pub threads: Vec<PullThread>,
+    /// How many more threads there are.
+    pub more: u32,
+}
+
+/// One open point of a review: a thread on a line of a file, or a reviewer's own words over
+/// their review.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PullThread {
+    /// The file it is on, from the repository's root; none for a review's own words.
+    pub path: Option<String>,
+    /// The line of the file's new side it is on, when the forge says.
+    pub line: Option<u32>,
+    /// The code it was on has changed since.
+    pub outdated: bool,
+    /// Its page.
+    pub url: Option<String>,
+    /// What was said, the first note first; at most [`NOTES_MAX`].
+    pub notes: Vec<PullNote>,
+}
+
+/// One note of a review thread.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PullNote {
+    /// Who wrote it, as the forge names them.
+    pub author: String,
+    /// What they wrote, at most [`NOTE_MAX`] bytes.
+    pub body: String,
 }
 
 /// Where a repository's pull requests live, as its `origin`'s host says: a GitLab host's are

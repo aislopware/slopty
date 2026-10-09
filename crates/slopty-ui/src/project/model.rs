@@ -13,31 +13,34 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::Review;
+use slopty_proto::git::Forge;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Checks, ChecksState, Fact, Merge, Native, NativeChange, NativeCounts, Natives, Project,
-    ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId,
-    TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
+    Fact, Merge, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
+    ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    TimelineEntry, VerifierRun, WorkerFacts,
 };
+use slopty_proto::thread::wire::{PullSeen, PullStands};
 
-/// `card`'s pull request as a row says it, with its own checks and its review, and whether
-/// either holds the merge back.
+/// `card`'s pull request as a row says it, and whether it holds the merge back: a check failed,
+/// changes were asked for, or it conflicts.
 #[must_use]
 pub fn pull_words(card: &TaskCard) -> Option<(String, bool)> {
-    let pr = card.pr.as_ref()?;
-    let asked = pr.review == Some(Review::ChangesRequested);
-    let checks = card.checks.as_ref().and_then(checks_words);
-    let mut words = format!("PR #{}", pr.number);
-    if let Some((checks, _)) = &checks {
-        words.push_str(", ");
-        words.push_str(checks);
+    let pull = card.pull.as_ref()?;
+    Some((format!("{} {}", short(pull.forge), pull.line()), pull.stands.needs_you()))
+}
+
+/// What a request is called on a chip: "PR", a merge request's "MR".
+const fn short(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => "PR",
+        Forge::GitLab => "MR",
     }
-    if asked {
-        words.push_str(", changes requested");
-    }
-    let failing = checks.is_some_and(|(_, failing)| failing);
-    Some((words, failing || asked))
+}
+
+/// Whether a pull request still open has a failed check: CI to fix.
+const fn checks_fail(pull: &PullSeen) -> bool {
+    pull.failed > 0 && !matches!(pull.stands, PullStands::Merged | PullStands::Closed)
 }
 
 /// Where `merge` put a task, as its row says it; `None` until it merged.
@@ -56,24 +59,19 @@ pub fn merged_words(merge: &Merge, piped: bool) -> Option<String> {
 }
 
 /// A pull request's checks as its row says them, in neutral words, and whether one failed;
-/// none when it has none.
-fn checks_words(checks: &Checks) -> Option<(String, bool)> {
-    let all = checks.passed.saturating_add(checks.failed).saturating_add(checks.pending);
-    Some(match checks.state {
-        ChecksState::None => return None,
-        ChecksState::Pending => (format!("{} of {all} checks running", checks.pending), false),
-        ChecksState::Passing => ("checks pass".to_owned(), false),
-        ChecksState::Failing => (format!("{} of {all} checks fail", checks.failed), true),
-        ChecksState::Unknown => (unknown_words(checks), false),
-    })
-}
-
-/// Checks that could not be read, as a row says them: why, in the forge's first line.
-fn unknown_words(checks: &Checks) -> String {
-    match checks.why.as_deref().map(crate::kit::first_line).filter(|w| !w.trim().is_empty()) {
-        Some(why) => format!("checks unknown: {why}"),
-        None => "checks unknown".to_owned(),
+/// none while none failed or runs.
+fn checks_words(pull: &PullSeen) -> Option<(String, bool)> {
+    let plural = |n: u32| if n == 1 { "check" } else { "checks" };
+    if checks_fail(pull) {
+        let words = match (&pull.failed_first, pull.failed) {
+            (Some(first), 1) => format!("{first} failed"),
+            (Some(first), n) => format!("{first} and {} more failed", n.saturating_sub(1)),
+            (None, n) => format!("{n} {} failed", plural(n)),
+        };
+        return Some((words, true));
     }
+    let running = pull.running;
+    (running > 0).then(|| (format!("{running} {} running", plural(running)), false))
 }
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
@@ -728,13 +726,13 @@ impl Board {
         let failed = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
         let live = self.terminal(Some(task)).is_some();
         let mut out = Vec::new();
-        let checks_fail = card.checks.as_ref().is_some_and(|c| c.state == ChecksState::Failing);
+        let checks_fail = card.pull.as_ref().is_some_and(checks_fail);
         let fix_ci = live && (self.verdict(task).is_some_and(|r| !r.passed) || checks_fail);
         if fix_ci {
             out.push(TaskAction::FixCi);
         }
         let review_asked =
-            card.pr.as_ref().is_some_and(|pr| pr.review == Some(Review::ChangesRequested));
+            card.pull.as_ref().is_some_and(|p| p.stands == PullStands::ChangesRequested);
         if live && review_asked {
             out.push(TaskAction::AddressComments);
         }
@@ -799,12 +797,16 @@ impl Board {
                         short_commit(&run.head)
                     ));
                 }
-                let checks = card.checks.as_ref().filter(|c| c.state == ChecksState::Failing);
-                if let (Some(checks), Some(pr)) = (checks, card.pr.as_ref()) {
-                    let names = checks.failing.join(", ");
+                if let Some(pull) = card.pull.as_ref().filter(|p| checks_fail(p)) {
+                    let (which, _) = checks_words(pull).unwrap_or_default();
+                    let shows = match pull.forge {
+                        Forge::GitHub => format!("gh pr checks {}", pull.number),
+                        Forge::GitLab => format!("glab mr view {}", pull.number),
+                    };
                     failed.push(format!(
-                        "Pull request #{}'s checks failed: {names}. `gh pr checks {}` shows them.",
-                        pr.number, pr.number
+                        "{} {}: {which}. `{shows}` shows them.",
+                        pull.forge.title(),
+                        pull.named()
                     ));
                 }
                 if failed.is_empty() {
@@ -814,12 +816,14 @@ impl Board {
             }
             TaskAction::AddressComments => {
                 let mut lines = vec!["Address the review's comments.".to_owned()];
-                if let Some(pr) =
-                    card.pr.as_ref().filter(|pr| pr.review == Some(Review::ChangesRequested))
+                if let Some(pull) =
+                    card.pull.as_ref().filter(|p| p.stands == PullStands::ChangesRequested)
                 {
                     lines.push(format!(
-                        "Pull request #{} has changes requested: {}",
-                        pr.number, pr.url
+                        "{} {} has changes requested: {}",
+                        pull.forge.title(),
+                        pull.named(),
+                        pull.url
                     ));
                 }
                 lines.push(format!("Then {then}"));
@@ -862,7 +866,7 @@ impl Board {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
         let on_its_way = card.verified.is_some()
             || card.merge.is_some()
-            || card.pr.is_some()
+            || card.pull.is_some()
             || matches!(card.state, TaskState::Verifying | TaskState::Done);
         let stage = |kind, words: String, holds| Stage { kind, words, holds, failed: false };
         let failure = |kind, words: String| Stage { kind, words, holds: true, failed: true };
@@ -904,16 +908,17 @@ impl Board {
         }
         // The pull request, its checks and its review apart, so a narrow lane wraps them
         // rather than cutting one long chip.
-        if let Some(pr) = &card.pr {
-            out.push(stage(StageKind::Pull, format!("PR #{}", pr.number), false));
-            if let Some((words, failing)) = card.checks.as_ref().and_then(checks_words) {
+        if let Some(pull) = &card.pull {
+            let named = format!("{} {}", short(pull.forge), pull.named());
+            out.push(stage(StageKind::Pull, named, false));
+            if let Some((words, failing)) = checks_words(pull) {
                 out.push(if failing {
                     failure(StageKind::Checks, words)
                 } else {
                     stage(StageKind::Checks, words, false)
                 });
             }
-            if pr.review == Some(Review::ChangesRequested) {
+            if pull.stands == PullStands::ChangesRequested {
                 out.push(stage(StageKind::PullReview, "Changes requested".to_owned(), true));
             }
         }

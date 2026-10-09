@@ -213,3 +213,51 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     lease.handle(snapshot(vec![claude_root, third]));
     assert_eq!(natives().await.len(), 2, "no native from a hooked agent's rows");
 }
+
+/// A Codex task's card carries its pull request as its thread's row names it, read from the
+/// forge by the worker's one watcher: no status line and no second read. A failed check is on
+/// the card, where the board offers Fix CI, and on the timeline once, where the project tells
+/// the person; the same row again says nothing new.
+#[tokio::test]
+async fn a_codex_task_s_card_shows_its_thread_s_failing_pull_request() {
+    use slopty_proto::project::Moment;
+    use slopty_proto::thread::wire::PullStands;
+
+    use super::ladder::tests::pull_seen;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    lease.handle(ToServer::Facts(installed(&["codex"])));
+    create(&hub, None).await;
+    let task = new_task(&hub, None).await;
+    let codex = AgentId::named(AgentId::CODEX);
+    let asked = spawn(
+        &hub,
+        Verb::TaskSpawn { project: project(), task, launch: as_thread(codex.clone(), &[]) },
+    );
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    let thread = ThreadId::new();
+    answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let mut seated = row(Phase::Idle, 1, None);
+    seated.id = thread;
+    seated.agent = codex;
+    seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    lease.handle(snapshot(vec![seated.clone()]));
+    assert_eq!(card(&hub, task).await.pull, None, "no pull request yet");
+
+    let failing = pull_seen(PullStands::ChecksFailed);
+    seated.pull = Some(failing.clone());
+    for _ in 0..2 {
+        lease.handle(snapshot(vec![seated.clone()]));
+    }
+    let shown = card(&hub, task).await.pull.expect("its pull request");
+    assert_eq!((shown.stands, shown.line()), (PullStands::ChecksFailed, "#42: lint failed".into()));
+    let timeline = status(&hub).await.timeline;
+    let said: Vec<_> = timeline.iter().filter(|e| matches!(e.what, Moment::Pull(_))).collect();
+    assert_eq!(said.len(), 1, "told once: {said:?}");
+    assert_eq!(said[0].what, Moment::Pull(failing));
+    assert_eq!(said[0].task, Some(task));
+}

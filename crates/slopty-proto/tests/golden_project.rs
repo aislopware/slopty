@@ -8,9 +8,10 @@ mod golden_project {
     use std::collections::BTreeMap;
 
     use slopty_core::{SessionId, WallMs, WorkerId};
-    use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
+    use slopty_proto::agent::{AgentBranch, Worktree};
     use slopty_proto::codec;
     use slopty_proto::folder::FsOp;
+    use slopty_proto::git::Forge;
     use slopty_proto::orchestration::{
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
@@ -23,7 +24,7 @@ mod golden_project {
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
-    use slopty_proto::thread::wire::{NewWorktree, Start};
+    use slopty_proto::thread::wire::{NewWorktree, PullSeen, PullStands, Start};
     use slopty_proto::thread::{AgentId, ThreadId};
     use uuid::Uuid;
 
@@ -106,7 +107,6 @@ mod golden_project {
     fn task() -> Task {
         let s = spec();
         Task {
-            checks: None,
             spent: Spent {
                 active_ms: 754_000,
                 since_ms: Some(WallMs::from_millis(1_790_000_004_500)),
@@ -133,12 +133,7 @@ mod golden_project {
             branch: Some("slopty/slopty/3".to_owned()),
             worktree: Some("/w/slopty-3".to_owned()),
             base: Some(commit('b')),
-            pr: Some(PullRequest {
-                number: 42,
-                url: "https://github.com/o/r/pull/42".to_owned(),
-                review: Some(Review::Pending),
-                merge_request: false,
-            }),
+            pull: Some(pull()),
             verified: Some(run(false, "clippy: 2 errors")),
             merge: Some(Merge::Queued { since_ms: at() }),
             created_ms: at(),
@@ -705,40 +700,6 @@ mod golden_project {
         snap("step_verify_commits", &verifying);
     }
 
-    /// A task's pull request's own checks: the read the server asks of the worker its agent
-    /// ran on, what the forge said, and the timeline's word when where they stand moved.
-    #[test]
-    fn pull_request_checks() {
-        use slopty_proto::project::{Checks, ChecksState};
-        snap(
-            "pull_checks",
-            &request(Verb::PullChecks {
-                worker: term().worker,
-                cwd: "/w/slopty/.claude/worktrees/slopty-slopty-3".to_owned(),
-                number: 42,
-                merge_request: false,
-            }),
-        );
-        let checks = Checks {
-            state: ChecksState::Failing,
-            passed: 6,
-            failed: 1,
-            pending: 0,
-            skipped: 2,
-            failing: vec!["clippy (macos)".to_owned()],
-            why: None,
-            at_ms: at(),
-        };
-        snap("outcome_checks", &reply(Outcome::Checks(checks.clone())));
-        let entry = TimelineEntry {
-            seq: 13,
-            at_ms: at(),
-            task: Some(TaskId(3)),
-            what: Moment::Checks(checks),
-        };
-        snap("moment_checks", &entry);
-    }
-
     /// What the server asks of workers for a task around its agent: a clone, a branch
     /// bundled, a bundle fetched; and how they answer.
     #[test]
@@ -830,6 +791,21 @@ mod golden_project {
         }
     }
 
+    /// A task's pull request with a failed check, as its thread's row says it.
+    fn pull() -> PullSeen {
+        PullSeen {
+            forge: Forge::GitHub,
+            number: 42,
+            url: "https://github.com/o/r/pull/42".to_owned(),
+            title: "Keep projects beside workers.json".to_owned(),
+            base: "main".to_owned(),
+            stands: PullStands::ChecksFailed,
+            failed: 2,
+            failed_first: Some("clippy (macos)".to_owned()),
+            running: 1,
+        }
+    }
+
     fn report() -> Report {
         Report {
             note: "Store keeps a log; gate passed.".to_owned(),
@@ -863,8 +839,9 @@ mod golden_project {
             Moment::TaskCreated { title: "Server store".to_owned() },
             Moment::Assigned { term: term(), spawned: false },
             Moment::State { from: TaskState::Planned, to: TaskState::Running },
-            Moment::Branch { branch: Some("slopty/slopty/3".to_owned()), pr: Some(42) },
+            Moment::Branch { branch: Some("slopty/slopty/3".to_owned()) },
             Moment::Verified(run(true, "gate passed")),
+            Moment::Pull(pull()),
             Moment::AgentGone { term: term() },
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
@@ -932,7 +909,6 @@ mod golden_project {
             "report_branch",
             &ToServer::Report(AgentReport::Branch(AgentBranch {
                 session,
-                pr: None,
                 worktree: Some(Worktree {
                     name: "rows".to_owned(),
                     path: "/w/.claude/worktrees/rows".to_owned(),

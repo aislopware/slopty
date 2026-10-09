@@ -418,8 +418,7 @@ fn pull(number: u32, stands: PullStands) -> PullSeen {
 /// An agent's pull request rides on its tile's header as its thread's row says it, for every
 /// agent alike: its glyph by where it stands, its number, its line for a screen reader, a click
 /// away from its page; its worktree beside it; its navigator row says it as well. Replaced by
-/// each row from the worker, and gone with the agent. A pull request Claude Code's status line
-/// names is not a second source: the chip waits for the thread's row.
+/// each row from the worker, and gone with the agent.
 #[gpui::test]
 fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -430,7 +429,6 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
     state.meta.terminal = Some(session);
     let worktree = AgentBranch {
         session,
-        pr: None,
         worktree: Some(Worktree {
             name: "fix-build".to_owned(),
             path: "/r/.claude/worktrees/fix-build".to_owned(),
@@ -439,18 +437,6 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
             original_branch: Some("main".to_owned()),
         }),
     };
-    let named = slopty_proto::agent::PullRequest {
-        number: 99,
-        url: "https://github.com/o/r/pull/99".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    let status_line = AgentBranch { pr: Some(named), ..worktree.clone() };
-    view.update_in(cx, |v, _w, cx| v.agent_branch(status_line, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "no agent, no chip");
-    pulled(&view, cx, studio.key, Some((&state, None)));
-    assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "the status line's is not one");
     view.update_in(cx, |v, _w, cx| v.agent_branch(worktree, cx));
     cx.run_until_parked();
 
@@ -470,6 +456,7 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
 
     pulled(&view, cx, studio.key, Some((&state, Some(pull(7, PullStands::ChecksFailed)))));
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a new one");
+
     pulled(&view, cx, studio.key, None);
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "gone with the agent");
 }

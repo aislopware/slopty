@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_agent::vouch::SessionKey;
-use slopty_proto::agent::{AgentKind, PullRequest, Worktree};
+use slopty_proto::agent::{AgentKind, Worktree};
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
     Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV, TaskCard,
     TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
+use slopty_proto::thread::wire::{PullStands, TableFrame};
 
 use super::tests::{caps, registration, summary};
 use super::*;
@@ -515,7 +516,6 @@ async fn a_worker_s_reported_facts_are_shown_under_the_server_s() {
 /// The worker's table moving the thread of the agent in `session` to where `status` says, as
 /// its codec maps a hook's word into the row: an agent gone takes its row with it.
 pub(super) fn agent(session: SessionId, status: &AgentStatus) -> ToServer {
-    use slopty_proto::thread::wire::TableFrame;
     use slopty_proto::thread::{Cursor, Phase, Request, ThreadId, Wait};
     let thread = ThreadId::from_uuid(*session.as_uuid());
     let cursor = Cursor::default();
@@ -553,8 +553,8 @@ pub(super) fn agent(session: SessionId, status: &AgentStatus) -> ToServer {
 }
 
 /// What the worker's link says of an agent reaches its task: the worktree its status line
-/// named before the agent was put on the task, a pull request after, Claude Code's own
-/// subagent as a child node, a block, and at last its terminal closing.
+/// named before the agent was put on the task, the pull request its thread's row names after,
+/// Claude Code's own subagent as a child node, a block, and at last its terminal closing.
 #[tokio::test]
 async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -568,7 +568,7 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
         original_cwd: "/w".to_owned(),
         original_branch: Some("main".to_owned()),
     };
-    let branch = AgentBranch { session, pr: None, worktree: Some(worktree) };
+    let branch = AgentBranch { session, worktree: Some(worktree) };
     lease.handle(ToServer::Report(AgentReport::Branch(branch.clone())));
     create(&hub, None).await;
     let task = new_task(&hub, None).await;
@@ -577,23 +577,24 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
     };
     assert_eq!(assigned.worktree.as_deref(), Some("/w/.claude/worktrees/rows"));
 
-    let pr = PullRequest {
-        number: 9,
-        url: "https://github.com/o/r/pull/9".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    lease.handle(ToServer::Report(AgentReport::Branch(AgentBranch { pr: Some(pr), ..branch })));
     lease.handle(ToServer::Report(AgentReport::SubagentStarted {
         session,
         agent: "ag1".to_owned(),
         kind: "Explore".to_owned(),
     }));
     let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-    lease.handle(agent(session, &blocked));
+    let ToServer::Threads(TableFrame::Delta { cursor, mut rows, removed }) =
+        agent(session, &blocked)
+    else {
+        panic!("its row")
+    };
+    for row in &mut rows {
+        row.pull = Some(ladder::tests::pull_seen(PullStands::Waiting));
+    }
+    lease.handle(ToServer::Threads(TableFrame::Delta { cursor, rows, removed }));
     let s = status(&hub).await;
     let t = s.tasks.first().unwrap();
-    assert_eq!(t.pr.as_ref().map(|p| p.number), Some(9));
+    assert_eq!(t.pull.as_ref().map(|p| p.number), Some(42));
     assert_eq!(t.natives.agents, 1, "counted on its card");
     let Outcome::Node(node) =
         hub.dispatch(Verb::TaskGet { project: project(), task: Some(task) }).await

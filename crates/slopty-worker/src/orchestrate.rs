@@ -547,8 +547,7 @@ impl Orchestrator {
             | Verb::Rebase { .. }
             | Verb::TestDiff { .. }
             | Verb::FastForward { .. }
-            | Verb::RemoveWorktree { .. }
-            | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::RemoveWorktree { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
                 let threads = inner.task_threads.get().cloned().ok_or_else(|| {
@@ -992,22 +991,6 @@ impl Orchestrator {
                         .map_err(|f| verify_failure(&f))?;
                 let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
                 Ok(Outcome::FastForwarded { head, pushed, push_failed })
-            }
-            Verb::PullChecks { worker, cwd, number, merge_request } => {
-                self.mine(worker)?;
-                let cwd = crate::file::expand_home(Path::new(&cwd));
-                crate::repo::checks::read(&cwd, number, merge_request)
-                    .await
-                    .map(Outcome::Checks)
-                    .map_err(|failed| match failed {
-                        crate::repo::checks::Failed::Missing(program) => Failure::new(
-                            ErrorCode::Unsupported,
-                            format!("this worker has no {program}"),
-                        ),
-                        crate::repo::checks::Failed::Said(why) => {
-                            Failure::new(ErrorCode::Failed, why)
-                        }
-                    })
             }
             Verb::RemoveWorktree { worker, worktree, landed } => {
                 self.mine(worker)?;

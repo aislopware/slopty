@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use gpui::accesskit::{Node as AkNode, NodeId};
-use slopty_proto::agent::{AgentBranch, PullRequest, Worktree};
+use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::folder::{FolderEntry, Listing};
 use slopty_proto::orchestration::FileKind;
 use slopty_proto::thread::Cursor;
@@ -145,12 +145,6 @@ fn agent_with_chips(
     let tile = opens(view, cx, fake, session, fake.me, 1);
     let branch = AgentBranch {
         session,
-        pr: Some(PullRequest {
-            number: 12_345,
-            url: "https://github.com/o/r/pull/12345".to_owned(),
-            review: None,
-            merge_request: false,
-        }),
         worktree: Some(Worktree {
             name: "responsive-tile-headers".to_owned(),
             path: "/r/.claude/worktrees/responsive-tile-headers".to_owned(),

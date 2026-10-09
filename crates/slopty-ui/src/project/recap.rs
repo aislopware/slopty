@@ -6,9 +6,8 @@
 //! board can say "Merged #4 and #6".
 
 use slopty_core::WallMs;
-use slopty_proto::project::{
-    ChecksState, Moment, StepKind, StepState, TaskId, TaskState, TimelineEntry,
-};
+use slopty_proto::project::{Moment, StepKind, StepState, TaskId, TaskState, TimelineEntry};
+use slopty_proto::thread::wire::PullStands;
 
 use super::model::Board;
 
@@ -81,7 +80,7 @@ impl RecapKind {
         match what {
             Moment::Verified(run) if !run.passed => Some(Self::VerifyFailed),
             Moment::Verified(_) => Some(Self::Verified),
-            Moment::Checks(checks) if checks.state == ChecksState::Failing => {
+            Moment::Pull(pull) if pull.stands == PullStands::ChecksFailed => {
                 Some(Self::ChecksFailed)
             }
             Moment::Step(step) => match (step.kind, &step.state) {

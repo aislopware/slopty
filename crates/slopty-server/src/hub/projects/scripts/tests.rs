@@ -140,7 +140,7 @@ async fn a_script_runs_in_the_project_s_folder_or_a_task_s_worktree() {
         original_cwd: "/w".to_owned(),
         original_branch: Some("main".to_owned()),
     };
-    let branch = AgentBranch { session: building, pr: None, worktree: Some(tree) };
+    let branch = AgentBranch { session: building, worktree: Some(tree) };
     lease.handle(ToServer::Report(AgentReport::Branch(branch)));
     let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: building });
     assert!(matches!(assigned, Outcome::Task(_)));

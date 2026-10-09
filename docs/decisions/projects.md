@@ -1217,6 +1217,10 @@ says no time, cost, context or plan figure.*
 
 ## A pull request's own checks, and the pipeline row (2026-10-02)
 
+The reading of checks below is superseded by "One pull request watcher" (2026-10-09): a task's
+card reads its thread's pull request, and `Hub::watch_checks`, `Verb::PullChecks` and
+`Checks` are gone. The pipeline row stands.
+
 - **Who reads them.** The server watches every task that has a pull request and is not merged
   or failed (`Hub::watch_checks`). It asks the worker its agent ran on, in that task's
   worktree, with `Verb::PullChecks`. The worker runs the person's own forge command:
@@ -1671,6 +1675,8 @@ N16)
   `task_merged_unpushed_card` and `task_push`.
 
 **Checks that cannot be read say why, and never hide a reading.** ✅ 2026-10-04 (readiness #16)
+- Superseded 2026-10-09 by "One pull request watcher": a forge that cannot answer leaves the
+  thread's last reading standing, on the worker.
 - A worker with no `gh` or `glab`, or one not signed in, used to leave a pull request whose
   checks never came, with nothing said.
 - `ChecksState::Unknown` with `Checks::why` (the worker's words, at most `CHECKS_WHY_MAX`)
@@ -2130,4 +2136,37 @@ reordering and edited allows are gone" in `agents.md`.*
     default.
   - Test: `repo::worktrees::a_worktree_of_a_pull_request_checks_out_its_head_and_tracks_it`
     (a fork's head and a branch's, one not there, a reopen). The thread table's goldens
+    changed.
+
+- ✅ **One pull request watcher** (2026-10-09, `.research/readiness-2026-10-08.md` R7). A
+  task's pull request was read twice over: the server polled each task's checks through its
+  worker (`Hub::watch_checks`, `Verb::PullChecks`, `repo::checks`), while the worker already
+  watched every thread's pull request (`thread::pulls`). The server learned a task had one only
+  from Claude Code's status line (`AgentBranch::pr`), so a Codex, pi or ACP task never showed
+  its pull request or offered Fix CI for it.
+  - *The card reads the thread.* `Task::pull` and `TaskCard::pull` are the `PullSeen` the
+    task's thread row carries, found by the seat its thread runs at (its terminal, or
+    `SEAT_FACT`): the hub takes each table frame and hands the rows' pull requests to
+    `Projects::pulls_seen`, which cuts them to a card's bounds (`PULL_MAX_BYTES`). Among
+    several threads at one seat, the latest to change speaks.
+  - *The timeline.* `Moment::Pull` is logged when a pull request is first seen and each time
+    its number or where it stands moves; its words alone, or its going away, change only the
+    card. A move to a failed check, changes asked for or a conflict is the project's notice
+    ("its pull request #42: lint failed"), and the recap says "Checks failed on". The thread's
+    own notice stays off for a task's agent, so the person hears it once.
+  - *The board.* Fix CI is offered while the task's agent runs and its open pull request has a
+    failed check, and the words name the first one with the forge's own command to see them
+    (`gh pr checks N`, `glab mr view N`). Address the comments follows `ChangesRequested`. The
+    pipeline says "PR #42" or "MR !42", the failure or how many still run.
+  - *Deleted*: `AgentBranch::pr`, `agent::PullRequest` and `Review`, the status line's `pr`
+    reading, `Checks`, `ChecksState` and their bounds, `Moment::Checks`, `Verb::PullChecks`,
+    `Outcome::Checks`, `repo::checks` (its `find` moved to `repo::commit`) and
+    `Hub::watch_checks`. `Moment::Branch` names the branch alone. A forge that cannot answer
+    leaves the thread's last reading standing, as the worker's watcher keeps it.
+  - Tests: `hub::thread_tests::a_codex_task_s_card_shows_its_thread_s_failing_pull_request`,
+    `project::tests::a_task_s_card_follows_its_thread_s_pull_request`,
+    `hub::ladder::tests::a_resting_thread_s_pull_request_lifts_it` (the project tells of a
+    task's failed check), `held_up_work_is_said_by_what_held_it`, and in `slopty-ui::project`
+    `a_task_s_pipeline_says_each_stage_and_its_open_to_dos` and
+    `running_checks_hold_nothing_and_a_merged_pull_request_asks_for_no_fix`. The project goldens
     changed.

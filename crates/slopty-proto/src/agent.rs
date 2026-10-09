@@ -13,42 +13,16 @@ pub enum AgentKind {
     ClaudeCode,
 }
 
-/// Where an agent's work lands, as its status line names it: the worktree it runs in and the
-/// pull request (or merge request) open for its branch.
+/// Where an agent's work lands, as its status line names it: the worktree it runs in.
+///
+/// Its branch's pull request is its thread's, which the worker reads from the forge
+/// ([`crate::thread::wire::ThreadRow::pull`]), never what the status line says of one.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct AgentBranch {
     /// The terminal session the agent runs in.
     pub session: SessionId,
-    /// The open pull request, when there is one.
-    pub pr: Option<PullRequest>,
     /// The worktree, when the agent runs in one Claude Code made (`--worktree`).
     pub worktree: Option<Worktree>,
-}
-
-/// A pull request, or a GitLab merge request.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PullRequest {
-    /// Its number.
-    pub number: u32,
-    /// Its page.
-    pub url: String,
-    /// Where its review stands, when the forge said.
-    pub review: Option<Review>,
-    /// A GitLab merge request rather than a GitHub pull request.
-    pub merge_request: bool,
-}
-
-/// Where a pull request's review stands.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Review {
-    /// Approved.
-    Approved,
-    /// Waiting on reviewers.
-    Pending,
-    /// Changes asked for.
-    ChangesRequested,
-    /// Still a draft.
-    Draft,
 }
 
 /// A worktree Claude Code made for a session.

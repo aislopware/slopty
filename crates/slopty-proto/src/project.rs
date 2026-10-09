@@ -22,9 +22,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
-use crate::agent::{AgentBranch, PullRequest};
+use crate::agent::AgentBranch;
 use crate::orchestration::{Size, TermRef};
 use crate::terminal::RepoId;
+use crate::thread::wire::PullSeen;
 
 /// The variable naming the server, `host[:port]`, in every session a worker runs: `slopty mcp`
 /// and the CLI inside it find the server with no flag.
@@ -135,12 +136,11 @@ pub const TIMELINE_PAGE_BYTES: usize = 1 << 20;
 pub const TIMELINE_BYTES_KEPT: usize = 8 << 20;
 /// The longest report note, in bytes.
 pub const NOTE_MAX: usize = SUMMARY_MAX;
-/// How many failing checks of a pull request a card names ([`Checks::failing`]).
-pub const CHECKS_NAMED: usize = 5;
-/// The longest name of a check a card keeps.
-pub const CHECK_NAME_MAX: usize = 128;
-/// The longest reason a pull request's checks could not be read ([`Checks::why`]), in bytes.
-pub const CHECKS_WHY_MAX: usize = 256;
+/// The most a card's pull request takes on the wire.
+///
+/// Its title, its page, its base and its first failed check are each cut by the server to
+/// [`TITLE_MAX`] or [`REF_MAX`] as it takes the thread's row in, with room for the rest.
+pub const PULL_MAX_BYTES: usize = TITLE_MAX + 3 * REF_MAX + 48;
 /// The most artifacts one [`Report`] names.
 pub const ARTIFACTS_MAX: usize = 32;
 
@@ -762,8 +762,9 @@ pub struct Task {
     /// The commit its work started from, in hex; kept in its worker's mirror as
     /// [`Task::base_ref`], so a diff, a verification again or a rebase outlives a restart.
     pub base: Option<String>,
-    /// The pull request open for its branch.
-    pub pr: Option<PullRequest>,
+    /// Its branch's pull request, as its thread's row last said it
+    /// ([`crate::thread::wire::ThreadRow::pull`]): one watcher, the worker's, reads the forge.
+    pub pull: Option<PullSeen>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
     /// Its place in the merge queue, or the merge that put its work on the target.
@@ -773,8 +774,6 @@ pub struct Task {
     pub step: Option<TaskStep>,
     /// How long its agents worked on it, idle waits left out.
     pub spent: Spent,
-    /// What its pull request's own checks last said, while it has one.
-    pub checks: Option<Checks>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
     /// When it last changed.
@@ -983,67 +982,6 @@ pub struct Spent {
     pub since_ms: Option<WallMs>,
 }
 
-/// What a pull request's own checks say, as its forge reports them (`gh pr checks`, a merge
-/// request's pipeline).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Checks {
-    /// Where they stand together.
-    pub state: ChecksState,
-    /// How many passed.
-    pub passed: u16,
-    /// How many failed or were cancelled.
-    pub failed: u16,
-    /// How many still run or wait to.
-    pub pending: u16,
-    /// How many were skipped.
-    pub skipped: u16,
-    /// The names of those that failed, at most [`CHECKS_NAMED`], each at most
-    /// [`CHECK_NAME_MAX`] bytes.
-    pub failing: Vec<String>,
-    /// Why they could not be read, for [`ChecksState::Unknown`]: the forge's command missing
-    /// or not signed in, in its words, at most [`CHECKS_WHY_MAX`] bytes.
-    pub why: Option<String>,
-    /// When the forge said so, by the server's clock.
-    pub at_ms: WallMs,
-}
-
-impl Checks {
-    /// The most it takes on the wire.
-    pub const MAX_BYTES: usize = CHECKS_NAMED * (CHECK_NAME_MAX + 2) + CHECKS_WHY_MAX + 44;
-
-    /// About how many bytes it takes on the wire, never less.
-    #[must_use]
-    pub fn approx_bytes(&self) -> usize {
-        self.failing
-            .iter()
-            .map(|n| n.len().saturating_add(10))
-            .fold(40, usize::saturating_add)
-            .saturating_add(self.why.as_deref().map_or(0, str::len))
-    }
-
-    /// Whether it says the same as `other`, whenever each was read.
-    #[must_use]
-    pub fn says_as(&self, other: &Self) -> bool {
-        Self { at_ms: other.at_ms, ..self.clone() } == *other
-    }
-}
-
-/// Where a pull request's checks stand together.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum ChecksState {
-    /// It has none.
-    None,
-    /// Some still run, and none has failed.
-    Pending,
-    /// Every one passed or was skipped.
-    Passing,
-    /// At least one failed.
-    Failing,
-    /// The forge could not be asked: its command is missing or not signed in on the machine
-    /// the work is on ([`Checks::why`]). Asked again later; nothing is known meanwhile.
-    Unknown,
-}
-
 /// What following an agent's status did to its [`Spent`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stretch {
@@ -1232,13 +1170,12 @@ impl Task {
             assignment: self.assignment.clone(),
             branch: self.branch.clone(),
             worktree: self.worktree.clone(),
-            pr: self.pr.clone(),
+            pull: self.pull.clone(),
             verified: self.verified.clone(),
             merge: self.merge.clone(),
             step: self.step.clone(),
             pin: self.pin,
             spent: self.spent,
-            checks: self.checks.clone(),
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
@@ -1276,8 +1213,8 @@ pub struct TaskCard {
     pub branch: Option<String>,
     /// The worktree its agent works in.
     pub worktree: Option<String>,
-    /// Its pull request.
-    pub pr: Option<PullRequest>,
+    /// Its branch's pull request, as its thread's row last said it.
+    pub pull: Option<PullSeen>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
     /// Its place in the merge queue, or its merge.
@@ -1288,8 +1225,6 @@ pub struct TaskCard {
     pub pin: Option<WorkerId>,
     /// How long its agents worked on it, idle waits left out.
     pub spent: Spent,
-    /// What its pull request's own checks last said, while it has one.
-    pub checks: Option<Checks>,
     /// How many natives its node holds.
     pub natives: NativeCounts,
     /// When it was made.
@@ -1311,7 +1246,7 @@ impl TaskCard {
         + DEPENDS_MAX * 5
         + 2 * SUMMARY_MAX
         + 8 * REF_MAX
-        + Checks::MAX_BYTES
+        + PULL_MAX_BYTES
         + TestDiff::MAX_BYTES
         + 800;
 
@@ -1342,9 +1277,8 @@ impl TaskCard {
             text(self.status.as_deref()),
             text(self.branch.as_deref()),
             text(self.worktree.as_deref()),
-            self.pr.as_ref().map_or(0, |pr| pr.url.len().saturating_add(32)),
+            self.pull.as_ref().map_or(0, pull_bytes),
             self.verified.as_ref().map_or(0, VerifierRun::approx_bytes),
-            self.checks.as_ref().map_or(0, Checks::approx_bytes),
             self.merge.as_ref().map_or(0, |m| match m {
                 Merge::Queued { .. } => 16,
                 Merge::Merged { target, head, push_failed, .. } => target
@@ -1363,6 +1297,15 @@ impl TaskCard {
         .into_iter()
         .fold(128, usize::saturating_add)
     }
+}
+
+/// About how many bytes a pull request on a card or the timeline takes on the wire, never less.
+fn pull_bytes(pull: &PullSeen) -> usize {
+    [&pull.url, &pull.title, &pull.base]
+        .into_iter()
+        .chain(&pull.failed_first)
+        .map(|t| t.len().saturating_add(10))
+        .fold(32, usize::saturating_add)
 }
 
 /// How many natives a node holds.
@@ -1437,17 +1380,16 @@ pub enum Moment {
         /// To.
         to: TaskState,
     },
-    /// Its work's branch, worktree or pull request changed.
+    /// Its work's branch changed.
     Branch {
         /// The branch.
         branch: Option<String>,
-        /// The pull request's number.
-        pr: Option<u32>,
     },
     /// Its verifier ran, or the person recorded what it said.
     Verified(VerifierRun),
-    /// Its pull request's checks came to stand otherwise: started, passed or failed.
-    Checks(Checks),
+    /// Its pull request was first seen, or came to stand otherwise: its checks started,
+    /// passed or failed, changes were asked for, it merged.
+    Pull(PullSeen),
     /// The terminal on it closed.
     AgentGone {
         /// The terminal.
@@ -1490,9 +1432,9 @@ impl TimelineEntry {
         let texts = |ts: &[String]| ts.iter().map(|t| text(t)).fold(0_usize, usize::saturating_add);
         let what = match &self.what {
             Moment::TaskCreated { title } => text(title),
-            Moment::Branch { branch, .. } => branch.as_deref().map_or(0, text),
+            Moment::Branch { branch } => branch.as_deref().map_or(0, text),
             Moment::Verified(run) => run.approx_bytes(),
-            Moment::Checks(checks) => checks.approx_bytes(),
+            Moment::Pull(pull) => pull_bytes(pull),
             Moment::Note { text: words } | Moment::Told { text: words } => text(words),
             Moment::Reported { report } => text(&report.note)
                 .saturating_add(texts(&report.artifacts))

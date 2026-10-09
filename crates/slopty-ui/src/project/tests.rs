@@ -465,9 +465,9 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
 /// so Retry waits for an agent that is gone. What is said names what failed and what to do.
 #[test]
 fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
-    use slopty_proto::agent::{PullRequest, Review};
+    use slopty_proto::thread::wire::PullStands;
 
-    use super::fixtures::{run, step};
+    use super::fixtures::{pull, run, step};
     use super::model::TaskAction;
 
     let worker = WorkerId::new();
@@ -477,12 +477,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     ci.step =
         Some(step(StepKind::Verify, worker, StepState::Failed { why: "2 errors".into() }, None));
     let mut pr = live(3, "Its pull request", TaskState::Waiting);
-    pr.pr = Some(PullRequest {
-        number: 9,
-        url: "https://github.com/o/r/pull/9".into(),
-        review: Some(Review::ChangesRequested),
-        merge_request: false,
-    });
+    pr.pull = Some(pull(9, PullStands::ChangesRequested, (0, None)));
     let mut conflict = live(4, "Does not rebase", TaskState::Waiting);
     let why = StepState::Failed { why: "conflicts in a.txt".into() };
     conflict.step = Some(step(StepKind::Rebase, worker, why.clone(), None));
@@ -515,32 +510,17 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
 /// checks are CI to fix.
 #[test]
 fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
-    use slopty_proto::agent::PullRequest;
-    use slopty_proto::project::{Checks, ChecksState, NativeCounts};
+    use slopty_proto::project::NativeCounts;
+    use slopty_proto::thread::wire::PullStands;
 
-    use super::fixtures::queued;
+    use super::fixtures::{pull, queued};
     use super::model::{StageKind, TaskAction};
 
     let worker = WorkerId::new();
     let mut ahead = queued(card(1, "Ahead", TaskState::Done), 10, "1111111");
     ahead.branch = Some("worktree-ahead".into());
     let mut piped = queued(card(2, "Its pull request", TaskState::Done), 20, "2222222");
-    piped.pr = Some(PullRequest {
-        number: 42,
-        url: "https://github.com/o/r/pull/42".into(),
-        review: None,
-        merge_request: false,
-    });
-    piped.checks = Some(Checks {
-        state: ChecksState::Failing,
-        passed: 5,
-        failed: 1,
-        pending: 0,
-        skipped: 0,
-        failing: vec!["clippy (macos)".into()],
-        why: None,
-        at_ms: AT,
-    });
+    piped.pull = Some(pull(42, PullStands::ChecksFailed, (1, Some("clippy (macos)"))));
     let piped = on(piped, worker, SessionId::new());
     let mut todos = on(card(3, "Still has to-dos", TaskState::Done), worker, SessionId::new());
     todos.natives = NativeCounts { agents: 0, running: 0, todos: 3, done: 1 };
@@ -558,7 +538,7 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
             (StageKind::Verifier, "Verified".to_owned(), false),
             (StageKind::Queue, "2nd to merge".to_owned(), false),
             (StageKind::Pull, "PR #42".to_owned(), false),
-            (StageKind::Checks, "1 of 6 checks fail".to_owned(), true),
+            (StageKind::Checks, "clippy (macos) failed".to_owned(), true),
         ]
     );
     let todo = (StageKind::ToDos, "2 to-dos open".to_owned(), true);
@@ -571,7 +551,8 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
 
     assert_eq!(b.actions(TaskId(2)), [TaskAction::FixCi], "failing checks are CI to fix");
     let fix = b.told(TaskId(2), TaskAction::FixCi).expect("words");
-    assert!(fix.contains("Pull request #42's checks failed: clippy (macos)."), "{fix}");
+    assert!(fix.contains("Pull request #42: clippy (macos) failed."), "{fix}");
+    assert!(fix.contains("`gh pr checks 42` shows them"), "{fix}");
     assert_eq!(b.actions(TaskId(3)), [TaskAction::Merge], "to-dos are said, not a hold");
     assert_eq!(b.open_todos(TaskId(3)), 2);
 }
@@ -669,40 +650,34 @@ fn a_node_says_where_it_runs_and_whether_it_can_move() {
     assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");
 }
 
-/// Checks that could not be read say why on the pull request's stage, in the first line, and
-/// hold nothing: no Fix CI is offered for a forge that did not answer.
+/// A pull request's checks still running say how many and hold nothing, and failures on one
+/// already merged are no CI to fix: only an open pull request's failed check asks for Fix CI.
 #[test]
-fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
-    use slopty_proto::agent::PullRequest;
-    use slopty_proto::project::{Checks, ChecksState};
+fn running_checks_hold_nothing_and_a_merged_pull_request_asks_for_no_fix() {
+    use slopty_proto::thread::wire::PullStands;
 
+    use super::fixtures::pull;
     use super::model::{StageKind, TaskAction};
 
-    let mut c = on(card(1, "Its pull request", TaskState::Done), WorkerId::new(), SessionId::new());
-    c.pr = Some(PullRequest {
-        number: 42,
-        url: "https://github.com/o/r/pull/42".into(),
-        review: None,
-        merge_request: false,
-    });
-    c.checks = Some(Checks {
-        state: ChecksState::Unknown,
-        passed: 0,
-        failed: 0,
-        pending: 0,
-        skipped: 0,
-        failing: Vec::new(),
-        why: Some("this worker has no gh\nsee https://cli.github.com".into()),
-        at_ms: AT,
-    });
-    let mirror = one(vec![c]);
+    let worker = WorkerId::new();
+    let mut running = on(card(1, "Checks run", TaskState::Done), worker, SessionId::new());
+    let mut seen = pull(42, PullStands::Running, (0, None));
+    seen.running = 3;
+    running.pull = Some(seen);
+    let mut merged = on(card(2, "Merged on the forge", TaskState::Done), worker, SessionId::new());
+    merged.pull = Some(pull(43, PullStands::Merged, (1, Some("lint"))));
+    let mirror = one(vec![running, merged]);
     let b = board(&mirror);
-    let checks: Vec<_> = b
-        .pipeline(TaskId(1))
-        .into_iter()
-        .filter(|s| s.kind == StageKind::Checks)
-        .map(|s| (s.words, s.holds))
-        .collect();
-    assert_eq!(checks, [("checks unknown: this worker has no gh".to_owned(), false)]);
-    assert!(!b.actions(TaskId(1)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(1)));
+    let checks = |n| -> Vec<_> {
+        b.pipeline(TaskId(n))
+            .into_iter()
+            .filter(|s| s.kind == StageKind::Checks)
+            .map(|s| (s.words, s.holds))
+            .collect()
+    };
+    assert_eq!(checks(1), [("3 checks running".to_owned(), false)]);
+    assert_eq!(checks(2), [], "a merged pull request's checks are done with");
+    for n in [1, 2] {
+        assert!(!b.actions(TaskId(n)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(n)));
+    }
 }

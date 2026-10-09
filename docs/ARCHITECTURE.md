@@ -1229,8 +1229,9 @@ it reads the transcript and every subagent's file (`slopty_agent::conversation::
 on the blocking pool, every 250 ms and at each hook), one thread per session and per subagent,
 and a client sees it as any thread, on a thread stream. A composer types into the same PTY
 (`slopty_worker::thread::compose`). A status-line wrapper (`slopty hook statusline`) forwards
-the context, cost and rate-limit meters and still prints the person's own line, and the pull
-request and worktree that line is given (`WorkerMsg::AgentBranch`).
+the context, cost and rate-limit meters and still prints the person's own line, and the
+worktree that line is given (`WorkerMsg::AgentBranch`). A pull request is the thread's, read
+from the forge by the worker (`thread::pulls`).
 
 Permission prompts are answered through the blocking `PermissionRequest` hook
 (`slopty_agent::permission`). The relay's `CtlRequest::Permission` is held on the worker

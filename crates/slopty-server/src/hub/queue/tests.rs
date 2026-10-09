@@ -3,13 +3,12 @@
 //! person's checkout in the way each end as they should. The git behind each verb is proved in
 //! `slopty-worker`'s `repo::verify` and end to end in `apps/slopty-cli/tests/projects.rs`.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use slopty_proto::orchestration::{Line, Screen};
 use slopty_proto::project::{
-    Checks, ChecksState, GiveBacks, LimitsChange, Merge, Moment, Report, StepKind, StepState,
-    TaskId, TaskState, TestDiff,
+    GiveBacks, LimitsChange, Merge, Moment, Report, StepKind, StepState, TaskId, TaskState,
+    TestDiff,
 };
 use slopty_proto::server::Os;
 
@@ -659,138 +658,6 @@ async fn a_task_given_back_three_times_waits_on_the_person() {
         Verb::TaskTell { project: project(), task: Some(task), text: "Try once more.".to_owned() };
     assert_eq!(hub.dispatch(tell).await, Outcome::Done);
     assert_eq!(task_now(&hub, task).await.give_backs, GiveBacks::default(), "the person's word");
-}
-
-/// A task's pull request's own checks are read on the worker its agent ran on, in its
-/// worktree, and put on its card; the timeline says where they stand when that moves, and a
-/// read that says the same again is no change.
-#[tokio::test]
-async fn a_pull_request_s_checks_are_read_where_its_work_is() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
-    let worktree = slopty_proto::agent::Worktree {
-        name: "slopty-slopty-1".to_owned(),
-        path: TREE.to_owned(),
-        branch: Some(BRANCH.to_owned()),
-        original_cwd: "/w/demo".to_owned(),
-        original_branch: Some("main".to_owned()),
-    };
-    let pr = slopty_proto::agent::PullRequest {
-        number: 7,
-        url: "https://example.com/o/demo/pull/7".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    let branch = AgentBranch { session: agent.session, pr: Some(pr), worktree: Some(worktree) };
-    studio.lease.handle(ToServer::Report(AgentReport::Branch(branch)));
-    let card = task_now(&hub, task).await;
-    assert_eq!((card.pr.map(|p| p.number), card.worktree.as_deref()), (Some(7), Some(TREE)));
-
-    let failing = Checks {
-        state: ChecksState::Failing,
-        passed: 3,
-        failed: 1,
-        pending: 0,
-        skipped: 1,
-        failing: vec!["lint".to_owned()],
-        why: None,
-        at_ms: WallMs::now(),
-    };
-    for round in 0..2 {
-        let watcher = hub.clone();
-        let read = tokio::spawn(async move {
-            let mut due = HashMap::new();
-            watcher.read_due_checks(&mut due).await;
-            due.len()
-        });
-        let (id, verb) = studio.request().await;
-        let Verb::PullChecks { worker, cwd, number, merge_request } = verb else {
-            panic!("round {round}: {verb:?}")
-        };
-        assert_eq!((worker, cwd.as_str(), number, merge_request), (agent.worker, TREE, 7, false));
-        let again = Checks { at_ms: WallMs::now(), ..failing.clone() };
-        answer(&studio.lease, id, Outcome::Checks(again));
-        assert_eq!(read.await.unwrap(), 1, "due again later");
-    }
-    let card = task_now(&hub, task).await;
-    let kept = card.checks.expect("its checks");
-    assert_eq!((kept.state, kept.failing), (ChecksState::Failing, vec!["lint".to_owned()]));
-    let s = status(&hub).await;
-    let said: Vec<_> = s.timeline.iter().filter(|e| matches!(e.what, Moment::Checks(_))).collect();
-    assert_eq!(said.len(), 1, "{said:?}");
-}
-
-/// Checks that cannot be read (the forge's command missing or not signed in where the work
-/// is) put that on the card, once, and are asked again later; a reading replaces them, and a
-/// forge that stops answering afterwards leaves that reading standing.
-#[tokio::test]
-async fn checks_that_cannot_be_read_say_why_and_never_hide_a_reading() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
-    let pr = slopty_proto::agent::PullRequest {
-        number: 7,
-        url: "https://example.com/o/demo/pull/7".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    let worktree = slopty_proto::agent::Worktree {
-        name: "slopty-slopty-1".to_owned(),
-        path: TREE.to_owned(),
-        branch: Some(BRANCH.to_owned()),
-        original_cwd: "/w/demo".to_owned(),
-        original_branch: Some("main".to_owned()),
-    };
-    let branch = AgentBranch { session: agent.session, pr: Some(pr), worktree: Some(worktree) };
-    studio.lease.handle(ToServer::Report(AgentReport::Branch(branch)));
-    let _card = task_now(&hub, task).await;
-    let passing = Checks {
-        state: ChecksState::Passing,
-        passed: 2,
-        failed: 0,
-        pending: 0,
-        skipped: 0,
-        failing: Vec::new(),
-        why: None,
-        at_ms: WallMs::now(),
-    };
-    let missing = || Outcome::Error {
-        code: ErrorCode::Unsupported,
-        message: "this worker has no gh".to_owned(),
-    };
-    for (round, said) in
-        [missing(), missing(), Outcome::Checks(passing.clone()), missing()].into_iter().enumerate()
-    {
-        let watcher = hub.clone();
-        let read = tokio::spawn(async move {
-            let mut due = HashMap::new();
-            watcher.read_due_checks(&mut due).await;
-            due.len()
-        });
-        let (id, verb) = studio.request().await;
-        assert!(matches!(verb, Verb::PullChecks { number: 7, .. }), "round {round}: {verb:?}");
-        answer(&studio.lease, id, said);
-        assert_eq!(read.await.unwrap(), 1, "round {round}: due again later");
-        let kept = task_now(&hub, task).await.checks.expect("its checks");
-        if round < 2 {
-            assert_eq!(
-                (kept.state, kept.why.as_deref()),
-                (ChecksState::Unknown, Some("this worker has no gh")),
-                "round {round}"
-            );
-        } else {
-            assert_eq!((kept.state, kept.why), (ChecksState::Passing, None), "round {round}");
-        }
-    }
-    let s = status(&hub).await;
-    let said: Vec<_> = s
-        .timeline
-        .iter()
-        .filter_map(|e| match &e.what {
-            Moment::Checks(c) => Some(c.state),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(said, [ChecksState::Unknown, ChecksState::Passing]);
 }
 
 /// A merge whose push failed is pushed again on the person's word: the target as the

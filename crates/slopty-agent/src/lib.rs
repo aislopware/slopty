@@ -75,7 +75,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::{AgentBranch, AgentKind, PullRequest, Worktree};
+use slopty_proto::agent::{AgentBranch, AgentKind, Worktree};
 use slopty_proto::project::{AgentReport, NativeTask};
 
 use crate::detect::Program;
@@ -323,9 +323,6 @@ pub struct Hook {
     /// `Stop`/`SubagentStop`: the prompts scheduled on the session (`/loop`, `CronCreate`).
     #[serde(default)]
     pub session_crons: Option<Vec<SessionCron>>,
-    /// `Statusline`: the open pull request the status line names.
-    #[serde(default)]
-    pub pr: Option<PullRequest>,
     /// `Statusline`: the worktree the session runs in.
     #[serde(default)]
     pub worktree: Option<Worktree>,
@@ -1427,16 +1424,16 @@ impl AgentTable {
         Some(AgentReport::Loosened { session, found })
     }
 
-    /// Take the pull request and worktree a status line named in `session`; what every client
-    /// is told when either changed. Anything but a `Statusline` hook is passed over, and so is
+    /// Take the worktree a status line named in `session`; what every client is told when it
+    /// changed. Anything but a `Statusline` hook is passed over, and so is
     /// a session with no agent: the branch lives and goes with its agent, so apply the hook
     /// first.
     pub fn branch(&mut self, session: SessionId, hook: &Hook) -> Option<AgentBranch> {
         if hook.event != HookEvent::Statusline || !self.sessions.contains_key(&session) {
             return None;
         }
-        let now = AgentBranch { session, pr: hook.pr.clone(), worktree: hook.worktree.clone() };
-        let empty = now.pr.is_none() && now.worktree.is_none();
+        let now = AgentBranch { session, worktree: hook.worktree.clone() };
+        let empty = now.worktree.is_none();
         if self.branches.get(&session).map_or(empty, |before| *before == now) {
             return None;
         }
@@ -2842,35 +2839,36 @@ mod tests {
         assert!(text.chars().count() <= PENDING_TEXT_MAX + 1 && text.ends_with('…'));
     }
 
-    /// A status line's pull request and worktree are news when they change and only then, a
-    /// joining client gets them, and they go with the agent.
+    /// A status line's worktree is news when it changes and only then, a joining client gets
+    /// it, and it goes with the agent.
     #[test]
     fn the_branch_is_told_when_it_changes_and_goes_with_the_agent() {
         let (sid, mut table) = (SessionId::new(), AgentTable::default());
-        let line = |pr: Option<u32>| Hook {
+        let line = |name: Option<&str>| Hook {
             event: HookEvent::Statusline,
-            pr: pr.map(|number| PullRequest {
-                number,
-                url: format!("https://github.com/o/r/pull/{number}"),
-                review: None,
-                merge_request: false,
+            worktree: name.map(|name| Worktree {
+                name: name.to_owned(),
+                path: format!("/r/.claude/worktrees/{name}"),
+                branch: Some(format!("worktree-{name}")),
+                original_cwd: "/r".to_owned(),
+                original_branch: Some("main".to_owned()),
             }),
             ..Hook::default()
         };
-        assert_eq!(table.branch(sid, &line(Some(6))), None, "no agent to go with");
+        assert_eq!(table.branch(sid, &line(Some("six"))), None, "no agent to go with");
         table.observe(sid, &seen("claude", None));
         assert_eq!(table.branch(sid, &line(None)), None, "nothing to say");
-        let opened = table.branch(sid, &line(Some(7))).expect("a pull request");
-        assert_eq!(opened.pr.as_ref().map(|pr| pr.number), Some(7));
-        assert_eq!(table.branch(sid, &line(Some(7))), None, "the same again");
+        let opened = table.branch(sid, &line(Some("seven"))).expect("a worktree");
+        assert_eq!(opened.worktree.as_ref().map(|w| w.name.as_str()), Some("seven"));
+        assert_eq!(table.branch(sid, &line(Some("seven"))), None, "the same again");
         assert_eq!(table.branches(), [opened]);
-        let closed = table.branch(sid, &line(None)).expect("merged");
-        assert_eq!((closed.pr, closed.worktree), (None, None));
+        let closed = table.branch(sid, &line(None)).expect("left");
+        assert_eq!(closed.worktree, None);
         assert_eq!(table.branches(), Vec::<AgentBranch>::new());
         let stop = hook(r#"{"hook_event_name":"Stop"}"#);
         assert_eq!(table.branch(sid, &stop), None, "only a status line names one");
 
-        assert!(table.branch(sid, &line(Some(8))).is_some());
+        assert!(table.branch(sid, &line(Some("eight"))).is_some());
         table.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd"}"#));
         assert!(table.branches().is_empty(), "the agent went, its branch with it");
     }

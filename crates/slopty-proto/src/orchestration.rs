@@ -817,20 +817,6 @@ pub enum Verb {
         /// Which.
         project: ProjectId,
     },
-    /// Read a pull request's own checks from its forge, with the forge's own command line
-    /// (`gh`, `glab`) in a checkout of its repository, as the worker's user is signed in to it:
-    /// nothing of the sign-in is read. The server's own, for a task's card. Answered with
-    /// [`Outcome::Checks`]; [`ErrorCode::Unsupported`] when the worker has no such command.
-    PullChecks {
-        /// Where.
-        worker: WorkerId,
-        /// A checkout of the repository the pull request is in.
-        cwd: String,
-        /// Its number.
-        number: u32,
-        /// A GitLab merge request rather than a GitHub pull request.
-        merge_request: bool,
-    },
     /// Push a merged task's target to its clone's `origin` again after the push that went
     /// with its merge failed, the person's word. The target goes as the merge left it, so a
     /// target moved on since is pushed from where it is instead. Answered with
@@ -1027,7 +1013,6 @@ impl Verb {
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
             // A clone there already is answered as it is.
             Self::CloneRepo { .. }
-            | Self::PullChecks { .. }
             | Self::TestDiff { .. }
             | Self::ListWorkers
             | Self::ListTerminals { .. }
@@ -1480,8 +1465,6 @@ pub enum Outcome {
         /// Why a push asked for did not happen; the branch moved all the same.
         push_failed: Option<String>,
     },
-    /// For [`Verb::PullChecks`]: what the pull request's checks say.
-    Checks(crate::project::Checks),
     /// For [`Verb::RemoveWorktree`]: the worktree is gone.
     WorktreeRemoved {
         /// The branch it had checked out, if one.

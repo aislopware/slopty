@@ -39,7 +39,6 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
 /// Task `n`, titled, in `state`.
 pub(crate) fn card(n: u32, title: &str, state: TaskState) -> TaskCard {
     TaskCard {
-        checks: None,
         spent: slopty_proto::project::Spent::default(),
         id: TaskId(n),
         depends_on: Vec::new(),
@@ -51,7 +50,7 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState) -> TaskCard {
         assignment: None,
         branch: None,
         worktree: None,
-        pr: None,
+        pull: None,
         verified: None,
         merge: None,
         step: None,
@@ -151,4 +150,24 @@ pub(crate) fn queued(mut card: TaskCard, after: u64, head: &str) -> TaskCard {
     card.merge =
         Some(Merge::Queued { since_ms: WallMs::from_millis(AT.as_millis().saturating_add(after)) });
     card
+}
+
+/// Pull request `number` on GitHub, standing as `stands`, with `failed` checks failed, the
+/// first named `first`.
+pub(crate) fn pull(
+    number: u32,
+    stands: slopty_proto::thread::wire::PullStands,
+    (failed, first): (u32, Option<&str>),
+) -> slopty_proto::thread::wire::PullSeen {
+    slopty_proto::thread::wire::PullSeen {
+        forge: slopty_proto::git::Forge::GitHub,
+        number,
+        url: format!("https://github.com/o/r/pull/{number}"),
+        title: "Its pull request".to_owned(),
+        base: "main".to_owned(),
+        stands,
+        failed,
+        failed_first: first.map(str::to_owned),
+        running: 0,
+    }
 }

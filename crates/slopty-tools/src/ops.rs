@@ -1114,7 +1114,8 @@ pub struct TaskWait {
 /// Whether a timeline entry is news of its task for [`task_wait`].
 ///
 /// News is a report, a move of its state (its agent ending a turn without a report is one),
-/// its terminal gone, its verifier's word, its checks, or a step that ended.
+/// its terminal gone, its verifier's word, its pull request standing otherwise, or a step that
+/// ended.
 #[must_use]
 pub const fn news(what: &Moment) -> bool {
     match what {
@@ -1122,7 +1123,7 @@ pub const fn news(what: &Moment) -> bool {
         | Moment::State { .. }
         | Moment::AgentGone { .. }
         | Moment::Verified(_)
-        | Moment::Checks(_) => true,
+        | Moment::Pull(_) => true,
         Moment::Step(step) => !matches!(step.state, StepState::Running { .. }),
         _ => false,
     }

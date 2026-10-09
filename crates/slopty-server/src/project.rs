@@ -19,18 +19,19 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, CHECK_NAME_MAX, CHECKS_NAMED,
-    CHECKS_WHY_MAX, Checks, ChecksState, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits, LimitsChange,
-    Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange,
-    Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Project, ProjectStatus, ProjectUpdate, REF_MAX,
-    Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch, TASKS_MAX, TESTS_NAMED,
-    TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, TITLE_MAX, Task,
-    TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
+    ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits,
+    LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent,
+    NativeChange, Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Project, ProjectStatus,
+    ProjectUpdate, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch,
+    TASKS_MAX, TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES,
+    TITLE_MAX, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry,
+    VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
 use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::PullSeen;
 
 mod scripts;
 
@@ -40,23 +41,6 @@ pub const RECENT_ENTRIES: usize = 64;
 pub const NATIVES_KEPT: usize = 256;
 /// Sessions whose natives are kept until a task takes the session on, the oldest dropped first.
 const UNCLAIMED_KEPT: usize = 256;
-
-/// A task's pull request, for its checks to be read where its agent worked.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PrWatch {
-    /// Its project.
-    pub project: ProjectId,
-    /// The task.
-    pub task: TaskId,
-    /// The worker its agent ran on.
-    pub worker: WorkerId,
-    /// The worktree it worked in there.
-    pub cwd: String,
-    /// The pull request's number.
-    pub number: u32,
-    /// A GitLab merge request.
-    pub merge_request: bool,
-}
 
 /// Who asks for a change. The person may do anything a verb allows; an agent may not answer
 /// a permission, merge a task or record what its verifier said, which are the person's or the
@@ -1073,7 +1057,6 @@ impl Projects {
         let number = u32::try_from(record.tasks.len()).unwrap_or(u32::MAX).saturating_add(1);
         let task = Task {
             spent: Spent::default(),
-            checks: None,
             id: TaskId(number),
             depends_on,
             kind,
@@ -1089,7 +1072,7 @@ impl Projects {
             branch: None,
             worktree: None,
             base: None,
-            pr: None,
+            pull: None,
             verified: None,
             merge: None,
             created_ms: now,
@@ -1202,10 +1185,7 @@ impl Projects {
         }
         if let Some(branch) = change.branch.filter(|b| t.branch.as_ref() != Some(b)) {
             t.branch = Some(branch);
-            moments.push(Moment::Branch {
-                branch: t.branch.clone(),
-                pr: t.pr.as_ref().map(|p| p.number),
-            });
+            moments.push(Moment::Branch { branch: t.branch.clone() });
         }
         if let Some(base) = change.base.filter(|b| t.base.as_ref() != Some(b)) {
             t.base = Some(base);
@@ -1262,10 +1242,7 @@ impl Projects {
         let mut moments = Vec::new();
         if let Some(branch) = report.branch.clone().filter(|b| t.branch.as_ref() != Some(b)) {
             t.branch = Some(branch);
-            moments.push(Moment::Branch {
-                branch: t.branch.clone(),
-                pr: t.pr.as_ref().map(|p| p.number),
-            });
+            moments.push(Moment::Branch { branch: t.branch.clone() });
         }
         moments.push(Moment::Reported { report: report.clone() });
         t.updated_ms = now;
@@ -1460,64 +1437,52 @@ impl Projects {
         Ok((task_now, updates))
     }
 
-    /// Every task whose pull request's checks are worth reading: one with a pull request
-    /// still open to merge, and a worktree on the worker its agent ran on to read them in.
-    pub(crate) fn pull_requests(&self) -> Vec<PrWatch> {
-        self.records
-            .iter()
-            .flat_map(|(id, r)| {
-                r.tasks.iter().filter_map(move |t| {
-                    if matches!(t.state, TaskState::Merged | TaskState::Failed) {
-                        return None;
-                    }
-                    let pr = t.pr.as_ref()?;
-                    Some(PrWatch {
-                        project: id.clone(),
-                        task: t.id,
-                        worker: t.assignment.as_ref()?.term.worker,
-                        cwd: t.worktree.clone()?,
-                        number: pr.number,
-                        merge_request: pr.merge_request,
-                    })
-                })
-            })
-            .collect()
-    }
-
-    /// What `task`'s pull request's checks say now. Only a change is worth a word: it goes to
-    /// the card, and to the timeline when where they stand together moved.
-    pub(crate) fn set_checks(
+    /// What the thread rows on `worker` say of their branches' pull requests, each by the seat
+    /// its thread runs at: the card of the task assigned that seat follows its thread's
+    /// ([`Task::pull`]), cut to a card's bounds. A pull request first seen, or come to stand
+    /// otherwise, is worth the timeline; one gone, or with only its words changed, the card
+    /// alone.
+    pub(crate) fn pulls_seen(
         &mut self,
-        id: &ProjectId,
-        task: TaskId,
-        mut checks: Checks,
+        worker: WorkerId,
+        seen: &[(SessionId, Option<PullSeen>)],
         now: WallMs,
-    ) -> Result<Vec<Change>, Refused> {
-        checks.at_ms = now;
-        checks.failing.truncate(CHECKS_NAMED);
-        for name in &mut checks.failing {
-            *name = clipped(name, CHECK_NAME_MAX);
+    ) -> Vec<Change> {
+        let mut updates = Vec::new();
+        for record in self.records.values_mut() {
+            let mut changed = Vec::new();
+            for t in &mut record.tasks {
+                let Some(term) = t.assignment.as_ref().map(|a| a.term) else { continue };
+                if term.worker != worker {
+                    continue;
+                }
+                let Some((_, pull)) = seen.iter().find(|(seat, _)| *seat == term.session) else {
+                    continue;
+                };
+                let pull = pull.clone().map(|mut p| {
+                    p.url = clipped(&p.url, REF_MAX);
+                    p.title = clipped(&p.title, TITLE_MAX);
+                    p.base = clipped(&p.base, REF_MAX);
+                    p.failed_first = p.failed_first.map(|f| clipped(&f, REF_MAX));
+                    p
+                });
+                if t.pull == pull {
+                    continue;
+                }
+                let standing = |p: &Option<PullSeen>| p.as_ref().map(|p| (p.number, p.stands));
+                let moved = pull.is_some() && standing(&t.pull) != standing(&pull);
+                t.pull.clone_from(&pull);
+                t.updated_ms = now;
+                changed.push((t.id, pull.filter(|_| moved)));
+            }
+            for (task, moment) in changed {
+                let entry = moment.map(|pull| record.log(Some(task), Moment::Pull(pull), now));
+                if let Ok(task_now) = record.task(task).cloned() {
+                    updates.push(record.task_update(&task_now, entry));
+                }
+            }
         }
-        checks.why = checks.why.map(|why| clipped(&why, CHECKS_WHY_MAX));
-        let record = self.record(id)?;
-        let t = record.task_mut(task)?;
-        let was = t.checks.as_ref().map(|c| c.state);
-        // A forge that stops answering leaves the last reading standing: it is still the most
-        // that is known, and a passing card flickering to unknown and back says nothing.
-        let read_before = was.is_some_and(|s| s != ChecksState::Unknown);
-        if checks.state == ChecksState::Unknown && read_before {
-            return Ok(Vec::new());
-        }
-        if t.checks.as_ref().is_some_and(|c| c.says_as(&checks)) {
-            t.checks = Some(checks);
-            return Ok(Vec::new());
-        }
-        let moved = was != Some(checks.state);
-        t.checks = Some(checks.clone());
-        t.updated_ms = now;
-        let task_now = t.clone();
-        let entry = moved.then(|| record.log(Some(task), Moment::Checks(checks), now));
-        Ok(vec![record.task_update(&task_now, entry)])
+        updates
     }
 
     /// What `task`'s work did to the project's tests, read once its branch came home: on its
@@ -1990,7 +1955,7 @@ enum Took {
     Changed(Option<Moment>),
 }
 
-/// Take a status line's branch into `t`; a new branch or pull request is worth the timeline.
+/// Take a status line's worktree into `t`; a new branch is worth the timeline.
 fn take_branch(t: &mut Task, branch: &AgentBranch) -> Took {
     let worktree = branch.worktree.as_ref().map(|w| clipped(&w.path, REF_MAX));
     let named = branch
@@ -1998,19 +1963,13 @@ fn take_branch(t: &mut Task, branch: &AgentBranch) -> Took {
         .as_ref()
         .and_then(|w| w.branch.as_deref().map(|b| clipped(b, REF_MAX)))
         .or_else(|| t.branch.clone());
-    let pr = branch.pr.clone().map(|mut pr| {
-        pr.url = clipped(&pr.url, REF_MAX);
-        pr
-    });
-    if t.worktree == worktree && t.branch == named && t.pr == pr {
+    if t.worktree == worktree && t.branch == named {
         return Took::Unchanged;
     }
-    let before = (t.branch.clone(), t.pr.as_ref().map(|p| p.number));
+    let moved = t.branch != named;
     t.worktree = worktree;
     t.branch = named;
-    t.pr = pr;
-    let now = (t.branch.clone(), t.pr.as_ref().map(|p| p.number));
-    Took::Changed((now != before).then_some(Moment::Branch { branch: now.0, pr: now.1 }))
+    Took::Changed(moved.then(|| Moment::Branch { branch: t.branch.clone() }))
 }
 
 /// Take a subagent's or a task-list item's report into `natives`: the leaf as it is now, when

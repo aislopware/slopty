@@ -7,7 +7,7 @@ use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::project::{TaskId, TaskSpec};
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
-use slopty_proto::thread::wire::RequestCard;
+use slopty_proto::thread::wire::{PullSeen, PullStands, RequestCard};
 use slopty_proto::thread::{
     AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Status,
 };
@@ -43,6 +43,21 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         cwd: None,
         repo: None,
         repo_id: None,
+    }
+}
+
+/// Pull request #42 standing as `stands`, its one failed check `lint` when a check failed.
+pub(in crate::hub) fn pull_seen(stands: PullStands) -> PullSeen {
+    PullSeen {
+        forge: slopty_proto::git::Forge::GitHub,
+        number: 42,
+        url: "https://github.com/o/r/pull/42".to_owned(),
+        title: "Fix the login".to_owned(),
+        base: "main".to_owned(),
+        stands,
+        failed: u32::from(stands == PullStands::ChecksFailed),
+        failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),
+        running: 0,
     }
 }
 
@@ -337,10 +352,9 @@ async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
 
 /// A thread's pull request lifts it while it rests: a failed check needs the person, said in
 /// the pull request's words, and one ready to merge is to review. While the agent works it
-/// stays working. A task's agent's pull request is the project's to tell of, so it sends none.
+/// stays working. A task's agent's pull request is the project's to tell of, from its card.
 #[tokio::test]
 async fn a_resting_thread_s_pull_request_lifts_it() {
-    use slopty_proto::thread::wire::{PullSeen, PullStands};
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (shell, building, orchestrating) = (SessionId::new(), SessionId::new(), SessionId::new());
     let worker = WorkerId::new();
@@ -353,17 +367,7 @@ async fn a_resting_thread_s_pull_request_lifts_it() {
     assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
     let mut desk = Client::sit(&hub, "mac");
     desk.at(&hub, Seat::Desk, true, Vec::new());
-    let pull = |stands| PullSeen {
-        forge: slopty_proto::git::Forge::GitHub,
-        number: 42,
-        url: "https://github.com/o/r/pull/42".to_owned(),
-        title: "Fix the login".to_owned(),
-        base: "main".to_owned(),
-        stands,
-        failed: u32::from(stands == PullStands::ChecksFailed),
-        failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),
-        running: 0,
-    };
+    let pull = pull_seen;
     let mine = row(Phase::Done, 1_000, Some(shell));
     let builder = row(Phase::Done, 1_000, Some(building));
     lease.handle(snapshot(vec![mine.clone(), builder.clone()]));
@@ -397,7 +401,10 @@ async fn a_resting_thread_s_pull_request_lifts_it() {
 
     let ladder = rank(vec![with(&builder, Phase::Done, PullStands::ChecksFailed)]);
     assert_eq!(ladder.rung(at(&builder)), Some(Rung::NeedsYou));
-    assert!(desk.notices().is_empty(), "the project tells of a task's checks");
+    let heard = desk.notices();
+    let said: Vec<(NoticeKind, &str)> = heard.iter().map(|n| (n.kind, n.text.as_str())).collect();
+    let [(NoticeKind::Project, text)] = said[..] else { panic!("the project tells: {said:?}") };
+    assert!(text.ends_with(": its pull request #42: lint failed"), "{text}");
 }
 
 /// A project's held-up work is a notice about the project, one per timeline entry, routed by the
@@ -465,7 +472,7 @@ async fn a_project_s_held_up_work_is_a_notice_about_the_project() {
 /// its first line, and a merge only when its push did not go. The rest is the board's.
 #[tokio::test]
 async fn held_up_work_is_said_by_what_held_it() {
-    use slopty_proto::project::{Checks, StepState, TaskStep, TimelineEntry};
+    use slopty_proto::project::{StepState, TaskStep, TimelineEntry};
     let hub = Hub::new("server".to_owned(), Vec::new());
     create(&hub, None).await;
     let id = task(&hub).await;
@@ -482,21 +489,11 @@ async fn held_up_work_is_said_by_what_held_it() {
         })
     };
     let say = |what, card: &Task| held_up(&entry(what), Some(card), "main");
-    let checks = |state| Checks {
-        state,
-        passed: 3,
-        failed: 2,
-        pending: 0,
-        skipped: 0,
-        failing: vec!["test".to_owned(), "lint".to_owned()],
-        why: None,
-        at_ms: WallMs::ZERO,
-    };
     assert_eq!(
-        say(Moment::Checks(checks(ChecksState::Failing)), &card).as_deref(),
-        Some("its pull request's checks fail (test, lint)")
+        say(Moment::Pull(pull_seen(PullStands::ChecksFailed)), &card).as_deref(),
+        Some("its pull request #42: lint failed")
     );
-    assert_eq!(say(Moment::Checks(checks(ChecksState::Passing)), &card), None);
+    assert_eq!(say(Moment::Pull(pull_seen(PullStands::Running)), &card), None);
     let failed = StepState::Failed { why: "no space left\nmore".to_owned() };
     assert_eq!(
         say(step(StepKind::Clone, failed), &card).as_deref(),

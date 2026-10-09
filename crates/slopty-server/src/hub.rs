@@ -847,11 +847,6 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server opens a script's terminal itself; ask it with script run",
             ),
-            Verb::PullChecks { .. } => error(
-                ErrorCode::Forbidden,
-                "the server reads each task's pull request checks itself, onto its card; \
-                 task_get shows them",
-            ),
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -1399,8 +1394,7 @@ impl Lease {
                 let term = TermRef { worker, session: report.session() };
                 match &report {
                     AgentReport::Branch(branch) => {
-                        let empty = branch.pr.is_none() && branch.worktree.is_none();
-                        if empty {
+                        if branch.worktree.is_none() {
                             entry.branches.remove(&branch.session);
                         } else {
                             entry.branches.insert(branch.session, branch.clone());
@@ -1439,6 +1433,8 @@ impl Lease {
                 for report in state.board.native_moves(worker) {
                     moved.extend(state.projects.report(worker, &report, now));
                 }
+                let pulls = state.board.pulls(worker);
+                moved.extend(state.projects.pulls_seen(worker, &pulls, now));
                 hub.projects_moved(&mut state, moved);
                 hub.threads_ended(&mut state, worker, now);
             }
@@ -1677,7 +1673,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::CloneRepo { worker, .. }
         | Verb::BundleBranch { worker, .. }
         | Verb::FetchBundle { worker, .. }
-        | Verb::PullChecks { worker, .. }
         | Verb::Verify { worker, .. }
         | Verb::Rebase { worker, .. }
         | Verb::TestDiff { worker, .. }

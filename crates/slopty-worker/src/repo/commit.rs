@@ -34,14 +34,14 @@ pub struct Programs {
 
 impl Programs {
     /// The ones this worker has: git as everything else finds it ([`crate::changes::git`]),
-    /// gh and glab on `PATH` or where Homebrew and the system put them ([`super::checks::find`]).
+    /// gh and glab on `PATH` or where Homebrew and the system put them ([`find`]).
     #[must_use]
     pub fn here() -> Self {
         let path = std::env::var_os("PATH");
         Self {
             git: crate::changes::git().map(Path::to_path_buf),
-            gh: super::checks::find("gh", path.as_deref()),
-            glab: super::checks::find("glab", path.as_deref()),
+            gh: find("gh", path.as_deref()),
+            glab: find("glab", path.as_deref()),
         }
     }
 
@@ -50,6 +50,20 @@ impl Programs {
     pub const fn has_forge(&self) -> bool {
         self.gh.is_some() || self.glab.is_some()
     }
+}
+
+/// Where a forge's command line is looked for beyond `PATH`: a daemon started by launchd has
+/// little on its `PATH`, and Homebrew puts both commands here.
+const KNOWN: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+
+/// `program` on `path`, else in the places Homebrew and the system put it.
+#[must_use]
+pub fn find(program: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let on_path = path.map(std::env::split_paths).into_iter().flatten();
+    on_path
+        .chain(KNOWN.iter().map(PathBuf::from))
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs`.

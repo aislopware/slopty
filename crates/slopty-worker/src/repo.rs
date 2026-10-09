@@ -12,7 +12,6 @@
 
 pub mod branches;
 pub mod bundle;
-pub mod checks;
 pub mod cloning;
 pub mod commit;
 pub mod pull;

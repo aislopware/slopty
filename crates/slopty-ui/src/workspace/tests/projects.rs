@@ -1297,10 +1297,10 @@ fn a_next_step_is_said_to_the_task_s_agent(cx: &mut TestAppContext) {
 /// them. A card still at work draws none.
 #[gpui::test]
 fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext) {
-    use slopty_proto::agent::PullRequest;
-    use slopty_proto::project::{Checks, ChecksState, NativeCounts};
+    use slopty_proto::project::NativeCounts;
+    use slopty_proto::thread::wire::PullStands;
 
-    use crate::project::fixtures::queued;
+    use crate::project::fixtures::{pull, queued};
 
     let (view, cx) = still_workspace(cx);
     let setup = setup(&view, cx);
@@ -1309,22 +1309,9 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     let worker = fixtures_worker(&view, cx, orchestrator);
     let mut done =
         on(queued(card(1, "Wire the board", TaskState::Done), 10, "1111111"), worker, agent);
-    done.pr = Some(PullRequest {
-        number: 42,
-        url: "https://github.com/o/r/pull/42".into(),
-        review: None,
-        merge_request: false,
-    });
-    done.checks = Some(Checks {
-        state: ChecksState::Pending,
-        passed: 4,
-        failed: 0,
-        pending: 2,
-        skipped: 0,
-        failing: Vec::new(),
-        why: None,
-        at_ms: fixtures::AT,
-    });
+    let mut seen = pull(42, PullStands::Running, (0, None));
+    seen.running = 2;
+    done.pull = Some(seen);
     done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };
     let working = card(2, "Golden files", TaskState::Running);
     // Zoomed over its tab, so the card has the room for every fact on its line.
@@ -1346,7 +1333,7 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     }
     assert!(cx.debug_bounds("project-card-2-branch").is_none(), "nothing on its way yet");
     let said = labels(&view, cx);
-    assert!(said.iter().any(|l| l == "2 of 6 checks running"), "{said:?}");
+    assert!(said.iter().any(|l| l == "2 checks running"), "{said:?}");
     assert!(said.iter().any(|l| l == "1 to-do open"), "{said:?}");
 }
 

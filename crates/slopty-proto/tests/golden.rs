@@ -235,20 +235,14 @@ mod golden {
         insta::assert_snapshot!("worker_frame_copy", hex(&bytes));
     }
 
-    /// The pull request and worktree an agent's status line names.
+    /// The worktree an agent's status line names.
     #[test]
     fn agent_branch() {
-        use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
+        use slopty_proto::agent::{AgentBranch, Worktree};
         snap(
             "worker_agent_branch",
             &WorkerMsg::AgentBranch(AgentBranch {
                 session: session(),
-                pr: Some(PullRequest {
-                    number: 1234,
-                    url: "https://github.com/o/r/pull/1234".to_owned(),
-                    review: Some(Review::ChangesRequested),
-                    merge_request: false,
-                }),
                 worktree: Some(Worktree {
                     name: "fix-login".to_owned(),
                     path: "/r/.claude/worktrees/fix-login".to_owned(),

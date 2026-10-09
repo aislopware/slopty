@@ -19,9 +19,10 @@
 //! ([`crate::push`]).
 //!
 //! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
-//! request's checks failing, its verifier or a step for it failing (a rebase that conflicts
-//! among them), or the push after its merge not going. It is one notice per timeline entry,
-//! about the project, routed by the orchestrator's terminal as a thread's is by its own.
+//! request (as its thread's row names it) failing a check, asked to change or conflicting, its
+//! verifier or a step for it failing (a rebase that conflicts among them), or the push after its
+//! merge not going. It is one notice per timeline entry, about the project, routed by the
+//! orchestrator's terminal as a thread's is by its own.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -30,8 +31,7 @@ use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{TermAgent, TermRef};
 use slopty_proto::project::{
-    AgentReport, ChecksState, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep,
-    TimelineEntry,
+    AgentReport, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep, TimelineEntry,
 };
 use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::server::FromServer;
@@ -301,6 +301,21 @@ impl Board {
             }
         }
         moves
+    }
+
+    /// What each seat's thread on `worker` says of its branch's pull request, the latest to
+    /// change speaking for a seat several threads share: what a task's card follows.
+    pub(super) fn pulls(&self, worker: WorkerId) -> Vec<(SessionId, Option<PullSeen>)> {
+        let Some(table) = self.tables.get(&worker) else { return Vec::new() };
+        let mut latest: HashMap<SessionId, &ThreadRow> = HashMap::new();
+        for r in table.values().filter(|r| root_of(table, r) == r.id) {
+            let Some(seat) = seat_of(r) else { continue };
+            let later = |was: &&ThreadRow| (was.updated_ms, was.id) < (r.updated_ms, r.id);
+            if latest.get(&seat).is_none_or(later) {
+                latest.insert(seat, r);
+            }
+        }
+        latest.into_iter().map(|(seat, r)| (seat, r.pull.clone())).collect()
     }
 
     /// Each thread on `worker` hanging from no other whose rung, phase or ask moved since last
@@ -716,8 +731,8 @@ fn project_notice(projects: &Projects, kept: &Kept) -> Option<Notice> {
 fn held_up(entry: &TimelineEntry, task: Option<&Task>, target: &str) -> Option<String> {
     let first = |text: &str| text.lines().next().unwrap_or_default().trim().to_owned();
     Some(match &entry.what {
-        Moment::Checks(checks) if checks.state == ChecksState::Failing => {
-            format!("its pull request's checks fail ({})", checks.failing.join(", "))
+        Moment::Pull(pull) if pull.stands.needs_you() => {
+            format!("its {} {}", pull.forge.noun(), pull.line())
         }
         Moment::Verified(run) if !run.passed => "its verifier failed".to_owned(),
         Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {

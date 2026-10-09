@@ -686,7 +686,6 @@ mod tests {
     /// Task `id` as the fake's server makes it, its agent in the fake's shell once started.
     fn made_task(id: u32, title: &str, started: bool) -> Task {
         Task {
-            checks: None,
             spent: slopty_proto::project::Spent::default(),
             id: TaskId(id),
             depends_on: Vec::new(),
@@ -710,7 +709,7 @@ mod tests {
             branch: None,
             worktree: None,
             base: None,
-            pr: None,
+            pull: None,
             verified: None,
             merge: None,
             created_ms: WallMs::ZERO,

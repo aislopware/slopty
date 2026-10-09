@@ -306,7 +306,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
             original_cwd: "/w/demo".to_owned(),
             original_branch: Some("main".to_owned()),
         };
-        let branch = AgentBranch { session: term.session, pr: None, worktree: Some(worktree) };
+        let branch = AgentBranch { session: term.session, worktree: Some(worktree) };
         lease.handle(ToServer::Report(AgentReport::Branch(branch)));
         for state in [TaskState::Done, TaskState::Merged] {
             let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });

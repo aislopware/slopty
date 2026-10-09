@@ -464,8 +464,8 @@ fn subagents_and_to_dos_are_leaves_sent_as_deltas_and_kept_until_a_task_takes_th
     );
 }
 
-/// A status line's worktree and pull request land on the task its agent works on, whether they
-/// came before the assignment or after.
+/// A status line's worktree lands on the task its agent works on, whether it came before the
+/// assignment or after, and a new branch is worth the timeline.
 #[test]
 fn a_branch_lands_on_the_task_its_agent_works_on() {
     let mut p = project(None);
@@ -478,7 +478,7 @@ fn a_branch_lands_on_the_task_its_agent_works_on() {
         original_cwd: "/w".to_owned(),
         original_branch: Some("main".to_owned()),
     };
-    let branch = AgentBranch { session: at.session, pr: None, worktree: Some(worktree) };
+    let branch = AgentBranch { session: at.session, worktree: Some(worktree.clone()) };
     let terminals = HashSet::from([at]);
     let (assigned, _) =
         p.assign(&id(), t, who(at, false, Some(&branch)), &terminals, now()).unwrap();
@@ -488,19 +488,62 @@ fn a_branch_lands_on_the_task_its_agent_works_on() {
         p.report(at.worker, &AgentReport::Branch(branch.clone()), now()),
         Vec::<Change>::new()
     );
-    let pr = slopty_proto::agent::PullRequest {
-        number: 7,
-        url: "https://github.com/o/r/pull/7".to_owned(),
-        review: None,
-        merge_request: false,
-    };
-    let opened = AgentBranch { pr: Some(pr), ..branch };
-    let updates = kept(&p.report(at.worker, &AgentReport::Branch(opened), now()));
+    let renamed = Worktree { branch: Some("worktree-cards".to_owned()), ..worktree };
+    let moved = AgentBranch { worktree: Some(renamed), ..branch };
+    let updates = kept(&p.report(at.worker, &AgentReport::Branch(moved), now()));
     let [Kept { entry: Some(entry), .. }] = updates.as_slice() else { panic!("{updates:?}") };
-    assert_eq!(
-        entry.what,
-        Moment::Branch { branch: Some("worktree-rows".to_owned()), pr: Some(7) }
-    );
+    assert_eq!(entry.what, Moment::Branch { branch: Some("worktree-cards".to_owned()) });
+}
+
+/// A task's card follows the pull request its thread's row names at the task's seat, cut to a
+/// card's bounds: first seen and each move of where it stands go on the timeline, words alone
+/// and its going away on the card only, and a seat on another worker or of no task is nobody's.
+#[test]
+fn a_task_s_card_follows_its_thread_s_pull_request() {
+    use slopty_proto::git::Forge;
+    use slopty_proto::thread::wire::{PullSeen, PullStands};
+
+    let mut p = project(None);
+    let t = task(&mut p, "Work");
+    let at = term();
+    assign(&mut p, t, at).unwrap();
+    let seen = |stands, title: &str| PullSeen {
+        forge: Forge::GitLab,
+        number: 7,
+        url: "https://gitlab.com/o/r/-/merge_requests/7".to_owned(),
+        title: title.to_owned(),
+        base: "main".to_owned(),
+        stands,
+        failed: u32::from(stands == PullStands::ChecksFailed),
+        failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),
+        running: 0,
+    };
+    let said = |p: &mut Projects, worker, pull: Option<PullSeen>| {
+        kept(&p.pulls_seen(worker, &[(at.session, pull)], now()))
+    };
+    let card = |p: &Projects| p.task(&id(), t).unwrap().pull.clone();
+
+    let running = seen(PullStands::Running, "Rows");
+    let [Kept { entry: Some(entry), .. }] = &*said(&mut p, at.worker, Some(running.clone())) else {
+        panic!("first seen is news")
+    };
+    assert_eq!(entry.what, Moment::Pull(running.clone()));
+    assert_eq!(said(&mut p, at.worker, Some(running)), [], "the same again is nothing");
+    let failed = seen(PullStands::ChecksFailed, "Rows");
+    let [Kept { entry: Some(entry), .. }] = &*said(&mut p, at.worker, Some(failed.clone())) else {
+        panic!("a move is news")
+    };
+    assert_eq!(entry.what, Moment::Pull(failed));
+    let long = seen(PullStands::ChecksFailed, &"r".repeat(TITLE_MAX * 2));
+    let [Kept { entry: None, .. }] = &*said(&mut p, at.worker, Some(long)) else {
+        panic!("words alone go on the card")
+    };
+    assert_eq!(card(&p).map(|c| c.title.len()), Some(TITLE_MAX), "cut to a card's bounds");
+    assert_eq!(said(&mut p, WorkerId::new(), None), [], "another worker's seat");
+    let [Kept { entry: None, .. }] = &*said(&mut p, at.worker, None) else {
+        panic!("gone, quietly")
+    };
+    assert_eq!(card(&p), None);
 }
 
 /// A project's review limit is at least one, and the person's policy says which projects'

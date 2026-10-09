@@ -739,10 +739,10 @@ mod handoff {
             .collect()
     }
 
-    /// The pull request an agent's status line names reaches every client, a later one in its
+    /// The worktree an agent's status line names reaches every client, a later one in its
     /// greeting.
     #[tokio::test]
-    async fn a_status_lines_pull_request_reaches_every_client() {
+    async fn a_status_lines_worktree_reaches_every_client() {
         let dir = tempfile::tempdir().unwrap();
         let d = daemons(dir.path()).await;
         let (_e, mut client) = d.client("app").await;
@@ -751,7 +751,7 @@ mod handoff {
             .await;
         let status = serde_json::json!({
             "session_id": "s1",
-            "pr": { "number": 1234, "url": "https://github.com/o/r/pull/1234", "review_state": "approved" },
+            "worktree": { "name": "fix-build", "path": "/r/.claude/worktrees/fix-build", "original_cwd": "/r" },
         });
         let mut wrapper = scrubbed(d.link("slopty"), &d.dir)
             .args(["hook", "statusline"])
@@ -772,14 +772,13 @@ mod handoff {
         })
         .await;
         assert_eq!(branch.session, shell);
-        let pr = branch.pr.unwrap();
-        assert_eq!((pr.number, pr.review), (1234, Some(slopty_proto::agent::Review::Approved)));
+        assert_eq!(branch.worktree.map(|w| w.name).as_deref(), Some("fix-build"));
         let (_e2, mut later) = d.client("later").await;
         let greeted = next_msg(&mut later, |m| match m {
             WorkerMsg::AgentBranch(b) => Some(b),
             _ => None,
         })
         .await;
-        assert_eq!(greeted.pr.map(|pr| pr.number), Some(1234));
+        assert_eq!(greeted.worktree.map(|w| w.name).as_deref(), Some("fix-build"));
     }
 }

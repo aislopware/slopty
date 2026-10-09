@@ -7,7 +7,7 @@
 //! opening another. So a start whose answer was lost still counts, and its terminal is put on
 //! its task when the worker announces it. A caller never chooses the id.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
@@ -25,8 +25,8 @@ use slopty_proto::thread::wire::{NewWorktree, Start};
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::{
-    Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, codex, digest, error, keep_start,
-    keyed, known_term, remember, start_again, start_answered, term_of,
+    Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, codex, digest, error, keep_start, keyed,
+    known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
 
@@ -1722,11 +1722,8 @@ impl Hub {
         // answer; one whose answer was lost may still open, and is put on its task when its
         // worker announces it.
         let outcome = self.forward(key.map(|k| k.part("start")), start).await;
-        let made = |worktree: Box<_>| AgentBranch {
-            session: term.session,
-            pr: None,
-            worktree: Some(*worktree),
-        };
+        let made =
+            |worktree: Box<_>| AgentBranch { session: term.session, worktree: Some(*worktree) };
         let (opened, thread, made) = match outcome {
             Outcome::Opened(opened) => (opened, None, None),
             // The worktree the worker made is the task's from the start, so it is freed once the
@@ -1922,96 +1919,6 @@ fn agent_of(run: &Runner) -> Option<Installed> {
 
 /// Claude Code's program, and its name among a worker's `agents` facts.
 const CLAUDE: &str = "claude";
-
-/// How often the watcher looks for checks falling due.
-const CHECKS_TICK: Duration = Duration::from_secs(10);
-/// How soon a pull request's checks are read again while some still run.
-const CHECKS_RUNNING: Duration = Duration::from_secs(30);
-/// How soon once they have settled: a push starts them again, and the next read sees it.
-const CHECKS_SETTLED: Duration = Duration::from_secs(120);
-/// How soon after the forge could not be asked: a worker away, a command not signed in.
-const CHECKS_FAILED: Duration = Duration::from_secs(300);
-
-impl Hub {
-    /// Read every open task's pull request's own checks from its forge, on the worker its
-    /// agent ran on and in the worktree it worked in, until the hub is gone: often while they
-    /// run, seldom once they settle, and only when one falls due. The card shows them.
-    pub async fn watch_checks(hub: WeakHub) {
-        let mut due: HashMap<(ProjectId, TaskId), tokio::time::Instant> = HashMap::new();
-        loop {
-            tokio::time::sleep(CHECKS_TICK).await;
-            let Some(hub) = hub.upgrade() else { return };
-            hub.read_due_checks(&mut due).await;
-        }
-    }
-
-    /// One round of [`Hub::watch_checks`]: read the checks that fall due by `due`, and say
-    /// when each is due again.
-    pub(crate) async fn read_due_checks(
-        &self,
-        due: &mut HashMap<(ProjectId, TaskId), tokio::time::Instant>,
-    ) {
-        let watched = self.inner.state.lock().projects.pull_requests();
-        due.retain(|at, _| watched.iter().any(|w| (&w.project, w.task) == (&at.0, at.1)));
-        let now = tokio::time::Instant::now();
-        for watch in watched {
-            let at = (watch.project.clone(), watch.task);
-            if due.get(&at).is_some_and(|when| *when > now) {
-                continue;
-            }
-            let next = self.read_checks(watch).await;
-            due.insert(at, now.checked_add(next).unwrap_or(now));
-        }
-    }
-
-    /// Ask `watch`'s worker for its pull request's checks and put them on its card; how soon
-    /// to ask again.
-    async fn read_checks(&self, watch: crate::project::PrWatch) -> Duration {
-        let verb = Verb::PullChecks {
-            worker: watch.worker,
-            cwd: watch.cwd,
-            number: watch.number,
-            merge_request: watch.merge_request,
-        };
-        let (checks, again) = match self.forward(None, verb).await {
-            Outcome::Checks(checks) => {
-                let running = checks.state == slopty_proto::project::ChecksState::Pending;
-                (checks, if running { CHECKS_RUNNING } else { CHECKS_SETTLED })
-            }
-            // The forge's command missing or not signed in there: the card says so, rather
-            // than showing a pull request whose checks never come.
-            Outcome::Error { code: ErrorCode::Unsupported | ErrorCode::Failed, message } => {
-                (unknown_checks(message), CHECKS_FAILED)
-            }
-            other => {
-                tracing::debug!(project = %watch.project, task = %watch.task, ?other, "no checks");
-                return CHECKS_FAILED;
-            }
-        };
-        let mut state = self.inner.state.lock();
-        let set = state.projects.set_checks(&watch.project, watch.task, checks, WallMs::now());
-        match set {
-            Ok(changes) => self.projects_moved(&mut state, changes),
-            Err(refused) => tracing::debug!(?refused, "checks not kept"),
-        }
-        drop(state);
-        again
-    }
-}
-
-/// Checks that could not be read, and `why` in the worker's words.
-const fn unknown_checks(why: String) -> slopty_proto::project::Checks {
-    slopty_proto::project::Checks {
-        state: slopty_proto::project::ChecksState::Unknown,
-        passed: 0,
-        failed: 0,
-        pending: 0,
-        skipped: 0,
-        failing: Vec::new(),
-        why: Some(why),
-        at_ms: WallMs::ZERO,
-    }
-}
 
 /// Where the thread `of` names is, as `state` knows it: its worker and id, or why it is not
 /// found. A task that is not there is the store's refusal.

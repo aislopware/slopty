@@ -7,7 +7,6 @@ use std::fmt::Write as _;
 use serde::Serialize;
 use serde_json::Value;
 use slopty_core::{WallMs, WorkerId};
-use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Bounds, Fact, Facts, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, NodeDetail,
@@ -15,6 +14,7 @@ use slopty_proto::project::{
     TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
+use slopty_proto::thread::wire::{PullSeen, PullStands};
 
 use super::term_string;
 
@@ -126,12 +126,25 @@ pub fn project(p: &Project) -> ProjectView<'_> {
     }
 }
 
-/// A pull request, for JSON.
+/// A task's pull request as its thread's row last said it, for JSON.
 #[derive(Debug, Serialize)]
-pub struct PrView<'a> {
+pub struct PullView<'a> {
+    /// `github` or `gitlab`.
+    forge: &'static str,
     number: u32,
     url: &'a str,
-    review: Option<&'static str>,
+    title: &'a str,
+    base: &'a str,
+    /// `merged`, `closed`, `draft`, `conflicted`, `checks_failed`, `changes_requested`,
+    /// `running`, `waiting` or `ready`.
+    stands: &'static str,
+    /// How many of its checks failed, and the first of them.
+    failed: u32,
+    failed_first: Option<&'a str>,
+    /// How many still run.
+    running: u32,
+    /// In a line, as a person reads it.
+    line: String,
 }
 
 /// A verifier's word, for JSON.
@@ -171,9 +184,7 @@ pub struct TaskView<'a> {
     branch: Option<&'a str>,
     worktree: Option<&'a str>,
     base: Option<&'a str>,
-    pr: Option<PrView<'a>>,
-    /// Its pull request's own checks, as its forge last said.
-    checks: Option<ChecksView<'a>>,
+    pull: Option<PullView<'a>>,
     verified: Option<VerifiedView<'a>>,
     /// Its time at work, as on its card.
     active_ms: u64,
@@ -242,9 +253,7 @@ pub struct CardView<'a> {
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
     worktree: Option<&'a str>,
-    pr: Option<PrView<'a>>,
-    /// Its pull request's own checks, as its forge last said.
-    checks: Option<ChecksView<'a>>,
+    pull: Option<PullView<'a>>,
     verified: Option<VerifiedView<'a>>,
     /// Its time at work, idle waits left out: the stretches that ended, and when the one under
     /// way began.
@@ -279,8 +288,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
         worktree: t.worktree.as_deref(),
-        pr: t.pr.as_ref().map(pr),
-        checks: t.checks.as_ref().map(checks),
+        pull: t.pull.as_ref().map(pull),
         verified: t.verified.as_ref().map(verified),
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
@@ -293,17 +301,35 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
     }
 }
 
-const fn review(r: Review) -> &'static str {
-    match r {
-        Review::Approved => "approved",
-        Review::Pending => "pending",
-        Review::ChangesRequested => "changes_requested",
-        Review::Draft => "draft",
+/// A pull request as its thread's row says it, for JSON.
+fn pull(p: &PullSeen) -> PullView<'_> {
+    let forge = match p.forge {
+        slopty_proto::git::Forge::GitHub => "github",
+        slopty_proto::git::Forge::GitLab => "gitlab",
+    };
+    let stands = match p.stands {
+        PullStands::Merged => "merged",
+        PullStands::Closed => "closed",
+        PullStands::Draft => "draft",
+        PullStands::Conflicted => "conflicted",
+        PullStands::ChecksFailed => "checks_failed",
+        PullStands::ChangesRequested => "changes_requested",
+        PullStands::Running => "running",
+        PullStands::Waiting => "waiting",
+        PullStands::Ready => "ready",
+    };
+    PullView {
+        forge,
+        number: p.number,
+        url: &p.url,
+        title: &p.title,
+        base: &p.base,
+        stands,
+        failed: p.failed,
+        failed_first: p.failed_first.as_deref(),
+        running: p.running,
+        line: p.line(),
     }
-}
-
-fn pr(pr: &PullRequest) -> PrView<'_> {
-    PrView { number: pr.number, url: &pr.url, review: pr.review.map(review) }
 }
 
 /// A task, for JSON.
@@ -327,8 +353,7 @@ pub fn task(t: &Task) -> TaskView<'_> {
         branch: t.branch.as_deref(),
         worktree: t.worktree.as_deref(),
         base: t.base.as_deref(),
-        pr: t.pr.as_ref().map(pr),
-        checks: t.checks.as_ref().map(checks),
+        pull: t.pull.as_ref().map(pull),
         verified: t.verified.as_ref().map(verified),
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
@@ -392,14 +417,11 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         Moment::State { from, to } => {
             ("state", format!("{} (was {})", state_word(*to), state_word(*from)))
         }
-        Moment::Branch { branch, pr } => {
-            let branch = branch.as_deref().unwrap_or("no branch");
-            let text =
-                pr.map_or_else(|| branch.to_owned(), |n| format!("{branch}, pull request #{n}"));
-            ("branch", text)
+        Moment::Branch { branch } => {
+            ("branch", branch.as_deref().unwrap_or("no branch").to_owned())
         }
         Moment::Verified(run) => ("verified", verified_text(run)),
-        Moment::Checks(checks) => ("checks", checks_text(checks)),
+        Moment::Pull(pull) => ("pull", pull.line()),
         Moment::AgentGone { .. } => ("agent_gone", "its terminal closed".to_owned()),
         Moment::Note { text } => ("note", text.clone()),
         Moment::Told { text } => ("told", format!("the person told its agent: {text}")),
@@ -408,61 +430,6 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
             ("delivered", format!("{reports} report(s) handed to its agent"))
         }
         Moment::Step(step) => ("step", step_text(step)),
-    }
-}
-
-/// A pull request's own checks, for JSON.
-#[derive(Debug, Serialize)]
-pub struct ChecksView<'a> {
-    /// `none`, `pending`, `passing` or `failing`.
-    state: &'static str,
-    passed: u16,
-    failed: u16,
-    pending: u16,
-    skipped: u16,
-    /// The first failing checks, by name.
-    failing: &'a [String],
-    at_ms: WallMs,
-}
-
-fn checks(c: &slopty_proto::project::Checks) -> ChecksView<'_> {
-    use slopty_proto::project::ChecksState;
-    let state = match c.state {
-        ChecksState::None => "none",
-        ChecksState::Pending => "pending",
-        ChecksState::Passing => "passing",
-        ChecksState::Failing => "failing",
-        ChecksState::Unknown => "unknown",
-    };
-    ChecksView {
-        state,
-        passed: c.passed,
-        failed: c.failed,
-        pending: c.pending,
-        skipped: c.skipped,
-        failing: &c.failing,
-        at_ms: c.at_ms,
-    }
-}
-
-/// A pull request's checks, in a line.
-fn checks_text(checks: &slopty_proto::project::Checks) -> String {
-    use slopty_proto::project::ChecksState;
-    let counts = format!(
-        "{} passed, {} failed, {} pending, {} skipped",
-        checks.passed, checks.failed, checks.pending, checks.skipped
-    );
-    match checks.state {
-        ChecksState::None => "its pull request has no checks".to_owned(),
-        ChecksState::Pending => format!("its pull request's checks run: {counts}"),
-        ChecksState::Passing => format!("its pull request's checks pass: {counts}"),
-        ChecksState::Failing => {
-            format!("its pull request's checks fail ({}): {counts}", checks.failing.join(", "))
-        }
-        ChecksState::Unknown => format!(
-            "its pull request's checks could not be read: {}",
-            checks.why.as_deref().unwrap_or("the forge did not answer")
-        ),
     }
 }
 
@@ -749,8 +716,8 @@ pub fn node_text(n: &NodeDetail) -> String {
         if let Some(base) = &t.base {
             let _infallible = writeln!(out, "base {base}");
         }
-        if let (Some(pr), Some(checks)) = (&t.pr, &t.checks) {
-            let _infallible = writeln!(out, "PR #{}: {}", pr.number, checks_text(checks));
+        if let Some(pull) = &t.pull {
+            let _infallible = writeln!(out, "{}  {}", pull.line(), pull.url);
         }
     }
     natives_text(&mut out, &n.natives, 1);
