@@ -66,9 +66,9 @@ fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
 strategy = "merge"
-base = "a4aacd918ba9e79929ff608034c60a4341773ef0"
-base_date = "2026-10-06"
-checked = "2026-10-06"
+base = "b115e456749e2820a14d3942a63159ff8d46d925"
+base_date = "2026-10-08"
+checked = "2026-10-09"
 check_every_days = 1
 paths = [
     "src/terminal/",
@@ -90,7 +90,7 @@ checkout = ".research/libghostty-rs"
 strategy = "rebase"
 base = "8953a740bc378cec3e07e1f6ca949f0595eab19b"
 base_date = "2026-09-28"
-checked = "2026-10-06"
+checked = "2026-10-09"
 check_every_days = 7
 
 # noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
