@@ -290,4 +290,36 @@ mod golden_git {
         };
         snap("worker_git_changes_absent", &done(10, none));
     }
+
+    /// A clone asked of a worker straight, how far it has come, and how it went.
+    #[test]
+    fn clone_repo() {
+        use slopty_proto::cloning::{CloneOutcome, ClonedRepo};
+        use slopty_proto::terminal::RepoId;
+
+        let ask = ClientMsg::CloneRepo {
+            request: 13,
+            url: "https://github.com/o/demo.git".to_owned(),
+            into: "~/src/demo".to_owned(),
+        };
+        snap("client_clone_repo", &ask);
+        let step = WorkerMsg::RepoCloning {
+            request: 13,
+            phase: "Receiving objects".to_owned(),
+            percent: Some(45),
+        };
+        snap("worker_repo_cloning", &step);
+        let repo = RepoId {
+            origin: Some("github.com/o/demo".to_owned()),
+            root: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            url: Some("https://github.com/o/demo.git".to_owned()),
+        };
+        let cloned = ClonedRepo { path: "/Users/ada/src/demo".to_owned(), repo };
+        let done = |outcome| WorkerMsg::RepoCloned { request: 13, outcome };
+        snap("worker_repo_cloned", &done(CloneOutcome::Cloned(cloned)));
+        let why = "/Users/ada/src/demo is there already and is not a clone of github.com/o/demo";
+        snap("worker_repo_clone_refused", &done(CloneOutcome::Refused { why: why.to_owned() }));
+        let said = "fatal: repository 'https://github.com/o/demo.git/' not found".to_owned();
+        snap("worker_repo_clone_failed", &done(CloneOutcome::Failed { said }));
+    }
 }

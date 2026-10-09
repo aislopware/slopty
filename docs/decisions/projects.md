@@ -2312,3 +2312,26 @@ reordering and edited allows are gone" in `agents.md`.*
     and `remove_merged_says_when_there_is_nothing_to_take` (slopty-ui); goldens
     `client_git_worktrees`, `worker_git_worktrees`, and the e2e `settings-keyboard` (the new
     palette line).
+
+- ✅ **A client asks a worker for a clone directly** (readiness rank 12, the wire and worker
+  half, 2026-10-09). A start's folder step can offer a repository another machine has and this
+  one lacks. Until now only the server could ask for a clone (`Verb::CloneRepo`), and only into
+  `~/slopty/clones/`. A machine reached with no server must be able to make one too.
+  - **The wire.** `ClientMsg::CloneRepo { request, url, into }` asks for it. `url` is the other
+    machine's `RepoId.url`, which has no credentials in it. `into` is where the person's
+    client chose to put it. `WorkerMsg::RepoCloning` says how far it has come, a step lost when
+    the client is behind. `WorkerMsg::RepoCloned` answers with `CloneOutcome`: `Cloned` with
+    the path and the `RepoId` it read, `Refused` in Slopty's words, or `Failed` in git's.
+  - **The worker** clones with the same `Cloner` the server's clones use (`clone_into`), so the
+    two kinds share their turns and their one-at-a-time per place. A clone is made beside its
+    place and moved in only once git finished. A clone of the same origin already there is
+    answered as found. A place that holds anything else, a path that is not absolute, or an
+    address that names no remote is refused before git runs.
+  - **Trust.** Slopty keeps Claude Code's folder trust only for the clones it places itself
+    under `~/slopty/clones/`. A clone the person placed is theirs to trust, as any folder of
+    theirs is.
+  - Tests: `repo::cloning::tests::a_clone_goes_where_the_person_asks` (slopty-worker: real
+    git, the forge reached through the person's own `insteadOf`); the daemon's
+    `a_clone_asked_by_a_client_is_found_or_refused` (`apps/slopty-worker/tests/e2e.rs`);
+    goldens `client_clone_repo`, `worker_repo_cloning`, `worker_repo_cloned`,
+    `worker_repo_clone_refused` and `worker_repo_clone_failed`.

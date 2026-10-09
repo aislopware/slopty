@@ -90,6 +90,24 @@ impl std::fmt::Debug for Cloner {
     }
 }
 
+/// Why there is no clone.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Missed {
+    /// Not tried: the address names no remote, the place holds something else, or it is no
+    /// place to clone into.
+    Refused(String),
+    /// git failed, timed out or could not start, in its words. Nothing is left behind.
+    Failed(String),
+}
+
+impl std::fmt::Display for Missed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(why) | Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 impl Cloner {
     /// Clone `url` with `git` into its place under `home`, telling `progress` how it goes:
     /// where the clone is and which repository it is. A clone of the same origin there already
@@ -105,16 +123,48 @@ impl Cloner {
         home: &Path,
         progress: impl Fn(Progress),
     ) -> Result<(PathBuf, RepoId), String> {
-        let origin = normalize_origin(url).ok_or_else(|| {
-            format!("{url} names no remote to clone from, and nothing is cloned without one")
-        })?;
+        let origin = origin_of(url).map_err(|m| m.to_string())?;
         let dest =
             place(home, &origin).ok_or_else(|| format!("{origin} is no place to clone into"))?;
+        self.clone_at(git, url, &origin, dest, progress).await.map_err(|m| m.to_string())
+    }
+
+    /// Clone `url` with `git` into `into`, where the person asked for it, telling `progress` how
+    /// it goes. A clone of the same origin there already is answered as it is.
+    ///
+    /// # Errors
+    /// [`Missed::Refused`] for a `url` that names no remote, an `into` that is not absolute, or
+    /// one that holds anything else; [`Missed::Failed`] when git failed, timed out or could not
+    /// start. Nothing is left behind.
+    pub async fn clone_into(
+        &self,
+        git: &Path,
+        url: &str,
+        into: &Path,
+        progress: impl Fn(Progress),
+    ) -> Result<(PathBuf, RepoId), Missed> {
+        let origin = origin_of(url)?;
+        let named = into.file_name().is_some_and(|n| n != "." && n != "..");
+        if !into.is_absolute() || !named {
+            return Err(Missed::Refused(format!("{} is no place to clone into", into.display())));
+        }
+        self.clone_at(git, url, &origin, into.to_path_buf(), progress).await
+    }
+
+    /// Clone `url`, of `origin`, into `dest`, one at a time per place and [`AT_ONCE`] at most.
+    async fn clone_at(
+        &self,
+        git: &Path,
+        url: &str,
+        origin: &str,
+        dest: PathBuf,
+        progress: impl Fn(Progress),
+    ) -> Result<(PathBuf, RepoId), Missed> {
         let held = Arc::clone(self.places.lock().entry(dest.clone()).or_default());
         let _place = held.lock().await;
 
         if dest.exists() {
-            return existing(&dest, &origin).await;
+            return existing(&dest, origin).await.map_err(Missed::Refused);
         }
         let now = tokio::time::Instant::now();
         let deadline = now.checked_add(TIMEOUT).unwrap_or(now);
@@ -125,14 +175,16 @@ impl Cloner {
             let turn = Arc::clone(&self.turns).acquire_owned();
             tokio::time::timeout_at(deadline, turn)
                 .await
-                .map_err(|_elapsed| too_long())?
-                .map_err(|e| e.to_string())?
+                .map_err(|_elapsed| Missed::Failed(too_long()))?
+                .map_err(|e| Missed::Failed(e.to_string()))?
         };
-        let parent = dest.parent().ok_or("a clone's place has a parent")?;
+        let parent = dest
+            .parent()
+            .ok_or_else(|| Missed::Refused(format!("{} has no parent", dest.display())))?;
         let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("{}: {e}", parent.display()))?;
+            .map_err(|e| Missed::Failed(format!("{}: {e}", parent.display())))?;
         // Whatever a worker that stopped mid-clone left beside the place is nobody's now: this
         // one holds the place.
         sweep_partials(parent, &name).await;
@@ -145,11 +197,20 @@ impl Cloner {
         };
         if let Err(why) = moved {
             remove(&partial).await;
-            return Err(why);
+            return Err(Missed::Failed(why));
         }
         let id = identify(dest.clone()).await;
         Ok((dest, id))
     }
+}
+
+/// The origin `url` names, normalized, or why it names none.
+fn origin_of(url: &str) -> Result<String, Missed> {
+    normalize_origin(url).ok_or_else(|| {
+        Missed::Refused(format!(
+            "{url} names no remote to clone from, and nothing is cloned without one"
+        ))
+    })
 }
 
 /// What is in a clone's place already: the clone, when it is one of `origin`.
@@ -424,5 +485,59 @@ mod tests {
         std::fs::write(home.join("slopty/clones/example.com/o/stray"), "x").expect("write");
         let stray = cloner.clone_repo(&wrapper, "https://example.com/o/stray", &home, |_| {}).await;
         assert!(stray.is_err_and(|why| why.contains("not a clone")));
+    }
+
+    /// A clone the person asks for goes where they said: made there, telling how far it is, and
+    /// found there on a second ask. A place that is not absolute, or that holds anything else, is
+    /// refused before git runs; a remote that is not there fails in git's words.
+    #[tokio::test]
+    async fn a_clone_goes_where_the_person_asks() {
+        if crate::changes::git().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("temp");
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).expect("mkdir");
+        git_in(&source, &["init", "-q"]);
+        std::fs::write(source.join("f"), "x".repeat(10_000)).expect("write");
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-q", "-m", "c"]);
+        let map = format!(
+            "[url \"file://{}\"]\n\tinsteadOf = https://example.com/o/r.git\n",
+            source.display()
+        );
+        let wrapper = git_with(tmp.path(), &map);
+        let url = "https://example.com/o/r.git";
+        let into = tmp.path().join("home/work/r");
+        let cloner = Cloner::default();
+
+        let seen = Mutex::new(Vec::new());
+        let (path, id) =
+            cloner.clone_into(&wrapper, url, &into, |p| seen.lock().push(p)).await.expect("cloned");
+        assert_eq!(path, into);
+        assert!(into.join("f").exists());
+        assert_eq!(id.origin.as_deref(), Some("example.com/o/r"));
+        assert!(seen.lock().iter().any(|p| p.percent == Some(100)), "{:?}", seen.lock());
+        let again = cloner.clone_into(&wrapper, url, &into, |_| {}).await;
+        assert_eq!(again.map(|(p, _)| p), Ok(into.clone()), "found, not cloned again");
+
+        let relative = cloner.clone_into(&wrapper, url, Path::new("work/r"), |_| {}).await;
+        assert!(matches!(&relative, Err(Missed::Refused(why)) if why.contains("no place")));
+        let stray = tmp.path().join("home/stray");
+        std::fs::write(&stray, "x").expect("write");
+        let held = cloner.clone_into(&wrapper, url, &stray, |_| {}).await;
+        assert!(matches!(&held, Err(Missed::Refused(why)) if why.contains("not a clone")));
+
+        let gone = "https://127.0.0.1:9/nobody/nothing.git";
+        let nothing = tmp.path().join("home/nothing");
+        let failed = cloner.clone_into(&wrapper, gone, &nothing, |_| {}).await;
+        assert!(matches!(failed, Err(Missed::Failed(why)) if !why.is_empty()));
+        let left: Vec<String> = std::fs::read_dir(tmp.path().join("home"))
+            .expect("home")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("nothing"))
+            .collect();
+        assert_eq!(left, Vec::<String>::new(), "nothing left of the failed clone");
     }
 }

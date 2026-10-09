@@ -296,7 +296,7 @@ impl std::fmt::Debug for Orchestrator {
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
     /// client broadcast, agent reports and followed conversations. The agents it starts get
-    /// what `launch` says.
+    /// what `launch` says; the clones the server asks for share `cloner` with the person's own.
     #[must_use]
     pub fn new(
         id: WorkerId,
@@ -304,7 +304,7 @@ impl Orchestrator {
         items: ItemStore,
         (events, heard): (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
         launch: Launch,
-        conversations: Arc<dyn Conversations>,
+        (conversations, cloner): (Arc<dyn Conversations>, crate::repo::cloning::Cloner),
     ) -> Self {
         let inner = Inner {
             id,
@@ -317,7 +317,7 @@ impl Orchestrator {
             once: idempotency::Ledger::default(),
             agent_terms: parking_lot::Mutex::default(),
             choosing: tokio::sync::Mutex::default(),
-            cloner: crate::repo::cloning::Cloner::default(),
+            cloner,
             clone_progress: broadcast::channel(CLONE_PROGRESS).0,
             task_threads: std::sync::OnceLock::new(),
             thread_reads: std::sync::OnceLock::new(),

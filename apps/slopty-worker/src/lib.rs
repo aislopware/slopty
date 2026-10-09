@@ -229,6 +229,8 @@ pub(crate) struct Daemon {
     /// The server registered with and how the link to it stands, for the doctor; `None` while
     /// none is set.
     pub server_link: Arc<tokio::sync::watch::Sender<Option<slopty_proto::ctl::ServerHealth>>>,
+    /// The clones under way, the server's and the person's, which share their turns.
+    pub cloner: slopty_worker::repo::cloning::Cloner,
 }
 
 impl Daemon {
@@ -375,7 +377,7 @@ fn join_server(
         daemon.items.clone(),
         (daemon.events.clone(), daemon.heard.clone()),
         launch,
-        Arc::new(threads::hold::Orchestrated(daemon.clone())),
+        (Arc::new(threads::hold::Orchestrated(daemon.clone())), daemon.cloner.clone()),
     );
     if let Some(threads) = &daemon.threads {
         orchestrator.set_task_threads(Arc::new(threads.clone()));
@@ -787,6 +789,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         reports_turn: Arc::default(),
         session_key,
         server_link: Arc::new(tokio::sync::watch::Sender::new(None)),
+        cloner: slopty_worker::repo::cloning::Cloner::default(),
         displays,
         sources,
         threads,

@@ -3662,6 +3662,12 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::GitDone { request, outcome }) => {
             view.update(cx, |v, cx| v.git_done(key, request, outcome, cx));
         }
+        // The start's clone step takes these once it is in; until then they are only logged.
+        LinkEvent::Control(
+            msg @ (WorkerMsg::RepoCloning { .. } | WorkerMsg::RepoCloned { .. }),
+        ) => {
+            tracing::debug!(%key, kind = msg.kind(), "a clone's word with no step to take it");
+        }
         LinkEvent::Control(WorkerMsg::FolderPage { path, after, listing }) => {
             view.update(cx, |v, cx| v.folder_page(key, &path, &after, &listing, cx));
         }

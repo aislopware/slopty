@@ -5543,6 +5543,61 @@ mod tests {
         assert!(why.contains("no remote"), "{why}");
     }
 
+    /// A clone asked of a real worker straight: a place holding a clone of the same origin is
+    /// answered as found, with which repository it is, and a place holding anything else is
+    /// refused in words. Nothing reaches the network.
+    #[tokio::test]
+    async fn a_clone_asked_by_a_client_is_found_or_refused() {
+        use slopty_proto::cloning::CloneOutcome;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let clone = std::fs::canonicalize(dir.path()).unwrap().join("work/r");
+        std::fs::create_dir_all(&clone).unwrap();
+        let git = |args: &[&str]| {
+            let ran = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&["remote", "add", "origin", "https://example.com/o/r.git"]);
+        let stray = dir.path().join("work/stray");
+        std::fs::write(&stray, "x").unwrap();
+
+        let url = "https://example.com/o/r.git".to_owned();
+        for (request, into) in [(1, &clone), (2, &stray)] {
+            let into = into.to_string_lossy().into_owned();
+            link.send(ClientMsg::CloneRepo { request, url: url.clone(), into }).await.unwrap();
+        }
+        let mut answers = Vec::new();
+        while answers.len() < 2 {
+            let answer = next_control(&mut events, |msg| match msg {
+                WorkerMsg::RepoCloned { request, outcome } => Some((request, outcome)),
+                _other => None,
+            })
+            .await;
+            answers.push(answer);
+        }
+        answers.sort_by_key(|(request, _)| *request);
+        let [(_, found), (_, refused)] = <[_; 2]>::try_from(answers).unwrap();
+        let CloneOutcome::Cloned(found) = found else { panic!("{found:?}") };
+        assert_eq!(found.path, clone.to_string_lossy());
+        assert_eq!(found.repo.origin.as_deref(), Some("example.com/o/r"));
+        assert!(found.repo.root.is_some(), "{:?}", found.repo);
+        let CloneOutcome::Refused { why } = refused else { panic!("{refused:?}") };
+        assert!(why.contains("not a clone"), "{why}");
+    }
+
     /// A folder past one listing's cap is paged through a real worker: the first listing holds
     /// the cap and the whole count, and the pages after it hold the rest, each entry once.
     #[tokio::test]

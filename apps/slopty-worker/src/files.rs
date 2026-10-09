@@ -324,3 +324,40 @@ pub async fn watch_folders(
         }
     }
 }
+
+/// Clone `url` into `into` (absolute, or `~/…`) for the person, as `ClientMsg::CloneRepo` asks:
+/// how far it has come is told as it moves, a step lost when the client is behind, and how it
+/// went once it is done. The clones the server asks for share `cloner`'s turns.
+pub async fn clone_repo(
+    cloner: slopty_worker::repo::cloning::Cloner,
+    client: ClientId,
+    out: mpsc::Sender<WorkerMsg>,
+    request: RequestId,
+    (url, into): (String, String),
+) {
+    use slopty_proto::cloning::{CloneOutcome, ClonedRepo};
+    use slopty_worker::repo::cloning::{Missed, Progress};
+
+    let outcome = match slopty_worker::changes::git() {
+        None => CloneOutcome::Refused { why: "git is not on this worker".to_owned() },
+        Some(git) => {
+            let dest = slopty_worker::file::expand_home(std::path::Path::new(&into));
+            let told = out.clone();
+            let progress = move |p: Progress| {
+                let step = WorkerMsg::RepoCloning { request, phase: p.phase, percent: p.percent };
+                let _behind = told.try_send(step);
+            };
+            match cloner.clone_into(git, &url, &dest, progress).await {
+                Ok((path, repo)) => CloneOutcome::Cloned(ClonedRepo {
+                    path: path.to_string_lossy().into_owned(),
+                    repo,
+                }),
+                Err(Missed::Refused(why)) => CloneOutcome::Refused { why },
+                Err(Missed::Failed(said)) => CloneOutcome::Failed { said },
+            }
+        }
+    };
+    let cloned = matches!(outcome, CloneOutcome::Cloned(_));
+    tracing::info!(%client, request, %url, %into, cloned, "clone");
+    let _sent = out.send(WorkerMsg::RepoCloned { request, outcome }).await;
+}

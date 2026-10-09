@@ -993,6 +993,17 @@ impl Peer<'_> {
             ClientMsg::Git { request, repo, op } => {
                 let _gone = self.saves.send(crate::files::Save::Git { request, repo, op });
             }
+            ClientMsg::CloneRepo { request, url, into } => {
+                let (client, out, cloner) =
+                    (self.client, self.out.clone(), self.daemon.cloner.clone());
+                self.tasks.spawn(crate::files::clone_repo(
+                    cloner,
+                    client,
+                    out,
+                    request,
+                    (url, into),
+                ));
+            }
             ClientMsg::WatchFiles { paths } => {
                 self.watch_files.send_replace(paths);
             }

@@ -1065,8 +1065,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `Blocked(Question)` with the question as detail. Test:
     `a_question_asked_through_the_permission_hook_stays_a_question`.
   - **Left:** Codex background terminals, hooks, MCP startup and rewind (not in the generated
-    protocol yet), Claude Code `StopFailure` as failed and its per-turn cost, MCP servers as
-    model state, pi commands (pi edit diffs since rank 16), and ACP subagents and compaction.
+    protocol yet), Claude Code's per-turn cost, MCP servers as model state, pi commands, and
+    ACP subagents and compaction. Since done: Claude Code `StopFailure` reads as failed (with
+    its error, and a rate limit's reset), and pi's edits carry their diff (readiness rank 16).
 
 - ✅ **A Codex thread reads like every other agent's** (2026-10-02, from the showcase).
   - A thread Codex has not named takes its first prompt as its title, as pi and ACP threads do,
@@ -1586,17 +1587,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Never twice.** A message is marked as going, in the log, before it is sent. One the worker
     stopped in the middle of sending comes back held ("It was being sent when the worker
     stopped, so it may have gone") for the person to take back or send again, never sent on its
-    own. A message scheduled for a thread keeps its agent from being put to sleep.
+    own.
   - **The client's half.** The composer sets a time only as "Continue at" a usage limit's reset
     (`conversation/thread/view/later.rs`), the scope kept when `After` and "Send later…" went.
     Test: `a_thread_a_limit_stopped_continues_when_it_lifts`
     (`conversation::thread::tests::composing`). **Not built:** a server project task on a
     schedule.
-  - Tests: `a_message_goes_at_its_time_or_once_its_thread_has_settled` (`thread::schedule`);
+  - Tests: `a_message_goes_at_its_time` (`thread::schedule`);
     `a_scheduled_message_waits_on_the_worker_and_outlives_a_restart` and
     `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
-    `a_message_scheduled_after_another_thread_goes_to_pi_once_it_rests`; goldens
-    `intent_send_at` and `intent_send_after`.
+    golden `intent_send_at`.
 
 - ✅ **A thread goes on in a new one, on another agent or on its own afresh** (2026-10-04, R8 of
   the T3 Code orchestrator study, after T3's budgeted context handoff and Amp's Handoff). *The

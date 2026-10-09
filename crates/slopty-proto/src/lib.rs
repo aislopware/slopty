@@ -34,6 +34,7 @@
 )]
 
 pub mod agent;
+pub mod cloning;
 pub mod codec;
 pub mod conversation;
 pub mod ctl;
@@ -183,6 +184,16 @@ pub enum ClientMsg {
         /// What to do.
         op: git::GitOp,
     },
+    /// Clone the repository at `url` into `into` ([`cloning`]): how far it has come is told
+    /// with `WorkerMsg::RepoCloning`, and how it went with `WorkerMsg::RepoCloned`.
+    CloneRepo {
+        /// This client's number for it.
+        request: RequestId,
+        /// Where to clone it from, with no credentials in it ([`terminal::RepoId::url`]).
+        url: String,
+        /// Where the clone goes: absolute, or `~/…`.
+        into: String,
+    },
 }
 
 impl ClientMsg {
@@ -211,6 +222,7 @@ impl ClientMsg {
             Self::FolderPage { .. } => "FolderPage",
             Self::FsOp { .. } => "FsOp",
             Self::Git { .. } => "Git",
+            Self::CloneRepo { .. } => "CloneRepo",
         }
     }
 }
@@ -365,6 +377,22 @@ pub enum WorkerMsg {
     ThreadHits(thread::wire::ThreadHits),
     /// Which threads wrote a file's lines (`ClientMsg::Thread`'s `Authors`).
     Authors(thread::wire::Authors),
+    /// How far a clone `ClientMsg::CloneRepo` asked for has come, as it moves.
+    RepoCloning {
+        /// The request's number.
+        request: RequestId,
+        /// What git is doing, in its words (`Receiving objects`), or waiting its turn.
+        phase: String,
+        /// How far that is, when git says.
+        percent: Option<u8>,
+    },
+    /// The answer to `ClientMsg::CloneRepo`.
+    RepoCloned {
+        /// The request's number.
+        request: RequestId,
+        /// How it went.
+        outcome: cloning::CloneOutcome,
+    },
 }
 
 impl WorkerMsg {
@@ -401,6 +429,8 @@ impl WorkerMsg {
             Self::FolderPage { .. } => "FolderPage",
             Self::FsDone { .. } => "FsDone",
             Self::GitDone { .. } => "GitDone",
+            Self::RepoCloning { .. } => "RepoCloning",
+            Self::RepoCloned { .. } => "RepoCloned",
             Self::ThreadHits(_) => "ThreadHits",
             Self::Authors(_) => "Authors",
         }
