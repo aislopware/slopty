@@ -482,10 +482,11 @@ fn agents_at_their_turn_draw_no_section_and_no_clock(cx: &mut TestAppContext) {
     assert_eq!(renders(&view, cx), before, "the seconds passing draw nothing");
 }
 
-/// With the navigator hidden where it docks, a worker is on the rail only while something of
-/// its own (a tile with no project) wants the person, marked with what; it goes to that tile.
+/// With the navigator hidden where it docks, a worker holding tiles of its own (of no project)
+/// stands on the rail for them, marked with what wants the person once something does; it goes
+/// to that tile. A rail of a machine's loose tiles alone was an empty column before.
 #[gpui::test]
-fn the_rail_shows_a_worker_while_its_own_tiles_wait(cx: &mut TestAppContext) {
+fn the_rail_shows_a_worker_with_its_own_tiles_and_what_waits(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -498,10 +499,11 @@ fn the_rail_shows_a_worker_while_its_own_tiles_wait(cx: &mut TestAppContext) {
     let rail = cx.debug_bounds("nav-rail").expect("the rail in its place");
     assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5, "{rail:?}");
     let glyph = leak(format!("nav-rail-{}", laptop.key));
-    assert!(cx.debug_bounds(glyph).is_none(), "at rest and well, no worker");
+    assert!(cx.debug_bounds(glyph).is_some(), "at rest and well, it stands for its tiles");
+    let badge = leak(format!("nav-rail-{}-rollup", laptop.key));
+    assert!(cx.debug_bounds(badge).is_none(), "with nothing waiting");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(away), cx));
     cx.run_until_parked();
-    let badge = leak(format!("nav-rail-{}-rollup", laptop.key));
     assert!(cx.debug_bounds(badge).is_some(), "what waits shows on the rail");
     click_at(cx, glyph);
     assert_eq!(focused(&view, cx), Some(theirs), "the worker's tile");

@@ -85,6 +85,9 @@ fn a_narrow_window_folds_the_navigator_to_its_rail(cx: &mut TestAppContext) {
     let area = cx.debug_bounds("area").expect("the panes");
     assert!(area.left() >= rail.right() - px(0.5), "the panes past it: {rail:?} {area:?}");
     assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5);
+    let machine = leak(format!("nav-rail-{}", studio.key));
+    let machine = cx.debug_bounds(machine).expect("the machine its shell is on");
+    assert!(rail.contains(&machine.center()), "in the rail: {machine:?}");
 
     view.update_in(cx, |v, window, cx| v.toggle_navigator(&ToggleNavigator, window, cx));
     cx.run_until_parked();

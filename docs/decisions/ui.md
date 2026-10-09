@@ -1381,8 +1381,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Toasts.** They stack in the strip's corner, two at most, 6 s each, with Go or Undo. (Moved
     into the status bar on 2026-10-02: "What the showcase showed".)
 
-  Not built: a "lines below · back to live" pill, because the terminal view tracks only its
-  offset. Tests (`workspace/tests/tiles.rs`):
+  The "lines below · back to live" pill came later, in `terminal.md`'s "A view scrolled up
+  holds still, and a pill counts the lines below" (2026-09-25). Tests
+  (`workspace/tests/tiles.rs`):
   `a_place_is_its_last_two_directories_with_home_as_a_tilde`,
   `a_shell_header_names_its_directory`, `the_worker_chip_shows_only_beside_another_worker`,
   `a_focused_header_shares_its_body_surface`,
@@ -5287,7 +5288,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     lists the project's clones by machine. A tile's header names its worker only where its
     workspace holds tiles of more than one, so a one-machine project never pays for the chip.
   - **The rail** (navigator hidden) keeps a glyph per project with its rollup, then a glyph for
-    a worker only while it is not well or something of its own waits. It scrolls.
+    a worker while it holds tiles of no project or is not well (widened 2026-10-09 by "A window
+    too narrow to dock the navigator folds it to the rail"). It scrolls.
   - **The palette** lists projects first ("atlas", its state, the machines it spans and what it
     holds: "3 agents", else "4 tiles"), ranked by how often and how lately the focus went to
     each on this device, as zoxide ranks directories (`groups::Frecency`, saved with the
@@ -8996,6 +8998,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     rise from the foot bar's ends.
   - **No foot bar on a phone.** Its foot is the key bar, and its title bar already holds the
     focused tile. The iPad keeps it above the home indicator.
+  - **The bar pads for nothing under it** (2026-10-09, from the goldens retake). The app lays a
+    band under the workspace over the home indicator and a soft keyboard, so a bar that also
+    added the bottom inset stood a keyboard tall on an iPad (golden `ios-pad-panes.png`). The
+    bar is the status step tall and no more, and the band under it takes the chrome while it
+    is drawn.
   - Tests: `workspace::tests::foot::*`,
     `workspace::tests::chrome::the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work`.
 
@@ -9046,4 +9053,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     was opened over the panes. The panel still opens over the panes, and the rail stays under
     it, so the panes do not move as it opens. A phone keeps its drawer and no rail.
   - The rail is now a view of its own (`Region::Rail`), drawn while the panel is open.
-  - Tests: `workspace::tests::frame::a_narrow_window_folds_the_navigator_to_its_rail`.
+  - **A machine stands for its loose tiles.** A healthy worker used to be left off the rail
+    until something of its own waited, so a window whose work sat on one machine, in no
+    project, showed an empty 40 pt column (golden `workspace.png`). A worker holding tiles of
+    no project now has its glyph there, as a project has, and its rollup once something waits.
+  - Tests: `workspace::tests::frame::a_narrow_window_folds_the_navigator_to_its_rail`,
+    `workspace::tests::chrome::the_rail_shows_a_worker_with_its_own_tiles_and_what_waits`.

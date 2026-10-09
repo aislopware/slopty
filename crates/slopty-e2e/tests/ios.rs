@@ -215,9 +215,11 @@ mod tests {
         .await
         .unwrap();
         drv.keys("enter").await.unwrap();
+        // The page takes the panes' place, under the notices: the closed shell's take-back
+        // offer hangs over its head until it lapses, and a tap there would take the shell back.
         let dump = drv
-            .wait_for("the settings editor", STEP, |d| {
-                d.a11y_node("Group", Some("Settings")).is_some()
+            .wait_for("the settings editor, the offer gone", STEP, |d| {
+                d.a11y_node("Group", Some("Settings")).is_some() && d.notice.is_none()
             })
             .await
             .unwrap();

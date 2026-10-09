@@ -2862,9 +2862,12 @@ impl WorkspaceView {
         groups.sort_by(|(a, _), (b, _)| a.cmp(b));
         let workers = self.workers.iter().filter_map(|(key, w)| {
             let key = *key;
-            let rollup = loose.get(&key).copied().unwrap_or_default();
+            // A machine holding tiles of no project stands for them, as a project's glyph
+            // does for its own; one with none shows only while it is not well.
+            let holds = loose.get(&key).copied();
+            let rollup = holds.unwrap_or_default();
             let health = worker_health(&w.status);
-            if health.is_none() && rollup.shown().is_none() {
+            if health.is_none() && holds.is_none() {
                 return None;
             }
             let glyph = Mark::from(self.machine_glyph(key));

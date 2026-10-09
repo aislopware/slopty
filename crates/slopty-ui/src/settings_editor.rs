@@ -654,6 +654,8 @@ mod tests {
         let file = cx.debug_bounds("settings-edit-toml").expect("the head's link");
         let done = cx.debug_bounds("settings-done").expect("Done");
         assert!((f32::from(file.center().y - done.center().y)).abs() < 1.0, "on Done's line");
+        click(cx, "settings-edit-toml");
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Toml, "the head's link opens it");
     }
 
     /// A change applies as it is made, and the dialog stays open: a switch hands the app the

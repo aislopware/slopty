@@ -143,3 +143,43 @@ fn the_page_carries_its_list_and_leaves_for_the_work(cx: &mut TestAppContext) {
     assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss), "the work");
     assert!(cx.debug_bounds("settings-editor").is_none());
 }
+
+/// On a phone the page is one column under the bar, its head's link opening the file's face
+/// and Done leaving, with no navigator list beside it.
+#[gpui::test]
+fn a_phone_s_page_opens_the_file_from_its_head(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.simulate_resize(size(px(402.0), px(874.0)));
+    cx.run_until_parked();
+    let (editor, events) = open_settings(&view, cx);
+    let page = cx.debug_bounds("settings-editor").expect("the page");
+    let file = cx.debug_bounds("settings-edit-toml").expect("the head's link");
+    assert!(page.contains(&file.center()), "in the page's head: {file:?} {page:?}");
+    click(cx, "settings-edit-toml");
+    assert_eq!(editor.read_with(cx, |e, _| e.mode()), Mode::Toml, "the file's face");
+    click(cx, "settings-edit-form");
+    click(cx, "settings-done");
+    assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss), "Done leaves");
+}
+
+/// The page leaves the focus where it found it: the tile focused before the settings opened
+/// is the focused one once they close, on a phone as on a Mac.
+#[gpui::test]
+fn the_page_gives_the_focus_back_to_its_tile(cx: &mut TestAppContext) {
+    for width in [1280.0, 402.0] {
+        let (view, cx) = workspace(cx);
+        let studio = connect(&view, cx, 1, "studio");
+        let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+        let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+        cx.simulate_resize(size(px(width), px(874.0)));
+        view.update(cx, |v, cx| v.focus_tile(second, cx));
+        cx.run_until_parked();
+        let (editor, events) = open_settings(&view, cx);
+        editor.update_in(cx, |e, _window, cx| e.close(cx));
+        cx.run_until_parked();
+        assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss));
+        assert_eq!(focused(&view, cx), Some(second), "{width} pt: the tile it found");
+    }
+}

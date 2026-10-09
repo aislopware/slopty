@@ -2282,8 +2282,8 @@ impl WorkspaceView {
         let page = self.render_settings_page();
         let area = page.unwrap_or(area);
         // Cached, as the title bar is not: nothing in it is a view notified alone.
-        let foot = (self.foot_shown() && self.settings.is_none()).then(|| {
-            let height = px(self.foot_height()) + safe.bottom;
+        let foot = self.foot_drawn().then(|| {
+            let height = px(self.foot_height());
             self.chrome
                 .foot
                 .clone()

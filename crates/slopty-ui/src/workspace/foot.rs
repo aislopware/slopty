@@ -66,6 +66,14 @@ impl WorkspaceView {
         !self.phone && !self.workers.is_empty()
     }
 
+    /// Whether the foot bar is drawn now: the window has one and the settings page, which goes
+    /// with the panes, is not up. The band the app lays under the workspace over the home
+    /// indicator and a soft keyboard continues it, so the bar itself pads for neither.
+    #[must_use]
+    pub fn foot_drawn(&self) -> bool {
+        self.foot_shown() && self.settings.is_none()
+    }
+
     /// The shells of the project on show whose command runs past the running time out of
     /// sight, in the layout's order: what the foot bar's chips name.
     pub(super) fn running_shells(&self) -> Vec<(TileRef, SessionId)> {
@@ -140,7 +148,6 @@ impl WorkspaceView {
             .gap(px(spacing.sm))
             .pl(px(spacing.xs))
             .pr(px(spacing.xxs))
-            .pb(window.insets().effective().bottom)
             .bg(hsla(s.chrome))
             .border_t(kit::HAIR)
             .border_color(hsla(s.sash))

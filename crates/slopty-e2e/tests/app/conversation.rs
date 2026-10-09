@@ -704,10 +704,10 @@ fn build_finished() -> String {
     format!("{record}\n")
 }
 
-/// A turn's work beyond its words: the pasted screenshot on the prompt, the plan over the
-/// composer, and the build run in the background with its last line, following the file it
-/// writes as it grows and ending when its notice comes. With every step open (⌃O) the thinking
-/// shows, and the screenshot the `Read` returned shows on its call.
+/// A turn's work beyond its words: the plan over the composer, and the build run in the
+/// background with its last line, following the file it writes as it grows and ending when its
+/// notice comes. With every step open (⌃O) the thinking shows, and the screenshot the `Read`
+/// returned shows on its call. Above them all, the prompt with the screenshot pasted on it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_thread_shows_the_work_beyond_words() {
@@ -725,9 +725,10 @@ async fn the_thread_shows_the_work_beyond_words() {
     drv.wait_for("the background chip", STEP, |d| has(d, "Button", "1 running")).await.unwrap();
     click(drv, "Button", "1 running").await;
     drv.wait_for("the build in the background", STEP, |d| {
+        // The foot bar and the two panels leave the prompt above the fold: it is looked for
+        // last, scrolled to.
         labels(d, "Status").iter().any(|l| l == building)
             && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))
-            && has(d, "Button", picture)
     })
     .await
     .unwrap();

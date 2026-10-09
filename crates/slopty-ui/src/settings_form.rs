@@ -1074,6 +1074,9 @@ impl SettingsForm {
             .flex_col()
             .gap(px(spacing.xxs))
             .p(px(spacing.sm))
+            // The navigator's rows are set in the chrome's size; drawn in its place, the
+            // sections are too, rather than the window's body size.
+            .text_size(px(theme.roles().chrome.size))
             .child(self.search_field(cx))
             .child(
                 div()
