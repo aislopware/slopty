@@ -20,7 +20,7 @@ use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
+use slopty_proto::thread::{ItemBody, ItemId, Patch, ToolCall, ToolDetail, ToolState};
 use slopty_theme::{Rgb, Surfaces};
 
 use super::{
@@ -98,7 +98,7 @@ const fn file_verb(call: &ToolCall) -> Option<&'static str> {
 
 /// `path` as the machine opens it: absolute, or under `~`, as it is; else under the agent's
 /// folder `cwd`.
-fn opened_at(path: &str, cwd: &str) -> String {
+pub(super) fn opened_at(path: &str, cwd: &str) -> String {
     if path.starts_with('/') || path == "~" || path.starts_with("~/") || cwd.is_empty() {
         return path.to_owned();
     }
@@ -133,7 +133,7 @@ impl ThreadView {
             .map(|end| kit::duration(Duration::from_millis(end.millis_since(item.at_ms))));
         let line = self.call_line(id, call, open, child, took, cx);
         let body =
-            open.then(|| self.sources(id, call).or_else(|| self.tool_body(id, call))).flatten();
+            open.then(|| self.sources(id, call).or_else(|| self.tool_body(id, call, cx))).flatten();
         let pictures = if open { self.pictures_row(&call.images, false, cx) } else { None };
         let answers =
             self.answered_inline(ix).then(|| self.shown_waiting(cx).cloned()).flatten().and_then(
@@ -227,6 +227,7 @@ impl ThreadView {
         let changes = patch_of(call).and_then(|p| kit::changes(theme, p.added, p.removed));
         let found = match &call.detail {
             Some(ToolDetail::WebSearch(search)) => sources_words(&search.links),
+            Some(ToolDetail::Agent(agent)) => agent_words(agent),
             _ => None,
         };
         let quiet = rows::quiet(call);
@@ -357,43 +358,31 @@ impl ThreadView {
     }
 
     /// What an opened call shows, in its [`Self::well`]: its diff, or its command and output.
-    fn tool_body(&self, id: &ItemId, call: &ToolCall) -> Option<AnyElement> {
+    /// A call with neither a diff nor a command (an MCP tool, a skill, a tool this client does
+    /// not know) shows what it was called with, as JSON laid out to read, over its output.
+    /// Each part shows its first [`PEEK_LINES`] lines (the output its last) until the reader
+    /// asks for all of the call.
+    fn tool_body(&self, id: &ItemId, call: &ToolCall, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         if let Some((path, patch)) = path_patch(call) {
-            // A call's patch is whole once it shows: the call is over before it opens.
-            let blocks = Rc::clone(
-                self.diffs
-                    .borrow_mut()
-                    .entry(id.clone())
-                    .or_insert_with(|| diff::thread_blocks(path, patch)),
-            );
-            let ink = Ink { theme, digits: lines::digits(&blocks) };
-            let mut shown = 0_usize;
-            let mut children: Vec<AnyElement> = Vec::new();
-            for (ix, block) in blocks.iter().enumerate() {
-                if shown >= PEEK_LINES {
-                    break;
-                }
-                if ix > 0 {
-                    children.push(ink.hunk_head(block).into_any_element());
-                }
-                for line in block.lines.iter().take(PEEK_LINES.saturating_sub(shown)) {
-                    children.push(ink.unified(line).into_any_element());
-                    shown = shown.saturating_add(1);
-                }
-            }
-            let code = ink.code().py(px(theme.spacing.xxs)).children(children);
-            return Some(self.well(code).into_any_element());
+            return Some(self.patch_well(id, (path, patch), true, cx).into_any_element());
         }
+        let whole = self.whole.contains(id);
         let command = match &call.detail {
-            Some(ToolDetail::Exec(exec)) => Some(exec.command.text.clone()),
+            Some(ToolDetail::Exec(exec)) => Some(format!("$ {}", exec.command.text)),
             _ => None,
         };
-        let output = call.output.as_ref().map(|o| tail(&o.text, PEEK_LINES));
-        if command.is_none() && output.is_none() {
-            return None;
-        }
+        // A call of a kind this client knows says its input on its line; an MCP tool's, a
+        // skill's or an unknown one's is shown.
+        let input = match &call.detail {
+            None | Some(ToolDetail::Mcp(_)) => called_with(&call.input.text),
+            Some(_) => None,
+        };
+        let output = call.output.as_ref().map(|o| o.text.trim_end().to_owned());
+        let longest =
+            [&command, &input, &output].into_iter().flatten().map(|t| t.lines().count()).max()?;
+        let head = |t: String| if whole { t } else { head_lines(&t, PEEK_LINES) };
         let text = div()
             .w_full()
             .flex()
@@ -401,16 +390,95 @@ impl ThreadView {
             .gap(px(theme.spacing.xs))
             .font_family(self.mono())
             .text_size(px(theme.typography.small()))
-            .children(command.map(|c| {
-                div().text_color(hsla(s.text)).child(SharedString::from(format!("$ {c}")))
+            .children(command.map(|c| div().text_color(hsla(s.text)).child(SharedString::from(c))))
+            .children(input.map(|i| {
+                let id = id.0.clone();
+                div()
+                    .debug_selector(move || format!("call-input-{id}"))
+                    .text_color(hsla(s.text))
+                    .whitespace_normal()
+                    .child(SharedString::from(head(i)))
             }))
             .children(output.map(|o| {
                 div()
                     .text_color(hsla(s.text_secondary))
                     .whitespace_normal()
-                    .child(SharedString::from(o))
+                    .child(SharedString::from(if whole { o } else { tail(&o, PEEK_LINES) }))
             }));
-        Some(self.well(text.px(px(theme.spacing.sm)).py(px(theme.spacing.xs))).into_any_element())
+        let well = self.well(text.px(px(theme.spacing.sm)).py(px(theme.spacing.xs)));
+        let more =
+            (!whole && longest > PEEK_LINES).then(|| self.show_lines(id, longest as u64, cx));
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xxs))
+                .child(well)
+                .children(more)
+                .into_any_element(),
+        )
+    }
+
+    /// `patch` of the file at `path` in a [`Self::well`], under `key` (a call's id, or a
+    /// request's). With `peek`, its first [`PEEK_LINES`] lines, then "Show all N lines" until
+    /// the reader asks for all of them (a call's, in the thread); without, all of it (a
+    /// request's, in a well that scrolls). Once all shows, how many more lines the agent's side
+    /// left out, so a cut diff never reads as the whole change.
+    pub(super) fn patch_well(
+        &self,
+        key: &ItemId,
+        (path, patch): (&str, &Patch),
+        peek: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        let theme = &self.theme;
+        let blocks = Rc::clone(
+            self.diffs
+                .borrow_mut()
+                .entry(key.clone())
+                .or_insert_with(|| diff::thread_blocks(path, patch)),
+        );
+        let ink = Ink { theme, digits: lines::digits(&blocks) };
+        let total: usize = blocks.iter().map(|b| b.lines.len()).sum();
+        let whole = !peek || self.whole.contains(key) || total <= PEEK_LINES;
+        let cap = if whole { usize::MAX } else { PEEK_LINES };
+        let mut shown = 0_usize;
+        let mut children: Vec<AnyElement> = Vec::new();
+        for (ix, block) in blocks.iter().enumerate() {
+            if shown >= cap {
+                break;
+            }
+            if ix > 0 {
+                children.push(ink.hunk_head(block).into_any_element());
+            }
+            for line in block.lines.iter().take(cap.saturating_sub(shown)) {
+                children.push(ink.unified(line).into_any_element());
+                shown = shown.saturating_add(1);
+            }
+        }
+        let selector = format!("patch-{}", key.0);
+        let code = ink.code().py(px(theme.spacing.xxs)).children(children);
+        let well = self.well(code).debug_selector(move || selector);
+        let more = (!whole).then(|| self.show_lines(key, total as u64, cx));
+        let left_out = (whole && patch.clipped_lines > 0).then(|| {
+            let n = u64::from(patch.clipped_lines);
+            div()
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(theme.surfaces.text_muted))
+                .child(SharedString::from(format!(
+                    "{} not shown here",
+                    kit::count(n, "more line", "more lines")
+                )))
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.xxs))
+            .child(well)
+            .children(more)
+            .children(left_out)
     }
 
     /// What a web search came back with, opened: its links numbered, each its title and its
@@ -497,6 +565,26 @@ impl ThreadView {
     }
 }
 
+/// What a call was called with, as JSON laid out to read; its own text when that is not
+/// JSON (cut short on the wire); nothing when it was called with nothing.
+fn called_with(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(serde_json::Value::Object(map)) if map.is_empty() => None,
+        Ok(serde_json::Value::Null) => None,
+        Ok(value) => serde_json::to_string_pretty(&value).ok(),
+        Err(_) => Some(input.to_owned()),
+    }
+}
+
+/// The first `lines` lines of `text`.
+fn head_lines(text: &str, lines: usize) -> String {
+    text.lines().take(lines).collect::<Vec<_>>().join("\n")
+}
+
 /// The site a link is on: its host, without the scheme or a leading `www.`.
 fn host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -524,6 +612,20 @@ fn sources_words(links: &[slopty_proto::thread::detail::WebLink]) -> Option<Stri
             .collect::<Vec<_>>()
             .join(" \u{b7} "),
     )
+}
+
+/// What a subagent did, beside its line: its kind, the calls it made and the tokens it took
+/// ("Explore · 14 tools · 12k tokens"), each as far as the agent says.
+fn agent_words(agent: &slopty_proto::thread::detail::AgentDetail) -> Option<String> {
+    let parts: Vec<String> = agent
+        .agent_type
+        .iter()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().to_owned())
+        .chain(agent.tool_uses.map(|n| kit::count(n, "tool", "tools")))
+        .chain(agent.tokens.filter(|n| *n > 0).map(|n| format!("{} tokens", super::tokens(n))))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
 /// A tool's id as words: `app_click`, `appClick` and `app-click` read "App click".
@@ -557,7 +659,9 @@ fn humane(id: &str) -> String {
 mod tests {
     use slopty_proto::thread::{AskId, Clipped, ToolCall, ToolState, kind};
 
-    use super::{host, humane, sources_words, standing, tidy};
+    use super::{
+        agent_words, called_with, head_lines, host, humane, sources_words, standing, tidy,
+    };
 
     /// An MCP tool reads by what it does, whatever spelling its server gave its id.
     #[test]
@@ -634,5 +738,46 @@ mod tests {
         assert_eq!(standing(&ToolState::Completed, &s), None);
         assert_eq!(standing(&ToolState::Running, &s), None);
         let _quiet = call(kind::READ, ToolState::Completed);
+    }
+
+    /// A call is shown with what it was called with, laid out to read; a cut input as it came;
+    /// an empty one not at all.
+    #[test]
+    fn a_call_shows_what_it_was_called_with() {
+        assert_eq!(
+            called_with(r#"{"query":["gpui",3]}"#).as_deref(),
+            Some("{\n  \"query\": [\n    \"gpui\",\n    3\n  ]\n}")
+        );
+        assert_eq!(called_with(r#"{"query":"gp"#).as_deref(), Some(r#"{"query":"gp"#));
+        assert_eq!(called_with("{}"), None);
+        assert_eq!(called_with("  "), None);
+        assert_eq!(head_lines("a\nb\nc", 2), "a\nb");
+    }
+
+    /// A subagent's line says its kind, its calls and its tokens, as far as the agent said.
+    #[test]
+    fn a_subagent_says_what_it_did() {
+        use slopty_proto::thread::Clipped;
+        use slopty_proto::thread::detail::AgentDetail;
+        let mut agent = AgentDetail {
+            agent_type: Some("Explore".to_owned()),
+            description: None,
+            prompt: Clipped::default(),
+            background: false,
+            report: None,
+            tokens: Some(12_000),
+            tool_uses: Some(14),
+            duration_ms: None,
+        };
+        assert_eq!(
+            agent_words(&agent).as_deref(),
+            Some("Explore \u{b7} 14 tools \u{b7} 12k tokens")
+        );
+        agent.tokens = None;
+        agent.tool_uses = Some(1);
+        assert_eq!(agent_words(&agent).as_deref(), Some("Explore \u{b7} 1 tool"));
+        agent.agent_type = None;
+        agent.tool_uses = None;
+        assert_eq!(agent_words(&agent), None);
     }
 }

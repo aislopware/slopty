@@ -694,6 +694,14 @@ impl ThreadView {
             .on_click(cx.listener(move |this, _ev, window, cx| this.menu_pick(ix, window, cx)))
     }
 
+    /// "Opens in the terminal" beside a command of Claude Code's own that shows a dialog there.
+    fn dialog_label(&self, command: &Command, cx: &App) -> Option<String> {
+        let claude = self
+            .state(cx)
+            .is_some_and(|st| st.meta.agent.0 == slopty_proto::thread::AgentId::CLAUDE_CODE);
+        (claude && menu::may_open_dialog(command)).then(|| "Opens in the terminal".to_owned())
+    }
+
     fn command_row(&self, ix: usize, command: &Command, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -726,13 +734,15 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(command.description.clone())),
             )
-            .children(menu::source_label(command).map(|source| {
-                div()
-                    .flex_none()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(source))
-            }))
+            .children(self.dialog_label(command, cx).or_else(|| menu::source_label(command)).map(
+                |source| {
+                    div()
+                        .flex_none()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(source))
+                },
+            ))
             .into_any_element()
     }
 

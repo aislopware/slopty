@@ -553,3 +553,37 @@ fn a_start_held_at_its_trust_dialog_offers_to_trust_the_folder(cx: &mut TestAppC
     assert!(cx.debug_bounds(format!("refused-{id}").leak()).is_some(), "why, in the thread");
     assert!(cx.debug_bounds("release-terminal-start").is_some(), "the terminal is still a way");
 }
+
+/// A Claude Code command that opens a dialog (`/config`) goes to the agent as any message, and
+/// its terminal comes into view, where the dialog is; a command that acts at once stays here.
+#[gpui::test]
+fn a_command_that_opens_a_dialog_shows_the_terminal(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    state.meta.terminal = Some(SessionId::new());
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let asked = asked(cx, &view);
+
+    cx.simulate_input("/model sonnet");
+    cx.simulate_keystrokes("escape enter");
+    assert!(asked.borrow().is_empty(), "a command that acts at once: {:?}", asked.borrow());
+    cx.simulate_input("/config");
+    cx.simulate_keystrokes("escape enter");
+    let sends = intents(&sent)
+        .into_iter()
+        .filter_map(|i| match i {
+            Intent::Send { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sends, ["/model sonnet", "/config"], "both go as messages");
+    assert!(
+        matches!(asked.borrow().as_slice(), [ThreadViewEvent::ShowTerminal]),
+        "the terminal comes into view: {:?}",
+        asked.borrow()
+    );
+}

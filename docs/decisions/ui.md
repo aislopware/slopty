@@ -9302,3 +9302,66 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Intent::Answer { ask: "terminal-start", choice: "trust" }`. If the worker refuses, the
     thread says why, and the card returns with the way to the terminal.
   - Test: `conversation::thread::tests::doors::a_start_held_at_its_trust_dialog_offers_to_trust_the_folder`.
+
+- ✅ **A request's card shows what is being approved: an edit's change, a plan whole**
+  (2026-10-11, readiness audit items 1 and 3, the client half).
+  - **The defect.** Claude Code's hooks name no call, so an edit put to the person read
+    "Allow Edit?" with nothing to judge it by. The patch was on the wire (`Request.proposed`)
+    and nothing drew it. A plan with no card on show printed its last 12 lines.
+  - **An edit.** The card draws `proposed` under the file's line: its type mark, its name
+    (which opens it), its folder muted, then +N −M. The diff is the thread's own renderer
+    (`patch_well`), drawn whole, in a well at most 0.4 of the window tall that scrolls, so
+    the answers under it stay on screen. The file is the request's call's, else that of the
+    newest call in the thread carrying the same patch: the transcript holds the call before
+    its hook asks (`proposed_path`). With neither, the diff shows with no file line.
+  - **A plan.** With no card of its own on show, the plan reads whole as Markdown at the
+    prose size, in the same bounded well. A plan the agent's side cut says how many lines
+    are left in its terminal.
+  - **A call's diff in the thread** keeps its first 12 lines until "Show all N lines", and
+    once all of it shows, says how many lines the agent's side left out. Before, it stopped
+    at 12 lines and did not say so.
+  - Tests: `conversation::thread::tests::proposed::*`.
+
+- ✅ **A failure reads as one, and a failed turn offers "Try again"** (2026-10-11, readiness
+  audit item 4).
+  - **Notices.** An API error the agent gave up on, and a hook notice, take the error tone and
+    a cross mark. An API error being retried, and a usage limit, take the warn tone and a
+    triangle. Auto mode's decline stays a muted cross. Words in passing keep the muted info
+    mark. A notice in a tone also reads a step stronger (`notice_mark`). A hook notice now
+    means a hook failed, blocked a call or stopped the turn; one that only speaks is to come as
+    information (lane W's adapters).
+  - **The failed turn.** While the last turn stands failed with no limit holding it, and
+    nothing works or waits, one line over the field says what failed in the agent's first
+    line of it, with "Try again". The button sends "Continue" as ↵ would send it. A lapsed
+    sign-in (Claude Code's "run /login", an expired OAuth token, a refused key, a 401) offers
+    no Try again, since sending cannot mend it. It says "Claude Code needs you to sign in again,
+    in its own terminal" and offers "Show terminal". Slopty never offers a login of its own.
+  - Tests: `conversation::thread::tests::failing::*`,
+    `view::notes::tests::a_failure_reads_in_the_error_tone`,
+    `view::later::tests::a_lapsed_sign_in_is_told_from_other_failures`.
+
+- ✅ **A Claude Code command that opens a dialog brings its terminal into view** (2026-10-11,
+  readiness audit item 10).
+  - **The defect.** `/config`, `/mcp`, a bare `/model` and the like were pasted into the TUI,
+    and their dialogs showed where nobody looked while the thread was on show.
+  - **The rule.** The command still goes as any message goes, through the worker's paste. A
+    command Claude Code draws as a dialog then flips the tile to its terminal, as ⌘J does.
+    Its command list does not say which commands do that, so `menu.rs` names them from Claude
+    Code's `local-jsx` commands: `DIALOGS` always, and `BARE_DIALOGS` (`model`, `resume`,
+    `add-dir`, `output-style`, `export`) only when sent with no argument. The slash menu says
+    "Opens in the terminal" beside each one. Other agents' commands are not touched.
+  - Tests: `conversation::thread::tests::doors::a_command_that_opens_a_dialog_shows_the_terminal`,
+    `conversation::menu::tests::a_dialog_command_is_told_by_its_name`.
+
+- ✅ **An opened call shows what it was called with; a subagent says what it did**
+  (2026-10-11, readiness audit item 11, the client half).
+  - **Input.** An MCP tool's call, a skill's, or one of a kind this client does not know shows
+    its input over its output, as JSON laid out to read (`called_with`). An input cut short
+    on the wire shows as it came. An empty one shows nothing. A call of a kind the client
+    knows already says its input on its line, so it shows none.
+  - **Length.** Each part shows its first 12 lines (the output its last 12) until "Show all N
+    lines". That one press opens the whole call.
+  - **A subagent's line** says its kind, its calls and its tokens beside its title, as far as
+    the agent said them: "Explore · 14 tools · 12k tokens" (`agent_words`).
+  - Tests: `conversation::thread::tests::proposed::an_mcp_call_shows_what_it_was_called_with`,
+    `view::tools::tests::{a_call_shows_what_it_was_called_with, a_subagent_says_what_it_did}`.

@@ -837,6 +837,7 @@ impl ThreadView {
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.limit_strip(cx))
+                    .children(self.failed_strip(cx))
                     .children(self.goal_strip(cx))
                     .children(self.notice_strip())
                     .children(self.editing_strip(cx))

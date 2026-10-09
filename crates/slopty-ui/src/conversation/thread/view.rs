@@ -128,6 +128,7 @@ mod notes;
 mod outline;
 mod pictures;
 mod plan;
+mod proposed;
 pub mod screens;
 mod tools;
 mod trail;
@@ -993,9 +994,22 @@ impl ThreadView {
             return;
         }
         let Some((text, attachments)) = self.take_message(cx) else { return };
+        let dialog = self.opens_dialog(&text, cx);
         let _id = self.intent(Intent::Send { text, delivery, attachments }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
+        // Its dialog shows in the agent's terminal, which comes into view to answer it.
+        if dialog {
+            self.show_terminal(cx);
+        }
+    }
+
+    /// Whether `text`, sent, opens a dialog in the agent's own terminal (Claude Code's
+    /// `/config`, a bare `/model`), which nobody would see while the thread is on show.
+    fn opens_dialog(&self, text: &str, cx: &App) -> bool {
+        self.state(cx).is_some_and(|st| {
+            st.meta.agent.0 == AgentId::CLAUDE_CODE && crate::conversation::menu::opens_dialog(text)
+        })
     }
 
     /// ↵ on a draft: its first message goes with what is attached, once nothing is still on
@@ -1425,18 +1439,30 @@ impl ThreadView {
 
     /// "Show all 240 lines", under a clipped text.
     fn show_all(&self, item: &ItemId, clipped: &Clipped, cx: &Context<Self>) -> AnyElement {
+        self.show_lines(item, u64::from(clipped.lines), cx)
+    }
+
+    /// "Show all `lines` lines" under what `item` shows the head of; a press shows it whole.
+    pub(super) fn show_lines(&self, item: &ItemId, lines: u64, cx: &Context<Self>) -> AnyElement {
         let id = item.clone();
         let s = self.theme.surfaces;
-        div()
-            .id(ElementId::Name(format!("whole-{}", item.0).into()))
-            .role(Role::Button)
-            .text_size(px(self.theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            .cursor_pointer()
-            .hover(move |el| el.text_color(hsla(s.text)))
-            .child(SharedString::from(format!("Show all {} lines", clipped.lines)))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(id.clone(), cx)))
-            .into_any_element()
+        let label = SharedString::from(format!("Show all {lines} lines"));
+        let selector = format!("whole-{}", item.0);
+        crate::a11y::tab_stop(
+            div()
+                .id(ElementId::Name(selector.clone().into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(label.clone())
+                .text_size(px(self.theme.typography.small()))
+                .text_color(hsla(s.text_muted))
+                .cursor_pointer()
+                .hover(move |el| el.text_color(hsla(s.text)))
+                .child(label),
+            s.focus,
+        )
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(id.clone(), cx)))
+        .into_any_element()
     }
 
     /// Whether row `ix` is a line of the agent's work (a call, a group of calls, its reasoning,

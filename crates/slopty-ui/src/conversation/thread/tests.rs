@@ -653,7 +653,9 @@ mod commit;
 mod composing;
 mod doors;
 mod face;
+mod failing;
 mod find;
+mod proposed;
 mod questions;
 mod steps;
 

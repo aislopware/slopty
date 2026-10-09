@@ -11,6 +11,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Notice, Retry, Turn};
+use slopty_theme::{Rgb, Surfaces};
 
 use super::{TOOL_ROW, ThreadView, composer, tokens};
 use crate::colors::hsla;
@@ -65,6 +66,20 @@ pub(super) fn turn_footer(turn: &Turn, meters: &Meters) -> (Option<String>, Opti
     (model, (used > 0).then(|| format!("{} tokens", tokens(used))))
 }
 
+/// A notice's mark and the tone it is said in. What stopped the work reads as a failure: an
+/// API error the agent gave up on and a hook (one that only speaks is said as information);
+/// an API error it is trying again waits in the warn tone, as does a usage limit. Auto mode
+/// turning a call down reads as a refusal, muted. The rest are words in passing.
+fn notice_mark(n: &Notice, s: &Surfaces) -> (Symbol, Rgb) {
+    match n.kind.as_str() {
+        Notice::API_ERROR if n.retry.is_some() => (Symbol::ExclamationmarkTriangle, s.warn),
+        Notice::API_ERROR | Notice::HOOK => (Symbol::XmarkCircle, s.error),
+        Notice::LIMIT => (Symbol::ExclamationmarkTriangle, s.warn),
+        Notice::DECLINED => (Symbol::XmarkCircle, s.text_muted),
+        _ => (Symbol::InfoCircle, s.text_muted),
+    }
+}
+
 /// The most lines a notice shows before "Show all".
 const NOTICE_LINES: usize = 3;
 
@@ -82,6 +97,7 @@ impl ThreadView {
         let s = theme.surfaces;
         let open = self.items_open.contains(id);
         let mut cut = false;
+        let mut tone = s.text_muted;
         let (icon, words, under, more) = match &item.body {
             ItemBody::Compaction(c) => {
                 let summary = c.summary.as_ref().map(|t| t.text.clone()).filter(|t| !t.is_empty());
@@ -91,12 +107,8 @@ impl ThreadView {
                 let (shown, rest) = notice_lines(&n.text.text);
                 cut = rest && !self.whole.contains(id);
                 let words = if cut { shown } else { n.text.text.trim().to_owned() };
-                // Auto mode turning a call down reads as a refusal, not as a word in passing.
-                let icon = if n.kind == Notice::DECLINED {
-                    Symbol::XmarkCircle
-                } else {
-                    Symbol::InfoCircle
-                };
+                let (icon, ink) = notice_mark(n, &s);
+                tone = ink;
                 (icon, words, n.retry.as_ref().map(retrying), None)
             }
             // Codex's reviewer begins here; what it found follows as its answer.
@@ -125,7 +137,8 @@ impl ThreadView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .min_h(px(TOOL_ROW))
-            .child(Self::slot().child(self.icon(icon, s.text_muted)))
+            .when(tone != s.text_muted, |el| el.text_color(hsla(s.text_secondary)))
+            .child(Self::slot().child(self.icon(icon, tone)))
             .child(div().min_w_0().whitespace_normal().child(SharedString::from(words)))
             .when(opens, |el| {
                 el.cursor_pointer()
@@ -189,7 +202,7 @@ impl ThreadView {
 mod tests {
     use slopty_proto::thread::{Compaction, Meters, Retry, Turn, TurnId, TurnState, Usage};
 
-    use super::{compacted, notice_lines, retrying, turn_footer};
+    use super::{compacted, notice_lines, notice_mark, retrying, turn_footer};
 
     /// A notice shows three lines and says when there is more; a short one shows whole.
     #[test]
@@ -259,5 +272,22 @@ mod tests {
             summary: None,
         };
         assert_eq!(compacted(&c), "Compacted 120k \u{2192} 18k tokens");
+    }
+
+    /// What stopped the work is said in the error tone; a retry under way and a limit wait in
+    /// the warn tone; words in passing stay muted.
+    #[test]
+    fn a_failure_reads_in_the_error_tone() {
+        use slopty_proto::thread::{Clipped, Notice};
+        let s = slopty_theme::Theme::default().surfaces;
+        let notice = |kind: &str| Notice::new(kind, Clipped::whole("x"));
+        assert_eq!(notice_mark(&notice(Notice::API_ERROR), &s).1, s.error);
+        assert_eq!(notice_mark(&notice(Notice::HOOK), &s).1, s.error);
+        let mut retried = notice(Notice::API_ERROR);
+        retried.retry = Some(Retry { attempt: 2, max: None, in_ms: None });
+        assert_eq!(notice_mark(&retried, &s).1, s.warn);
+        assert_eq!(notice_mark(&notice(Notice::LIMIT), &s).1, s.warn);
+        assert_eq!(notice_mark(&notice(Notice::INFO), &s).1, s.text_muted);
+        assert_eq!(notice_mark(&notice(Notice::DECLINED), &s).1, s.text_muted);
     }
 }

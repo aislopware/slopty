@@ -34,6 +34,10 @@ use crate::kit::{self, ButtonKind};
 /// The widest an answer's reach is drawn on its button, in ems of its text.
 const SCOPE_EMS: f32 = 14.0;
 
+/// The most of the window's height what a request asks the person to read (a plan, an edit's
+/// change) takes on its card before it scrolls.
+const READ_SHARE: f32 = 0.4;
+
 /// What a frame drew from the list's scroll, to know when a scroll changes it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) struct Marks {
@@ -263,7 +267,7 @@ impl ThreadView {
         let placement = self.marks.get().asked.map_or(Placement::Tray, |(_, p)| p);
         let request = waiting.get(at).filter(|_| placement != Placement::Inline).map(|current| {
             let asked = (current.request, at, waiting.len());
-            self.request_card(asked, placement, cx)
+            self.request_card(asked, placement, window_h, cx)
         });
         // Each kind of thing stands in a group of its own, a base unit of space between groups,
         // so a row never reads as belonging to the group above it. Space, not a rule: rules
@@ -645,11 +649,15 @@ impl ThreadView {
         &self,
         (request, at, of): (&Request, usize, usize),
         placement: Placement,
+        window_h: gpui::Pixels,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let release = self.release_button(request, cx);
+        // What the person reads before answering stands at most a share of the window, and
+        // scrolls past it, so the answers under it stay on screen.
+        let well_h = window_h * READ_SHARE;
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
         // A plan put to the person is read on its card in the thread: the tray names it and
         // keeps the way to it and the answers, not a second copy of its words.
@@ -671,8 +679,19 @@ impl ThreadView {
             None if carded => ("Plan ready".to_owned(), None),
             None => (request.title.clone(), None),
         };
-        let text =
-            request.text.as_ref().filter(|_| !carded).map(|t| t.text.clone()).or_else(|| {
+        // A plan with no card on show is read here whole, as the document it is.
+        let plan = request
+            .text
+            .as_ref()
+            .filter(|_| request.kind == Request::PLAN && !carded && asking.is_none());
+        // An edit put to the person shows the change it would make.
+        let proposed = request.proposed.as_ref().filter(|_| asking.is_none());
+        let text = request
+            .text
+            .as_ref()
+            .filter(|_| !carded && plan.is_none())
+            .map(|t| t.text.clone())
+            .or_else(|| {
                 asking
                     .is_none()
                     .then(|| request.questions.first().map(|q| q.text.clone()))
@@ -822,11 +841,16 @@ impl ThreadView {
                         .bg(hsla(s.ground))
                         .font_family(self.mono())
                         .text_color(hsla(s.text))
+                        .child(SharedString::from(tail(&t, PEEK_LINES)))
+                        .into_any_element()
                 } else {
                     el.text_color(hsla(s.text_secondary))
+                        .child(SharedString::from(tail(&t, PEEK_LINES)))
+                        .into_any_element()
                 }
-                .child(SharedString::from(tail(&t, PEEK_LINES)))
             }))
+            .children(plan.map(|plan| self.plan_well(request, plan, well_h)))
+            .children(proposed.map(|patch| self.proposed_well(request, patch, well_h, cx)))
             .children(body)
             .into_any_element()
     }

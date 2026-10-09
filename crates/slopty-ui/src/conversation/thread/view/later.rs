@@ -6,6 +6,11 @@
 //! (`TurnState::Failed::until_ms`). The thread says so over the field, and one press sends the
 //! draft, or "Continue" when nothing is typed, to go at that moment. The tray says when it
 //! goes.
+//!
+//! A turn that failed on anything else (an API error, an overload) offers "Try again" in the
+//! same place, which sends "Continue" as any message goes; one that failed because the agent's
+//! sign-in lapsed says to sign in again in its own terminal, and shows it. Slopty never offers
+//! a login of its own.
 
 use gpui::accesskit::Role;
 use gpui::{
@@ -20,10 +25,28 @@ use super::ThreadView;
 use crate::colors::hsla;
 use crate::conversation::figures;
 use crate::icons::Symbol;
-use crate::kit::ButtonKind;
+use crate::kit::{self, ButtonKind};
 
 /// What goes at a limit's reset when nothing is typed.
 const CONTINUE: &str = "Continue";
+
+/// Whether `error` says the agent's sign-in failed: Claude Code's "run /login", an expired
+/// OAuth token, a refused API key, an HTTP 401. Sending again cannot mend that.
+fn sign_in_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    ["/login", "oauth token", "invalid api key", "authentication_error", "not logged in", "401 "]
+        .iter()
+        .any(|said| error.contains(said))
+}
+
+/// The error the thread's last turn failed on, where no usage limit holds it (`limit_lifts`
+/// answers that one).
+pub(super) fn failed_on(state: &ThreadState) -> Option<&str> {
+    match &state.turns.last()?.state {
+        TurnState::Failed { error, until_ms: None } => Some(error),
+        _ => None,
+    }
+}
 
 /// When a message held for `delivery` goes, in words for a line of its own: "14:35",
 /// "Tomorrow 09:00". Nothing for a message that goes with the turn.
@@ -99,12 +122,78 @@ impl ThreadView {
     }
 }
 
+impl ThreadView {
+    /// Send "Continue" now, as ↵ sends: the agent takes up the failed turn's work again.
+    fn try_again(&self, cx: &mut Context<Self>) {
+        let delivery = self.send_now(cx);
+        let text = CONTINUE.to_owned();
+        let _id = self.intent(Intent::Send { text, delivery, attachments: Vec::new() }, cx);
+        self.list.scroll_to_end();
+    }
+
+    /// Over the field while the last turn stands failed and nothing else is under way or
+    /// waits: what failed, in the error tone, and "Try again"; for a lapsed sign-in, where to
+    /// sign in instead, and the agent's terminal.
+    pub(super) fn failed_strip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let state = self.state(cx)?;
+        if self.composing.editing() || self.working(cx) || !state.pending.is_empty() {
+            return None;
+        }
+        let error = failed_on(state)?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let sign_in = sign_in_error(error);
+        let words = if sign_in {
+            let agent = super::agent_label(&state.meta.agent);
+            format!("{agent} needs you to sign in again, in its own terminal")
+        } else {
+            let said = kit::first_line(error);
+            if said.is_empty() { "The turn failed".to_owned() } else { format!("Failed: {said}") }
+        };
+        let action = if sign_in {
+            state.meta.terminal.is_some().then(|| {
+                self.button("thread-show-terminal", "Show terminal", ButtonKind::Secondary)
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.show_terminal(cx)))
+            })
+        } else {
+            Some(
+                self.button("thread-try-again", "Try again", ButtonKind::Secondary)
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.try_again(cx))),
+            )
+        };
+        Some(
+            div()
+                .id("thread-failed")
+                .debug_selector(|| "thread-failed".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(words.clone()))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_secondary))
+                .child(self.icon(Symbol::XmarkCircle, s.error))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(SharedString::from(words)),
+                )
+                .children(action)
+                .into_any_element(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{Delivery, TurnState};
 
-    use super::{limit_lifts, when_words};
+    use super::{failed_on, limit_lifts, sign_in_error, when_words};
     use crate::conversation::figures;
     use crate::conversation::thread::fixtures;
 
@@ -141,5 +230,38 @@ mod tests {
         assert_eq!(limit_lifts(&state, now), None, "already lifted");
         state.turns = vec![turn(None)];
         assert_eq!(limit_lifts(&state, now), None);
+    }
+
+    /// A lapsed sign-in reads as one, in the words the agents use; an overload does not.
+    #[test]
+    fn a_lapsed_sign_in_is_told_from_other_failures() {
+        assert!(sign_in_error("Invalid API key \u{b7} Please run /login"));
+        assert!(sign_in_error("OAuth token has expired. Please obtain a new token"));
+        assert!(sign_in_error("API Error: 401 {\"type\":\"error\"}"));
+        assert!(!sign_in_error("API Error: 529 Overloaded"));
+        assert!(!sign_in_error("Request timed out"));
+    }
+
+    /// Only a failure no limit holds is one to try again.
+    #[test]
+    fn a_failed_turn_with_no_limit_is_one_to_try_again() {
+        let mut state = fixtures::empty();
+        assert_eq!(failed_on(&state), None);
+        let turn = |until_ms| slopty_proto::thread::Turn {
+            id: slopty_proto::thread::TurnId(1),
+            input: None,
+            state: TurnState::Failed { error: "529 Overloaded".to_owned(), until_ms },
+            started_ms: WallMs::ZERO,
+            ended_ms: None,
+            usage: slopty_proto::thread::Usage::default(),
+            models: Vec::new(),
+            changed: slopty_proto::thread::Changed::default(),
+            before: None,
+            after: None,
+        };
+        state.turns = vec![turn(None)];
+        assert_eq!(failed_on(&state), Some("529 Overloaded"));
+        state.turns = vec![turn(Some(WallMs::from_millis(70_000)))];
+        assert_eq!(failed_on(&state), None, "a limit's reset is Continue at");
     }
 }
