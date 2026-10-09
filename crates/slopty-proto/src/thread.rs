@@ -741,7 +741,7 @@ impl Notice {
     /// The agent's own judge of risk (Claude Code's auto mode) turned a call down, with no
     /// person asked.
     pub const DECLINED: &'static str = "declined";
-    /// A hook spoke or stopped the turn.
+    /// A hook failed, blocked a call or stopped the turn.
     pub const HOOK: &'static str = "hook";
     /// Something the agent wanted to say.
     pub const INFO: &'static str = "info";

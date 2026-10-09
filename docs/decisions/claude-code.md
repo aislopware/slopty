@@ -2253,3 +2253,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the agent's own records say. No golden moves.
   - Tests: `claude_start::a_resume_of_a_session_a_claude_elsewhere_holds_is_refused`,
     `workspace::agent_start::tests::a_session_a_live_agent_holds_is_marked_running`.
+
+- ✅ **An approval names its call, and a plan may be approved with edits accepted** (2026-10-11,
+  readiness 10-11 ranks 1 and 3, the agent's half).
+  - **The call.** Claude Code's `PermissionRequest` names no call. The `approve-edit` capture
+    (2.1.295) shows the `PreToolUse` before it naming the call (`tool_use_id`) with the same
+    tool and input. So the worker's `Board` keeps each session's calls a `PreToolUse` named
+    until they end (`Board::call_of`, at most 32), and the held prompt carries the one matched
+    (`PermissionPrompt::call`). The request then hangs on the call's row (`Request::item`). The
+    call goes `ToolState::Pending` while the prompt is held, and back to `Running` once it is
+    settled, the way Codex's and pi's calls already did.
+  - **The title.** An edit or a write is titled by its file's name ("Allow edit of
+    notes.txt?", "Allow write of todo.txt?"), and any other tool by its name, as before.
+  - **The plan.** When a plan's request suggests a mode (`setMode`), it offers "Approve, and
+    accept edits" beside the plain approval, as Claude Code's own plan dialog does. Its answer
+    goes the way "Always allow" goes (`Verdict::AllowAlways`), and `Decision::AllowAlways` now
+    also carries the call's input, without which Claude Code takes no approval of a plan. The
+    ctl golden `ctl_reply_permission_always` moved for the new field.
+  - **What stays unverified.** `--print` offers no `ExitPlanMode`, with `--permission-prompts`
+    `none` or `host` alike, so a plan's approval cannot be captured the way the fixtures are.
+    Which suggestions a plan's request carries, and which mode a plain approval leaves, are
+    Claude Code's, read from its hooks reference. The choice is offered only when a `setMode`
+    is suggested, so a request without one shows the plain approval alone.
+  - Tests: `an_edit_put_to_the_person_names_its_file_and_waits_on_its_call` and
+    `a_plan_may_be_approved_with_edits_accepted` (slopty-agent `observed/tests.rs`), and
+    `a_permission_request_is_matched_to_its_call` (slopty-worker `conversation.rs`, over the
+    capture's hooks).
+
+- ✅ **A notebook's cell edit is an edit with a diff** (2026-10-11, readiness 10-11 rank 11, the
+  decoder's arm). `NotebookEdit` decoded as an unknown tool, so its card showed no change. The
+  `notebook` capture (2.1.295) shows its input (`notebook_path`, `cell_id`, `edit_mode`,
+  `new_source`) and a result that adds the cell's `old_source` for a replacement. It now decodes
+  as `ToolDetail::Edit` of the notebook, its patch the cell's source (`notebook_patch`): old to
+  new for a replacement, all added for an insert, all removed for a delete. A request to the
+  person, which has no result yet, shows the new source as added. Tests:
+  `a_notebook_edit_is_an_edit_of_its_cell` (slopty-agent `conversation/tests.rs`).
+- ✅ **Codex's hook that only spoke is information** (2026-10-11, with lane A's error tone for
+  `Notice::HOOK`). A Codex hook run that completed or still runs with words left is
+  `Notice::INFO`. One that failed, blocked a call or stopped the turn stays `Notice::HOOK`,
+  which now means only that. Test: `calls_keep_their_times_and_hooks_and_mcp_failures_are_said`
+  (slopty-agent `tests/codex.rs`).

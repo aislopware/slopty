@@ -12,8 +12,17 @@ use crate::live::{Board, ModEvent};
 use crate::status::AgentSource;
 use crate::transcript::Tail;
 
-const CONVERSATIONS: [&str; 7] =
-    ["edit", "tools", "interrupt", "compact", "permission", "background", "auto"];
+const CONVERSATIONS: [&str; 9] = [
+    "edit",
+    "tools",
+    "interrupt",
+    "compact",
+    "permission",
+    "background",
+    "auto",
+    "approve-edit",
+    "notebook",
+];
 
 fn dir(kind: &str, scenario: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(kind).join(scenario)
@@ -315,7 +324,7 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     let prompt = crate::permission::prompt(
         session,
         7,
-        &hook,
+        (&hook, None),
         WallMs::from_millis(1),
         WallMs::from_millis(9),
     );
@@ -345,6 +354,153 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     assert_eq!((answered.client, choice.as_str()), (Some(by), "allow"));
 }
 
+/// The hooks of a recorded scenario, in order.
+fn recorded_hooks(scenario: &str) -> Vec<Hook> {
+    let text =
+        std::fs::read_to_string(dir("conversation", scenario).join("hooks.jsonl")).expect("hooks");
+    text.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json"))
+        .map(|r| serde_json::from_value::<Hook>(r["input"].clone()).expect("a hook"))
+        .collect()
+}
+
+/// An edit put to the person, as Claude Code 2.1.295 asked it (the `approve-edit` capture):
+/// the `PermissionRequest` names no call, but the `PreToolUse` before it names the call with
+/// the same tool and input. Told that call, the request is titled with the file, carries the
+/// proposed patch, hangs on the call's row, and the call waits on the person until the prompt
+/// is settled.
+#[test]
+fn an_edit_put_to_the_person_names_its_file_and_waits_on_its_call() {
+    let hooks = recorded_hooks("approve-edit");
+    let asked: Vec<&Hook> =
+        hooks.iter().filter(|h| h.event == crate::HookEvent::PermissionRequest).collect();
+    assert_eq!(asked.len(), 2, "the edit and the write");
+    assert!(asked.iter().all(|h| h.tool_use_id.is_none()), "a permission request names no call");
+    let call_of = |hook: &Hook| {
+        let at = hooks.iter().position(|h| std::ptr::eq(h, hook)).expect("in order");
+        hooks[..at]
+            .iter()
+            .rev()
+            .find(|h| {
+                h.event == crate::HookEvent::PreToolUse
+                    && h.tool_name == hook.tool_name
+                    && h.tool_input == hook.tool_input
+            })
+            .and_then(|h| h.tool_use_id.clone())
+    };
+    let (edit, write) = (asked[0], asked[1]);
+    assert_eq!(call_of(edit).as_deref(), Some("toolu_02"));
+    assert_eq!(call_of(write).as_deref(), Some("toolu_03"));
+
+    // The transcript up to the edit's call, as Claude Code had written it when it asked.
+    let tmp = tempfile::tempdir().expect("tmp");
+    let text =
+        std::fs::read_to_string(dir("conversation", "approve-edit").join("transcript.jsonl"))
+            .expect("transcript");
+    let upto: Vec<&str> =
+        text.lines().take_while(|l| !l.contains(r#""tool_use_id":"toolu_02""#)).collect();
+    std::fs::write(tmp.path().join("transcript.jsonl"), format!("{}\n", upto.join("\n")))
+        .expect("write");
+    let (mut observed, mut host, _) = replay(tmp.path());
+    let state = |host: &Host, observed: &Observed| {
+        let main = host.thread(observed.main());
+        match &main.items.iter().find(|i| i.id.0 == "toolu_02").expect("the call").body {
+            ItemBody::Tool(call) => call.state.clone(),
+            other => panic!("a call: {other:?}"),
+        }
+    };
+    assert_eq!(state(&host, &observed), ToolState::Running);
+
+    let session = SessionId::nil();
+    let prompt = crate::permission::prompt(
+        session,
+        7,
+        (edit, call_of(edit)),
+        WallMs::from_millis(1),
+        WallMs::from_millis(9),
+    );
+    host.take(observed.permission(&PermissionEvent::Asked(Box::new(prompt))));
+    let main = host.thread(observed.main());
+    let request = main.open_requests().next().expect("open");
+    assert_eq!(request.title, "Allow edit of notes.txt?");
+    assert_eq!(request.item, Some(ItemId("toolu_02".to_owned())));
+    let proposed = request.proposed.as_ref().expect("the patch");
+    assert_eq!((proposed.added, proposed.removed), (1, 1));
+    assert_eq!(state(&host, &observed), ToolState::Pending { ask: AskId("7".to_owned()) });
+
+    let by = ClientId::from_uuid(uuid::Uuid::from_u128(5));
+    let outcome = Settled::Answered { verdict: Verdict::Allow, by };
+    host.take(observed.permission(&PermissionEvent::Settled { session, ask: 7, outcome }));
+    assert_eq!(state(&host, &observed), ToolState::Running, "answered, it runs");
+
+    let prompt = crate::permission::prompt(
+        session,
+        8,
+        (write, None),
+        WallMs::from_millis(1),
+        WallMs::from_millis(9),
+    );
+    assert_eq!(super::request(&prompt).title, "Allow write of todo.txt?");
+}
+
+/// A plan whose request suggests accepting edits offers it beside the plain approval, as
+/// Claude Code's own plan dialog does; its decision carries the plan back, as any approval of
+/// it must, and the suggested mode with it. A plan suggesting no mode offers the plain
+/// approval alone.
+#[test]
+fn a_plan_may_be_approved_with_edits_accepted() {
+    let plan = |suggestions: serde_json::Value| -> Hook {
+        serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s",
+            "tool_name": "ExitPlanMode",
+            "tool_input": { "plan": "1. Write hello.txt" },
+            "permission_mode": "plan",
+            "permission_suggestions": suggestions,
+        }))
+        .expect("a hook")
+    };
+    let suggested = serde_json::json!([
+        { "type": "setMode", "mode": "acceptEdits", "destination": "session" }
+    ]);
+    let hook = plan(suggested.clone());
+    let prompt = crate::permission::prompt(
+        SessionId::nil(),
+        3,
+        (&hook, None),
+        WallMs::from_millis(1),
+        WallMs::from_millis(9),
+    );
+    let request = request(&prompt);
+    assert_eq!(request.kind, Request::PLAN);
+    let offered: Vec<(&str, &str)> =
+        request.options.iter().map(|c| (c.id.as_str(), c.label.as_str())).collect();
+    assert_eq!(
+        offered,
+        [("allow", "Approve the plan"), ("always", "Approve, and accept edits"), ("deny", "Deny")]
+    );
+    let always = &request.options[1];
+    assert_eq!(always.scope.as_deref(), Some("edits this session"));
+    let verdict = verdict("always", None).expect("a verdict");
+    let decision = crate::permission::decision(&verdict, &hook);
+    let printed = crate::permission::hook_output(crate::HookEvent::PermissionRequest, &decision)
+        .expect("printed");
+    let decided = &printed["hookSpecificOutput"]["decision"];
+    assert_eq!(decided["updatedInput"], serde_json::json!({ "plan": "1. Write hello.txt" }));
+    assert_eq!(decided["updatedPermissions"], suggested);
+
+    let none = plan(serde_json::json!([]));
+    let prompt = crate::permission::prompt(
+        SessionId::nil(),
+        4,
+        (&none, None),
+        WallMs::from_millis(1),
+        WallMs::from_millis(9),
+    );
+    let ids: Vec<String> = super::request(&prompt).options.into_iter().map(|c| c.id).collect();
+    assert_eq!(ids, ["allow", "deny"]);
+}
+
 /// "Always allow" is followed by what it grants as Claude Code's dialog words it: a mode as
 /// what it lets through, in the folders granted with it, then how long it holds; a command
 /// rule as its commands; an unknown mode or update kind still in words.
@@ -359,6 +515,7 @@ fn always_allow_says_what_it_grants_as_claude_code_does() {
             session: SessionId::nil(),
             ask: 1,
             tool: "Bash".to_owned(),
+            call: None,
             detail: conv::ToolDetail::Other {
                 input: conv::Clipped { text: "{}".to_owned(), lines: 1, chars: 2, full: None },
             },
@@ -520,7 +677,7 @@ fn a_block_with_no_prompt_held_asks_in_the_terminal() {
         crate::permission::prompt(
             session,
             ask,
-            &hook,
+            (&hook, None),
             WallMs::from_millis(1),
             WallMs::from_millis(99),
         )
@@ -1093,7 +1250,7 @@ fn an_auto_mode_decline_is_said_after_its_call_and_may_be_let_try_again() {
     let prompt = crate::permission::prompt(
         session,
         9,
-        &hook,
+        (&hook, None),
         WallMs::from_millis(7),
         WallMs::from_millis(9),
     );

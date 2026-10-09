@@ -300,6 +300,9 @@ struct Mapped {
     turns: HashMap<TurnId, Turn>,
     /// Background commands as last sent, for their output to land on.
     background: HashMap<String, Item>,
+    /// Calls not ended yet, as last sent, by call: a permission prompt held for one marks it
+    /// waiting on the person, and its settling lets it run again.
+    calls: HashMap<String, Item>,
     /// The work left running in the background, by the call that started it, in the order
     /// the calls came, as last sent.
     tasks: Vec<BackgroundTask>,
@@ -317,6 +320,7 @@ impl Mapped {
             ended: HashSet::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
+            calls: HashMap::new(),
             tasks: Vec::new(),
         }
     }
@@ -948,12 +952,24 @@ impl Observed {
                 }
                 let request = request(prompt);
                 self.open.push(request.clone());
+                if let Some(call) = &request.item {
+                    self.call_state(call, &ToolState::Pending { ask: request.id.clone() });
+                }
                 Action::RequestOpened(Box::new(request))
             }
             PermissionEvent::Settled { ask, outcome, .. } => {
                 self.held_block = self.held_block.or_else(|| self.blocked_since());
                 let id = ask.to_string();
+                let calls: Vec<ItemId> = self
+                    .open
+                    .iter()
+                    .filter(|r| r.id.0 == id)
+                    .filter_map(|r| r.item.clone())
+                    .collect();
                 self.open.retain(|r| r.id.0 != id);
+                for call in &calls {
+                    self.call_state(call, &ToolState::Running);
+                }
                 let state = match outcome {
                     Settled::Answered { verdict, by } => {
                         RequestState::Answered { by: answerer(*by), choice: choice_of(verdict) }
@@ -970,6 +986,24 @@ impl Observed {
         };
         self.push(self.meta.id, action);
         self.drain()
+    }
+
+    /// Set the state of `call`, a call not ended yet, and send it again: a prompt held for it
+    /// marks it waiting on the person, and its settling lets it run. A call not in the
+    /// transcript yet, or ended, is left as it is.
+    fn call_state(&mut self, call: &ItemId, state: &ToolState) {
+        let found = self.threads.values_mut().find_map(|m| {
+            let item = m.calls.get_mut(&call.0)?;
+            let ItemBody::Tool(tool) = &mut item.body else { return None };
+            if tool.state == *state {
+                return None;
+            }
+            tool.state = state.clone();
+            Some((m.id, item.clone()))
+        });
+        if let Some((thread, item)) = found {
+            self.push(thread, Action::ItemUpdated(item));
+        }
     }
 
     /// Auto mode turned a call down: say so after the call, or once the transcript has it.
@@ -1236,7 +1270,13 @@ impl Observed {
         }
         let changed = changed_by(&entry.body);
         let had = mapped.items.insert(entry.id.clone(), (turn, changed)).map(|(_, c)| c);
-        let item = Item { id: ItemId(entry.id.clone()), turn, at_ms: entry.at_ms, body };
+        let mut item = Item { id: ItemId(entry.id.clone()), turn, at_ms: entry.at_ms, body };
+        if let ItemBody::Tool(call) = &mut item.body
+            && call.state == ToolState::Running
+            && let Some(asked) = self.open.iter().find(|r| r.item.as_ref() == Some(&item.id))
+        {
+            call.state = ToolState::Pending { ask: asked.id.clone() };
+        }
         let background = matches!(&item.body, ItemBody::Tool(call)
             if matches!(&call.detail, Some(detail::ToolDetail::Exec(e)) if e.background));
         if background {
@@ -1247,6 +1287,11 @@ impl Observed {
             actions.push(Action::TasksSet(mapped.tasks.clone()));
         }
         let open = matches!(&item.body, ItemBody::Tool(call) if !call.state.is_final());
+        if open {
+            mapped.calls.insert(entry.id.clone(), item.clone());
+        } else {
+            mapped.calls.remove(&entry.id);
+        }
         actions.push(if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) });
         if had.unwrap_or_default() != changed
             && let Some(mut t) = mapped.turns.get(&turn).cloned()
@@ -1293,6 +1338,7 @@ impl Observed {
         let mut actions = vec![Action::ItemRemoved { item: ItemId(entry.to_owned()) }];
         mapped.items.remove(entry);
         mapped.background.remove(entry);
+        mapped.calls.remove(entry);
         if mapped.set_task(entry, None) {
             actions.push(Action::TasksSet(mapped.tasks.clone()));
         }
@@ -1994,6 +2040,17 @@ fn grants(prompt: &PermissionPrompt) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
+/// The mode a plan's approval may switch to, as [`mode_words`] says it ("edits" for
+/// `acceptEdits`): the first `setMode` the request suggests, other than plan mode itself.
+fn plan_mode(prompt: &PermissionPrompt) -> Option<String> {
+    prompt.suggestions.iter().find_map(|s| match &s.grant {
+        Grant::Mode { mode } if mode.trim() != "plan" => {
+            Some(mode_words(mode)).filter(|said| !said.is_empty())
+        }
+        _ => None,
+    })
+}
+
 /// A permission mode as what it lets through: `acceptEdits` is "edits", as Claude Code's
 /// "allow all edits during this session" says it; any other mode is named ("plan mode").
 fn mode_words(mode: &str) -> String {
@@ -2090,6 +2147,21 @@ fn decline_notice(declined: &conv::Declined) -> Notice {
     Notice::new(Notice::DECLINED, Clipped::whole(&text))
 }
 
+/// The title of a yes or no on a call: the file an edit or a write is to, by its name ("Allow
+/// edit of `lib.rs`?"), else the tool ("Allow Bash?").
+fn approval_title(prompt: &PermissionPrompt) -> String {
+    let named = |path: &str| path.rsplit('/').find(|p| !p.is_empty()).unwrap_or(path).to_owned();
+    match &prompt.detail {
+        conv::ToolDetail::Edit(e) if !e.path.is_empty() => {
+            format!("Allow edit of {}?", named(&e.path))
+        }
+        conv::ToolDetail::Write(w) if !w.path.is_empty() => {
+            format!("Allow write of {}?", named(&w.path))
+        }
+        _ => format!("Allow {}?", prompt.tool),
+    }
+}
+
 /// A held permission prompt as a request, with the answers Claude Code takes.
 fn request(prompt: &PermissionPrompt) -> Request {
     let thread = conv::ThreadId::Main;
@@ -2127,7 +2199,17 @@ fn request(prompt: &PermissionPrompt) -> Request {
             }
             conv::ToolDetail::Plan { .. } => {
                 let allow = choice("allow", "Approve the plan", Effect::Allow, None, false);
-                (Request::PLAN, "Approve the plan?".to_owned(), vec![allow, deny], Vec::new(), None)
+                // Claude Code's own plan dialog offers to accept edits from then on: the mode
+                // its request suggests, carried back as "Always allow" carries its suggestions.
+                let and_then = plan_mode(prompt).map(|mode| {
+                    let label = match mode.as_str() {
+                        "edits" => "Approve, and accept edits".to_owned(),
+                        mode => format!("Approve, and switch to {mode}"),
+                    };
+                    choice("always", &label, Effect::Allow, grants(prompt), false)
+                });
+                let options = [Some(allow), and_then, Some(deny)].into_iter().flatten().collect();
+                (Request::PLAN, "Approve the plan?".to_owned(), options, Vec::new(), None)
             }
             detail => {
                 let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
@@ -2146,13 +2228,7 @@ fn request(prompt: &PermissionPrompt) -> Request {
                     conv::ToolDetail::Write(w) => Some(patch(&thread, &w.patch)),
                     _ => None,
                 };
-                (
-                    Request::APPROVAL,
-                    format!("Allow {}?", prompt.tool),
-                    options,
-                    Vec::new(),
-                    proposed,
-                )
+                (Request::APPROVAL, approval_title(prompt), options, Vec::new(), proposed)
             }
         },
     };
@@ -2163,7 +2239,7 @@ fn request(prompt: &PermissionPrompt) -> Request {
     };
     Request {
         id: AskId(prompt.ask.to_string()),
-        item: None,
+        item: prompt.call.clone().map(ItemId),
         kind: kind.to_owned(),
         title,
         text,

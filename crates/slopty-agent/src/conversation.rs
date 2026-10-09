@@ -991,6 +991,7 @@ pub fn proposed(name: &str, input: &Value) -> ToolDetail {
         }
     };
     match &mut detail {
+        ToolDetail::Edit(edit) if name == "NotebookEdit" => edit.patch = notebook_patch(input),
         ToolDetail::Edit(edit) => edit.patch = proposed_patch(&replacements(input)),
         ToolDetail::Write(write) => {
             let content = string_at(input, "content").unwrap_or_default();
@@ -999,6 +1000,20 @@ pub fn proposed(name: &str, input: &Value) -> ToolDetail {
         _ => {}
     }
     detail
+}
+
+/// A `NotebookEdit`'s change to its cell, from its input or its result (`toolUseResult`), which
+/// says the same and adds the cell's source before (`old_source`): a replaced cell's source
+/// for its new one, an inserted cell's all added, a deleted cell's all removed. Before the
+/// result, a replaced cell's old source is not known, and its new one reads as added.
+fn notebook_patch(said: &Value) -> Patch {
+    let old = string_at(said, "old_source").unwrap_or_default();
+    let new = string_at(said, "new_source").unwrap_or_default();
+    match str_at(said, "edit_mode") {
+        Some("delete") => proposed_patch(&[(old, String::new())]),
+        Some("insert") => proposed_patch(&[(String::new(), new)]),
+        _ => proposed_patch(&[(old, new)]),
+    }
 }
 
 /// A patch of replacements without line numbers (the file is not read): each is one hunk, the
@@ -1066,6 +1081,14 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
         })
     };
     match name {
+        // A notebook's cell is an edit of the notebook: its patch is the cell's source, from
+        // the result's `old_source` once it came ([`notebook_patch`]).
+        "NotebookEdit" => ToolDetail::Edit(EditDetail {
+            path: path(),
+            edits: 1,
+            replace_all: false,
+            patch: Patch::default(),
+        }),
         "Edit" | "MultiEdit" => ToolDetail::Edit(EditDetail {
             path: path(),
             edits: input.get("edits").and_then(Value::as_array).map_or(1, |e| to_u32(e.len())),
@@ -1236,7 +1259,10 @@ fn apply_result(
     let patch = || result.map(|r| patch(r, uuid)).unwrap_or_default();
     match detail {
         ToolDetail::Edit(edit) => {
-            edit.patch = patch();
+            edit.patch = match result {
+                Some(result) if result.get("edit_mode").is_some() => notebook_patch(result),
+                _ => patch(),
+            };
             result.is_some()
         }
         ToolDetail::Write(write) => {

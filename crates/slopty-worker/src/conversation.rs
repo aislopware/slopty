@@ -43,8 +43,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use slopty_agent::Hook;
 use slopty_agent::live::{self, ModEvent};
+use slopty_agent::{Hook, HookEvent};
 use slopty_core::SessionId;
 use slopty_proto::conversation::Meters;
 use tokio::sync::watch;
@@ -279,11 +279,27 @@ pub struct Board {
     sessions: HashMap<SessionId, watch::Sender<Seen>>,
     /// Each session's mod, once it said hello ([`live::admit`]).
     mods: HashMap<SessionId, live::Trust>,
+    /// Each session's calls a `PreToolUse` named and nothing has ended yet, the latest last,
+    /// at most [`CALLS_KEPT`]: the `PermissionRequest` after one names no call, so its call
+    /// is found here ([`Board::call_of`]).
+    calls: HashMap<SessionId, Vec<Called>>,
+}
+
+/// The most calls [`Board`] keeps a session's `PreToolUse` of, the oldest let go first.
+const CALLS_KEPT: usize = 32;
+
+/// A call a `PreToolUse` named.
+#[derive(Debug)]
+struct Called {
+    tool: String,
+    input: Option<serde_json::Value>,
+    id: String,
 }
 
 impl Board {
     /// A hook fired in `session`.
     pub fn heard(&mut self, session: SessionId, hook: &Hook) {
+        self.called(session, hook);
         let seen = self.seen(session);
         seen.send_modify(|seen| {
             seen.hooks = seen.hooks.wrapping_add(1);
@@ -371,6 +387,48 @@ impl Board {
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
         self.mods.remove(&session);
+        self.calls.remove(&session);
+    }
+
+    /// The call `session`'s `PermissionRequest` `hook` asks about: the latest one a
+    /// `PreToolUse` named with the same tool and input that has not ended. Claude Code runs
+    /// `PreToolUse` before it asks, and names the call only there.
+    #[must_use]
+    pub fn call_of(&self, session: SessionId, hook: &Hook) -> Option<String> {
+        let tool = hook.tool_name.as_deref()?;
+        self.calls
+            .get(&session)?
+            .iter()
+            .rev()
+            .find(|c| c.tool == tool && c.input == hook.tool_input)
+            .map(|c| c.id.clone())
+    }
+
+    /// Keep the call a `PreToolUse` names, and let go of one that ended.
+    fn called(&mut self, session: SessionId, hook: &Hook) {
+        let Some(id) = hook.tool_use_id.as_ref() else { return };
+        match hook.event {
+            HookEvent::PreToolUse => {
+                let calls = self.calls.entry(session).or_default();
+                calls.retain(|c| c.id != *id);
+                if calls.len() >= CALLS_KEPT {
+                    calls.remove(0);
+                }
+                calls.push(Called {
+                    tool: hook.tool_name.clone().unwrap_or_default(),
+                    input: hook.tool_input.clone(),
+                    id: id.clone(),
+                });
+            }
+            HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::PermissionDenied => {
+                if let Some(calls) = self.calls.get_mut(&session) {
+                    calls.retain(|c| c.id != *id);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn seen(&mut self, session: SessionId) -> &watch::Sender<Seen> {
@@ -387,6 +445,42 @@ mod tests {
 
     fn session(n: u8) -> SessionId {
         format!("00000000-0000-4000-8000-{n:012}").parse().expect("a session id")
+    }
+
+    /// Claude Code's `PermissionRequest` names no call; heard in order, as a real Claude Code
+    /// ran them (the `approve-edit` capture), each is matched to the call whose `PreToolUse`
+    /// came before it with the same tool and input. A call that ended is no longer matched, nor
+    /// one of another session or with other input.
+    #[test]
+    fn a_permission_request_is_matched_to_its_call() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../slopty-agent/tests/fixtures/conversation/approve-edit/hooks.jsonl"
+        );
+        let text = std::fs::read_to_string(path).expect("hooks");
+        let hooks: Vec<Hook> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json"))
+            .map(|r| serde_json::from_value(r["input"].clone()).expect("a hook"))
+            .collect();
+        let mut board = Board::default();
+        let mut matched = Vec::new();
+        for hook in &hooks {
+            board.heard(session(1), hook);
+            if hook.event == HookEvent::PermissionRequest {
+                matched.push(board.call_of(session(1), hook));
+                assert_eq!(board.call_of(session(2), hook), None, "another session's");
+            }
+        }
+        assert_eq!(matched, [Some("toolu_02".to_owned()), Some("toolu_03".to_owned())]);
+        let edit = hooks
+            .iter()
+            .find(|h| h.event == HookEvent::PermissionRequest)
+            .expect("the edit's request");
+        assert_eq!(board.call_of(session(1), edit), None, "its call ended");
+        let mut other = edit.clone();
+        other.tool_input = Some(serde_json::json!({ "file_path": "/work/else.txt" }));
+        assert_eq!(board.call_of(session(1), &other), None);
     }
 
     /// Nobody follows: the question goes straight back, and nothing is held.

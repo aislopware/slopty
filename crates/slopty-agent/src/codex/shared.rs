@@ -562,12 +562,12 @@ impl Shared {
                     Some(codex) => self.turn(codex),
                     None => self.latest(),
                 };
-                hook_said(&done.run).map_or_else(Vec::new, |text| {
+                hook_said(&done.run).map_or_else(Vec::new, |(kind, text)| {
                     let item = Item {
                         id: ItemId(format!("hook:{}", done.run.id)),
                         turn,
                         at_ms: done.run.completed_at.map_or(now, millis),
-                        body: ItemBody::Notice(Notice::new(Notice::HOOK, Clipped::whole(&text))),
+                        body: ItemBody::Notice(Notice::new(kind, Clipped::whole(&text))),
                     };
                     vec![Action::ItemCompleted(item)]
                 })
@@ -1801,10 +1801,11 @@ fn millis(at: i64) -> WallMs {
     WallMs::from_millis(u64::try_from(at).unwrap_or_default())
 }
 
-/// What a hook Codex ran says, when it says anything worth a line: one that did not simply
-/// complete, or that left words (a warning, feedback, context, an error, why it stopped). A
-/// hook that ran and said nothing is passed over, as Claude Code's are.
-fn hook_said(run: &p::HookRunSummary) -> Option<String> {
+/// What a hook Codex ran says, when it says anything worth a line, and the notice it is: one
+/// that failed, blocked a call or stopped the turn is a [`Notice::HOOK`]; one that completed or
+/// still runs with words left (a warning, feedback, context) is a [`Notice::INFO`]. A hook that
+/// ran and said nothing is passed over, as Claude Code's are.
+fn hook_said(run: &p::HookRunSummary) -> Option<(&'static str, String)> {
     let event = wire(&run.event_name);
     let mut chars = event.chars();
     let event: String =
@@ -1827,8 +1828,14 @@ fn hook_said(run: &p::HookRunSummary) -> Option<String> {
     if how.is_none() && said.is_empty() {
         return None;
     }
+    let kind = match run.status {
+        p::HookRunStatus::Completed | p::HookRunStatus::Running => Notice::INFO,
+        p::HookRunStatus::Failed | p::HookRunStatus::Blocked | p::HookRunStatus::Stopped => {
+            Notice::HOOK
+        }
+    };
     let head = format!("{event} hook {}", how.unwrap_or("said"));
-    Some(if said.is_empty() { head } else { format!("{head}: {}", said.join("\n")) })
+    Some((kind, if said.is_empty() { head } else { format!("{head}: {}", said.join("\n")) }))
 }
 
 /// What an MCP server's start says, when it did not start: Codex's words for why, or that it

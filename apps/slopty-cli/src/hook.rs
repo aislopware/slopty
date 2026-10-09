@@ -669,6 +669,7 @@ mod tests {
         let suggested = json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "touch x" }],
             "behavior": "allow", "destination": "localSettings" }]);
         let always = Decision::AllowAlways {
+            updated_input: None,
             updated_permissions: suggested.as_array().cloned().unwrap_or_default(),
         };
         let answer = CtlReply::Permission(PermissionAnswer { decision: always.clone() });

@@ -2599,6 +2599,7 @@ mod ctl {
         snap(
             "ctl_reply_permission_always",
             &reply(Decision::AllowAlways {
+                updated_input: None,
                 updated_permissions: vec![sorted(serde_json::json!({
                     "behavior": "allow", "destination": "localSettings",
                     "rules": [{ "ruleContent": "cargo test:*", "toolName": "Bash" }],

@@ -116,8 +116,15 @@ pub fn hook_output(event: HookEvent, decision: &Decision) -> Option<Value> {
         Decision::Allow { updated_input: Some(input) } => {
             json!({ "behavior": "allow", "updatedInput": input })
         }
-        Decision::AllowAlways { updated_permissions } => {
+        Decision::AllowAlways { updated_input: None, updated_permissions } => {
             json!({ "behavior": "allow", "updatedPermissions": updated_permissions })
+        }
+        Decision::AllowAlways { updated_input: Some(input), updated_permissions } => {
+            json!({
+                "behavior": "allow",
+                "updatedInput": input,
+                "updatedPermissions": updated_permissions,
+            })
         }
         Decision::Deny { message, interrupt: false } => {
             json!({ "behavior": "deny", "message": message })
@@ -155,14 +162,10 @@ pub fn approvable(hook: &Hook) -> bool {
 #[must_use]
 pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
     let input = || hook.tool_input.clone().unwrap_or_else(|| json!({}));
+    let asks_the_person =
+        || hook.tool_name.as_deref().is_some_and(|tool| ASKS_THE_PERSON.contains(&tool));
     match verdict {
-        Verdict::Allow => Decision::Allow {
-            updated_input: hook
-                .tool_name
-                .as_deref()
-                .is_some_and(|tool| ASKS_THE_PERSON.contains(&tool))
-                .then(input),
-        },
+        Verdict::Allow => Decision::Allow { updated_input: asks_the_person().then(input) },
         Verdict::Answer { answers } => {
             let mut input = input();
             let answers: serde_json::Map<String, Value> = answers
@@ -175,6 +178,7 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
             Decision::Allow { updated_input: Some(input) }
         }
         Verdict::AllowAlways => Decision::AllowAlways {
+            updated_input: asks_the_person().then(input),
             updated_permissions: hook
                 .permission_suggestions
                 .as_ref()
@@ -193,13 +197,16 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
     }
 }
 
-/// The prompt a follower is shown for a `PermissionRequest` hook: the call as the conversation
-/// will show it ([`crate::conversation::proposed`]) and what "allow always" would grant.
+/// The prompt a follower is shown for a `PermissionRequest` hook.
+///
+/// It carries the call as the conversation will show it ([`crate::conversation::proposed`]),
+/// the call it is about when the worker matched one (`call`, from the hooks before it), and what
+/// "allow always" would grant.
 #[must_use]
 pub fn prompt(
     session: SessionId,
     ask: u64,
-    hook: &Hook,
+    (hook, call): (&Hook, Option<String>),
     asked_ms: WallMs,
     until_ms: WallMs,
 ) -> PermissionPrompt {
@@ -208,6 +215,7 @@ pub fn prompt(
     PermissionPrompt {
         session,
         ask,
+        call: hook.tool_use_id.clone().or(call),
         detail: crate::conversation::proposed(&tool, &input),
         tool,
         suggestions: hook.permission_suggestions.as_ref().map(suggestions).unwrap_or_default(),
@@ -327,7 +335,7 @@ mod tests {
         let prompt = prompt(
             SessionId::nil(),
             7,
-            &hook,
+            (&hook, None),
             WallMs::from_millis(1_000),
             WallMs::from_millis(2_000),
         );
@@ -381,6 +389,7 @@ mod tests {
         assert_eq!(
             always,
             Decision::AllowAlways {
+                updated_input: None,
                 updated_permissions: given.and_then(Value::as_array).cloned().unwrap_or_default()
             }
         );

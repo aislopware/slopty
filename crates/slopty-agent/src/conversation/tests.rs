@@ -801,3 +801,46 @@ fn a_tools_picture_is_on_its_result() {
     assert_eq!(image.at.part, Part::Image { tool_use_id: Some("t1".to_owned()), index: 0 });
     assert!(image_bytes(&line(&record), &image.at).is_some());
 }
+
+/// A notebook's cell edited, as Claude Code 2.1.295 did it (the `notebook` capture): a replaced
+/// cell is an edit of the notebook whose patch takes its old source to its new one, an
+/// inserted cell's source is all added; and the same call put to the person shows its new
+/// source before any result says what it replaced.
+#[test]
+fn a_notebook_edit_is_an_edit_of_its_cell() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/conversation/notebook/transcript.jsonl");
+    let jsonl = std::fs::read_to_string(path).expect("transcript");
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let edits: Vec<&EditDetail> = c
+        .entries(&MAIN)
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Tool(call) if call.name == "NotebookEdit" => match &call.detail {
+                ToolDetail::Edit(edit) => Some(edit),
+                other => panic!("an edit: {other:?}"),
+            },
+            _ => None,
+        })
+        .collect();
+    let [replaced, inserted] = edits.as_slice() else { panic!("two: {edits:?}") };
+    assert_eq!(replaced.path, "/work/nb.ipynb");
+    let lines = |e: &EditDetail| -> Vec<String> {
+        e.patch.hunks.iter().flat_map(|h| h.lines.clone()).collect()
+    };
+    assert_eq!(lines(replaced), ["-print(1)", "+print(2)"]);
+    assert_eq!((replaced.patch.added, replaced.patch.removed), (1, 1));
+    assert_eq!(lines(inserted), ["+print(3)"]);
+
+    let asked = proposed(
+        "NotebookEdit",
+        &json!({"cell_id": "a1", "edit_mode": "replace", "new_source": "print(2)",
+            "notebook_path": "/work/nb.ipynb"}),
+    );
+    let ToolDetail::Edit(asked) = asked else { panic!("an edit") };
+    assert_eq!(
+        (asked.path.as_str(), lines(&asked)),
+        ("/work/nb.ipynb", vec!["+print(2)".to_owned()])
+    );
+}

@@ -451,8 +451,12 @@ pub enum Decision {
         updated_input: Option<Value>,
     },
     /// Allow this call and apply these permission updates, normally what the request's
-    /// `permission_suggestions` offered (an allow rule, a mode, a directory).
+    /// `permission_suggestions` offered (an allow rule, a mode, a directory): "Always allow",
+    /// or a plan approved and edits accepted from then on.
     AllowAlways {
+        /// The call's input, for a tool that asks the person (`ExitPlanMode`'s own), as
+        /// [`Decision::Allow`] carries it.
+        updated_input: Option<Value>,
         /// The updates, as Claude Code's `updatedPermissions` entries.
         updated_permissions: Vec<Value>,
     },

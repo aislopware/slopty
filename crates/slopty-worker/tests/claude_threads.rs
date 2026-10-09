@@ -283,6 +283,7 @@ mod claude_threads {
             session: rig.terminal,
             ask: 3,
             tool: "Bash".to_owned(),
+            call: None,
             detail: ToolDetail::Other {
                 input: slopty_proto::conversation::Clipped::head(
                     "{}",

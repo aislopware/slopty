@@ -1055,6 +1055,10 @@ pub struct PermissionPrompt {
     pub ask: u64,
     /// The tool's name as the model called it.
     pub tool: String,
+    /// The call it asks about (its `tool_use_id`), when the worker knows it: the
+    /// `PermissionRequest` hook names none, so it is the call whose `PreToolUse` came last with
+    /// the same tool and input.
+    pub call: Option<String>,
     /// What the call would do, as a conversation entry shows a call (an edit's proposed change
     /// as a patch).
     pub detail: ToolDetail,

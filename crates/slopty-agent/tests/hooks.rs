@@ -154,7 +154,8 @@ mod hooks {
             } else if command.contains("always") {
                 let suggested =
                     hook.permission_suggestions.as_ref().and_then(Value::as_array).cloned();
-                Decision::AllowAlways { updated_permissions: suggested.expect("suggestions") }
+                let updated_permissions = suggested.expect("suggestions");
+                Decision::AllowAlways { updated_input: None, updated_permissions }
             } else {
                 Decision::Allow { updated_input: None }
             };

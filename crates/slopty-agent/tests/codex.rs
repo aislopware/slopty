@@ -1054,6 +1054,9 @@ mod tests {
             json!([{"kind": "feedback", "text": "Use trash instead"}]),
         );
         hear(&mut shared, &mut state, "hook/completed", &blocked);
+        let warned =
+            run("h3", "completed", Value::Null, json!([{"kind": "warning", "text": "slow lint"}]));
+        hear(&mut shared, &mut state, "hook/completed", &warned);
         let mcp = |name: &str, status: &str, error: Value, reason: Value| {
             json!({"threadId": thread, "name": name, "status": status, "error": error,
                 "failureReason": reason})
@@ -1080,6 +1083,7 @@ mod tests {
             notices(&state).into_iter().map(|n| (n.kind, n.text.text)).collect();
         let want = [
             (Notice::HOOK, "PreToolUse hook blocked: rm -rf is not allowed\nUse trash instead"),
+            (Notice::INFO, "PreToolUse hook said: slow lint"),
             (Notice::INFO, "MCP server linear didn't start: connection refused"),
             (Notice::INFO, "MCP server github needs signing in again"),
         ];

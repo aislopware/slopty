@@ -146,13 +146,15 @@ fn hold(
     relay_wait: Duration,
 ) -> Option<(PermissionPrompt, Reach, Duration)> {
     let approvable = permission::approvable(hook);
-    let holds = &mut daemon.follows.lock().holds;
+    let follows = &mut *daemon.follows.lock();
+    let call = follows.board.call_of(session, hook);
+    let holds = &mut follows.holds;
     let reach = holds.reach(session)?;
     let wait = hold_for(reach, relay_wait);
     let asked_ms = WallMs::now();
     let until_ms = asked_ms.saturating_add(wait);
     let id = holds.ask(session, approvable, |id| Pending {
-        prompt: permission::prompt(session, id, hook, asked_ms, until_ms),
+        prompt: permission::prompt(session, id, (hook, call), asked_ms, until_ms),
         hook: hook.clone(),
         reply,
     })?;

@@ -218,12 +218,55 @@ const SCENARIOS: &[Scenario] = &[
         canned: false,
         mode: "auto",
     },
+    // An edit and a write put to the person: each call's `PreToolUse` names it before the
+    // `PermissionRequest`, which names no call, asks about it with the same input. (A plan's
+    // approval cannot be captured this way: `--print` offers no `ExitPlanMode`.)
+    Scenario {
+        name: "approve-edit",
+        files: &[("notes.txt", "alpha\nbeta\n")],
+        turns: &["Use the Edit tool to change beta to BETA in notes.txt, then use the Write \
+                  tool to create todo.txt containing the single line \"ship\", then reply \
+                  \"done\"."],
+        allowed: "Read",
+        interrupt_on: None,
+        expect: &["todo.txt"],
+        absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
+        mode: "default",
+    },
+    // A notebook's cell replaced, then one inserted after it: `NotebookEdit` names cells, and
+    // its result carries the notebook before and after.
+    Scenario {
+        name: "notebook",
+        files: &[("nb.ipynb", NOTEBOOK)],
+        turns: &["Use the NotebookEdit tool on nb.ipynb twice: first replace the source of the \
+                  cell with id a1 with `print(2)`, then insert a new code cell after cell a1 \
+                  with source `print(3)`. Then reply \"done\"."],
+        allowed: "Read NotebookEdit",
+        interrupt_on: None,
+        expect: &["nb.ipynb"],
+        absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
+        mode: "default",
+    },
 ];
 
+/// The `notebook` scenario's notebook: one code cell, `a1`.
+const NOTEBOOK: &str = r#"{"cells": [{"cell_type": "code", "execution_count": null, "id": "a1",
+ "metadata": {}, "outputs": [], "source": ["print(1)"]}], "metadata": {"kernelspec":
+ {"display_name": "Python 3", "language": "python", "name": "python3"}}, "nbformat": 4,
+ "nbformat_minor": 5}
+"#;
+
 /// Events the sink is registered for.
-const SINK_EVENTS: [&str; 14] = [
+const SINK_EVENTS: [&str; 15] = [
     "SessionStart",
     "UserPromptSubmit",
+    "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
     "PermissionRequest",

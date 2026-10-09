@@ -2,4 +2,4 @@
 source: crates/slopty-proto/tests/golden.rs
 expression: line
 ---
-{"reply":"permission","decision":{"kind":"allow_always","updated_permissions":[{"behavior":"allow","destination":"localSettings","rules":[{"ruleContent":"cargo test:*","toolName":"Bash"}],"type":"addRules"}]}}
+{"reply":"permission","decision":{"kind":"allow_always","updated_input":null,"updated_permissions":[{"behavior":"allow","destination":"localSettings","rules":[{"ruleContent":"cargo test:*","toolName":"Bash"}],"type":"addRules"}]}}
