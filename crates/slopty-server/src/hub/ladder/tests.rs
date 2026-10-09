@@ -530,26 +530,23 @@ impl crate::push::Pusher for Answering {
 }
 
 /// The workers hear whether a pocketed phone can answer a yes or no: once pushing is set up and
-/// a phone is known, and again only when that moves. A worker that registers while one can is
-/// told so with its welcome; one that registers while none can hears nothing.
+/// a phone is known, and again only when that moves. A worker that registers while one can
+/// hears so at once; one that registers while none can hears nothing.
 #[tokio::test]
 async fn the_workers_hear_whether_a_pocketed_phone_can_answer() {
     use slopty_proto::push::PushDevice;
 
     let hub = Hub::new("server".to_owned(), Vec::new());
-    let (tx, mut first) = mpsc::channel(8);
-    let _lease =
-        hub.register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 7].into(), tx);
-    let told = |rx: &mut mpsc::Receiver<FromServer>| {
-        let mut said = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let FromServer::Pushes(pushes) = msg {
-                said.push(pushes);
-            }
-        }
-        said
+    let (tx, _first_rx) = mpsc::channel(8);
+    let first = hub
+        .register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let mut first = first.pushes();
+    // What a link has yet to send of the word: its latest, once it moved.
+    let told = |rx: &mut watch::Receiver<bool>| {
+        rx.has_changed().unwrap_or(false).then(|| *rx.borrow_and_update())
     };
-    assert!(told(&mut first).is_empty(), "nothing can be pushed yet");
+    assert_eq!(told(&mut first), None, "nothing can be pushed yet");
     let (client, phone) = (ClientId::new(), Client::sit(&hub, "phone"));
     let device = PushDevice {
         token: "0f".repeat(32),
@@ -559,19 +556,21 @@ async fn the_workers_hear_whether_a_pocketed_phone_can_answer() {
         quiet_ms: 60_000,
     };
     hub.push_device(phone.seated.link(), client, Some(device.clone()));
-    assert!(told(&mut first).is_empty(), "a phone, but pushing is off");
+    assert_eq!(told(&mut first), None, "a phone, but pushing is off");
     let (out, _pushed) = mpsc::channel(8);
     hub.push_to(Some(out));
-    assert_eq!(told(&mut first), [true], "set up, with a phone");
+    assert_eq!(told(&mut first), Some(true), "set up, with a phone");
     hub.push_device(phone.seated.link(), client, Some(device.clone()));
-    assert!(told(&mut first).is_empty(), "said once");
+    assert_eq!(told(&mut first), None, "said once");
 
-    let (tx, mut second) = mpsc::channel(8);
-    let _later =
-        hub.register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 8].into(), tx);
-    assert_eq!(told(&mut second), [true], "with its welcome");
+    let (tx, _second_rx) = mpsc::channel(8);
+    let second = hub
+        .register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 8].into(), tx)
+        .unwrap();
+    let mut second = second.pushes();
+    assert!(*second.borrow_and_update(), "at once");
     hub.forget_device(client, &device.token);
-    assert_eq!((told(&mut first), told(&mut second)), (vec![false], vec![false]), "no phone now");
+    assert_eq!((told(&mut first), told(&mut second)), (Some(false), Some(false)), "no phone now");
 }
 
 /// A notice that finds the person at no client is pushed to a phone whose link is gone, once

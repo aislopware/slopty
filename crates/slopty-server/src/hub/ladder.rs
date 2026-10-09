@@ -90,8 +90,9 @@ struct Phones {
     out: Option<mpsc::Sender<Outgoing>>,
     /// Where the devices go to be kept ([`crate::store::PushStore`]).
     kept: Option<watch::Sender<Devices>>,
-    /// What the workers were last told of [`Self::answerable`].
-    said: bool,
+    /// [`Self::answerable`], as every worker's link sends it: a word each link takes the
+    /// latest of, so none is dropped behind a full queue.
+    said: watch::Sender<bool>,
 }
 
 /// The phones the server may push to, by their clients.
@@ -543,7 +544,7 @@ impl Hub {
         if phones.devices != before {
             phones.keep();
         }
-        say_pushes(&mut state);
+        say_pushes(&state);
         drop(state);
     }
 
@@ -555,7 +556,7 @@ impl Hub {
             phones.devices.remove(&client);
             phones.keep();
         }
-        say_pushes(&mut state);
+        say_pushes(&state);
         drop(state);
     }
 
@@ -567,7 +568,7 @@ impl Hub {
         phones.devices = devices;
         let (kept, changes) = watch::channel(phones.devices.clone());
         phones.kept = Some(kept);
-        say_pushes(&mut state);
+        say_pushes(&state);
         drop(state);
         changes
     }
@@ -583,7 +584,7 @@ impl Hub {
     pub fn push_to(&self, out: Option<mpsc::Sender<Outgoing>>) {
         let mut state = self.inner.state.lock();
         state.board.phones.out = out;
-        say_pushes(&mut state);
+        say_pushes(&state);
         drop(state);
     }
 
@@ -652,32 +653,16 @@ impl Hub {
 
 /// Tell every worker linked whether a pocketed phone can answer, once that moved: while one
 /// can, a worker holds for it any prompt nobody follows ([`FromServer::Pushes`]).
-fn say_pushes(state: &mut State) {
+fn say_pushes(state: &State) {
     let now = state.board.phones.answerable();
-    if state.board.phones.said == now {
-        return;
-    }
-    state.board.phones.said = now;
-    for entry in state.workers.values() {
-        tell_pushes(entry, now);
-    }
-}
-
-/// Tell the worker of `entry`, when it is linked, whether a pocketed phone can answer.
-fn tell_pushes(entry: &super::Entry, pushes: bool) {
-    let Some(link) = &entry.link else { return };
-    if link.tx.try_send(FromServer::Pushes(pushes)).is_err() {
-        tracing::debug!(worker = %entry.info.worker, "a worker's link was full or gone");
-    }
+    state.board.phones.said.send_if_modified(|said| std::mem::replace(said, now) != now);
 }
 
 impl Board {
-    /// Tell the worker of `entry`, just registered, that a pocketed phone can answer, when one
-    /// can: a worker starts out holding nothing for a phone.
-    pub(super) fn welcome_pushes(&self, entry: &super::Entry) {
-        if self.phones.said {
-            tell_pushes(entry, true);
-        }
+    /// Whether a pocketed phone can answer, as it moves: each worker's link sends its latest
+    /// ([`FromServer::Pushes`]), once after the welcome when one can, then on every change.
+    pub(super) fn pushes(&self) -> watch::Receiver<bool> {
+        self.phones.said.subscribe()
     }
 }
 

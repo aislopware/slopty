@@ -2529,3 +2529,22 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Proof: the deletions compile, and only the wire goldens these values were in moved:
     `golden__orchestration__server_request_spawn` (one byte fewer) and
     `golden_thread__frame_actions` (the two statuses that named them are gone).
+
+- ✅ **The word that a pocketed phone can answer always reaches the workers** (2026-10-09).
+  - **The bug.** While a phone can answer, a worker holds for it any prompt nobody follows
+    (`FromServer::Pushes`). The server used to queue that word on each worker's link with
+    `try_send` and drop it when the queue was full. The worker then kept the old state until
+    the next change. It held prompts for a phone that could no longer answer, or handed them to
+    the TUI while one could.
+  - **The fix.** The server keeps the word in one `watch`. Each worker link's writer selects on
+    it beside the queue (`link::next_for_worker`): the welcome goes first, then the latest word
+    goes ahead of anything queued whenever it moved from what that worker was told. Nothing
+    waits in the queue, so nothing can drop it or hold it back. A word that moved and came back
+    before it was sent is not sent. A worker that registers while a phone can answer hears it
+    right after its welcome.
+  - **Not ordered, on purpose.** The prompt reaches the worker over its control socket, so a
+    prompt that arrives within one link delay of the word is handled as the worker last heard.
+    It goes to the TUI, as when no phone can answer. Tests that need the word applied first
+    round-trip a verb on the link after sending it.
+  - Tests: `link::tests::a_worker_hears_the_pushes_word_past_a_full_queue`,
+    `hub::ladder::tests::the_workers_hear_whether_a_pocketed_phone_can_answer` (slopty-server).

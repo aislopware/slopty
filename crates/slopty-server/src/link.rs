@@ -17,7 +17,7 @@ use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome};
 use slopty_proto::server::{FromServer, Role, ToServer};
 use slopty_tailnet::LocalApi;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::hub::{Hub, Lease, Speaker};
@@ -133,14 +133,19 @@ async fn read_worker(lease: &Lease, rx: &mut FramedRecv<ToServer>) {
     }
 }
 
-/// Send the worker what is queued until the link fails. A request too large for one message
-/// is answered here with an error: nothing of it was written.
+/// Send the worker what is queued, and whether a pocketed phone can answer as that moves, until
+/// the link fails. A request too large for one message is answered here with an error: nothing
+/// of it was written.
 async fn write_worker(
     lease: &Lease,
     mut tx: FramedSend<FromServer>,
     mut queue: mpsc::Receiver<FromServer>,
 ) {
-    while let Some(msg) = queue.recv().await {
+    let mut pushes = lease.pushes();
+    // Told after its welcome when a phone can answer already.
+    pushes.mark_changed();
+    let mut told = None;
+    while let Some(msg) = next_for_worker(&mut queue, &mut pushes, &mut told).await {
         let failed = match tx.send(&msg).await {
             Ok(()) => continue,
             Err(NetError::Codec(CodecError::TooLarge { len, max })) => match msg {
@@ -155,6 +160,42 @@ async fn write_worker(
         };
         tracing::info!(worker = %lease.worker(), error = %failed, "worker link write failed");
         return;
+    }
+}
+
+/// What goes to a worker next: its welcome, the first queued, before anything; then the latest
+/// word on whether a pocketed phone can answer whenever it moved from what the worker was
+/// `told`, ahead of what is queued. That word never waits in the queue, so a full queue can
+/// neither drop nor hold it back, and the worker hears the last of it. `None` once the queue
+/// is closed.
+async fn next_for_worker(
+    queue: &mut mpsc::Receiver<FromServer>,
+    pushes: &mut watch::Receiver<bool>,
+    told: &mut Option<bool>,
+) -> Option<FromServer> {
+    let Some(was) = *told else {
+        let welcome = queue.recv().await;
+        // A worker starts out holding nothing for a phone.
+        *told = Some(false);
+        return welcome;
+    };
+    let mut hub = true;
+    loop {
+        tokio::select! {
+            biased;
+            changed = pushes.changed(), if hub => {
+                if changed.is_err() {
+                    hub = false;
+                    continue;
+                }
+                let now = *pushes.borrow_and_update();
+                if now != was {
+                    *told = Some(now);
+                    return Some(FromServer::Pushes(now));
+                }
+            }
+            msg = queue.recv() => return msg,
+        }
     }
 }
 
@@ -452,5 +493,45 @@ mod tests {
         link.close();
         until("the wait ended with the link", || hub.events_waiting() == 0).await;
         serving.abort();
+    }
+
+    /// The word on whether a pocketed phone can answer reaches a worker whose link's queue is
+    /// full: it never waits in the queue, so it is neither dropped nor held back. The welcome
+    /// still goes first; the word goes next, ahead of what was queued, which then goes in its
+    /// order; and a word that moved back to what the worker was told is not sent at all.
+    #[tokio::test]
+    async fn a_worker_hears_the_pushes_word_past_a_full_queue() {
+        let (out, mut queue) = mpsc::channel(LINK_QUEUE);
+        let (said, mut pushes) = watch::channel(false);
+        pushes.mark_changed();
+        let numbered = |n: usize| FromServer::Welcome { name: format!("queued {n}"), link: 1 };
+        let welcome = FromServer::Welcome { name: "server".to_owned(), link: 1 };
+        out.try_send(welcome.clone()).unwrap();
+        let mut queued = Vec::new();
+        while out.try_send(numbered(queued.len())).is_ok() {
+            queued.push(Some(numbered(queued.len())));
+        }
+        assert_eq!(queued.len(), LINK_QUEUE - 1, "the queue is full");
+        said.send_replace(true);
+
+        let mut told = None;
+        let next = async |queue: &mut mpsc::Receiver<FromServer>, pushes: &mut _, told: &mut _| {
+            tokio::time::timeout(Duration::from_secs(5), next_for_worker(queue, pushes, told))
+                .await
+                .unwrap()
+        };
+        assert_eq!(next(&mut queue, &mut pushes, &mut told).await, Some(welcome), "first");
+        let word = next(&mut queue, &mut pushes, &mut told).await;
+        assert_eq!(word, Some(FromServer::Pushes(true)), "the word, ahead of the queue");
+        let mut sent = Vec::new();
+        for _ in 0..queued.len() {
+            sent.push(next(&mut queue, &mut pushes, &mut told).await);
+        }
+        assert_eq!(sent, queued, "what was queued, in its order");
+
+        said.send_replace(false);
+        said.send_replace(true);
+        drop(out);
+        assert_eq!(next(&mut queue, &mut pushes, &mut told).await, None, "back as it was told");
     }
 }
