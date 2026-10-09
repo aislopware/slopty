@@ -299,8 +299,10 @@ jobs:
     needs: [gate, linux]
     if: github.ref == 'refs/heads/gate'
     runs-on: ubuntu-24.04
+    # `actions: write` starts the app's e2e on the new main (the last step).
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -323,6 +325,18 @@ jobs:
           fi
           git push origin "$GITHUB_SHA:refs/heads/main"
           echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
+      # The app's e2e on the main just promoted, once four hours have passed since the last one
+      # started. A schedule cannot do it: this job's push is not an event to GitHub, so a
+      # scheduled run checked out the last commit a person pushed (e2e.yml).
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 1 \
+            --json createdAt --jq '.[0].createdAt // empty')
+          if [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 14400 ]; then
+            gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref main
+            echo "the app's e2e started on main" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # A tag, gated, is built into a release by `cargo xtask dist`: the app, the Mac CLI and
   # daemons, the Linux workers and servers, the dSYMs and SHA256SUMS, each checked. It signs with

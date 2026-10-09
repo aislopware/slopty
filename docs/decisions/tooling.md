@@ -1139,6 +1139,11 @@ more full-window layer.
   - The app's e2e (`e2e.yml`) runs every four hours on main and by hand, at most one macOS slot,
     until it is green on a runner and a slot is spare. The lanes run the suites they touch here
     before they report, as they did.
+  - Started by `promote`, not a schedule (2026-10-09). Every scheduled run from 10-07 to 10-09
+    checked out `0d67253b` while main moved on 30-odd commits: main moves only by `promote`'s
+    token, and GitHub counts no push by that token, so the schedule kept the last commit a
+    person pushed. Its 8 reds in a row tested two-day-old code. `promote` now starts the e2e on
+    the main it just pushed once four hours have passed since the last run started.
   - On CI, rustdoc runs first on iOS clippy's runner (it reports by about minute 8 instead of
     13), and iOS clippy runs after it even when it failed.
   - The repository's invariants (every member in exactly one test shard, `ci.yml` running every

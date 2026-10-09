@@ -7,12 +7,13 @@ name: E2E
 # its build never holds the gate's concurrency group, and `promote` waits for none of it: it is
 # not a gate lane until its renders are shown to match the goldens drawn on a Mac with a GPU of
 # its own. A changed frame leaves its render and diff in the `e2e-app` artifact, which
-# `cargo xtask e2e app --accept` reproduces locally. It runs every four hours on main and by
-# hand, not on each land: on every push it held a sixth macOS slot almost all the time, so the
-# gate's fifth lane waited for it (docs/decisions/tooling.md, "The app's e2e runs on a schedule").
+# `cargo xtask e2e app --accept` reproduces locally. It runs at most every four hours, started by
+# `ci.yml`'s `promote` once main moves, and by hand; not on each land: on every push it held a
+# sixth macOS slot almost all the time, so the gate's fifth lane waited for it. Not on a
+# schedule, as main moves only by `promote`'s token, which GitHub does not count as a push, so a
+# scheduled run kept checking out the last commit a person pushed (0d67253b, for two days)
+# (docs/decisions/tooling.md, "The app's e2e runs on a schedule").
 on:
-  schedule:
-    - cron: "17 */4 * * *"
   workflow_dispatch:
 
 concurrency:

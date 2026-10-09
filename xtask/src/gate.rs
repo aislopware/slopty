@@ -1739,7 +1739,8 @@ mod tests {
     }
 
     /// Nothing that compiles runs in the quick gate, which is the tools lane; CI carries the
-    /// app's live tests in a workflow of their own, on a schedule, which holds no gate run back.
+    /// app's live tests in a workflow of their own, which holds no gate run back, started by
+    /// `promote` on the main it pushed: a schedule checked out a commit days old.
     #[test]
     fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
@@ -1749,8 +1750,12 @@ mod tests {
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
         assert!(e2e.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
         assert!(
-            e2e.contains("schedule:\n    - cron: ") && !e2e.contains("push:"),
-            "on a schedule, never holding a macOS slot beside every land's run"
+            !e2e.contains("push:") && !e2e.contains("schedule:"),
+            "never beside every land's run, and never on a schedule's stale commit"
+        );
+        assert!(
+            workflow.contains("gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref main"),
+            "promote starts it on the main it pushed"
         );
         assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));
         assert!(!workflow.contains("e2e app"), "in a workflow of its own, off the gate's queue");
