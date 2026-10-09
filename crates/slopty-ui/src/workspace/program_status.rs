@@ -7,11 +7,22 @@
 //! ([`WorkspaceView::tile_status`]); a record outranks what is only inferred, a command's exit or
 //! a progress report. A result is looked at when its tile takes the focus, or arrives while it
 //! has it.
+//!
+//! A record waiting on the person is on the attention ladder as an agent that needs them is: it
+//! counts on the bell and the badge, ⌘⇧A walks to it, and it sounds, notifies while the app is
+//! away and is said beside a tile not on show the same way ([`super::attention`]). The server
+//! never hears the records, so its note is this client's own even while a server leads. A
+//! program is any program, so its sound and its note come at most once in [`PROGRAM_QUIET`],
+//! however often its record flips.
 
+use std::time::Instant;
+
+use gpui::Context;
 use slopty_core::SessionId;
 use slopty_proto::terminal::{ProgramState, ProgramStatus};
 
-use super::WorkspaceView;
+use super::attention::PROGRAM_QUIET;
+use super::{WorkspaceEvent, WorkspaceView};
 use crate::icons::Status;
 
 /// Whether `record` is a result, which stays for the person to see.
@@ -78,14 +89,58 @@ impl WorkspaceView {
         }
     }
 
-    /// `session`'s summary changed: a result that arrives while its tile has the focus is seen
-    /// as it comes.
-    pub(super) fn program_moved(&mut self, session: SessionId) {
+    /// Whether `session`'s program waits on the person where no agent's adapter speaks for its
+    /// tile: it is on the attention ladder, and notifies, as an agent that needs them does.
+    pub(super) fn program_asks(&self, session: SessionId) -> bool {
+        self.agent_state(session).is_none()
+            && self.program(session).iter().any(|r| r.state == ProgramState::Blocked)
+    }
+
+    /// `session`'s summary changed from records `before`: a result that arrives while its tile
+    /// has the focus is seen as it comes. A record that comes to wait on the person sounds as an
+    /// agent's need does, and is said beside a tile not on show, at most once in
+    /// [`PROGRAM_QUIET`]; the count of what needs the person follows.
+    pub(super) fn program_moved(
+        &mut self,
+        session: SessionId,
+        before: &[ProgramStatus],
+        cx: &mut Context<Self>,
+    ) {
         let focused = self.focused().and_then(|tile| self.item(tile)).is_some_and(|item| {
             matches!(item.kind, slopty_proto::items::ItemKind::Terminal { session: s } if s == session)
         });
         if focused {
             self.see_program(session);
+        }
+        let blocked = |records: &[ProgramStatus]| -> Vec<String> {
+            records
+                .iter()
+                .filter(|r| r.state == ProgramState::Blocked)
+                .map(|r| r.id.clone())
+                .collect()
+        };
+        let (was, now) = (blocked(before), blocked(self.program(session)));
+        if was.is_empty() != now.is_empty() {
+            self.agents_moved(cx);
+        }
+        let came = now.iter().any(|id| !was.contains(id));
+        if !came || !self.program_asks(session) {
+            return;
+        }
+        let now = Instant::now();
+        let quiet = self
+            .program_sounded
+            .get(&session)
+            .is_some_and(|at| now.saturating_duration_since(*at) < PROGRAM_QUIET);
+        if quiet {
+            return;
+        }
+        self.program_sounded.insert(session, now);
+        cx.emit(WorkspaceEvent::Program(session));
+        if let (Some(tile), Some(word)) =
+            (self.tile_of_session(session), self.program_need_word(session))
+        {
+            self.attention_toast(tile, Status::NeedsYou, &word.to_lowercase(), cx);
         }
     }
 }

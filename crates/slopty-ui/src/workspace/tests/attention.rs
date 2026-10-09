@@ -31,7 +31,14 @@ fn route(seed: u128) -> Route {
 }
 
 fn asking(route: Route, body: &str) -> Asking {
-    Asking { route, title: "api".into(), body: body.into(), approval: None, answered: None }
+    Asking {
+        route,
+        title: "api".into(),
+        body: body.into(),
+        approval: None,
+        answered: None,
+        own: false,
+    }
 }
 
 fn attention() -> (Attention, Rc<Memory>) {

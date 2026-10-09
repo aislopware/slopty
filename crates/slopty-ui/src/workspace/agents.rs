@@ -226,7 +226,8 @@ impl WorkspaceView {
         }
     }
 
-    /// Sessions whose agent is waiting on the human: those with a tile in reading order
+    /// Sessions whose agent is waiting on the human, or whose program is (`OSC 7501`) where no
+    /// agent speaks for the tile: those with a tile in reading order
     /// (project, tab, pane) so ⌘⇧A walks the tiles predictably, then those the server's
     /// ladder names on a worker with no tile for them here.
     pub(super) fn needs_you(&self) -> Vec<Waiting> {
@@ -238,7 +239,9 @@ impl WorkspaceView {
                 }
                 _ => None,
             })
-            .filter(|w| self.agent_state(w.session).is_some_and(needs_human))
+            .filter(|w| {
+                self.agent_state(w.session).is_some_and(needs_human) || self.program_asks(w.session)
+            })
             .map(|w| (w.tile.and_then(|t| self.reading_rank(t)), w))
             .collect();
         shown.sort_by_key(|(rank, w)| (*rank, w.tile.map(|t| t.item)));

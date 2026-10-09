@@ -2301,3 +2301,25 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     says that" once several were asked; with one, they name it as before. The step reads while
     any machine that has not said it has none is still answering.
   - Test: `workspace::tests::past_sessions::a_past_session_is_found_on_every_machine`.
+
+- ✅ **Run opens the repository's own run scripts** (2026-10-10, readiness rank 15, the UI half;
+  the wire is `projects.md`'s run and archive scripts entry).
+  - **Where.** "Run" is offered in the palette where the focus works in a folder: a folder or
+    changes tile's folder, a terminal's directory, or where a thread's agent works. It asks
+    that machine for the scripts of the checkout there (`GitOp::Scripts`).
+  - **One or several.** One script opens at once in a terminal beside the focus, with the
+    script's own command, folder, environment and name as `OpenSession` carries them. Several
+    are a step that lists each by its name, its script muted beside it, the default first.
+  - **Local feel.** The scripts read last for that folder answer at once while the machine
+    reads them again, so a second Run is a keystroke. A step that showed the last read takes
+    the fresh list in its place and opens nothing the person did not pick. With none read yet,
+    the step says "Reading the run scripts…" until the answer comes, then lists them, opens the
+    one there is, says the repository keeps none, says why they could not be read, or says
+    the machine went out of reach.
+  - **No button.** The palette is where actions live, and the thread and folder headers stay
+    quiet; a Run button would earn its place only once a script's terminal is something the
+    person watches there.
+  - Tests: `workspace::tests::run_scripts::*` (offered, asked, the reading step, a list
+    picked and opened with its spec, the last read at once and the fresh list in its place;
+    one opening at once, none, a refusal, the link lost); the keyboard settings golden lists
+    its row.

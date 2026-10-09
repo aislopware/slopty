@@ -314,6 +314,7 @@ impl WorkspaceView {
         // An ask the link took with it is never answered: the next one goes.
         self.listing.retain(|(worker, _)| *worker != key);
         self.clone_lost(key, cx);
+        self.run_lost(key, cx);
         let Some(w) = self.workers.get_mut(&key) else { return };
         let unanswered = w.fs_ops.lost();
         let said: Vec<String> =
@@ -742,10 +743,13 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let session = summary.id;
-        if let Some(w) = self.workers.get_mut(&key) {
-            w.sessions.insert(session, summary);
-        }
-        self.program_moved(session);
+        let before = self
+            .workers
+            .get_mut(&key)
+            .and_then(|w| w.sessions.insert(session, summary))
+            .map(|s| s.program)
+            .unwrap_or_default();
+        self.program_moved(session, &before, cx);
         self.reconcile(cx);
         // A thread tile waiting on this session as its agent's terminal becomes its tile.
         self.settle_thread_tiles(cx);
@@ -761,6 +765,7 @@ impl WorkspaceView {
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
         self.finished.remove(&About::Session(session));
         self.program_seen.remove(&session);
+        self.program_sounded.remove(&session);
         self.update_awake(cx);
         self.reconcile(cx);
         self.agents_moved(cx);

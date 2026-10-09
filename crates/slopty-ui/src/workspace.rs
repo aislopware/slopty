@@ -73,6 +73,7 @@ pub mod remote;
 mod restore;
 mod reviews;
 mod rollup;
+mod run_scripts;
 mod seating;
 mod secure;
 mod settings_page;
@@ -313,8 +314,9 @@ pub enum WorkspaceEvent {
     /// worker's table says, or the server's ladder for a worker not linked here. Led by a
     /// server, its notices say this instead ([`attention::Attention::server_led`]).
     Attention(slopty_proto::thread::ThreadId),
-    /// A program in this session asked for a desktop notification (`OSC 9`, `OSC 777`): this
-    /// client's own moment, never the server's.
+    /// A program in this session asked for a desktop notification (`OSC 9`, `OSC 777`), or a
+    /// status record of its came to wait on the person (`OSC 7501`): this client's own moment,
+    /// never the server's.
     Program(SessionId),
     /// How many agents are waiting on the human right now, across every worker (the Dock
     /// badge).
@@ -792,6 +794,8 @@ pub struct WorkspaceView {
     folder_step: Option<agent_start::FolderStep>,
     /// The clone a folder step asked for, until its machine says how it went.
     clone_asked: Option<clone_here::CloneAsked>,
+    /// The run scripts a Run asked for, until its machine answers.
+    run_asked: Option<run_scripts::RunAsked>,
     /// The asks for past sessions with no words still out, by machine and agent (every agent's
     /// when `None`): one at a time each ([`Self::ask_past_places`]).
     listing: HashSet<(WorkerKey, Option<slopty_proto::thread::AgentId>)>,
@@ -852,6 +856,9 @@ pub struct WorkspaceView {
     /// The results each terminal's program reported (`OSC 7501`) that the person has looked at
     /// ([`program_status`]).
     program_seen: HashMap<SessionId, Vec<slopty_proto::terminal::ProgramStatus>>,
+    /// When each program last sounded for a record that came to wait on the person: at most
+    /// once in [`attention::PROGRAM_QUIET`].
+    program_sounded: HashMap<SessionId, Instant>,
     slow_command: Duration,
     /// How long a command runs before its tile says so ([`RUNNING_AFTER`]).
     running_after: Duration,
@@ -1124,6 +1131,7 @@ impl WorkspaceView {
             past_places: HashMap::new(),
             folder_step: None,
             clone_asked: None,
+            run_asked: None,
             listing: HashSet::new(),
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
@@ -1156,6 +1164,7 @@ impl WorkspaceView {
             server_status: None,
             finished: HashMap::new(),
             program_seen: HashMap::new(),
+            program_sounded: HashMap::new(),
             slow_command: SLOW_COMMAND,
             running_after: RUNNING_AFTER,
             recency: Vec::new(),
@@ -2132,6 +2141,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::start_orchestrator))
             .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::clone_to_start))
+            .on_action(cx.listener(Self::run_script_on))
             .on_action(cx.listener(Self::resume_session))
             .on_action(cx.listener(Self::review_pull))
             .on_action(cx.listener(Self::review_pull_in))
@@ -2168,6 +2178,7 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::remove_merged))
             })
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
+            .when(applies.run, |el| el.on_action(cx.listener(Self::run_here_action)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
             .when(applies.screen, |el| {
                 el.on_action(cx.listener(Self::toggle_mute))

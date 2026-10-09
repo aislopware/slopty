@@ -604,7 +604,7 @@ impl WorkspaceView {
     }
 
     /// Ask `key` for the session `spec` says, its item to go where `opening` says.
-    fn ask_session(
+    pub(super) fn ask_session(
         &mut self,
         key: WorkerKey,
         spec: OpenSession,

@@ -60,6 +60,8 @@ actions!(
         /// Free every agent's worktree of the focused folder's clone whose work has landed and
         /// that nothing works in.
         RemoveMerged,
+        /// Run one of the repository's own run scripts, read in the folder the focus works in.
+        RunHere,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -260,6 +262,16 @@ pub struct CloneToStart {
     pub into: String,
     /// The agent orchestrates a new project ("New project…"), rather than working on its own.
     pub project: bool,
+}
+
+/// A run script picked in Run's step: it opens on `worker` in a terminal of its own.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct RunScriptOn {
+    /// The machine it runs on.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// The script, as the machine read it.
+    pub script: slopty_proto::git::RunScript,
 }
 
 /// A repository picked in "Review a pull request…": which pull request of it is asked next.
@@ -467,6 +479,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w(super::pull_review::REVIEW_PULL, Box::new(ReviewPull)),
         w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
         w(super::worktrees::REMOVE_MERGED, Box::new(RemoveMerged)),
+        w(super::run_scripts::RUN, Box::new(RunHere)),
         w("Enclosing folder", Box::new(crate::folder::OpenParent)),
         w("Save file", Box::new(crate::file::SaveFile)),
         w("Done with this file", Box::new(crate::file::FinishEdit)),
@@ -594,6 +607,8 @@ pub(super) struct Applies {
     pub changes: bool,
     /// Work in an agent's worktree, which can be removed.
     pub worktree: bool,
+    /// Work in a folder, whose repository's run scripts can be run.
+    pub run: bool,
     /// The project on show has more than one tab.
     pub tabs: bool,
     /// The focused tile has another project to go to.
@@ -632,6 +647,7 @@ impl super::WorkspaceView {
             undo: !self.closed.is_empty(),
             changes: self.changes_here().is_some(),
             worktree: self.worktree_here().is_some(),
+            run: self.run_here().is_some(),
             tabs: self.layout.shown_project().is_some_and(|p| p.tabs().len() > 1),
             projects: focused.is_some() && self.layout.projects().len() > 1,
         }

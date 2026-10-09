@@ -82,3 +82,82 @@ fn a_programs_status_is_its_tiles_state(cx: &mut TestAppContext) {
     fresh(cx, "away again");
     assert_eq!(state(cx).0, None, "nothing new since");
 }
+
+/// A record waiting on the person climbs the attention ladder as an agent that needs them does:
+/// it counts on the bell, sounds once as it comes and not again while it waits, and its note
+/// posts while the app is away in the record's words, even with a server leading, which never
+/// hears the records. Once it no longer waits, its note is taken back and the bell is empty;
+/// waiting again at once, it counts but neither sounds nor notifies again (`PROGRAM_QUIET`).
+#[gpui::test]
+fn a_program_waiting_on_the_person_notifies_as_an_agent_does(cx: &mut TestAppContext) {
+    use std::rc::Rc;
+
+    use slopty_platform::notify::Memory;
+
+    use crate::workspace::attention::Attention;
+
+    let (view, cx) = still_workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let (busy, other) = (SessionId::new(), SessionId::new());
+    let _tile = opens(&view, cx, &fake, busy, fake.me, 1);
+    let beside = opens(&view, cx, &fake, other, fake.me, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(beside, cx));
+    cx.run_until_parked();
+    let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let heard = Rc::clone(&events);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_v, e: &WorkspaceEvent, _cx| heard.borrow_mut().push(*e))
+            .detach();
+    });
+    let memory = Rc::new(Memory::default());
+    let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+    attention.set_server_led(true);
+    attention.set_active(false);
+    let key = fake.key;
+    let says = |program: Vec<ProgramStatus>, cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, _w, cx| {
+            v.session_opened(key, SessionSummary { program, ..summary(busy, None) }, cx);
+        });
+        cx.run_until_parked();
+    };
+    let look = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.attention_look());
+    attention.look(&look(cx));
+    assert_eq!(memory.posted(), [], "nothing waits yet");
+
+    let apply = ProgramStatus {
+        message: "Apply these changes?".to_owned(),
+        ..record("deploy", ProgramState::Blocked, Some(ProgramStatus::PERMISSION))
+    };
+    says(vec![apply.clone()], cx);
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "on the bell");
+    let sounds =
+        || events.borrow().iter().filter(|e| matches!(e, WorkspaceEvent::Program(_))).count();
+    assert_eq!(sounds(), 1, "it sounds");
+    assert!(events.borrow().contains(&WorkspaceEvent::NeedsYou(1)), "the badge counts it");
+    attention.look(&look(cx));
+    let posted = memory.posted();
+    let [note] = posted.as_slice() else { panic!("one note: {posted:?}") };
+    assert_eq!(note.id, busy.to_string(), "the tile's one note");
+    assert_eq!(note.body, "Apply these changes?");
+    assert!(note.urgent, "a need breaks through a Focus");
+
+    events.borrow_mut().clear();
+    let progress = ProgramStatus { progress: Some(40), ..apply };
+    says(vec![progress], cx);
+    attention.look(&look(cx));
+    assert_eq!(sounds(), 0, "still the same wait: no second sound");
+    assert_eq!(memory.posted().len(), 1, "nor a second note");
+
+    says(vec![record("deploy", ProgramState::Working, None)], cx);
+    attention.look(&look(cx));
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 0, "answered");
+    assert_eq!(memory.withdrawn(), [busy.to_string()], "its note taken back");
+
+    events.borrow_mut().clear();
+    let again = record("deploy", ProgramState::Blocked, Some(ProgramStatus::QUESTION));
+    says(vec![again], cx);
+    attention.look(&look(cx));
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "waiting again");
+    assert_eq!(sounds(), 0, "a record flipping back at once sounds no more");
+    assert_eq!(memory.posted().len(), 1, "nor notifies again");
+}

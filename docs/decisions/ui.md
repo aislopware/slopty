@@ -9154,8 +9154,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Precedence.** An agent's own adapter leads, being the richer source; a record outranks
     what is only inferred (a command's exit, a finished command not looked at). The records come
     with the session's summary, so a tile not viewed shows them.
-  - **No notification yet.** A record raises no banner or sound; the tile and the navigator
-    say it. One would be rate-limited, as the ruling asks, once a program worth it sends them.
-  - Test: `workspace::tests::program_status::a_programs_status_is_its_tiles_state` (needs
+  - **It notifies as an agent's need does.** A waiting record where no agent speaks for the
+    tile is on the attention ladder (`needs_you`): the bell and the badge count it, ⌘⇧A walks to
+    it, a tile not on show gets the corner's word, it sounds per the alert setting, and while
+    the app is away it posts the tile's one Time Sensitive note in the record's words, taken back
+    once it no longer waits. The server never hears the records, so the note is this client's
+    own even while a server leads; a phone pocketed with its link gone hears nothing of it,
+    since the push path starts at the server's ladder.
+  - **Rate-limited.** A program is any program, so as the ruling asks, its sound and its note
+    come at most once in `attention::PROGRAM_QUIET` (10 s) per tile, however often its record
+    flips; the tile's state follows every flip.
+  - Tests: `workspace::tests::program_status::a_programs_status_is_its_tiles_state` (needs
     you and its word, an unknown need, results and a failure first, looked at on focus, a result
-    arriving while focused, the row's words; each frame the one drawn from scratch).
+    arriving while focused, the row's words; each frame the one drawn from scratch) and
+    `a_program_waiting_on_the_person_notifies_as_an_agent_does` (the bell and badge, one sound,
+    the note while away with a server leading, none again for a progress update, taken back
+    when answered, and a flip back inside the quiet neither sounding nor notifying).

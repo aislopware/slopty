@@ -59,6 +59,8 @@ ListItem │ Remove this worktree
 Button │ Keys for Remove this worktree
 ListItem │ Remove merged worktrees
 Button │ Keys for Remove merged worktrees
+ListItem │ Run
+Button │ Keys for Run
 ListItem │ Save a copy…
 Button │ Keys for Save a copy…
 ListItem │ Close tile │ ⌘W

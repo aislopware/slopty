@@ -1695,6 +1695,7 @@ mod remote;
 mod retained;
 mod review_tile;
 mod rooms;
+mod run_scripts;
 mod save_copy;
 mod search;
 mod seating;

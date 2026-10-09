@@ -1,10 +1,11 @@
 //! Attention on a pocketed phone: which moments become a system notification while the app is
 //! not in front, and where a tapped one leads.
 //!
-//! Three moments notify. An agent starts to need the human (a permission, a question, input it
-//! asks for), an agent's turn that ran at least the slow-command time ends, or a shell command
-//! that ran that long ends. Nothing notifies
-//! while the app is in front, since the bell and the navigator say it there. A tile has at most
+//! Four moments notify. An agent starts to need the human (a permission, a question, input it
+//! asks for), a program's status record starts to wait on them (`OSC 7501`'s `blocked`, said as
+//! an agent's need is and taken back the same way), an agent's turn that ran at least the
+//! slow-command time ends, or a shell command that ran that long ends. Nothing notifies while
+//! the app is in front, since the bell and the navigator say it there. A tile has at most
 //! one notification up: the note's identifier is its session's, so a newer one replaces the
 //! older, and an agent answered anywhere takes its own back. Coming back to the app takes back
 //! every note it posted, because the navigator now shows the same things. The icon badge is the
@@ -27,7 +28,8 @@
 //! devices never both say it. Its notices are then the only agent moments that post here
 //! ([`Attention::notice`], made by [`WorkspaceView::heard`]); the workspace's own look still
 //! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
-//! A shell's moments are this client's own and post as before.
+//! A shell's moments and a program's records are this client's own and post as before: the
+//! server never hears a program's records.
 //!
 //! A note of an agent that needs the person is Time Sensitive (`Note::urgent`), so it reaches
 //! them through a Focus and past the notification summary; a finished turn, a failure, a
@@ -46,7 +48,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
@@ -66,6 +68,12 @@ use crate::terminal::TerminalView;
 /// What a note's answer says when its request was no longer open: answered elsewhere, or the
 /// terminal asks by now.
 pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
+
+/// How long after a program's record sounded or notified another of the same program's may.
+///
+/// A program is any program, and one that flips between waiting and working would otherwise
+/// sound with each flip.
+pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
 /// Whether `tap` is a note's "Allow" or "Deny", which answers where the note is and may have
 /// woken the app in the background to do it.
@@ -158,6 +166,9 @@ pub struct Asking {
     pub approval: Option<String>,
     /// The request this client answered that its worker's table still shows open.
     pub answered: Option<String>,
+    /// This client's own moment: a program waiting on the person (`OSC 7501`), which no
+    /// server's ladder ranks, so it posts here even while a server leads.
+    pub own: bool,
 }
 
 impl Asking {
@@ -280,6 +291,8 @@ pub struct Attention {
     /// The app still hears the server's notices on its link: it has not told the server it is
     /// about to be suspended, after which the server pushes instead.
     listening: bool,
+    /// When each program's record last posted a note: at most once in [`PROGRAM_QUIET`].
+    own_posted: HashMap<About, Instant>,
 }
 
 impl std::fmt::Debug for Attention {
@@ -313,6 +326,7 @@ impl Attention {
             unsaid: false,
             said_off: false,
             listening: true,
+            own_posted: HashMap::new(),
         }
     }
 
@@ -453,6 +467,21 @@ impl Attention {
         }
     }
 
+    /// Whether a program's record in `about` may post a note now: none posted in the last
+    /// [`PROGRAM_QUIET`]. Noted as posting when it may.
+    fn own_due(&mut self, about: About) -> bool {
+        let now = Instant::now();
+        self.own_posted.retain(|_, at| now.saturating_duration_since(*at) < PROGRAM_QUIET);
+        let quiet = self
+            .own_posted
+            .get(&about)
+            .is_some_and(|at| now.saturating_duration_since(*at) < PROGRAM_QUIET);
+        if !quiet {
+            self.own_posted.insert(about, now);
+        }
+        !quiet
+    }
+
     /// Whether a moment is worth a note now: the app is not in front, and the person is not
     /// at another device.
     const fn away(&self) -> bool {
@@ -480,7 +509,10 @@ impl Attention {
                 let session = asking.route.about;
                 let up = self.posted.get(&session) == Some(&Why::Asks);
                 let was = self.answers.get(&session).cloned().flatten();
-                if !self.asking.contains(&session) && !self.server_led {
+                if !self.asking.contains(&session) && (!self.server_led || asking.own) {
+                    if asking.own && !self.own_due(session) {
+                        continue;
+                    }
                     self.post(session, Why::Asks, asking.note(false));
                 } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
                 {
@@ -603,10 +635,24 @@ impl WorkspaceView {
             .needs_you()
             .into_iter()
             .filter_map(|w| {
-                let agent = self.agent_state(w.session)?;
-                let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Session(w.session) };
+                let Some(agent) = self.agent_state(w.session) else {
+                    // A program waiting on the person, in its record's words.
+                    let body = self
+                        .program_words(w.session)
+                        .or_else(|| self.program_need_word(w.session))?;
+                    let title = self.route_title(route);
+                    return Some(Asking {
+                        route,
+                        title,
+                        body,
+                        approval: None,
+                        answered: None,
+                        own: true,
+                    });
+                };
+                let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
                 let approval = self
                     .session_request(w.session)
                     .filter(|a| answerable(a))
@@ -616,7 +662,7 @@ impl WorkspaceView {
                     .and_then(|t| self.thread_answered_here(t))
                     .map(|ask| ask.0.clone());
                 let title = self.route_title(route);
-                Some(Asking { route, title, body, approval, answered })
+                Some(Asking { route, title, body, approval, answered, own: false })
             })
             .chain(self.threads_waiting().into_iter().filter_map(|w| {
                 let stand = self.thread_stand(w.thread)?;
@@ -631,7 +677,7 @@ impl WorkspaceView {
                 let approval =
                     stand.asks.as_ref().filter(|a| answerable(a)).map(|a| a.id.0.clone());
                 let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
-                Some(Asking { route, title, body, approval, answered })
+                Some(Asking { route, title, body, approval, answered, own: false })
             }))
             .collect();
         let turns = self

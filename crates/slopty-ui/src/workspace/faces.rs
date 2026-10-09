@@ -718,7 +718,10 @@ impl WorkspaceView {
             HubEvent::Authors => this.author_files(key, cx),
             // An aside's fork stays in the sheet of the view that asked it.
             HubEvent::Started { thread, aside: false, .. } => this.open_thread(key, *thread, cx),
-            HubEvent::Git(repo) => this.worktree_heard(key, repo, cx),
+            HubEvent::Git(repo) => {
+                this.worktree_heard(key, repo, cx);
+                this.scripts_heard(key, repo, cx);
+            }
             _ => {}
         });
         self.faces.threads.hearing.insert(key, hearing);
