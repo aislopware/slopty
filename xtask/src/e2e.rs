@@ -158,12 +158,27 @@ struct Suite {
     default: Option<&'static str>,
     /// One test at a time: the frame-time scenarios measure a quiet machine.
     serial: bool,
+    /// Its tests code video through VideoToolbox: they run after the rest, behind the encoder
+    /// probe and a deadline ([`coding_step`]).
+    codes: bool,
+    /// Its tests stream nothing, so its apps open no decoder at launch
+    /// (`slopty_client::NO_DECODER_WARM_UP`).
+    quiet_decoder: bool,
 }
 
 impl Suite {
     /// A suite of live tests: the whole target, in parallel.
     const fn live(package: &'static str, test: &'static str) -> Self {
-        Self { kept: Kept::Ignored, package, test, only: None, default: None, serial: false }
+        Self {
+            kept: Kept::Ignored,
+            package,
+            test,
+            only: None,
+            default: None,
+            serial: false,
+            codes: false,
+            quiet_decoder: false,
+        }
     }
 
     /// A suite kept out of `cargo gate` by `var`.
@@ -180,6 +195,16 @@ impl Suite {
     const fn serial(self) -> Self {
         Self { serial: true, ..self }
     }
+
+    /// Its tests code video ([`Suite::codes`]).
+    const fn codes(self) -> Self {
+        Self { codes: true, ..self }
+    }
+
+    /// Its tests stream nothing ([`Suite::quiet_decoder`]).
+    const fn quiet_decoder(self) -> Self {
+        Self { quiet_decoder: true, ..self }
+    }
 }
 
 /// The module holding a target's tests that need the Screen Recording grant; they run only
@@ -190,8 +215,28 @@ const FRAME_TIME: &str = "test(~frame_time::)";
 /// The module holding the app target's showcase renders, which run only as their own case.
 const SHOWCASE: &str = "test(~showcase::)";
 
-const APP: &[Suite] =
-    &[Suite::live("slopty-e2e", "app").only("not test(~frame_time::) and not test(~showcase::)")];
+/// The app target's tests that code video: a window or a display streamed into a tile, a
+/// remote window opened, and the screen captured. Each is named; a new one left out still runs,
+/// in the first group, only not behind the probe.
+macro_rules! coding {
+    () => {
+        "(test(~stream::) | test(~screen_recording::) \
+         | test(=clipboard::text_copied_on_one_worker_is_ready_to_paste_in_another_workers_window) \
+         | test(=gallery::a_remote_window_waits_in_its_chrome))"
+    };
+}
+
+/// The app's tests: first every one that codes no video, its apps opening no decoder at launch,
+/// so a runner whose encoder stops cannot hold them; then the ones that code, last, behind the
+/// encoder probe ([`coding_step`]).
+const APP: &[Suite] = &[
+    Suite::live("slopty-e2e", "app")
+        .only(concat!("not test(~frame_time::) and not test(~showcase::) and not ", coding!()))
+        .quiet_decoder(),
+    Suite::live("slopty-e2e", "app")
+        .only(concat!("not test(~frame_time::) and not test(~showcase::) and ", coding!()))
+        .codes(),
+];
 
 const SHOWCASE_APP: &[Suite] = &[Suite::live("slopty-e2e", "app").only(SHOWCASE)];
 
@@ -360,25 +405,43 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         let threads: &[&str] = if suite.serial { &["--test-threads", "1"] } else { &[] };
         let ignored: &[&str] =
             if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
-        let command = cmd!(
+        let mut command = cmd!(
             sh,
             "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {threads...} {filter_flag...} {expr...}"
         );
+        if suite.quiet_decoder {
+            command = command.env(NO_DECODER_WARM_UP, "1");
+        }
         println!("▶ {title}");
         let started = std::time::Instant::now();
-        let status = std::process::Command::from(command)
-            .status()
-            .with_context(|| format!("start nextest for {title}"))?;
-        let outcome = match status.code() {
-            Some(0) => {
+        let watchdog = on_ci()
+            .then(|| crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER));
+        let ran = if suite.codes && cfg!(target_os = "macos") {
+            coding_step(sh, command)
+        } else {
+            Ran::Exited(
+                std::process::Command::from(command)
+                    .status()
+                    .with_context(|| format!("start nextest for {title}"))?
+                    .code(),
+            )
+        };
+        if let Some(watchdog) = watchdog {
+            watchdog.finish();
+        }
+        let outcome = match ran {
+            Ran::Exited(Some(0)) | Ran::Excused => {
                 matched = matched.saturating_add(1);
                 "✓"
             }
             // Nextest's "no tests to run": the filter picked nothing in this suite.
-            Some(NO_TESTS_RUN) if opts.filter.is_some() => "–",
-            _ => {
+            Ran::Exited(Some(NO_TESTS_RUN)) if opts.filter.is_some() => "–",
+            Ran::Exited(_) => {
                 matched = matched.saturating_add(1);
                 failed.push(title.to_owned());
+                if on_ci() {
+                    print!("{}", machine_state());
+                }
                 "✘"
             }
         };
@@ -410,6 +473,148 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
 
 /// Nextest's exit code when the filters leave no test to run.
 const NO_TESTS_RUN: i32 = 4;
+
+/// The variable that keeps the app from opening a decoder at launch
+/// (`slopty_client::NO_DECODER_WARM_UP`).
+const NO_DECODER_WARM_UP: &str = "SLOPTY_NO_DECODER_WARM_UP";
+
+/// How long a suite runs on a runner before [`crate::watchdog`] says what it waits on: the
+/// app's whole suite takes about a quarter of an hour on a green runner.
+const SUITE_HANG_AFTER: std::time::Duration = std::time::Duration::from_mins(25);
+
+/// How long the tests that code video may take together: four of them, under 20 s each on a
+/// green runner, against nextest's two minutes for any one.
+const CODING_DEADLINE: std::time::Duration = std::time::Duration::from_mins(6);
+
+/// How long the encoder probe may take: one keyframe codes in milliseconds, and a cold session
+/// in under a second, so only an encoder that does not answer runs this long.
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// The probe binary (`crates/slopty-e2e/src/bin/slopty-encoder-probe.rs`).
+const PROBE: &str = "slopty-encoder-probe";
+
+/// How a suite's run went.
+enum Ran {
+    /// Nextest exited with this code (`None`: killed).
+    Exited(Option<i32>),
+    /// It failed, or was not run, for want of a runner's encoder: a warning, not a failure.
+    Excused,
+}
+
+/// Whether this runs on CI.
+fn on_ci() -> bool {
+    std::env::var_os("CI").is_some()
+}
+
+/// Whether this Mac's encoder codes one keyframe in time ([`PROBE`]), run from a copy on the
+/// boot volume: a session started from a binary on a volume mounted without ownership waits tens
+/// of seconds on its signature check (`slopty_e2e::harness::bin_dir`).
+fn encoder_answers(sh: &Shell) -> bool {
+    let built = sh.current_dir().join("target/debug").join(PROBE);
+    let copy = std::env::temp_dir().join(format!("{PROBE}-{}", std::process::id()));
+    if std::fs::copy(&built, &copy).is_err() {
+        println!("  the encoder probe is not built at {}", built.display());
+        return false;
+    }
+    let answered = bounded(std::process::Command::new(&copy), PROBE_DEADLINE);
+    let _gone = std::fs::remove_file(&copy);
+    answered == Ended::Exited(Some(0))
+}
+
+/// Run the app's tests that code video, after the rest, and judge a failure by whether the
+/// runner's encoder still answers, as the gate's VideoToolbox step does
+/// (`crate::gate::videotoolbox_step`).
+///
+/// A hosted runner's virtual Mac forwards its encoder to the host, and at times that encoder
+/// stops for good with a few dozen clients open (`docs/decisions/video.md`): every test that
+/// codes then hangs, and its killed processes stall in their exit inside the driver. Run
+/// 37955284234 lost its last 21 tests so, after the display stream. So the encoder is asked first,
+/// and an encoder that does not answer skips these tests with a warning; the run is killed whole
+/// past [`CODING_DEADLINE`]; and after a failure, an encoder that stopped answering (or said so in
+/// the system log) makes it a warning, since it says nothing of the change. A failure while the
+/// encoder still codes is a failure.
+fn coding_step(sh: &Shell, command: xshell::Cmd<'_>) -> Ran {
+    if !encoder_answers(sh) {
+        println!(
+            "::warning title=VideoToolbox::this runner's video encoder does not code one frame, \
+             so the app's tests that stream were not run"
+        );
+        println!("  ⚠ the runner's encoder does not answer: the tests that code video are skipped");
+        return Ran::Excused;
+    }
+    let ran = bounded(std::process::Command::from(command), CODING_DEADLINE);
+    if let Ended::Exited(Some(code @ (0 | NO_TESTS_RUN))) = ran {
+        return Ran::Exited(Some(code));
+    }
+    if ran == Ended::Late {
+        println!("  the tests that code video passed {CODING_DEADLINE:?}: killed them");
+    }
+    if crate::watchdog::encoder_stopped() || !encoder_answers(sh) {
+        println!(
+            "::warning title=VideoToolbox::this runner's video encoder stopped during the app's \
+             tests that stream, so they say nothing of the change"
+        );
+        println!("  ⚠ the runner's encoder stopped");
+        return Ran::Excused;
+    }
+    println!("  the encoder still codes, so the failure is the tests'");
+    Ran::Exited(None)
+}
+
+/// How a [`bounded`] run ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ended {
+    /// With this exit code; `None` when it did not start or a signal ended it.
+    Exited(Option<i32>),
+    /// Past its deadline, killed with its whole group.
+    Late,
+}
+
+/// Run `command` in a process group of its own, killing the whole group past `deadline`, as the
+/// gate runs its VideoToolbox step (`crate::gate`'s `within`).
+fn bounded(mut command: std::process::Command, deadline: std::time::Duration) -> Ended {
+    use std::os::unix::process::CommandExt as _;
+
+    command.process_group(0);
+    let Ok(mut child) = command.spawn() else { return Ended::Exited(None) };
+    let group = child.id();
+    let (done, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _sent = done.send(child.wait());
+    });
+    if let Ok(status) = waited.recv_timeout(deadline) {
+        return Ended::Exited(status.ok().and_then(|s| s.code()));
+    }
+    let _killed = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .status();
+    Ended::Late
+}
+
+/// The machine as a failed suite left it, for the log: its disks, its memory, and every process
+/// of the run's still alive with its state, a stuck one among them.
+fn machine_state() -> String {
+    let run = |program: &str, args: &[&str]| {
+        std::process::Command::new(program).args(args).output().map_or_else(
+            |e| format!("{program}: {e}\n"),
+            |out| String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let processes = run("/bin/ps", &["-axo", "pid,ppid,stat,wchan,etime,rss,command"])
+        .lines()
+        .enumerate()
+        .filter(|(n, line)| *n == 0 || line.contains("slopty") || line.contains("VTEncoder"))
+        .fold(String::new(), |mut kept, (_, line)| {
+            kept.push_str(line);
+            kept.push('\n');
+            kept
+        });
+    format!(
+        "── the machine after the failure\n{}{}{processes}",
+        run("/bin/df", &["-h", "/", "/private/tmp"]),
+        run("/usr/bin/memory_pressure", &["-Q"]),
+    )
+}
 
 /// Build `suite`'s test binary and record where it is, for nextest to run without cargo.
 fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<()> {
@@ -444,7 +649,20 @@ fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{Suite, filterset};
+    use super::{APP, Suite, filterset};
+
+    /// The app's tests run in two groups that split the target between them on the same list of
+    /// tests that code video: first the rest, opening no decoder at launch, then those, behind
+    /// the probe.
+    #[test]
+    fn the_app_runs_its_tests_that_code_video_last_and_apart() {
+        let [rest, coding] = APP else { panic!("two groups") };
+        assert!(rest.quiet_decoder && !rest.codes);
+        assert!(coding.codes && !coding.quiet_decoder);
+        let (rest, coding) = (rest.only.unwrap_or_default(), coding.only.unwrap_or_default());
+        assert_eq!(rest.replace(" and not (", " and ("), coding, "the same list, once negated");
+        assert!(coding.contains("test(~stream::)"), "{coding}");
+    }
 
     #[test]
     fn a_suites_filters_the_callers_and_the_capture_rule_all_apply() {

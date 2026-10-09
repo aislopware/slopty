@@ -466,6 +466,42 @@ pub fn artifacts_dir() -> PathBuf {
     )
 }
 
+/// How long a killed process may take to be reaped before it is left behind.
+///
+/// A process that coded video through a virtual Mac's encoder after the encoder stopped stalls
+/// in its exit inside the driver, where no signal ends it (`docs/decisions/video.md`). Waiting on
+/// it held a test whose checks had all passed to its timeout, and so every test after it
+/// (CI run 37955284234). A process gone in time is gone at once; one still there after this is
+/// named with its state, for the run's log, and left.
+const REAP: Duration = Duration::from_secs(10);
+
+/// Kill `child` (SIGKILL) and reap it, waiting at most [`REAP`]; one still there then is named
+/// as `what`, with its state as `ps` reads it, and left.
+#[expect(clippy::print_stderr, reason = "test helper; stderr is the test's log")]
+async fn reap(child: &mut Child, what: &str) {
+    let pid = child.id();
+    let _killed = child.start_kill();
+    if tokio::time::timeout(REAP, child.wait()).await.is_ok() {
+        return;
+    }
+    let Some(pid) = pid else { return };
+    let state = tokio::time::timeout(
+        REAP,
+        Command::new("/bin/ps")
+            .args(["-o", "pid,stat,wchan,etime,command", "-p", &pid.to_string()])
+            .output(),
+    )
+    .await;
+    let state = match state {
+        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Ok(Err(e)) => format!("ps: {e}"),
+        Err(_elapsed) => "ps did not answer".to_owned(),
+    };
+    eprintln!(
+        "e2e: {what} (pid {pid}) was killed but is not gone after {REAP:?}; left as it is:\n{state}"
+    );
+}
+
 async fn wait_for_path(path: &Path, child: &mut Child, what: &str) -> Result<()> {
     let waited = tokio::time::timeout(STARTUP, async {
         while !path.exists() {
@@ -685,6 +721,11 @@ async fn spawn_worker(
     tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut listen))
         .await
         .context("the worker did not print its address in time")??;
+    // Its output closed with nothing on it: it stopped first, and said why on its stderr.
+    if listen.is_empty() {
+        let status = tokio::time::timeout(STARTUP, worker.wait()).await;
+        bail!("slopty-worker stopped before it printed its address ({status:?}); its log says why");
+    }
     Ok((worker, loopback_address(&listen)?))
 }
 
@@ -1141,7 +1182,7 @@ impl Stack {
         let ix = self.app_ix.take().context("no app process")?;
         let mut app = self.children.remove(ix);
         app.start_kill().context("kill slopty-app")?;
-        let _status = app.wait().await;
+        reap(&mut app, "slopty-app").await;
         Ok(())
     }
 
@@ -1191,7 +1232,7 @@ impl Stack {
         // The worker is the second child, after ptyd ([`Self::worker_pid`]).
         let worker = self.children.get_mut(1).context("no worker process")?;
         worker.start_kill().context("kill slopty-worker")?;
-        let _status = worker.wait().await;
+        reap(worker, "slopty-worker").await;
         Ok(())
     }
 
@@ -1520,8 +1561,7 @@ impl Stack {
                 .await;
         }
         for child in &mut self.children {
-            let _killed = child.start_kill();
-            let _reaped = child.wait().await;
+            reap(child, "a process of the stack").await;
         }
         self.server.kill().await;
         #[cfg(target_os = "macos")]
@@ -1615,8 +1655,7 @@ impl SecondApp {
                 .await;
         }
         if let Some(mut child) = self.child.take() {
-            let _killed = child.start_kill();
-            let _reaped = child.wait().await;
+            reap(&mut child, "the second app").await;
         }
     }
 }
@@ -1858,8 +1897,7 @@ impl ServerDaemon {
 
     /// Kill the server (SIGKILL) and reap it.
     pub async fn kill(&mut self) {
-        let _killed = self.child.start_kill();
-        let _reaped = self.child.wait().await;
+        reap(&mut self.child, "slopty-server").await;
     }
 }
 
@@ -1932,8 +1970,7 @@ impl Worker {
     /// cable would leave them) and reap it. ptyd and its shells live on.
     pub async fn kill_worker(&mut self) {
         if let Some(mut worker) = self.daemon.take() {
-            let _killed = worker.start_kill();
-            let _reaped = worker.wait().await;
+            reap(&mut worker, "slopty-worker").await;
         }
     }
 
@@ -1958,8 +1995,7 @@ impl Worker {
     /// Kill both daemons, reap them and give the worker's pasteboard back.
     pub async fn shutdown(mut self) {
         self.kill_worker().await;
-        let _killed = self.ptyd.start_kill();
-        let _reaped = self.ptyd.wait().await;
+        reap(&mut self.ptyd, "slopty-ptyd").await;
         #[cfg(target_os = "macos")]
         slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(&self.root, "worker"))
             .release();
@@ -2520,8 +2556,7 @@ impl ServerFleet {
     /// Ask the app to quit, then kill it, both workers and the server.
     pub async fn shutdown(mut self) {
         let _quit = self.driver.call(&crate::Command::Quit).await;
-        let _killed = self.app.start_kill();
-        let _reaped = self.app.wait().await;
+        reap(&mut self.app, "slopty-app").await;
         self.far.shutdown().await;
         self.near.shutdown().await;
         self.server.kill().await;
@@ -2698,8 +2733,7 @@ impl ProjectStack {
     /// Ask the app to quit, then kill it, the worker and the server.
     pub async fn shutdown(mut self) {
         let _quit = self.driver.call(&crate::Command::Quit).await;
-        let _killed = self.app.start_kill();
-        let _reaped = self.app.wait().await;
+        reap(&mut self.app, "slopty-app").await;
         self.worker.shutdown().await;
         self.server.kill().await;
         #[cfg(target_os = "macos")]

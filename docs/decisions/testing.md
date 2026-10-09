@@ -1191,3 +1191,40 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `/private/tmp` on macOS and not `TMPDIR`. A runner's `TMPDIR` is another length, and `folder`
     drew another path (`harness::roots_parent`).
   - Test: `snapshot::tests::a_glyphs_edge_shaded_apart_matches_and_a_lost_line_does_not`.
+- ✅ **The app's e2e codes video last, behind the encoder probe, and a stuck process no longer
+  holds a test** (2026-10-10, from CI e2e run 37955284234). The run went green for 43 tests,
+  then `stream::the_drawn_display_streams_into_its_tile` reached its 120 s timeout, and so did
+  20 of the 21 tests after it. The 44th test's checks had all passed (its render matched): it
+  hung in its teardown, after ptyd was killed, waiting to reap the next process it killed. So
+  did the tests after it, each once its own checks were done, and one hung starting up. By the
+  end, writes to `/private/tmp` failed with `EIO`, which is what the last test's panic
+  (`tiles.rs:227`, a worker that stopped before printing its address) reports.
+  - **The cause.** A process that coded through a hosted runner's paravirtual VideoToolbox after
+    the encoder stopped stalls in its exit inside the driver, where no signal ends it
+    (`video.md`, "A virtual Mac's encoder stops for good past its 1020th client"; the gate saw it
+    stop with 46 clients open). Every app the e2e started opened a decoder at launch
+    (`slopty_client::warm_up_decoder`), streaming or not: of the 61 processes that had touched
+    VideoToolbox by test 44 (56 apps and 5 streaming workers), at least 51 were apps of tests
+    that streamed nothing. The log cannot show
+    which wait hung; the next run will (below).
+  - **Coding last.** `cargo xtask e2e app` runs the target in two groups. First every test
+    that codes no video, with `SLOPTY_NO_DECODER_WARM_UP` set so its apps open no decoder at
+    launch, and so a stopped encoder cannot hold them (a stream still makes its decoder when it
+    comes). Then the tests that code (`stream::`, `screen_recording::`, and the two named in
+    `xtask/src/e2e.rs`), behind the gate's way of asking: the encoder probe
+    (`slopty-encoder-probe`, one keyframe through a real session, under a minute) skips them
+    with a warning when the encoder does not answer, the group is killed whole past six
+    minutes, and after a failure an encoder that stopped answering (or said so in the system
+    log) makes it a warning. A failure while the encoder still codes fails the run.
+  - **A stuck process is left, not waited on.** The harness reaps a killed process for at most
+    10 s (`harness::REAP`); one still there is named in the test's log with its state as `ps`
+    reads it (`STAT`, `WCHAN`) and left. A test whose checks passed then passes, or fails at once
+    as leaky, instead of holding its timeout and the run behind it.
+  - **What the next stuck run says.** On CI a failed group prints the disks, the memory pressure
+    and every Slopty and encoder process left with its state, and a group running past 25
+    minutes prints what each process under it waits on (`crate::watchdog`).
+  - Not taken: a longer timeout, which only makes the run slower to fail, and a fresh runner
+    for the coding tests, which a hosted runner cannot give within one job.
+  - Proof: `cargo xtask e2e app -E 'test(=settings::the_settings_form_edits_the_file) |
+    test(=stream::a_drawn_window_streams_into_its_tile)'` runs the first in the quiet group (no
+    decoder at launch) and the second after the probe; both pass.

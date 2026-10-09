@@ -867,6 +867,10 @@ async fn receive_bulk(
     }
 }
 
+/// The variable that, set, keeps [`warm_up_decoder`] from opening a session.
+#[cfg(target_vendor = "apple")]
+pub const NO_DECODER_WARM_UP: &str = "SLOPTY_NO_DECODER_WARM_UP";
+
 #[cfg(target_vendor = "apple")]
 /// Whether the process has warmed VideoToolbox's decoder up yet.
 static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -878,8 +882,14 @@ static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// Once per process; later calls are free. [`WorkerLink::start`] calls it, but a session
 /// created while the first stream is already starting still delays that stream's own
 /// session, so the apps call it at launch, before any worker is dialed.
+///
+/// Not at all with [`NO_DECODER_WARM_UP`] set: a virtual Mac's VideoToolbox keeps two clients
+/// of every process that opened a session until it restarts, and stops past a few dozen
+/// (`docs/decisions/video.md`), so the app's e2e sets it for the tests that stream nothing. A
+/// stream still makes its decoder when it comes.
 pub fn warm_up_decoder() {
-    if DECODER_WARM.swap(true, Ordering::Relaxed) {
+    if DECODER_WARM.swap(true, Ordering::Relaxed) || std::env::var_os(NO_DECODER_WARM_UP).is_some()
+    {
         return;
     }
     let spawned = std::thread::Builder::new().name("decoder-warm-up".to_owned()).spawn(|| {

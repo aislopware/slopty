@@ -33,6 +33,12 @@ live = [ "harness" ]
 name = "slopty-glass"
 required-features = [ "harness" ]
 
+# Whether this Mac's video encoder answers, asked by `cargo xtask e2e app` before the tests that
+# code video; it reports through `anyhow`, which the `harness` feature brings.
+[[bin]]
+name = "slopty-encoder-probe"
+required-features = [ "harness" ]
+
 [[test]]
 name = "app"
 required-features = [ "live" ]
@@ -98,6 +104,10 @@ objc2-foundation.workspace = true
 slopty-platform.workspace = true
 # The glass measurement's client (`src/bin/slopty-glass.rs`): the app's receive path.
 slopty-capture.workspace = true
+# The encoder probe (`src/bin/slopty-encoder-probe.rs`): one keyframe through a real session.
+objc2-core-foundation.workspace = true
+objc2-core-video.workspace = true
+slopty-codec.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true
