@@ -195,6 +195,9 @@ fn listed(name: &str, merged: bool, changed: u32) -> slopty_proto::git::AgentWor
         ahead: u32::from(!merged),
         merged,
         committed: 1,
+        made_by: Some(slopty_proto::thread::AgentId::named(
+            slopty_proto::thread::AgentId::CLAUDE_CODE,
+        )),
     }
 }
 

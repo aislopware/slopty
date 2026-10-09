@@ -2313,8 +2313,8 @@ reordering and edited allows are gone" in `agents.md`.*
   task, so a long project fills the disk. Freeing them one at a time ("Remove this worktree",
   `docs/decisions/workspace.md`) needed a look at each.
   - **The listing** (`GitOp::Worktrees`, answered `GitDone::Worktrees`). The worker lists every
-    linked worktree of the clone the folder is in that sits under `.claude/worktrees/` and is
-    still there. For each it gives:
+    linked worktree of the clone the folder is in that is still there, wherever it lies (since
+    2026-10-10, see "Every linked worktree is listed"). For each it gives:
     - the files not committed;
     - whether a live terminal works in it;
     - its commits not yet in `origin`'s default branch or the clone's checked-out branch,
@@ -2459,3 +2459,27 @@ reordering and edited allows are gone" in `agents.md`.*
     `reports::tests::a_batch_read_already_is_not_kept_again`; and the daemon's
     `reports_reach_an_agent_through_its_next_prompt_s_hook`, which sends the batch again after it
     was read and hears `Delivered` again with nothing kept.
+
+- ✅ **Every linked worktree is listed, marked by who made it** (2026-10-10, readiness 10-10
+  rank 18; wire change). The listing showed only `.claude/worktrees/`. So a worktree made by
+  hand, or by Codex 0.162's managed worktrees, never showed and was never cleaned up.
+  - The worker lists every linked worktree that `git worktree list` names. Each carries
+    `AgentWorktree::made_by`, the agent whose tool made it, read from where it lies and what it
+    keeps:
+    - Claude Code for one under the clone's `.claude/worktrees/`, where Slopty makes its own too;
+    - Codex for one in a four-hex bucket under `$CODEX_HOME/worktrees` (`<root>/1f2e/<name>`),
+      as Codex's own `has_managed_layout` reads it, or one whose git directory keeps Codex's
+      owner file `codex-thread.json`, wherever its root was set;
+    - none for one made by hand or by a tool not known here.
+    The field is an open agent id, so a new tool's mark is one more rule, not a new type.
+  - Removing and freeing take any linked worktree, under the same guards: never one a terminal
+    works in, never one with anything not committed (`git worktree remove` without `--force`),
+    and its branch only once every commit landed. A discard, which takes work not committed
+    with it, still touches only an agent's worktree under `.claude/worktrees/`.
+  - Not read: a Codex root moved by `[desktop] git-worktree-root` in its config. Such a
+    worktree is marked by its owner file once a thread holds it, and listed unmarked before.
+  - Tests: `repo::worktrees::tests::a_clones_worktrees_are_listed_with_how_each_stands` (a hand-made
+    worktree listed unmarked and free to go, a Codex one marked by its owner file),
+    `codex_worktrees_are_known_by_their_layout`, and
+    `a_worktree_in_use_or_not_committed_is_kept` (the person's own is kept while it holds a
+    change, then goes with its branch). Golden `worker_git_worktrees` changed.

@@ -227,7 +227,7 @@ pub struct Branch {
     pub committed: i64,
 }
 
-/// The agents' worktrees of a clone, each with its state.
+/// The linked worktrees of a clone, each with its state and who made it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Worktrees {
     /// The clone's root.
@@ -238,7 +238,7 @@ pub struct Worktrees {
     pub more: u32,
 }
 
-/// One agent's worktree and how it stands.
+/// One linked worktree of a clone, how it stands, and the agent whose tool made it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentWorktree {
     /// Where it is: the path [`GitOp::RemoveWorktree`] is asked in.
@@ -257,6 +257,10 @@ pub struct AgentWorktree {
     pub merged: bool,
     /// When its newest commit was made: seconds since the Unix epoch, as git keeps them.
     pub committed: i64,
+    /// The agent whose tool made it, as where it lies and what it keeps say: Claude Code for one
+    /// under the clone's `.claude/worktrees/` (Slopty makes its own there too), Codex for one
+    /// Codex manages. `None` for one made by hand or by a tool not known here.
+    pub made_by: Option<crate::thread::AgentId>,
 }
 
 /// A repository's run scripts, as the checkout a folder is in keeps them.

@@ -8,6 +8,7 @@ mod golden_git {
         AgentWorktree, Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus,
         PullCheck, PullComments, PullNote, PullStatus, PullThread, Worktrees,
     };
+    use slopty_proto::thread::AgentId;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
     fn hex(bytes: &[u8]) -> String {
@@ -187,6 +188,7 @@ mod golden_git {
             ahead: u32::from(!merged),
             merged,
             committed: 1_700_000_300,
+            made_by: Some(AgentId::named(AgentId::CLAUDE_CODE)),
         };
         let worktrees = GitDone::Worktrees(Box::new(Worktrees {
             clone: "/Users/ada/src/demo".to_owned(),
@@ -194,6 +196,16 @@ mod golden_git {
                 tree("fix-login", true, 0, false),
                 tree("draft", true, 2, true),
                 AgentWorktree { branch: None, ..tree("open", false, 0, false) },
+                AgentWorktree {
+                    path: "/Users/ada/.codex/worktrees/1f2e/demo".to_owned(),
+                    made_by: Some(AgentId::named(AgentId::CODEX)),
+                    ..tree("codex", false, 1, false)
+                },
+                AgentWorktree {
+                    path: "/Users/ada/src/demo-hotfix".to_owned(),
+                    made_by: None,
+                    ..tree("hotfix", true, 0, false)
+                },
             ],
             more: 1,
         }));

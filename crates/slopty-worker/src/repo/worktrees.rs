@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use slopty_proto::agent::Worktree;
 use slopty_proto::git::{AgentWorktree, WORKTREES_MAX, Worktrees};
+use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::{NewWorktree, Setup, Start};
 
 use super::bundle::{self, branch_ref};
@@ -143,7 +144,7 @@ pub async fn make(
     if path.exists() {
         let (tree, of, _) = {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || agent_worktree(&path))
+            tokio::task::spawn_blocking(move || linked_worktree(&path))
                 .await
                 .map_err(|e| Failed::Other(e.to_string()))??
         };
@@ -436,11 +437,12 @@ pub(super) fn clone_of(cwd: &Path) -> Result<(PathBuf, PathBuf), Failed> {
     Ok((main.unwrap_or(root), within))
 }
 
-/// The agents' worktrees of the clone `root` is in, each as it stands
-/// ([`slopty_proto::git::GitOp::Worktrees`]).
+/// The linked worktrees of the clone `root` is in, each as it stands and marked by the agent
+/// whose tool made it ([`slopty_proto::git::GitOp::Worktrees`], `made_by`).
 ///
-/// Those `git worktree list` names under the clone's `.claude/worktrees/` whose folder is
-/// there. For each: the files not committed in it, whether one of `terminals` works in it, its
+/// Every one `git worktree list` names whose folder is there, wherever it lies: one made by
+/// hand or by Codex is listed, and freed, as an agent's under `.claude/worktrees/` is. For
+/// each: the files not committed in it, whether one of `terminals` works in it, its
 /// commits not in what counts as landed (as [`free`] reads it), and, only when those do not say
 /// it landed, whether its pull request merged at its tip, asked of the forge for each such
 /// worktree at once.
@@ -461,13 +463,13 @@ pub async fn list(
             .0
     };
     let clone = std::fs::canonicalize(&clone).unwrap_or(clone);
-    let place = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part));
     let listed = bundle::run(git, &clone, &["worktree", "list", "--porcelain"]).await?;
     let landed = [DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+    let codex = codex_worktrees();
     let mut list = Vec::new();
     for (tree, branch) in linked_trees(&listed) {
         let tree = std::fs::canonicalize(&tree).unwrap_or(tree);
-        if tree.parent() != Some(place.as_path()) || !tree.is_dir() {
+        if !tree.is_dir() {
             continue;
         }
         let status = bundle::run(git, &tree, &["status", "--porcelain"]).await?;
@@ -481,6 +483,7 @@ pub async fn list(
             ahead,
             merged: ahead == 0,
             committed: committed.ok().and_then(|c| c.trim().parse().ok()).unwrap_or_default(),
+            made_by: made_by(&tree, &clone, codex.as_deref()),
         });
     }
     // The forge is asked only for what the commits leave open, each worktree's at once: a
@@ -503,6 +506,38 @@ pub async fn list(
         list,
         more: u32::try_from(more).unwrap_or(u32::MAX),
     })
+}
+
+/// The file Codex keeps in the git directory of a worktree it manages, naming the thread that
+/// owns it (Codex `codex-rs/worktree/src/metadata.rs`, `OWNER_FILENAME`).
+const CODEX_OWNER: &str = "codex-thread.json";
+
+/// Where Codex makes the worktrees it manages: `$CODEX_HOME/worktrees`, as its settings default
+/// to (`codex-rs/worktree/src/settings.rs`), resolved.
+fn codex_worktrees() -> Option<PathBuf> {
+    let root = crate::thread::codex::codex_home()?.join("worktrees");
+    Some(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
+/// The agent whose tool made the linked worktree `tree` of `clone`, as where it lies and what it
+/// keeps say. Claude Code's, and Slopty's made where Claude Code would, lie in the clone's
+/// `.claude/worktrees/`. Codex's lie in a bucket of four hex digits under its root (`codex`),
+/// `<root>/1f2e/<name>` as its `has_managed_layout` reads them, or keep its owner file once a
+/// thread holds them, wherever its root was set. Any other was made by hand or by a tool not
+/// known here.
+fn made_by(tree: &Path, clone: &Path, codex: Option<&Path>) -> Option<AgentId> {
+    let place = AGENT_WORKTREES.iter().fold(clone.to_path_buf(), |dir, part| dir.join(part));
+    if tree.parent() == Some(place.as_path()) {
+        return Some(AgentId::named(AgentId::CLAUDE_CODE));
+    }
+    let owned = git_dir(tree).is_some_and(|dir| dir.join(CODEX_OWNER).is_file());
+    let laid_out = codex.and_then(|root| tree.strip_prefix(root).ok()).is_some_and(|within| {
+        let mut parts = within.components();
+        let bucket = parts.next().and_then(|c| c.as_os_str().to_str());
+        let hex = bucket.is_some_and(|b| b.len() == 4 && b.bytes().all(|c| c.is_ascii_hexdigit()));
+        hex && parts.next().is_some() && parts.next().is_none()
+    });
+    (owned || laid_out).then(|| AgentId::named(AgentId::CODEX))
 }
 
 /// The linked worktrees `git worktree list --porcelain` names, each with the branch it has
@@ -552,7 +587,7 @@ async fn ahead_of(git: &Path, clone: &Path, tree: &Path, landed: &[String]) -> u
 
 /// Remove the worktree at `worktree` from its clone.
 ///
-/// It must be one an agent made under its clone's `.claude/worktrees/`, with no terminal
+/// It may be any linked worktree of the clone, an agent's or one made by hand, with no terminal
 /// whose directory is in it (`cwds`, every live terminal's) and nothing uncommitted in it:
 /// `git worktree remove` without `--force`, so git refuses what this missed. The branch it had
 /// checked out goes too when every commit on it is in one of `landed` (commits or branches of
@@ -571,7 +606,7 @@ pub async fn remove(
 ) -> Result<Removed, Failed> {
     let (tree, clone, branch) = {
         let worktree = worktree.to_path_buf();
-        tokio::task::spawn_blocking(move || agent_worktree(&worktree))
+        tokio::task::spawn_blocking(move || linked_worktree(&worktree))
             .await
             .map_err(|e| Failed::Other(e.to_string()))??
     };
@@ -692,7 +727,7 @@ pub async fn free(
 ) -> Result<Removed, Failed> {
     let (tree, clone, branch) = {
         let worktree = worktree.to_path_buf();
-        tokio::task::spawn_blocking(move || agent_worktree(&worktree))
+        tokio::task::spawn_blocking(move || linked_worktree(&worktree))
             .await
             .map_err(|e| Failed::Other(e.to_string()))??
     };
@@ -717,9 +752,21 @@ async fn merged_at_tip(git: &Path, programs: &super::commit::Programs, tree: &Pa
     pull.state == "MERGED" && pull.head_commit == tip.trim()
 }
 
-/// `worktree`, resolved, if it is a linked worktree under its clone's `.claude/worktrees/`:
-/// itself, the clone's root, and the branch it has checked out.
+/// [`linked_worktree`], for one an agent made under its clone's `.claude/worktrees/`: what a
+/// discard, which takes work not committed with it, may touch.
 fn agent_worktree(worktree: &Path) -> Result<(PathBuf, PathBuf, Option<String>), Failed> {
+    let (tree, clone, branch) = linked_worktree(worktree)?;
+    let place = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part));
+    if tree.parent() != Some(place.as_path()) {
+        let why = "is not an agent's worktree under .claude/worktrees";
+        return Err(Failed::NotOne(format!("{} {why}", worktree.display())));
+    }
+    Ok((tree, clone, branch))
+}
+
+/// `worktree`, resolved, if it is a linked worktree of a clone with a checkout, wherever it
+/// lies: itself, the clone's root, and the branch it has checked out.
+fn linked_worktree(worktree: &Path) -> Result<(PathBuf, PathBuf, Option<String>), Failed> {
     let not_one = |why: &str| Failed::NotOne(format!("{} {why}", worktree.display()));
     let tree =
         std::fs::canonicalize(worktree).map_err(|e| not_one(&format!("is not there: {e}")))?;
@@ -734,10 +781,6 @@ fn agent_worktree(worktree: &Path) -> Result<(PathBuf, PathBuf, Option<String>),
         .then(|| common.parent().map(Path::to_path_buf))
         .flatten()
         .ok_or_else(|| not_one("is not of a clone with a checkout"))?;
-    let place = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part));
-    if tree.parent() != Some(place.as_path()) {
-        return Err(not_one("is not an agent's worktree under .claude/worktrees"));
-    }
     let head = std::fs::read_to_string(own.join("HEAD")).unwrap_or_default();
     let branch = head
         .trim()
@@ -1140,12 +1183,18 @@ mod tests {
             let refused = remove(git, &not_one, &landed, &[]).await;
             assert!(matches!(refused, Err(Failed::NotOne(_))), "{not_one:?}: {refused:?}");
         }
+        // The person's own, made by hand outside `.claude/worktrees/`, goes as an agent's
+        // does, once it holds nothing not committed; its branch, all landed, with it.
         let elsewhere = tmp.path().join("elsewhere");
         let elsewhere_text = elsewhere.to_string_lossy().into_owned();
         git_in(&clone, &["worktree", "add", "-q", "-b", "mine", &elsewhere_text, "main"]);
-        let refused = remove(git, &elsewhere, &landed, &[]).await;
-        assert!(matches!(refused, Err(Failed::NotOne(_))), "the person's own: {refused:?}");
-        assert!(elsewhere.exists());
+        std::fs::write(elsewhere.join("draft.txt"), "half done").expect("write");
+        let dirty = remove(git, &elsewhere, &landed, &[]).await;
+        assert!(matches!(dirty, Err(Failed::Uncommitted(_))), "the person's own: {dirty:?}");
+        std::fs::remove_file(elsewhere.join("draft.txt")).expect("removed");
+        let gone = remove(git, &elsewhere, &landed, &[]).await.expect("removed");
+        assert!(gone.branch_removed, "{gone:?}");
+        assert!(!elsewhere.exists());
     }
 
     /// A run the person let go takes its worktree with it, changes not committed and all, but
@@ -1301,8 +1350,9 @@ mod tests {
     /// `main` by patch is merged; one squash-merged on the forge at its tip is merged as gh
     /// says, though a commit is ahead by patch; one with a commit `main` lacks is not; one with a
     /// file not committed, or with a terminal in it, is merged but not for "Remove merged" to
-    /// take. A worktree outside `.claude/worktrees/` is no agent's and is not listed, and the
-    /// newest commit comes first.
+    /// take. Each is marked by the agent whose tool made it: Claude Code's under
+    /// `.claude/worktrees/`, Codex's by the owner file it keeps, and none for one made by hand
+    /// elsewhere, which is listed too. The newest commit comes first.
     #[tokio::test]
     async fn a_clones_worktrees_are_listed_with_how_each_stands() {
         use slopty_proto::git::{GitDone, GitOp, GitOutcome};
@@ -1331,8 +1381,14 @@ mod tests {
         git_in(&clone, &["commit", "-q", "-m", "Squashed (#7)"]);
         std::fs::write(dirty.join("draft.txt"), "half done").expect("write");
         std::fs::create_dir_all(busy.join("src")).expect("mkdir");
-        let elsewhere = tmp.path().join("elsewhere").to_string_lossy().into_owned();
-        git_in(&clone, &["worktree", "add", "-q", "-b", "elsewhere", &elsewhere, "main"]);
+        let elsewhere = tmp.path().join("elsewhere");
+        let elsewhere_text = elsewhere.to_string_lossy().into_owned();
+        git_in(&clone, &["worktree", "add", "-q", "-b", "elsewhere", &elsewhere_text, "main"]);
+        let codexs = tmp.path().join("codex-made");
+        let codexs_text = codexs.to_string_lossy().into_owned();
+        git_in(&clone, &["worktree", "add", "-q", "--detach", &codexs_text, "main"]);
+        let owner = git_dir(&codexs).expect("its git directory").join(CODEX_OWNER);
+        std::fs::write(owner, r#"{"version":1,"ownerThreadId":"t1"}"#).expect("write");
         std::fs::write(tmp.path().join("tip"), git_in(&squashed, &["rev-parse", "HEAD"]))
             .expect("write");
         let gh = stand_in_gh(tmp.path());
@@ -1366,7 +1422,12 @@ mod tests {
         assert_eq!(stands(&busy), (true, 0, 0, true, false), "a terminal works in it");
         let squashed_stands = stands(&squashed);
         assert_eq!(squashed_stands, (true, 2, 0, false, true), "merged at its tip, as gh says");
-        assert_eq!(listed.list.len(), 5, "the worktree elsewhere is no agent's");
+        assert_eq!(listed.list.len(), 7, "every linked worktree: {:?}", listed.list);
+        let made = |tree: &Path| by(tree).made_by.map(|agent| agent.0);
+        assert_eq!(made(&landed).as_deref(), Some(AgentId::CLAUDE_CODE));
+        assert_eq!(made(&codexs).as_deref(), Some(AgentId::CODEX), "by its owner file");
+        assert_eq!(made(&elsewhere), None, "made by hand");
+        assert_eq!(stands(&elsewhere), (true, 0, 0, false, true), "and freed as any other");
         assert!(by(&landed).committed > 0);
         let asked = std::fs::read_to_string(tmp.path().join("asked")).expect("asked");
         let mut asked_in: Vec<&str> = asked.lines().filter_map(|l| l.split(": ").next()).collect();
@@ -1374,6 +1435,23 @@ mod tests {
         let mut want = [real(&open), real(&squashed)];
         want.sort_unstable();
         assert_eq!(asked_in, want, "the forge is asked only where the commits leave it open");
+    }
+
+    /// Codex's managed worktrees are known by where they lie, `<root>/<four hex>/<name>`, as
+    /// its own `has_managed_layout` reads them: a deeper or a shallower path, or a bucket that
+    /// is not four hex digits, is no Codex worktree.
+    #[test]
+    fn codex_worktrees_are_known_by_their_layout() {
+        let (clone, root) = (Path::new("/w/atlas"), Path::new("/h/.codex/worktrees"));
+        let made = |tree: &str| made_by(Path::new(tree), clone, Some(root)).map(|a| a.0);
+        assert_eq!(made("/h/.codex/worktrees/1f2e/atlas").as_deref(), Some(AgentId::CODEX));
+        assert_eq!(made("/h/.codex/worktrees/1f2e"), None, "the bucket alone");
+        assert_eq!(made("/h/.codex/worktrees/1f2e/atlas/src"), None, "inside one");
+        assert_eq!(made("/h/.codex/worktrees/1f2g/atlas"), None, "not hex");
+        assert_eq!(made("/h/.codex/worktrees/1f2e3/atlas"), None, "five digits");
+        let claude = made("/w/atlas/.claude/worktrees/fix-login");
+        assert_eq!(claude.as_deref(), Some(AgentId::CLAUDE_CODE));
+        assert_eq!(made("/w/atlas-hotfix"), None, "made by hand");
     }
 
     /// A worktree's archive script, from the files its own checkout keeps, runs in it before it
