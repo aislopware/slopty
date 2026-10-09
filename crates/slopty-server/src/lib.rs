@@ -38,6 +38,7 @@ pub use mcp::Mcp;
 pub use push::PushConfig;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
+use store::DeliveryStore;
 pub use store::{ProjectStore, PushStore, Store};
 use tokio::task::JoinHandle;
 
@@ -153,6 +154,8 @@ pub struct Server {
     quic: SocketAddr,
     mcp: SocketAddr,
     store: Store,
+    /// Keeps the reports on their way to the agents, written once more at shutdown.
+    deliveries: DeliveryStore,
     tasks: Vec<JoinHandle<()>>,
     /// Keeps the projects; finishes, writing them, once the hub stops sending it changes.
     keeper: JoinHandle<()>,
@@ -171,6 +174,8 @@ impl Server {
         let kept = projects.load().await.map_err(unreadable(projects.path()))?;
         hub.adopt_projects(kept.clone());
         let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));
+        let deliveries = DeliveryStore::in_dir(&config.data_dir);
+        hub.adopt_deliveries(deliveries.load().await.map_err(unreadable(deliveries.path()))?);
         let phones = PushStore::in_dir(&config.data_dir);
         let devices = phones.load().await.map_err(unreadable(phones.path()))?;
         let devices = hub.keep_devices(devices);
@@ -189,6 +194,7 @@ impl Server {
             tokio::spawn(phones.keep(devices)),
             tokio::spawn(store.clone().keep(hub.persisted())),
             tokio::spawn(Hub::deliver_reports(hub.downgrade())),
+            tokio::spawn(hub.keep_deliveries(deliveries.clone())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
             tokio::spawn(mcp::serve(mcp_listener, config.admission, hub.clone())),
@@ -196,7 +202,7 @@ impl Server {
         ];
 
         tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, mcp, store, tasks, keeper })
+        Ok(Self { hub, listener, quic, mcp, store, deliveries, tasks, keeper })
     }
 
     /// The registry.
@@ -236,6 +242,9 @@ impl Server {
             && let Err(e) = self.store.save(&workers).await
         {
             tracing::warn!(error = %e, "state not saved at shutdown");
+        }
+        if let Err(e) = self.deliveries.save(&self.hub.deliveries_file()).await {
+            tracing::warn!(error = %e, "reports on their way not saved at shutdown");
         }
         self.hub.stop_keeping();
         if let Err(e) = self.keeper.await {

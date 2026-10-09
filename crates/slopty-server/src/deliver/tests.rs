@@ -196,3 +196,73 @@ fn the_orchestrator_speaks_after_the_person_and_never_in_their_place() {
     );
     assert!(!context.contains("cover the iPad.\n"), "replaced: {context}");
 }
+
+/// A batch the link could not take goes again once [`RESEND`] has passed, under a new number
+/// and with whatever came since; the old number's word counts for nothing, and a word repeated
+/// counts once.
+#[test]
+fn a_batch_the_link_could_not_take_goes_again() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    d.notice(orchestrator(), TaskId(1), Kind::NeedsInput, "one", t0);
+    let first = d.take(t0, |_| Some(to));
+    assert_eq!(d.next_due(), None, "out, and nothing new");
+    d.unsent(&orchestrator(), first[0].number, t0);
+    let again_at = t0.checked_add(RESEND).unwrap();
+    assert_eq!(d.next_due(), Some(again_at), "the link was full");
+    assert!(d.take(t0, |_| Some(to)).is_empty(), "not before it is due");
+    let second = d.take(again_at, |_| Some(to));
+    let [second] = second.as_slice() else { panic!("{second:?}") };
+    assert_ne!(second.number, first[0].number);
+    assert_eq!((second.context.clone(), second.reports), (first[0].context.clone(), 1));
+    assert_eq!(d.acked(to, first[0].number), None, "replaced");
+    assert_eq!(d.acked(to, second.number), Some((orchestrator(), 1)));
+    assert_eq!(d.acked(to, second.number), None, "once");
+    assert_eq!(d.len(), 0);
+}
+
+/// What waits and what is outstanding outlives a restart: the outstanding batch goes again
+/// whole under its number, what waits falls due as it would have, a word already told is not
+/// told again, and the numbers go on past every one used before.
+#[test]
+fn reports_on_their_way_outlive_a_restart() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    let changes = d.changes();
+    d.notice(orchestrator(), TaskId(1), Kind::NeedsInput, "one", t0);
+    assert!(changes.has_changed().unwrap(), "the store hears of it");
+    let sent = d.take(t0, |_| Some(to));
+    let later = t0.checked_add(Duration::from_secs(30)).unwrap();
+    d.add(orchestrator(), Some(TaskId(2)), report("done"), later);
+    d.outcome((project(), Some(TaskId(3))), TaskId(3), Kind::Stuck, "it exited", t0);
+    let _told = d.take(t0, |_| Some(to));
+    let wall = WallMs::from_millis(1_000_000);
+    let json = serde_json::to_vec(&d.kept(later, wall)).unwrap();
+    let kept: Kept = serde_json::from_slice(&json).unwrap();
+
+    // A new process: its clock starts anew, and the wall clock has moved on a minute.
+    let (mut back, t1) = (Deliveries::default(), Instant::now());
+    let wall_now = WallMs::from_millis(wall.as_millis() + 60_000);
+    back.adopt(kept, t1, wall_now);
+    assert_eq!(back.outstanding_on(to.worker), d.outstanding_on(to.worker), "goes again whole");
+    let due = back.next_due().unwrap();
+    let expected = t1.checked_add(DONE_SETTLE).unwrap().checked_sub(Duration::from_mins(1));
+    assert_eq!(Some(due), expected, "the finish settles from when it came");
+    back.outcome((project(), Some(TaskId(3))), TaskId(3), Kind::Stuck, "it exited", t1);
+    let node = (project(), Some(TaskId(3)));
+    assert!(back.take(t1, |n| (*n == node).then_some(to)).is_empty(), "told already");
+    let acked = back.acked(to, sent[0].number);
+    assert_eq!(acked, Some((orchestrator(), 1)), "handed over after the restart");
+    let next = back.take(due, |_| Some(to));
+    assert!(next.iter().all(|b| b.number > wall_now.as_millis()), "{next:?}");
+}
+
+/// A terminal that closed while the server was away is named when its worker registers, so
+/// what was outstanding on it waits for the node's next.
+#[test]
+fn an_outstanding_batch_on_a_terminal_gone_is_found() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    d.notice(orchestrator(), TaskId(1), Kind::NeedsInput, "one", t0);
+    let _sent = d.take(t0, |_| Some(to));
+    assert_eq!(d.gone_on(to.worker, &[to.session]), Vec::new(), "still open");
+    assert_eq!(d.gone_on(WorkerId::new(), &[]), Vec::new(), "another worker's");
+    assert_eq!(d.gone_on(to.worker, &[]), [to]);
+}

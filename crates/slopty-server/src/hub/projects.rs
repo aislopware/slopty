@@ -1914,17 +1914,19 @@ impl Hub {
             .deliveries
             .take(now, |(project, node)| projects.node_term(project, *node, &terminals));
         for batch in batches {
-            Self::push_batch(state, &batch);
+            let _taken = Self::push_batch(state, &batch, now);
         }
         let next = state.deliveries.next_due();
         drop(guard);
         next
     }
 
-    /// Send `batch` to its terminal's worker. One the link cannot take now stays outstanding,
-    /// and goes again with the next batch or when the worker registers again.
-    pub(super) fn push_batch(state: &State, batch: &Batch) {
-        let Batch { term, number, context, .. } = batch;
+    /// Send `batch` to its terminal's worker, as of `now`. One the link cannot take now stays
+    /// outstanding and goes again after [`crate::deliver::RESEND`], folded into the next
+    /// batch; one for a worker with no link goes again when it registers. Whether the link took
+    /// it, or there was none to try.
+    pub(super) fn push_batch(state: &mut State, batch: &Batch, now: tokio::time::Instant) -> bool {
+        let Batch { node, term, number, context, .. } = batch;
         let link = state.workers.get(&term.worker).and_then(|e| e.link.as_ref());
         let msg =
             FromServer::Deliver { session: term.session, batch: *number, context: context.clone() };
@@ -1932,7 +1934,10 @@ impl Hub {
             && link.tx.try_send(msg).is_err()
         {
             tracing::debug!(session = %term.session, batch = number, "reports not sent now");
+            state.deliveries.unsent(node, *number, now);
+            return false;
         }
+        true
     }
 
     /// The worker holding `term` handed batch `batch` to its agent. The timeline shows reports

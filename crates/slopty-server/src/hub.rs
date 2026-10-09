@@ -428,6 +428,43 @@ impl Hub {
         rx
     }
 
+    /// Take up the reports the store kept on their way to the agents, before any link is
+    /// served: what was outstanding goes again as each worker registers.
+    pub(crate) fn adopt_deliveries(&self, kept: crate::deliver::Kept) {
+        let mut state = self.inner.state.lock();
+        state.deliveries.adopt(kept, tokio::time::Instant::now(), WallMs::now());
+        drop(state);
+        self.inner.deliver.notify_one();
+    }
+
+    /// The reports on their way to the agents, as the store keeps them.
+    #[must_use]
+    pub(crate) fn deliveries_file(&self) -> crate::deliver::Kept {
+        self.inner.state.lock().deliveries.kept(tokio::time::Instant::now(), WallMs::now())
+    }
+
+    /// Keep the reports on their way to the agents in `store`: as they are now, then after
+    /// each burst of changes settles, until the hub is gone. The changes are watched from the
+    /// call, so none made before the keeper first runs is missed.
+    pub(crate) fn keep_deliveries(
+        &self,
+        store: crate::store::DeliveryStore,
+    ) -> impl Future<Output = ()> + use<> {
+        let mut changes = self.inner.state.lock().deliveries.changes();
+        changes.mark_changed();
+        let hub = self.downgrade();
+        async move {
+            while changes.changed().await.is_ok() {
+                tokio::time::sleep(crate::store::PROJECTS_SETTLE).await;
+                changes.mark_unchanged();
+                let Some(kept) = hub.upgrade().map(|h| h.deliveries_file()) else { return };
+                if let Err(e) = store.save(&kept).await {
+                    tracing::warn!(path = %store.path().display(), error = %e, "reports not kept");
+                }
+            }
+        }
+    }
+
     /// Stop sending the store changes: it writes what it has and finishes.
     pub fn stop_keeping(&self) {
         self.inner.state.lock().keeper = None;
@@ -616,9 +653,18 @@ impl Hub {
             self.adopt(&mut state, term);
             self.repo_seen(&mut state, term);
         }
-        // What was sent to its agents and never handed over goes again.
+        // What was sent to a terminal that closed while the server was away waits for its
+        // node's next; what was sent to its agents and never handed over goes again.
+        for term in state.deliveries.gone_on(worker, &open) {
+            state.deliveries.closed(term);
+        }
+        let now = tokio::time::Instant::now();
+        let mut unsent = false;
         for batch in state.deliveries.outstanding_on(worker) {
-            Self::push_batch(&state, &batch);
+            unsent |= !Self::push_batch(&mut state, &batch, now);
+        }
+        if unsent {
+            self.inner.deliver.notify_one();
         }
         self.unpark_deliveries(&mut state);
         // What a restart of the server left under way on it is taken up.

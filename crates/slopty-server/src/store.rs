@@ -1,8 +1,9 @@
 //! The server's state files.
 //!
 //! They hold the last-known info of every worker, so a restarted server lists them (as gone)
-//! before they re-register, every project whole ([`ProjectStore`]), and the phones it pushes
-//! to with this install's key for the relay ([`PushStore`]).
+//! before they re-register, every project whole ([`ProjectStore`]), the reports on their way to
+//! the agents (`DeliveryStore`), and the phones it pushes to with this install's key for the
+//! relay ([`PushStore`]).
 //!
 //! Each file is replaced whole ([`slopty_platform::fs::replace`]), so a crash leaves the old
 //! one or the new one. One that does not parse is set aside under a name of its own and read
@@ -19,6 +20,7 @@ use slopty_proto::server::WorkerInfo;
 use slopty_push::relay::InstallKey;
 use tokio::sync::{mpsc, watch};
 
+use crate::deliver::Kept;
 use crate::hub::Devices;
 use crate::project::{Keep, ProjectsFile};
 
@@ -32,6 +34,8 @@ pub const PROJECTS_LOG: &str = "projects.log";
 pub const PUSH_FILE: &str = "push.json";
 /// This install's key for the relay, beside [`FILE`], readable by its owner only.
 pub const PUSH_KEY: &str = "push.key";
+/// The reports on their way to the agents, beside [`FILE`].
+pub const DELIVERIES_FILE: &str = "deliveries.json";
 /// How long the projects keeper waits after a change for more before it writes: an agent's
 /// burst of hooks costs one write.
 pub const PROJECTS_SETTLE: Duration = Duration::from_millis(250);
@@ -233,6 +237,45 @@ impl ProjectStore {
         if let Err(e) = self.save(file).await {
             tracing::warn!(path = %self.path.display(), error = %e, "projects not saved");
         }
+    }
+}
+
+/// The reports on their way to the agents ([`DELIVERIES_FILE`]): what waits for each and
+/// what was sent and not yet handed over, so a server that restarts, as every update does,
+/// loses none and sends the outstanding again.
+#[derive(Clone, Debug)]
+pub(crate) struct DeliveryStore {
+    path: PathBuf,
+}
+
+impl DeliveryStore {
+    /// The store in `dir` (created on the first save).
+    #[must_use]
+    pub(crate) fn in_dir(dir: &Path) -> Self {
+        Self { path: dir.join(DELIVERIES_FILE) }
+    }
+
+    /// Its path.
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// What it holds: nothing when there is no file. One that does not parse is set aside as
+    /// `deliveries.json.bad-<ms>` and read as nothing.
+    ///
+    /// # Errors
+    /// The file is there and cannot be read, or cannot be set aside.
+    pub(crate) async fn load(&self) -> io::Result<Kept> {
+        load(&self.path).await
+    }
+
+    /// Replace the file with `kept`.
+    ///
+    /// # Errors
+    /// The file cannot be written.
+    pub(crate) async fn save(&self, kept: &Kept) -> io::Result<()> {
+        write(&self.path, serde_json::to_vec(kept).map_err(io::Error::other)?).await
     }
 }
 

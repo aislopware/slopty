@@ -1094,6 +1094,91 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     delivering.abort();
 }
 
+/// The next batch of reports sent on `rx`, passing over everything else.
+async fn next_batch(rx: &mut mpsc::Receiver<FromServer>) -> (SessionId, u64, String) {
+    loop {
+        match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
+            Ok(Some(FromServer::Deliver { session, batch, context })) => {
+                return (session, batch, context);
+            }
+            Ok(Some(_)) => {}
+            other => panic!("no batch: {other:?}"),
+        }
+    }
+}
+
+/// A batch the worker's link could not take when it fell due goes again once the link has
+/// room, without another report or a registration to carry it.
+#[tokio::test(start_paused = true)]
+async fn a_batch_a_full_link_could_not_take_goes_again() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let (worker, session) = (WorkerId::new(), SessionId::new());
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.try_send(FromServer::Directory(Vec::new())).unwrap();
+    let ip = IpAddr::from([100, 64, 0, 7]);
+    let lease = hub.register(registration(worker, Vec::new()), ip, tx.clone()).unwrap();
+    announce(&lease, session, true);
+    let orchestrator = TermRef { worker, session };
+    create(&hub, Some(orchestrator)).await;
+    let sent_at = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        matches!(rx.recv().await, Some(FromServer::Directory(_))),
+        "the link was full when the role fell due"
+    );
+    let (to, _, context) = next_batch(&mut rx).await;
+    assert_eq!(to, session);
+    assert!(context.contains("You orchestrate"), "{context}");
+    assert!(sent_at.elapsed() >= crate::deliver::RESEND, "{:?}", sent_at.elapsed());
+    delivering.abort();
+}
+
+/// What was sent to an agent and not handed over outlives a restart of the server: the store
+/// keeps it, and the worker is sent it again, under its number, when it registers with the
+/// server that came back.
+#[tokio::test]
+async fn a_batch_not_handed_over_outlives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::DeliveryStore::in_dir(dir.path());
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let keeping = tokio::spawn(hub.keep_deliveries(store.clone()));
+    let session = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, session, true);
+    create(&hub, Some(TermRef { worker, session })).await;
+    let (_, batch, context) = next_batch(&mut rx).await;
+    let outstanding = async {
+        loop {
+            let kept = store.load().await.unwrap();
+            let mut seen = Deliveries::default();
+            seen.adopt(kept, tokio::time::Instant::now(), WallMs::now());
+            if !seen.outstanding_on(worker).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), outstanding).await.expect("kept");
+    let projects = hub.projects_file(0);
+    delivering.abort();
+    keeping.abort();
+    drop((lease, rx, hub));
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    hub.adopt_projects(projects);
+    hub.adopt_deliveries(store.load().await.unwrap());
+    let (_, lease, mut rx) =
+        worker_again(&hub, worker, "studio", Os::MacOs, vec![summary(session)]);
+    let again = next_batch(&mut rx).await;
+    assert_eq!(again, (session, batch, context), "the same batch, under its number");
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    let mut left = Deliveries::default();
+    left.adopt(hub.deliveries_file(), tokio::time::Instant::now(), WallMs::now());
+    assert_eq!(left.outstanding_on(worker), Vec::new(), "handed over");
+}
+
 async fn keyed_request(
     rx: &mut mpsc::Receiver<FromServer>,
 ) -> (RequestId, Option<IdempotencyKey>, Verb) {

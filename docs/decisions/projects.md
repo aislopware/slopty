@@ -2415,3 +2415,34 @@ reordering and edited allows are gone" in `agents.md`.*
     daemon's `claude_in_a_shell_line_is_guarded_and_judged_as_a_spawned_one`
     (`apps/slopty-worker/tests/server_link.rs`), whose second link, after the first closes as
     a restarting server's does, hears the `Loosened` again with nothing changed.
+
+- ✅ **Reports outlive a full link, a lost word and a server restart** (2026-10-10, readiness
+  10-10 rank 9). A batch of reports the worker's link could not take when it fell due stayed
+  outstanding with nothing to send it again: no new report, no registration. What waited and
+  what was outstanding lived only in the server's memory, so a restart (every update) lost it.
+  And the worker's word that a batch was read could be lost, so the server sent it again and the
+  agent read it twice.
+  - **A full link.** A batch the link refuses (`try_send`) falls due again after `RESEND`
+    (one second) and goes as the next batch, with whatever came since. One for a worker with no
+    link still goes when it registers.
+  - **A restart.** The store keeps what waits for each node and what is outstanding, in
+    `deliveries.json` beside the projects, written after each burst of changes settles and once
+    more at shutdown. When each word came is kept as wall time. A server that comes back takes
+    it up before any link is served, and a worker registering is sent its outstanding batches
+    again under their numbers. One outstanding on a terminal that closed while the server was
+    away waits for its node's next terminal.
+  - **One number per batch.** Numbers go on past those kept and past the wall clock in
+    milliseconds, so a server whose store was lost or set aside never reuses one a worker saw.
+  - **A lost word.** The worker notes the last batch each session's agent read, beside the
+    batches. That note outlives the worker's restart and goes when the session ends. A batch
+    sent again under that number is acknowledged again and never kept to be read twice. A link
+    that fell behind the report broadcast says every last read again. A repeated `Delivered` on
+    the server matches no outstanding batch and does nothing.
+  - Tests: `deliver::tests` `a_batch_the_link_could_not_take_goes_again`,
+    `reports_on_their_way_outlive_a_restart` and
+    `an_outstanding_batch_on_a_terminal_gone_is_found`; the hub's
+    `a_batch_a_full_link_could_not_take_goes_again` and
+    `a_batch_not_handed_over_outlives_a_restart` (through the store); `slopty-agent`
+    `reports::tests::a_batch_read_already_is_not_kept_again`; and the daemon's
+    `reports_reach_an_agent_through_its_next_prompt_s_hook`, which sends the batch again after it
+    was read and hears `Delivered` again with nothing kept.

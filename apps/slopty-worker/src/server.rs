@@ -295,7 +295,15 @@ async fn session(
                         slopty_agent::reports::put(&dir, session, &batch)
                     });
                     match kept.await {
-                        Ok(Ok(())) => match may_post(daemon, session) {
+                        // Read already: the server did not hear so, and hears it again.
+                        Ok(Ok(false)) => {
+                            tracing::debug!(%session, batch, "reports read already");
+                            let report = AgentReport::Delivered { session, batch };
+                            if out.send(ToServer::Report(report)).await.is_err() {
+                                break "the writer stopped";
+                            }
+                        }
+                        Ok(Ok(true)) => match may_post(daemon, session) {
                             Ok(()) => {
                                 tracing::debug!(%session, batch, "reports kept, and posted");
                                 let (deliveries, inboxes) =
@@ -320,9 +328,11 @@ async fn session(
                 let msg = match ev {
                     Ok(WorkerMsg::SessionChanged(summary)) => ToServer::SessionChanged(summary),
                     Ok(WorkerMsg::SessionClosed { session, reason }) => {
-                        let inboxes = daemon.inboxes.clone();
+                        let (inboxes, deliveries) =
+                            (daemon.inboxes.clone(), daemon.deliveries.clone());
                         drop(tokio::task::spawn_blocking(move || {
-                            slopty_agent::reports::forget_inbox(&inboxes, session)
+                            let forgot = slopty_agent::reports::forget_inbox(&inboxes, session);
+                            slopty_agent::reports::forget_handed(&deliveries, session).and(forgot)
                         }));
                         ToServer::SessionClosed { session, reason }
                     }
@@ -354,10 +364,12 @@ async fn session(
                 let msg = match report {
                     Ok(report) => ToServer::Report(report),
                     // A subagent's start or stop the tree missed is only a leaf short.
-                    // What was dropped of each agent's permissions is told again whole.
+                    // What was dropped of each agent's permissions is told again whole, and
+                    // so is the last batch each agent read.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::warn!(missed, "agent reports dropped; their permissions told again");
-                        let standing = daemon.agents.lock().permission_reports();
+                        let mut standing = daemon.agents.lock().permission_reports();
+                        standing.extend(read_last(daemon).await);
                         let mut sent = true;
                         for report in standing {
                             sent &= out.send(ToServer::Report(report)).await.is_ok();
@@ -512,6 +524,25 @@ async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
                     tracing::warn!(%session, error = %e, "a gone inbox not forgotten");
                 }
             }
+        }
+    }
+}
+
+/// The last batch each session's agent read, as word that it did.
+async fn read_last(daemon: &Daemon) -> Vec<AgentReport> {
+    let (dir, turn) = (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
+    let read = tokio::task::spawn_blocking(move || {
+        let _turn = turn.lock();
+        slopty_agent::reports::last_handed(&dir)
+    });
+    match read.await.map_err(std::io::Error::other).flatten() {
+        Ok(read) => read
+            .into_iter()
+            .map(|(session, batch)| AgentReport::Delivered { session, batch })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "the batches read not listed");
+            Vec::new()
         }
     }
 }

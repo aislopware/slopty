@@ -1031,6 +1031,15 @@ mod tests {
         })
         .await;
         assert!(!kept.join(format!("{session}.json")).exists(), "handed over once");
+
+        // The server did not hear it and sends it again: it hears it again, and the agent
+        // does not read it twice.
+        peer.tx.send(&deliver).await.unwrap();
+        peer.heard(|m| {
+            matches!(m, ToServer::Report(AgentReport::Delivered { session: s, batch: 7 }) if *s == session)
+        })
+        .await;
+        assert!(!kept.join(format!("{session}.json")).exists(), "not kept to be read twice");
     }
 
     /// An agent at rest that takes messages on an inbox: the stub with an inbox and a

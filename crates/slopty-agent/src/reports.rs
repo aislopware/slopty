@@ -21,6 +21,12 @@
 //! decides: when the mark is in the prompt or the transcript, the message reached the agent and
 //! the hook only acknowledges it; when it is not, the hook hands the batch over itself
 //! ([`reached`]). A report is therefore never acknowledged unread, and read twice at worst.
+//!
+//! The worker's word that a batch was read can be lost on its way (no server link then, or a
+//! link that fell behind), and the server then sends the batch again. So the worker notes the
+//! last batch each session's agent read ([`handed`], [`last_handed`]), across its own restarts
+//! too, and a batch sent again under that number is only acknowledged again, never kept to be
+//! read twice ([`put`]). The server never gives two batches one number.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,14 +63,68 @@ fn file(dir: &Path, session: SessionId) -> PathBuf {
 /// Keep `batch` for `session`, in place of any it had: a later batch holds what an earlier one
 /// did not hand over. Written whole and renamed into place, so a reader never sees half.
 ///
+/// Whether it was kept: the batch `session`'s agent read last, sent again because the word of
+/// it was lost, is not, and its caller says it was read again.
+///
 /// # Errors
 /// The directory or the file cannot be written.
-pub fn put(dir: &Path, session: SessionId, batch: &Batch) -> io::Result<()> {
+pub fn put(dir: &Path, session: SessionId, batch: &Batch) -> io::Result<bool> {
     use std::os::unix::fs::PermissionsExt as _;
+    if read_last(dir, session) == Some(batch.batch) {
+        return Ok(false);
+    }
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let json = serde_json::to_vec(batch).map_err(io::Error::other)?;
-    slopty_platform::fs::replace(&file(dir, session), &json)
+    slopty_platform::fs::replace(&file(dir, session), &json)?;
+    Ok(true)
+}
+
+/// The note of the last batch a session's agent read.
+const HANDED: &str = "handed";
+
+fn handed_file(dir: &Path, session: SessionId) -> PathBuf {
+    dir.join(format!("{session}.{HANDED}"))
+}
+
+/// The last batch `session`'s agent read, as noted; none when none is or it cannot be read.
+fn read_last(dir: &Path, session: SessionId) -> Option<u64> {
+    std::fs::read_to_string(handed_file(dir, session)).ok()?.trim().parse().ok()
+}
+
+/// The last batch each session's agent read, to say again to a server that may not have
+/// heard.
+///
+/// # Errors
+/// The directory is there and cannot be read.
+pub fn last_handed(dir: &Path) -> io::Result<Vec<(SessionId, u64)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != HANDED) {
+            continue;
+        }
+        let session = path.file_stem().and_then(|s| s.to_str()?.parse::<SessionId>().ok());
+        if let Some(session) = session
+            && let Some(batch) = read_last(dir, session)
+        {
+            out.push((session, batch));
+        }
+    }
+    Ok(out)
+}
+
+/// Forget which batch `session`'s agent read last: its session ended.
+///
+/// # Errors
+/// One is noted and cannot be removed.
+pub fn forget_handed(dir: &Path, session: SessionId) -> io::Result<()> {
+    remove(&handed_file(dir, session))
 }
 
 /// The batch kept for `session`, left where it is.
@@ -176,13 +236,14 @@ pub fn note_posted(dir: &Path, session: SessionId, posted: &Posted) -> io::Resul
     slopty_platform::fs::replace(&posted_file(dir, session), &json)
 }
 
-/// `session`'s agent read batch `batch`: it is no longer kept, nor the note of its post.
+/// `session`'s agent read batch `batch`: it is no longer kept, nor the note of its post, and it
+/// is noted as the last read ([`put`]).
 ///
 /// Whether it was still kept; a later batch kept in its place stays. Its caller runs one of
 /// these, [`put`] and [`hand_over`] at a time.
 ///
 /// # Errors
-/// The batch or its note is there and cannot be read or removed.
+/// The batch or its note is there and cannot be read, written or removed.
 pub fn handed(dir: &Path, session: SessionId, batch: u64) -> io::Result<bool> {
     if peek_posted(dir, session).is_some_and(|p| p.batch == batch) {
         remove(&posted_file(dir, session))?;
@@ -190,6 +251,7 @@ pub fn handed(dir: &Path, session: SessionId, batch: u64) -> io::Result<bool> {
     if peek(dir, session)?.is_none_or(|kept| kept.batch != batch) {
         return Ok(false);
     }
+    slopty_platform::fs::replace(&handed_file(dir, session), batch.to_string().as_bytes())?;
     remove(&file(dir, session))?;
     Ok(true)
 }
@@ -268,15 +330,24 @@ pub fn message(inbox: &Inbox, context: &str, mark: &str) -> String {
     lines
 }
 
-/// Forget every session's batch: a worker starting again is sent again what is outstanding.
+/// Forget every session's batch and post: a worker starting again is sent again what is
+/// outstanding. Which batch each agent read last stays, so one of those sent again is known.
 ///
 /// # Errors
-/// The directory is there and cannot be removed.
+/// The directory is there and cannot be read, or a file in it cannot be removed.
 pub fn clear(dir: &Path) -> io::Result<()> {
-    match std::fs::remove_dir_all(dir) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != HANDED) {
+            remove(&path)?;
+        }
     }
+    Ok(())
 }
 
 /// What `slopty hook reports` prints for `event` to hand `context` over.
@@ -374,8 +445,33 @@ mod tests {
         assert_eq!(peek(&dir, a).expect("read"), None, "read once");
         assert_eq!(peek(&dir, b).expect("read"), Some(first));
         clear(&dir).expect("clear");
-        assert!(!dir.exists());
+        assert_eq!(peek(&dir, b).expect("read"), None, "cleared");
         clear(&dir).expect("nothing to clear");
+    }
+
+    /// A batch sent again because the word that it was read was lost is not kept to be read
+    /// twice, across the worker's restart too; every session's last read is there to say
+    /// again, and goes with its session.
+    #[test]
+    fn a_batch_read_already_is_not_kept_again() {
+        let root = tempfile::tempdir().expect("dir");
+        let dir = dir(&root.path().join("worker.sock"));
+        let (a, b) = (SessionId::new(), SessionId::new());
+        assert_eq!(last_handed(&dir).expect("read"), Vec::new(), "no directory yet");
+        let first = Batch { batch: 7, context: "one".to_owned() };
+        assert!(put(&dir, a, &first).expect("put"));
+        assert!(handed(&dir, a, 7).expect("handed"));
+        assert!(!put(&dir, a, &first).expect("put"), "sent again: read already");
+        assert_eq!(peek(&dir, a).expect("read"), None);
+        assert!(put(&dir, b, &first).expect("put"), "another session's");
+        clear(&dir).expect("clear");
+        assert!(!put(&dir, a, &first).expect("put"), "known after a restart");
+        assert_eq!(last_handed(&dir).expect("read"), [(a, 7)]);
+        let next = Batch { batch: 8, context: "one\ntwo".to_owned() };
+        assert!(put(&dir, a, &next).expect("put"), "a new batch is kept");
+        forget_handed(&dir, a).expect("forget");
+        assert_eq!(last_handed(&dir).expect("read"), Vec::new());
+        forget_handed(&dir, a).expect("nothing to forget");
     }
 
     /// A batch whose post reached the agent (its mark in the prompt or the transcript) is only
@@ -411,9 +507,11 @@ mod tests {
         assert!(super::handed(&dir, session, 3).expect("handed"));
         assert!(hand_over(&dir, session, stop, Turn::default()).is_none(), "read once");
 
+        // Each batch read has a number of its own: one read already is not kept again.
+        let batch = Batch { batch: 5, ..batch };
         // Posted, and the message is in the transcript: acknowledged, not printed again.
         put(&dir, session, &batch).expect("put");
-        let posted = Posted::new(3);
+        let posted = Posted::new(5);
         assert_eq!(peek(&dir, session).expect("read"), Some(batch.clone()), "a peek leaves it");
         note_posted(&dir, session, &posted).expect("note");
         let inbox = Inbox { socket: PathBuf::from("/s"), token: None };
@@ -423,19 +521,20 @@ mod tests {
         let line = json!({ "type": "user", "message": sent["message"] }).to_string();
         std::fs::write(&transcript, format!("{{\"type\":\"summary\"}}\n{line}\n")).expect("write");
         let handed = hand_over(&dir, session, stop, on(&transcript)).expect("taken");
-        assert_eq!((handed.batch, handed.print), (3, None));
-        assert!(super::handed(&dir, session, 3).expect("handed"));
+        assert_eq!((handed.batch, handed.print), (5, None));
+        assert!(super::handed(&dir, session, 5).expect("handed"));
         assert_eq!(peek_posted(&dir, session), None, "the note went with it");
 
         // Posted and held: the mark is nowhere, so the hook hands it over.
+        let batch = Batch { batch: 6, ..batch };
         put(&dir, session, &batch).expect("put");
-        note_posted(&dir, session, &Posted::new(3)).expect("note");
+        note_posted(&dir, session, &Posted::new(6)).expect("note");
         let handed = hand_over(&dir, session, stop, on(&transcript)).expect("taken");
         assert!(handed.print.is_some(), "held by Claude Code, so handed over here");
 
         // The message started the turn: its mark is in the prompt.
         put(&dir, session, &batch).expect("put");
-        let posted = Posted::new(3);
+        let posted = Posted::new(6);
         note_posted(&dir, session, &posted).expect("note");
         let prompt = message(&inbox, &batch.context, &posted.mark);
         let handed = hand_over(&dir, session, HookEvent::UserPromptSubmit, prompted(&prompt))
@@ -443,11 +542,11 @@ mod tests {
         assert_eq!(handed.print, None);
 
         // A note of an older batch's post says nothing of a newer batch.
-        put(&dir, session, &Batch { batch: 4, ..batch.clone() }).expect("put");
+        put(&dir, session, &Batch { batch: 7, ..batch.clone() }).expect("put");
         note_posted(&dir, session, &posted).expect("note");
         let handed = hand_over(&dir, session, HookEvent::UserPromptSubmit, prompted(&prompt))
             .expect("taken");
-        assert_eq!(handed.batch, 4);
+        assert_eq!(handed.batch, 7);
         assert!(handed.print.is_some());
 
         // An event that takes no reports leaves the batch.
@@ -459,7 +558,7 @@ mod tests {
         assert!(hand_over(&dir, session, stop, held).is_none());
         assert!(peek(&dir, session).expect("read").is_some(), "still waiting");
         // One the inbox brought is acknowledged there all the same, and nothing is printed.
-        let posted = Posted::new(3);
+        let posted = Posted::new(6);
         note_posted(&dir, session, &posted).expect("note");
         let sent: Value =
             serde_json::from_str(message(&inbox, &batch.context, &posted.mark).trim())
@@ -467,7 +566,7 @@ mod tests {
         let line = json!({ "type": "user", "message": sent["message"] }).to_string();
         std::fs::write(&transcript, format!("{line}\n")).expect("write");
         let handed = hand_over(&dir, session, stop, held).expect("acknowledged");
-        assert_eq!((handed.batch, handed.print), (3, None));
+        assert_eq!((handed.batch, handed.print), (6, None));
     }
 
     /// An inbox is noted per session and read back; a message is the token's line, when there

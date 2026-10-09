@@ -19,17 +19,25 @@
 //!
 //! A batch goes to the node's live terminal, whose worker hands it to the agent through its
 //! hooks and says so ([`Deliveries::acked`]). Until then it stays outstanding: sent again when
-//! the worker registers again, folded into the next batch when more falls due, and put back to
-//! wait for the node's next terminal when this one closes. Nothing is ever typed into a
-//! terminal.
+//! the worker registers again, folded into the next batch when more falls due or after
+//! [`RESEND`] when the link could not take it ([`Deliveries::unsent`]), and put back to wait for
+//! the node's next terminal when this one closes. Nothing is ever typed into a terminal.
 //!
-//! Pure: the hub keeps it under its lock and says what time it is.
+//! What waits and what is outstanding outlives the server: the store keeps it
+//! ([`Deliveries::kept`], [`Deliveries::adopt`]), and each change is said
+//! ([`Deliveries::changes`]). A batch's number is never used twice, across restarts too, so a
+//! worker knows a batch it handed over already when it comes again.
+//!
+//! Pure but for that word of a change: the hub keeps it under its lock and says what time it is.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use slopty_core::WallMs;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{ProjectId, Report, TaskId};
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 /// How long a finish settles before it is delivered.
@@ -37,6 +45,9 @@ pub(crate) const DONE_SETTLE: Duration = Duration::from_mins(2);
 /// How long a task's agent waits on the person before the orchestrator hears so: a
 /// permission the person answers at once wakes nobody.
 pub(crate) const WAIT_SETTLE: Duration = Duration::from_secs(30);
+/// How long a batch the link could not take waits before it goes again, with whatever came
+/// since: a link full now has drained by then.
+pub(crate) const RESEND: Duration = Duration::from_secs(1);
 /// The longest batch, in bytes: Claude Code takes up to 10 000 characters of a hook's
 /// context.
 pub(crate) const CONTEXT_MAX: usize = 9_000;
@@ -45,7 +56,7 @@ pub(crate) const CONTEXT_MAX: usize = 9_000;
 pub(crate) type Node = (ProjectId, Option<TaskId>);
 
 /// What a word waiting for a node says of its task, which decides when it goes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub(crate) enum Kind {
     /// The work is finished: it goes once it has settled.
     Done,
@@ -57,7 +68,7 @@ pub(crate) enum Kind {
 }
 
 /// Who wrote what waits for a node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum By {
     /// A task's agent: its report.
     Agent,
@@ -105,6 +116,8 @@ struct Outstanding {
     batch: u64,
     term: TermRef,
     items: Vec<Item>,
+    /// The link could not take it: when it goes again.
+    resend: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -120,11 +133,16 @@ struct Queue {
 impl Queue {
     /// When what waits falls due. While a batch is out, only a report that came since makes
     /// another: what did not fit it waits for it to be read.
+    /// A batch the link could not take goes again when it is due to.
     fn due(&self) -> Option<Instant> {
-        if self.parked || (self.outstanding.is_some() && !self.fresh) {
+        if self.parked {
             return None;
         }
-        self.waiting.iter().map(Item::due).min()
+        let resend = self.outstanding.as_ref().and_then(|o| o.resend);
+        if self.outstanding.is_some() && !self.fresh {
+            return resend;
+        }
+        self.waiting.iter().map(Item::due).chain(resend).min()
     }
 }
 
@@ -149,13 +167,26 @@ fn reports_in(items: &[Item]) -> u16 {
 }
 
 /// Every node's reports.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Deliveries {
     queues: BTreeMap<Node, Queue>,
     next_batch: u64,
     /// What the server last sent each node of each task's agent, by its kind and words: the
     /// same again says nothing new and is not sent.
     told: HashMap<(Node, TaskId), (Kind, u64)>,
+    /// Counts the changes the store keeps.
+    changes: watch::Sender<u64>,
+}
+
+impl Default for Deliveries {
+    fn default() -> Self {
+        Self {
+            queues: BTreeMap::new(),
+            next_batch: 0,
+            told: HashMap::new(),
+            changes: watch::Sender::new(0),
+        }
+    }
 }
 
 /// An outcome's kind and words, to know it again.
@@ -208,7 +239,11 @@ impl Deliveries {
     /// not sent, no longer holds.
     pub(crate) fn moved_on(&mut self, node: &Node, task: TaskId) {
         if let Some(queue) = self.queues.get_mut(node) {
+            let before = queue.waiting.len();
             queue.waiting.retain(|i| i.by != By::Outcome || i.task != Some(task));
+            if queue.waiting.len() != before {
+                self.changed();
+            }
         }
         self.prune();
     }
@@ -216,13 +251,19 @@ impl Deliveries {
     /// Read again what the server says of each agent that did not report, as it waits:
     /// `words` gives the note for its node, task and kind now, or keeps it when it gives none.
     pub(crate) fn reword(&mut self, mut words: impl FnMut(&Node, TaskId, Kind) -> Option<String>) {
+        let mut any = false;
         for (node, queue) in &mut self.queues {
             for item in queue.waiting.iter_mut().filter(|i| i.by == By::Outcome) {
                 let kind = item.kind;
                 if let Some(note) = item.task.and_then(|task| words(node, task, kind)) {
-                    item.report.note = plain(&note);
+                    let note = plain(&note);
+                    any |= item.report.note != note;
+                    item.report.note = note;
                 }
             }
+        }
+        if any {
+            self.changed();
         }
     }
 
@@ -266,6 +307,7 @@ impl Deliveries {
         queue.parked &= item.by != By::Person;
         queue.waiting.push(item);
         queue.fresh = true;
+        self.changed();
     }
 
     /// When the next batch falls due, if anything waits.
@@ -314,11 +356,24 @@ impl Deliveries {
             self.next_batch = self.next_batch.wrapping_add(1);
             let batch = self.next_batch;
             let reports = reports_in(&items);
-            queue.outstanding = Some(Outstanding { batch, term, items });
+            queue.outstanding = Some(Outstanding { batch, term, items, resend: None });
             out.push(Batch { node: node.clone(), term, number: batch, context, reports });
         }
         self.prune();
+        if !out.is_empty() {
+            self.changed();
+        }
         out
+    }
+
+    /// The link to `node`'s worker could not take batch `batch` now: it goes again [`RESEND`]
+    /// after `now`, as the next batch with whatever came since, unless something else makes
+    /// one first.
+    pub(crate) fn unsent(&mut self, node: &Node, batch: u64, now: Instant) {
+        let outstanding = self.queues.get_mut(node).and_then(|q| q.outstanding.as_mut());
+        if let Some(o) = outstanding.filter(|o| o.batch == batch) {
+            o.resend = Some(now.checked_add(RESEND).unwrap_or(now));
+        }
     }
 
     /// A terminal may have come for a node whose reports wait for one: they fall due again.
@@ -342,6 +397,7 @@ impl Deliveries {
         // Held back only while the batch was out.
         queue.fresh = true;
         self.prune();
+        self.changed();
         Some((node, reports_in(&done.items)))
     }
 
@@ -365,6 +421,7 @@ impl Deliveries {
     /// `term` closed: what it was sent and never handed over waits for the node's next
     /// terminal, due at once, since no agent read it.
     pub(crate) fn closed(&mut self, term: TermRef) {
+        let mut any = false;
         for (node, queue) in &mut self.queues {
             if queue.outstanding.as_ref().is_some_and(|o| o.term == term)
                 && let Some(o) = queue.outstanding.take()
@@ -378,8 +435,113 @@ impl Deliveries {
                 let mut items = o.items;
                 items.append(&mut queue.waiting);
                 queue.waiting = items;
+                any = true;
             }
         }
+        if any {
+            self.changed();
+        }
+    }
+
+    /// The terminals of `worker` that batches are outstanding on and that it no longer has
+    /// (`open` are those it has): they closed while the server was away.
+    pub(crate) fn gone_on(
+        &self,
+        worker: slopty_core::WorkerId,
+        open: &[slopty_core::SessionId],
+    ) -> Vec<TermRef> {
+        self.queues
+            .values()
+            .filter_map(|q| q.outstanding.as_ref().map(|o| o.term))
+            .filter(|t| t.worker == worker && !open.contains(&t.session))
+            .collect()
+    }
+
+    /// Says each change the store keeps: what waits, what is outstanding, a batch's number.
+    pub(crate) fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// What the store keeps, as of `now`, which is `wall` on the clock: when each word came
+    /// is kept as wall time, since an [`Instant`] means nothing to the next process.
+    pub(crate) fn kept(&self, now: Instant, wall: WallMs) -> Kept {
+        let item = |i: &Item| {
+            let ago =
+                u64::try_from(now.saturating_duration_since(i.at).as_millis()).unwrap_or(u64::MAX);
+            KeptItem {
+                task: i.task,
+                kind: i.kind,
+                report: i.report.clone(),
+                at: WallMs::from_millis(wall.as_millis().saturating_sub(ago)),
+                by: i.by,
+            }
+        };
+        let queues = self
+            .queues
+            .iter()
+            .map(|(node, q)| KeptQueue {
+                node: node.clone(),
+                waiting: q.waiting.iter().map(item).collect(),
+                outstanding: q.outstanding.as_ref().map(|o| KeptBatch {
+                    batch: o.batch,
+                    term: o.term,
+                    items: o.items.iter().map(item).collect(),
+                }),
+                fresh: q.fresh,
+            })
+            .collect();
+        let told = self
+            .told
+            .iter()
+            .map(|((node, task), (kind, words))| (node.clone(), *task, *kind, *words))
+            .collect();
+        Kept { next_batch: self.next_batch, queues, told }
+    }
+
+    /// Take up what the store kept, as of `now`, which is `wall` on the clock, in place of
+    /// what is here. Batch numbers go on past the kept ones and past `wall` in milliseconds:
+    /// a store lost or set aside never makes a number a worker saw before.
+    pub(crate) fn adopt(&mut self, kept: Kept, now: Instant, wall: WallMs) {
+        let item = |i: KeptItem| {
+            let ago = Duration::from_millis(wall.as_millis().saturating_sub(i.at.as_millis()));
+            Item {
+                task: i.task,
+                kind: i.kind,
+                report: i.report,
+                at: now.checked_sub(ago).unwrap_or(now),
+                by: i.by,
+            }
+        };
+        self.queues = kept
+            .queues
+            .into_iter()
+            .map(|q| {
+                let queue = Queue {
+                    waiting: q.waiting.into_iter().map(item).collect(),
+                    outstanding: q.outstanding.map(|o| Outstanding {
+                        batch: o.batch,
+                        term: o.term,
+                        items: o.items.into_iter().map(item).collect(),
+                        resend: None,
+                    }),
+                    fresh: q.fresh,
+                    parked: false,
+                };
+                (q.node, queue)
+            })
+            .collect();
+        self.told = kept
+            .told
+            .into_iter()
+            .map(|(node, task, kind, words)| ((node, task), (kind, words)))
+            .collect();
+        self.next_batch = kept.next_batch.max(wall.as_millis());
+        self.prune();
+        self.changed();
     }
 
     /// Drop queues with nothing in them.
@@ -397,6 +559,39 @@ impl Deliveries {
             })
             .sum()
     }
+}
+
+/// What waits for the agents and what is outstanding, as the store keeps it
+/// ([`crate::store::DELIVERIES_FILE`]).
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Kept {
+    next_batch: u64,
+    queues: Vec<KeptQueue>,
+    told: Vec<(Node, TaskId, Kind, u64)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct KeptQueue {
+    node: Node,
+    waiting: Vec<KeptItem>,
+    outstanding: Option<KeptBatch>,
+    fresh: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct KeptBatch {
+    batch: u64,
+    term: TermRef,
+    items: Vec<KeptItem>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct KeptItem {
+    task: Option<TaskId>,
+    kind: Kind,
+    report: Report,
+    at: WallMs,
+    by: By,
 }
 
 /// `note` as a word of the server's or the person's, with no report's fields beside it.
