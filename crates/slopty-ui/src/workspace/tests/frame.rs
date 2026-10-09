@@ -70,6 +70,34 @@ fn the_navigator_docks_only_where_the_panes_keep_their_room() {
     assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Drawer, "a phone");
 }
 
+/// A window too narrow to dock the navigator folds it to the rail rather than to nothing, as
+/// `MonoCode`'s compact rail: the panes start past it, and the panel opened over them leaves the
+/// rail and the panes where they were.
+#[gpui::test]
+fn a_narrow_window_folds_the_navigator_to_its_rail(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.simulate_resize(size(px(800.0), px(700.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("navigator").is_none(), "not docked, not open");
+    let rail = cx.debug_bounds("nav-rail").expect("the rail");
+    let area = cx.debug_bounds("area").expect("the panes");
+    assert!(area.left() >= rail.right() - px(0.5), "the panes past it: {rail:?} {area:?}");
+    assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5);
+
+    view.update_in(cx, |v, window, cx| v.toggle_navigator(&ToggleNavigator, window, cx));
+    cx.run_until_parked();
+    let panel = cx.debug_bounds("navigator").expect("open over the panes");
+    assert_eq!(cx.debug_bounds("nav-rail"), Some(rail), "the rail stays");
+    assert_eq!(cx.debug_bounds("area"), Some(area), "and the panes do not move");
+    assert!(panel.right() > area.left(), "over them");
+
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("nav-rail").is_none(), "a phone has its drawer, no rail");
+}
+
 /// ⌘B hides the docked navigator and the panes take its room but the rail's; ⌘B brings it
 /// back. Whether it shows is written with the layout, and a workspace made from that file
 /// starts the same way.

@@ -170,6 +170,9 @@ enum Region {
     /// The navigator's rows, inside its panel: the list's wheel builds this view alone,
     /// not the panel with its filter field.
     NavigatorRows,
+    /// The navigator folded to a glyph per project, where it is hidden or lays over the panes:
+    /// a view of its own, so it stays while the panel opens over it.
+    Rail,
     Titlebar,
     /// The title bar's tabs, inside it: a working mark's step builds this view alone, not
     /// the bar with its breadcrumb and its readouts.
@@ -240,6 +243,8 @@ impl gpui::Render for AreaHost {
 struct Chrome {
     navigator: Entity<ChromeView>,
     nav_rows: Entity<ChromeView>,
+    /// The navigator folded to its glyphs ([`Region::Rail`]).
+    rail: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
     title_tabs: Entity<ChromeView>,
     foot: Entity<ChromeView>,
@@ -261,6 +266,7 @@ impl Chrome {
         Self {
             navigator: view(Region::Navigator),
             nav_rows: view(Region::NavigatorRows),
+            rail: view(Region::Rail),
             titlebar: view(Region::Titlebar),
             title_tabs: view(Region::TitleTabs),
             foot: view(Region::Foot),
@@ -275,8 +281,8 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 5] {
-        [&self.navigator, &self.nav_rows, &self.titlebar, &self.title_tabs, &self.foot]
+    fn ids(&self) -> [gpui::EntityId; 6] {
+        [&self.navigator, &self.nav_rows, &self.rail, &self.titlebar, &self.title_tabs, &self.foot]
             .map(Entity::entity_id)
     }
 }
@@ -1613,6 +1619,7 @@ impl WorkspaceView {
         match region {
             Region::Navigator => self.render_navigator_region(window, cx),
             Region::NavigatorRows => self.render_navigator_rows(window, cx),
+            Region::Rail => self.navigator_rail(cx),
             Region::Titlebar => self.render_titlebar(window, cx),
             Region::Foot => self.render_foot(window, cx),
             Region::TitleTabs => {
@@ -2239,7 +2246,6 @@ impl WorkspaceView {
         if self.nav.drawn.is_none() {
             self.drop_spots.projects.borrow_mut().clear();
         }
-        let column = |width: Pixels| StyleRefinement::default().flex_none().h_full().w(width);
         let (docked, rail, over, handle) = match self.nav.drawn {
             Some(navigator::Mode::Docked) => {
                 let width = px(self.navigator_width());
@@ -2264,13 +2270,12 @@ impl WorkspaceView {
                     .child(edge);
                 (Some(column.into_any_element()), None, None, Some(handle))
             }
+            // Over the panes, the rail stays under it, so the panes do not move as it opens.
             Some(mode) => {
-                (None, None, Some(self.navigator_over(mode, navigator, window, cx)), None)
+                let over = self.navigator_over(mode, navigator, window, cx);
+                (None, self.render_rail(), Some(over), None)
             }
-            None if self.nav.rail => {
-                (None, Some(navigator.cached(column(px(navigator::RAIL_W)))), None, None)
-            }
-            None => (None, None, None, None),
+            None => (None, self.render_rail(), None, None),
         };
         // The settings take the panes' place, and the foot bar goes with them.
         let page = self.render_settings_page();

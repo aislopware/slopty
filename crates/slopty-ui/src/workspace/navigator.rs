@@ -212,7 +212,9 @@ pub(super) struct NavState {
     pub resize: Option<(f32, f32)>,
     /// How it sat in the last frame drawn, and whether it showed.
     pub drawn: Option<Mode>,
-    /// The rail shows in its place: docked where it would dock, but hidden.
+    /// The rail shows in its place: where it would dock but is hidden, and where the window is
+    /// too narrow to dock it, under the panel when that is open over the panes (`MonoCode`'s
+    /// compact rail).
     pub rail: bool,
     /// The filter over its rows.
     pub filter: Filter,
@@ -1316,7 +1318,12 @@ impl WorkspaceView {
         let mode = self.navigator_mode(window);
         let visible = self.navigator_visible(mode);
         self.nav.drawn = visible.then_some(mode);
-        self.nav.rail = !visible && mode == Mode::Docked && !self.workers.is_empty();
+        self.nav.rail = !self.workers.is_empty()
+            && match mode {
+                Mode::Docked => !visible,
+                Mode::Overlay => true,
+                Mode::Drawer => false,
+            };
         if !visible {
             self.nav.resize = None;
             self.nav.tick.take();
@@ -2311,8 +2318,8 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The navigator's region of the frame as [`Self::place_navigator`] placed it: the panel,
-    /// the rail, or nothing.
+    /// The navigator's panel as [`Self::place_navigator`] placed it, or nothing; the rail is a
+    /// view of its own ([`super::Region::Rail`]).
     pub(super) fn render_navigator_region(
         &self,
         window: &Window,
@@ -2320,9 +2327,16 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         match self.nav.drawn {
             Some(mode) => self.navigator_panel(mode, window, cx),
-            None if self.nav.rail => self.navigator_rail(cx),
             None => gpui::Empty.into_any_element(),
         }
+    }
+
+    /// The rail's column of the frame, while it shows.
+    pub(super) fn render_rail(&self) -> Option<gpui::AnyElement> {
+        self.nav.rail.then(|| {
+            let column = gpui::StyleRefinement::default().flex_none().h_full().w(px(RAIL_W));
+            self.chrome.rail.clone().cached(column).into_any_element()
+        })
     }
 
     /// The navigator's top: the lights row, then the filter while it shows.
@@ -2775,7 +2789,7 @@ impl WorkspaceView {
     /// Where the navigator is hidden but would dock: a column of one glyph per project, with
     /// what its tiles add up to under it, then a server glyph for each worker that is not up or
     /// whose own tiles want the human. A click goes to the project, or to the worker.
-    fn navigator_rail(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    pub(super) fn navigator_rail(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;

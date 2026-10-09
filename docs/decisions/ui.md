@@ -9038,3 +9038,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::settings_page::*`, `settings_editor::tests::*`,
     `settings_form::schema::tests::the_groups_list_the_sections_in_order`; the app's
     `a_settings_change_applies_with_the_page_still_up`.
+
+- ✅ **A window too narrow to dock the navigator folds it to the rail** (2026-10-09, MonoCode
+  audit row 30, M6 `CompactProjectRail`; the rail was only the hidden navigator's before).
+  - Where the navigator would leave the panes less than a phone's width, so it cannot dock,
+    the rail of project glyphs keeps its column. Before, nothing stood there until the panel
+    was opened over the panes. The panel still opens over the panes, and the rail stays under
+    it, so the panes do not move as it opens. A phone keeps its drawer and no rail.
+  - The rail is now a view of its own (`Region::Rail`), drawn while the panel is open.
+  - Tests: `workspace::tests::frame::a_narrow_window_folds_the_navigator_to_its_rail`.
