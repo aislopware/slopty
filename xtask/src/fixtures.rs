@@ -311,6 +311,9 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         // From 2.1.295 a session with no settings starts in auto mode, whose classifier decides
         // what the scenarios' allowed tools already settle; the fixtures record `default`.
         .args(["--permission-mode", "default"])
+        // Haiku 5.5 at its default effort writes no thinking, and the fixtures pin how thinking
+        // decodes; at high effort it thinks before each step, as Haiku 4.5 did.
+        .args(["--effort", "high"])
         .args(["--allowedTools", scenario.allowed, "--settings", &settings.to_string()])
         .current_dir(&work)
         .stdin(Stdio::piped())

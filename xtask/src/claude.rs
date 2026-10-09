@@ -30,21 +30,26 @@ const REGISTRY: &str = "https://registry.npmjs.org";
 
 /// The `claude` to record with: `SLOPTY_CLAUDE`, else the official build of `version`,
 /// downloaded and verified on first use. Either way it must say it is `version`.
+///
+/// The downloaded build is asked in an empty environment. A `claude` the person names is asked
+/// in theirs, as a capture runs it: a managed launcher signs the machine in from it and, with
+/// none, answers that the machine is not signed in instead of its version.
 pub fn official(version: &str) -> Result<PathBuf> {
     ensure!(
         !version.is_empty() && version.split('.').all(|p| p.parse::<u32>().is_ok()),
         "{version} is no Claude Code version"
     );
-    let binary = match std::env::var_os(OVERRIDE) {
-        Some(path) => PathBuf::from(path),
+    let named = std::env::var_os(OVERRIDE).map(PathBuf::from);
+    let binary = match &named {
+        Some(path) => path.clone(),
         None => download(version)?,
     };
-    let out = Command::new(&binary)
-        .arg("--version")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .with_context(|| format!("run {}", binary.display()))?;
+    let mut asked = Command::new(&binary);
+    if named.is_none() {
+        asked.env_clear().env("PATH", "/usr/bin:/bin");
+    }
+    let out =
+        asked.arg("--version").output().with_context(|| format!("run {}", binary.display()))?;
     let said = String::from_utf8_lossy(&out.stdout);
     ensure!(
         said.split_whitespace().next() == Some(version),

@@ -1,12 +1,13 @@
 ---
 source: crates/slopty-agent/tests/conversation.rs
+assertion_line: 91
 expression: "decode(\"interrupt\").snapshot()"
 ---
 - id: Main
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1790482605008
+      at_ms: 1791562891880
       body:
         Prompt:
           text:
@@ -16,16 +17,8 @@ expression: "decode(\"interrupt\").snapshot()"
             full: ~
           images: []
           command: ~
-    - id: "00000000-0000-4000-8000-000000000015:0"
-      at_ms: 1790482609619
-      body:
-        Thinking:
-          text: "The user wants me to run a Bash command that sleeps for 20 seconds and then echoes \"woke\", then reply \"done\".\n\nI should use the Bash tool to run this command. The user hasn't explicitly asked for it to run in the background, but given that it's a 20-second sleep, I could consider running it in the background. However, the user's instruction is clear: \"Run the Bash command... then reply 'done'\". This suggests they want me to wait for it to complete and then reply.\n\nLet me check the Bash tool parameters. I can set `run_in_background` to control whether it runs in the background. The instructions say to use `run_in_background` when I don't need the result immediately. In this case, the user seems to want me to wait and then reply \"done\", which suggests they do want me to wait.\n\nActually, re-reading the instructions: \"When you do write updates, write so the reader can pick up cold: complete sentences, no unexplained jargon or shorthand from earlier in the session. State results and decisions directly, and focus user-facing text on relevant updates for the user.\"\n\nThe user is explicitly asking me to run a command and then reply \"done\". This is a bit unusual but I should follow their instruction. I'll run it in the foreground (the default) and then reply \"done\" when it completes."
-          lines: 9
-          chars: 1294
-          full: ~
     - id: toolu_01
-      at_ms: 1790482609814
+      at_ms: 1791562893160
       body:
         Tool:
           name: Bash
@@ -48,31 +41,31 @@ expression: "decode(\"interrupt\").snapshot()"
           result:
             status: Rejected
             text:
-              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions."
-              lines: 3
-              chars: 436
+              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+              lines: 1
+              chars: 225
               full: ~
-            at_ms: 1790482610080
+            at_ms: 1791562893374
             images: []
-    - id: 00000000-0000-4000-8000-000000000019
-      at_ms: 1790482610081
+    - id: 00000000-0000-4000-8000-000000000018
+      at_ms: 1791562893376
       body:
         Interrupted:
           during_tool: true
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1790482605008
+      started_ms: 1791562891880
       ended_ms: ~
       models:
-        - claude-haiku-4-5-20251001
+        - claude-haiku-5-5
       requests: 1
       usage:
-        input: 10
-        cache_read: 20399
-        cache_write: 0
-        output: 392
-        thinking: 314
-      context_tokens: 20409
+        input: 2
+        cache_read: 13748
+        cache_write: 4359
+        output: 79
+        thinking: 0
+      context_tokens: 18109
       mode: default
       stop: tool_use

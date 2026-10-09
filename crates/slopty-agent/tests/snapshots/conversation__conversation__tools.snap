@@ -1,12 +1,13 @@
 ---
 source: crates/slopty-agent/tests/conversation.rs
+assertion_line: 86
 expression: "decode(\"tools\").snapshot()"
 ---
 - id: Main
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1790482568649
+      at_ms: 1791562873371
       body:
         Prompt:
           text:
@@ -16,23 +17,15 @@ expression: "decode(\"tools\").snapshot()"
             full: ~
           images: []
           command: ~
-    - id: "00000000-0000-4000-8000-000000000015:0"
-      at_ms: 1790482573134
-      body:
-        Thinking:
-          text: "The user is asking me to do a sequence of steps using various tools. Let me break this down:\n\n1. TaskCreate a task \"Survey files\" and a task \"Write notes\" - I need to use TaskCreate (need to fetch first since it's deferred)\n2. TaskUpdate \"Survey files\" to in_progress - TaskUpdate (deferred)\n3. Glob \"*.rs\" - use Glob tool\n4. Grep for \"println\" with output mode content - use Grep tool\n5. Bash: `printf 'one\\ntwo\\n'` with a description - use Bash tool\n6. Bash: `ls missing-file` (it fails; that is expected) - use Bash tool\n7. Bash with run_in_background true: `sleep 1; echo bg-finished` - use Bash tool\n8. Write notes.md containing two lines: \"# Notes\" and \"main.rs prints hello\" - use Write tool\n9. Use Agent tool with subagent_type general-purpose to count lines in main.rs - use Agent tool\n10. TaskUpdate both tasks to completed - TaskUpdate (deferred)\n\nFirst, I need to fetch the deferred tools using ToolSearch to get TaskCreate and TaskUpdate."
-          lines: 14
-          chars: 951
-          full: ~
     - id: toolu_01
-      at_ms: 1790482573446
+      at_ms: 1791562875353
       body:
         Tool:
           name: ToolSearch
           detail:
             Other:
               input:
-                text: "{\"max_results\":5,\"query\":\"select:TaskCreate,TaskUpdate\"}"
+                text: "{\"max_results\":2,\"query\":\"select:TaskCreate,TaskUpdate\"}"
                 lines: 1
                 chars: 56
                 full: ~
@@ -43,26 +36,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 0
               chars: 0
               full: ~
-            at_ms: 1790482573495
+            at_ms: 1791562875388
             images: []
-    - id: "00000000-0000-4000-8000-000000000021:0"
-      at_ms: 1790482577266
-      body:
-        Thinking:
-          text: "Good, the tools are loaded. Now I need to proceed with the steps in order:\n\n1) TaskCreate a task \"Survey files\" and a task \"Write notes\"\n2) TaskUpdate \"Survey files\" to in_progress\n3) Glob \"*.rs\"\n4) Grep for \"println\" with output mode content\n5) Bash: `printf 'one\\ntwo\\n'` with a description\n6) Bash: `ls missing-file` (it fails; that is expected)\n7) Bash with run_in_background true: `sleep 1; echo bg-finished`\n8) Write notes.md containing two lines: \"# Notes\" and \"main.rs prints hello\"\n9) Use Agent tool to count lines in main.rs\n10) TaskUpdate both tasks to completed\n\nLet me start with step 1 - creating two tasks. I'll create both in parallel since they don't depend on each other."
-          lines: 14
-          chars: 689
-          full: ~
-    - id: "00000000-0000-4000-8000-000000000022:0"
-      at_ms: 1790482577477
-      body:
-        Text:
-          text: "Starting the sequence of steps:"
-          lines: 1
-          chars: 31
-          full: ~
     - id: toolu_02
-      at_ms: 1790482577875
+      at_ms: 1791562876684
       body:
         Tool:
           name: TaskCreate
@@ -70,14 +47,14 @@ expression: "decode(\"tools\").snapshot()"
             TaskCreate:
               task_id: "1"
               subject: Survey files
-              description: Survey the available files in the project
+              description: Find *.rs files and locate println usages in the project
           result:
             status: Ok
             text: ~
-            at_ms: 1790482577911
+            at_ms: 1791562876707
             images: []
     - id: toolu_03
-      at_ms: 1790482578134
+      at_ms: 1791562876952
       body:
         Tool:
           name: TaskCreate
@@ -85,22 +62,14 @@ expression: "decode(\"tools\").snapshot()"
             TaskCreate:
               task_id: "2"
               subject: Write notes
-              description: Write notes about findings
+              description: Write notes.md with the two notes lines and verify main.rs line count
           result:
             status: Ok
             text: ~
-            at_ms: 1790482578164
+            at_ms: 1791562876970
             images: []
-    - id: "00000000-0000-4000-8000-000000000028:0"
-      at_ms: 1790482579626
-      body:
-        Thinking:
-          text: "Good, both tasks created. Now step 2: TaskUpdate \"Survey files\" to in_progress. The task ID is \"1\" based on the output."
-          lines: 1
-          chars: 119
-          full: ~
     - id: toolu_04
-      at_ms: 1790482579876
+      at_ms: 1791562877722
       body:
         Tool:
           name: TaskUpdate
@@ -115,18 +84,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482579900
+            at_ms: 1791562877735
             images: []
-    - id: "00000000-0000-4000-8000-000000000032:0"
-      at_ms: 1790482581073
-      body:
-        Thinking:
-          text: "Good. Now step 3: Glob \"*.rs\""
-          lines: 1
-          chars: 29
-          full: ~
     - id: toolu_05
-      at_ms: 1790482581210
+      at_ms: 1791562878453
       body:
         Tool:
           name: Glob
@@ -143,18 +104,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 1
               chars: 7
               full: ~
-            at_ms: 1790482581229
+            at_ms: 1791562878474
             images: []
-    - id: "00000000-0000-4000-8000-000000000036:0"
-      at_ms: 1790482582567
-      body:
-        Thinking:
-          text: "Found main.rs. Now step 4: Grep for \"println\" with output mode content"
-          lines: 1
-          chars: 70
-          full: ~
     - id: toolu_06
-      at_ms: 1790482582807
+      at_ms: 1791562879211
       body:
         Tool:
           name: Grep
@@ -173,18 +126,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 1
               chars: 32
               full: ~
-            at_ms: 1790482582851
+            at_ms: 1791562879234
             images: []
-    - id: "00000000-0000-4000-8000-000000000040:0"
-      at_ms: 1790482584171
-      body:
-        Thinking:
-          text: "Good, found a println statement. Now step 5: Bash: `printf 'one\\ntwo\\n'` with a description"
-          lines: 1
-          chars: 91
-          full: ~
     - id: toolu_07
-      at_ms: 1790482584454
+      at_ms: 1791562880078
       body:
         Tool:
           name: Bash
@@ -195,7 +140,7 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 19
                 full: ~
-              description: Print two lines
+              description: Print two lines of test output
               background: false
               task_id: ~
               status: Done
@@ -211,18 +156,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482584717
+            at_ms: 1791562880500
             images: []
-    - id: "00000000-0000-4000-8000-000000000044:0"
-      at_ms: 1790482586121
-      body:
-        Thinking:
-          text: "Good. Now step 6: Bash: `ls missing-file` (it fails; that is expected)"
-          lines: 1
-          chars: 70
-          full: ~
     - id: toolu_08
-      at_ms: 1790482586422
+      at_ms: 1791562881333
       body:
         Tool:
           name: Bash
@@ -233,7 +170,7 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 15
                 full: ~
-              description: Try to list a non-existent file
+              description: List a missing file (expected to fail)
               background: false
               task_id: ~
               status: Failed
@@ -249,18 +186,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 2
               chars: 66
               full: ~
-            at_ms: 1790482586485
+            at_ms: 1791562881404
             images: []
-    - id: "00000000-0000-4000-8000-000000000048:0"
-      at_ms: 1790482587959
-      body:
-        Thinking:
-          text: "Good, that failed as expected. Now step 7: Bash with run_in_background true: `sleep 1; echo bg-finished`"
-          lines: 1
-          chars: 104
-          full: ~
     - id: toolu_09
-      at_ms: 1790482588402
+      at_ms: 1791562882736
       body:
         Tool:
           name: Bash
@@ -271,7 +200,7 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 25
                 full: ~
-              description: Background sleep and echo
+              description: Run a short background echo command
               background: true
               task_id: b00000001
               status: Done
@@ -279,22 +208,14 @@ expression: "decode(\"tools\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: /private/tmp/claude-uid/-work/00000000-0000-4000-8000-000000000001/tasks/b00000001.output
-              finished_ms: 1790482589448
+              finished_ms: 1791562883772
           result:
             status: Ok
             text: ~
-            at_ms: 1790482588418
+            at_ms: 1791562882760
             images: []
-    - id: "00000000-0000-4000-8000-000000000052:0"
-      at_ms: 1790482592446
-      body:
-        Thinking:
-          text: "Good, the background command is running. Now step 8: Write notes.md with two lines. Let me read the file first if it exists, but the user is asking me to write new content, so I'll just write it.\n\nActually, looking at the Write tool description, it says \"If this is an existing file, you MUST use the Read tool first to read the file's contents.\" But the user is asking me to create/write notes.md with specific content. Since this is a fresh file we're creating, I should check if it exists first. Let me just write it since we're creating new content.\n\nActually, let me reconsider - the instructions say I MUST use Read first if it's an existing file. But in this case, we're creating a new file. The tool description says \"If this is an existing file, you MUST use the Read tool first\". So if it doesn't exist, I don't need to read. Let me just write it."
-          lines: 5
-          chars: 857
-          full: ~
     - id: toolu_10
-      at_ms: 1790482592898
+      at_ms: 1791562884319
       body:
         Tool:
           name: Write
@@ -312,18 +233,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482592914
+            at_ms: 1791562884338
             images: []
-    - id: "00000000-0000-4000-8000-000000000058:0"
-      at_ms: 1790482595015
-      body:
-        Thinking:
-          text: "Great! The background task completed. Now step 9: Use Agent tool with subagent_type general-purpose to count lines in main.rs. Let me read the file first to get the content, but actually, the user is asking the Agent to count the lines by reading the file. So I should prompt the Agent to do that."
-          lines: 1
-          chars: 297
-          full: ~
     - id: toolu_11
-      at_ms: 1790482595910
+      at_ms: 1791562886088
       body:
         Tool:
           name: Agent
@@ -333,35 +246,27 @@ expression: "decode(\"tools\").snapshot()"
               agent_type: general-purpose
               description: Count lines
               prompt:
-                text: "Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else."
+                text: "Use the Read tool to read the file /work/main.rs and count its lines. Reply with just the number, nothing else."
                 lines: 1
-                chars: 102
+                chars: 111
                 full: ~
               background: false
               status: Completed
               report:
-                text: "4"
+                text: "3"
                 lines: 1
                 chars: 1
                 full: ~
-              tokens: 13422
+              tokens: 13734
               tool_uses: 1
-              duration_ms: 3073
+              duration_ms: 2408
           result:
             status: Ok
             text: ~
-            at_ms: 1790482598999
+            at_ms: 1791562888508
             images: []
-    - id: "00000000-0000-4000-8000-000000000062:0"
-      at_ms: 1790482600753
-      body:
-        Thinking:
-          text: "Perfect! The Agent found that main.rs has 4 lines. Now step 10: TaskUpdate both tasks to completed. Task #1 is \"Survey files\" and Task #2 is \"Write notes\"."
-          lines: 1
-          chars: 155
-          full: ~
     - id: toolu_12
-      at_ms: 1790482601002
+      at_ms: 1791562889573
       body:
         Tool:
           name: TaskUpdate
@@ -376,10 +281,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482601041
+            at_ms: 1791562889591
             images: []
     - id: toolu_13
-      at_ms: 1790482601242
+      at_ms: 1791562889714
       body:
         Tool:
           name: TaskUpdate
@@ -394,18 +299,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482601264
+            at_ms: 1791562889737
             images: []
-    - id: "00000000-0000-4000-8000-000000000068:0"
-      at_ms: 1790482603999
-      body:
-        Thinking:
-          text: "All steps completed! Let me summarize what happened:\n\n1. ✓ Created tasks \"Survey files\" and \"Write notes\"\n2. ✓ Updated \"Survey files\" to in_progress\n3. ✓ Glob found main.rs\n4. ✓ Grep found a println statement on line 2\n5. ✓ Bash printed one and two\n6. ✓ Bash failed to list missing-file (as expected)\n7. ✓ Bash background command ran and completed\n8. ✓ Wrote notes.md with the two lines\n9. ✓ Agent counted 4 lines in main.rs\n10. ✓ Updated both tasks to completed\n\nDone!"
-          lines: 14
-          chars: 469
-          full: ~
-    - id: "00000000-0000-4000-8000-000000000069:0"
-      at_ms: 1790482604047
+    - id: "00000000-0000-4000-8000-000000000062:0"
+      at_ms: 1791562890349
       body:
         Text:
           text: done
@@ -421,18 +318,18 @@ expression: "decode(\"tools\").snapshot()"
       status: completed
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1790482568649
-      ended_ms: 1790482604079
+      started_ms: 1791562873371
+      ended_ms: 1791562890373
       models:
-        - claude-haiku-4-5-20251001
+        - claude-haiku-5-5
       requests: 14
       usage:
-        input: 118
-        cache_read: 341718
-        cache_write: 7467
-        output: 2805
-        thinking: 1468
-      context_tokens: 26832
+        input: 28
+        cache_read: 313050
+        cache_write: 12918
+        output: 2108
+        thinking: 585
+      context_tokens: 25150
       mode: default
       stop: end_turn
 - id:
@@ -442,19 +339,19 @@ expression: "decode(\"tools\").snapshot()"
     agent_type: general-purpose
     description: Count lines
   entries:
-    - id: 00000000-0000-4000-8000-000000000072
-      at_ms: 1790482595917
+    - id: 00000000-0000-4000-8000-000000000065
+      at_ms: 1791562886094
       body:
         Prompt:
           text:
-            text: "Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else."
+            text: "Use the Read tool to read the file /work/main.rs and count its lines. Reply with just the number, nothing else."
             lines: 1
-            chars: 102
+            chars: 111
             full: ~
           images: []
           command: ~
     - id: toolu_14
-      at_ms: 1790482597611
+      at_ms: 1791562887034
       body:
         Tool:
           name: Read
@@ -473,30 +370,30 @@ expression: "decode(\"tools\").snapshot()"
               lines: 4
               chars: 44
               full: ~
-            at_ms: 1790482597625
+            at_ms: 1791562887052
             images: []
-    - id: "00000000-0000-4000-8000-000000000089:0"
-      at_ms: 1790482598941
+    - id: "00000000-0000-4000-8000-000000000081:0"
+      at_ms: 1791562888455
       body:
         Text:
-          text: "4"
+          text: "3"
           lines: 1
           chars: 1
           full: ~
   tasks: []
   turns:
-    - prompt: 00000000-0000-4000-8000-000000000072
-      started_ms: 1790482595917
+    - prompt: 00000000-0000-4000-8000-000000000065
+      started_ms: 1791562886094
       ended_ms: ~
       models:
-        - claude-haiku-4-5-20251001
+        - claude-haiku-5-5
       requests: 2
       usage:
-        input: 18
-        cache_read: 12984
-        cache_write: 13356
-        output: 182
-        thinking: 105
-      context_tokens: 13364
+        input: 4
+        cache_read: 12514
+        cache_write: 13580
+        output: 221
+        thinking: 149
+      context_tokens: 13582
       mode: ~
       stop: end_turn

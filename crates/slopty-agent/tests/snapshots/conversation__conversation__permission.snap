@@ -1,12 +1,13 @@
 ---
 source: crates/slopty-agent/tests/conversation.rs
+assertion_line: 101
 expression: "decode(\"permission\").snapshot()"
 ---
 - id: Main
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1790482629839
+      at_ms: 1791562905488
       body:
         Prompt:
           text:
@@ -16,16 +17,8 @@ expression: "decode(\"permission\").snapshot()"
             full: ~
           images: []
           command: ~
-    - id: "00000000-0000-4000-8000-000000000015:0"
-      at_ms: 1790482631345
-      body:
-        Thinking:
-          text: "The user wants me to run three Bash commands sequentially:\n1. `touch refused.txt`\n2. `touch allowed.txt`\n3. `touch always.txt`\n\nThey want each as its own call, in order. If one is refused, I should continue with the next one, then reply \"done\".\n\nLet me execute these one at a time."
-          lines: 8
-          chars: 281
-          full: ~
     - id: toolu_01
-      at_ms: 1790482631706
+      at_ms: 1791562906774
       body:
         Tool:
           name: Bash
@@ -52,18 +45,10 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1790482631755
+            at_ms: 1791562906838
             images: []
-    - id: "00000000-0000-4000-8000-000000000021:0"
-      at_ms: 1790482632727
-      body:
-        Thinking:
-          text: "The first command was refused. Now I'll try the second one."
-          lines: 1
-          chars: 59
-          full: ~
     - id: toolu_02
-      at_ms: 1790482632964
+      at_ms: 1791562907722
       body:
         Tool:
           name: Bash
@@ -86,18 +71,10 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482633255
+            at_ms: 1791562908296
             images: []
-    - id: "00000000-0000-4000-8000-000000000026:0"
-      at_ms: 1790482634063
-      body:
-        Thinking:
-          text: "The second command succeeded. Now I'll try the third one."
-          lines: 1
-          chars: 57
-          full: ~
     - id: toolu_03
-      at_ms: 1790482634304
+      at_ms: 1791562909145
       body:
         Tool:
           name: Bash
@@ -120,38 +97,30 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1790482634363
+            at_ms: 1791562909323
             images: []
-    - id: "00000000-0000-4000-8000-000000000032:0"
-      at_ms: 1790482635730
-      body:
-        Thinking:
-          text: "All three commands have been executed:\n1. `touch refused.txt` - was refused\n2. `touch allowed.txt` - succeeded\n3. `touch always.txt` - succeeded\n\nNow I should reply \"done\" as requested."
-          lines: 6
-          chars: 185
-          full: ~
-    - id: "00000000-0000-4000-8000-000000000033:0"
-      at_ms: 1790482635752
+    - id: "00000000-0000-4000-8000-000000000030:0"
+      at_ms: 1791562910721
       body:
         Text:
-          text: done
-          lines: 1
-          chars: 4
+          text: "done\n\nThe first command (`touch refused.txt`) was refused by the fixture, so that file was not created. `allowed.txt` and `always.txt` were created."
+          lines: 3
+          chars: 148
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1790482629839
-      ended_ms: 1790482635789
+      started_ms: 1791562905488
+      ended_ms: 1791562910746
       models:
-        - claude-haiku-4-5-20251001
+        - claude-haiku-5-5
       requests: 4
       usage:
-        input: 34
-        cache_read: 82322
-        cache_write: 569
-        output: 423
-        thinking: 179
-      context_tokens: 21006
+        input: 8
+        cache_read: 68541
+        cache_write: 4797
+        output: 415
+        thinking: 120
+      context_tokens: 18545
       mode: default
       stop: end_turn
