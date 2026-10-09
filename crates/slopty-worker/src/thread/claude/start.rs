@@ -12,7 +12,13 @@
 //!   the thread ([`slopty_agent::observed::thread_of`]) is begun as soon as the terminal opens and
 //!   the start is answered with it; the hooks and the transcript then fill it in. The first message
 //!   is Claude Code's own initial prompt on its command line, after `--`, never keys typed into its
-//!   TUI, and is marked with the start's intent once the transcript shows it.
+//!   TUI, and is marked with the start's intent once the transcript shows it. Until then it is in
+//!   the thread's pending list, on its way ([`Host::first_message`]).
+//! - **Held at its own dialog.** Claude Code may open on a dialog of its own (the folder's trust, a
+//!   project's `.mcp.json`), and its hooks run only once that is answered. A start no hook has
+//!   spoken for in [`slopty_agent::observed::UNHEARD`] asks the person to answer it in the terminal
+//!   ([`slopty_agent::observed::ASKING_IN_TERMINAL`]) until the first hook. The silence is the
+//!   sign; the screen is never read.
 //! - **The TUI is the agent.** The terminal is the person's: they can type into it at any time, and
 //!   closing it ends the agent.
 //! - **Once.** A start is acted on once per intent id: starts are taken one at a time, and a repeat
@@ -31,7 +37,9 @@ use std::sync::Arc;
 
 use slopty_core::SessionId;
 use slopty_proto::thread::wire::{Outcome, Start};
-use slopty_proto::thread::{AgentId, Drive, Fork, IntentId, ThreadId, TurnId};
+use slopty_proto::thread::{
+    AgentId, Delivery, Drive, Fork, IntentId, Pending, PendingState, ThreadId, TurnId,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -231,6 +239,16 @@ async fn begin(
     }
     if let Some(prompt) = prompt {
         host.typed(thread, id, prompt);
+        host.first_message(
+            thread,
+            Pending {
+                intent: id,
+                text: start.prompt.clone().unwrap_or_default(),
+                attachments: start.attachments.clone(),
+                delivery: Delivery::Queue,
+                state: PendingState::Sending,
+            },
+        );
     }
     Outcome::Started { thread }
 }

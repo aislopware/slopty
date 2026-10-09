@@ -10,15 +10,15 @@ mod claude_start {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use slopty_agent::observed::thread_of;
+    use slopty_agent::observed::{self, thread_of};
     use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus};
     use slopty_core::SessionId;
     use slopty_proto::WorkerMsg;
     use slopty_proto::agent::AgentKind;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Drive, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta, ThreadState,
-        TurnId,
+        AgentId, Drive, Fork, IntentId, ItemBody, Liveness, PendingState, Phase, ThreadId,
+        ThreadMeta, ThreadState, TurnId,
     };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
@@ -264,6 +264,50 @@ mod claude_start {
 
         rig.write("edit");
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
+        assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
+    }
+
+    /// A Claude Code held at a dialog of its own as it opens (the folder's trust, a project's
+    /// `.mcp.json`) fires no hook. The start's first message is on its way in the thread's
+    /// pending list at once; after [`observed::UNHEARD`] of hook silence, and not before, the
+    /// thread asks the person to answer in the terminal, a request with nothing to answer here.
+    /// The first hook (its `SessionStart`) settles it, and the transcript's item for the message
+    /// takes the message out of the list.
+    #[tokio::test]
+    async fn a_start_held_at_its_own_dialog_says_so_once_its_hooks_are_silent() {
+        let rig = Rig::new();
+        let prompt = first_message("edit");
+        let id = IntentId::new();
+        let opened_at = std::time::Instant::now();
+        let outcome = rig.starter.start(id, rig.start(Some(&prompt))).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let (state, _) = rig.host.state(thread).expect("begun");
+        let on_its_way: Vec<_> =
+            state.pending.iter().map(|p| (p.intent, p.text.clone(), p.state.clone())).collect();
+        assert_eq!(on_its_way, [(id, prompt.clone(), PendingState::Sending)], "shown at once");
+        assert_eq!(state.open_requests().count(), 0, "nothing asked yet");
+
+        let state = until(&rig.host, thread, |s| s.open_requests().next().is_some()).await;
+        assert!(opened_at.elapsed() >= observed::UNHEARD, "only after the silence");
+        let asked: Vec<_> = state.open_requests().collect();
+        let [asked] = asked.as_slice() else { panic!("one request: {asked:?}") };
+        assert_eq!(asked.id.0, observed::UNHEARD_ASK);
+        assert_eq!(asked.title, observed::ASKING_IN_TERMINAL);
+        assert!(asked.options.is_empty() && asked.questions.is_empty(), "answered only there");
+        assert_eq!(state.status.phase, Phase::NeedsYou, "it needs the person");
+        let wait = state.status.wait.as_ref().map(|w| w.text.as_str());
+        assert_eq!(wait, Some(observed::ASKING_IN_TERMINAL));
+        assert_eq!(state.pending.len(), 1, "the message still on its way");
+
+        // The person answers the dialog, and Claude Code's hooks speak.
+        rig.sources.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
+        let state = until(&rig.host, thread, |s| s.open_requests().next().is_none()).await;
+        assert_ne!(state.status.phase, Phase::NeedsYou, "it asks nothing now");
+        assert_eq!(state.pending.len(), 1, "until the transcript shows the message");
+
+        rig.write("edit");
+        let state =
+            until(&rig.host, thread, |s| !users(s).is_empty() && s.pending.is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
     }
 

@@ -148,6 +148,112 @@ fn a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face(cx: &mut Te
     assert_eq!(tile_says(cx, &title).as_deref(), Some(Face::Terminal.label()), "the face shown");
 }
 
+/// A Claude Code start held at a dialog of its own as it opens (the folder's trust, a project's
+/// `.mcp.json`) lands on the thread face with its first message on its way, not under the
+/// question an empty thread asks. Once its worker says the agent asks in its terminal, that
+/// request's one answer brings the terminal face up, where the dialog is.
+#[gpui::test]
+fn a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    use slopty_proto::thread::wire::{Intent, ThreadFrame};
+    use slopty_proto::thread::{
+        AskId, Delivery, Pending, PendingState, Phase, Request, RequestState, Wait,
+    };
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    view.update_in(cx, |v, _w, cx| v.start_thread(key, claude, "/src/app".into(), None, cx));
+    let intent = studio
+        .drain()
+        .into_iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { id, .. }) => Some(id),
+            _ => None,
+        })
+        .expect("the start");
+    settle(cx);
+    let placeholder = focused(&view, cx).expect("the start's tile");
+
+    // The terminal opens, and the agent sits at its dialog: no hook, no transcript, only the
+    // start's message on its way.
+    let session = SessionId::new();
+    view.update_in(cx, |v, _w, cx| v.session_opened(key, summary(session, Some("/src/app")), cx));
+    cx.run_until_parked();
+    let mut state = crate::conversation::thread::fixtures::empty();
+    state.meta.terminal = Some(session);
+    state.pending = vec![Pending {
+        intent,
+        text: "Plan the parser.".to_owned(),
+        attachments: Vec::new(),
+        delivery: Delivery::Queue,
+        state: PendingState::Sending,
+    }];
+    let thread = state.meta.id;
+    let frame = |state: &ThreadState, seq| ThreadFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq },
+        state: Box::new(state.clone()),
+    };
+    table(&view, cx, key, 1, &[&state]);
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame(&state, 1), cx));
+    let started = IntentDone { id: intent, outcome: Outcome::Started { thread } };
+    view.update_in(cx, |v, _w, cx| v.thread_done(key, &started, cx));
+    settle(cx);
+    let ops = item_ops(&mut studio);
+    let [ItemOp::Add(item)] = ops.as_slice() else { panic!("one item: {ops:?}") };
+    let echo = ItemSync::Delta { version: 2, by: studio.me, op: ItemOp::Add(item.clone()) };
+    view.update_in(cx, |v, _w, cx| v.apply_sync(key, echo, cx));
+    settle(cx);
+    assert_eq!(focused(&view, cx), Some(placeholder));
+    assert!(view.read_with(cx, |v, _| v.face_shown(session)), "on the thread face");
+    assert!(cx.debug_bounds("thread-hero").is_none(), "the message went: nothing is asked");
+
+    // Its hooks stay silent, and the worker says it asks in its terminal.
+    let ask = AskId("terminal-start".to_owned());
+    state.requests = vec![Request {
+        id: ask.clone(),
+        item: None,
+        kind: "input".to_owned(),
+        title: "Claude Code is asking something in its terminal".to_owned(),
+        text: None,
+        options: Vec::new(),
+        questions: Vec::new(),
+        proposed: None,
+        schema_json: None,
+        url: None,
+        state: RequestState::Open,
+        opened_ms: WallMs::ZERO,
+        until_ms: None,
+    }];
+    state.status.phase = Phase::NeedsYou;
+    state.status.wait = Some(Wait {
+        kind: "input".to_owned(),
+        text: "Claude Code is asking something in its terminal".to_owned(),
+    });
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame(&state, 2), cx));
+    settle(cx);
+    assert!(cx.debug_bounds("thread-hero").is_none());
+    assert!(cx.debug_bounds("request-terminal-start").is_some(), "it says so");
+    let release = cx.debug_bounds("release-terminal-start").expect("the way to the terminal");
+    studio.drain();
+    cx.simulate_click(release.center(), Modifiers::none());
+    settle(cx);
+    assert!(!view.read_with(cx, |v, _| v.face_shown(session)), "the terminal face, where it asks");
+    let released = studio.drain().into_iter().any(|m| {
+        matches!(
+            m,
+            ClientMsg::Thread(ThreadRequest::Intent { intent: Intent::Release { ask: a }, .. })
+                if a == ask
+        )
+    });
+    assert!(released, "the worker hears it is answered there");
+}
+
 /// A thread tile whose agent comes to run in a terminal (taken up again, its TUI opened)
 /// becomes that terminal's tile where it stood, under its id, and its thread view goes on as
 /// the face: the draft and the keyboard are where they were.

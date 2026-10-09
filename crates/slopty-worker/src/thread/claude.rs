@@ -248,6 +248,7 @@ async fn observe(
         title: String::new(),
         hooks: 0,
         meters: seen.borrow().meters.clone(),
+        silent_since: None,
     };
     // The hook that brought the session here was heard before this watched for changes.
     let heard = seen.borrow().cwd.clone();
@@ -290,6 +291,11 @@ async fn observe(
                         on.cwd = cwd;
                     }
                     on.begin(&native);
+                    // Slopty opened it with the hook relay: until a hook speaks, it may be held
+                    // at a dialog of its own.
+                    if on.hooks == 0 {
+                        on.silent_since = Some(Instant::now());
+                    }
                     let _gone = reply.send(on.observed.as_ref().map(Observed::main));
                     on.read().await;
                 }
@@ -308,6 +314,7 @@ async fn observe(
                     take(&on.host, observed.live(&board, Instant::now(), WallMs::now()));
                     take(&on.host, observed.waited(WallMs::now()));
                 }
+                on.silence();
             }
         }
     }
@@ -336,6 +343,9 @@ struct Session {
     hooks: u64,
     /// The status line's latest meters, for a thread begun after they came.
     meters: Option<slopty_proto::conversation::Meters>,
+    /// When Slopty opened the Claude Code here, while no hook has spoken since
+    /// ([`observed::UNHEARD`]).
+    silent_since: Option<Instant>,
 }
 
 impl Session {
@@ -392,7 +402,22 @@ impl Session {
         }
         if seen.hooks != self.hooks {
             self.hooks = seen.hooks;
+            self.silent_since = None;
             self.read().await;
+        }
+    }
+
+    /// A Claude Code Slopty opened here that no hook has spoken for in [`observed::UNHEARD`]
+    /// is held at a dialog of its own: its thread says it asks in the terminal, once.
+    fn silence(&mut self) {
+        let Some(since) = self.silent_since else { return };
+        if since.elapsed() < observed::UNHEARD {
+            return;
+        }
+        self.silent_since = None;
+        if let Some(observed) = self.observed.as_mut() {
+            tracing::info!(terminal = %self.terminal, "Claude Code is silent at its start");
+            take(&self.host, observed.unheard(WallMs::now()));
         }
     }
 

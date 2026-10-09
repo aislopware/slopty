@@ -182,6 +182,9 @@ struct Own {
     /// The messages the worker holds until their moment ([`super::schedule`]), which no
     /// adapter knows: put back in every pending list an adapter tells.
     scheduled: Vec<Pending>,
+    /// The start's first message, given on the agent's command line: on its way in the
+    /// pending list until the agent's item for it shows ([`Host::first_message`]).
+    first: Option<IntentId>,
 }
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
@@ -219,7 +222,31 @@ impl Own {
                 _ => p.clone(),
             })
             .collect();
-        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, aside, scheduled }
+        Self {
+            typed: VecDeque::new(),
+            sent,
+            trees,
+            fork,
+            seat,
+            seated: None,
+            aside,
+            scheduled,
+            first: None,
+        }
+    }
+
+    /// The start's first message, once `actions` show the agent's item for it: it leaves the
+    /// pending list.
+    fn took_first(&mut self, actions: &[Action]) -> Option<IntentId> {
+        let first = self.first?;
+        let shown = actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::ItemStarted(item) | Action::ItemUpdated(item) | Action::ItemCompleted(item)
+                    if matches!(&item.body, ItemBody::User(m) if m.intent == Some(first))
+            )
+        });
+        shown.then(|| self.first.take()).flatten()
     }
 
     /// `pending`, an adapter's list, with the messages the worker holds put back after it.
@@ -440,7 +467,8 @@ impl Host {
         hosted.own.meta(&mut state.meta);
         state.pending.clone_from(&hosted.log.state().pending);
         state.to_review = hosted.log.state().to_review;
-        for pending in &mut state.pending {
+        let first = hosted.own.first;
+        for pending in state.pending.iter_mut().filter(|p| Some(p.intent) != first) {
             if pending.state == PendingState::Sending {
                 pending.state =
                     PendingState::Held { reason: super::compose::TYPED_NOT_SENT.to_owned() };
@@ -554,6 +582,22 @@ impl Host {
             typed.pop_front();
         }
         typed.push_back((id, text.to_owned()));
+    }
+
+    /// The first message of the start that opened `thread`'s agent, `pending`, given on the
+    /// agent's command line rather than typed: it shows in the thread's pending list, on its way,
+    /// from the start until the agent's item for it shows, so a client sees what was sent while
+    /// the agent is still opening (or held at a dialog of its own). Typed text matches it to its
+    /// item as [`Self::typed`] says.
+    pub fn first_message(&self, thread: ThreadId, pending: Pending) {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+        hosted.own.first = Some(pending.intent);
+        let mut list = hosted.log.state().pending.clone();
+        list.retain(|p| p.intent != pending.intent);
+        list.insert(0, pending);
+        apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(list)]);
     }
 
     /// Every turn edge any thread reaches from now on.
@@ -863,6 +907,15 @@ fn apply(
 ) -> Cursor {
     let edges = &heard.edges;
     hosted.own.mark(&mut actions);
+    if let Some(first) = hosted.own.took_first(&actions) {
+        let told = actions.iter().rev().find_map(|action| match action {
+            Action::PendingSet(pending) => Some(pending.clone()),
+            _ => None,
+        });
+        let mut pending = told.unwrap_or_else(|| hosted.log.state().pending.clone());
+        pending.retain(|p| p.intent != first);
+        actions.push(Action::PendingSet(pending));
+    }
     let first = hosted.log.cursor();
     let was_working = hosted.log.state().status.phase == Phase::Working;
     match hosted.log.append(&actions) {

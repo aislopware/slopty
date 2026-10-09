@@ -2311,9 +2311,11 @@ impl ThreadView {
             return (!draft.sent()).then(|| (agents.collect(), draft.place().clone()));
         }
         // At rest and unbriefed only: an agent at work on a turn whose rows have not come yet,
-        // or one a project briefed, is not asking the person anything.
+        // one a project briefed, or one with a message on its way (a start's first, while the
+        // agent opens), is not asking the person anything.
         if self.briefed
             || !self.rows.is_empty()
+            || !state.pending.is_empty()
             || self.in_subagent()
             || state.status.phase != Phase::Idle
         {

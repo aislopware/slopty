@@ -189,6 +189,23 @@ pub const IN_TERMINAL: &str = "terminal";
 /// its ticks ([`Observed::waited`]).
 pub const ASK_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// How long a Claude Code Slopty started may stay silent before the thread says it asks
+/// something in its terminal ([`Observed::unheard`]).
+///
+/// Its hooks run only once its own dialogs at start (the folder's trust, a project's
+/// `.mcp.json`) are answered, so their silence is the sign one waits; the screen is never read
+/// for it.
+pub const UNHEARD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a Claude Code held at a dialog of its own at start asks, as its thread says it.
+pub const ASKING_IN_TERMINAL: &str = "Claude Code is asking something in its terminal";
+
+/// The request of a Claude Code held at a dialog of its own at start ([`Observed::unheard`]).
+pub const UNHEARD_ASK: &str = "terminal-start";
+
+/// The kind of [`UNHEARD_ASK`]: input the agent waits for in its terminal.
+const INPUT: &str = "input";
+
 /// The request a block that began at `since` asks in the agent's own terminal.
 fn terminal_ask(since: WallMs) -> AskId {
     AskId(format!("terminal-{}", since.as_millis()))
@@ -373,6 +390,9 @@ pub struct Observed {
     /// What the agent asks in its own terminal with no prompt held here (nobody followed it,
     /// or no relay held it): a request answered only there, so the thread still shows it.
     in_terminal: Option<Request>,
+    /// What a Claude Code Slopty started asks in its terminal before any hook spoke
+    /// ([`Observed::unheard`]): open until the first hook.
+    unheard: Option<Request>,
     /// When the block a held prompt stood for began: that block is the prompt's, and asks
     /// nothing more in the terminal once the prompt is settled.
     held_block: Option<WallMs>,
@@ -476,6 +496,7 @@ impl Observed {
             status: None,
             open: Vec::new(),
             in_terminal: None,
+            unheard: None,
             held_block: None,
             blocked_kind: None,
             waiting_on: None,
@@ -511,6 +532,68 @@ impl Observed {
             self.meta.caps.insert(at, approvals);
         }
         self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
+        // Its hooks speak once its own dialog is answered, in its terminal.
+        if let Some(asked) = self.unheard.take() {
+            let by = Answerer { client: None, name: IN_TERMINAL.to_owned() };
+            let state = RequestState::Answered { by, choice: String::new() };
+            self.push(self.meta.id, Action::RequestResolved { id: asked.id, state });
+            let status = self.status.clone().unwrap_or(Status {
+                phase: Phase::Idle,
+                wait: None,
+                liveness: Liveness::Live,
+                since_ms: asked.opened_ms,
+            });
+            self.push(self.meta.id, Action::Status(status));
+        }
+    }
+
+    /// A Claude Code Slopty started, silent since it opened [`UNHEARD`] ago at `now`: it is held
+    /// at a dialog of its own (the folder's trust, a project's `.mcp.json`), which its hooks
+    /// wait behind. The thread asks the person to answer it there ([`ASKING_IN_TERMINAL`]), a
+    /// request answered only in the terminal, until the first hook.
+    pub fn unheard(&mut self, now: WallMs) -> Vec<Out> {
+        if self.hooked || self.unheard.is_some() || self.meta.terminal.is_none() {
+            return self.drain();
+        }
+        let request = Request {
+            id: AskId(UNHEARD_ASK.to_owned()),
+            item: None,
+            kind: INPUT.to_owned(),
+            title: ASKING_IN_TERMINAL.to_owned(),
+            text: None,
+            options: Vec::new(),
+            questions: Vec::new(),
+            proposed: None,
+            schema_json: None,
+            url: None,
+            state: RequestState::Open,
+            opened_ms: now,
+            until_ms: None,
+        };
+        self.unheard = Some(request.clone());
+        self.push(self.meta.id, Action::RequestOpened(Box::new(request)));
+        let status = self.status.clone().unwrap_or(Status {
+            phase: Phase::Idle,
+            wait: None,
+            liveness: Liveness::Live,
+            since_ms: now,
+        });
+        if let Some(status) = self.shown(Some(status)) {
+            self.push(self.meta.id, Action::Status(status));
+        }
+        self.drain()
+    }
+
+    /// `status` as the thread shows it: waiting on the person while its agent is held at a
+    /// dialog of its own ([`Self::unheard`]) and runs.
+    fn shown(&self, status: Option<Status>) -> Option<Status> {
+        let mut status = status?;
+        if let Some(asked) = self.unheard.as_ref().filter(|_| status.liveness == Liveness::Live) {
+            status.phase = Phase::NeedsYou;
+            status.wait = Some(Wait { kind: INPUT.to_owned(), text: asked.title.clone() });
+            status.since_ms = asked.opened_ms;
+        }
+        Some(status)
     }
 
     /// The session's own thread.
@@ -637,7 +720,16 @@ impl Observed {
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
         let status = Status { phase, wait, liveness, since_ms: event.since_ms };
         self.status = Some(status.clone());
-        self.push(self.meta.id, Action::Status(status.clone()));
+        // Gone before a hook spoke, it asks nothing any more.
+        if liveness != Liveness::Live
+            && let Some(asked) = self.unheard.take()
+        {
+            let state = RequestState::Withdrawn;
+            self.push(self.meta.id, Action::RequestResolved { id: asked.id, state });
+        }
+        if let Some(shown) = self.shown(Some(status.clone())) {
+            self.push(self.meta.id, Action::Status(shown));
+        }
         self.ask_in_terminal(event, &status);
         let mode = event.mode.as_ref().map(|m| m.name.clone());
         if mode.is_some() && mode != self.meters.mode {
@@ -996,7 +1088,8 @@ impl Observed {
     /// What the main thread holds that its transcript does not: told again after it began
     /// anew.
     fn again(&mut self) {
-        let mut actions: Vec<Action> = self.status.iter().cloned().map(Action::Status).collect();
+        let mut actions: Vec<Action> =
+            self.shown(self.status.clone()).into_iter().map(Action::Status).collect();
         if self.meters != Meters::default() {
             actions.push(Action::MetersSet(self.meters.clone()));
         }
@@ -1004,6 +1097,7 @@ impl Observed {
             self.open
                 .iter()
                 .chain(&self.in_terminal)
+                .chain(&self.unheard)
                 .cloned()
                 .map(|r| Action::RequestOpened(Box::new(r))),
         );

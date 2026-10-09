@@ -2255,3 +2255,24 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a_clone_lists_its_branches_and_origins}`, the `client_git_branches` and
     `worker_git_branches` goldens, `git::tests::a_branches_read_changes_nothing_and_is_kept`
     and `workspace::tests::thread_start::the_place_chip_starts_a_worktree_from_a_branch_picked`.
+
+- ✅ **A Claude Code start held at its own dialog keeps its message and says it asks in its
+  terminal** (2026-10-09, `.research/readiness-2026-10-08.md` rank 1). Claude Code may open on
+  a dialog of its own, such as the folder's trust or a project's `.mcp.json`, before it takes
+  the first message given on its command line. The thread then sat empty and at rest, so its
+  face asked "What should Claude Code do in …?" over a message already sent, and nothing said
+  that the terminal was waiting.
+  - *The message* shows in the thread's pending list from the start, on its way
+    (`Host::first_message`). It leaves the list when the agent's item for it shows, matched to
+    the start's intent as before. A thread with a pending message shows no hero question.
+  - *The signal is the hooks' silence.* Claude Code runs its hooks only after its own dialogs
+    are answered. A start no hook has spoken for in `observed::UNHEARD` (5 s) opens a request,
+    "Claude Code is asking something in its terminal" (`observed::UNHEARD_ASK`). The request
+    has nothing to answer in Slopty, so it reads *Needs you*, and its one button, "Answer in
+    the terminal", turns the tile to the terminal face. The first hook (`SessionStart` once
+    the dialog is answered, or `UserPromptSubmit`) settles it as answered there. An agent that
+    exits first withdraws it. The screen is never read, and nothing is typed into the dialog.
+  - Only a start Slopty made is timed: Slopty opened it with the hook relay, so silence means
+    something. A `claude` the person started by hand may have no hooks at all.
+  - Tests: `claude_start::a_start_held_at_its_own_dialog_says_so_once_its_hooks_are_silent`,
+    `agent_tile::a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_terminal`.
