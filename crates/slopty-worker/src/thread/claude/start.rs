@@ -19,6 +19,12 @@
 //!   spoken for in [`slopty_agent::observed::UNHEARD`] asks the person to answer it in the terminal
 //!   ([`slopty_agent::observed::ASKING_IN_TERMINAL`]) until the first hook. The silence is the
 //!   sign; the screen is never read.
+//! - **Trusted on the person's press.** A start in a folder Claude Code keeps no trust for, and
+//!   which the person may trust (not the home, nor above it), offers "Trust this folder" on that
+//!   request. Pressed ([`Starter::trust`]), the trust is written as the person's own "yes" is kept
+//!   (`slopty_agent::trust::trust_named`), and Claude Code, still at its dialog, is closed and
+//!   opened again as it was, on the same session: past the dialog it now skips, without a key typed
+//!   into it.
 //! - **The TUI is the agent.** The terminal is the person's: they can type into it at any time, and
 //!   closing it ends the agent.
 //! - **Once.** A start is acted on once per intent id: starts are taken one at a time, and a repeat
@@ -62,7 +68,43 @@ enum What {
     Start(Box<Start>, Option<Box<Seated>>),
     /// A thread branched off this one through this turn, or all of it.
     Fork { from: ThreadId, after: Option<TurnId> },
+    /// The folder of this thread's start trusted on the person's word, and its Claude Code,
+    /// held at the trust dialog, opened again.
+    Trust(ThreadId),
 }
+
+/// Where Claude Code keeps its trust, and whose home may never be trusted from here.
+#[derive(Clone, Debug)]
+pub struct TrustAt {
+    /// Claude Code's global config (`slopty_agent::trust::config_path`).
+    pub config: PathBuf,
+    /// The person's home.
+    pub home: PathBuf,
+}
+
+impl TrustAt {
+    /// This worker's person's: their home, and the config their `claude` reads.
+    #[must_use]
+    pub fn here() -> Self {
+        Self {
+            config: slopty_agent::trust::this_config_path(),
+            home: slopty_platform::dirs::home(),
+        }
+    }
+}
+
+/// A start that may be held at Claude Code's trust dialog, as it was opened, to open again
+/// once the person trusts its folder.
+#[derive(Debug)]
+struct Reopen {
+    args: Vec<String>,
+    native: String,
+    cwd: String,
+    at: Option<(SessionId, Vec<(String, String)>)>,
+}
+
+/// Starts kept to open again at most; the oldest goes first.
+const REOPENS_MAX: usize = 64;
 
 /// Starts Claude Code threads. Cheap to clone.
 #[derive(Clone, Debug)]
@@ -111,6 +153,18 @@ impl Starter {
         outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
     }
 
+    /// The person pressed "Trust this folder" on `thread`, a start held at a dialog of its own:
+    /// its folder is trusted for Claude Code on their word, and Claude Code, at its trust
+    /// dialog, is closed and opened again as it was. Once: a second press finds nothing held.
+    pub async fn trust(&self, thread: ThreadId) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        let ask = Ask { id: IntentId::new(), what: What::Trust(thread), reply };
+        if self.0.send(ask).is_err() {
+            return refused("Claude Code threads are not started here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
+    }
+
     /// Branch a new thread off the whole of `from`'s conversation for intent `id`, once: Claude
     /// Code resumes it into a new one (`--fork-session`) in a terminal of its own.
     pub async fn fork(&self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
@@ -133,30 +187,90 @@ pub fn spawn(
     terminals: Arc<dyn Terminals>,
     path: Option<OsString>,
     registry: PathBuf,
-    Asks(mut asks): Asks,
+    asks: Asks,
+) -> JoinHandle<()> {
+    spawn_trusting(host, driver, terminals, path, registry, (TrustAt::here(), asks))
+}
+
+/// [`spawn`], with the trust the person gives a start's folder kept where `trust` says, not in
+/// this worker's person's own config: a test's.
+pub fn spawn_trusting(
+    host: Host,
+    driver: Driver,
+    terminals: Arc<dyn Terminals>,
+    path: Option<OsString>,
+    registry: PathBuf,
+    (trust, Asks(mut asks)): (TrustAt, Asks),
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut reopens: Vec<(ThreadId, Reopen)> = Vec::new();
         while let Some(Ask { id, what, reply }) = asks.recv().await {
-            let outcome = if let Some(first) = host.started(id) {
-                first
-            } else {
-                let claude = Claude {
-                    driver: &driver,
-                    terminals: terminals.as_ref(),
-                    path: &path,
-                    registry: &registry,
-                };
-                let outcome = match &what {
-                    What::Start(start, seated) => {
-                        begin(&host, &claude, id, start, seated.as_deref()).await
+            let claude = Claude {
+                driver: &driver,
+                terminals: terminals.as_ref(),
+                path: &path,
+                registry: &registry,
+                trust: &trust,
+            };
+            let first = (!matches!(what, What::Trust(_))).then(|| host.started(id)).flatten();
+            let outcome = match (&what, first) {
+                (What::Trust(thread), _) => trusted(&host, &claude, *thread, &mut reopens).await,
+                (_, Some(first)) => first,
+                (What::Start(start, seated), None) => {
+                    let (outcome, reopen) =
+                        begin(&host, &claude, id, start, seated.as_deref()).await;
+                    if let (Outcome::Started { thread }, Some(reopen)) = (&outcome, reopen) {
+                        if reopens.len() >= REOPENS_MAX {
+                            reopens.remove(0);
+                        }
+                        reopens.push((*thread, reopen));
                     }
-                    What::Fork { from, after } => fork(&host, &claude, *from, *after).await,
-                };
-                host.record_start(id, outcome)
+                    host.record_start(id, outcome)
+                }
+                (What::Fork { from, after }, None) => {
+                    host.record_start(id, fork(&host, &claude, *from, *after).await)
+                }
             };
             let _gone = reply.send(outcome);
         }
     })
+}
+
+/// Trust the folder of `thread`'s start on the person's word, and open its Claude Code again
+/// as it was opened, in place of the one held at the trust dialog.
+async fn trusted(
+    host: &Host,
+    claude: &Claude<'_>,
+    thread: ThreadId,
+    reopens: &mut Vec<(ThreadId, Reopen)>,
+) -> Outcome {
+    let Some(at) = reopens.iter().position(|(t, _)| *t == thread) else {
+        return refused("This start is not held at Claude Code's trust dialog");
+    };
+    let (_, reopen) = reopens.remove(at);
+    let (config, home, cwd) =
+        (claude.trust.config.clone(), claude.trust.home.clone(), PathBuf::from(&reopen.cwd));
+    let written =
+        tokio::task::spawn_blocking(move || slopty_agent::trust::trust_named(&config, &home, &cwd))
+            .await;
+    match written {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return refused(&format!("The folder was not trusted: {e}")),
+        Err(e) => return refused(&format!("The folder was not trusted: {e}")),
+    }
+    let terminal = host.state(thread).and_then(|(state, _)| state.meta.terminal);
+    if let Some(terminal) = terminal {
+        claude.terminals.close(terminal).await;
+    }
+    // The session has one writer: the held Claude Code is gone before its session opens again.
+    if !ended(host, thread).await {
+        return refused("Claude Code at its trust dialog did not end; answer it in its terminal");
+    }
+    let Reopen { args, native, cwd, at } = reopen;
+    match open(claude, args, native, &cwd, at, None).await {
+        Ok(_) => Outcome::Done,
+        Err(why) => refused(&why),
+    }
 }
 
 /// What opening the person's `claude` takes: the driver that observes it, the terminals it
@@ -167,14 +281,31 @@ struct Claude<'a> {
     path: &'a Option<OsString>,
     /// Claude Code's registry of its live sessions.
     registry: &'a Path,
+    /// Where Claude Code keeps trust.
+    trust: &'a TrustAt,
 }
 
+/// Start Claude Code as `start` says: its outcome, and how to open it again should it be held
+/// at its trust dialog, when the person may trust its folder.
 async fn begin(
     host: &Host,
     claude: &Claude<'_>,
     id: IntentId,
     start: &Start,
     seated: Option<&Seated>,
+) -> (Outcome, Option<Reopen>) {
+    let mut reopen = None;
+    let outcome = begin_as(host, claude, id, start, seated, &mut reopen).await;
+    (outcome, reopen)
+}
+
+async fn begin_as(
+    host: &Host,
+    claude: &Claude<'_>,
+    id: IntentId,
+    start: &Start,
+    seated: Option<&Seated>,
+    reopen: &mut Option<Reopen>,
 ) -> Outcome {
     if !start.agent.is(AgentId::CLAUDE_CODE) {
         return refused(&format!("{} is not Claude Code", start.agent.0));
@@ -230,7 +361,12 @@ async fn begin(
         args.insert(0, format!("--append-system-prompt={role}"));
     }
     let at = seated.map(|seated| (seated.seat, host.env_of(seated)));
-    let thread = match open(claude, args, native, &start.cwd, at).await {
+    let trust = untrusted(claude.trust, &start.cwd).await;
+    if trust.is_some() {
+        let (args, native, cwd) = (args.clone(), native.clone(), start.cwd.clone());
+        *reopen = Some(Reopen { args, native, cwd, at: at.clone() });
+    }
+    let thread = match open(claude, args, native, &start.cwd, at, trust).await {
         Ok(thread) => thread,
         Err(why) => return refused(&why),
     };
@@ -283,7 +419,7 @@ async fn fork(host: &Host, claude: &Claude<'_>, from: ThreadId, after: Option<Tu
         return refused(&format!("{} is no Claude Code session", state.meta.native));
     };
     let cwd = state.meta.cwd.clone();
-    let thread = match open(claude, args, native, &cwd, None).await {
+    let thread = match open(claude, args, native, &cwd, None, None).await {
         Ok(thread) => thread,
         Err(why) => return refused(&why),
     };
@@ -291,15 +427,56 @@ async fn fork(host: &Host, claude: &Claude<'_>, from: ThreadId, after: Option<Tu
     Outcome::Started { thread }
 }
 
+/// How long a Claude Code closed at its trust dialog may take to be seen gone.
+const ENDING: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether `thread`'s Claude Code is seen gone within [`ENDING`].
+async fn ended(host: &Host, thread: ThreadId) -> bool {
+    let mut table = host.table_watch();
+    let gone = async {
+        loop {
+            let live = host.state(thread).is_some_and(|(state, _)| {
+                state.status.liveness == slopty_proto::thread::Liveness::Live
+            });
+            if !live {
+                return;
+            }
+            if table.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(ENDING, gone).await.is_ok()
+}
+
+/// The folder whose trust Claude Code would keep for a start in `cwd`, when it keeps none for
+/// it yet and the person may give it from here (not the home, nor a folder holding it).
+async fn untrusted(trust: &TrustAt, cwd: &str) -> Option<String> {
+    let (trust, cwd) = (trust.clone(), PathBuf::from(cwd));
+    tokio::task::spawn_blocking(move || {
+        let offered = !slopty_agent::trust::trusted(&trust.config, &cwd)
+            && slopty_agent::trust::trustable(&trust.home, &cwd);
+        offered
+            .then(|| slopty_agent::trust::key(&cwd).ok())
+            .flatten()
+            .map(|key| key.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Open the person's `claude` with `args` in folder `cwd`, in a terminal of its own, and begin
 /// the thread of its conversation `native`; why not, in words. `at` a server task's seat, the
-/// terminal opens under the seat's id with every variable of the seat.
+/// terminal opens under the seat's id with every variable of the seat. `trust` the folder the
+/// person may trust, should it be held at its dialog.
 async fn open(
     Claude { driver, terminals, path, .. }: &Claude<'_>,
     args: Vec<String>,
     native: String,
     cwd: &str,
     at: Option<(SessionId, Vec<(String, String)>)>,
+    trust: Option<String>,
 ) -> Result<ThreadId, String> {
     let installed = crate::facts::installed("claude", (*path).clone())
         .await
@@ -317,7 +494,7 @@ async fn open(
     let terminal = opened.map_err(|e| format!("Its terminal did not open: {e}"))?;
     tracing::info!(%terminal, native, cwd, "started Claude Code");
     driver
-        .begin(terminal, native, cwd.to_owned())
+        .begin(terminal, native, cwd.to_owned(), trust)
         .await
         .ok_or_else(|| "Claude Code started, but nothing observes it here".to_owned())
 }

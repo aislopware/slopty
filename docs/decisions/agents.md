@@ -2676,3 +2676,31 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     start and gets the thread, with the setup run once. Also
     `a_start_on_its_way_closes_and_outlives_its_link` (slopty-ui): the tile waits, the link
     back resends the same intent, and the answer fills the tile.
+
+- ✅ **A start held at Claude Code's trust dialog is trusted on the person's press** (2026-10-10,
+  readiness 10-10 rank 13, the worker's half). A start in a folder Claude Code had not trusted
+  stopped at its trust dialog, and the thread asked the person to answer in the terminal. That
+  is clumsy from a phone.
+  - **The offer.** The request a silent start opens (`UNHEARD_ASK`) now offers "Trust this
+    folder" (`observed::TRUST_CHOICE`). Its reach is the folder Claude Code keeps the trust
+    under (`trust::key`: the repository's root, a worktree's main checkout). It is offered only
+    when Claude Code keeps no trust there yet (`trust::trusted`) and the folder may be trusted
+    from here (`trust::trustable`). The same request still says to answer in the terminal, for
+    any other dialog of Claude Code's own.
+  - **The word.** Trust is the person's word, so it is written only on their press
+    (`trust::trust_named`), the way their own "yes" is kept: one flag added to Claude Code's
+    config, nothing else moved. Unlike the trust Slopty gives its own folders unasked, it may be
+    any folder, but never the home nor a folder holding it, whose trust would cover every folder
+    below.
+  - **Past the dialog.** The dialog is Claude Code's own, and Slopty types no key into it. So
+    once the trust is kept, the Claude Code held at the dialog is closed and opened again
+    exactly as it was started, on the same `--session-id`. The new one skips the dialog, and the
+    same thread goes on in its new terminal. The starts' task does it once
+    (`claude::start::Starter::trust`), from the opening it kept for that start. A second press
+    finds nothing held. The intent is `Accepted` at once, and the request settles when the
+    agent's first hook speaks.
+  - Tests: `trust::tests::a_named_folder_is_trusted_but_never_the_home_or_above_it`
+    (slopty-agent: the home, its parent and `/` refused with the config untouched);
+    `trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again` (slopty-worker
+    `tests/claude_start.rs`: the offer and its reach, the flag kept, the same command opened
+    again and the thread in its new terminal, a second press refused).

@@ -86,10 +86,12 @@ enum Input {
     /// The whole of a clipped text or picture, asked through a [`Driver`].
     Expand(ContentRef, oneshot::Sender<Expanded>),
     /// Slopty started Claude Code in the terminal on session `native`, in `cwd`: its thread
-    /// begins now, before the agent says anything, and is answered.
+    /// begins now, before the agent says anything, and is answered. `trust` names the folder
+    /// the person may trust should it be held at its dialog ([`observed::TRUST_CHOICE`]).
     Begin {
         native: String,
         cwd: String,
+        trust: Option<String>,
         reply: oneshot::Sender<Option<ThreadId>>,
     },
 }
@@ -129,10 +131,18 @@ impl Driver {
     }
 
     /// Slopty started Claude Code in terminal `session` on session `native`, in `cwd`: observe
-    /// it from now on, its thread begun at once. The thread, or `None` when nothing observes.
-    pub async fn begin(&self, session: SessionId, native: String, cwd: String) -> Option<ThreadId> {
+    /// it from now on, its thread begun at once. Should it be held at a dialog of its own, its
+    /// thread offers to trust the folder `trust` names, where that is given
+    /// ([`observed::TRUST_CHOICE`]). The thread, or `None` when nothing observes.
+    pub async fn begin(
+        &self,
+        session: SessionId,
+        native: String,
+        cwd: String,
+        trust: Option<String>,
+    ) -> Option<ThreadId> {
         let (reply, rx) = oneshot::channel();
-        self.0.send((session, Input::Begin { native, cwd, reply })).ok()?;
+        self.0.send((session, Input::Begin { native, cwd, trust, reply })).ok()?;
         rx.await.ok().flatten()
     }
 }
@@ -296,6 +306,7 @@ async fn observe(
         hooks: 0,
         meters: seen.borrow().meters.clone(),
         silent_since: None,
+        trust: None,
     };
     // The hook that brought the session here was heard before this watched for changes.
     let heard = seen.borrow().cwd.clone();
@@ -331,10 +342,11 @@ async fn observe(
                 }
                 Some(Input::Permission(event)) => on.permission(&event).await,
                 Some(Input::Expand(content, reply)) => on.expand(&content, reply),
-                Some(Input::Begin { native, cwd, reply }) => {
+                Some(Input::Begin { native, cwd, trust, reply }) => {
                     if on.cwd.is_empty() {
                         on.cwd = cwd;
                     }
+                    on.trust = trust;
                     on.begin(&native);
                     // Slopty opened it with the hook relay: until a hook speaks, it may be held
                     // at a dialog of its own.
@@ -391,6 +403,8 @@ struct Session {
     /// When Slopty opened the Claude Code here, while no hook has spoken since
     /// ([`observed::UNHEARD`]).
     silent_since: Option<Instant>,
+    /// The folder the person may trust, should Claude Code here be held at its dialog.
+    trust: Option<String>,
 }
 
 impl Session {
@@ -462,7 +476,7 @@ impl Session {
         self.silent_since = None;
         if let Some(observed) = self.observed.as_mut() {
             tracing::info!(terminal = %self.terminal, "Claude Code is silent at its start");
-            take(&self.host, observed.unheard(WallMs::now()));
+            take(&self.host, observed.unheard(WallMs::now(), self.trust.as_deref()));
         }
     }
 

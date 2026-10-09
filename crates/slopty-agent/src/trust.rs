@@ -19,10 +19,14 @@
 //! - Trust in the home directory itself lasts one session and is never kept, so it is refused.
 //!
 //! Trust is the person's word that a folder's own settings, hooks and tools may run, so Slopty
-//! keeps it only for folders it made: the key must lie strictly inside the folder the caller
-//! names as Slopty's own (`within`). A folder an agent points at elsewhere, an ancestor that
-//! would cover the person's folders below it, or a worktree whose `.git` file leads to a
+//! keeps it unasked only for folders it made: the key must lie strictly inside the folder the
+//! caller names as Slopty's own (`within`). A folder an agent points at elsewhere, an ancestor
+//! that would cover the person's folders below it, or a worktree whose `.git` file leads to a
 //! repository outside is refused, since trusting its key would trust the person's repository.
+//!
+//! Any other folder is trusted only on the person's own press ([`trust_named`], "Trust this
+//! folder" on a start held at Claude Code's dialog). Even then never the home, nor a folder that
+//! holds it: its trust would cover every folder of the person's below it.
 //! - Hooks wait for trust (<https://code.claude.com/docs/en/hooks>, "Workspace trust").
 //!
 //! The edit only adds: nothing in the config is removed or changed but the one flag. A config
@@ -148,6 +152,63 @@ pub fn trust(config: &Path, home: &Path, folder: &Path, within: &Path) -> io::Re
             "Claude Code never keeps trust in the home directory",
         ));
     }
+    write(config, &key)
+}
+
+/// Mark `folder` trusted in the config at `config` on the person's own word: a folder they
+/// started an agent in and pressed "Trust this folder" for. [`Outcome::Unchanged`] when it was
+/// already.
+///
+/// Refused when the path its trust is kept under ([`key`]) is the home of `home` or a folder
+/// that holds it ([`trustable`]).
+///
+/// # Errors
+///
+/// As [`trust`], with `PermissionDenied` for the home or a folder holding it.
+pub fn trust_named(config: &Path, home: &Path, folder: &Path) -> io::Result<Outcome> {
+    let key = key(folder)?;
+    if !holds_no_home(&key, home) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is the home or holds it: its trust would cover every folder below it",
+                key.display()
+            ),
+        ));
+    }
+    write(config, &key)
+}
+
+/// Whether the person may trust `folder` from Slopty ([`trust_named`]): the path its trust is
+/// kept under is neither the home of `home` nor a folder holding it. No folder that is not there.
+#[must_use]
+pub fn trustable(home: &Path, folder: &Path) -> bool {
+    key(folder).is_ok_and(|key| holds_no_home(&key, home))
+}
+
+/// Whether Claude Code keeps `folder` trusted in the config at `config`.
+///
+/// That is the flag set under the path its trust is kept under. Trust Claude Code reads from a
+/// folder above it (outside a repository) is not looked for, so this may say no for a folder
+/// Claude Code trusts.
+#[must_use]
+pub fn trusted(config: &Path, folder: &Path) -> bool {
+    let Ok(key) = key(folder) else { return false };
+    let Some(key) = key.to_str() else { return false };
+    let Ok(read) = std::fs::read(config) else { return false };
+    let Ok(doc) = serde_json::from_slice::<Value>(&read) else { return false };
+    doc.get("projects").and_then(|p| p.get(key)).and_then(|p| p.get(ACCEPTED))
+        == Some(&Value::Bool(true))
+}
+
+/// Whether `key` is neither the home of `home` nor a folder that holds it, both resolved.
+fn holds_no_home(key: &Path, home: &Path) -> bool {
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    !home.starts_with(key)
+}
+
+/// Set the flag for `key` in the config at `config`, as [`trust`] says.
+fn write(config: &Path, key: &Path) -> io::Result<Outcome> {
     let key = key.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "the folder's path is not UTF-8")
     })?;
@@ -351,6 +412,31 @@ mod tests {
         let plain = base.join("plain/folder");
         std::fs::create_dir_all(&plain).expect("plain");
         assert_eq!(key(&plain).expect("key"), plain);
+    }
+
+    /// A folder the person names is trusted on their word, anywhere but the home and the
+    /// folders that hold it, whose trust would cover all of theirs below: those are refused and
+    /// the config left as it was. What is kept is read back as trusted.
+    #[test]
+    fn a_named_folder_is_trusted_but_never_the_home_or_above_it() {
+        let h = home_with("{}");
+        let work = h.home.join("src/atlas");
+        std::fs::create_dir_all(&work).expect("work");
+        let above = h.home.parent().expect("above the home").to_path_buf();
+        for folder in [h.home.clone(), above, PathBuf::from("/")] {
+            assert!(!trustable(&h.home, &folder), "{}", folder.display());
+            let err = trust_named(&h.config, &h.home, &folder).expect_err("refused");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{}: {err}", folder.display());
+        }
+        assert_eq!(std::fs::read_to_string(&h.config).expect("read"), "{}", "untouched");
+
+        assert!(trustable(&h.home, &work));
+        assert!(!trusted(&h.config, &work), "not yet");
+        let named = trust_named(&h.config, &h.home, &work).expect("trusted");
+        assert_eq!(named, Outcome::Changed);
+        assert!(trusted(&h.config, &work), "read back");
+        let again = trust_named(&h.config, &h.home, &work).expect("again");
+        assert_eq!(again, Outcome::Unchanged);
     }
 
     /// Trust stays inside the folders Slopty makes: a folder elsewhere, the folder itself (which

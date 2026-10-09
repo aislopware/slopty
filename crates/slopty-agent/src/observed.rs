@@ -207,6 +207,13 @@ pub const ASKING_IN_TERMINAL: &str = "Claude Code is asking something in its ter
 /// The request of a Claude Code held at a dialog of its own at start ([`Observed::unheard`]).
 pub const UNHEARD_ASK: &str = "terminal-start";
 
+/// The choice on [`UNHEARD_ASK`] that trusts the start's folder for Claude Code and starts it
+/// again past its trust dialog (`slopty_agent::trust::trust_named`).
+pub const TRUST_CHOICE: &str = "trust";
+
+/// What [`TRUST_CHOICE`] says.
+pub const TRUST_LABEL: &str = "Trust this folder";
+
 /// The kind of [`UNHEARD_ASK`]: input the agent waits for in its terminal.
 const INPUT: &str = "input";
 
@@ -558,8 +565,10 @@ impl Observed {
     /// A Claude Code Slopty started, silent since it opened [`UNHEARD`] ago at `now`: it is held
     /// at a dialog of its own (the folder's trust, a project's `.mcp.json`), which its hooks
     /// wait behind. The thread asks the person to answer it there ([`ASKING_IN_TERMINAL`]), a
-    /// request answered only in the terminal, until the first hook.
-    pub fn unheard(&mut self, now: WallMs) -> Vec<Out> {
+    /// request answered in the terminal, until the first hook. `trust` names the folder whose
+    /// trust Claude Code keeps for the start when that is not kept yet and the person may give
+    /// it here: the request then offers [`TRUST_CHOICE`] too, with the folder as its reach.
+    pub fn unheard(&mut self, now: WallMs, trust: Option<&str>) -> Vec<Out> {
         if self.hooked || self.unheard.is_some() || self.meta.terminal.is_none() {
             return self.drain();
         }
@@ -569,7 +578,16 @@ impl Observed {
             kind: INPUT.to_owned(),
             title: ASKING_IN_TERMINAL.to_owned(),
             text: None,
-            options: Vec::new(),
+            options: trust
+                .map(|folder| Choice {
+                    id: TRUST_CHOICE.to_owned(),
+                    label: TRUST_LABEL.to_owned(),
+                    effect: Effect::Allow,
+                    scope: Some(folder.to_owned()),
+                    stops: false,
+                })
+                .into_iter()
+                .collect(),
             questions: Vec::new(),
             proposed: None,
             schema_json: None,

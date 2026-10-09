@@ -115,6 +115,8 @@ mod claude_start {
         starter: claude::start::Starter,
         /// The daemon's broadcast, kept open while the rig lives, and its agent reports.
         events: (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
+        /// Claude Code's config, in the test's own home.
+        config: PathBuf,
     }
 
     impl Rig {
@@ -141,8 +143,24 @@ mod claude_start {
             let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(&terminals);
             let path = Some(programs.clone().into_os_string());
             let registry = root.join("registry");
-            drop(claude::start::spawn(host.clone(), driver, opened, path, registry, asks));
-            Self { dir, work, programs, host, terminals, sources, starter, events }
+            // Claude Code's config in the test's own home: the person's is never read.
+            let trust = claude::start::TrustAt {
+                config: root.join(".claude.json"),
+                home: root.join("home"),
+            };
+            std::fs::write(&trust.config, "{}").unwrap();
+            let config = trust.config.clone();
+            let spawned = claude::start::spawn_trusting;
+            drop(spawned(host.clone(), driver, opened, path, registry, (trust, asks)));
+            Self { dir, work, programs, host, terminals, sources, starter, events, config }
+        }
+
+        /// Claude Code keeps the work folder trusted, as the person's "yes" would have.
+        fn trust_work(&self) {
+            let key = self.work.to_string_lossy().into_owned();
+            let config =
+                serde_json::json!({ "projects": { key: { "hasTrustDialogAccepted": true } } });
+            std::fs::write(&self.config, config.to_string()).unwrap();
         }
 
         fn start(&self, prompt: Option<&str>) -> Start {
@@ -283,6 +301,8 @@ mod claude_start {
     #[tokio::test]
     async fn a_start_held_at_its_own_dialog_says_so_once_its_hooks_are_silent() {
         let rig = Rig::new();
+        // Trusted already: the dialog it is held at is another of its own.
+        rig.trust_work();
         let prompt = first_message("edit");
         let id = IntentId::new();
         let opened_at = std::time::Instant::now();
@@ -316,6 +336,55 @@ mod claude_start {
         let state =
             until(&rig.host, thread, |s| !users(s).is_empty() && s.pending.is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
+    }
+
+    /// A start in a folder Claude Code keeps no trust for, held at its dialog, offers to trust
+    /// the folder. Pressed, the trust is kept in Claude Code's config as the person's own "yes"
+    /// is, and Claude Code is opened again exactly as it was, on the same session, in place of
+    /// the one held: the same thread, in its new terminal. A second press finds nothing held.
+    #[tokio::test]
+    async fn trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again() {
+        let rig = Rig::new();
+        let prompt = first_message("edit");
+        let outcome = rig.starter.start(IntentId::new(), rig.start(Some(&prompt))).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let state = until(&rig.host, thread, |s| s.open_requests().next().is_some()).await;
+        let asked: Vec<_> = state.open_requests().collect();
+        let [asked] = asked.as_slice() else { panic!("one request: {asked:?}") };
+        let offered: Vec<_> = asked
+            .options
+            .iter()
+            .map(|o| (o.id.as_str(), o.label.as_str(), o.scope.clone()))
+            .collect();
+        let work = rig.work.to_string_lossy().into_owned();
+        assert_eq!(
+            offered,
+            [(observed::TRUST_CHOICE, observed::TRUST_LABEL, Some(work.clone()))],
+            "the folder its trust is kept under"
+        );
+
+        let first = rig.opened()[0].3;
+        let pressed = tokio::spawn({
+            let starter = rig.starter.clone();
+            async move { starter.trust(thread).await }
+        });
+        // The held Claude Code, closed, ends before its session opens again.
+        gone(&rig, first, &thread_native(&rig, thread));
+        assert_eq!(pressed.await.unwrap(), Outcome::Done);
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&rig.config).unwrap()).unwrap();
+        assert_eq!(config["projects"][&work]["hasTrustDialogAccepted"], true, "kept");
+        let opened = rig.opened();
+        let [(first, first_cwd, ..), (again, again_cwd, _, terminal)] = opened.as_slice() else {
+            panic!("opened twice: {opened:?}")
+        };
+        assert_eq!((again, again_cwd), (first, first_cwd), "as it was, on the same session");
+        let state = until(&rig.host, thread, |s| s.meta.terminal == Some(*terminal)).await;
+        assert_eq!(state.meta.id, thread, "the same thread, in its new terminal");
+
+        let twice = rig.starter.trust(thread).await;
+        assert!(matches!(twice, Outcome::Refused { .. }), "{twice:?}");
+        assert_eq!(rig.opened().len(), 2, "nothing opened again");
     }
 
     /// A server task's thread opens Claude Code in a terminal under the seat, with the seat's

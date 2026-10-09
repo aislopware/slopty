@@ -1094,6 +1094,9 @@ fn decide(
         let reason = "the thread's agent runs in no terminal here".to_owned();
         return (refused(reason), Vec::new());
     };
+    if let Some(trusting) = trust_pressed(threads, state, intent) {
+        return (trusting, Vec::new());
+    }
     if let Some(decided) = threads.composer.decide(state, id, intent) {
         return decided;
     }
@@ -1119,6 +1122,34 @@ fn decide(
         _ => intent.unsupported(),
     };
     (outcome, Vec::new())
+}
+
+/// "Trust this folder" pressed on a Claude Code start held at a dialog of its own, where the
+/// request offers it: the folder is trusted and Claude Code opened again past the dialog, on
+/// the starts' own task ([`claude::start::Starter::trust`]). Taken at once; the request settles
+/// when the agent's hooks first speak. `None` for any other intent.
+fn trust_pressed(threads: &Threads, state: &ThreadState, intent: &Intent) -> Option<Outcome> {
+    let Intent::Answer { ask, choice, .. } = intent else { return None };
+    if ask.0 != slopty_agent::observed::UNHEARD_ASK
+        || choice != slopty_agent::observed::TRUST_CHOICE
+    {
+        return None;
+    }
+    let offered = state
+        .requests
+        .iter()
+        .any(|r| r.id == *ask && r.is_open() && r.options.iter().any(|o| o.id == *choice));
+    if !offered {
+        return Some(refused("This start offers no trust to give".to_owned()));
+    }
+    let (starts, thread) = (threads.claude_start.clone(), state.meta.id);
+    drop(tokio::spawn(async move {
+        let outcome = starts.trust(thread).await;
+        if !matches!(outcome, Outcome::Done) {
+            tracing::warn!(%thread, ?outcome, "a folder was not trusted");
+        }
+    }));
+    Some(Outcome::Accepted)
 }
 
 /// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
