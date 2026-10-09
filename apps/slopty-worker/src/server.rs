@@ -305,7 +305,7 @@ async fn session(
                         Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
                     }
                 }
-                // A yes or no nobody here can answer waits for a pocketed phone while one can.
+                // A prompt nobody here can answer waits for a pocketed phone while one can.
                 Ok(FromServer::Pushes(pushed)) => crate::threads::hold::pushed(daemon, pushed),
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
                 Err(NetError::Closed) => break "the server closed the link",

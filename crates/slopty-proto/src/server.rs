@@ -368,11 +368,12 @@ pub enum FromServer {
     Present(Vec<crate::thread::attention::Present>),
     /// For a client: a notice the server picked it to show, from where the person is.
     Notice(Box<crate::thread::attention::Notice>),
-    /// For a worker: whether a phone the server pushes to can answer a yes or no while no client
-    /// is linked (pushing is set up, and a phone is known). While it can, the worker holds such
-    /// a prompt for it up to the hook's own wait, and takes the answer the phone sends through
-    /// the server ([`crate::orchestration::Verb::AnswerRequest`]). Sent after the welcome and
-    /// on every change.
+    /// For a worker: whether a phone the server pushes to can answer while no client is linked
+    /// (pushing is set up, and a phone is known). While it can, the worker holds any prompt
+    /// nobody follows for it, up to the hook's own wait: a yes or no takes the answer the
+    /// phone's note sends through the server ([`crate::orchestration::Verb::AnswerRequest`]),
+    /// and a plan or a question is answered in the thread the note opens. Sent after the
+    /// welcome and on every change.
     Pushes(bool),
 }
 

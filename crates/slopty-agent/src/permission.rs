@@ -140,7 +140,7 @@ const ASKS_THE_PERSON: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 ///
 /// Such a prompt may be answered from a notification or the inbox, without the conversation in
 /// view. A question wants its answers and a plan wants reading, so those wait for the
-/// conversation face or the TUI.
+/// conversation face (a pocketed phone's among them, opened from its note) or the TUI.
 #[must_use]
 pub fn approvable(hook: &Hook) -> bool {
     hook.tool_name.as_deref().is_some_and(|tool| !ASKS_THE_PERSON.contains(&tool))

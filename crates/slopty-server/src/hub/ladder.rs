@@ -650,8 +650,8 @@ impl Hub {
     }
 }
 
-/// Tell every worker linked whether a pocketed phone can answer a yes or no, once that moved:
-/// while one can, a worker holds such a prompt for it ([`FromServer::Pushes`]).
+/// Tell every worker linked whether a pocketed phone can answer, once that moved: while one
+/// can, a worker holds for it any prompt nobody follows ([`FromServer::Pushes`]).
 fn say_pushes(state: &mut State) {
     let now = state.board.phones.answerable();
     if state.board.phones.said == now {

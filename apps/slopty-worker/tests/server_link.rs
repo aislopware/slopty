@@ -379,7 +379,8 @@ mod tests {
     /// While the server says a pocketed phone can answer, a yes or no Claude Code asks with no
     /// client linked is held for the phone rather than handed to the TUI at once: the thread's
     /// row shows it to the server, which pushes it, and the person's answer from the phone comes
-    /// back through the server (`AnswerRequest`) to the waiting relay. Once the server says no
+    /// back through the server (`AnswerRequest`) to the waiting relay. A plan to confirm is
+    /// held for the phone as long as the relay waits, then handed back. Once the server says no
     /// phone can, the next one goes straight back to the TUI.
     #[tokio::test]
     async fn a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server() {
@@ -460,6 +461,44 @@ mod tests {
             panic!("{reply:?}")
         };
         assert!(matches!(decision, Decision::Allow { .. }), "{decision:?}");
+
+        // A plan to confirm waits for the phone too, whose note opens its thread: as long as the
+        // relay waits, and then it goes back to the TUI undecided.
+        let mut plan = ask.clone();
+        plan["tool_name"] = "ExitPlanMode".into();
+        plan["tool_input"] = serde_json::json!({ "plan": "1. Read.\n2. Write." });
+        plan["permission_suggestions"] = serde_json::Value::Null;
+        let wait = Duration::from_secs(4);
+        let req = CtlRequest::Permission(PermissionAsk {
+            session: term.session,
+            payload: plan.to_string(),
+            wait_ms: u64::try_from(wait.as_millis()).unwrap(),
+        });
+        let asked_at = std::time::Instant::now();
+        let held = {
+            let dir = dir.path().to_owned();
+            tokio::spawn(async move { ctl(&dir, &req).await })
+        };
+        let mut kind = None;
+        while kind.as_deref() != Some(slopty_proto::thread::Request::PLAN) {
+            let msg = tokio::time::timeout(STEP, peer.rx.recv()).await.unwrap().unwrap();
+            if let ToServer::Threads(
+                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+            ) = &msg
+            {
+                kind = rows
+                    .iter()
+                    .find(|r| r.id == thread)
+                    .and_then(|r| r.requests.first())
+                    .map(|q| q.kind.clone());
+            }
+            peer.heard.push(msg);
+        }
+        assert!(!held.is_finished(), "held for the phone, with no client linked");
+        let reply = tokio::time::timeout(STEP, held).await.unwrap().unwrap();
+        assert_eq!(reply, CtlReply::Permission(PermissionAnswer { decision: Decision::Pass }));
+        let waited = asked_at.elapsed();
+        assert!(waited >= wait.saturating_sub(Duration::from_secs(2)), "{waited:?}");
 
         peer.tx.send(&FromServer::Pushes(false)).await.unwrap();
         // The link reads in order: a verb answered after it means the word was taken.

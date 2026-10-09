@@ -11,9 +11,11 @@
 //!
 //! A yes or no nobody follows is held for the clients that keep the thread table, where every
 //! request shows (a notification's "Allow", the inbox), for [`APPROVAL_HOLD`] at most. While
-//! the server says a pocketed phone can answer it (`FromServer::Pushes`), it is held for that
-//! phone as long as the relay waits instead: the person has to reach the phone, and a note's
-//! Allow reaches the server's link first, which answers it as orchestration does.
+//! the server says a pocketed phone can answer (`FromServer::Pushes`), any prompt nobody
+//! follows is held for that phone as long as the relay waits instead: the person has to reach
+//! the phone. A note's Allow reaches the server's link first, which answers it as
+//! orchestration does; a plan to confirm or a question is answered in the thread the note
+//! opens, which the phone then follows.
 //!
 //! A call auto mode declined (`PermissionDenied`) comes the same way. The thread is told of the
 //! decline whoever follows it, and when the person may let the model try again
@@ -153,7 +155,7 @@ fn hold_for(reach: Reach, relay_wait: Duration) -> Duration {
     }
 }
 
-/// The server says whether a pocketed phone can answer a yes or no; once none can, every
+/// The server says whether a pocketed phone can answer; once none can, every
 /// prompt nobody else can answer goes back to the TUI.
 pub fn pushed(daemon: &Daemon, pushed: bool) {
     let released = daemon.follows.lock().holds.set_pushed(pushed);
@@ -266,10 +268,11 @@ mod tests {
         assert!(APPROVAL_HOLD < relay, "the TUI asks well before Claude Code gives up");
     }
 
-    /// A yes or no held for a pocketed phone waits as long as the relay does, less the margin
-    /// its answer needs to reach the relay: the person has to reach the phone first.
+    /// A prompt held for a pocketed phone (a yes or no, a plan, a question) waits as long as
+    /// the relay does, less the margin its answer needs to reach the relay: the person has to
+    /// reach the phone first.
     #[test]
-    fn a_yes_or_no_is_held_for_a_pushed_phone_up_to_the_relays_wait() {
+    fn a_prompt_is_held_for_a_pushed_phone_up_to_the_relays_wait() {
         let relay = permission::WAIT;
         assert_eq!(hold_for(Reach::Pushed, relay), relay.saturating_sub(HOLD_MARGIN));
         assert!(hold_for(Reach::Pushed, relay) > APPROVAL_HOLD, "longer than a linked approver's");

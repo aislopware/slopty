@@ -2458,3 +2458,24 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     the daemon's `threads::an_auto_mode_decline_is_said_and_may_be_let_try_again` (the relay
     as Claude Code runs it, a follower answering), and
     `conversation::thread::tests::doors::auto_modes_decline_is_let_try_again_or_kept`.
+
+- ✅ **A plan or a question waits for a pocketed phone too** (readiness rank 8, 2026-10-09).
+  A yes or no nobody followed was already held for a phone the server pushes to, for as long
+  as the relay waits, and its note's Allow answered it through the server. A plan to confirm
+  (`ExitPlanMode`) or a question (`AskUserQuestion`) was held only for followers. With the
+  phone in a pocket it went back to the TUI at once, so an orchestrator's plan could not be
+  confirmed ("Confirm & start") from the phone.
+  - **Now.** While the server says a phone can answer (`FromServer::Pushes`), any prompt
+    nobody follows is held for it, up to the relay's wait less the margin (`Holds::reach`
+    gives `Reach::Pushed` whatever the prompt). The note opens the thread. The phone then
+    follows it and answers the plan or the question there as any follower does. A note's
+    button still answers only a yes or no: a plan is never confirmed, and a question never
+    answered, from outside its thread. The table's keepers (`Reach::Approvers`) still get yes
+    or no only, since they answer whole and nothing more.
+  - **The cost.** A person at the terminal while a phone is registered waits for Claude Code's
+    own dialog on a plan or a question as they already did for a yes or no. Any client showing
+    the TUI hands the prompt back at once, and the server's word that no phone can answer any
+    more hands back everything held for one.
+  - Tests: `conversation::tests::a_prompt_is_held_for_a_pushed_phone` (slopty-worker), and the
+    daemon's `server_link::a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server`
+    (a plan held with no client linked until the relay's wait runs out, then handed back).
