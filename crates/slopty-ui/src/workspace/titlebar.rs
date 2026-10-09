@@ -209,20 +209,32 @@ impl WorkspaceView {
         (rollup, count)
     }
 
+    /// What a title tab whose focused tile is `tile` is named: its title; a thread on its way
+    /// as its tile's header names it; a tile whose item is not here, its machine's name, as the
+    /// tile itself says while its worker is away.
+    fn tab_title(&self, tile: TileRef) -> String {
+        if let Some(item) = self.item(tile) {
+            return self.tile_title(item);
+        }
+        match self.starting.get(tile.item) {
+            Some(starting) => {
+                format!("New {} thread", super::projects::agent_label(&starting.agent))
+            }
+            None => self.worker_name(tile.worker),
+        }
+    }
+
     /// The tabs of the project on show, as the bar draws them: each named by its focused
     /// work, with a mark for each agent in it that works or has finished.
     pub(super) fn title_tabs(&self) -> Vec<TitleTab> {
         let Some(project) = self.layout.shown_project() else { return Vec::new() };
         let shown = project.shown().map(Tab::id);
+        let lone = self.lone_tile();
         project
             .tabs()
             .iter()
             .map(|tab| {
-                let title = tab
-                    .focused()
-                    .and_then(|t| self.item(t))
-                    .map(|item| self.tile_title(item))
-                    .unwrap_or_default();
+                let title = tab.focused().map(|t| self.tab_title(t)).unwrap_or_default();
                 let marks = tab
                     .tiles()
                     .filter_map(|t| {
@@ -236,11 +248,19 @@ impl WorkspaceView {
                         })
                     })
                     .collect();
+                let shown = shown == Some(tab.id());
+                let alone = lone.filter(|_| shown);
+                // A tab's one tile's state is its strip's glyph, with its words: said once.
+                let marks = if alone.is_some() { Vec::new() } else { marks };
+                let place = alone.and_then(|tile| self.bar_place(tile));
+                let edited = alone.is_some_and(|tile| self.file_facts(tile.item).unsaved);
                 TitleTab {
                     id: tab.id(),
                     title: title.into(),
+                    place: place.map(SharedString::from),
+                    edited,
                     marks,
-                    shown: shown == Some(tab.id()),
+                    shown,
                 }
             })
             .collect()
@@ -418,6 +438,11 @@ impl WorkspaceView {
         let where_ = (has_workers && !phone).then(|| self.render_breadcrumb(cx));
         let tabs =
             (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
+        // A tab's one tile's header, but for its title, which its tab says; empty while the tab
+        // holds more. Always in the bar with the tabs, as theirs is: a view that left the
+        // retained tree and is then told of news fails gpui-fast's layout splice.
+        let strip =
+            (has_workers && !phone).then(|| self.chrome.tile_strip.clone().into_any_element());
         if tabs.is_none() {
             self.drop_spots.no_strip();
         }
@@ -529,6 +554,7 @@ impl WorkspaceView {
                     .children(tabs)
                     .children(new),
             )
+            .children(strip)
             .children(lane)
             .children(readouts)
             .child(buttons)
@@ -975,6 +1001,14 @@ impl super::title_tabs::TitleTabsHost for WorkspaceView {
 
     fn carry_title_tab(&mut self, id: TabId, ev: &gpui::MouseDownEvent) {
         self.begin_carry(super::area::Carried::Tab(id), ev);
+    }
+
+    fn name_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((p, t)) = self.layout.tab_place(id) else { return };
+        let tile = self.layout.projects().get(p).and_then(|project| project.tabs().get(t));
+        if let Some(tile) = tile.and_then(Tab::focused) {
+            self.keep_or_rename(tile, window, cx);
+        }
     }
 
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {

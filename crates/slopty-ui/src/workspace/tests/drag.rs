@@ -92,17 +92,20 @@ fn a_header_dropped_on_the_title_strip_is_a_tab_where_it_fell(cx: &mut TestAppCo
     assert_eq!(ids.len(), 3, "{ids:?}");
     assert_eq!(ids.first(), Some(&pos_of(&view, cx, second).tab), "first now");
 
-    // Alone in its tab, carried past the last: that tab moves, and no tab is made.
+    // Alone in its tab it has no header but its title tab: carried past the last, that tab
+    // moves, and no tab is made.
     let lone = pos_of(&view, cx, second).tab;
+    assert!(cx.debug_bounds(selector("title", second.item)).is_none(), "the bar is its header");
+    let own = leak(format!("title-tab-{}", lone.get()));
     let last = leak(format!("title-tab-{}", ids[2].get()));
-    let header = bounds(cx, selector("title", second.item)).center();
+    let header = bounds(cx, own).center();
     let to = near(bounds(cx, last), true);
     carry(cx, header, to, |_| {});
     assert_eq!(tabs(&view, cx), [ids[1], ids[2], lone], "the same tab, last");
 
     // Let go over the empty title bar, the move lands nowhere.
     let bar = bounds(cx, "titlebar");
-    let header = bounds(cx, selector("title", second.item)).center();
+    let header = bounds(cx, own).center();
     carry(cx, header, point(bar.center().x, bar.top() + px(4.0)), |_| {});
     assert_eq!(tabs(&view, cx), [ids[1], ids[2], lone], "unchanged");
 }

@@ -137,8 +137,8 @@ fn a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face(cx: &mut Te
 
     let title = view.read_with(cx, |v, _| v.tile_title(item));
     assert_eq!(tile_says(cx, &title).as_deref(), Some(Face::Thread.label()));
-    // Under the pointer its header offers the other face.
-    let header = cx.debug_bounds(selector("title", placeholder.item)).expect("its header");
+    // Its header offers the other face: alone in its tab, in the title bar, at rest.
+    let header = cx.debug_bounds(selector("tile-strip", placeholder.item)).expect("its header");
     cx.simulate_mouse_move(header.center(), None, Modifiers::none());
     settle(cx);
     let nodes = tree(cx);

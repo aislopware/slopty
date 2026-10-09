@@ -63,6 +63,8 @@ impl TitleTabsHost for Harness {
 
     fn carry_title_tab(&mut self, _id: TabId, _ev: &gpui::MouseDownEvent) {}
 
+    fn name_title_tab(&mut self, _id: TabId, _window: &mut Window, _cx: &mut Context<Self>) {}
+
     fn close_title_tab(&mut self, id: TabId, _window: &mut Window, cx: &mut Context<Self>) {
         self.closed.push(id);
         self.tiling.drop_tab(id);
@@ -89,6 +91,8 @@ fn title_tabs(tiling: &Tiling) -> Vec<TitleTab> {
         .map(|(i, tab)| TitleTab {
             id: tab.id(),
             title: format!("Tab {i}").into(),
+            place: None,
+            edited: false,
             marks: vec![crate::icons::Status::Working; tab.panes().count().min(2)],
             shown: i == project.shown_index(),
         })
@@ -119,7 +123,7 @@ impl Render for Shown {
                     &this.theme,
                     &tabs,
                     &this.tabs_scroll,
-                    &title_tabs::Drops { spots: &this.spots, at: None, closing: None },
+                    title_tabs::Drops { spots: &this.spots, at: None, closing: None, field: None },
                     window,
                     cx,
                 )))

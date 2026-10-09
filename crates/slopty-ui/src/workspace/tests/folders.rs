@@ -168,9 +168,13 @@ fn a_click_opens_a_row_and_the_header_goes_up(cx: &mut TestAppContext) {
     answer(&view, cx, &studio, "/w/docs", &listed("/w/docs", Vec::new()));
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Button", Some("Enclosing folder"))), "{nodes:#?}");
-    // Drawn under the pointer, as the header's controls are.
+    // Drawn under the pointer, as the header's controls are; at rest in the title bar, which
+    // is a tab's one tile's header.
     let hover = |cx: &mut VisualTestContext, tile: TileRef| {
-        let header = cx.debug_bounds(selector("title", tile.item)).expect("its header");
+        let header = cx
+            .debug_bounds(selector("title", tile.item))
+            .or_else(|| cx.debug_bounds(selector("tile-strip", tile.item)))
+            .expect("its header");
         cx.simulate_mouse_move(header.center(), None, Modifiers::none());
         cx.run_until_parked();
     };
@@ -185,7 +189,7 @@ fn a_click_opens_a_row_and_the_header_goes_up(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(root, cx));
     cx.run_until_parked();
     hover(cx, root);
-    assert!(cx.debug_bounds(selector("close", root.item)).is_some(), "its controls show");
+    assert!(cx.debug_bounds(selector("tile-strip", root.item)).is_some(), "alone, the bar's");
     assert!(cx.debug_bounds(selector("up", root.item)).is_none(), "nothing above the root");
 }
 

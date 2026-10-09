@@ -374,7 +374,7 @@ fn a_file_tiles_caret_blinks_without_building_the_area(cx: &mut TestAppContext) 
     cx.simulate_input("y");
     cx.run_until_parked();
     assert_eq!(builds(cx), before, "the area was not built for the caret or the key");
-    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the dot still shows");
+    assert!(says_edited(&view, cx, tile), "the word still shows");
 }
 
 /// The keyboard moved by a view of its own (a click in a body, a find bar giving it back)

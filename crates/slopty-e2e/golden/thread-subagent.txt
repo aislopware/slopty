@@ -18,14 +18,12 @@ TabList
 Tab │ Do these steps in order, using the named tools, then reply "done". 1)…
 Button │ Close tab
 Button │ New
+Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
+Label │ home
+Button │ Show terminal
 Button │ Needs you
 Button │ More
 Group │ Do these steps in order, using the named tools, then reply "done". 1)…
-Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
-Image │ Claude Code
-Label │ home
-Button │ Show terminal
-Button │ Close tile
 Group │ Thread (focused)
 Navigation │ Subagent Count lines
 Button │ Back

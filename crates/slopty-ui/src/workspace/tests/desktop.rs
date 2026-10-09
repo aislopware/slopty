@@ -124,7 +124,8 @@ fn body_pixels(
     let scale = cx.update(|window, _| window.scale_factor());
     view.read_with(cx, |v, _| {
         let placed = v.placed_tiles().into_iter().find(|p| p.tile == tile).expect("placed");
-        let header = v.theme.density.header;
+        // None for a tab's one tile, whose header is the title bar's.
+        let header = v.header_h();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
         let px = |points: f32| (points * scale).round() as u32;
         (px(placed.rect.w), px(placed.rect.h - header))

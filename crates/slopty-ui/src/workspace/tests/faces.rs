@@ -196,6 +196,7 @@ fn a_pill_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
     let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    paired(&view, cx, &studio, tile, 2);
     let asks = AgentEvent {
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
         detail: Some("$ touch a-file-with-a-rather-long-name-for-a-phone.txt".into()),

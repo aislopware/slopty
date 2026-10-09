@@ -93,7 +93,8 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
 #[gpui::test]
 fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    cx.simulate_resize(size(px(720.0), px(600.0)));
+    // Room for two panes side by side, each too narrow for the whole path.
+    cx.simulate_resize(size(px(1200.0), px(600.0)));
     let fake = connect(&view, cx, 1, "studio");
     let named = |session| Item {
         id: ItemId::new(),
@@ -115,9 +116,11 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
         }
     });
     cx.run_until_parked();
-    // Each alone in its pane and its tab, shown in its turn.
+    // Each alone in its pane, side by side in one tab, shown in its turn.
     let tile = |id| TileRef { worker: key, item: id };
-    on_new_tab(&view, cx, tile(bare_id));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile(placed_id), cx));
+    cx.run_until_parked();
+    beside(&view, cx, tile(bare_id), tile(placed_id), slopty_client::layout::Side::Right);
     let width = |cx: &mut VisualTestContext, what: &str, item: ItemId| {
         let b = cx.debug_bounds(selector(what, item)).unwrap_or_else(|| panic!("{what} drawn"));
         f32::from(b.size.width)
@@ -177,7 +180,11 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let window = arrives(&view, cx, &fake, remote, 2);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
     assert_eq!(focused(&view, cx), Some(second));
+    // Each in a pane of its own in one tab: a tab's one tile has no header of its own.
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
+    beside(&view, cx, window, first, slopty_client::layout::Side::Right);
+    beside(&view, cx, second, first, slopty_client::layout::Side::Bottom);
     for tile in [first, window, second] {
         // Each shown in its turn: a pane shows one of its tabs.
         view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
@@ -302,6 +309,7 @@ fn the_header_leads_with_its_kind_and_ends_with_its_state(cx: &mut TestAppContex
     let fake = connect(&view, cx, 1, "studio");
     let shell = SessionId::new();
     let tile = opens(&view, cx, &fake, shell, fake.me, 1);
+    paired(&view, cx, &fake, tile, 2);
     let slot_at = |cx: &mut VisualTestContext| {
         cx.debug_bounds(selector("kind", tile.item)).expect("the slot is always drawn")
     };
@@ -379,6 +387,9 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
+    // Beside another, which has the focus: a focused pane's tab wears the focus edge.
+    let other = paired(&view, cx, &fake, waiting, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(other, cx));
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
             AgentEvent {
@@ -1014,6 +1025,7 @@ fn a_tile_that_fills_a_phone_offers_no_zoom(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    paired(&view, cx, &fake, shell, 2);
     let header = cx.debug_bounds(selector("title", shell.item)).expect("drawn");
     cx.simulate_mouse_down(header.center(), MouseButton::Right, Modifiers::none());
     cx.simulate_mouse_up(header.center(), MouseButton::Right, Modifiers::none());
@@ -1073,6 +1085,7 @@ fn an_idle_agent_keeps_its_kind_in_the_slot(cx: &mut TestAppContext) {
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let tile = opens(&view, cx, &fake, agent, fake.me, 1);
+    paired(&view, cx, &fake, tile, 2);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(agent) }, cx);
     });
@@ -1129,10 +1142,12 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    assert!(cx.debug_bounds(selector("title", shell.item)).is_some(), "a header on a desktop");
+    let strip = selector("tile-strip", shell.item);
+    assert!(cx.debug_bounds(strip).is_some(), "on a desktop, alone, the title bar is its header");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("title", shell.item)).is_none(), "no header on a phone");
+    assert!(cx.debug_bounds(strip).is_none(), "and no strip: the bar is the phone's");
     assert!(cx.debug_bounds(selector("phone-kind", shell.item)).is_some(), "the tile's kind");
     let title = view.read_with(cx, |v, _| v.item(shell).map(|i| v.tile_title(i))).unwrap();
     let heading = tree(cx).into_iter().find(|n| {
@@ -1273,6 +1288,7 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let tile = arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
+    paired(&view, cx, &fake, tile, 2);
     cx.executor().advance_clock(crate::screen::LOADING_GRACE);
     cx.run_until_parked();
     let working = crate::icons::Status::Working.label();

@@ -175,6 +175,27 @@ impl WorkspaceView {
         self.facts.shells.get(&session)
     }
 
+    /// `session`'s program's progress report as last copied.
+    pub(super) fn shell_progress(
+        &self,
+        session: SessionId,
+    ) -> Option<crate::kit::progress::Progress> {
+        self.facts.progress.get(&session).copied()
+    }
+
+    /// Copy `session`'s progress report again: news for its header, wherever it is drawn.
+    pub(super) fn progress_changed(&mut self, session: SessionId, cx: &mut App) {
+        let Some(view) = self.terminals.get(&session) else { return };
+        let now = view.read(cx).progress();
+        let was = match now {
+            Some(now) => self.facts.progress.insert(session, now),
+            None => self.facts.progress.remove(&session),
+        };
+        if was != now {
+            self.panes_news(cx);
+        }
+    }
+
     /// Item `id`'s stream as last copied.
     pub(super) fn stream(&self, id: ItemId) -> Option<&ScreenFacts> {
         self.facts.screens.get(&id)
@@ -222,7 +243,7 @@ impl WorkspaceView {
         let Some(view) = self.files.get(&id) else { return };
         let now = FileFacts::of(view.read(cx));
         if self.facts.files.insert(id, now) != Some(now) {
-            App::notify(cx, self.area_host.entity_id());
+            self.panes_news(cx);
         }
         self.keep_edited(id, cx);
     }
@@ -242,7 +263,7 @@ impl WorkspaceView {
             self.titles_dirty = true;
             cx.notify();
         } else if was != now {
-            App::notify(cx, self.area_host.entity_id());
+            self.panes_news(cx);
         }
     }
 
@@ -251,7 +272,7 @@ impl WorkspaceView {
         let Some(view) = self.folders.get(&id) else { return };
         let now = FolderFacts::of(view.read(cx));
         if self.facts.folders.insert(id, now) != Some(now) {
-            App::notify(cx, self.area_host.entity_id());
+            self.panes_news(cx);
         }
     }
 
@@ -296,7 +317,7 @@ impl WorkspaceView {
         let counting = |session: &SessionId| self.running_for(*session).is_some();
         if self.facts.shells.keys().any(counting) {
             App::notify(cx, self.chrome.nav_rows.entity_id());
-            App::notify(cx, self.area_host.entity_id());
+            self.panes_news(cx);
         }
         // The foot bar's chips name the shells running out of sight, not how long they ran:
         // news for it only when which they are changed.
@@ -320,6 +341,7 @@ impl WorkspaceView {
     pub(super) fn prune_facts(&mut self) {
         let Self { facts, terminals, screens, files, browsers, folders, .. } = self;
         facts.shells.retain(|session, _| terminals.contains_key(session));
+        facts.progress.retain(|session, _| terminals.contains_key(session));
         facts.screens.retain(|id, _| screens.contains_key(id));
         facts.files.retain(|id, _| files.contains_key(id));
         facts.pages.retain(|id, _| browsers.contains_key(id));
@@ -336,6 +358,8 @@ pub(super) struct Facts {
     files: std::collections::HashMap<ItemId, FileFacts>,
     pages: std::collections::HashMap<ItemId, PageFacts>,
     folders: std::collections::HashMap<ItemId, FolderFacts>,
+    /// Each shell's program's progress report (`OSC 9;4`), while one is reported.
+    progress: std::collections::HashMap<SessionId, crate::kit::progress::Progress>,
     /// The readouts' last tick ([`WorkspaceView::keep_time`]): the monotonic clock, and the
     /// wall clock in Unix milliseconds for what a worker stamped.
     ticked: Option<(Instant, u64)>,
@@ -346,9 +370,10 @@ pub(super) struct Facts {
 impl Facts {
     /// How many facts are kept of each kind, for the footprint.
     #[cfg(test)]
-    pub(super) fn lens(&self) -> [(&'static str, usize); 5] {
+    pub(super) fn lens(&self) -> [(&'static str, usize); 6] {
         [
             ("facts.shells", self.shells.len()),
+            ("facts.progress", self.progress.len()),
             ("facts.screens", self.screens.len()),
             ("facts.files", self.files.len()),
             ("facts.pages", self.pages.len()),

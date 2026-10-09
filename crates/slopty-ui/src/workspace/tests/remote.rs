@@ -880,7 +880,8 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     let label = view.read_with(cx, |v, _| v.upload_on(tile).map(|(_, u)| u.label()));
     assert_eq!(label.as_deref(), Some("\u{2191} 42%"));
     let pill = cx.debug_bounds(selector("upload", tile.item)).expect("the tile shows it");
-    let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
+    // Alone in its tab, its header is the title bar's strip.
+    let header = cx.debug_bounds(selector("tile-strip", tile.item)).expect("the header");
     assert!(header.contains(&pill.center()), "in the header, as a pill with its ring: {pill:?}");
     assert!(pill.bottom() < header.bottom(), "no line along the header's foot");
 
@@ -1314,6 +1315,7 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     let (view, cx) = workspace(cx);
     let (mut studio, mut calls, _board) = connect_remote(&view, cx);
     let tile = streaming(&view, cx, &studio, StreamId(1));
+    paired(&view, cx, &studio, tile, 2);
     studio.drain();
     let bounds = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
     let body = bounds.center();

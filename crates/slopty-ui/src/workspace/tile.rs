@@ -99,6 +99,39 @@ pub(super) const ATTACH_TO_MESSAGE: &str = "Attach to the message";
 pub(super) const STOP_UPLOAD: &str = "Stop upload";
 
 /// What a single tile's header is made of, gathered by `render_header` for `header_row`.
+/// Where a tile's header is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Seat {
+    /// Over its pane, as a row of its tabs or of its one tab.
+    Pane,
+    /// In the title bar: its tab holds it alone, and the bar's tab is its title.
+    Bar,
+}
+
+/// What a tile's header says besides its title and its lead ([`WorkspaceView::header_bits`]).
+pub(super) struct HeaderBits {
+    /// Where it is, beside the title; in the bar, a page's address or its field.
+    pub place: Option<gpui::AnyElement>,
+    /// The title is the page's address, which a click edits.
+    pub address_title: bool,
+    /// Its machine, where more than one could be meant; never in the bar, whose breadcrumb
+    /// says it.
+    pub worker: Option<Stateful<Div>>,
+    /// "Edited", for a file with an edit not yet on disk.
+    pub unsaved: Option<Stateful<Div>>,
+    /// An agent's place, pull request and worktree, each with how much it is needed.
+    pub branch: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
+    pub upload: Option<gpui::AnyElement>,
+    pub readouts: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
+    /// What the kind says of how it stands, at rest.
+    pub states: Vec<gpui::AnyElement>,
+    /// The kind's own actions.
+    pub actions: Vec<gpui::AnyElement>,
+    pub silenced: Option<gpui::AnyElement>,
+    /// The face toggle, or a Markdown file's preview toggle.
+    pub face: Option<gpui::AnyElement>,
+}
+
 struct HeaderParts<'a> {
     placed: &'a Placed,
     item: &'a Item,
@@ -831,10 +864,12 @@ impl WorkspaceView {
         Some(cwd_tail(s.cwd.as_deref()?, home))
     }
 
-    /// How tall a tile's header is: none on a phone, whose bar above the strip is the focused
-    /// tile's (its mark, its title, and its rows in "…"), so the screen keeps one bar of chrome.
-    pub(super) const fn header_h(&self) -> f32 {
-        if self.phone { 0.0 } else { self.theme.density.header }
+    /// How tall the headers of the tab on show are: none on a phone, whose bar above the strip
+    /// is the focused tile's (its mark, its title, and its rows in "…"), so the screen keeps one
+    /// bar of chrome; none either for a tab's one tile, whose header is the title bar's
+    /// ([`Self::lone_tile`]).
+    pub(super) fn header_h(&self) -> f32 {
+        if self.phone || self.lone_tile().is_some() { 0.0 } else { self.theme.density.header }
     }
 
     /// `worker`'s home directory, once it has said.
@@ -859,8 +894,10 @@ impl WorkspaceView {
         let title = self.tile_title(item);
         let label = SharedString::from(title.clone());
         let shows = self.tile_shows(item);
-        // A phone's bar is the focused tile's ([`Self::header_h`]): no header of its own.
-        let header = (!self.phone).then(|| self.render_header(placed, item, title, cx));
+        // A phone's bar is the focused tile's, and a tab's one tile's header is the title bar's
+        // ([`Self::header_h`]): no header of its own.
+        let header =
+            (!self.phone && !placed.lone).then(|| self.render_header(placed, item, title, cx));
         let body = self.render_body(placed, item, window, cx);
         // Files dropped on a shell go to its directory; on a thread, to its composer; on a
         // remote window, to the worker's clipboard; on a folder, into it.
@@ -1016,15 +1053,10 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let tile = placed.tile;
         let id = item.id;
         let focused = placed.focused;
         let kind = self.spoken_kind(item);
-        let agent = match item.kind {
-            ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
-            _ => None,
-        };
         let ink = title_ink(theme, focused);
         let heading = SharedString::from(spoken_heading(&kind, &title));
         // A pane's header is its tab row, as Zed's is: a cap on the chrome step over the pane,
@@ -1064,6 +1096,30 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
+        self.pane_header(placed, item, title, header, cx)
+    }
+
+    /// What a tile's header says besides its title and its lead, built for where the header
+    /// is drawn: over its pane, or in the title bar for a tab of one tile ([`Seat::Bar`]),
+    /// which leaves out what the bar's breadcrumb and its tab say already.
+    pub(super) fn header_bits(
+        &self,
+        placed: &Placed,
+        item: &Item,
+        title: &str,
+        seat: Seat,
+        cx: &Draw<'_, Self>,
+    ) -> HeaderBits {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let tile = placed.tile;
+        let id = item.id;
+        let focused = placed.focused;
+        let bar = seat == Seat::Bar;
+        let agent = match item.kind {
+            ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
+            _ => None,
+        };
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => {
                 self.finished.get(&About::Session(*session)).map(|f| (*session, f))
@@ -1154,8 +1210,14 @@ impl WorkspaceView {
         };
         let thread_place = thread.and_then(|thread| self.header_place(thread));
         let worktree = agent.and_then(|(session, _)| self.worktree_of(session).cloned());
+        // In the bar the breadcrumb names a shell's checkout and branch, once it knows them.
+        let crumbed = bar
+            && matches!(item.kind, ItemKind::Terminal { .. })
+            && self.focused() == Some(tile)
+            && self.crumbs().checkout.is_some();
         let mut branch = thread_place
             .clone()
+            .filter(|_| !crumbed)
             .map_or_else(Vec::new, |at| self.place_chips(placed.tile, at, worktree.as_ref(), cx));
         branch.extend(self.pull_chip(item));
         branch.extend(agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session)));
@@ -1164,9 +1226,6 @@ impl WorkspaceView {
         let face = match agent {
             Some((session, _)) => self.face_toggle(tile, session, cx),
             None => self.preview_toggle(tile, cx),
-        };
-        let actions = |actions: Vec<gpui::AnyElement>| {
-            div().flex().flex_none().items_center().gap(px(theme.spacing.xs)).children(actions)
         };
         // How long a command has run, beside its calm mark, while no agent speaks for the shell.
         let running = match &item.kind {
@@ -1188,7 +1247,12 @@ impl WorkspaceView {
         });
         // A program's progress report (`OSC 9;4`): the kit's bar with its figure beside it, where
         // a tile says how it stands, not a line along the terminal's edge.
+        // The bar reads the workspace's copy, so a shell's output never builds it. A pane's
+        // header still reads the shell: with the copy, the panes are no longer built with each
+        // line of output, and gpui-fast's splice of the shell's cached view into panes it did
+        // not build fails (`Window::splice_gaps`, an invalid layout key).
         let report = match &item.kind {
+            ItemKind::Terminal { session } if bar => self.shell_progress(*session),
             ItemKind::Terminal { session } => {
                 self.terminals.get(session).and_then(|view| view.read(cx).progress())
             }
@@ -1235,9 +1299,7 @@ impl WorkspaceView {
         // is, with no separator: the colour tells it from the title.
         let place = match &item.kind {
             _ if thread_place.is_some() => None,
-            ItemKind::Terminal { .. } => {
-                self.tile_place(item).and_then(|p| place_beside(p, &title))
-            }
+            ItemKind::Terminal { .. } => self.tile_place(item).and_then(|p| place_beside(p, title)),
             // The path bar right under a folder's header is where it is, every folder above it
             // a click away; the parent beside the title said it twice, 20 pt apart.
             ItemKind::Folder { .. } => None,
@@ -1250,8 +1312,11 @@ impl WorkspaceView {
         // A page with no title of its own is titled by its address, which is then what a
         // click turns into the address field.
         let address_title = page && field.is_none() && place.is_none();
+        // The bar's tab is the title, so its place is the page's address always: its control.
         let address = if page && field != Some(Field::Address) {
-            place.as_ref().and_then(|_| self.address_place(tile, focused, cx))
+            (place.is_some() || bar).then(|| self.address_place(tile, focused, cx)).flatten()
+        } else if bar && field == Some(Field::Address) {
+            self.rename_field(tile, id)
         } else {
             None
         };
@@ -1279,11 +1344,12 @@ impl WorkspaceView {
         // A pane of tabs keeps a page's address after the tabs, which is a control, and no other
         // place: a shell's prompt says where it is, and a file's tab its folder where two read
         // alike ([`Self::render_tabs`]).
-        let place = if placed.tabs { address } else { address.or(text_place) };
+        // In the bar, the tab says the rest ([`Self::bar_place`]).
+        let place = if placed.tabs || bar { address } else { address.or(text_place) };
         // The worker's name, where more than one could be meant (the tile's project holds
         // tiles of several): quiet text after a server glyph, a fact about the tile rather than
         // a control. A project on one machine never pays for it.
-        let several = self.project_machines(tile) > 1;
+        let several = !bar && self.project_machines(tile) > 1;
         let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
             let name = w.name.clone();
             let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
@@ -1308,7 +1374,8 @@ impl WorkspaceView {
         });
         // A file with an edit not yet on disk says so in a word after its name, as macOS's
         // "Edited" follows a document's title; saving keeps it until the worker has written it.
-        let unsaved = self.file_facts(id).unsaved;
+        // In the bar, the tab says it after the title.
+        let unsaved = self.file_facts(id).unsaved && !bar;
         let unsaved = unsaved.then(|| {
             div()
                 .id("unsaved")
@@ -1320,6 +1387,49 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_muted))
                 .child(ChromeText::new(EDITED, px(theme.typography.small())))
         });
+        HeaderBits {
+            place,
+            address_title,
+            worker,
+            unsaved,
+            branch,
+            upload,
+            readouts,
+            states: kind_states,
+            actions: kind_actions,
+            silenced,
+            face,
+        }
+    }
+
+    /// A pane's header, `header`, holding its tabs or its one tab, and the rest of what it says
+    /// ([`Self::header_bits`]).
+    fn pane_header(
+        &self,
+        placed: &Placed,
+        item: &Item,
+        title: String,
+        header: Stateful<Div>,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let tile = placed.tile;
+        let HeaderBits {
+            place,
+            address_title,
+            worker,
+            unsaved,
+            branch,
+            upload,
+            readouts,
+            states: kind_states,
+            actions: kind_actions,
+            silenced,
+            face,
+        } = self.header_bits(placed, item, &title, Seat::Pane, cx);
+        let actions = |actions: Vec<gpui::AnyElement>| {
+            div().flex().flex_none().items_center().gap(px(theme.spacing.xs)).children(actions)
+        };
         let tabbed = placed.tabs;
         let header = if tabbed {
             let readouts = readouts.into_iter().map(|(_, _, el)| el).collect();
@@ -1408,7 +1518,7 @@ impl WorkspaceView {
     /// pointer. While a terminal's agent waits on the person, its glyph is the one state worth a
     /// click: it brings up the terminal, whose own prompt is answered there (Slopty never answers
     /// for the person). A thread's face answers in its own card, so its glyph only says it.
-    fn header_state(
+    pub(super) fn header_state(
         &self,
         tile: TileRef,
         item: &Item,

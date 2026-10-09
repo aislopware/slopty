@@ -442,6 +442,36 @@ fn beside(
     cx.run_until_parked();
 }
 
+/// A shell of this client's opened at `version` and put in a pane of its own beside `tile`,
+/// which is focused again: a tab's one tile has no header of its own, its header being the
+/// title bar's ([`WorkspaceView::lone_tile`]), so a test of a pane's header gives it company.
+fn paired(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    tile: TileRef,
+    version: u64,
+) -> TileRef {
+    let other = opens(view, cx, fake, SessionId::new(), fake.me, version);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let (at, there) = (pos_of(view, cx, tile), pos_of(view, cx, other));
+    if there.tab != at.tab || there.pane == at.pane {
+        beside(view, cx, other, tile, slopty_client::layout::Side::Right);
+    }
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    other
+}
+
+/// Whether `tile` says "Edited": in its pane's header, or in its tab while it is its tab's one
+/// tile.
+fn says_edited(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) -> bool {
+    let tab = format!("title-tab-edited-{}", pos_of(view, cx, tile).tab.get());
+    cx.debug_bounds(selector("unsaved", tile.item)).is_some()
+        || cx.debug_bounds(Box::leak(tab.into_boxed_str())).is_some()
+}
+
 /// `tile` moved to a new tab of the project on show, and that tab shown.
 fn on_new_tab(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) {
     view.update(cx, |v, cx| {
@@ -561,7 +591,7 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.simulate_input("x");
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the header says so");
+    assert!(says_edited(&view, cx, tile), "the header says so");
     cx.simulate_keystrokes("cmd-s");
     cx.run_until_parked();
     let writes: Vec<ClientMsg> =
@@ -578,7 +608,7 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
         slopty_proto::file::WriteResult::Saved { size: 9, modified_ms: WallMs::from_millis(2_000) };
     view.update_in(cx, |v, _w, cx| v.file_written(key, path, &saved, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_none(), "saved: the dot goes");
+    assert!(!says_edited(&view, cx, tile), "saved: the word goes");
 }
 
 #[test]
@@ -1635,6 +1665,7 @@ mod foot;
 mod frame;
 mod handoffs;
 mod leaks;
+mod lone_tile;
 mod measure;
 mod menus;
 mod modal_focus;

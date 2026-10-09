@@ -619,10 +619,12 @@ fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppCon
     let beside = bounds(cx, leak(format!("tile-notices-{}", shell.item.as_uuid())))
         .expect("the failure beside its tile");
     assert!(tile.contains(&beside.center()), "within its tile: {beside:?} in {tile:?}");
-    let header = Theme::default().density.header;
+    // Alone in its tab it has no header of its own: the title bar is its header.
+    let header = view.read_with(cx, |v, _| v.header_h());
+    assert!(header.abs() < f32::EPSILON, "the shell is its tab's one tile");
     assert!(
         f32::from(beside.top()) >= f32::from(tile.top()) + header - 0.5,
-        "under its header: {beside:?} in {tile:?}"
+        "at its top: {beside:?} in {tile:?}"
     );
     assert!(
         (f32::from(tile.right() - beside.right())).abs() <= Theme::default().spacing.md,

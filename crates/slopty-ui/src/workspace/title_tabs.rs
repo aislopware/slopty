@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
     ParentElement as _, Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement as _,
@@ -41,6 +42,12 @@ use crate::kit::{self, Pace};
 const TAB_MIN: f32 = 96.0;
 const TAB_MAX: f32 = 220.0;
 
+/// The widest the tab on show grows while it says where its one tile is too, or names it.
+const TAB_WIDE: f32 = 340.0;
+
+/// How much faster a tab's place shrinks than its title.
+const PLACE_SHRINK: f32 = 1000.0;
+
 /// The hover group of one tab, so its close shows with the pointer on it.
 const TAB_GROUP: &str = "title-tab";
 
@@ -54,6 +61,12 @@ pub(super) struct TitleTab {
     pub id: TabId,
     /// The title of its focused work.
     pub title: SharedString,
+    /// Where its one tile is, when it holds one alone and the bar is its header
+    /// ([`super::tile_strip`]): a file's folder, beside the title, giving way first.
+    pub place: Option<SharedString>,
+    /// Its one tile is a file with an edit not yet on disk, said after the title as a
+    /// document's title bar says it, when the bar is the tile's header.
+    pub edited: bool,
     /// One mark for each agent in it that works or has finished, in pane order.
     pub marks: Vec<Status>,
     /// It is the one on show.
@@ -67,6 +80,9 @@ pub(super) trait TitleTabsHost: Sized + 'static {
 
     /// Tab `id` was pressed at `ev`: a move from here carries it.
     fn carry_title_tab(&mut self, id: TabId, ev: &MouseDownEvent);
+
+    /// Tab `id` was pressed twice: its focused tile is named, or a preview kept.
+    fn name_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>);
 
     /// Close tab `id`, and what is in it.
     fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>);
@@ -82,11 +98,13 @@ pub(super) trait TitleTabsHost: Sized + 'static {
 }
 
 /// What [`render`] draws besides the tabs: where the row takes a drop, where a drop would
-/// land, before the tab at that index (past the last, after it), and the tabs closing.
+/// land, before the tab at that index (past the last, after it), the tabs closing, and the
+/// field that names the tab on show's one tile, in its title's place while it is open.
 pub(super) struct Drops<'a> {
     pub spots: &'a Rc<DropSpots>,
     pub at: Option<usize>,
     pub closing: Option<(&'a Closing, Clock)>,
+    pub field: Option<gpui::AnyElement>,
 }
 
 /// The project whose tabs are on show, as a number its key hashes to, and the instant the frame
@@ -186,11 +204,12 @@ pub(super) fn render<V: TitleTabsHost>(
     theme: &Theme,
     tabs: &[TitleTab],
     scroll: &ScrollHandle,
-    drops: &Drops<'_>,
+    drops: Drops<'_>,
     window: &Window,
     cx: &Draw<'_, V>,
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
+    let mut field = drops.field;
     // Where each tab lay last frame is the width a closed one folds from.
     let ghosts = drops.closing.map_or_else(Vec::new, |(closing, clock)| {
         closing.0.borrow_mut().step(tabs, &drops.spots.tabs.borrow(), clock)
@@ -251,6 +270,40 @@ pub(super) fn render<V: TitleTabsHost>(
                 // tab is a control's words, as the breadcrumb beside it is.
                 let roles = theme.roles();
                 let role = if tab.shown { roles.action } else { roles.chrome };
+                let named = if tab.shown { field.take() } else { None };
+                let widened = named.is_some() || tab.place.is_some() || tab.edited;
+                let edited = tab.edited.then(|| {
+                    kit::typed(div(), roles.metadata)
+                        .id(("title-tab-edited", n))
+                        .debug_selector(move || format!("title-tab-edited-{n}"))
+                        .role(Role::Label)
+                        .aria_label(super::tile::EDITED)
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(hsla(s.text_muted))
+                        .child(super::tile::EDITED)
+                });
+                let title = div()
+                    .debug_selector(move || format!("title-tab-text-{n}"))
+                    .flex_auto()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(tab.title.clone());
+                let place = tab.place.clone().map(|place| {
+                    let mut el = div();
+                    // Gives way long before the title does.
+                    el.style().flex_shrink = Some(PLACE_SHRINK);
+                    kit::typed(el, roles.metadata)
+                        .debug_selector(move || format!("title-tab-place-{n}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(hsla(s.text_muted))
+                        .child(place)
+                });
                 let el = kit::typed(tab_look::tab(theme, el, look), role)
                     .debug_selector(move || format!("title-tab-{n}"))
                     .group(TAB_GROUP)
@@ -259,29 +312,27 @@ pub(super) fn render<V: TitleTabsHost>(
                     .aria_selected(tab.shown)
                     .flex_initial()
                     .min_w(px(TAB_MIN))
-                    .max_w(px(TAB_MAX))
+                    .max_w(px(if widened { TAB_WIDE } else { TAB_MAX }))
                     .gap(px(theme.spacing.xs))
                     .pl(px(theme.spacing.sm))
                     .pr(px(theme.spacing.xs))
                     .text_color(hsla(ink))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this: &mut V, ev: &MouseDownEvent, _window, cx| {
-                            this.show_title_tab(id, cx);
-                            this.carry_title_tab(id, ev);
+                        cx.listener(move |this: &mut V, ev: &MouseDownEvent, window, cx| {
+                            if ev.click_count == 2 {
+                                this.name_title_tab(id, window, cx);
+                            } else {
+                                this.show_title_tab(id, cx);
+                                this.carry_title_tab(id, ev);
+                            }
                             cx.stop_propagation();
                         }),
                     )
-                    .child(
-                        div()
-                            .debug_selector(move || format!("title-tab-text-{n}"))
-                            .flex_auto()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(tab.title.clone()),
-                    )
+                    .map(|el| match named {
+                        Some(field) => el.child(field),
+                        None => el.child(title).children(edited).children(place),
+                    })
                     .children(marks)
                     .child(close)
                     .child(spot)

@@ -915,8 +915,8 @@ impl WorkspaceView {
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => this.terminal_changed(sid, cx),
-            // The header draws the report: the panes draw again.
-            TerminalViewEvent::Progress => App::notify(cx, this.area_host.entity_id()),
+            // The header draws the report, over its pane or in the bar.
+            TerminalViewEvent::Progress => this.progress_changed(sid, cx),
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();

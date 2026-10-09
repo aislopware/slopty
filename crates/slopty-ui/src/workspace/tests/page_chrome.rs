@@ -264,6 +264,7 @@ fn back_and_forward_show_only_with_history_that_way(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let tile = page(&view, cx, &fake);
+    paired(&view, cx, &fake, tile, 2);
     let header = cx.debug_bounds(selector("title", tile.item)).expect("its header");
     let shown = |cx: &mut VisualTestContext| {
         cx.simulate_mouse_move(header.center(), None, Modifiers::none());

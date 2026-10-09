@@ -188,7 +188,9 @@ async fn golden_stream(
     distance
 }
 
-/// Where the tile's header says how the stream is doing: between its title and its buttons.
+/// Where the tile's header says how the stream is doing: between its title and its buttons in
+/// its pane's header, or anywhere in the title bar's strip, which is the header of a tab's one
+/// tile.
 ///
 /// The word there ("Frames late") follows the pacing of the last second, which the load on this
 /// Mac moves, so a golden masks it; the accessibility tree says which word it is.
@@ -197,15 +199,18 @@ fn header_status(dump: &Dump, heading: &str) -> PixelRect {
         .a11y_node("Heading", Some(heading))
         .unwrap_or_else(|| panic!("no heading {heading}: {:#?}", dump.a11y))
         .bounds;
-    let right = dump
+    let pane = dump
         .items
         .iter()
         .map(|i| i.bounds)
-        .find(|[x, y, w, h]| hx >= *x && hx <= x + w && hy >= *y && hy <= y + h)
-        .map_or(hx + hw, |[x, _, w, _]| x + w - STATUS_BUTTONS);
+        .find(|[x, y, w, h]| hx >= *x && hx <= x + w && hy >= *y && hy <= y + h);
     let scale = dump.window.scale;
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
     let px = |points: f32| (points * scale).round().max(0.0) as u32;
+    let Some([x, _, w, _]) = pane else {
+        return [px(hx - 4.0), px(hy - 6.0), px(hw + 8.0), px(hh + 12.0)];
+    };
+    let right = x + w - STATUS_BUTTONS;
     let left = hx + hw + 4.0;
     [px(left), px(hy - 6.0), px((right - left).max(0.0)), px(hh + 12.0)]
 }

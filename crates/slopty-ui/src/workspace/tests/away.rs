@@ -96,7 +96,7 @@ fn a_closed_file_tile_comes_back_with_its_edit(cx: &mut TestAppContext) {
         sent.iter().any(|m| matches!(m, ClientMsg::ReadFile { path: p } if p == path)),
         "{sent:?}"
     );
-    assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "and says so");
+    assert!(says_edited(&view, cx, tile), "and says so");
 }
 
 /// ⌘W on a shell while its worker is away: the tile goes at once, and when the worker is

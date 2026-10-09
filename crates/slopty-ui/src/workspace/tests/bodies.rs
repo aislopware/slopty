@@ -118,6 +118,7 @@ fn edited_follows_the_title(cx: &mut TestAppContext) {
     let studio = connect(&view, cx, 1, "studio");
     let path = "/w/notes.txt";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    paired(&view, cx, &studio, tile, 2);
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
         size: 8,
@@ -180,6 +181,7 @@ fn a_markdown_file_s_header_swaps_its_preview_and_source(cx: &mut TestAppContext
     let studio = connect(&view, cx, 1, "studio");
     let path = "/w/PLAN.md";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    paired(&view, cx, &studio, tile, 2);
     let text = slopty_proto::file::FileRead::Text {
         text: "# Plan\n\n- [ ] ship".to_owned(),
         size: 19,
@@ -279,6 +281,10 @@ fn the_header_and_its_hit_test_follow_the_density(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| v.set_theme(theme, cx));
     let fake = connect(&view, cx, 1, "studio");
     let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    // Company that draws no grid, so the shell's is the one there is.
+    let window =
+        arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 2);
+    beside(&view, cx, window, tile, slopty_client::layout::Side::Right);
     let header = bounds(cx, selector("title", tile.item));
     near(f32::from(header.size.height), 44.0);
     let grid = bounds(cx, "terminal");

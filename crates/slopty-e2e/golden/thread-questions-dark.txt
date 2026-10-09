@@ -20,20 +20,17 @@ Group │ Where
 Button │ e2e-worker
 TabList
 Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
-Image │ Needs you
 Button │ Close tab
 Button │ New
-Button │ Needs you
-Status │ 1 new
-Button │ More
-Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
-Image │ Claude Code
 Label │ home
 Status │ Asks: Which layout should the review use?
 Image │ Needs you
 Button │ Show terminal
-Button │ Close tile
+Button │ Needs you
+Status │ 1 new
+Button │ More
+Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Group │ Thread
 Article │ You: Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
 Button │ Branch from here

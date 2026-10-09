@@ -94,38 +94,41 @@ impl WorkspaceView {
         let id = tile.item;
         let name = SharedString::from(self.worker_name(tile.worker));
         let ink = hsla(title_ink(theme, placed.focused));
-        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`).
-        let header = super::tab_look::row(theme, div().id("title"))
-            .debug_selector(move || format!("title-{}", id.as_uuid()))
-            .role(Role::Heading)
-            .aria_label(name.clone())
-            .h(px(theme.density.header))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_size(px(theme.typography.ui_size))
-            .text_color(ink)
-            .font_family(theme.typography.ui_family.clone())
-            .map(|el| {
-                let look = super::tab_look::Look {
-                    shown: true,
-                    first: true,
-                    marked: placed.focused && placed.shared,
-                };
-                let glyph = self.machine_glyph(tile.worker);
-                el.child(
-                    super::tab_look::tab(theme, div().id("lone-tab"), look)
-                        .min_w_0()
-                        .gap(px(theme.spacing.sm))
-                        .pl(px(theme.spacing.inset()))
-                        .pr(px(theme.spacing.md))
-                        .child(crate::palette::lead_slot(theme, glyph, ink))
-                        .child(name.clone()),
-                )
-            });
+        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`); none
+        // for a tab's one tile, which the title bar's tab names.
+        let header = (!placed.lone).then(|| {
+            super::tab_look::row(theme, div().id("title"))
+                .debug_selector(move || format!("title-{}", id.as_uuid()))
+                .role(Role::Heading)
+                .aria_label(name.clone())
+                .h(px(theme.density.header))
+                .w_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(theme.typography.ui_size))
+                .text_color(ink)
+                .font_family(theme.typography.ui_family.clone())
+                .map(|el| {
+                    let look = super::tab_look::Look {
+                        shown: true,
+                        first: true,
+                        marked: placed.focused && placed.shared,
+                    };
+                    let glyph = self.machine_glyph(tile.worker);
+                    el.child(
+                        super::tab_look::tab(theme, div().id("lone-tab"), look)
+                            .min_w_0()
+                            .gap(px(theme.spacing.sm))
+                            .pl(px(theme.spacing.inset()))
+                            .pr(px(theme.spacing.md))
+                            .child(crate::palette::lead_slot(theme, glyph, ink))
+                            .child(name.clone()),
+                    )
+                })
+        });
         let pill = Some(self.render_state_pill(tile, &state, true, cx));
         Some(
             div()
@@ -139,7 +142,7 @@ impl WorkspaceView {
                     cx.listener(move |this, _ev, _w, cx| this.click_tile(tile, cx)),
                 )
                 .map(|el| {
-                    let inside = div().flex().flex_col().child(header).child(
+                    let inside = div().flex().flex_col().children(header).child(
                         div()
                             .debug_selector(move || format!("missing-{}", id.as_uuid()))
                             .flex_1()

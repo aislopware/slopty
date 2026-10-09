@@ -499,15 +499,24 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
 }
 
 /// How many times the workspace draws in one second of a 120 Hz display: each tick delivers
-/// whatever frame was asked for, then runs what is due.
+/// whatever frame was asked for, then runs what is due. Counted by the panes' builds or the
+/// title bar strip's, which is a tab's one tile's header, whichever built more: one frame may
+/// build both.
 fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> u64 {
-    let before = view.read_with(cx, |v, _| v.drawn.builds.get());
+    let builds = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| {
+            let strip = u64::try_from(v.chrome.tile_strip.read(cx).renders).unwrap_or(u64::MAX);
+            (v.drawn.builds.get(), strip)
+        })
+    };
+    let (area, strip) = builds(cx);
     for _ in 0..120 {
         cx.executor().advance_clock(Duration::from_nanos(8_333_333));
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
     }
-    view.read_with(cx, |v, _| v.drawn.builds.get()).wrapping_sub(before)
+    let (area_after, strip_after) = builds(cx);
+    area_after.wrapping_sub(area).max(strip_after.wrapping_sub(strip))
 }
 
 /// A working agent in view turns its mark twelve steps a second, and the workspace draws

@@ -10,13 +10,11 @@ TabList
 Tab │ Terminal
 Button │ Close tab
 Button │ New
+Heading │ terminal Terminal
 Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ e2e-worker
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
 Group │ Status
 Button │ Show the tab's terminal
 Heading │ Connect a phone or iPad

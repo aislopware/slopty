@@ -11,20 +11,18 @@ TabList
 Tab │ Claude Code
 Button │ Close tab
 Button │ New
+Heading │ Claude Code
+Label │ home
+Label │ Worktree fix-build on worktree-fix-build
+Status │ Waiting on cargo test
+Image │ Waiting
+Button │ Show terminal
 Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ e2e-worker, running
 Image │ Waiting
 Group │ Claude Code
-Heading │ Claude Code
-Image │ Claude Code
-Label │ home
-Label │ Worktree fix-build on worktree-fix-build
-Status │ Waiting on cargo test
-Image │ Waiting
-Button │ Show terminal
-Button │ Close tile
 Group │ Thread
 MultilineTextInput │ Message (focused)
 Button │ Add to the message

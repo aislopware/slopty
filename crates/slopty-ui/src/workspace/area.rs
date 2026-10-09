@@ -129,6 +129,9 @@ pub(super) struct Placed {
     pub tabs: bool,
     /// Its tab holds other panes too, so the focused one's shown tab wears the focus edge.
     pub shared: bool,
+    /// It is the one tile on show in its tab ([`WorkspaceView::lone_tile`]): its header is
+    /// the title bar's, and its pane has none.
+    pub lone: bool,
 }
 
 /// What the area drew, kept by its view ([`super::AreaHost`]) and read by the workspace's
@@ -410,12 +413,43 @@ impl WorkspaceView {
         App::notify(cx, self.area_host.entity_id());
     }
 
+    /// The tile on show alone in the tab on show: one pane laid out, holding one tile, and no
+    /// other pane zoomed away. Its tab in the title bar says its title, so its pane draws no
+    /// header, and the bar holds the rest of one ([`super::tile_strip`]). A tab's terminal put
+    /// away leaves it alone; a phone's bar is its focused tile's anyway.
+    pub(super) fn lone_tile(&self) -> Option<TileRef> {
+        let tab = self.layout.shown_tab()?;
+        if self.phone || tab.zoomed().is_some_and(|_| tab.panes().nth(1).is_some()) {
+            return None;
+        }
+        let frame = self.layout.frame();
+        let [laid] = frame.panes.as_slice() else { return None };
+        match tab.pane(laid.pane)?.tiles() {
+            [tile] => Some(*tile),
+            _ => None,
+        }
+    }
+
+    /// News for the tiles' headers and bodies alone: the panes are drawn again, and so is the
+    /// title bar's strip while it is the one tile's header, and its tab where what it says
+    /// changed ("Edited").
+    pub(super) fn panes_news(&self, cx: &mut App) {
+        App::notify(cx, self.area_host.entity_id());
+        if self.lone_tile().is_some() {
+            App::notify(cx, self.chrome.tile_strip.entity_id());
+            if *self.title_tabs_drawn.borrow() != self.title_tabs() {
+                App::notify(cx, self.chrome.title_tabs.entity_id());
+            }
+        }
+    }
+
     /// The tile each pane of the tab on show shows, where.
     pub(super) fn placed_tiles(&self) -> Vec<Placed> {
         let Some(tab) = self.layout.shown_tab() else { return Vec::new() };
         let focus = tab.focus();
         let frame = self.layout.frame();
         let shared = frame.panes.len() > 1;
+        let lone = self.lone_tile();
         frame
             .panes
             .iter()
@@ -428,6 +462,7 @@ impl WorkspaceView {
                     focused: laid.pane == focus,
                     tabs: pane.tiles().len() > 1,
                     shared,
+                    lone: lone.is_some(),
                 })
             })
             .collect()

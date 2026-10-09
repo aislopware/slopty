@@ -13,14 +13,13 @@ Button │ Close tab
 Tab │ nc -l 47310
 Button │ Close tab
 Button │ New
+Heading │ terminal drop-here
+Button │ Stop upload │ ↑ 0%
 Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ drop-here
 Group │ drop-here
-Heading │ terminal drop-here
-Button │ Stop upload │ ↑ 0%
-Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~/drop-here %
 Group │ Status

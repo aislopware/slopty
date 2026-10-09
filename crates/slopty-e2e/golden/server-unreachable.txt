@@ -11,6 +11,7 @@ TabList
 Tab │ Terminal
 Button │ Close tab
 Button │ New
+Heading │ terminal Terminal
 Group │ Status
 Button │ Server offline
 Button │ Needs you
@@ -18,9 +19,6 @@ Button │ More
 Navigation │ Projects
 Button │ e2e-worker
 Group │ Terminal
-Heading │ terminal Terminal
-Label │ ~
-Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
 Group │ Status

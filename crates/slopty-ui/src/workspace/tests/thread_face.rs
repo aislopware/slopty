@@ -169,6 +169,7 @@ fn a_thread_tile_says_its_checkout_and_branch_in_its_header(cx: &mut TestAppCont
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
     let tile = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/src/slopty"));
+    paired(&view, cx, &studio, tile, 2);
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);

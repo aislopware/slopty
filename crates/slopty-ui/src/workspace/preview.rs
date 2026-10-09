@@ -34,7 +34,7 @@ impl WorkspaceView {
     /// Keep `tile`: a preview becomes a tab like any other. Nothing for any other tile.
     pub(super) fn keep_preview(&mut self, tile: TileRef, cx: &mut App) {
         if self.preview.tile.take_if(|t| *t == tile).is_some() {
-            App::notify(cx, self.area_host.entity_id());
+            self.panes_news(cx);
         }
     }
 

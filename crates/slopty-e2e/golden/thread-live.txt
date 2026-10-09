@@ -18,14 +18,12 @@ TabList
 Tab │ scenario:bash run echo hi
 Button │ Close tab
 Button │ New
+Heading │ Claude Code scenario:bash run echo hi
+Label │ home
+Button │ Show terminal
 Button │ Needs you
 Button │ More
 Group │ scenario:bash run echo hi
-Heading │ Claude Code scenario:bash run echo hi
-Image │ Claude Code
-Label │ home
-Button │ Show terminal
-Button │ Close tile
 Group │ Thread
 Article │ You: scenario:bash run echo hi
 Button │ Branch from here

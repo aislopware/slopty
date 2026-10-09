@@ -78,6 +78,7 @@ mod starting;
 mod tab_look;
 mod tabs;
 mod tile;
+mod tile_strip;
 mod title_tabs;
 mod titlebar;
 mod toast;
@@ -180,6 +181,9 @@ enum Region {
     TitleTabs,
     /// The bar along the window's foot ([`foot`]).
     Foot,
+    /// The facts and controls of a tab's one tile, in the title bar ([`tile_strip`]): news for
+    /// its header builds this view and the panes, not the bar.
+    TileStrip,
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
@@ -249,6 +253,7 @@ struct Chrome {
     titlebar: Entity<ChromeView>,
     title_tabs: Entity<ChromeView>,
     foot: Entity<ChromeView>,
+    tile_strip: Entity<ChromeView>,
 }
 
 impl Chrome {
@@ -271,6 +276,7 @@ impl Chrome {
             titlebar: view(Region::Titlebar),
             title_tabs: view(Region::TitleTabs),
             foot: view(Region::Foot),
+            tile_strip: view(Region::TileStrip),
         }
     }
 
@@ -282,9 +288,17 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 6] {
-        [&self.navigator, &self.nav_rows, &self.rail, &self.titlebar, &self.title_tabs, &self.foot]
-            .map(Entity::entity_id)
+    fn ids(&self) -> [gpui::EntityId; 7] {
+        [
+            &self.navigator,
+            &self.nav_rows,
+            &self.rail,
+            &self.titlebar,
+            &self.title_tabs,
+            &self.foot,
+            &self.tile_strip,
+        ]
+        .map(Entity::entity_id)
     }
 }
 
@@ -1623,6 +1637,7 @@ impl WorkspaceView {
             Region::Rail => self.navigator_rail(cx),
             Region::Titlebar => self.render_titlebar(window, cx),
             Region::Foot => self.render_foot(window, cx),
+            Region::TileStrip => self.render_tile_strip(cx),
             Region::TitleTabs => {
                 let tabs = self.title_tabs();
                 let at = match self.landing() {
@@ -1640,9 +1655,17 @@ impl WorkspaceView {
                     };
                     (&self.title_closing, clock)
                 });
-                let drops = title_tabs::Drops { spots: &self.drop_spots, at, closing };
+                // The tab on show is its one tile's title, which its field names in place.
+                let field = self.lone_tile().and_then(|tile| {
+                    let named = self
+                        .rename
+                        .as_ref()
+                        .is_some_and(|r| r.tile == tile && r.field != Field::Address);
+                    named.then(|| self.rename_field(tile, tile.item)).flatten()
+                });
+                let drops = title_tabs::Drops { spots: &self.drop_spots, at, closing, field };
                 let drawn =
-                    title_tabs::render(&self.theme, &tabs, &self.title_scroll, &drops, window, cx);
+                    title_tabs::render(&self.theme, &tabs, &self.title_scroll, drops, window, cx);
                 *self.title_tabs_drawn.borrow_mut() = tabs;
                 drawn
             }
@@ -1749,7 +1772,7 @@ impl WorkspaceView {
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         self.follow_secure_input(cx);
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
-        let (navigator, area) = (self.chrome.nav_rows.entity_id(), self.area_host.entity_id());
+        let navigator = self.chrome.nav_rows.entity_id();
         // A command that starts or ends renames its shell and its twins.
         if was.running != now.running {
             self.number_twins();
@@ -1780,7 +1803,7 @@ impl WorkspaceView {
         if (was.exit, was.failure_in_view) != (now.exit, now.failure_in_view) {
             cx.notify();
         } else if was.driving != now.driving {
-            App::notify(cx, area);
+            self.panes_news(cx);
         }
     }
 
@@ -1790,7 +1813,7 @@ impl WorkspaceView {
     /// phone the bar is the focused tile's header, so a change to that tile's title, kind or
     /// state is the bar's news as well; any other tile's is not.
     fn header_news(&self, session: SessionId, cx: &mut App) {
-        App::notify(cx, self.area_host.entity_id());
+        self.panes_news(cx);
         let tile = self.tile_of_session(session);
         let shown = self.layout.shown_index();
         if tile.and_then(|t| self.layout.position(t)).is_some_and(|p| Some(p.project) == shown)

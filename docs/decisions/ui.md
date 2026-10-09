@@ -5412,7 +5412,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     choice is passed over. A machine the "+" menu chose first is not asked again.
   - **What a machine can start** comes from its own link (the agents its capabilities found
     installed) and from the server's facts, so a machine reached with no server still offers
-    Claude Code. Its link names Claude Code alone until `AgentKind` grows (rulings §3, lane T).
+    Claude Code.
   - **The folders** are the focused shell's on that machine, the last start's there, where its
     shells stand (most recent first), then its home.
   - **Per-agent lines skip the agent step**: the palette's "New Claude Code agent", "New Codex
@@ -8663,7 +8663,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       on each side (none at the pane's own edge), over the foot line, so it opens into what it
       shows. A tile alone in its pane has a row of one tab: its lead and its title, the facts
       and the controls after it on the chrome. The starting and the out-of-reach tiles' headers
-      are the same row. The look is one, `workspace::tab_look`, shared with the title bar's
+      are the same row. A tab's one tile has none since 2026-10-09: the title bar is its
+      header ("A tab's one tile says its title once", below). The look is one, `workspace::tab_look`, shared with the title bar's
       tabs.
     - **Focus** is the title's tone and weight, and, while the tab on show holds two panes or
       more, a `stroke::MARK` (1.5 pt) focus-green edge along the top of the focused pane's shown
@@ -9074,3 +9075,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     platform's).
   - Tests: `settings_form::schema::tests::the_agents_page_holds_the_agents_projects_and_notes`,
     `settings_form::tests::the_agents_page_writes_the_projects_and_the_notes_tables`.
+
+- ✅ **A tab's one tile says its title once** (2026-10-09, readiness item 9).
+  - **What.** A tab holding one tile, with no other pane zoomed away, draws no pane header.
+    Its title bar tab already said the title, and the row of one tab under it said it again
+    32 pt lower and took that height from the body. The body now starts at the area's top,
+    under the bar's tab, which opens into it as a pane's shown tab did.
+  - **Where the rest of the header went.**
+    - The bar's tab says the title, then "Edited" for a file with an edit not on disk, then
+      where the tile is (a file's folder), muted and giving way first. It leaves its agent's
+      mark to the strip, whose glyph says it with its words and its hint. The tab grows to 340 pt
+      while it says more than the title.
+    - The breadcrumb already names a shell's machine, checkout and branch, so nothing else
+      repeats them.
+    - A strip at the bar's trailing end, before the notices, holds the rest: a page's address
+      (its field while typed in), an agent's place, pull request and worktree, an upload, the
+      kind's states, how the tile is doing, its readouts, then its controls (the kind's
+      actions, the face toggle). The controls stand at rest, as the bar's buttons do. A strip
+      that showed them only under the pointer would have nothing to point at while it held no
+      facts. Close is the tab's.
+    - The strip is the tile's heading to a screen reader, named as its header was. A right
+      click on it opens the tile's menu.
+    - A double-click on a tab names its focused tile. For a tab's one tile the field stands in
+      the tab, in the title's place.
+  - **When it comes back.** A second tile in the tab, as a split or as a tab of the pane,
+    brings the pane headers back and empties the strip. A zoomed pane over others keeps its
+    header. A phone is unchanged: its bar was the focused tile's already.
+  - **Drawing.** The strip is a view of its own (`Region::TileStrip`), always in the bar and
+    empty while the tab holds more. It is told the news a header is told
+    (`WorkspaceView::panes_news`), so a header's news never builds the bar. It reads a program's
+    progress report from the workspace's copy (`facts.progress`), never the shell.
+  - **Left as found.** A pane's header still reads the shell for that report, so the panes are
+    built with each line of output. Moving it to the copy too makes gpui-fast's splice of a
+    shell's cached view into panes it did not build fail (`Window::splice_gaps`, an invalid
+    taffy key; `workspace::tests::output_redraws_its_own_tile_only` panics). Fix that in the
+    fork, then read the copy.
+  - Tests: `workspace::tests::lone_tile::*`; the header tests give their tile a neighbour
+    (`tests::paired`).
