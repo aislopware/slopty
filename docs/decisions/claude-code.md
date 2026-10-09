@@ -1222,7 +1222,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.295"]`, recorded 2026-10-09 with the mod unchanged; 2.1.291,
+      recorded (today `["2.1.296"]`, recorded 2026-10-10 with the mod unchanged; 2.1.295, 2.1.291,
       2.1.290, 2.1.289 and 2.1.286 before it).
     - From 2.1.295 a session with no settings starts in auto mode, and the request carries
       `system` entries after the turn. The recorder runs `--permission-mode default`, since
