@@ -183,7 +183,8 @@ impl Directory {
             | FromServer::Request { .. }
             | FromServer::Reply { .. }
             | FromServer::Projects { .. }
-            | FromServer::Deliver { .. } => Vec::new(),
+            | FromServer::Deliver { .. }
+            | FromServer::Pushes(_) => Vec::new(),
             FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
             FromServer::Present(present) => vec![Change::Present(present)],
             FromServer::Notice(notice) => vec![Change::Notice(notice)],

@@ -1161,5 +1161,6 @@ mod golden_thread {
             via: None,
         };
         snap("push_body", &PushBody { notice, ask: Some(AskId("toolu_01".to_owned())) });
+        snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
     }
 }

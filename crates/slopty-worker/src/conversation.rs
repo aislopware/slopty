@@ -14,6 +14,10 @@
 //!   notification's "Allow", the inbox), and the prompt is a yes or no ([`Held::approvable`]): it
 //!   is held the same way for those approvers, for a shorter time the caller sets
 //!   ([`Reach::Approvers`]);
+//! - nobody follows, and the server says a pocketed phone it pushes to can answer a yes or no
+//!   ([`Holds::set_pushed`]): it is held for that phone as long as the hook waits
+//!   ([`Reach::Pushed`]), and the person's answer comes through the server, as orchestration
+//!   ([`ORCHESTRATION`]), whose link a phone's note reaches before any worker's;
 //! - the last follower lets the thread go (the person went back to the TUI), nobody who could
 //!   answer it is connected any more, a client hands it to the TUI, the worker has held it as long
 //!   as it may, or the relay went away: it is released, undecided. A release and an answer race for
@@ -56,6 +60,10 @@ pub enum Reach {
     /// Nobody follows the session's thread: the clients that keep the thread table, for a
     /// bounded time.
     Approvers,
+    /// Nobody follows the session's thread, and a yes or no may be answered from a pocketed
+    /// phone the server pushes to: as long as the hook waits, since the person has to reach the
+    /// phone first.
+    Pushed,
 }
 
 /// A prompt being held, and for which session.
@@ -77,6 +85,8 @@ pub struct Holds<R> {
     last: u64,
     followers: HashMap<SessionId, BTreeSet<Link>>,
     approvers: BTreeSet<Link>,
+    /// The server says a pocketed phone can answer a yes or no ([`Self::set_pushed`]).
+    pushed: bool,
     held: BTreeMap<u64, Held<R>>,
 }
 
@@ -86,6 +96,7 @@ impl<R> Default for Holds<R> {
             last: 0,
             followers: HashMap::new(),
             approvers: BTreeSet::new(),
+            pushed: false,
             held: BTreeMap::new(),
         }
     }
@@ -117,14 +128,28 @@ impl<R> Holds<R> {
     }
 
     /// `link`'s connection ended: it stops following everything and answering approvals, and
-    /// every prompt nobody else can answer is handed back.
+    /// every prompt nobody else can answer is handed back. A yes or no stays held while a
+    /// pocketed phone can answer it: a phone's link ends soon after it leaves the screen.
     pub fn leave(&mut self, link: Link) -> Vec<(u64, Held<R>)> {
         self.followers.retain(|_session, links| {
             links.remove(&link);
             !links.is_empty()
         });
         self.approvers.remove(&link);
-        let (followers, approvers) = (&self.followers, !self.approvers.is_empty());
+        self.orphans()
+    }
+
+    /// Whether a pocketed phone the server pushes to can answer a yes or no, as the server
+    /// says on every change, and `false` once the server's link is gone. When it no longer
+    /// can, every prompt nobody else can answer is handed back.
+    pub fn set_pushed(&mut self, pushed: bool) -> Vec<(u64, Held<R>)> {
+        self.pushed = pushed;
+        if pushed { Vec::new() } else { self.orphans() }
+    }
+
+    /// Every prompt nobody can answer now, taken out.
+    fn orphans(&mut self) -> Vec<(u64, Held<R>)> {
+        let (followers, approvers) = (&self.followers, !self.approvers.is_empty() || self.pushed);
         self.held
             .extract_if(.., |_id, held| {
                 !(followers.contains_key(&held.session) || held.approvable && approvers)
@@ -152,11 +177,14 @@ impl<R> Holds<R> {
 
     /// Who a prompt Claude Code asks in `session` would be held for; `None` when nobody could
     /// answer it and it is to be handed back at once. A prompt that is not `approvable` waits
-    /// only for followers.
+    /// only for followers; a yes or no a pocketed phone can answer waits for it rather than
+    /// only for the clients linked now.
     #[must_use]
     pub fn reach(&self, session: SessionId, approvable: bool) -> Option<Reach> {
         if self.followers.contains_key(&session) {
             Some(Reach::Followers)
+        } else if approvable && self.pushed {
+            Some(Reach::Pushed)
         } else if approvable && !self.approvers.is_empty() {
             Some(Reach::Approvers)
         } else {
@@ -212,8 +240,11 @@ impl<R> Holds<R> {
         self.held.get(&ask)
     }
 
+    /// Whether `held` was shown to `link`: it follows the session, or it approves a yes or no.
+    /// A pocketed phone's answer comes through the server, as orchestration does.
     fn shown(&self, link: Link, held: &Held<R>) -> bool {
-        self.follows(link, held.session) || (held.approvable && self.approves(link))
+        let phone = self.pushed && link == ORCHESTRATION;
+        self.follows(link, held.session) || (held.approvable && (self.approves(link) || phone))
     }
 }
 
@@ -506,6 +537,32 @@ mod tests {
         let again = holds.ask(s, true, |_| "again").expect("held for the follower");
         assert_eq!(holds.unfollow(s, B).len(), 1, "the person went back to the TUI");
         assert!(holds.get(again).is_none());
+    }
+
+    /// While the server says a pocketed phone can answer, a yes or no nobody follows is held
+    /// for it, the approvers linked or not, and the person's answer comes through the server
+    /// (as orchestration); a question still needs a follower. A phone's link ending keeps what
+    /// the phone can answer, and the server's word that no phone can any more hands it back.
+    #[test]
+    fn a_yes_or_no_is_held_for_a_pushed_phone() {
+        let mut holds = Holds::default();
+        let s = session(1);
+        assert_eq!(holds.set_pushed(true), []);
+        assert_eq!(holds.reach(s, true), Some(Reach::Pushed), "no client is linked");
+        assert_eq!(holds.reach(s, false), None, "a question needs a follower");
+        let yes = holds.ask(s, true, |_| "yes").expect("held for the phone");
+        assert_eq!(holds.answer(A, s, yes), None, "not shown to a stranger");
+        assert_eq!(holds.answer(ORCHESTRATION, s, yes).map(|h| h.reply), Some("yes"));
+        holds.approve(A);
+        assert_eq!(holds.reach(s, true), Some(Reach::Pushed), "the phone may be pocketed soon");
+        let kept = holds.ask(s, true, |_| "kept").expect("held");
+        assert!(holds.leave(A).is_empty(), "the phone left the screen: still held");
+        assert_eq!(holds.get(kept).map(|h| h.reply), Some("kept"));
+        let gone: Vec<u64> = holds.set_pushed(false).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(gone, [kept], "no phone can answer now");
+        assert_eq!(holds.reach(s, true), None);
+        let later = holds.ask(s, true, |_| "later");
+        assert_eq!(later, None, "nobody to answer");
     }
 
     /// The board keeps the latest meters and the named subagent files, and wakes a watcher on

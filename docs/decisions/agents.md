@@ -2276,3 +2276,27 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     something. A `claude` the person started by hand may have no hooks at all.
   - Tests: `claude_start::a_start_held_at_its_own_dialog_says_so_once_its_hooks_are_silent`,
     `agent_tile::a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_terminal`.
+
+- ✅ **A yes or no waits for a pocketed phone, which answers it through the server**
+  (2026-10-09, `.research/readiness-2026-10-08.md` rank 3; wire change). A phone's link ends
+  soon after it leaves the screen. Once it did, nobody was left to answer an approval, so the
+  worker handed it straight to the TUI. The server's push then carried a note whose Allow and
+  Deny found nothing held.
+  - *On the wire*: `FromServer::Pushes(bool)` tells a worker whether a pocketed phone can
+    answer. That holds while pushing is set up (`[server.push]`) and the server knows a phone.
+    The server sends it with a worker's welcome when it is true, and to every worker when it
+    changes (`ladder::say_pushes`). A worker counts it false while it has no server link.
+  - *On the worker* (`Holds::set_pushed`, `Reach::Pushed`): while it is true, a yes or no that
+    no follower is there for is held for the phone, whether approvers are linked or not. It is
+    held for the relay's whole wait (`permission::WAIT`, 595 s, less the margin), not
+    `APPROVAL_HOLD`, because the person first has to reach the phone. An approver's link ending
+    keeps it held. The answer comes through the server as `Verb::AnswerRequest`, which reaches
+    the worker as orchestration, and `Holds` takes a pushed hold's answer from there. When the
+    server's word turns false, everything nobody else can answer goes back to the TUI.
+  - A question or a plan still waits only for followers: a note's buttons cannot answer them.
+  - Tests: `conversation::tests::a_yes_or_no_is_held_for_a_pushed_phone`,
+    `hold::tests::a_yes_or_no_is_held_for_a_pushed_phone_up_to_the_relays_wait`,
+    `server_link::a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server`
+    (a daemon with no client link and the server's flag set),
+    `ladder::tests::the_workers_hear_whether_a_pocketed_phone_can_answer`, and the
+    `push_answerable` golden.

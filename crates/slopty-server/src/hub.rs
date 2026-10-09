@@ -583,6 +583,9 @@ impl Hub {
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
+        if let Some(entry) = state.workers.get(&worker) {
+            state.board.welcome_pushes(entry);
+        }
         let (name, liveness) = (info.name.clone(), info.liveness);
         self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));

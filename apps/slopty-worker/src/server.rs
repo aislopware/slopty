@@ -103,6 +103,8 @@ pub async fn run(
     loop {
         let ended =
             session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut redial).await;
+        // No phone's answer comes through a server this worker is not linked to.
+        crate::threads::hold::pushed(&daemon, false);
         let redialling = |why: String| stands(&daemon, &addr, LinkState::Redialling { why });
         match ended {
             Ok(why) => {
@@ -303,6 +305,8 @@ async fn session(
                         Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
                     }
                 }
+                // A yes or no nobody here can answer waits for a pocketed phone while one can.
+                Ok(FromServer::Pushes(pushed)) => crate::threads::hold::pushed(daemon, pushed),
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
                 Err(NetError::Closed) => break "the server closed the link",
                 Err(e) => return Err(e.into()),

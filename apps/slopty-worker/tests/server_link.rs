@@ -376,6 +376,101 @@ mod tests {
         );
     }
 
+    /// While the server says a pocketed phone can answer, a yes or no Claude Code asks with no
+    /// client linked is held for the phone rather than handed to the TUI at once: the thread's
+    /// row shows it to the server, which pushes it, and the person's answer from the phone comes
+    /// back through the server (`AnswerRequest`) to the waiting relay. Once the server says no
+    /// phone can, the next one goes straight back to the TUI.
+    #[tokio::test]
+    async fn a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server() {
+        use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAnswer, PermissionAsk};
+        use slopty_proto::orchestration::ThreadOf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        peer.heard(|m| matches!(m, ToServer::Threads(TableFrame::Snapshot { .. }))).await;
+        let Outcome::Opened(term) = peer.ask(open(reg.worker, dir.path())).await else {
+            panic!("the terminal opens");
+        };
+        let transcript = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        hook(dir.path(), term.session, start).await;
+        let thread = slopty_agent::observed::thread_of("s1");
+        peer.heard(|m| row_at(m, term.session, |r| r.id == thread)).await;
+        peer.tx.send(&FromServer::Pushes(true)).await.unwrap();
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/slopty-agent/tests/fixtures/conversation/permission/hooks.jsonl");
+        let mut ask: serde_json::Value = std::fs::read_to_string(fixture)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .find(|input| input["hook_event_name"] == "PermissionRequest")
+            .unwrap();
+        ask["transcript_path"] = transcript.to_string_lossy().into_owned().into();
+        ask["session_id"] = "s1".into();
+        let asking = |wait_ms| {
+            let req = CtlRequest::Permission(PermissionAsk {
+                session: term.session,
+                payload: ask.to_string(),
+                wait_ms,
+            });
+            let dir = dir.path().to_owned();
+            tokio::spawn(async move { ctl(&dir, &req).await })
+        };
+        // Long enough that a hold only for linked clients (two minutes at most) would show.
+        let held = asking(300_000);
+        let mut request = None;
+        while request.is_none() {
+            let msg = tokio::time::timeout(STEP, peer.rx.recv()).await.unwrap().unwrap();
+            if let ToServer::Threads(
+                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+            ) = &msg
+            {
+                request = rows
+                    .iter()
+                    .find(|r| r.id == thread)
+                    .and_then(|r| r.requests.first())
+                    .map(|q| q.id.clone());
+            }
+            peer.heard.push(msg);
+        }
+        let ask_id = request.expect("the prompt shows on the thread's row");
+        assert!(!held.is_finished(), "held for the phone, with no client linked");
+        let answer = Verb::AnswerRequest {
+            of: ThreadOf::On { worker: reg.worker, thread },
+            ask: ask_id,
+            choice: "allow".to_owned(),
+            message: None,
+        };
+        assert_eq!(peer.ask(answer).await, Outcome::Done, "the phone's answer, via the server");
+        let reply = tokio::time::timeout(STEP, held).await.unwrap().unwrap();
+        let CtlReply::Permission(PermissionAnswer { decision }) = reply else {
+            panic!("{reply:?}")
+        };
+        assert!(matches!(decision, Decision::Allow { .. }), "{decision:?}");
+
+        peer.tx.send(&FromServer::Pushes(false)).await.unwrap();
+        // The link reads in order: a verb answered after it means the word was taken.
+        let status = peer.ask(Verb::AgentStatus { term }).await;
+        assert!(matches!(status, Outcome::Agent(_)), "{status:?}");
+        let at_once = std::time::Instant::now();
+        let reply = asking(30_000).await.unwrap();
+        assert_eq!(reply, CtlReply::Permission(PermissionAnswer { decision: Decision::Pass }));
+        assert!(at_once.elapsed() < Duration::from_secs(5), "{:?}", at_once.elapsed());
+    }
+
     /// Once registered, the worker tells the server what it has, its toolchains among it. What
     /// the server fills in itself from the registration is left to it.
     #[tokio::test]
