@@ -11,7 +11,8 @@
 //! stand, where the agent's threads work, the last start's folder, and where the agent's past
 //! sessions ran, as the machine lists them when its link comes up and again as the step opens.
 //! Its home ends them; after them comes a new worktree of each repository they are in, so
-//! agents can work one repository side by side.
+//! agents can work one repository side by side, then a clone of each repository another machine
+//! has and this one does not ([`super::clone_here`]).
 //!
 //! The folder step ends with "Resume a past session…": every machine up that has the agent lists
 //! its sessions from the agent's own record, the last prompted first (`ThreadRequest::Sessions`),
@@ -64,7 +65,7 @@ pub(super) const NO_ORCHESTRATOR: &str =
 
 /// What the steps start: an agent of its own, or one to orchestrate a new project.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum For {
+pub(super) enum For {
     /// "New agent…".
     Agent,
     /// "New project…".
@@ -496,6 +497,7 @@ impl WorkspaceView {
         if let Some(first) = first {
             lines.insert(0, first);
         }
+        lines.extend(self.clone_lines(agent, worker, purpose));
         if purpose == For::Agent {
             let past = Box::new(ResumePastSession { worker, agent: agent.clone() });
             lines.push(PaletteItem::new(RESUME_PAST, past, &[]));
@@ -835,7 +837,7 @@ fn typed_folder(
 
 /// The folder step's action for a line: start `agent` on `worker` in `cwd`, as an agent of its
 /// own or as a new project's orchestrator.
-fn start(
+pub(super) fn start(
     purpose: For,
     worker: WorkerKey,
     agent: &AgentId,

@@ -1628,6 +1628,12 @@ impl CommandPalette {
         cx.notify();
     }
 
+    /// What the list says while it has no line ([`Self::set_empty`]).
+    #[cfg(test)]
+    pub(crate) fn empty_words(&self) -> &str {
+        &self.empty
+    }
+
     /// The threads worked in lately, newest first: a brief palette lists them under their own
     /// heading while its field is empty, so going back to one is a key away (R17).
     pub fn set_recent(&mut self, lines: Vec<PaletteItem>, cx: &App) {

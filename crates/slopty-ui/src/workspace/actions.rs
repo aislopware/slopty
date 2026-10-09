@@ -243,6 +243,25 @@ pub struct StartThread {
     pub worktree: bool,
 }
 
+/// A folder step's "Clone `origin` into `into`": `worker` clones the repository another machine
+/// has from `url`, the step saying how far it is, and `agent` then starts in the clone.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct CloneToStart {
+    /// Where it is cloned, and the agent runs.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// Which agent starts in it.
+    pub agent: slopty_proto::thread::AgentId,
+    /// The repository, as its origin names it (`github.com/aislopware/slopty`).
+    pub origin: String,
+    /// Where to clone it from, with no credentials in it.
+    pub url: String,
+    /// Where the clone goes on `worker`: absolute, or `~/…`.
+    pub into: String,
+    /// The agent orchestrates a new project ("New project…"), rather than working on its own.
+    pub project: bool,
+}
+
 /// A repository picked in "Review a pull request…": which pull request of it is asked next.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]

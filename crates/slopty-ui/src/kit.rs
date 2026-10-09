@@ -2749,11 +2749,12 @@ mod tests {
     }
 
     /// A command in the palette is its words: no line an action runs leads with an icon. Only a
-    /// step that lists things (an agent, a machine, a folder, a checkout, a past session) marks
-    /// its lines with what they are, and only there may `with_icon` follow a command's line.
+    /// step that lists things (an agent, a machine, a folder, a checkout, a repository to clone,
+    /// a past session) marks its lines with what they are, and only there may `with_icon` follow
+    /// a command's line.
     #[test]
     fn a_command_is_its_words() {
-        const THINGS: &str = "workspace/agent_start.rs";
+        const THINGS: [&str; 2] = ["workspace/agent_start.rs", "workspace/clone_here.rs"];
         let bindings: Vec<gpui::KeyBinding> = Vec::new();
         let lines = crate::workspace::palette_items()
             .into_iter()
@@ -2769,7 +2770,7 @@ mod tests {
         let source = chrome_lines("slopty-ui/src");
         for (ix, (file, no, line)) in source.iter().enumerate() {
             if !line.contains(".with_icon(")
-                || file.ends_with(THINGS)
+                || THINGS.iter().any(|things| file.ends_with(things))
                 || file.ends_with("palette.rs")
             {
                 continue;

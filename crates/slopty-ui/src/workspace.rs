@@ -43,6 +43,7 @@ pub mod attention;
 mod authors;
 mod breadcrumb;
 mod browsers;
+mod clone_here;
 mod commands;
 mod context_menus;
 mod desktop;
@@ -788,6 +789,8 @@ pub struct WorkspaceView {
     past_places: HashMap<WorkerKey, Vec<agent_start::PastPlace>>,
     /// The folder step that is up.
     folder_step: Option<agent_start::FolderStep>,
+    /// The clone a folder step asked for, until its machine says how it went.
+    clone_asked: Option<clone_here::CloneAsked>,
     /// The asks for past sessions with no words still out, by machine and agent (every agent's
     /// when `None`): one at a time each ([`Self::ask_past_places`]).
     listing: HashSet<(WorkerKey, Option<slopty_proto::thread::AgentId>)>,
@@ -1116,6 +1119,7 @@ impl WorkspaceView {
             sessions_asked: None,
             past_places: HashMap::new(),
             folder_step: None,
+            clone_asked: None,
             listing: HashSet::new(),
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
@@ -2122,6 +2126,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::new_project_on))
             .on_action(cx.listener(Self::start_orchestrator))
             .on_action(cx.listener(Self::resume_past_session))
+            .on_action(cx.listener(Self::clone_to_start))
             .on_action(cx.listener(Self::resume_session))
             .on_action(cx.listener(Self::review_pull))
             .on_action(cx.listener(Self::review_pull_in))

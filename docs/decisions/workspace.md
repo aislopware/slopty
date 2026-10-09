@@ -2258,12 +2258,33 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     tile asks, and the lines follow its answer. Typing on in the same folder asks nothing more.
   - Hidden folders show only for a part that begins with a dot. A trailing `/` lists the
     folder's own folders.
-  - **Not done: cloning a repository known on another machine.** The server refuses
-    `Verb::CloneRepo` from anyone but its own task starts (`hub.rs`, "the server clones …
-    for tasks itself"). The folder step can offer "Clone <url>" once the person's own caller
-    may ask for a clone, or once a worker takes a clone op.
+  - Cloning a repository known on another machine is its second half, below.
   - Tests: `workspace::tests::folder_typing::a_typed_path_completes_from_the_machines_folders`;
     `workspace::folder_typing::tests::*`.
+
+- ✅ **The folder step clones a repository another machine has** (2026-10-09, readiness R14,
+  its second half; the wire is `projects.md`'s "A client asks a worker for a clone directly").
+  - **What is offered.** After the worktree lines, a line "Clone `origin` into `~/…`" for each
+    repository whose clone another machine's shells stand in or threads work in, and that no
+    checkout known on the step's machine is (by origin, else first commit). The address is
+    the checkout's credential-free `RepoId::url`; a repository with none, or no origin, is not
+    offered. One line each: the shortest root found wins, so a clone is taken over its
+    worktrees. It goes to the same place under the home there (`~/work/slopty` for
+    `/Users/l/work/slopty`), else to the home under its own name (`workspace::clone_here`).
+  - **The step.** Picked, the machine is asked (`ClientMsg::CloneRepo`) and a step opens at
+    once saying "Cloning … into … on studio…", then git's own phase and percent as the machine
+    says them; only the latest counts. When the clone is there the step goes and the agent's
+    start opens in it, from where the keyboard was, as a pick of that folder would. A refusal
+    or git's failure, and a link lost on the way, are said in the step; one that comes after
+    the step was put away is a failure notice. A step put away first starts nothing: the
+    clone that lands then is said as a notice, so its place is known. Asked again, the machine
+    answers with the clone it finds there.
+  - **Why a step rather than a tile at once.** The start's tile opens with the agent's composer,
+    and the agent runs in a folder that does not exist until git is done. A step that says how
+    far git is, then the usual start, keeps the start as it always is.
+  - Tests: `workspace::tests::clone_start::*` (offered, asked, said at once and as it goes,
+    started in the clone; refused; the link lost; a late clone with its step gone);
+    `workspace::clone_here::tests::*`.
 
 - ✅ **"Resume a past session…" asks every machine** (2026-10-09, readiness R25; closes
   `agents.md`'s "Not yet: a search of every machine's prompts at once").

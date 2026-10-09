@@ -1652,6 +1652,7 @@ mod attach_block;
 mod away;
 mod bars;
 mod bodies;
+mod clone_start;
 mod context_menus;
 mod cwd;
 mod desktop;
