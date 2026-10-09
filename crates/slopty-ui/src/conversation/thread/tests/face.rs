@@ -372,6 +372,99 @@ fn a_long_thread_scrolled_up_a_little_offers_the_way_down(cx: &mut TestAppContex
     assert!(stale.is_none(), "{stale:?}");
 }
 
+/// A subagent's thread opened from a thread scrolled up stands at its newest row and follows
+/// it, with no way down; the first frame of each step (the opening, its rows coming, the way
+/// back) draws the marks the list's layout then confirms, rather than a way down the next
+/// frame takes away. Back on the thread above, it stands where the reader left it, and a
+/// thread that followed its newest row follows it again.
+#[gpui::test]
+fn a_subagent_s_thread_opens_at_its_newest_row_without_the_way_down(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Link;
+
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (hub, _sent) = hub(cx, None);
+    let mut parent = fixtures::long(12, 0);
+    let (main, sub) = (parent.meta.id, slopty_proto::thread::ThreadId::new());
+    parent.items.push(Item {
+        id: ItemId("agent".to_owned()),
+        turn: TurnId(12),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::Tool(Box::new(ToolCall {
+            name: "Task".to_owned(),
+            kind: kind::AGENT.to_owned(),
+            title: "Count lines".to_owned(),
+            input: Clipped::default(),
+            state: ToolState::Completed,
+            output: None,
+            images: Vec::new(),
+            detail: None,
+            child: Some(sub),
+            ended_ms: None,
+        })),
+    });
+    // A short subagent's thread and a long one: the short fits in the tile, so the list has no
+    // end to scroll to; the long one's rows are measured only as they come into view.
+    let child = |turns: u32| {
+        let mut child = fixtures::long(turns, 0);
+        child.meta.id = sub;
+        for item in &mut child.items {
+            item.id = ItemId(format!("sub-{}", item.id.0));
+        }
+        for turn in &mut child.turns {
+            turn.input = turn.input.take().map(|id| ItemId(format!("sub-{}", id.0)));
+        }
+        child.meta.parent = Some(Link { thread: main, item: ItemId("agent".to_owned()) });
+        child
+    };
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, main);
+    cx.simulate_resize(gpui::size(px(400.0), px(420.0)));
+    hub.update(cx, |hub, cx| hub.frame(main, snapshot(parent, 1), cx));
+    cx.run_until_parked();
+    let moved = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.marks_moved());
+    let first_frame_holds = |cx: &mut VisualTestContext, before: usize, step: &str| {
+        cx.run_until_parked();
+        assert_eq!(moved(cx), before, "{step}: the first frame drew the marks the layout keeps");
+        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        assert!(stale.is_none(), "{step}: {stale:?}");
+    };
+
+    for (turns, seq) in [(1, 1), (12, 2)] {
+        scroll(cx, 60.0);
+        assert!(cx.debug_bounds("thread-down").is_some(), "{turns}: scrolled up, the way down");
+        let before = moved(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| v.open_subagent(sub, "Count lines".to_owned(), window, cx));
+        });
+        first_frame_holds(cx, before, "the subagent's thread opened");
+        let before = moved(cx);
+        hub.update(cx, |hub, cx| hub.frame(sub, snapshot(child(turns), seq), cx));
+        first_frame_holds(cx, before, "its rows came");
+        assert!(view.read_with(cx, |v, _| v.following()), "{turns}: it follows its newest row");
+        assert!(cx.debug_bounds("thread-down").is_none(), "{turns}: no way down at the newest");
+
+        // The key's own frame is drawn before the key is handled, so the marks it read are
+        // checked again once the way back drew: only the frame itself is judged here.
+        cx.simulate_keystrokes("escape");
+        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        assert!(stale.is_none(), "{turns}: back: {stale:?}");
+        assert_eq!(view.read_with(cx, |v, _| v.shown()), main);
+        assert!(!view.read_with(cx, |v, _| v.following()), "{turns}: where the reader left it");
+        assert!(cx.debug_bounds("thread-down").is_some(), "{turns}: still scrolled up");
+        let down = cx.debug_bounds("thread-down").expect("the way down").center();
+        cx.simulate_click(down, Modifiers::none());
+        assert!(view.read_with(cx, |v, _| v.following()), "{turns}: the way down follows");
+    }
+
+    cx.update(|window, cx| {
+        view.update(cx, |v, cx| v.open_subagent(sub, "Count lines".to_owned(), window, cx));
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.following()), "a thread that followed follows again");
+}
+
 /// Scrolled up while the thread moves on, the way down says how much came ("3 new"), and
 /// announces it politely only once the count has held for 700 ms; back at the newest row
 /// the count goes.

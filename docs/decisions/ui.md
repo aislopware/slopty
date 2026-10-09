@@ -9170,3 +9170,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_program_waiting_on_the_person_notifies_as_an_agent_does` (the bell and badge, one sound,
     the note while away with a server leading, none again for a progress update, taken back
     when answered, and a flip back inside the quiet neither sounding nor notifying).
+
+- ✅ **A subagent's thread follows its newest row from its first frame** (2026-10-10, readiness
+  audit item 1).
+  - **The defect.** Opened from a thread scrolled up, a subagent's thread was only scrolled to
+    its end, so the list stayed out of tail-follow until a layout found it at the end. The frame
+    its rows arrived in read the marks before that layout and drew the way down; the next frame
+    took it away. A dump between the two frames saw a stale 28 px button
+    (CI run 37950895313, `conversation::a_subagent_has_a_thread_of_its_own`).
+  - **The fix.** Opening a subagent's thread sets the list to follow its newest row
+    (`FollowMode::Tail`), so its first frame and every frame after it agree. The thread above
+    remembers whether it followed: on the way back it follows again, or stands where the reader
+    left it.
+  - Test: `conversation::thread::tests::face::a_subagent_s_thread_opens_at_its_newest_row_without_the_way_down`
+    (a short and a long subagent's thread: the first frame of the opening and of its rows
+    holds the marks the layout keeps; the way back; a followed thread followed again).

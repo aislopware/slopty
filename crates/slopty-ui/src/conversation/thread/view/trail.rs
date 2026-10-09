@@ -6,9 +6,9 @@ use std::collections::HashSet;
 
 use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, App, Context, FontWeight, InteractiveElement as _, IntoElement as _, ListOffset,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    AnyElement, App, Context, FollowMode, FontWeight, InteractiveElement as _, IntoElement as _,
+    ListOffset, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, px,
 };
 use slopty_proto::thread::{ItemId, ThreadId, TurnId};
 use slopty_theme::Typography;
@@ -28,6 +28,8 @@ pub(super) struct Above {
     items_open: HashSet<ItemId>,
     whole: HashSet<ItemId>,
     scroll: ListOffset,
+    /// Whether it followed its newest row.
+    following: bool,
     /// What the call that opened the thread below calls the subagent.
     called: String,
 }
@@ -71,13 +73,17 @@ impl ThreadView {
             items_open: std::mem::take(&mut self.items_open),
             whole: std::mem::take(&mut self.whole),
             scroll: self.list.logical_scroll_top(),
+            following: self.list.is_following_tail(),
             called,
         });
         self.thread = child;
         self.asked_at = 0;
         self.plan_open = false;
         self.rebuild(cx);
-        self.list.scroll_to_end();
+        // At its newest row and following it from the first frame: a list only scrolled to its
+        // end takes up following once a layout finds it there, a frame after the one that drew
+        // the way down for a list left behind.
+        self.list.set_follow_mode(FollowMode::Tail);
         window.focus(&self.focus, cx);
     }
 
@@ -95,7 +101,11 @@ impl ThreadView {
         self.whole = above.whole;
         self.asked_at = 0;
         self.rebuild(cx);
-        self.list.scroll_to(above.scroll);
+        if above.following {
+            self.list.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.list.scroll_to(above.scroll);
+        }
         if self.trail.is_empty() {
             self.composer.update(cx, |c, cx| c.focus(window, cx));
         }
