@@ -316,7 +316,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         hello.client,
         link,
         hello.name.clone(),
-        handoff_sink(out.clone(), hello.client),
+        handoff_sink(out.clone()),
     );
     for session in unwatched {
         let _sent = daemon.presence.send((session, false));
@@ -596,9 +596,22 @@ impl InputOrder {
     }
 }
 
-/// Where the handoffs send this client an ask: the control stream, without waiting.
-fn handoff_sink(out: mpsc::Sender<WorkerMsg>, client: ClientId) -> slopty_worker::handoff::Sink {
-    Arc::new(move |msg| post(&out, client, msg))
+/// Where the handoffs send this client an ask or a withdrawal: the control stream, in order,
+/// waiting for room. None is dropped: an ask lost leaves its program waiting, and a withdrawal
+/// lost leaves an ask on the client that is over. The handoffs call it under their lock, so a
+/// task of its own does the waiting; it ends when the handoffs let go of the client.
+fn handoff_sink(out: mpsc::Sender<WorkerMsg>) -> slopty_worker::handoff::Sink {
+    let (told, mut telling) = mpsc::unbounded_channel::<WorkerMsg>();
+    tokio::spawn(async move {
+        while let Some(msg) = telling.recv().await {
+            if out.send(msg).await.is_err() {
+                return;
+            }
+        }
+    });
+    Arc::new(move |msg| {
+        let _gone = told.send(msg);
+    })
 }
 
 /// Tell the client a request about `session` failed, from a task that may wait for room.
@@ -1635,6 +1648,33 @@ mod tests {
     use slopty_proto::terminal::{CloseReason, RepoChanges, SessionState, SessionSummary};
 
     use super::{Heard, Input, InputOrder, Route, ScreenOrder, StreamId, route};
+
+    /// A handoff's word reaches a client whose control queue is full at that moment, once there
+    /// is room, and the words keep their order: an ask, then its withdrawal.
+    #[tokio::test]
+    async fn a_handoff_word_waits_for_room_and_keeps_its_order() {
+        use slopty_proto::handoff::HandoffEvent;
+
+        let (out, mut client) = tokio::sync::mpsc::channel(1);
+        out.try_send(WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() })
+            .expect("room for one");
+        let sink = super::handoff_sink(out);
+        for id in [1, 2, 3] {
+            sink(WorkerMsg::Handoff(HandoffEvent::Withdrawn { id }));
+        }
+        let mut heard = Vec::new();
+        while heard.len() < 4 {
+            heard.push(client.recv().await.expect("the queue stays open"));
+        }
+        let ids: Vec<u64> = heard
+            .iter()
+            .filter_map(|m| match m {
+                WorkerMsg::Handoff(HandoffEvent::Withdrawn { id }) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [1, 2, 3], "every word, in order");
+    }
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
         ScreenInput::Key { code, action: KeyAction::Press, mods }
