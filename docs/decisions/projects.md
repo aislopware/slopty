@@ -2438,6 +2438,12 @@ reordering and edited allows are gone" in `agents.md`.*
     sent again under that number is acknowledged again and never kept to be read twice. A link
     that fell behind the report broadcast says every last read again. A repeated `Delivered` on
     the server matches no outstanding batch and does nothing.
+  - **Still open: a fold after a lost word.** Suppose the word that batch N was read is lost
+    while the link stays up. If a new report falls due before the worker says N again, the
+    server folds N's reports into N+1 and the agent reads them twice. The worker cannot drop
+    them one by one: a report waiting here has no id of its own, and a batch reaches the worker
+    as one block of text. Closing this needs an id per report in `Deliver`, a wire change. The
+    window is a broadcast lag or a registration, and the cost is one repeat, never a loss.
   - Tests: `deliver::tests` `a_batch_the_link_could_not_take_goes_again`,
     `reports_on_their_way_outlive_a_restart` and
     `an_outstanding_batch_on_a_terminal_gone_is_found`; the hub's

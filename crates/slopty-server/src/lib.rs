@@ -178,7 +178,7 @@ impl Server {
         hub.adopt_deliveries(deliveries.load().await.map_err(unreadable(deliveries.path()))?);
         let phones = PushStore::in_dir(&config.data_dir);
         let devices = phones.load().await.map_err(unreadable(phones.path()))?;
-        let devices = hub.keep_devices(devices);
+        let devices = hub.keep_phones(devices);
         push_as(&hub, config.push, &config.data_dir).await?;
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;

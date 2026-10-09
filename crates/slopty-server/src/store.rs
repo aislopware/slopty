@@ -21,7 +21,7 @@ use slopty_push::relay::InstallKey;
 use tokio::sync::{mpsc, watch};
 
 use crate::deliver::Kept;
-use crate::hub::Devices;
+use crate::hub::PushKept;
 use crate::project::{Keep, ProjectsFile};
 
 /// The file's name in the server's data directory.
@@ -300,30 +300,31 @@ impl PushStore {
         &self.path
     }
 
-    /// The phones it holds: none when there is no file. One that does not parse is set aside
-    /// as `push.json.bad-<ms>` and read as none.
+    /// The phones it holds, with the notes they show and the take-backs they are owed: none
+    /// when there is no file. One that does not parse is set aside as `push.json.bad-<ms>` and
+    /// read as none.
     ///
     /// # Errors
     /// The file is there and cannot be read, or cannot be set aside.
-    pub async fn load(&self) -> io::Result<Devices> {
+    pub async fn load(&self) -> io::Result<PushKept> {
         load(&self.path).await
     }
 
-    /// Replace the file with `devices`.
+    /// Replace the file with `kept`.
     ///
     /// # Errors
     /// The file cannot be written.
-    pub async fn save(&self, devices: &Devices) -> io::Result<()> {
-        let json = serde_json::to_vec_pretty(devices).map_err(io::Error::other)?;
+    pub async fn save(&self, kept: &PushKept) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(kept).map_err(io::Error::other)?;
         write(&self.path, json).await
     }
 
     /// Save every change `changes` says until its sender goes away; changes that arrive during
     /// a write collapse into the latest.
-    pub async fn keep(self, mut changes: watch::Receiver<Devices>) {
+    pub async fn keep(self, mut changes: watch::Receiver<PushKept>) {
         while changes.changed().await.is_ok() {
-            let devices = changes.borrow_and_update().clone();
-            if let Err(e) = self.save(&devices).await {
+            let kept = changes.borrow_and_update().clone();
+            if let Err(e) = self.save(&kept).await {
                 tracing::warn!(path = %self.path.display(), error = %e, "phones not saved");
             }
         }
@@ -486,9 +487,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = PushStore::in_dir(&dir.path().join("server"));
-        assert!(store.load().await.unwrap().is_empty(), "no file yet");
+        assert_eq!(store.load().await.unwrap(), PushKept::default(), "no file yet");
         let hub = Hub::new("server".to_owned(), Vec::new());
-        let keeper = tokio::spawn(store.clone().keep(hub.keep_devices(Devices::new())));
+        let keeper = tokio::spawn(store.clone().keep(hub.keep_phones(PushKept::default())));
         let (tx, _rx) = mpsc::channel(8);
         let link = hub.number_link();
         let seated = hub.seat(link, "phone".to_owned(), tx);
@@ -505,7 +506,7 @@ mod tests {
         drop(hub);
         keeper.await.unwrap();
         let loaded = store.load().await.unwrap();
-        assert_eq!(loaded.get(&client), Some(&device), "the phone is kept");
+        assert_eq!(loaded.devices().get(&client), Some(&device), "the phone is kept");
 
         let key = store.install_key().await.unwrap();
         let path = dir.path().join("server").join(PUSH_KEY);

@@ -70,7 +70,7 @@ mod settle;
 mod steps;
 
 pub use awake::{Hold, Policy as KeepAwake};
-pub use ladder::{Devices, Seated};
+pub use ladder::{Devices, PushKept, Seated};
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
 /// grace; `docs/decisions/topology.md`).
@@ -1137,10 +1137,23 @@ impl Hub {
         // However this call ends, answered, timed out or dropped by its caller mid-wait, the
         // request stops waiting on the link.
         let _pending = Pending { hub: self, worker, generation, id };
-        if tx.send(FromServer::Request { id, key, verb }).await.is_err() {
-            return error(ErrorCode::WorkerUnreachable, "the worker's link closed");
+        // The deadline holds from here: a link that stays up and does not drain holds the
+        // request no longer than an answer that does not come.
+        let end = tokio::time::Instant::now().checked_add(deadline);
+        let end = end.unwrap_or_else(tokio::time::Instant::now);
+        match tokio::time::timeout_at(end, tx.send(FromServer::Request { id, key, verb })).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_closed)) => {
+                return error(ErrorCode::WorkerUnreachable, "the worker's link closed");
+            }
+            Err(_elapsed) => {
+                return error(
+                    ErrorCode::WorkerUnreachable,
+                    "the worker's link took nothing in time; the request was not sent",
+                );
+            }
         }
-        match tokio::time::timeout(deadline, reply).await {
+        match tokio::time::timeout_at(end, reply).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_dropped)) => error(
                 ErrorCode::Interrupted,
@@ -2096,6 +2109,27 @@ pub(crate) mod tests {
         // The worker's late answer is to nothing, and harmless.
         lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
         assert_eq!(hub.pending(worker), 0);
+    }
+
+    /// A worker whose link stays up and takes nothing holds a forwarded verb no longer than
+    /// its deadline: the send waits inside it, and the request is said not to have gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_that_does_not_drain_holds_a_forward_no_longer_than_its_deadline() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(FromServer::Directory(Vec::new())).unwrap();
+        let _lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        let term = TermRef { worker, session: SessionId::new() };
+        let started = tokio::time::Instant::now();
+        let asked = hub.dispatch(Verb::ReadScreen { term }).await;
+        assert_eq!(started.elapsed(), FORWARD_TIMEOUT);
+        let Outcome::Error { code, message } = asked else { panic!("{asked:?}") };
+        assert_eq!(code, ErrorCode::WorkerUnreachable);
+        assert!(message.contains("not sent"), "{message}");
+        assert_eq!(hub.pending(worker), 0, "nothing left waiting on the link");
+        assert!(matches!(rx.try_recv(), Ok(FromServer::Directory(_))));
+        assert!(rx.try_recv().is_err(), "the request never went");
     }
 
     #[tokio::test(start_paused = true)]

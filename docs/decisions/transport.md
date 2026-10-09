@@ -2094,3 +2094,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `the_max_bw_filter_advances_once_per_probe` and
     `probe_up_goes_on_while_inflight_longterm_holds_it` (noq-proto, 455 of its tests pass);
     `crates/slopty-net/tests/bulk_twice.rs` measures it end to end.
+
+- ✅ **A forwarded verb's deadline covers its send** (2026-10-10, readiness 10-10 rank 21).
+  `Hub::forward` awaited the worker link's `send` before its timeout started. A worker whose
+  link stayed up and did not drain (its 256-deep queue full) held every verb forwarded to it
+  with no limit. The deadline now runs from before the send, and the send waits inside it. One
+  the link never took fails with `WorkerUnreachable`, and says the request was not sent, so a
+  caller knows a retry cannot do it twice. An answer that does not come still fails with
+  `Interrupted`, as before.
+  - Test: `hub::tests::a_link_that_does_not_drain_holds_a_forward_no_longer_than_its_deadline`
+    (slopty-server).

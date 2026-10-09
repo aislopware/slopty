@@ -1055,3 +1055,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `hub::ladder::tests::a_program_waiting_on_the_person_is_pushed_and_taken_back`;
     `slopty-platform` `a_pushed_note_carries_what_a_tap_routes_by` (its terminal case);
     golden `push_body_program`.
+
+- ✅ **A take-back is never lost, and a late note never follows it** (2026-10-10, readiness
+  10-10 rank 11). Four ways a pocketed phone was left showing an answered ask, or never heard
+  of one:
+  - **A full push queue.** A thread was struck from what its phone was pushed before the
+    take-back was queued. If the queue was full, the take-back was dropped and never tried
+    again. Now it stays owed (`Phones::owed`) until the queue takes it. Each ranking pass
+    tries again, and while any is owed a try is set for `TAKE_BACK_RETRY` (2 s) later
+    (`Board::retry_owed`). A newer note about the same thread or terminal replaces the old
+    note on the phone, so it drops the take-back owed for it.
+  - **A restart.** What each phone shows and is owed lived only in memory. It is now kept
+    with the phones in `push.json` (`PushKept`). A server that starts again from the store
+    takes back what was answered while it was away. The file's shape changed: an old one is
+    set aside, and a phone gives its device again on its next link.
+  - **A late note.** APNs' try-later sent a note again at 2 s and 10 s, alongside the pushes
+    queued after it, so a note could land after its own take-back and show the answered ask
+    again. Each push is now numbered per phone and subject (`push::Latest`). A retry that a
+    later push about the same subject overtook is given up, and a take-back retried keeps only
+    the subjects still its own.
+  - **A notice no link took.** A notice for the desk or handheld the person is at went by
+    `try_send` on that link alone. When every link it went to was full, nothing stood in.
+    Now it is pushed as though the person were away, and the phone whose own link refused
+    it counts as not listening.
+  - Tests: `slopty-server` `hub::ladder::tests::a_take_back_a_full_queue_refused_is_owed_and_kept`
+    (owed, tried again on the timer, and kept across a restart from the store),
+    `hub::ladder::tests::a_notice_no_link_could_take_is_pushed`, and
+    `push::tests::a_note_older_than_its_take_back_is_not_sent_again`.

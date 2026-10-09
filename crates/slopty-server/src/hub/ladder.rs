@@ -18,7 +18,11 @@
 //! `slopty_proto::push`): sealed to the phone, through the relay or straight to APNs
 //! ([`crate::push`]). Once a thread a phone was pushed an ask about stops needing the person
 //! (answered at another client, or in its terminal), the note is taken back with a background
-//! push ([`Phones::take_back`]).
+//! push ([`Phones::take_back`]). A take-back the push queue cannot take now is owed, and tried
+//! again after [`TAKE_BACK_RETRY`] unless a newer note about the same thread replaced it. What
+//! each phone shows and what is owed it are kept with the phones ([`PushKept`]), so a server
+//! that restarts still takes them back. A notice every link it went to could not take is pushed
+//! as well, as though the person were away.
 //!
 //! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
 //! request (as its thread's row names it) failing a check, asked to change or conflicting, its
@@ -26,9 +30,11 @@
 //! merge not going. It is one notice per timeline entry, about the project, routed by the
 //! orchestrator's terminal as a thread's is by its own.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{TermAgent, TermRef};
@@ -74,7 +80,7 @@ pub(super) struct Board {
     /// Where each thread hanging from no other was last said to stand ([`Self::rung_moves`]).
     rungs_said: HashMap<(WorkerId, ThreadId), TermAgent>,
     /// Every task's thread a table has shown, by its worker: one gone from it since ended.
-    seen: std::collections::HashSet<(WorkerId, ThreadId)>,
+    seen: HashSet<(WorkerId, ThreadId)>,
     /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
     /// with the seat it was told under and whether it had stopped.
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
@@ -84,6 +90,9 @@ pub(super) struct Board {
     phones: Phones,
 }
 
+/// How long a take-back the push queue could not take waits before it is tried again.
+pub(crate) const TAKE_BACK_RETRY: Duration = Duration::from_secs(2);
+
 /// The phones the server may push to, and where their pushes go.
 #[derive(Debug, Default)]
 struct Phones {
@@ -91,18 +100,39 @@ struct Phones {
     devices: Devices,
     /// Where pushes go to be sealed and sent: none while pushing is off.
     out: Option<mpsc::Sender<Outgoing>>,
-    /// Where the devices go to be kept ([`crate::store::PushStore`]).
-    kept: Option<watch::Sender<Devices>>,
+    /// Where the phones go to be kept ([`crate::store::PushStore`]).
+    kept: Option<watch::Sender<PushKept>>,
     /// [`Self::answerable`], as every worker's link sends it: a word each link takes the
     /// latest of, so none is dropped behind a full queue.
     said: watch::Sender<bool>,
     /// What each phone was last pushed a note about that needs the person, to take back once
     /// it no longer does ([`Self::take_back`], [`Self::program_answered`]).
-    asked: BTreeMap<ClientId, std::collections::HashSet<Asked>>,
+    asked: BTreeMap<ClientId, HashSet<Asked>>,
+    /// What each phone is owed a take-back of, decided and not yet taken by the push queue.
+    owed: BTreeMap<ClientId, HashSet<Asked>>,
+    /// When the owed take-backs are next tried, once a try is set.
+    retry_at: Option<tokio::time::Instant>,
+}
+
+/// The phones the server may push to, the notes each shows that need the person, and the
+/// take-backs each is owed, as the store keeps them ([`crate::store::PushStore`]).
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct PushKept {
+    devices: Devices,
+    asked: BTreeMap<ClientId, HashSet<Asked>>,
+    owed: BTreeMap<ClientId, HashSet<Asked>>,
+}
+
+impl PushKept {
+    /// Each phone, by its client.
+    #[must_use]
+    pub const fn devices(&self) -> &Devices {
+        &self.devices
+    }
 }
 
 /// What a pushed note that needs the person is about: a thread, or a terminal's program.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 enum Asked {
     Thread(ThreadAt),
     Terminal(TermRef),
@@ -127,21 +157,39 @@ impl Phones {
         self.out.is_some() && !self.devices.is_empty()
     }
 
-    /// Hand every device to the keeper.
+    /// Hand the phones, and what they show and are owed, to the keeper when that moved.
     fn keep(&self) {
         if let Some(kept) = &self.kept {
-            kept.send_replace(self.devices.clone());
+            kept.send_if_modified(|kept| {
+                let now = PushKept {
+                    devices: self.devices.clone(),
+                    asked: self.asked.clone(),
+                    owed: self.owed.clone(),
+                };
+                let moved = *kept != now;
+                *kept = now;
+                moved
+            });
         }
     }
 
     /// Push `notice` to every phone not listening on a live link among `seats`, with `ask`,
     /// the request its note's buttons answer; a finished turn shorter than a phone's quiet
-    /// time is not pushed to it, as that phone would not post it.
-    fn push(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
+    /// time is not pushed to it, as that phone would not post it. A link in `unheard` could
+    /// not take the notice, so its phone is not counted as listening.
+    fn push(
+        &mut self,
+        seats: &BTreeMap<u64, Sitting>,
+        notice: &Notice,
+        ask: Option<&AskId>,
+        unheard: &[u64],
+    ) {
         let Some(out) = &self.out else { return };
         for (client, device) in &self.devices {
-            let listening = seats.values().any(|s| {
-                s.client == Some(*client) && s.presence.as_ref().is_none_or(|p| p.listening)
+            let listening = seats.iter().any(|(link, s)| {
+                s.client == Some(*client)
+                    && s.presence.as_ref().is_none_or(|p| p.listening)
+                    && !unheard.contains(link)
             });
             let short = notice.kind == NoticeKind::Finished
                 && notice.worked_ms.is_some_and(|ms| ms < device.quiet_ms);
@@ -161,6 +209,10 @@ impl Phones {
                 Subject::Terminal(term) => Asked::Terminal(term),
                 Subject::Project { .. } => continue,
             };
+            // A take-back owed for what this note replaced would take this one back.
+            if let Some(owed) = self.owed.get_mut(client) {
+                owed.remove(&about);
+            }
             let asked = self.asked.entry(*client).or_default();
             if notice.kind == NoticeKind::NeedsYou {
                 asked.insert(about);
@@ -169,31 +221,64 @@ impl Phones {
             }
         }
         self.asked.retain(|_, asked| !asked.is_empty());
+        self.owed.retain(|_, owed| !owed.is_empty());
+        self.keep();
     }
 
     /// Take back from each phone what `answered` says no longer needs the person, among what
-    /// it was pushed: one background push per [`slopty_push::apns::MAX_TAKE_BACK`].
+    /// it was pushed: one background push per [`slopty_push::apns::MAX_TAKE_BACK`]. What the
+    /// queue cannot take now stays owed ([`Self::send_owed`]).
     fn take_back_where(&mut self, answered: impl Fn(&Asked) -> bool) {
-        let Some(out) = &self.out else {
+        if self.out.is_none() {
             self.asked.clear();
+            self.owed.clear();
+            self.keep();
             return;
-        };
+        }
         let devices = &self.devices;
+        self.owed.retain(|client, _| devices.contains_key(client));
+        let owed = &mut self.owed;
         self.asked.retain(|client, asked| {
-            let Some(device) = devices.get(client) else { return false };
-            let gone: Vec<Asked> = asked.iter().copied().filter(|a| answered(a)).collect();
-            for about in &gone {
-                asked.remove(about);
+            if !devices.contains_key(client) {
+                return false;
             }
-            for chunk in gone.chunks(slopty_push::apns::MAX_TAKE_BACK) {
-                let what = Sending::TakeBack(chunk.iter().map(|a| a.subject()).collect());
-                let push = Outgoing { client: *client, device: device.clone(), what };
-                if out.try_send(push).is_err() {
-                    tracing::debug!(%client, "a take-back found its queue full or gone");
-                }
+            let gone: Vec<Asked> = asked.iter().copied().filter(|a| answered(a)).collect();
+            for about in gone {
+                asked.remove(&about);
+                owed.entry(*client).or_default().insert(about);
             }
             !asked.is_empty()
         });
+        self.send_owed();
+    }
+
+    /// Hand the push queue every take-back owed that it takes; the rest stay owed. Whether any
+    /// is still owed.
+    fn send_owed(&mut self) -> bool {
+        if let Some(out) = &self.out {
+            let devices = &self.devices;
+            for (client, owed) in &mut self.owed {
+                let Some(device) = devices.get(client) else {
+                    owed.clear();
+                    continue;
+                };
+                let all: Vec<Asked> = owed.iter().copied().collect();
+                for chunk in all.chunks(slopty_push::apns::MAX_TAKE_BACK) {
+                    let what = Sending::TakeBack(chunk.iter().map(|a| a.subject()).collect());
+                    let push = Outgoing { client: *client, device: device.clone(), what };
+                    if out.try_send(push).is_err() {
+                        tracing::debug!(%client, "a take-back found its queue full; owed");
+                        break;
+                    }
+                    for about in chunk {
+                        owed.remove(about);
+                    }
+                }
+            }
+        }
+        self.owed.retain(|_, owed| !owed.is_empty());
+        self.keep();
+        !self.owed.is_empty()
     }
 
     /// Take back each phone's pushed note about `term`'s program: it no longer waits on the
@@ -225,6 +310,30 @@ impl Phones {
     /// notes, so none is left for a push to.
     fn listening(&mut self, client: ClientId) {
         self.asked.remove(&client);
+        self.owed.remove(&client);
+        self.keep();
+    }
+}
+
+impl Board {
+    /// Owed take-backs are tried again after [`TAKE_BACK_RETRY`]: a ranking pass sends what
+    /// the queue takes, and sets the next try while any is still owed.
+    fn retry_owed(&mut self) {
+        let now = tokio::time::Instant::now();
+        if self.phones.retry_at.is_some_and(|at| at > now) {
+            return;
+        }
+        self.phones.retry_at = None;
+        if !self.phones.send_owed() {
+            return;
+        }
+        let at = now.checked_add(TAKE_BACK_RETRY).unwrap_or(now);
+        self.phones.retry_at = Some(at);
+        let wake = Arc::clone(&self.wake);
+        drop(tokio::spawn(async move {
+            tokio::time::sleep_until(at).await;
+            wake.notify_one();
+        }));
     }
 }
 
@@ -658,15 +767,18 @@ impl Hub {
         drop(state);
     }
 
-    /// Take `devices`, the phones a store kept by their clients, and say every change to them
-    /// on the returned receiver from now on, for the store to keep.
-    pub fn keep_devices(&self, devices: Devices) -> watch::Receiver<Devices> {
+    /// Take `kept`, the phones a store kept with what they show and are owed, and say every
+    /// change to them on the returned receiver from now on, for the store to keep. What is
+    /// owed is tried again at the next ranking.
+    pub fn keep_phones(&self, kept: PushKept) -> watch::Receiver<PushKept> {
         let mut state = self.inner.state.lock();
         let phones = &mut state.board.phones;
-        phones.devices = devices;
-        let (kept, changes) = watch::channel(phones.devices.clone());
-        phones.kept = Some(kept);
+        let PushKept { devices, asked, owed } = kept.clone();
+        (phones.devices, phones.asked, phones.owed) = (devices, asked, owed);
+        let (sender, changes) = watch::channel(kept);
+        phones.kept = Some(sender);
         say_pushes(&state);
+        state.board.wake.notify_one();
         drop(state);
         changes
     }
@@ -738,6 +850,7 @@ impl Hub {
         let ladder = ladder(&state.board.tables, &state.projects);
         let board = &mut state.board;
         board.phones.take_back(&ladder, &board.tables);
+        board.retry_owed();
         if ladder == board.published {
             return;
         }
@@ -786,6 +899,7 @@ pub(super) fn program_moved(
 ) {
     let Some((summary, record)) = now.and_then(|s| Some((s, program_blocked(s)?))) else {
         board.phones.program_answered(term);
+        board.retry_owed();
         return;
     };
     if was || board.thread_in(term).is_some() {
@@ -813,7 +927,7 @@ pub(super) fn program_moved(
         via: None,
     };
     if route(&board.seats, &notice).away {
-        board.phones.push(&board.seats, &notice, None);
+        board.phones.push(&board.seats, &notice, None, &[]);
     }
 }
 
@@ -824,6 +938,7 @@ pub(super) fn programs_back(board: &mut Board, worker: WorkerId, waiting: &[Sess
     board.phones.take_back_where(|asked| {
         matches!(asked, Asked::Terminal(t) if t.worker == worker && !waiting.contains(&t.session))
     });
+    board.retry_owed();
 }
 
 /// A project's change that holds its work up goes to the person as a notice, where they are.
@@ -838,14 +953,18 @@ pub(super) fn tell_project(state: &mut State, kept: &Kept) {
 /// answer.
 fn tell(board: &mut Board, notice: &Notice, ask: Option<&AskId>) {
     let reach = route(&board.seats, notice);
+    let mut unheard = Vec::new();
     for link in &reach.links {
         let Some(seat) = board.seats.get(link) else { continue };
         if seat.tx.try_send(FromServer::Notice(Box::new(notice.clone()))).is_err() {
             tracing::debug!(link, "a notice found its link full or gone");
+            unheard.push(*link);
         }
     }
-    if reach.away {
-        board.phones.push(&board.seats, notice, ask);
+    // A notice no link it went to could take is pushed, as though the person were away.
+    let lost = !reach.links.is_empty() && unheard.len() == reach.links.len();
+    if reach.away || lost {
+        board.phones.push(&board.seats, notice, ask, &unheard);
     }
 }
 

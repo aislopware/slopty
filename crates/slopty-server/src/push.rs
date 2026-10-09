@@ -380,31 +380,91 @@ fn cut(text: &mut String, bytes: usize) {
     text.push(ellipsis);
 }
 
+/// The number of the latest push to each phone about each thing, by its collapse id's words
+/// ([`collapse_of`]): a try again that a later push about the same thing overtook is given up.
+#[derive(Debug, Default)]
+struct Latest(parking_lot::Mutex<std::collections::HashMap<(ClientId, String), u64>>);
+
+impl Latest {
+    /// `out` is push number `n`: the latest about everything it names.
+    fn mark(&self, out: &Outgoing, n: u64) {
+        let mut latest = self.0.lock();
+        for about in subjects(out) {
+            latest.insert((out.client, collapse_of(about)), n);
+        }
+    }
+
+    /// What of push number `n` is still the latest about what it names: all of it, part of a
+    /// take-back, or none once later pushes overtook it.
+    fn still(&self, out: &Outgoing, n: u64) -> Option<Outgoing> {
+        let latest = self.0.lock();
+        let mine = |about: &Subject| latest.get(&(out.client, collapse_of(about))) == Some(&n);
+        let what = match &out.what {
+            Sending::Note(body) => mine(&body.notice.about).then(|| Sending::Note(body.clone()))?,
+            Sending::TakeBack(about) => {
+                let left: Vec<Subject> = about.iter().filter(|a| mine(a)).cloned().collect();
+                (!left.is_empty()).then_some(Sending::TakeBack(left))?
+            }
+        };
+        Some(Outgoing { what, ..out.clone() })
+    }
+
+    /// Push number `n` is done: what it was the latest about is forgotten.
+    fn done(&self, out: &Outgoing, n: u64) {
+        let mut latest = self.0.lock();
+        for about in subjects(out) {
+            let key = (out.client, collapse_of(about));
+            if latest.get(&key) == Some(&n) {
+                latest.remove(&key);
+            }
+        }
+    }
+}
+
+/// What `out` is about.
+fn subjects(out: &Outgoing) -> Vec<&Subject> {
+    match &out.what {
+        Sending::Note(body) => vec![&body.notice.about],
+        Sending::TakeBack(about) => about.iter().collect(),
+    }
+}
+
 /// Seal and send every push `queue` brings through `pusher`, each on its own.
 ///
 /// It runs until the queue closes and the last is sent. A phone APNs says is gone is
-/// forgotten, and a push it says to try later is tried again ([`RETRY_AFTER`]).
+/// forgotten, and a push it says to try later is tried again ([`RETRY_AFTER`]), unless a later
+/// push about the same thing came meanwhile: a note tried again after its take-back would show
+/// again what was answered.
 pub async fn deliver(hub: WeakHub, mut queue: mpsc::Receiver<Outgoing>, pusher: Arc<dyn Pusher>) {
     let mut sending = JoinSet::new();
+    let latest = Arc::new(Latest::default());
+    let mut next = 0_u64;
     while let Some(out) = queue.recv().await {
         while sending.try_join_next().is_some() {}
-        let (hub, pusher) = (hub.clone(), Arc::clone(&pusher));
-        sending.spawn(async move { send(&hub, &out, pusher.as_ref()).await });
+        next = next.wrapping_add(1);
+        let n = next;
+        latest.mark(&out, n);
+        let (hub, pusher, latest) = (hub.clone(), Arc::clone(&pusher), Arc::clone(&latest));
+        sending.spawn(async move {
+            send(&hub, out.clone(), n, &latest, pusher.as_ref()).await;
+            latest.done(&out, n);
+        });
     }
     while sending.join_next().await.is_some() {}
 }
 
-/// Seal `out` and send it through `pusher`, trying again while it is told to.
-async fn send(hub: &WeakHub, out: &Outgoing, pusher: &dyn Pusher) {
-    let push = match sealed(out) {
-        Ok(push) => push,
-        Err(e) => {
-            tracing::warn!(client = %out.client, error = %e, "a push was not sealed");
-            return;
-        }
-    };
+/// Seal `out`, push number `n`, and send it through `pusher`, trying again while it is told to
+/// and while it is the latest about what it names ([`Latest`]).
+async fn send(hub: &WeakHub, mut out: Outgoing, n: u64, latest: &Latest, pusher: &dyn Pusher) {
     let mut waits = RETRY_AFTER.iter();
     loop {
+        let push = match sealed(&out) {
+            Ok(push) => push,
+            Err(e) => {
+                tracing::warn!(client = %out.client, error = %e, "a push was not sealed");
+                return;
+            }
+        };
         match pusher.push(&push, &out.device.topic).await {
             Outcome::Sent => return,
             Outcome::Gone => {
@@ -424,6 +484,11 @@ async fn send(hub: &WeakHub, out: &Outgoing, pusher: &dyn Pusher) {
                     return;
                 };
                 tokio::time::sleep(*wait).await;
+                let Some(left) = latest.still(&out, n) else {
+                    tracing::debug!(client = %out.client, "a push to try again was overtaken");
+                    return;
+                };
+                out = left;
             }
         }
     }
@@ -494,5 +559,66 @@ mod tests {
         let back = Outgoing { device, ..back };
         let taken = sealed(&back).unwrap().what;
         assert_eq!(taken, apns::What::TakeBack(vec![shown.collapse]), "the note's own id");
+    }
+
+    /// A stand-in for APNs that says to try the first push again later, sends the rest, and
+    /// keeps every push it was handed.
+    #[derive(Debug, Default)]
+    struct Busy(parking_lot::Mutex<Vec<apns::Push>>);
+
+    impl Pusher for Busy {
+        fn push<'a>(&'a self, push: &'a apns::Push, _topic: &'a str) -> PushFuture<'a> {
+            Box::pin(async move {
+                let mut seen = self.0.lock();
+                seen.push(push.clone());
+                if seen.len() == 1 { Outcome::Later } else { Outcome::Sent }
+            })
+        }
+    }
+
+    /// A note APNs said to try later is given up once its take-back went: tried again after
+    /// it, it would show what was answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_note_older_than_its_take_back_is_not_sent_again() {
+        use slopty_core::{SessionId, WorkerId};
+        use slopty_proto::orchestration::TermRef;
+        use slopty_proto::thread::ThreadId;
+        use slopty_proto::thread::attention::{Notice, ThreadAt};
+
+        let worker = WorkerId::new();
+        let about = Subject::Thread(ThreadAt { worker, thread: ThreadId::new() });
+        let notice = Notice {
+            kind: NoticeKind::NeedsYou,
+            about: about.clone(),
+            tile: Some(TermRef { worker, session: SessionId::new() }),
+            title: "Allow?".to_owned(),
+            text: "Bash".to_owned(),
+            worked_ms: None,
+            via: None,
+        };
+        let device = PushDevice {
+            token: "ab".repeat(32),
+            key: slopty_push::seal::DeviceKey::generate().unwrap().public(),
+            sandbox: false,
+            topic: "dev.aislopware.slopty".to_owned(),
+            quiet_ms: 0,
+        };
+        let client = ClientId::new();
+        let note = Outgoing {
+            client,
+            device: device.clone(),
+            what: Sending::Note(PushBody { notice, ask: None }),
+        };
+        let back = Outgoing { client, device, what: Sending::TakeBack(vec![about]) };
+        let hub = crate::Hub::new("server".to_owned(), Vec::new());
+        let pusher = Arc::new(Busy::default());
+        let (tx, rx) = mpsc::channel(4);
+        tx.try_send(note).unwrap();
+        tx.try_send(back).unwrap();
+        drop(tx);
+        deliver(hub.downgrade(), rx, Arc::<Busy>::clone(&pusher)).await;
+        let seen: Vec<bool> =
+            pusher.0.lock().iter().map(|p| matches!(p.what, apns::What::Note(_))).collect();
+        assert_eq!(seen, [true, false], "the note once, then its take-back, and no note after");
     }
 }

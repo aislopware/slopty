@@ -600,7 +600,7 @@ async fn needs_you_pushes_once_per_ask() {
     use slopty_proto::thread::{Choice, Effect};
 
     let hub = Hub::new("server".to_owned(), Vec::new());
-    let kept = hub.keep_devices(Devices::new());
+    let kept = hub.keep_phones(PushKept::default());
     let (out, mut pushed) = mpsc::channel(8);
     hub.push_to(Some(out));
     let (shell, worker) = (SessionId::new(), WorkerId::new());
@@ -631,7 +631,7 @@ async fn needs_you_pushes_once_per_ask() {
         quiet_ms: 60_000,
     };
     hub.push_device(phone.seated.link(), client, Some(device.clone()));
-    assert_eq!(kept.borrow().get(&client), Some(&device), "kept for the next start");
+    assert_eq!(kept.borrow().devices.get(&client), Some(&device), "kept for the next start");
     let odd = PushDevice { token: "not hex".to_owned(), ..device.clone() };
     hub.push_device(Client::sit(&hub, "odd").seated.link(), ClientId::new(), Some(odd));
     assert_eq!(hub.devices().len(), 1, "a token that is no token is no phone");
@@ -722,7 +722,7 @@ async fn needs_you_pushes_once_per_ask() {
     }
     assert_eq!(answering.1.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(hub.devices().is_empty(), "APNs said it is gone");
-    assert!(kept.borrow().is_empty(), "and the store forgets it");
+    assert!(kept.borrow().devices.is_empty(), "and the store forgets it");
 
     let again = Client::sit(&hub, "phone");
     hub.push_device(again.seated.link(), client, Some(device));
@@ -903,4 +903,114 @@ async fn a_program_waiting_on_the_person_is_pushed_and_taken_back() {
         [Sending::TakeBack(vec![Subject::Terminal(term)])],
         "linked again, it waits no more"
     );
+}
+
+/// A phone that will take pushes, pocketed on `link`, as `client`.
+fn pocketed_phone(hub: &Hub, link: u64, client: ClientId) {
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 0,
+    };
+    hub.push_device(link, client, Some(device));
+    let presence = Presence {
+        seat: Seat::Handheld,
+        active: false,
+        workspace: None,
+        showing: Vec::new(),
+        focus: None,
+        listening: false,
+    };
+    hub.presence(link, presence);
+}
+
+/// A take-back the push queue cannot take is owed, not lost: it goes once the queue has room
+/// and its try comes round. What a phone shows and is owed is kept with it, so a server that
+/// starts again from the store still takes back what was answered meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_take_back_a_full_queue_refused_is_owed_and_kept() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let publishing = tokio::spawn(Hub::publish_ladder(hub.downgrade()));
+    let kept = hub.keep_phones(PushKept::default());
+    let (out, mut pushed) = mpsc::channel(2);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let phone = Client::sit(&hub, "phone");
+    let client = ClientId::new();
+    pocketed_phone(&hub, phone.seated.link(), client);
+    let (one, two) = (row(Phase::Working, 1_000, None), row(Phase::Working, 1_000, None));
+    lease.handle(snapshot(vec![one.clone(), two.clone()]));
+    hub.rank_ladder();
+    let at = |row: &ThreadRow| Subject::Thread(ThreadAt { worker, thread: row.id });
+    let ask = |row: &ThreadRow, since| asking(moved(row, Phase::NeedsYou, since), "Allow?");
+    lease.handle(delta(vec![ask(&one, 2_000), ask(&two, 2_000)]));
+    hub.rank_ladder();
+
+    // The queue holds both notes: the take-back finds it full.
+    lease.handle(delta(vec![moved(&one, Phase::Done, 3_000)]));
+    hub.rank_ladder();
+    let asked_one = Asked::Thread(ThreadAt { worker, thread: one.id });
+    assert!(kept.borrow().owed.get(&client).is_some_and(|o| o.contains(&asked_one)), "owed");
+    let notes: Vec<Sending> =
+        [pushed.recv().await, pushed.recv().await].into_iter().map(|p| p.unwrap().what).collect();
+    assert!(notes.iter().all(|n| matches!(n, Sending::Note(_))), "{notes:?}");
+    tokio::time::sleep(TAKE_BACK_RETRY).await;
+    let again = tokio::time::timeout(Duration::from_secs(5), pushed.recv()).await.unwrap();
+    assert_eq!(again.unwrap().what, Sending::TakeBack(vec![at(&one)]), "tried again");
+    tokio::task::yield_now().await;
+    assert!(kept.borrow().owed.is_empty(), "paid");
+
+    // A server that starts again from the store still knows the phone shows the other ask.
+    let stored = kept.borrow().clone();
+    publishing.abort();
+    drop((lease, phone, hub));
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let _kept = hub.keep_phones(stored);
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    lease.handle(snapshot(vec![moved(&one, Phase::Done, 3_000), moved(&two, Phase::Done, 4_000)]));
+    hub.rank_ladder();
+    let back = pushed.try_recv().unwrap();
+    assert_eq!(back.what, Sending::TakeBack(vec![at(&two)]), "answered while the server was away");
+}
+
+/// A notice for the desk the person is at whose link cannot take it is pushed to the pocketed
+/// phone instead, so it is not lost.
+#[tokio::test]
+async fn a_notice_no_link_could_take_is_pushed() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let (desk_tx, mut desk_rx) = mpsc::channel(1);
+    desk_tx.try_send(FromServer::Directory(Vec::new())).unwrap();
+    let desk = hub.seat(hub.number_link(), "mac".to_owned(), desk_tx);
+    let presence = Presence {
+        seat: Seat::Desk,
+        active: true,
+        workspace: None,
+        showing: Vec::new(),
+        focus: None,
+        listening: true,
+    };
+    hub.presence(desk.link(), presence);
+    let phone = Client::sit(&hub, "phone");
+    pocketed_phone(&hub, phone.seated.link(), ClientId::new());
+    let one = row(Phase::Working, 1_000, None);
+    lease.handle(snapshot(vec![one.clone()]));
+    hub.rank_ladder();
+    lease.handle(delta(vec![asking(moved(&one, Phase::NeedsYou, 2_000), "Allow?")]));
+    hub.rank_ladder();
+    let note = pushed.try_recv().expect("pushed in the desk's place");
+    assert!(matches!(note.what, Sending::Note(_)), "{:?}", note.what);
+    assert!(matches!(desk_rx.try_recv(), Ok(FromServer::Directory(_))));
+    assert!(desk_rx.try_recv().is_err(), "the desk's link took nothing");
 }
