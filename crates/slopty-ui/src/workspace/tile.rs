@@ -1891,7 +1891,9 @@ impl WorkspaceView {
             return Some(Status::Away);
         };
         // An open that failed is over: its pane says so, and the header waits on nothing.
-        if worker.failed_opens.contains_key(&item.id) {
+        if worker.failed_opens.contains_key(&item.id)
+            || worker.stopped.get(&item.id).is_some_and(|s| s.why().is_some())
+        {
             return None;
         }
         if self.opening(item) {
@@ -3141,9 +3143,8 @@ impl WorkspaceView {
     }
 
     /// A remote window or display the worker could not open: an end, said where the wait was,
-    /// so nothing in the pane still looks like it waits. The error's mark, what is so as a task's
-    /// title, why under it in the chrome's words, and the way to pick another in its place
-    /// ([`Self::add_screen_item`] puts the pick where this one was).
+    /// so nothing in the pane still looks like it waits, with the way to pick another in its
+    /// place ([`Self::add_screen_item`] puts the pick where this one was).
     fn failed_body(
         &self,
         tile: TileRef,
@@ -3152,51 +3153,89 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
+        let machine = self.workers.get(&tile.worker).map_or("The machine", |w| w.name.as_str());
+        let (title, detail, pick) = failed_words(item, &self.derived_title(item), why, machine);
+        let choose = kit::button(theme, "choose-another", pick, kit::ButtonKind::Secondary)
+            .h(px(theme.density.control))
+            .px(px(theme.spacing.md))
+            .text_size(px(theme.typography.ui_size))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.focus_tile(tile, cx);
+                this.add_window(&AddWindow, window, cx);
+            }));
+        self.ended_body(item.id, "failed", &title, &detail, choose)
+    }
+
+    /// A remote window or display whose stream the worker ended twice in quick succession
+    /// ([`super::workers::STOP_AGAIN`]): said in its pane, with the worker's words, and a way
+    /// to ask for it again rather than asked for again and again.
+    fn stopped_body(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        why: &str,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let machine = self.workers.get(&tile.worker).map_or("The machine", |w| w.name.as_str());
+        let title = format!("{} stopped", self.derived_title(item));
+        let detail = format!("{machine} ended its stream: {why}");
+        let reopen = kit::button(theme, "reopen-stream", "Reopen", kit::ButtonKind::Secondary)
+            .h(px(theme.density.control))
+            .px(px(theme.spacing.md))
+            .text_size(px(theme.typography.ui_size))
+            .on_click(cx.listener(move |this, _ev, _window, cx| this.reopen_screen(tile, cx)));
+        self.ended_body(item.id, "stopped", &title, &detail, reopen)
+    }
+
+    /// A remote tile's stream that is over, where its picture was: the error's mark, what is
+    /// so as a task's title, why under it in the chrome's words, and `action` below. Its
+    /// debug selector is `{name}-{id}`.
+    fn ended_body(
+        &self,
+        id: ItemId,
+        name: &'static str,
+        title: &str,
+        detail: &str,
+        action: impl gpui::IntoElement,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
         let s = &theme.surfaces;
         let ty = &theme.typography;
         let roles = theme.roles();
-        let id = item.id;
-        let machine = self.workers.get(&tile.worker).map_or("The machine", |w| w.name.as_str());
-        let (title, detail, pick) = failed_words(item, &self.derived_title(item), why, machine);
-        let block = Some({
-            let choose = kit::button(theme, "choose-another", pick, kit::ButtonKind::Secondary)
-                .h(px(theme.density.control))
-                .px(px(theme.spacing.md))
-                .text_size(px(ty.ui_size))
-                .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.focus_tile(tile, cx);
-                    this.add_window(&AddWindow, window, cx);
-                }));
-            div()
-                .id("failed")
-                .debug_selector(move || format!("failed-{}", id.as_uuid()))
-                .role(Role::Status)
-                .aria_label(SharedString::from(format!("{title}. {detail}")))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .max_w_full()
-                .px(px(theme.spacing.inset()))
-                .font_family(ty.ui_family.clone())
-                .text_center()
-                .child(
-                    crate::icons::icon(
-                        theme,
-                        Symbol::ExclamationmarkTriangle,
-                        IconSize::Inline,
-                        hsla(s.error),
-                    )
-                    .size(px(ty.icon_large())),
+        let block = div()
+            .id(name)
+            .debug_selector(move || format!("{name}-{}", id.as_uuid()))
+            .role(Role::Status)
+            .aria_label(SharedString::from(format!("{title}. {detail}")))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .max_w_full()
+            .px(px(theme.spacing.inset()))
+            .font_family(ty.ui_family.clone())
+            .text_center()
+            .child(
+                crate::icons::icon(
+                    theme,
+                    Symbol::ExclamationmarkTriangle,
+                    IconSize::Inline,
+                    hsla(s.error),
                 )
-                .child(kit::typed(div(), roles.task_title).text_color(hsla(s.text)).child(title))
-                .child(
-                    kit::typed(div(), roles.chrome)
-                        .text_color(hsla(s.text_secondary))
-                        .child(detail),
-                )
-                .child(div().pt(px(theme.spacing.sm)).child(choose))
-        });
+                .size(px(ty.icon_large())),
+            )
+            .child(
+                kit::typed(div(), roles.task_title)
+                    .text_color(hsla(s.text))
+                    .child(title.to_owned()),
+            )
+            .child(
+                kit::typed(div(), roles.chrome)
+                    .text_color(hsla(s.text_secondary))
+                    .child(detail.to_owned()),
+            )
+            .child(div().pt(px(theme.spacing.sm)).child(action));
         div()
             .id(SharedString::from(format!("waiting-{}", id.as_uuid())))
             .flex_1()
@@ -3204,7 +3243,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
-            .children(block)
+            .child(block)
             .into_any_element()
     }
 
@@ -3308,14 +3347,18 @@ impl WorkspaceView {
                     None if self.parked.contains(&item.id) => {
                         self.waiting_body(item, Wait::Lasting(PAUSED.into()))
                     }
-                    None => match self
-                        .workers
-                        .get(&placed.tile.worker)
-                        .and_then(|w| w.failed_opens.get(&item.id))
-                    {
-                        Some(why) => self.failed_body(placed.tile, item, why, cx),
-                        None => self.opening_body(placed.tile, item),
-                    },
+                    None => {
+                        let worker = self.workers.get(&placed.tile.worker);
+                        let failed = worker.and_then(|w| w.failed_opens.get(&item.id));
+                        let stopped = worker
+                            .and_then(|w| w.stopped.get(&item.id))
+                            .and_then(super::workers::Stopped::why);
+                        match (failed, stopped) {
+                            (Some(why), _) => self.failed_body(placed.tile, item, why, cx),
+                            (None, Some(why)) => self.stopped_body(placed.tile, item, why, cx),
+                            (None, None) => self.opening_body(placed.tile, item),
+                        }
+                    }
                 }
             }
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {

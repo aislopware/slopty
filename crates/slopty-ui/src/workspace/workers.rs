@@ -29,6 +29,27 @@ use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 /// tile opened for it (an opened tile comes back from the worker first).
 const QUOTE_WAIT: Duration = Duration::from_secs(5);
 
+/// A stream the worker ends unasked again within this of the last is not asked for again: its
+/// tile says it stopped and offers to reopen, rather than flicker between a picture and none.
+pub(super) const STOP_AGAIN: Duration = Duration::from_secs(10);
+
+/// A remote tile whose stream the worker ended unasked ([`Worker::stopped`]).
+#[derive(Debug)]
+pub(super) struct Stopped {
+    /// When it last ended.
+    at: std::time::Instant,
+    /// Set once it ended twice within [`STOP_AGAIN`]: the worker's words, shown in the pane,
+    /// and the tile is not asked for again until the person reopens it or the link comes back.
+    why: Option<String>,
+}
+
+impl Stopped {
+    /// Why it stopped, once it is shown as stopped.
+    pub(super) fn why(&self) -> Option<&str> {
+        self.why.as_deref()
+    }
+}
+
 impl WorkspaceView {
     /// "Stop sharing the clipboard with …" or "Share the clipboard with …": applied at once
     /// and said, and handed to the app to keep in the settings by the machine's name.
@@ -280,6 +301,7 @@ impl WorkspaceView {
         w.openings.clear();
         w.dropped.clear();
         w.failed_opens.clear();
+        w.stopped.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
         }
@@ -1073,6 +1095,7 @@ impl WorkspaceView {
                 if streaming
                     || w.pending_opens.values().any(|&p| p == id)
                     || w.failed_opens.contains_key(&id)
+                    || w.stopped.get(&id).is_some_and(|s| s.why.is_some())
                 {
                     continue;
                 }
@@ -1084,6 +1107,7 @@ impl WorkspaceView {
             }
             w.pending_opens.retain(|_, id| wanted.iter().any(|(k, _)| k == id));
             w.failed_opens.retain(|id, _| wanted.iter().any(|(k, _)| k == id));
+            w.stopped.retain(|id, _| wanted.iter().any(|(k, _)| k == id));
         }
         // Dropping a view sends `Close` for its stream.
         self.screens.retain(|id, _| keep.contains(id));
@@ -1195,15 +1219,24 @@ impl WorkspaceView {
                 {
                     w.sized = None;
                 }
+                // A view still held was not let go by this client: the worker ended it.
+                let now = std::time::Instant::now();
                 for (id, _) in self.stream_views(key, stream, cx) {
                     tracing::info!(%stream, %reason, "screen closed by worker");
                     // Its last picture goes with it: what it showed has ended.
                     self.screens.remove(&id);
-                    if let Some(w) = self.workers.get_mut(&key) {
-                        w.fresh_screens.remove(&id);
-                        w.stale_screens.remove(&id);
-                    }
+                    let Some(w) = self.workers.get_mut(&key) else { continue };
+                    w.fresh_screens.remove(&id);
+                    w.stale_screens.remove(&id);
+                    // Asked for again at once, unless it ended just before as well.
+                    let again = w
+                        .stopped
+                        .get(&id)
+                        .is_some_and(|s| now.saturating_duration_since(s.at) < STOP_AGAIN);
+                    let why = again.then(|| reason.clone());
+                    w.stopped.insert(id, Stopped { at: now, why });
                 }
+                self.reconcile_screens();
             }
             ScreenEvent::Geometry { stream, width, height, .. } => {
                 if width > 0 && height > 0 {
@@ -1260,6 +1293,15 @@ impl WorkspaceView {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// "Reopen" on a tile shown as stopped: its stream is asked for again.
+    pub(super) fn reopen_screen(&mut self, tile: TileRef, cx: &mut Context<Self>) {
+        if let Some(w) = self.workers.get_mut(&tile.worker) {
+            w.stopped.remove(&tile.item);
+        }
+        self.reconcile_screens();
         cx.notify();
     }
 

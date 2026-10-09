@@ -9257,3 +9257,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `conversation::thread::tests::commit::{a_merged_pull_request_offers_to_remove_its_worktree,
     a_merged_pull_request_outside_a_worktree_offers_no_removal}` and
     `workspace::tests::review_tile::a_reviews_sheet_frees_a_merged_worktree`.
+
+- ✅ **A stream the worker ends on its own reopens once, then says it stopped** (2026-10-10,
+  readiness audit item 20(a)).
+  - **The gap.** A capture that stopped on its own (`ScreenEvent::Closed` this client did not
+    ask for) dropped the tile's picture and waited on nothing: the tile said "Opening …"
+    until some unrelated change asked for its stream again.
+  - **The rule.** The picture still goes with the stream, and the tile asks for it again at
+    once, so a passing stop (a display that slept, a capture the system restarted) heals
+    without a press. One that ends again within `STOP_AGAIN` (10 s) of the last is not asked
+    for again: its pane says "Window 7 stopped" with the worker's words under it ("studio ended
+    its stream: …") in the failed open's layout, the header's slot stops turning, and
+    "Reopen" asks for it once more. A window that closed for good reopens into the worker's
+    "no longer available", which offers another. The next link clears it, as it does a
+    failed open (`Worker::stopped`).
+  - Test: `workspace::tests::bodies::a_stream_the_worker_ends_reopens_once_then_offers_to_reopen`.

@@ -110,6 +110,71 @@ fn a_window_that_did_not_open_says_so_in_its_pane_and_gives_way_to_another(
     assert!(ops.contains(&ItemOp::Remove(tile.item)), "the failed pane gives way: {ops:?}");
 }
 
+/// A stream the worker ends on its own takes its last picture with it and is asked for again at
+/// once. Ended again soon after, it is not asked for again: the pane says it stopped and why,
+/// the header waits on nothing, and "Reopen" asks for it once more.
+#[gpui::test]
+fn a_stream_the_worker_ends_reopens_once_then_offers_to_reopen(cx: &mut TestAppContext) {
+    use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest, VideoCodec};
+
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    let asked = |sent: Vec<ClientMsg>| {
+        sent.into_iter().filter(|m| {
+            matches!(m, ClientMsg::Screen(ScreenRequest::Open { target: CaptureTarget::Window(w), .. }) if *w == window)
+        }).count()
+    };
+    assert_eq!(asked(fake.drain()), 1, "its stream was asked for");
+    let key = fake.key;
+    let opened = |stream: u32| ScreenEvent::Opened {
+        stream: StreamId(stream),
+        target: CaptureTarget::Window(window),
+        codec: VideoCodec::Hevc,
+        width: 1280,
+        height: 800,
+        scale: 2.0,
+        stripes: Vec::new(),
+    };
+    let closed = |stream: u32| ScreenEvent::Closed {
+        stream: StreamId(stream),
+        reason: "stream stopped: the display slept".to_owned(),
+    };
+
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, opened(1), cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.screen(tile.item).is_some()), "streaming");
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, closed(1), cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.screen(tile.item).is_none()), "its picture went");
+    assert_eq!(asked(fake.drain()), 1, "asked for again at once");
+    assert!(cx.debug_bounds(selector("stopped", tile.item)).is_none(), "not said to stop");
+
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, opened(2), cx));
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, closed(2), cx));
+    cx.executor().advance_clock(LOADING_GRACE);
+    cx.run_until_parked();
+    assert_eq!(asked(fake.drain()), 0, "ended again soon after: not asked for again");
+    let said = tree(cx).into_iter().any(|n| {
+        n.role == "Status"
+            && n.label.as_deref()
+                == Some(
+                    "Window 7 stopped. studio ended its stream: stream stopped: the display slept",
+                )
+    });
+    assert!(said, "the pane says it stopped and why");
+    let status = view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)));
+    assert_eq!(status, None, "the header waits on nothing");
+
+    let at = bounds(cx, "reopen-stream").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(asked(fake.drain()), 1, "reopen asks for it once more");
+    assert!(cx.debug_bounds(selector("stopped", tile.item)).is_none(), "and waits for it");
+}
+
 /// A file with an unsaved edit says "Edited" right after its title's text, a half unit on,
 /// before the directory the file is in, and not at the far end of the header.
 #[gpui::test]
