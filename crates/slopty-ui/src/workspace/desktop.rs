@@ -13,10 +13,13 @@ use slopty_client::screen::display::{self, Follow};
 use slopty_core::{ItemId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
-use slopty_proto::screen::{DisplayKey, DisplayShape, NoVirtualDisplay, Quality, VirtualDisplay};
+use slopty_proto::screen::{
+    CurtainState, DisplayKey, DisplayShape, NoVirtualDisplay, Quality, ScreenRequest,
+    VirtualDisplay,
+};
 
 use super::WorkspaceView;
-use super::actions::{ToggleSizedDisplay, ToggleSystemKeys, TypeClipboard};
+use super::actions::{ToggleCurtain, ToggleSizedDisplay, ToggleSystemKeys, TypeClipboard};
 use crate::palette::PaletteItem;
 use crate::screen::TYPE_MAX;
 
@@ -31,6 +34,11 @@ pub const TYPE_CLIPBOARD: &str = "Type the clipboard";
 pub const SEND_SYSTEM_KEYS: &str = "Send system shortcuts";
 /// The palette's name for [`ToggleSystemKeys`] while the shortcuts go to the worker.
 pub const KEEP_SYSTEM_KEYS: &str = "Keep system shortcuts on this Mac";
+/// The palette's name for [`ToggleCurtain`] while this device holds no curtain over the Mac,
+/// and its header control's.
+pub const DRAW_CURTAIN: &str = "Draw the curtain over the remote Mac";
+/// The palette's name for [`ToggleCurtain`] while this device holds the curtain.
+pub const LIFT_CURTAIN: &str = "Lift the curtain";
 /// What a notice says when macOS kept its hotkeys and only the tap's own list goes.
 pub const ONLY_CHORDS: &str = "macOS kept its shortcuts: only the app switcher, Spotlight, \
     Spaces and screenshots go to the remote Mac";
@@ -300,6 +308,10 @@ impl WorkspaceView {
             let label = if on { KEEP_SYSTEM_KEYS } else { SEND_SYSTEM_KEYS };
             lines.push(line(label, Box::new(ToggleSystemKeys)));
         }
+        if matches!(item.kind, ItemKind::Display { .. }) && self.draws_curtain(tile.worker) {
+            let label = if self.holds_curtain(tile.worker) { LIFT_CURTAIN } else { DRAW_CURTAIN };
+            lines.push(line(label, Box::new(ToggleCurtain)));
+        }
         if matches!(item.kind, ItemKind::Display { .. }) && self.offers_displays(tile.worker) {
             let sized = self
                 .workers
@@ -361,6 +373,89 @@ impl WorkspaceView {
             "System shortcuts stay on this Mac".to_owned()
         };
         self.show_notice(text, cx);
+        cx.notify();
+    }
+
+    /// Whether `worker` can draw the curtain over its Mac.
+    pub(super) fn draws_curtain(&self, worker: WorkerKey) -> bool {
+        self.workers.get(&worker).and_then(|w| w.caps.as_ref()).is_some_and(|caps| caps.curtain)
+    }
+
+    /// Whether this device holds the curtain over `worker`'s Mac.
+    pub(super) fn holds_curtain(&self, worker: WorkerKey) -> bool {
+        self.workers.get(&worker).is_some_and(|w| w.curtain_wanted)
+    }
+
+    /// Draw the curtain over the focused desktop's Mac, or lift it (the palette's command).
+    pub fn toggle_curtain(
+        &mut self,
+        _: &ToggleCurtain,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tile) = self.focused() {
+            self.flip_curtain(tile.worker, cx);
+        }
+    }
+
+    /// Hold the curtain over `worker`'s Mac from this device, or let it go (the palette, or a
+    /// desktop tile's header). The hold is this device's: asked again on each link, so a link
+    /// that blips keeps it, and the worker lowers it (and locks the Mac) only once this device
+    /// stays gone.
+    pub(super) fn flip_curtain(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
+        if !self.draws_curtain(worker) {
+            return;
+        }
+        let Some(w) = self.workers.get_mut(&worker) else { return };
+        let on = !w.curtain_wanted;
+        let ask = ClientMsg::Screen(ScreenRequest::Curtain { on });
+        if !w.send(ask) {
+            let text = format!("{} is out of reach, so the curtain stays as it is", w.name);
+            self.show_notice(text, cx);
+            return;
+        }
+        w.curtain_wanted = on;
+        cx.notify();
+    }
+
+    /// `worker`'s link came up: this device's hold on its curtain is asked again, and what
+    /// stands there now comes in the worker's greeting.
+    pub(super) fn curtain_relinked(&mut self, worker: WorkerKey) {
+        let Some(w) = self.workers.get_mut(&worker) else { return };
+        w.curtain = CurtainState::Down;
+        if w.curtain_wanted {
+            let _sent = w.send(ClientMsg::Screen(ScreenRequest::Curtain { on: true }));
+        }
+    }
+
+    /// `worker` said where its curtain stands. A refusal while this device held it lets the
+    /// hold go and says why; a curtain up while the Mac's own input could not be held says
+    /// what it needs.
+    pub(super) fn curtain_heard(
+        &mut self,
+        worker: WorkerKey,
+        state: CurtainState,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&worker) else { return };
+        let was_up = matches!(w.curtain, CurtainState::Up { .. });
+        let said = match &state {
+            CurtainState::Refused { why } if w.curtain_wanted => {
+                w.curtain_wanted = false;
+                Some(format!("No curtain over {}: {why}", w.name))
+            }
+            CurtainState::Up { input_held: false, .. } if w.curtain_wanted && !was_up => {
+                Some(format!(
+                    "{}'s screens are covered, but its own keyboard and pointer still work: allow Slopty in Accessibility there",
+                    w.name
+                ))
+            }
+            _ => None,
+        };
+        w.curtain = state;
+        if let Some(said) = said {
+            self.show_notice(said, cx);
+        }
         cx.notify();
     }
 

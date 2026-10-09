@@ -102,6 +102,7 @@ glyphs! {
     ExclamationmarkTriangle => "alert-triangle",
     ExclamationmarkTriangleFill => "alert-triangle-filled",
     Eye => "eye",
+    EyeSlash => "eye-off",
     Film => "movie",
     Flag => "flag",
     Fold => "fold",

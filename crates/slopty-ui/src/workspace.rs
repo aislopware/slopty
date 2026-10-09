@@ -503,6 +503,10 @@ struct Worker {
     handoffs: slopty_client::handoff::Handoffs,
     /// The changes to its files this client asked for, until it answers each.
     fs_ops: slopty_client::folders::FsOps,
+    /// Where the curtain over its Mac stands, as it last said; down until it says.
+    curtain: slopty_proto::screen::CurtainState,
+    /// This device holds the curtain over its Mac: asked again on each link.
+    curtain_wanted: bool,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -543,6 +547,8 @@ impl Worker {
             queued: Vec::new(),
             handoffs: slopty_client::handoff::Handoffs::default(),
             fs_ops: slopty_client::folders::FsOps::default(),
+            curtain: slopty_proto::screen::CurtainState::Down,
+            curtain_wanted: false,
         }
     }
 
@@ -2187,6 +2193,7 @@ impl gpui::Render for WorkspaceView {
                 el.on_action(cx.listener(Self::toggle_mute))
                     .on_action(cx.listener(Self::type_clipboard))
                     .on_action(cx.listener(Self::toggle_system_keys))
+                    .on_action(cx.listener(Self::toggle_curtain))
                     .on_action(cx.listener(Self::toggle_trackpad))
                     .on_action(cx.listener(Self::toggle_remote_gestures))
             })

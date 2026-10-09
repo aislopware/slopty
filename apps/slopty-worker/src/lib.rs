@@ -199,6 +199,9 @@ pub(crate) struct Daemon {
     /// The displays made for clients, on the main thread; `None` where none can be made, and
     /// every `OpenDisplay` then streams a physical display.
     pub displays: Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>,
+    /// The curtain over the Mac's own screens and input while a client holds it, on the main
+    /// thread; `None` off a Mac.
+    pub curtain: Curtain,
     /// The keyboard input sources the streams' clients asked for, one claim each, and the
     /// worker's own kept beside the data to come back even after a crash.
     pub sources: slopty_input::sources::Sources,
@@ -574,6 +577,10 @@ fn watch_caps(
 /// The displays made for clients, as the worker holds them.
 type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>;
 
+/// The curtain over the Mac, as the worker holds it: `None` off a Mac.
+type Curtain =
+    Option<slopty_worker::screen::curtain::Curtain<slopty_worker::screen::curtain::Native>>;
+
 /// The daemon: `src/main.rs` is this and nothing else.
 pub fn main() -> Result<std::process::ExitCode> {
     #[cfg(target_os = "macos")]
@@ -598,6 +605,7 @@ pub fn main() -> Result<std::process::ExitCode> {
 #[cfg(target_os = "macos")]
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
     let displays = slopty_worker::screen::sized::on_main_queue();
+    let curtain = slopty_worker::screen::curtain::on_main_queue();
     let sources = slopty_input::sources::Sources::system();
     // Lives as long as the main thread's run loop, which never returns.
     let _heard = hear_switches(&sources);
@@ -605,7 +613,7 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
         .name("slopty-worker".to_owned())
         .spawn(move || {
             slopty_platform::user_interactive_thread();
-            let ended = runtime.block_on(run(displays, sources));
+            let ended = runtime.block_on(run(displays, curtain, sources));
             drop(runtime);
             if let Err(e) = &ended {
                 tracing::error!(error = ?e, "worker stopped");
@@ -643,12 +651,16 @@ fn hear_switches(
 /// Elsewhere no display is made, and the daemon runs on the main thread.
 #[cfg(not(target_os = "macos"))]
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
-    let ended = runtime.block_on(run(None, slopty_input::sources::Sources::system()));
+    let ended = runtime.block_on(run(None, None, slopty_input::sources::Sources::system()));
     drop(runtime);
     ended
 }
 
-async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Result<()> {
+async fn run(
+    displays: Displays,
+    curtain: Curtain,
+    sources: slopty_input::sources::Sources,
+) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -790,6 +802,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         server_link: Arc::new(tokio::sync::watch::Sender::new(None)),
         cloner: slopty_worker::repo::cloning::Cloner::default(),
         displays,
+        curtain,
         sources,
         threads,
     };

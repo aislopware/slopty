@@ -22,6 +22,8 @@
 
 pub mod asked_size;
 pub mod continued;
+#[cfg(target_os = "macos")]
+pub mod curtain;
 pub mod dirs;
 #[cfg(target_vendor = "apple")]
 pub mod dock;

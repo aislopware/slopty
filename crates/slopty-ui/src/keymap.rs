@@ -310,6 +310,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "toggle_sized_display", ws::ToggleSizedDisplay, &[], W),
         c(Workspace, "toggle_own_window", ws::ToggleOwnWindow, &["ctrl-cmd-n"], &[CTX, POP_OUT]),
         c(Workspace, "toggle_system_keys", ws::ToggleSystemKeys, &[], W),
+        c(Workspace, "toggle_curtain", ws::ToggleCurtain, &[], W),
         c(Workspace, "toggle_navigator", ws::ToggleNavigator, &["cmd-b"], W),
         c(Workspace, "toggle_navigator_lens", ws::ToggleNavigatorLens, &[], W),
         c(Workspace, "find", t::Find, &["cmd-f"], W),

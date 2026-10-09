@@ -99,8 +99,15 @@ objc2-user-notifications = { workspace = true, features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 # Whether this Mac runs on a battery, which the setup's Server line warns of (`power`).
 objc2-io-kit = { workspace = true, features = [ "ps" ] }
-# The session tap that takes system shortcuts for a remote Mac (`system_keys`).
-objc2-core-graphics = { workspace = true, features = [ "CGEvent", "CGEventTypes" ] }
+# The session tap that takes system shortcuts for a remote Mac (`system_keys`), and the curtain's
+# HID tap, its displays and its shield's level (`curtain`).
+objc2-core-graphics = { workspace = true, features = [
+    "CGEvent",
+    "CGEventTypes",
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGWindowLevel",
+] }
 objc2-core-foundation = { workspace = true, features = [
     "CFMachPort",
     "CFRunLoop",
@@ -132,6 +139,12 @@ objc2-app-kit = { workspace = true, features = [
     "NSWorkspace",
     # The Dock tile's progress bar (`dock`).
     "NSControl",
+    # The curtain's shield: a window over each display with its message (`curtain`).
+    "NSWindow",
+    "NSColor",
+    "NSFont",
+    "NSText",
+    "NSTextField",
     "NSImageView",
     "NSProgressIndicator",
 ] }
@@ -234,8 +247,19 @@ objc2-web-kit = { workspace = true, features = [
     "WKWebsiteDataStore",
 ] }
 
+# The app `tests/curtain.rs` reads the curtain's shield through: a magenta window under the
+# shield, never installed.
+[[bin]]
+name = "slopty-curtain-app"
+path = "tests/support/curtain_app.rs"
+test = false
+doc = false
+bench = false
+
 [dev-dependencies]
 tempfile.workspace = true
+# The live tests' skip (`slopty_testkit::live`).
+slopty-testkit.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
 # The install plan's JSON, as the CLI prints it for a deploy (`service::Ptyd`).
@@ -247,3 +271,10 @@ serde_json.workspace = true
 [[test]]
 name = "main_thread"
 harness = false
+
+# The curtain's live test reads the screens through the capture the worker uses
+# (`tests/curtain.rs`), and skips as every live test does.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+slopty-capture.workspace = true
+slopty-proto.workspace = true
+objc2-core-video.workspace = true

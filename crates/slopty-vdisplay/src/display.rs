@@ -142,6 +142,15 @@ pub fn available() -> bool {
     Classes::resolve().is_ok()
 }
 
+/// Whether `display` is one a Slopty worker made for a client (its vendor is [`VENDOR_ID`]):
+/// what a client sees rather than a screen someone sits at, which the curtain leaves uncovered.
+///
+/// [`VENDOR_ID`]: crate::VENDOR_ID
+#[must_use]
+pub fn made_for_a_client(display: u32) -> bool {
+    objc2_core_graphics::CGDisplayVendorNumber(display) == crate::VENDOR_ID
+}
+
 /// A virtual display, alive as long as this value.
 ///
 /// Created on the main thread (`initWithDescriptor:` returns nil anywhere else) and, holding a

@@ -25,7 +25,7 @@ mod runloop;
 mod unsupported;
 
 #[cfg(target_os = "macos")]
-pub use display::{VirtualDisplay, available};
+pub use display::{VirtualDisplay, available, made_for_a_client};
 pub use plan::{
     ClientKey, DEFAULT_REFRESH_HZ, Descriptor, MAX_SIDE_PIXELS, MIN_SIDE_POINTS, Mode, NAME, Plan,
     REFRESH_HZ, Request, VENDOR_ID, plan,

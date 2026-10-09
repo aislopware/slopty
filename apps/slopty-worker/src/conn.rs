@@ -22,7 +22,7 @@ use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::ItemSync;
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::screen::{
-    Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest, Stripe,
+    CurtainState, Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest, Stripe,
 };
 use slopty_proto::terminal::{
     CloseReason, SessionSummary, TermError, TermEvent, TermRequest, TermSize,
@@ -261,6 +261,13 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     greeting.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let known = daemon.ports.lock().known();
     greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
+    // A curtain up is said at once, so a client linking (or linking again) knows it is drawn.
+    if let Some(curtain) = &daemon.curtain {
+        let state = curtain.state().await;
+        if state != CurtainState::Down {
+            greeting.push(WorkerMsg::Screen(ScreenEvent::Curtain(state)));
+        }
+    }
     for msg in greeting {
         heard.admit(&msg);
         out.send(msg).await.map_err(|_gone| NetError::Closed)?;
@@ -884,7 +891,25 @@ impl Drop for Peer<'_> {
         let released = self.daemon.follows.lock().holds.leave(self.link);
         crate::threads::hold::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
+        if let Some(curtain) = &self.daemon.curtain {
+            let daemon = self.daemon.clone();
+            curtain.went(self.client, CURTAIN_GRACE, move |settled| {
+                if settled.changed {
+                    tell_curtain(&daemon, settled.state);
+                }
+            });
+        }
     }
+}
+
+/// How long the curtain stays up for a client whose link went before it lets go and the Mac
+/// locks: the client holds it again on its next link meanwhile, so a link that blips neither
+/// shows the session at the desk nor locks the Mac.
+const CURTAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Tell every client where the curtain stands now.
+fn tell_curtain(daemon: &Daemon, state: CurtainState) {
+    let _none_linked = daemon.events.send(WorkerMsg::Screen(ScreenEvent::Curtain(state)));
 }
 
 impl Peer<'_> {
@@ -1388,7 +1413,38 @@ impl Peer<'_> {
             ScreenRequest::Resize { stream, width, height, scale } => {
                 self.command(stream, Command::Resize { width, height, scale });
             }
+            ScreenRequest::Curtain { on } => self.curtain(on),
         }
+    }
+
+    /// This client holds the curtain over the Mac (`on`), or lets it go on the person's word.
+    /// A change goes to every client; an ask that moved nothing is answered to this one alone.
+    fn curtain(&mut self, on: bool) {
+        let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
+        self.tasks.spawn(async move {
+            let Some(curtain) = daemon.curtain.as_ref() else {
+                let why = "this worker draws no curtain: only a Mac does".to_owned();
+                let refused = ScreenEvent::Curtain(CurtainState::Refused { why });
+                let _sent = out.send(WorkerMsg::Screen(refused)).await;
+                return;
+            };
+            let settled = if on {
+                Some(curtain.hold(client).await)
+            } else {
+                curtain.let_go(client, false).await
+            };
+            match settled {
+                Some(settled) if settled.changed => tell_curtain(&daemon, settled.state),
+                Some(settled) => {
+                    let _sent =
+                        out.send(WorkerMsg::Screen(ScreenEvent::Curtain(settled.state))).await;
+                }
+                None => {
+                    let state = ScreenEvent::Curtain(curtain.state().await);
+                    let _sent = out.send(WorkerMsg::Screen(state)).await;
+                }
+            }
+        });
     }
 
     /// A datagram copy of an input: applied now if it is the session's next, else left to its

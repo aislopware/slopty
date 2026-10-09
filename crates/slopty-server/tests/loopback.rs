@@ -33,6 +33,7 @@ mod tests {
             can_capture: false,
             can_inject: false,
             virtual_displays: false,
+            curtain: false,
             version: "0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,

@@ -263,6 +263,7 @@ impl WorkspaceView {
         w.links = w.links.saturating_add(1);
         // The worker hands pages and files only to a client that said it takes them.
         self.declare_handoffs(key);
+        self.curtain_relinked(key);
         self.focus_link_reset(key);
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.home = (!home.is_empty()).then_some(home);
@@ -1240,6 +1241,7 @@ impl WorkspaceView {
                 }
             }
             ScreenEvent::OpenFailed { asked, why } => self.screen_refused(key, asked, why, cx),
+            ScreenEvent::Curtain(state) => self.curtain_heard(key, state, cx),
             ScreenEvent::ListFailed { why } => {
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.titles_requested = false;

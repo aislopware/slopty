@@ -64,7 +64,7 @@ pub use source::{
     Rect, TargetWindow, Went, WindowState, crop_for,
 };
 #[cfg(target_os = "macos")]
-pub use stream::{Capture, SckDefaults, Target, host_now_us, sck_defaults};
+pub use stream::{Capture, SckDefaults, Target, host_now_us, leave_out, sck_defaults};
 
 #[cfg(target_os = "macos")]
 impl CaptureError {

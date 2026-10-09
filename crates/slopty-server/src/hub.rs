@@ -1843,6 +1843,7 @@ pub(crate) mod tests {
             can_capture: true,
             can_inject: true,
             virtual_displays: false,
+            curtain: false,
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,

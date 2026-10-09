@@ -78,6 +78,20 @@ pub fn sck_defaults() -> SckDefaults {
     SckDefaults { queue_depth, minimum_frame_interval_s }
 }
 
+/// The windows this process put over the displays, which no display capture shows.
+static LEFT_OUT: parking_lot::RwLock<Vec<u32>> = parking_lot::RwLock::new(Vec::new());
+
+/// Leave the windows numbered `windows` out of every display this process captures from now on.
+///
+/// These are the curtain's shield (`slopty_platform::curtain::Shield`), and they replace the ones
+/// left out before. A capture already running keeps its filter until it is resolved again.
+///
+/// Process-wide, because the windows are: whatever display a stream shows, this process's own
+/// shield is never what its client should see.
+pub fn leave_out(windows: Vec<u32>) {
+    *LEFT_OUT.write() = windows;
+}
+
 /// What to capture, resolved from a [`Shareable`] snapshot.
 pub struct Target {
     kind: CaptureTarget,
@@ -111,8 +125,21 @@ impl Target {
         &self.filter
     }
 
-    /// Resolve a target against a content snapshot.
+    /// Resolve a target against a content snapshot. A display leaves out the windows this
+    /// process put over the displays ([`leave_out`]).
     pub fn resolve(content: &Shareable, kind: CaptureTarget) -> Result<Self, CaptureError> {
+        let left_out = LEFT_OUT.read().clone();
+        Self::resolve_excluding(content, kind, &left_out)
+    }
+
+    /// Resolve a target, a display capture leaving out the windows numbered `excluded` (the
+    /// curtain's shield, `slopty_platform::curtain`). A window target is the window alone, so
+    /// nothing is left out of it. A number the snapshot does not list is passed over.
+    pub fn resolve_excluding(
+        content: &Shareable,
+        kind: CaptureTarget,
+        excluded: &[u32],
+    ) -> Result<Self, CaptureError> {
         crate::ensure_core_graphics();
         match kind {
             CaptureTarget::Window(id) => {
@@ -121,7 +148,11 @@ impl Target {
             }
             CaptureTarget::Display(id) => {
                 let display = content.display(id.0).ok_or(CaptureError::NotFound(kind))?;
-                Ok(Self::display(kind, &display))
+                let left_out: Vec<_> = excluded
+                    .iter()
+                    .filter_map(|number| content.window(WindowId(*number)))
+                    .collect();
+                Ok(Self::display_without(kind, &display, &left_out))
             }
         }
     }
@@ -184,13 +215,23 @@ impl Target {
     }
 
     fn display(kind: CaptureTarget, display: &SCDisplay) -> Self {
-        let none: Retained<NSArray<SCWindow>> = NSArray::from_slice(&[]);
+        Self::display_without(kind, display, &[])
+    }
+
+    /// The display filter with `left_out`'s windows left out of the picture.
+    fn display_without(
+        kind: CaptureTarget,
+        display: &SCDisplay,
+        left_out: &[Retained<SCWindow>],
+    ) -> Self {
+        let windows: Vec<&SCWindow> = left_out.iter().map(|w| &**w).collect();
+        let windows: Retained<NSArray<SCWindow>> = NSArray::from_slice(&windows);
         // SAFETY: as above.
         let filter = unsafe {
             SCContentFilter::initWithDisplay_excludingWindows(
                 SCContentFilter::alloc(),
                 display,
-                &none,
+                &windows,
             )
         };
         let (pixel_size, point_scale) = filter_pixel_size(&filter);

@@ -86,6 +86,7 @@ use tokio::task::JoinHandle;
 
 use crate::platform::{Native, Platform};
 
+pub mod curtain;
 pub mod drag;
 mod engines;
 mod region;
@@ -4168,6 +4169,10 @@ pub struct Pipeline<P: Platform> {
     on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>,
     /// `on_stop` has been called.
     stopped: bool,
+    /// Said each time the curtain's shield moved ([`curtain::Curtain::shield_moved`]): the
+    /// stream's server takes it ([`Self::take_shield`]) and takes the display's filter again
+    /// then ([`Self::refilter`]). `None` where no curtain is drawn.
+    shield: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 /// How long a stream may produce no frame at all before the client is told the target is idle.
@@ -4465,6 +4470,7 @@ impl<P: Platform> Pipeline<P> {
             on_stop,
             on_event,
             stopped: false,
+            shield: None,
         };
         Ok((stream, opened))
     }
@@ -5186,6 +5192,42 @@ impl<P: Platform> Pipeline<P> {
     /// [`Kind::Clock`]: slopty_proto::media::Kind::Clock
     pub fn echo_clock(&self, sent_us: u64, arrived: Instant) {
         self.shared.echo_clock(sent_us, arrived);
+    }
+
+    /// Follow the curtain's shield: told each time it moves, the stream takes its filter again.
+    pub fn follow_shield(&mut self, moved: tokio::sync::watch::Receiver<u64>) {
+        self.shield = Some(moved);
+    }
+
+    /// What says the curtain's shield moved, for the stream's server to wait on: `None` for a
+    /// stream that follows none, or a window stream, which the shield is never in.
+    pub fn take_shield(&mut self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.shield.take().filter(|_| matches!(self.target, CaptureTarget::Display(_)))
+    }
+
+    /// Take the display's filter again, so the windows this process leaves out of every display
+    /// capture (the curtain's shield, [`curtain`]) are out of this stream's picture: a running
+    /// capture keeps the filter it was made with. A window stream shows its window, or its
+    /// application's alone, so nothing of the shield is in it and it is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// Why ScreenCaptureKit would not take the filter; the stream goes on as it was.
+    pub async fn refilter(&mut self) -> Result<(), ScreenError> {
+        if !matches!(self.target, CaptureTarget::Display(_)) {
+            return Ok(());
+        }
+        *SHAREABLE.lock() = None;
+        let content = Self::shareable().await?;
+        let resolved = Source::<P>::resolve(&content, self.target)?;
+        let (tx, rx) = oneshot::channel();
+        Source::<P>::retarget(&self.capture, &resolved, move |result| {
+            let _receiver_gone = tx.send(result);
+        });
+        rx.await.map_err(|_dropped| ScreenError::Closed)??;
+        tracing::info!(stream = %self.id, target = ?self.target, "display filter taken again");
+        self.content = content;
+        Ok(())
     }
 
     /// Stream `display` from now on, in place of the display this stream shows: the display

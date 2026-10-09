@@ -18,7 +18,8 @@ dispatch2.workspace = true
 objc2.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics = { workspace = true, features = [ "CGDisplayConfiguration" ] }
-objc2-foundation.workspace = true
+# A virtual display's size in points (`display`).
+objc2-foundation = { workspace = true, features = [ "NSGeometry", "objc2-core-foundation" ] }
 
 [dev-dependencies]
 # A live test's skip, a failure in the VM lane (`slopty_testkit::live::skip`).

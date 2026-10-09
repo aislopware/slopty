@@ -600,3 +600,92 @@ fn a_remote_password_field_holds_secure_entry(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!on(cx), "a plain field");
 }
+
+/// The curtain over a remote Mac is this device's to hold from a desktop tile: offered only on
+/// a worker that draws one; asked for from the palette, and shown in the tile's header while
+/// held; asked again when the link comes back; a refusal lets the hold go and says why, as a
+/// curtain up without the Mac's own input held says what that needs; and lifted, let go.
+#[gpui::test]
+fn the_curtain_is_held_from_a_desktop_tile_and_asked_again_on_each_link(cx: &mut TestAppContext) {
+    use slopty_proto::screen::CurtainState;
+
+    use crate::workspace::actions::ToggleCurtain;
+    use crate::workspace::desktop::{DRAW_CURTAIN, LIFT_CURTAIN};
+
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let physical = DisplayId(1);
+    let tile = arrives(&view, cx, &fake, ItemKind::Display { display: physical }, 1);
+    opened(&view, cx, &fake, 1, CaptureTarget::Display(physical), (2560, 1440));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    assert!(!palette_has(&view, cx, DRAW_CURTAIN), "this worker draws none");
+
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, WorkerCaps { curtain: true, ..healthy() }, cx);
+    });
+    cx.run_until_parked();
+    assert!(palette_has(&view, cx, DRAW_CURTAIN));
+    sent(&mut fake, cx);
+    let asks = |fake: &mut Fake, cx: &VisualTestContext| -> Vec<bool> {
+        sent(fake, cx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Screen(ScreenRequest::Curtain { on }) => Some(on),
+                _ => None,
+            })
+            .collect()
+    };
+    let toggle = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| v.toggle_curtain(&ToggleCurtain, window, cx));
+        cx.run_until_parked();
+    };
+    let hear = |cx: &mut VisualTestContext, state: CurtainState| {
+        view.update_in(cx, |v, _w, cx| v.screen_event(key, ScreenEvent::Curtain(state), cx));
+        cx.run_until_parked();
+    };
+    let header = format!("curtain-{}", tile.item.as_uuid());
+    let header: &'static str = Box::leak(header.into_boxed_str());
+
+    toggle(cx);
+    assert_eq!(asks(&mut fake, cx), [true]);
+    hear(cx, CurtainState::Up { holders: 1, input_held: false });
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(
+        said.as_deref(),
+        Some(
+            "studio's screens are covered, but its own keyboard and pointer still work: allow \
+             Slopty in Accessibility there"
+        )
+    );
+    assert!(palette_has(&view, cx, LIFT_CURTAIN));
+    assert!(cx.debug_bounds(header).is_some(), "the header says it is held");
+
+    let (tx, rx) = mpsc::channel(256);
+    let factory: ScreenFactory =
+        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+    let me = fake.me;
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+        let link = WorkerLink { me, out: tx, open_screen: factory, remote: None };
+        v.connect_worker(key, link, hello("studio", Vec::new()), cx);
+    });
+    fake.rx = rx;
+    assert_eq!(asks(&mut fake, cx), [true], "held again on the new link");
+
+    hear(cx, CurtainState::Refused { why: "the worker's main thread is gone".to_owned() });
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("No curtain over studio: the worker's main thread is gone"));
+    assert!(!view.read_with(cx, |v, _| v.holds_curtain(key)), "the hold went with the refusal");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, WorkerCaps { curtain: true, ..healthy() }, cx);
+    });
+    toggle(cx);
+    hear(cx, CurtainState::Up { holders: 1, input_held: true });
+    toggle(cx);
+    assert_eq!(asks(&mut fake, cx), [true, false], "drawn, then lifted");
+    hear(cx, CurtainState::Down);
+    assert!(palette_has(&view, cx, DRAW_CURTAIN));
+}

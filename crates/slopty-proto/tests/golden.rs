@@ -317,6 +317,7 @@ mod golden {
             can_capture: false,
             can_inject: true,
             virtual_displays: false,
+            curtain: false,
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
@@ -337,7 +338,12 @@ mod golden {
         );
         snap(
             "worker_caps",
-            &WorkerMsg::Caps(WorkerCaps { can_capture: true, virtual_displays: true, ..caps }),
+            &WorkerMsg::Caps(WorkerCaps {
+                can_capture: true,
+                virtual_displays: true,
+                curtain: true,
+                ..caps
+            }),
         );
         snap("worker_load", &WorkerMsg::Load(3.25));
     }
@@ -1254,6 +1260,20 @@ mod golden {
                 why: slopty_proto::screen::ScreenFailure::Gone,
             }),
         );
+        snap("client_screen_curtain", &ClientMsg::Screen(ScreenRequest::Curtain { on: true }));
+        snap(
+            "worker_screen_curtain_up",
+            &WorkerMsg::Screen(ScreenEvent::Curtain(slopty_proto::screen::CurtainState::Up {
+                holders: 2,
+                input_held: false,
+            })),
+        );
+        snap(
+            "worker_screen_curtain_refused",
+            &WorkerMsg::Screen(ScreenEvent::Curtain(slopty_proto::screen::CurtainState::Refused {
+                why: "only a Mac draws the curtain".to_owned(),
+            })),
+        );
         snap(
             "worker_screen_cursor",
             &WorkerMsg::Screen(ScreenEvent::Cursor {
@@ -1735,6 +1755,7 @@ mod golden {
             can_capture: true,
             can_inject: true,
             virtual_displays: false,
+            curtain: false,
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
@@ -2391,6 +2412,7 @@ mod ctl {
                 can_capture: true,
                 can_inject: false,
                 virtual_displays: false,
+                curtain: false,
                 version: "0.1.0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,

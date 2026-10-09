@@ -2829,3 +2829,44 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The test took 4.5–6.6 s of CPU here and takes 1.4–2.2 s; on background QoS, throttled to the
   efficiency cores as a stand-in for that runner, 25–69 s and now 6–10 s. It still compares 12
   pairs, from the first frames after the keyframe on.
+
+- ✅ **The curtain** (2026-10-10, readiness rank 7). A client driving a Mac can draw a curtain
+  over it, as Apple Remote Desktop's curtain and Parsec's and Jump Desktop's privacy mode do:
+  the Mac's own screens show a shield saying it is in use remotely, and its own keyboard,
+  pointer, trackpad and tablet are held off, while the client still sees and drives the
+  session.
+  - *Parts* (`slopty_platform::curtain`, from the `curtain-wip` branch). The shield is a
+    borderless window over each physical display at `CGShieldingWindowLevel`, above the menu
+    bar, the Dock and full-screen spaces, that takes no clicks, so the events the worker posts
+    reach the windows under it. Displays made for clients are left uncovered
+    (`slopty_vdisplay::made_for_a_client`): they are what a client sees, not a screen someone
+    sits at. The hold is an event tap at the HID level that drops every input event not tagged
+    with the worker's own `kCGEventSourceUserData` (`SLOPTY_EVENT`). The Mac is locked with
+    `SACLockScreenImmediate`, the menu bar's Lock Screen.
+  - *Out of the picture.* ScreenCaptureKit ignores a window's `sharingType` since macOS 15, so
+    every display capture of the worker leaves the shield's windows out by number
+    (`slopty_capture::leave_out`). A running capture keeps the filter it was made with, so each
+    display stream takes its filter again whenever the shield's windows change
+    (`Pipeline::refilter`, told by `Curtain::shield_moved`). A window stream needs nothing: its
+    filter is the window, or its application alone on the crop path.
+  - *Held per client, on the main thread* (`slopty_worker::screen::curtain`). The curtain is up
+    while any linked client holds it (`ScreenRequest::Curtain`), and every client hears where it
+    stands (`ScreenEvent::Curtain`). The windows live on the main queue beside the displays made
+    for clients, and follow display reconfigurations. A client that lets go on the person's word
+    leaves the Mac unlocked. One whose link goes keeps the curtain up for 20 s, and holds it
+    again from its next link. If it stays gone, the curtain falls and the Mac locks as it does,
+    so a link that blips neither shows the session at the desk nor locks the Mac, and a client
+    that is gone never leaves it open. A worker without Accessibility cannot hold the input, so
+    it offers no curtain (`WorkerCaps::curtain`); if the hold still fails, the curtain goes up
+    over the screens and says the input is not held, and the client says what it needs.
+  - *On the client.* A desktop tile of such a worker offers "Draw the curtain over the remote
+    Mac" in the palette and as a header toggle. The hold is the device's own: asked again on
+    each link, and shown in the header while held, as system shortcuts are.
+  - *Proven by.* The owner's tests with fake drapes (`screen::curtain`): up while any client
+    holds it, a lock only when the last one went, a refusal holding nobody, displays followed,
+    the shield's move told, and a blip within the grace kept. The UI test
+    `the_curtain_is_held_from_a_desktop_tile_and_asked_again_on_each_link`. The branch's live
+    test (`slopty-platform/tests/curtain.rs`: the shield on the screens and out of both a still
+    and a stream's frames, an untagged pointer move dropped and a tagged one passed) covers
+    the screens and posts HID events, so it runs in the VM lane's guest only
+    (`cargo xtask vm live -p slopty-platform --test curtain`), never on a Mac someone is using.

@@ -601,6 +601,15 @@ pub enum ScreenRequest {
     /// while it plays (`docs/decisions/audio.md`, "One sound per worker on a client, not one
     /// per stream").
     SoundReport(SoundReport),
+    /// Draw the curtain over the worker's Mac, or let it go (`docs/decisions/video.md`, "The
+    /// curtain"): its own screens show a shield, and its own keyboard and pointer are held off,
+    /// for as long as any client linked holds it. A client that goes lets go of it, and the Mac
+    /// locks when the last one goes that way; letting go on the person's word does not lock.
+    /// Answered with [`ScreenEvent::Curtain`].
+    Curtain {
+        /// Hold it, or let it go.
+        on: bool,
+    },
 }
 
 impl ScreenRequest {
@@ -620,6 +629,7 @@ impl ScreenRequest {
             | Self::Focus(_)
             | Self::Focused { .. }
             | Self::SoundReport(_)
+            | Self::Curtain { .. }
             | Self::Resize { .. } => None,
         }
     }
@@ -894,6 +904,29 @@ pub enum ScreenEvent {
     ListFailed {
         /// Why.
         why: ScreenFailure,
+    },
+    /// Where the curtain over the worker's Mac stands: to every client linked whenever it
+    /// changes, and to one that asks ([`ScreenRequest::Curtain`]).
+    Curtain(CurtainState),
+}
+
+/// Where the curtain over a worker's Mac stands ([`ScreenEvent::Curtain`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CurtainState {
+    /// Not drawn: the Mac's screens and input are its own.
+    Down,
+    /// Drawn, held by `holders` clients.
+    Up {
+        /// The clients holding it.
+        holders: u32,
+        /// Its own keyboard and pointer are held off; `false` when the worker could not hold
+        /// them (no Accessibility), while its screens are still covered.
+        input_held: bool,
+    },
+    /// The worker could not draw it, in its words: no Mac, or no way to cover its screens.
+    Refused {
+        /// Why.
+        why: String,
     },
 }
 

@@ -92,6 +92,9 @@ actions!(
         /// Send the system's own shortcuts (⌘Tab, ⌘Space, Mission Control) to the focused
         /// remote Mac while its tile has the keyboard, or leave them to this Mac.
         ToggleSystemKeys,
+        /// Draw the curtain over the focused desktop's Mac, hiding its screens and holding its
+        /// own keyboard and pointer off while this device drives it; again, lift it.
+        ToggleCurtain,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
         /// Group the navigator's tiles by the machine each runs on, or back by project.

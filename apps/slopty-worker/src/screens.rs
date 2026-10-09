@@ -263,6 +263,9 @@ async fn serve_opened<P: Platform>(
     let (mut stream, mut sized) = match opened {
         Ok((mut stream, events, sized)) => {
             stream.listen(&*sound);
+            if let Some(curtain) = &daemon.curtain {
+                stream.follow_shield(curtain.shield_moved());
+            }
             let target = stream.target();
             tracing::info!(%client, %id, ?target, made = sized.is_some(), "screen opened");
             daemon.screens.insert(&client, target, stream.stats_handle());
@@ -368,6 +371,9 @@ pub async fn serve<P: Platform>(
     let mut field_due: Option<tokio::time::Instant> = None;
     let mut reading: Option<tokio::task::JoinHandle<Option<TextField>>> = None;
     let mut field_told: Option<TextField> = None;
+    // The curtain's shield moving, for a display stream: its filter is taken again, so the
+    // client sees the session rather than the shield.
+    let mut shield = stream.take_shield();
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -496,6 +502,15 @@ pub async fn serve<P: Platform>(
                 }
                 for command in std::mem::take(&mut held) {
                     feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
+                }
+            }
+            moved = async { shield.as_mut()?.changed().await.ok() }, if shield.is_some() => {
+                if moved.is_none() {
+                    shield = None;
+                    continue;
+                }
+                if let Err(e) = stream.refilter().await {
+                    tracing::warn!(stream = %stream.id(), error = %e, "the shield left in the picture");
                 }
             }
             changed = heard.changed(), if claimed.is_some() && sourcing.is_none() => {

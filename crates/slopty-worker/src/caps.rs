@@ -183,6 +183,7 @@ pub fn probe(agents: &[InstalledAgent], seldom: &Seldom) -> WorkerCaps {
         can_capture: desktop.can_capture,
         can_inject: desktop.can_inject,
         virtual_displays: desktop.virtual_displays,
+        curtain: desktop.curtain,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         lan: slopty_tailnet::lan::ports(),
         wake_on_lan: seldom.wake_on_lan,
@@ -257,21 +258,26 @@ struct Desktop {
     can_capture: bool,
     can_inject: bool,
     virtual_displays: bool,
+    curtain: bool,
 }
 
 /// macOS: both codecs, and the displays and input its grants allow.
 #[cfg(target_os = "macos")]
 fn desktop() -> Desktop {
     let can_capture = slopty_capture::can_capture();
+    let can_inject = slopty_input::can_post();
     Desktop {
         // Every Apple-silicon Mac encodes both in hardware (VideoToolbox).
         encoders: vec![VideoCodec::Hevc, VideoCodec::H264],
         // Without Screen Recording no display can be streamed, so none is offered.
         displays: if can_capture { slopty_capture::active_displays() } else { Vec::new() },
         can_capture,
-        can_inject: slopty_input::can_post(),
+        can_inject,
         // A display made for a client is streamed like any other, so it needs the grant too.
         virtual_displays: can_capture && slopty_vdisplay::available(),
+        // The shield needs no grant, but holding the Mac's own input off needs Accessibility,
+        // and a curtain the person at the desk could type through is none.
+        curtain: can_inject,
     }
 }
 
@@ -285,6 +291,7 @@ const fn desktop() -> Desktop {
         can_capture: false,
         can_inject: false,
         virtual_displays: false,
+        curtain: false,
     }
 }
 

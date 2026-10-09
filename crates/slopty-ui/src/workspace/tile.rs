@@ -2251,6 +2251,22 @@ impl WorkspaceView {
                             .into_any_element(),
                     );
                 }
+                // The curtain this device holds over the Mac is a state to see, as the system's
+                // shortcuts are; while none is held, it is one of the hover's actions.
+                if matches!(item.kind, ItemKind::Display { .. }) && self.draws_curtain(tile.worker)
+                {
+                    let (worker, held) = (tile.worker, self.holds_curtain(tile.worker));
+                    let toggle = kit::icon_toggle(
+                        theme,
+                        format!("curtain-{}", id.as_uuid()),
+                        Symbol::EyeSlash,
+                        super::desktop::DRAW_CURTAIN,
+                        held,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.flip_curtain(worker, cx)))
+                    .into_any_element();
+                    if held { states.push(toggle) } else { actions.push(toggle) }
+                }
                 // Silenced, the toggle is out of the hover's reach ([`Self::silenced`]).
                 if !muted && stream.has_audio {
                     actions.extend(self.mute_toggle(tile, id, false, cx));

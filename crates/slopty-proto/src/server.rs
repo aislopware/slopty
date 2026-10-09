@@ -153,6 +153,9 @@ pub struct WorkerCaps {
     pub can_inject: bool,
     /// It can make a display sized to a client ([`crate::screen::ScreenRequest::OpenDisplay`]).
     pub virtual_displays: bool,
+    /// It can draw the curtain over its Mac's own screens and input
+    /// ([`crate::screen::ScreenRequest::Curtain`]).
+    pub curtain: bool,
     /// Worker software version.
     pub version: String,
     /// Its interfaces on a LAN, by which a machine beside it wakes it when it sleeps.
@@ -187,6 +190,7 @@ impl WorkerCaps {
             can_capture: false,
             can_inject: false,
             virtual_displays: false,
+            curtain: false,
             version: String::new(),
             lan: Vec::new(),
             wake_on_lan: None,
