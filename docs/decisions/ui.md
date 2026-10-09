@@ -9272,3 +9272,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "no longer available", which offers another. The next link clears it, as it does a
     failed open (`Worker::stopped`).
   - Test: `workspace::tests::bodies::a_stream_the_worker_ends_reopens_once_then_offers_to_reopen`.
+
+- ✅ **The sweep takes the agents' worktrees and says whose they were** (2026-10-10, readiness
+  audit item 18, the client half).
+  - **The rule.** The worker now lists every linked worktree, each marked by the agent whose
+    tool made it (`AgentWorktree::made_by`). "Remove merged worktrees" takes the merged ones an
+    agent made, Codex's as well as Claude Code's, under the same guards as before. A worktree
+    the person made by hand is theirs: the sweep leaves it and counts it. Such a worktree can
+    still be removed by hand, one at a time.
+  - **What it says.** The notice names who made what went, then what stayed and what was
+    left, for example "Removed 2 merged worktrees (1 Claude Code, 1 Codex); 2 worktrees in use
+    or not committed; 1 worktree of your own left".
+  - **Where removal is offered.** "Remove this worktree" (palette, path bar, exited thread,
+    commit sheet) now also finds a Codex worktree's root, from its managed layout
+    `.codex/worktrees/<four hex>/<name>` (`worktree_root`).
+  - Tests: `workspace::tests::worktrees::remove_merged_takes_only_the_landed_worktrees_nothing_works_in`
+    and `workspace::worktrees::tests::a_worktrees_root_is_read_from_any_folder_in_it`.
+
+- ✅ **A start held at Claude Code's trust dialog offers to trust its folder** (2026-10-10,
+  readiness audit item 13, the client half; the worker half is in `agents.md`).
+  - **What the card shows.** The held start's request ("Claude Code is asking something in its
+    terminal") carries a "Trust this folder" choice, scoped to the folder. The card treats it as
+    the grant that lasts that it is: a quiet button, with the folder written out after it,
+    leading the row from its far end. "Answer in the terminal" stays the solid button,
+    because a card never leads the person to a standing grant. Before, the release went quiet
+    whenever any option was on the card; now it does so only when another answer stands in
+    the row (`release_button`).
+  - **The press.** It answers with
+    `Intent::Answer { ask: "terminal-start", choice: "trust" }`. If the worker refuses, the
+    thread says why, and the card returns with the way to the terminal.
+  - Test: `conversation::thread::tests::doors::a_start_held_at_its_trust_dialog_offers_to_trust_the_folder`.

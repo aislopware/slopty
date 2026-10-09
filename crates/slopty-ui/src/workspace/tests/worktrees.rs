@@ -202,10 +202,11 @@ fn listed(name: &str, merged: bool, changed: u32) -> slopty_proto::git::AgentWor
 }
 
 /// "Remove merged worktrees", offered in a folder of a clone, lists the clone's worktrees and
-/// asks to remove each merged one that is clean, with no terminal and no live agent in it; a
-/// merged one with changes not committed, or a live agent's, is passed over, and one not merged
-/// is left alone. Once every removal is answered, one notice says what went and what stayed,
-/// and the folder tile in the worktree that went closes.
+/// asks to remove each merged one an agent made that is clean, with no terminal and no live
+/// agent in it, Codex's as Claude Code's; a merged one with changes not committed, or a live
+/// agent's, is passed over, one not merged is left alone, and one the person made by hand is
+/// theirs. Once every removal is answered, one notice says what went and whose, what stayed
+/// and what was left, and the folder tile in the worktree that went closes.
 #[gpui::test]
 fn remove_merged_takes_only_the_landed_worktrees_nothing_works_in(cx: &mut TestAppContext) {
     use slopty_proto::git::Worktrees;
@@ -247,28 +248,51 @@ fn remove_merged_takes_only_the_landed_worktrees_nothing_works_in(cx: &mut TestA
         .collect();
     let [(request, repo)] = asked.as_slice() else { panic!("one listing: {asked:?}") };
     assert_eq!(repo, "/w/atlas");
+    let codex = slopty_proto::git::AgentWorktree {
+        path: "/Users/me/.codex/worktrees/1f2e/atlas".to_owned(),
+        made_by: Some(slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX)),
+        ..listed("codex", true, 0)
+    };
+    let own = slopty_proto::git::AgentWorktree {
+        path: "/w/atlas-hotfix".to_owned(),
+        made_by: None,
+        ..listed("hotfix", true, 0)
+    };
     let list = vec![
         listed("landed", true, 0),
         listed("agent-busy", true, 0),
         listed("draft", true, 2),
         listed("open", false, 0),
+        codex.clone(),
+        own,
     ];
     let worktrees = Worktrees { clone: "/w/atlas".to_owned(), list, more: 0 };
     let done = GitOutcome::Done(GitDone::Worktrees(Box::new(worktrees)));
     view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
     cx.run_until_parked();
-    let asked = removals(&mut studio);
-    let [(request, repo)] = asked.as_slice() else { panic!("one removal: {asked:?}") };
-    assert_eq!(repo, "/w/atlas/.claude/worktrees/landed", "only the one free to go");
+    let mut asked = removals(&mut studio);
+    asked.sort_by(|a, b| a.1.cmp(&b.1));
+    let repos: Vec<&str> = asked.iter().map(|(_, repo)| repo.as_str()).collect();
+    assert_eq!(
+        repos,
+        [codex.path.as_str(), "/w/atlas/.claude/worktrees/landed"],
+        "the agents' ones free to go; the person's own is left"
+    );
 
-    let done = GitOutcome::Done(GitDone::WorktreeRemoved {
-        branch: Some("worktree-landed".to_owned()),
-        branch_removed: true,
-    });
-    view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    for (request, _) in &asked {
+        let done = GitOutcome::Done(GitDone::WorktreeRemoved {
+            branch: Some("worktree-landed".to_owned()),
+            branch_removed: true,
+        });
+        view.update_in(cx, |v, _w, cx| v.git_done(key, *request, done, cx));
+    }
     cx.run_until_parked();
     let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
-    assert_eq!(told, "Removed 1 merged worktree; 2 worktrees in use or not committed");
+    assert_eq!(
+        told,
+        "Removed 2 merged worktrees (1 Claude Code, 1 Codex); 2 worktrees in use or not \
+         committed; 1 worktree of your own left"
+    );
     let closed: Vec<ItemOp> = studio
         .drain()
         .into_iter()

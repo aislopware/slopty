@@ -1,20 +1,21 @@
 //! Freeing a worktree the person started work in (`GitOp::RemoveWorktree`).
 //!
-//! "Remove this worktree" offers itself where the focus works in an agent's worktree under its
-//! clone's `.claude/worktrees/`: a folder tile or a changes tile in it, or a thread's or a
-//! review's tile whose agent works there. The same removal is a button where it is wanted at a
-//! glance: on a thread whose agent has exited, and in the path bar of a folder tile in one. It is
-//! refused here while an agent that has not exited works in it, since an agent driven over its
-//! protocol has no terminal for the worker to see, and on the worker while a terminal works in it
-//! or anything in it is not committed. What went and what stayed is said in a notice, and the
-//! folder tiles left showing it close.
+//! "Remove this worktree" offers itself where the focus works in an agent's worktree, Claude
+//! Code's under its clone's `.claude/worktrees/` or Codex's under `.codex/worktrees/`: a folder
+//! tile or a changes tile in it, or a thread's or a review's tile whose agent works there. The same
+//! removal is a button where it is wanted at a glance: on a thread whose agent has exited, and in
+//! the path bar of a folder tile in one. It is refused here while an agent that has not exited
+//! works in it, since an agent driven over its protocol has no terminal for the worker to see, and
+//! on the worker while a terminal works in it or anything in it is not committed. What went and
+//! what stayed is said in a notice, and the folder tiles left showing it close.
 //!
 //! "Remove merged worktrees" sweeps the clone the focus is in (`GitOp::Worktrees`): every agent's
 //! worktree whose work has landed, with nothing in it not committed, no terminal in it and no
-//! agent that has not exited working there, is asked to go as one would be alone. One notice
-//! says how many went and why any stayed, once every answer is in.
+//! agent that has not exited working there, is asked to go as one would be alone. A worktree
+//! the person made by hand is theirs, and is left. One notice says how many went and whose
+//! they were, why any stayed, and what was left, once every answer is in.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{Context, Window};
 use slopty_client::layout::WorkerKey;
@@ -30,8 +31,11 @@ pub(crate) const REMOVE_WORKTREE: &str = "Remove this worktree";
 /// The palette's line for the sweep.
 pub(crate) const REMOVE_MERGED: &str = "Remove merged worktrees";
 
-/// Where an agent's worktrees are, under their clone's root.
+/// Where Claude Code's worktrees are, under their clone's root.
 const UNDER: &str = "/.claude/worktrees/";
+/// Where Codex's managed worktrees are, under its home: `<bucket>/<name>`, the bucket four hex
+/// digits (Codex's `has_managed_layout`).
+const CODEX_UNDER: &str = "/.codex/worktrees/";
 
 /// What was asked of the worktrees and is not yet answered.
 #[derive(Default)]
@@ -49,21 +53,33 @@ struct Sweep {
     key: WorkerKey,
     /// The worktrees not answered yet.
     waiting: HashSet<String>,
-    /// How many went.
-    went: usize,
+    /// Who made each worktree asked to go: its agent's name.
+    made_by: HashMap<String, String>,
+    /// How many went, by who made them.
+    went: BTreeMap<String, usize>,
     /// Why each that stayed did, in the worker's words.
     kept: Vec<String>,
     /// How many of the merged ones were left alone: in use, or with changes not committed.
     passed: usize,
+    /// How many merged ones the person made by hand, left to them.
+    own: usize,
 }
 
-/// The root of the agent's worktree `path` is in or at, under its clone's
-/// `.claude/worktrees/`; `None` for a path in none.
+/// The root of the agent's worktree `path` is in or at: Claude Code's under its clone's
+/// `.claude/worktrees/`, or Codex's under `.codex/worktrees/<bucket>/`; `None` for a path in
+/// none.
 #[must_use]
 pub(crate) fn worktree_root(path: &str) -> Option<String> {
-    let (clone, rest) = path.split_once(UNDER)?;
-    let name = rest.split('/').next().filter(|name| !name.is_empty())?;
-    Some(format!("{clone}{UNDER}{name}"))
+    if let Some((clone, rest)) = path.split_once(UNDER) {
+        let name = rest.split('/').next().filter(|name| !name.is_empty())?;
+        return Some(format!("{clone}{UNDER}{name}"));
+    }
+    let (home, rest) = path.split_once(CODEX_UNDER)?;
+    let mut parts = rest.split('/');
+    let bucket =
+        parts.next().filter(|b| b.len() == 4 && b.bytes().all(|c| c.is_ascii_hexdigit()))?;
+    let name = parts.next().filter(|name| !name.is_empty())?;
+    Some(format!("{home}{CODEX_UNDER}{bucket}/{name}"))
 }
 
 /// `n` worktrees, in words: "1 worktree", "3 worktrees".
@@ -197,22 +213,38 @@ impl WorkspaceView {
             self.show_failure(format!("The worktrees could not be listed: {why}"), cx);
             return;
         };
-        let (free, held): (Vec<_>, Vec<_>) = listed
-            .list
-            .iter()
-            .filter(|w| w.merged)
+        let (agents, own): (Vec<_>, Vec<_>) =
+            listed.list.iter().filter(|w| w.merged).partition(|w| w.made_by.is_some());
+        let (free, held): (Vec<_>, Vec<_>) = agents
+            .into_iter()
             .partition(|w| w.removable() && self.threads_working_in(key, &w.path).is_empty());
         if free.is_empty() {
-            let said = match held.len() {
-                0 => "No merged worktree to remove".to_owned(),
-                n => format!("No merged worktree to remove; {} in use or not committed", count(n)),
-            };
+            let mut said = "No merged worktree to remove".to_owned();
+            if !held.is_empty() {
+                said = format!("{said}; {} in use or not committed", count(held.len()));
+            }
+            if !own.is_empty() {
+                said = format!("{said}; {} of your own left", count(own.len()));
+            }
             self.show_notice(said, cx);
             return;
         }
+        let made_by: HashMap<String, String> = free
+            .iter()
+            .filter_map(|w| {
+                Some((w.path.clone(), super::projects::agent_label(w.made_by.as_ref()?)))
+            })
+            .collect();
         let waiting: HashSet<String> = free.iter().map(|w| w.path.clone()).collect();
-        let sweep =
-            Sweep { key, waiting: waiting.clone(), went: 0, kept: Vec::new(), passed: held.len() };
+        let sweep = Sweep {
+            key,
+            waiting: waiting.clone(),
+            made_by,
+            went: BTreeMap::new(),
+            kept: Vec::new(),
+            passed: held.len(),
+            own: own.len(),
+        };
         self.worktrees.sweeps.push(sweep);
         for path in waiting {
             self.worktrees.removals.insert((key, path.clone()));
@@ -229,7 +261,11 @@ impl WorkspaceView {
         let key = sweep.key;
         let went = matches!(said, Some(Said::Freed { .. }));
         match said {
-            Some(Said::Freed { .. }) => sweep.went = sweep.went.saturating_add(1),
+            Some(Said::Freed { .. }) => {
+                let by = sweep.made_by.get(repo).cloned().unwrap_or_default();
+                let n = sweep.went.entry(by).or_default();
+                *n = n.saturating_add(1);
+            }
             Some(Said::Refused { why } | Said::Failed { said: why }) => sweep.kept.push(why),
             _ => sweep.kept.push("the machine did not answer".to_owned()),
         }
@@ -241,18 +277,26 @@ impl WorkspaceView {
             return;
         }
         let sweep = self.worktrees.sweeps.remove(at);
-        let mut said = match sweep.went {
+        let went: usize = sweep.went.values().sum();
+        let mut said = match went {
             0 => "Removed no merged worktree".to_owned(),
             1 => "Removed 1 merged worktree".to_owned(),
             n => format!("Removed {n} merged worktrees"),
         };
+        if went > 0 {
+            let whose: Vec<String> = sweep.went.iter().map(|(by, n)| format!("{n} {by}")).collect();
+            said = format!("{said} ({})", whose.join(", "));
+        }
         if let Some(first) = sweep.kept.first() {
             said = format!("{said}; kept {}: {first}", count(sweep.kept.len()));
         }
         if sweep.passed > 0 {
             said = format!("{said}; {} in use or not committed", count(sweep.passed));
         }
-        if sweep.went == 0 {
+        if sweep.own > 0 {
+            said = format!("{said}; {} of your own left", count(sweep.own));
+        }
+        if went == 0 {
             self.show_failure(said, cx);
         } else {
             self.show_notice(said, cx);
@@ -290,5 +334,10 @@ mod tests {
         assert_eq!(worktree_root("/w/atlas/.claude/worktrees/"), None);
         assert!(within(&format!("{root}/src"), root));
         assert!(!within(&format!("{root}-two"), root), "a sibling with a longer name");
+
+        let codex = "/Users/me/.codex/worktrees/1f2e/fix-login";
+        assert_eq!(worktree_root(&format!("{codex}/src")).as_deref(), Some(codex));
+        assert_eq!(worktree_root("/Users/me/.codex/worktrees/1f2e"), None, "a bucket alone");
+        assert_eq!(worktree_root("/Users/me/.codex/worktrees/notes/x"), None, "not a bucket");
     }
 }
