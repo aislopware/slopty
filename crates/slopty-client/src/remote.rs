@@ -10,7 +10,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
-use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, TunnelRefusal, XferMsg};
+use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, TunnelRefusal};
 
 use crate::clip::{ClipCache, Fetched, fits_inline};
 #[cfg(target_vendor = "apple")]
@@ -125,9 +125,8 @@ impl Remote for LinkRemote {
     fn cancel(&self, xfer: XferId) {
         self.line.cancel(xfer);
         self.up.table.cancel(xfer);
-        if let Err(e) = self.up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer })) {
-            tracing::debug!(%xfer, error = %e, "cancel not sent");
-        }
+        let out = self.up.out.clone();
+        self.runtime.spawn(async move { xfer::call_off(&out, xfer).await });
     }
 
     fn download(&self, ask: Download) -> Result<Vec<PathBuf>, XferError> {

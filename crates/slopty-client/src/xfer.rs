@@ -843,8 +843,8 @@ async fn carry(
         if matches!(error, XferError::Cancelled) || *stop.borrow() || up.table.cancelled(xfer) {
             // The streams stop here, and the worker hears it while the link is up.
             up.table.cancel(xfer);
-            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer }));
             shown.work().end(false);
+            call_off(&up.out, xfer).await;
             return (up, Err(XferError::Cancelled));
         }
         let gone = up.conn.close_reason().is_some() || matches!(error, XferError::LinkClosed);
@@ -1020,6 +1020,15 @@ async fn acknowledged(
 
 async fn send(up: &Uplink, msg: XferMsg) -> Result<(), XferError> {
     up.out.send(ClientMsg::Xfer(msg)).await.map_err(|_closed| XferError::LinkClosed)
+}
+
+/// Tell the worker transfer `xfer` is called off, waiting for room on the control stream: a
+/// cancel dropped on a full queue leaves the worker sending what no one reads. Nothing is told
+/// once the link has gone.
+pub(crate) async fn call_off(out: &mpsc::Sender<ClientMsg>, xfer: XferId) {
+    if out.send(ClientMsg::Xfer(XferMsg::Cancel { xfer })).await.is_err() {
+        tracing::debug!(%xfer, "the link went before its cancel");
+    }
 }
 
 async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &XferError) {
@@ -1223,7 +1232,7 @@ async fn attempts(
         if cancelled {
             // The attempt in flight stops here, and the worker hears it while the link is up.
             up.table.cancel(current);
-            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: current }));
+            call_off(&up.out, current).await;
             return Err(XferError::Cancelled);
         }
         up.table.abandon(current);
@@ -1237,7 +1246,7 @@ async fn attempts(
                 return Err(error);
             }
             tracing::info!(%current, path = on.path, %error, "download cut; fetching the rest");
-            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: current }));
+            call_off(&up.out, current).await;
             settle(fetch).await?;
         }
         current = XferId::new();
@@ -1506,6 +1515,31 @@ async fn wait_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cancel waits for room on a full control queue rather than being dropped, so the worker
+    /// hears it behind what was queued; on a link that has gone it is let go at once.
+    #[tokio::test]
+    async fn a_cancel_waits_for_room_on_the_control_stream_and_never_hangs_on_a_gone_link() {
+        let (out, mut control) = mpsc::channel(1);
+        out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: XferId::new() })).unwrap();
+        let xfer = XferId::new();
+        let told = tokio::spawn({
+            let out = out.clone();
+            async move { call_off(&out, xfer).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!told.is_finished(), "waits for room, not dropped");
+        let _queued = control.recv().await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(5), control.recv()).await.unwrap();
+        assert!(
+            matches!(heard, Some(ClientMsg::Xfer(XferMsg::Cancel { xfer: heard })) if heard == xfer),
+            "{heard:?}"
+        );
+        told.await.unwrap();
+
+        drop(control);
+        tokio::time::timeout(Duration::from_secs(5), call_off(&out, XferId::new())).await.unwrap();
+    }
 
     #[test]
     fn dropped_paths_are_typed_quoted_with_a_space_after_each() {
