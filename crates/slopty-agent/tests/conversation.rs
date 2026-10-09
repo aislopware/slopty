@@ -74,7 +74,7 @@ mod conversation {
         }
     }
 
-    const SCENARIOS: [&str; 5] = ["edit", "tools", "interrupt", "compact", "permission"];
+    const SCENARIOS: [&str; 6] = ["edit", "tools", "interrupt", "compact", "permission", "auto"];
 
     #[test]
     fn edit() {
@@ -99,6 +99,12 @@ mod conversation {
     #[test]
     fn permission() {
         insta::assert_yaml_snapshot!(decode("permission").snapshot());
+    }
+
+    /// Auto mode's classifier declining a call twice, the hook's word to try again between.
+    #[test]
+    fn auto() {
+        insta::assert_yaml_snapshot!(decode("auto").snapshot());
     }
 
     /// Fed a line at a time, main and subagent files interleaved, the decoder ends where a whole

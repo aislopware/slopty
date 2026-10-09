@@ -47,7 +47,9 @@ mod hooks {
 
     #[test]
     fn every_captured_event_is_one_the_relay_registers() {
-        for scenario in ["edit", "tools", "interrupt", "compact", "permission", "background"] {
+        for scenario in
+            ["edit", "tools", "interrupt", "compact", "permission", "background", "auto"]
+        {
             for record in records(scenario) {
                 let name = &record["input"]["hook_event_name"];
                 let event = HookEvent::deserialize(name).expect("event");

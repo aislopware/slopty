@@ -12,8 +12,8 @@ use crate::live::{Board, ModEvent};
 use crate::status::AgentSource;
 use crate::transcript::Tail;
 
-const CONVERSATIONS: [&str; 6] =
-    ["edit", "tools", "interrupt", "compact", "permission", "background"];
+const CONVERSATIONS: [&str; 7] =
+    ["edit", "tools", "interrupt", "compact", "permission", "background", "auto"];
 
 fn dir(kind: &str, scenario: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(kind).join(scenario)
@@ -1119,4 +1119,53 @@ fn an_auto_mode_decline_is_said_after_its_call_and_may_be_let_try_again() {
         }))
     );
     assert_eq!(answered("deny"), None, "the decline stands");
+}
+
+/// Auto mode as a real Claude Code ran it (the `auto` capture): its classifier declined an
+/// upload, the hook let the model try again, and the second try was declined too. Each decline
+/// is said after its own call, in the classifier's words; both had a verdict, so both could be
+/// let try again; and the answer the capture's hook printed for the first is the one Slopty
+/// prints for "Let it try again", which Claude Code acted on with the second call.
+#[test]
+fn a_recorded_auto_mode_decline_is_said_and_its_retry_is_the_one_claude_code_took() {
+    let dir = dir("conversation", "auto");
+    let (mut observed, mut host, _) = replay(&dir);
+    let calls: Vec<String> = host
+        .thread(observed.main())
+        .items
+        .iter()
+        .filter(|i| matches!(&i.body, ItemBody::Tool(t) if t.kind == kind::EXEC))
+        .map(|i| i.id.0.clone())
+        .collect();
+    assert_eq!(calls.len(), 2, "the call and its retry: {calls:?}");
+    let text = std::fs::read_to_string(dir.join("hooks.jsonl")).expect("hooks");
+    let records: Vec<serde_json::Value> =
+        text.lines().map(|l| serde_json::from_str(l).expect("json")).collect();
+    let declines: Vec<(Hook, serde_json::Value)> = records
+        .iter()
+        .filter(|r| r["input"]["hook_event_name"] == "PermissionDenied")
+        .map(|r| (serde_json::from_value(r["input"].clone()).expect("a hook"), r["output"].clone()))
+        .collect();
+    assert_eq!(declines.len(), 2, "declined twice");
+    let session = SessionId::nil();
+    for ((hook, _), call) in declines.iter().zip(&calls) {
+        assert_eq!(hook.tool_use_id.as_deref(), Some(call.as_str()), "each names its call");
+        let held = crate::permission::declined(session, hook, WallMs::from_millis(5));
+        assert!(held.retryable, "the classifier gave a verdict");
+        host.take(observed.permission(&PermissionEvent::Declined(Box::new(held))));
+        let state = host.thread(observed.main());
+        let at = |id: &str| state.items.iter().position(|i| i.id.0 == id);
+        let said = at(&format!("declined-{call}")).expect("said");
+        assert!(said > at(call).expect("the call"), "after its call");
+        let ItemBody::Notice(notice) = &state.items[said].body else { panic!("a notice") };
+        assert_eq!(notice.kind, Notice::DECLINED);
+        assert!(notice.text.text.starts_with("Auto mode declined: "), "{}", notice.text.text);
+        assert!(notice.text.text.ends_with("\nData Exfiltration"), "{}", notice.text.text);
+    }
+    let let_try = verdict("allow", None).expect("a verdict");
+    let (first, printed) = &declines[0];
+    let decision = crate::permission::decision(&let_try, first);
+    let ours = crate::permission::hook_output(crate::HookEvent::PermissionDenied, &decision);
+    assert_eq!(ours.as_ref(), Some(printed), "what the capture printed, and Claude Code took");
+    assert_eq!(declines[1].1, serde_json::Value::Null, "the second decline stood");
 }

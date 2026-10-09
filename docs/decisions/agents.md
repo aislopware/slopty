@@ -2599,3 +2599,21 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Test: `claude_threads::what_a_lag_loses_is_read_again` (slopty-worker): a final status
     lost behind 80 reports of other terminals is read from the table, and a close lost behind
     80 events takes its provisional thread.
+
+- ✅ **Auto mode's declines are pinned by a real capture** (2026-10-10, readiness 10-10 rank 24).
+  The decline path above was tested only on input written to look like the hooks reference.
+  `cargo xtask fixtures claude` now records an `auto` scenario. The session runs in auto mode
+  (`--permission-mode auto`, a new field of a scenario), with no tool allowed ahead.
+  - It asks for an upload of a one-word file to example.com, the domain reserved for examples.
+    Claude Code 2.1.295's classifier declines it as `[Data Exfiltration]`. The capture's hook
+    answers the first `PermissionDenied` with `retry: true`, as "Let it try again" does, and
+    lets the second stand. Claude Code then tells the model it may retry, in a meta entry the
+    decoder passes over, and the model calls again and is declined again.
+  - An earlier draft asked for a force push to a scratch remote, and the classifier let it
+    through: a call the person asked for in plain words is no exfiltration. Recorded with the
+    person's managed `claude` (`SLOPTY_CLAUDE`), on haiku at high effort.
+  - Tests: `observed::tests::a_recorded_auto_mode_decline_is_said_and_its_retry_is_the_one_claude_code_took`.
+    Each decline is said after its own call in the classifier's words, both may be let try
+    again, and the retry Slopty prints is the one the capture printed and Claude Code acted on.
+    Also the `conversation::auto` snapshot, and `auto` in every whole-scenario test
+    (`every_entry_is_an_item_in_its_prompts_turn`, `every_captured_event_is_one_the_relay_registers`).
