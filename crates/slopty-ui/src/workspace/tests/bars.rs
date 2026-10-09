@@ -85,9 +85,9 @@ fn a_place_is_named_by_its_repository_else_its_directory() {
     assert_eq!(place_name("/", None, None), None);
 }
 
-/// The title bar's readouts count the ports forwarded here, which list them, before the bell;
-/// the machine a shell runs on is the navigator's and the breadcrumb's to say, not theirs, and
-/// the frame time waits for the stream stats.
+/// The foot bar counts the ports forwarded here, which list them; the machine a shell runs on
+/// is the navigator's and the breadcrumb's to say, not a readout's, and the frame time waits
+/// for the stream stats.
 #[gpui::test]
 fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -103,10 +103,9 @@ fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext)
     cx.run_until_parked();
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "2 ports"), "{names:#?}");
-    let titlebar = cx.debug_bounds("titlebar").expect("the title bar");
+    let foot = cx.debug_bounds("foot").expect("the foot bar");
     let ports = cx.debug_bounds("readout-ports").expect("the ports");
-    let bell = cx.debug_bounds("bell").expect("the bell");
-    assert!(titlebar.contains(&ports.center()) && ports.right() <= bell.left(), "{ports:?}");
+    assert!(foot.contains(&ports.center()), "{ports:?}");
     assert!(cx.debug_bounds("status-worker").is_none(), "the machine is the navigator's");
     assert!(cx.debug_bounds("readout-frame").is_none(), "no frame time without the stats");
 
@@ -707,61 +706,6 @@ fn a_command_ending_on_the_focused_tile_while_away_is_badged(cx: &mut TestAppCon
         assert!(v.finished(missed).is_some(), "on the focused tile, but the app was away");
         assert_eq!(v.bell_count(), 0, "a shell's finish is not the bell's");
     });
-}
-
-/// A Claude Code thread on `fake` whose status line said `limits`, with no terminal.
-fn plan_row(limits: Vec<slopty_proto::thread::Limit>) -> slopty_proto::thread::wire::ThreadRow {
-    let mut row = crate::conversation::thread::fixtures::thread("edit").row(WallMs::now());
-    row.id = slopty_proto::thread::ThreadId::new();
-    row.terminal = None;
-    row.agent = slopty_proto::thread::AgentId(slopty_proto::thread::AgentId::CLAUDE_CODE.into());
-    row.meters.limits = limits;
-    row
-}
-
-fn window(name: &str, used_bp: u32) -> slopty_proto::thread::Limit {
-    slopty_proto::thread::Limit { name: name.to_owned(), used_bp, resets_ms: None }
-}
-
-/// The title bar says the focused tile's machine's plan windows as its agents published them
-/// once one is 80 % used, and a click lists every machine's readings. Under that it says
-/// nothing, and a machine whose agents published none shows no meter.
-#[gpui::test]
-fn a_far_used_plan_is_said_in_the_title_bar(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let laptop = connect(&view, cx, 2, "laptop");
-    let here = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let there = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
-    let key = studio.key;
-    let publish = |cx: &mut VisualTestContext, seq, seven_day| {
-        let row = plan_row(vec![window("five-hour", 2_300), window("seven-day", seven_day)]);
-        let table = slopty_proto::thread::wire::TableFrame::Snapshot {
-            cursor: slopty_proto::thread::Cursor { epoch: 1, seq },
-            rows: vec![row],
-        };
-        view.update_in(cx, |v, _w, cx| {
-            v.threads_linked(key, cx);
-            v.thread_table(key, &table, cx);
-            v.focus_tile(here, cx);
-        });
-        cx.run_until_parked();
-    };
-    publish(cx, 1, 4_100);
-    assert!(cx.debug_bounds("readout-plan").is_none(), "41 % is no news");
-    publish(cx, 2, 8_200);
-    assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 82%"));
-
-    click(cx, "readout-plan");
-    assert!(cx.debug_bounds("plans").is_some(), "every reading, listed");
-    let row = "studio · Claude Code, 5h 23% · 7d 82% · now".to_owned();
-    assert!(labels(&view, cx).contains(&row), "{:?}", labels(&view, cx));
-    let (bar, plans) = (cx.debug_bounds("titlebar"), cx.debug_bounds("plans"));
-    assert!(bar.zip(plans).is_some_and(|(b, p)| p.top() >= b.bottom()), "under the title bar");
-
-    view.update_in(cx, |v, _w, cx| v.focus_tile(there, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("readout-plan").is_none(), "the laptop's agents said nothing");
 }
 
 /// A worker on another build shows Update where it is named, not only on its tiles: on its

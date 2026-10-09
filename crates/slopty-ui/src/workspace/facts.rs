@@ -298,6 +298,12 @@ impl WorkspaceView {
             App::notify(cx, self.chrome.nav_rows.entity_id());
             App::notify(cx, self.area_host.entity_id());
         }
+        // The foot bar's chips name the shells running out of sight, not how long they ran:
+        // news for it only when which they are changed.
+        let chips: Vec<SessionId> = self.running_shells().into_iter().map(|(_, s)| s).collect();
+        if *self.foot.running.borrow() != chips {
+            App::notify(cx, self.chrome.foot.entity_id());
+        }
     }
 
     /// The clocks a readout counts by, read now.

@@ -1632,6 +1632,7 @@ mod facts;
 mod focus;
 mod focus_cache;
 mod folders;
+mod foot;
 mod frame;
 mod handoffs;
 mod leaks;

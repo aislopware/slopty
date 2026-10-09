@@ -48,6 +48,7 @@ mod desktop;
 mod faces;
 mod facts;
 mod folders;
+mod foot;
 mod grouping;
 mod handoffs;
 mod kept_items;
@@ -170,6 +171,8 @@ enum Region {
     /// The title bar's tabs, inside it: a working mark's step builds this view alone, not
     /// the bar with its breadcrumb and its readouts.
     TitleTabs,
+    /// The bar along the window's foot ([`foot`]).
+    Foot,
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
@@ -236,6 +239,7 @@ struct Chrome {
     nav_rows: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
     title_tabs: Entity<ChromeView>,
+    foot: Entity<ChromeView>,
 }
 
 impl Chrome {
@@ -256,6 +260,7 @@ impl Chrome {
             nav_rows: view(Region::NavigatorRows),
             titlebar: view(Region::Titlebar),
             title_tabs: view(Region::TitleTabs),
+            foot: view(Region::Foot),
         }
     }
 
@@ -267,8 +272,9 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 4] {
-        [&self.navigator, &self.nav_rows, &self.titlebar, &self.title_tabs].map(Entity::entity_id)
+    fn ids(&self) -> [gpui::EntityId; 5] {
+        [&self.navigator, &self.nav_rows, &self.titlebar, &self.title_tabs, &self.foot]
+            .map(Entity::entity_id)
     }
 }
 
@@ -696,6 +702,8 @@ pub struct WorkspaceView {
     title_closing: title_tabs::Closing,
     /// The file tile open as a preview, which the next file opened in passing replaces.
     preview: preview::Preview,
+    /// The foot bar's own state.
+    foot: foot::Foot,
     /// The title tabs as last drawn: a header's news draws them again only where it changed
     /// what they say.
     title_tabs_drawn: std::cell::RefCell<Vec<title_tabs::TitleTab>>,
@@ -1054,6 +1062,7 @@ impl WorkspaceView {
             title_scroll: gpui::ScrollHandle::new(),
             title_closing: title_tabs::Closing::default(),
             preview: preview::Preview::default(),
+            foot: foot::Foot::default(),
             title_tabs_drawn: std::cell::RefCell::default(),
             epoch: Instant::now(),
             away_ticking: false,
@@ -1599,6 +1608,7 @@ impl WorkspaceView {
             Region::Navigator => self.render_navigator_region(window, cx),
             Region::NavigatorRows => self.render_navigator_rows(window, cx),
             Region::Titlebar => self.render_titlebar(window, cx),
+            Region::Foot => self.render_foot(window, cx),
             Region::TitleTabs => {
                 let tabs = self.title_tabs();
                 let at = match self.landing() {
@@ -2255,6 +2265,14 @@ impl WorkspaceView {
             }
             None => (None, None, None, None),
         };
+        // Cached, as the title bar is not: nothing in it is a view notified alone.
+        let foot = self.foot_shown().then(|| {
+            let height = px(self.foot_height()) + safe.bottom;
+            self.chrome
+                .foot
+                .clone()
+                .cached(StyleRefinement::default().flex_none().w_full().h(height))
+        });
         // The panes meet the frame's edges and each other on the one ground.
         let middle =
             gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
@@ -2284,7 +2302,8 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .child(titlebar)
-                    .child(middle),
+                    .child(middle)
+                    .children(foot),
             )
             .children(handle)
             .children(over)

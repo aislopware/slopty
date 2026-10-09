@@ -7191,8 +7191,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Goldens to retake: `review-agent*`, `remote-window`.
 
 - ✅ **No bar along the bottom: notices go beside their work, readouts to the title bar's end
-  only while they have something to say** (2026-10-05, UX audit item 4 (C3), read with the
-  design critique's dissent; supersedes "The status bar's left slot says where the human is",
+  only while they have something to say** (2026-10-05; its bar half reversed 2026-10-09 by "A
+  foot bar holds the plan, the agent and what runs out of sight" below; UX audit item 4
+  (C3), read with the design critique's dissent; supersedes "The status bar's left slot says where the human is",
   "Design wave 3, the frame"'s status bar, the status bar half of "The status bar states
   facts", and "Notices live in the status bar"). The 24 pt band along the window's foot held
   the focused tile's worker in most goldens, which the navigator and the breadcrumb already
@@ -8972,3 +8973,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Zed's tabs do, by the name alone rather than "lib.rs 2". A file whose name is its own in
     the row shows none. The tab's spoken name carries the folder too ("lib.rs, src").
   - Test: `workspace::tests::tiles::a_tab_row_names_folders_only_where_files_read_alike`.
+
+- ✅ **A foot bar holds the plan, the agent and what runs out of sight** (2026-10-09, MonoCode
+  audit row 3, M8; reverses the bar half of "No bar along the bottom").
+  - **Where.** A bar the status step tall (`Density::status`, 28 pt, 32 on touch) along the
+    window's foot, under the panes and beside the navigator, on the chrome with a hairline
+    over it (`workspace::foot`). It is a cached view of its own, drawn again on the
+    workspace's news and when the shells running out of sight change, not on a clock.
+  - **What.** On the left: the plan's usage on the focused tile's machine and agent, always
+    shown while a reading exists, in `warn` from 80 %, and a click lists every machine's
+    readings in a popover above it. Then the focused agent: its mark, its name, and how it is
+    doing unless at rest. On the right: the ports forwarded here, the transfers in flight, the
+    frame time with the stats, a chip for each shell of the project on show whose command runs
+    out of sight, and the toggle of the tab's terminal.
+  - **Why it came back.** The old bar was struck because it said a worker's name twice and
+    said it whatever it had to say. This one says what nothing else on screen does. The plan's
+    usage under 80 % had no place at all, and MonoCode keeps it in view. A running shell has no
+    chip while its own header is on show, so nothing is said twice.
+  - **The title bar keeps only what warns:** the server out of reach, a relay link, a newer
+    build. The plan, the ports, the transfers and the frame time moved down, and their popovers
+    rise from the foot bar's ends.
+  - **No foot bar on a phone.** Its foot is the key bar, and its title bar already holds the
+    focused tile. The iPad keeps it above the home indicator.
+  - Tests: `workspace::tests::foot::*`,
+    `workspace::tests::chrome::the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work`.

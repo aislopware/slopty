@@ -1,21 +1,23 @@
-//! The title bar's readouts: what the app has to say for itself, at the bar's trailing end
-//! before the bell, each only while it has something to say. The server while it does not
-//! answer; the focused machine's link on a DERP relay that has held, with its fix; the plan's
-//! windows the focused machine's agents last published, once one is 80 % used (`7d 82%`, in `warn`,
-//! which list every machine's when clicked); the ports forwarded here (which list them when
-//! clicked); the transfers in flight both ways while one is not the focused tile's own upload
-//! (whose header says it; they list every transfer with its rate, time left and stop when clicked);
-//! a newer Slopty while one is out (which opens its release page when clicked); and the frame time
-//! with the stream stats (⌘⇧I).
+//! The readouts: what the app has to say for itself.
+//!
+//! The title bar's trailing end, before the bell, holds only those that warn, each only while
+//! it has something to say: the server while it does not answer; the focused machine's link on
+//! a DERP relay that has held, with its fix; and a newer Slopty while one is out (which opens
+//! its release page when clicked).
+//!
+//! The foot bar ([`super::foot`]) holds the rest: the plan's windows the focused machine's
+//! agents last published (`5h 23% · 7d 41%`, in `warn` once one is 80 % used, which list every
+//! machine's when clicked); the ports forwarded here (which list them when clicked); the
+//! transfers in flight both ways while one is not the focused tile's own upload (whose header
+//! says it; they list every transfer with its rate, time left and stop when clicked); and the
+//! frame time with the stream stats (⌘⇧I). Their popovers rise from the foot bar.
 //!
 //! Nothing here repeats what is said elsewhere: which machine a tile runs on is the navigator's
 //! and the breadcrumb's, a link's round trip its machine row's, a file's language and
-//! caret its tile's, a stream's size and rate its stats overlay's. They lived in a bar along
-//! the window's bottom that was there whatever it had to say, mostly a worker's name said
-//! twice (`docs/decisions/ui.md`, "No bar along the bottom").
+//! caret its tile's, a stream's size and rate its stats overlay's.
 //!
 //! Each readout is meta text with no icon, its figures tabular; a state is a small dot of its
-//! fill beside quiet words. A phone's bar has no room for them.
+//! fill beside quiet words. A phone's bars have no room for them.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -34,7 +36,6 @@ use slopty_theme::Theme;
 
 use super::WorkspaceView;
 use super::rollup::META_SEPARATOR;
-use super::titlebar::titlebar_height;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
@@ -132,7 +133,7 @@ impl Readouts {
     }
 
     /// Whether `which` is drawn: up, or on its way out.
-    fn shown(&self, which: Popover) -> bool {
+    pub(super) fn shown(&self, which: Popover) -> bool {
         self.open(which) || self.leaving == Some(which)
     }
 }
@@ -231,12 +232,12 @@ impl WorkspaceView {
     /// Keep the frame time's clock going while the stats show, and let it go once they do not.
     /// Set going once and left to fire: a draw that set it going again put the readout off for
     /// as long as the bar was drawn more often than its clock ticks.
-    fn keep_clock(&self, stats: bool, cx: &Draw<'_, Self>) {
+    pub(super) fn keep_clock(&self, stats: bool, cx: &Draw<'_, Self>) {
         if !stats {
             self.readouts.tick.borrow_mut().take();
             self.readouts.ticking.set(false);
         } else if !self.readouts.ticking.replace(true) {
-            let (bar, this) = (self.chrome.titlebar.entity_id(), cx.weak_entity());
+            let (bar, this) = (self.chrome.foot.entity_id(), cx.weak_entity());
             *self.readouts.tick.borrow_mut() = Some(cx.spawn(async move |cx| {
                 cx.background_executor().timer(FRAME_READOUT_EVERY).await;
                 cx.update(|cx| {
@@ -253,11 +254,9 @@ impl WorkspaceView {
     pub(super) fn render_readouts(
         &self,
         phone: bool,
-        window: &Window,
+        _window: &Window,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        let stats = self.show_stats && !phone;
-        self.keep_clock(stats, cx);
         if phone || self.workers.is_empty() {
             return None;
         }
@@ -317,39 +316,21 @@ impl WorkspaceView {
                         cx.new(|_| kit::Hint::new(fix, "", theme)).into()
                     })
             });
-        let ports = Some(self.forwarded_count()).filter(|n| *n > 0).map(|n| {
-            let text = SharedString::from(counted(n, "port", "ports"));
-            let el = button("readout-ports", text.clone(), theme).child(tabular(div()).child(text));
-            tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
-                this.list_ports(&super::actions::ListPorts, window, cx);
-            }))
-        });
-        let transfers = self.transfers_button(cx);
         let release = self.readouts.release.as_ref().map(|release| {
             let text = SharedString::from(release_line(release));
             let page = release.page.clone();
             let el = button("readout-release", text.clone(), theme).child(text);
             tab_stop(el, s.focus).on_click(move |_ev, _w, cx| cx.open_url(&page))
         });
-        let frame = stats.then(|| self.frame_readout(cx)).flatten();
-        let frame = frame.map(|text| tabular(readout("readout-frame", text.clone())).child(text));
-        let plan = self.plan_button(cx);
         let parts: Vec<gpui::AnyElement> = [
             server.map(gpui::IntoElement::into_any_element),
             relay.map(gpui::IntoElement::into_any_element),
-            plan.map(gpui::IntoElement::into_any_element),
-            ports.map(gpui::IntoElement::into_any_element),
-            transfers.map(gpui::IntoElement::into_any_element),
             release.map(gpui::IntoElement::into_any_element),
-            frame.map(gpui::IntoElement::into_any_element),
         ]
         .into_iter()
         .flatten()
         .collect();
-        let plans = self.readouts.shown(Popover::Plans).then(|| self.render_plans(window, cx));
-        let transfer_list = (self.readouts.shown(Popover::Transfers) && self.transfers_in_flight())
-            .then(|| self.render_transfers(window, cx));
-        if parts.is_empty() && plans.is_none() && transfer_list.is_none() {
+        if parts.is_empty() {
             return None;
         }
         let row = div()
@@ -362,18 +343,32 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.xs))
             .font_family(theme.typography.ui_family.clone())
-            .children(parts)
-            .children(plans)
-            .children(transfer_list);
+            .children(parts);
         Some(meta(row, theme).into_any_element())
     }
 
+    /// The ports forwarded here, in the foot bar; a click lists them.
+    pub(super) fn ports_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
+        let theme = &self.theme;
+        let n = Some(self.forwarded_count()).filter(|n| *n > 0)?;
+        let text = SharedString::from(counted(n, "port", "ports"));
+        let el = button("readout-ports", text.clone(), theme).child(tabular(div()).child(text));
+        Some(tab_stop(el, theme.surfaces.focus).on_click(cx.listener(|this, _ev, window, cx| {
+            this.list_ports(&super::actions::ListPorts, window, cx);
+        })))
+    }
+
+    /// The frame time while the stats show (⌘⇧I), in the foot bar.
+    pub(super) fn frame_readout_el(&self, stats: bool, cx: &App) -> Option<Stateful<Div>> {
+        let text = stats.then(|| self.frame_readout(cx)).flatten()?;
+        Some(tabular(readout("readout-frame", text.clone())).child(text))
+    }
+
     /// The plan's windows on the focused tile's machine, as its agent last published them (else
-    /// the freshest reading there), once one is 80 % used: `5h 23% · 7d 82%` in `warn`, with
-    /// when a spent window comes back, and its age once it is past [`PLAN_AGED_FROM`]. Under
-    /// that it is not news, and the composer's meter says the context. Clicked, every
-    /// machine's readings.
-    fn plan_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
+    /// the freshest reading there), in the foot bar: `5h 23% · 7d 41%`, in `warn` once one is
+    /// 80 % used, with when a spent window comes back, and its age once it is past
+    /// [`PLAN_AGED_FROM`]. Clicked, every machine's readings.
+    pub(super) fn plan_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let tile = self.focused();
@@ -382,9 +377,6 @@ impl WorkspaceView {
         let now = crate::clock::now(cx);
         let (_, reading) = self.faces.threads.meters().shown(worker, agent, now)?;
         let (text, warn) = plan_words(reading, now);
-        if !warn && !self.readouts.plans_open {
-            return None;
-        }
         let label = SharedString::from(format!("{PLAN_USAGE} {text}"));
         let words = spaced(tabular(div().id("readout-plan-words")), &text, theme);
         let el = button("readout-plan", label, theme)
@@ -399,7 +391,7 @@ impl WorkspaceView {
     /// Every transfer in flight at a glance, both ways, while one is not the focused tile's own
     /// upload (its header says that one, with its stop): how many and how far, together.
     /// Clicked, the list of them.
-    fn transfers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
+    pub(super) fn transfers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let rows = self.transfer_rows(cx.background_executor().now());
@@ -432,10 +424,14 @@ impl WorkspaceView {
     /// Every transfer in flight, both ways: what goes, to or from which machine, how far, how
     /// fast and how long it has left, with its stop under the pointer or the keyboard. A click
     /// anywhere else closes it.
-    fn render_transfers(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    pub(super) fn render_transfers(
+        &self,
+        window: &Window,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        let safe = window.insets().effective();
+        let rise = self.rise(window);
         let rows: Vec<gpui::AnyElement> = self
             .transfer_rows(cx.background_executor().now())
             .into_iter()
@@ -448,8 +444,8 @@ impl WorkspaceView {
             .aria_label(TRANSFERS)
             .occlude()
             .absolute()
-            .top(px(titlebar_height(theme) + spacing.xs) + safe.top)
-            .right(px(spacing.md) + safe.right)
+            .bottom(rise.bottom)
+            .right(rise.right)
             .w(px(POPOVER_W))
             .flex()
             .flex_col()
@@ -561,11 +557,11 @@ impl WorkspaceView {
 
     /// Every plan reading the machines' agents published, by machine and agent, with its age.
     /// A click anywhere else closes it.
-    fn render_plans(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    pub(super) fn render_plans(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let safe = window.insets().effective();
+        let rise = self.rise(window);
         let now = crate::clock::now(cx);
         let rows: Vec<gpui::AnyElement> = self
             .faces
@@ -620,8 +616,8 @@ impl WorkspaceView {
             .aria_label(PLAN_USAGE)
             .occlude()
             .absolute()
-            .top(px(titlebar_height(theme) + spacing.xs) + safe.top)
-            .right(px(spacing.md) + safe.right)
+            .bottom(rise.bottom)
+            .left(rise.left)
             .w(px(POPOVER_W))
             .flex()
             .flex_col()
@@ -633,6 +629,25 @@ impl WorkspaceView {
             .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE, true))
             .children(rows);
         self.popover(Popover::Plans, panel, window, cx)
+    }
+
+    /// Where a popover of the foot bar rises from: a gap above the bar, in from its ends.
+    fn rise(&self, window: &Window) -> Rise {
+        let theme = &self.theme;
+        let viewport = window.viewport_size();
+        let gap = px(theme.spacing.xs);
+        let bar = self.foot.at.get().unwrap_or_else(|| {
+            let h = px(self.foot_height());
+            gpui::Bounds::new(
+                gpui::point(px(0.0), viewport.height - h),
+                gpui::size(viewport.width, h),
+            )
+        });
+        Rise {
+            bottom: viewport.height - bar.top() + gap,
+            left: bar.left() + gap,
+            right: viewport.width - bar.right() + gap,
+        }
     }
 
     /// `panel` over the window as the bar's popover `which`: a click anywhere else closes it,
@@ -665,6 +680,13 @@ impl WorkspaceView {
             .with_priority(crate::palette::Layer::Popover.priority())
             .into_any_element()
     }
+}
+
+/// Where a popover rises from the foot bar, as offsets from the window's edges.
+struct Rise {
+    bottom: gpui::Pixels,
+    left: gpui::Pixels,
+    right: gpui::Pixels,
 }
 
 /// `text` in sentence case: the app and the link words come lowercase.

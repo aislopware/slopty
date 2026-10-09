@@ -247,11 +247,11 @@ fn a_double_click_on_a_sash_makes_its_panes_equal(cx: &mut TestAppContext) {
     let opened = height(cx);
     let grab = bounds(cx, "sash--0").center();
     cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
-    let to = point(grab.x, grab.y + px(80.0));
+    let to = point(grab.x, grab.y + px(40.0));
     cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
     cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
     cx.run_until_parked();
-    near(height(cx), opened + 80.0);
+    near(height(cx), opened + 40.0);
 
     let at = bounds(cx, "sash--0").center();
     for click_count in [1, 2] {

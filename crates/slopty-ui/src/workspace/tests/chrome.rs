@@ -570,25 +570,26 @@ fn the_project_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
 }
 
-/// No bar runs along the bottom: the panes meet the window's bottom edge, and the title
-/// bar says nothing of itself while nothing needs saying. The server out of reach is said at
+/// The panes meet the foot bar, which meets the window's bottom edge, and the title bar says
+/// nothing of itself while nothing needs saying. The server out of reach is said at
 /// its trailing end until it answers; a word about no one tile sits in its lane; a failure in
 /// a tile's own work sits beside that tile, under its header at its trailing edge, and moves to
 /// the title bar once the tile is gone.
 #[gpui::test]
-fn no_bar_runs_along_the_bottom_and_a_notice_sits_by_its_work(cx: &mut TestAppContext) {
+fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let bounds = |cx: &mut VisualTestContext, selector: &'static str| cx.debug_bounds(selector);
     let area = bounds(cx, "area").expect("the panes' area is drawn");
     let window = cx.update(|window, _| window.viewport_size());
-    assert!(bounds(cx, "statusbar").is_none(), "no bar along the bottom");
+    let foot = bounds(cx, "foot").expect("the foot bar");
+    assert!(f32::from(window.height - foot.bottom()).abs() < 0.5, "on the window's bottom edge");
     let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell");
     for (what, bottom) in [("the tile", tile.bottom()), ("the area", area.bottom())] {
         assert!(
-            f32::from(window.height - bottom).abs() < 0.5,
-            "{what} on the window's bottom edge: {bottom:?} in {window:?}"
+            f32::from(foot.top() - bottom).abs() < 0.5,
+            "{what} on the foot bar: {bottom:?} over {foot:?}"
         );
     }
     assert!(bounds(cx, "readouts").is_none(), "nothing to say, nothing said");
