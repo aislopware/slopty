@@ -256,6 +256,8 @@ impl WorkspaceView {
         w.away_since = None;
         self.clip_sharing_changed();
         let Some(w) = self.workers.get_mut(&key) else { return };
+        w.outbox =
+            Some(crate::outbox::Outbox::new(link.out.clone(), crate::outbox::hold_control, cx));
         w.link = Some(link);
         w.links = w.links.saturating_add(1);
         // The worker hands pages and files only to a client that said it takes them.
@@ -322,6 +324,7 @@ impl WorkspaceView {
         w.status = status;
         w.away_since.get_or_insert(now);
         w.link = None;
+        w.outbox = None;
         w.rtt = None;
         w.relay.reset();
         w.relay_due = None;

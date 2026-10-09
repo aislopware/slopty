@@ -22,7 +22,6 @@
 //! pointer (`touch`). Every point sent to the worker goes through the zoom, so a tap lands on
 //! the pixel under the finger.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -53,9 +52,10 @@ use slopty_proto::screen::{
     ScrollPhase, SourceState, TextField, VideoCodec,
 };
 use slopty_theme::Theme;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::colors::hsla;
+use crate::outbox::Outbox;
 use crate::{keys, kit};
 
 mod driver;
@@ -1086,7 +1086,7 @@ impl ScreenView {
             base_at: Rc::default(),
             laid_out: Rc::default(),
             mapped: size,
-            out: Outbox::new(out, cx),
+            out: Outbox::new(out, hold, cx),
             theme,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
@@ -2739,7 +2739,7 @@ impl ScreenView {
     /// Type the next burst of what waits to be typed, once the outbox has sent the last;
     /// whether more waits.
     fn type_burst(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.out.waiting.borrow().is_empty() {
+        if self.out.is_clear() {
             let take = self.typing.len().min(TYPE_BURST);
             let burst: String = self.typing.drain(..take).collect();
             self.commit_text(&burst, cx);
@@ -3010,75 +3010,11 @@ impl Drop for ScreenView {
     }
 }
 
-/// The view's way to the worker: the connection's outbound queue, and what waits in order for
-/// room in it.
-///
-/// The queue is shared with everything else on the connection, and a full one used to drop
-/// whatever was sent, releases included: a key or button whose release was lost stays down on
-/// the worker. Now nothing is dropped that lets go of something. While messages wait, a move
-/// replaces a move waiting last, since only where the pointer ends up matters.
-struct Outbox {
-    out: mpsc::Sender<ClientMsg>,
-    waiting: Rc<RefCell<VecDeque<ClientMsg>>>,
-    wake: Rc<Notify>,
-}
-
-impl Outbox {
-    /// An outbox into `out`, with the task that moves what waits into it as room frees. The
-    /// task outlives the view until what the view left waiting (its `Close`, say) has gone.
-    fn new(out: mpsc::Sender<ClientMsg>, cx: &App) -> Self {
-        let waiting = Rc::default();
-        let wake = Rc::new(Notify::new());
-        cx.foreground_executor()
-            .spawn(flush(out.clone(), Rc::clone(&waiting), Rc::clone(&wake)))
-            .detach();
-        Self { out, waiting, wake }
-    }
-
-    fn send(&self, msg: ClientMsg) {
-        let mut waiting = self.waiting.borrow_mut();
-        if waiting.is_empty() {
-            match self.out.try_send(msg) {
-                Ok(()) => return,
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("outbound queue closed");
-                    return;
-                }
-                Err(mpsc::error::TrySendError::Full(msg)) => waiting.push_back(msg),
-            }
-        } else {
-            hold(&mut waiting, msg);
-        }
-        self.wake.notify_one();
-    }
-}
-
-impl Drop for Outbox {
-    fn drop(&mut self) {
-        // The flush task ends once it holds the last reference and nothing waits.
-        self.wake.notify_one();
-    }
-}
-
-/// Move what waits into the queue in order as room frees, until the outbox is gone and nothing
-/// waits, or the connection is.
-async fn flush(
-    out: mpsc::Sender<ClientMsg>,
-    waiting: Rc<RefCell<VecDeque<ClientMsg>>>,
-    wake: Rc<Notify>,
-) {
-    loop {
-        while !waiting.borrow().is_empty() {
-            let Ok(permit) = out.reserve().await else { return };
-            let Some(msg) = waiting.borrow_mut().pop_front() else { break };
-            permit.send(msg);
-        }
-        if Rc::strong_count(&waiting) == 1 {
-            return;
-        }
-        wake.notified().await;
-    }
-}
+// The view's way to the worker is the connection's outbound queue through an outbox
+// (`crate::outbox`). A full queue used to drop whatever was sent, releases included: a key or
+// button whose release was lost stays down on the worker. Now nothing is dropped that lets go
+// of something. While messages wait, a move replaces a move waiting last, since only where the
+// pointer ends up matters ([`hold`]).
 
 /// Queue `msg` behind what already waits: a move replaces a move of the same stream waiting
 /// last; past [`OUTBOX_DEPTH`] waiting, input is dropped unless it lets go of something.
@@ -4526,7 +4462,7 @@ mod tests {
                 files: Some(offered.clone()),
             }));
         });
-        let asked = Rc::new(RefCell::new(Vec::new()));
+        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
         let seen = Rc::clone(&asked);
         cx.update(|cx| {
             cx.subscribe(&view, move |_view, event, _cx| {

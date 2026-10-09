@@ -439,6 +439,8 @@ struct Worker {
     name: String,
     status: WorkerStatus,
     link: Option<WorkerLink>,
+    /// The link's control stream with what waits for room in it; `Some` while linked.
+    outbox: Option<crate::outbox::Outbox>,
     /// Since when it has been out of reach on this client's clock: added and not yet linked,
     /// or since its link dropped; `None` while linked. Its tiles say for how long.
     away_since: Option<Duration>,
@@ -513,6 +515,7 @@ impl Worker {
             name,
             status: WorkerStatus::Connecting,
             link: None,
+            outbox: None,
             away_since: None,
             links: 0,
             doc: ItemDoc::default(),
@@ -548,17 +551,17 @@ impl Worker {
         self.link.is_some()
     }
 
-    /// Send `msg` if the worker is linked; otherwise it is lost. For what only means anything
-    /// now (a read, a key, a stream request): see [`Self::send_or_queue`] for what must land.
+    /// Send `msg` if the worker is linked: into the control stream now, or behind what waits
+    /// for room in it, in order. Nothing is dropped on a full stream but a message the next of
+    /// its kind outdates (a watch set, a size; [`crate::outbox::hold_control`]). False when the
+    /// worker is down, when it is lost: for what only means anything now (a read, a key, a
+    /// stream request). See [`Self::send_or_queue`] for what must land even then.
     fn send(&self, msg: ClientMsg) -> bool {
-        let Some(link) = &self.link else {
+        let Some(outbox) = self.outbox.as_ref().filter(|_| self.link.is_some()) else {
             tracing::debug!(kind = msg.kind(), "worker down; not sent");
             return false;
         };
-        if let Err(e) = link.out.try_send(msg) {
-            tracing::warn!(error = %e, "outbound queue");
-        }
-        true
+        outbox.send(msg)
     }
 
     /// Send what the human did to the worker's items (an item op, a session closed): now if

@@ -57,6 +57,7 @@ pub mod keymap;
 pub mod keys;
 pub mod kit;
 pub mod markdown;
+mod outbox;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;

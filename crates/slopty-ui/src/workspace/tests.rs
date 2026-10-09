@@ -1676,6 +1676,7 @@ mod nav_projects;
 mod nav_rows;
 mod needs_you;
 mod no_workers;
+mod outbox;
 mod overlays;
 mod page_chrome;
 mod page_host;

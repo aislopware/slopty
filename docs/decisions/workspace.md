@@ -2323,3 +2323,29 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     picked and opened with its spec, the last read at once and the fresh list in its place;
     one opening at once, none, a refusal, the link lost); the keyboard settings golden lists
     its row.
+
+- ✅ **What the workspace sends a worker is never dropped on a full stream** (2026-10-10,
+  readiness audit item 2).
+  - **The defect.** `Worker::send` put each message on the link's bounded control stream
+    with `try_send` and reported it sent even when the stream was full. The terminal and
+    screen views fill that same stream on purpose while they stream, so a burst of output or
+    input could drop a thread's intent (Send, Answer, Interrupt), a follow, a start, a
+    terminal's attach, a file's save, a watch set or a screen's close. The UI then showed
+    "saving" or "watched" for a message that never left. The thread outbox resends only on a
+    relink, so nothing put it right.
+  - **The fix.** Each link gets an outbox (`crate::outbox::Outbox`, taken out of the screen
+    view, which already had one for its input). A message that finds the stream full waits
+    behind what already waits, and a task on the UI executor moves it in, in order, as room
+    frees. "Sent" now means queued, so the "saving" and "watched" marks stay true. The outbox
+    goes with the link; the next link sends the watch sets, attaches and follows afresh, as
+    before.
+  - **Latest value only where only the latest matters.** A whole watch set (files or
+    folders), the handoffs taken, a liveness probe, and a terminal's or a display's size take
+    the place of the waiting message of their kind, at the back (`outbox::hold_control`).
+    Nothing else is dropped, however much waits: the link's own deadlines end a stream that
+    never drains. The screen view keeps its own policy, which drops input past 256 waiting
+    unless that input lets go of something.
+  - Tests: `outbox::tests::what_waits_keeps_everything_but_an_outdated_latest` and
+    `workspace::tests::outbox::a_full_control_stream_holds_what_must_arrive_in_order` (a stream
+    filled to its depth, then an attach, a save, two watch sets and a close: all arrive in
+    order after the fill, the first watch set outdated; a worker down reports nothing sent).
