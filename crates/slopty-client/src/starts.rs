@@ -196,6 +196,7 @@ mod tests {
                 label: "Plan".to_owned(),
                 description: None,
             }],
+            mode: None,
             efforts: vec![Effort {
                 id: "low".to_owned(),
                 label: "Low".to_owned(),

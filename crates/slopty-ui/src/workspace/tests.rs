@@ -1669,6 +1669,7 @@ mod seating;
 mod settings_page;
 mod shell_drag;
 mod soak;
+mod start_mode;
 mod tab_commands;
 mod tab_strip;
 mod thread_face;

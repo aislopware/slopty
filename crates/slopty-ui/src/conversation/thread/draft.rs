@@ -7,6 +7,8 @@
 //! and its attachments ([`DraftSent`]). The chips offer what the machine says a new thread of
 //! the agent can start with (`InstalledAgent::offers`): its models, modes, efforts and
 //! commands. Where it offers none, the chip offers nothing and the agent starts as it would.
+//! Until a mode is chosen, the mode chip names the one the machine says a start begins in
+//! (Claude Code's settings, else auto mode), and the start asks for none.
 //!
 //! The place chip switches where it starts, in a folder that is a repository: in the folder
 //! itself or in a new worktree of it, and the branch that worktree starts from
@@ -101,6 +103,10 @@ pub struct Draft {
     others: Vec<AgentId>,
     /// Those of [`Self::others`] chosen to run it too, in the order chosen.
     also: Vec<AgentId>,
+    /// Its mode was chosen, by a switch or the last start's chips. Until then its mode chip
+    /// names the mode the machine says a start begins in (`Offers::mode`), and the start asks
+    /// for none, so the folder's own settings still have their say.
+    mode_chosen: bool,
 }
 
 impl EventEmitter<DraftSent> for Draft {}
@@ -125,7 +131,7 @@ impl Draft {
         place: Place,
         recall: Vec<String>,
     ) -> Self {
-        let Offers { models, modes, efforts, commands } = offers;
+        let Offers { models, modes, mode, efforts, commands } = offers;
         // The doors a draft opens are the choices its start takes: a list offered is a chip
         // that switches.
         let caps = [
@@ -153,7 +159,16 @@ impl Draft {
             created_ms: WallMs::ZERO,
         });
         state.commands = commands;
-        Self { state, place, sent: false, recall, others: Vec::new(), also: Vec::new() }
+        state.meters.mode = mode;
+        Self {
+            state,
+            place,
+            sent: false,
+            recall,
+            others: Vec::new(),
+            also: Vec::new(),
+            mode_chosen: false,
+        }
     }
 
     /// The same draft with its chips on `chips`, as a switch of each would set them: where a
@@ -167,6 +182,7 @@ impl Draft {
         let meters = &mut self.state.meters;
         if mode.is_some() {
             meters.mode = mode;
+            self.mode_chosen = true;
         }
         if effort.is_some() {
             meters.effort = effort;
@@ -265,7 +281,10 @@ impl Draft {
     pub(super) fn take(&mut self, intent: Intent, cx: &mut Context<Self>) {
         match intent {
             Intent::SetModel { model } => self.set_model(model),
-            Intent::SetMode { mode } => self.state.meters.mode = Some(mode),
+            Intent::SetMode { mode } => {
+                self.state.meters.mode = Some(mode);
+                self.mode_chosen = true;
+            }
             Intent::SetEffort { effort } => self.state.meters.effort = Some(effort),
             Intent::Send { text, attachments, .. } if !self.sent => {
                 self.sent = true;
@@ -274,7 +293,7 @@ impl Draft {
                     text,
                     attachments,
                     model: meters.model_id.clone(),
-                    mode: meters.mode.clone(),
+                    mode: meters.mode.clone().filter(|_| self.mode_chosen),
                     effort: meters.effort.clone(),
                     also: self.also.clone(),
                     worktree: self.place.worktree,

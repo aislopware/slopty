@@ -53,6 +53,7 @@ mod golden_machine {
                             label: "Plan".to_owned(),
                             description: Some("Plans first and changes nothing".to_owned()),
                         }],
+                        mode: Some("plan".to_owned()),
                         efforts: vec![Effort {
                             id: "high".to_owned(),
                             label: "High".to_owned(),

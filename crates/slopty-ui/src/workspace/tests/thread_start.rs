@@ -1493,6 +1493,7 @@ fn a_relaunch_starts_where_the_last_run_left_off(cx: &mut TestAppContext) {
     let offers = Offers {
         models: ["gpt-5", "gpt-4"].map(|id| Model { id: choice(id).0, label: choice(id).1 }).into(),
         modes: vec![Mode { id: "auto".to_owned(), label: "Auto".to_owned(), description: None }],
+        mode: None,
         efforts: vec![Effort {
             id: "high".to_owned(),
             label: "High".to_owned(),

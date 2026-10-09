@@ -423,6 +423,9 @@ pub struct Offers {
     pub models: Vec<Model>,
     /// The modes it can start in ([`wire::Start::mode`]).
     pub modes: Vec<Mode>,
+    /// The mode a start that asks for none begins in, by its id in [`Self::modes`], where the
+    /// machine can tell (Claude Code's settings, else its built-in default).
+    pub mode: Option<String>,
     /// How hard it can start thinking ([`wire::Start::effort`]).
     pub efforts: Vec<Effort>,
     /// The commands its composer takes.

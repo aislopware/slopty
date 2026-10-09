@@ -15,12 +15,17 @@ use super::Host;
 
 /// What `agent`'s adapter knows a start of it can choose before any thread of it ran.
 ///
-/// Claude Code's models, modes and efforts from its CLI, Codex's approval policies; nothing
-/// for the agents that say theirs only once a session is open.
+/// Claude Code's models, modes and efforts from its CLI, with the mode its settings here start
+/// a session in; Codex's approval policies; nothing for the agents that say theirs only once a
+/// session is open.
 #[must_use]
 pub fn seed(agent: &AgentId) -> Offers {
     if agent.is(AgentId::CLAUDE_CODE) {
-        slopty_agent::resume::offers()
+        let home = slopty_platform::dirs::home();
+        Offers {
+            mode: Some(slopty_agent::resume::starting_mode(&home)),
+            ..slopty_agent::resume::offers()
+        }
     } else if agent.is(AgentId::CODEX) {
         slopty_agent::codex::shared::offers()
     } else {
@@ -101,13 +106,15 @@ pub fn seen(host: &Host) -> BTreeMap<AgentId, Offers> {
     seen
 }
 
-/// `seed` with each list `seen` has in place of its own.
+/// `seed` with each list `seen` has in place of its own. The mode a start begins in stays the
+/// seed's: a thread that ran says which mode it was in, not which a new one starts in.
 #[must_use]
 pub fn merged(seed: Offers, seen: Option<&Offers>) -> Offers {
     let Some(seen) = seen else { return seed };
     Offers {
         models: pick(seed.models, &seen.models),
         modes: pick(seed.modes, &seen.modes),
+        mode: seed.mode,
         efforts: pick(seed.efforts, &seen.efforts),
         commands: pick(seed.commands, &seen.commands),
     }

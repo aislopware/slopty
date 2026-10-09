@@ -114,6 +114,9 @@ pub struct ManagedSettings {
     pub enforce_available_models: bool,
     /// `permissions.defaultMode`: the mode a session starts in unless told another.
     pub default_mode: Option<String>,
+    /// `permissions.disableAutoMode` is `"disable"`: auto mode is off, and a session that would
+    /// start in it starts in Manual.
+    pub disable_auto_mode: bool,
     /// `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, which blocks the mod's requests.
     pub disables_nonessential_traffic: bool,
     /// `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set, which stops the title's heartbeat.
@@ -184,6 +187,10 @@ impl ManagedSettings {
         if let Some(mode) = doc.pointer("/permissions/defaultMode").and_then(Value::as_str) {
             self.default_mode.get_or_insert_with(|| mode.to_owned());
         }
+        let auto_off = ["/permissions/disableAutoMode", "/disableAutoMode"]
+            .iter()
+            .any(|key| doc.pointer(key).and_then(Value::as_str) == Some("disable"));
+        self.disable_auto_mode |= auto_off;
         let set = |name: &str| {
             doc.get("env").and_then(|env| env.get(name)).is_some_and(|value| {
                 value.as_str().is_some_and(|v| !v.is_empty()) || value.is_number()
