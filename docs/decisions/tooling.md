@@ -970,9 +970,14 @@ more full-window layer.
   packages, with `workspace-hack` beside them so third-party crates resolve as in every other
   build (`xtask check -p` builds the same way, so each crate's tests already pass resolved
   alone). The shards even out the build's CPU per package from the lane's `cargo-timing.html`:
-  `ui` (the UI and the apps over it), `worker` (the daemon, sessions, capture, codecs, input,
-  files) and `rest` (the server, the CLI, the wire, the client core, the engine, xtask). A test
-  fails when a member is in no shard or two, and when `ci.yml`'s matrix leaves a shard out.
+  `ui` (the UI and the apps over it, xtask), `worker` (the daemon, sessions, the terminal
+  engine, capture, codecs, input, files) and `rest` (the server, the CLI, the wire, the client
+  core). A test fails when a member is in no shard or two, and when `ci.yml`'s matrix leaves a
+  shard out.
+  - 2026-10-09: the engine moved from `rest` to `worker`, the only shard that builds it as a
+    dependency, and the VideoToolbox probe runs through the shard's own nextest build (it ran a
+    lone `cargo test -p slopty-codec`, which rebuilt a dozen crates: 5.5 of the worker shard's
+    16 minutes, 2.2 of the rest's). Before: ui 8.4, worker 15.6, rest 14.8 minutes of gate step.
   - **The spawned binaries in a shard.** Building them `--workspace --tests` would build every
     package's tests, so a shard selects its packages and the binaries' own, with `--examples`
     for `--tests`: no member has an example, and either makes cargo resolve features with the

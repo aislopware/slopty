@@ -135,9 +135,10 @@ impl LaneId {
 pub enum Shard {
     /// The client: the UI, the apps over it, and what only they use; and xtask.
     Ui,
-    /// The worker daemon and what it stands on: sessions, capture, codecs, input, files.
+    /// The worker daemon and what it stands on: sessions, the terminal engine, capture, codecs,
+    /// input, files.
     Worker,
-    /// The rest: the server, the CLI, the wire, the client core, the terminal engine.
+    /// The rest: the server, the CLI, the wire, the client core.
     Rest,
 }
 
@@ -184,6 +185,9 @@ impl Shard {
                 "slopty-input",
                 "slopty-vdisplay",
                 "slopty-files",
+                // Here, not in the rest: the worker is all that builds it, so the rest built it
+                // and libghostty for its tests alone, and its slowest test runs a minute.
+                "slopty-engine",
             ],
             Self::Rest => &[
                 "slopty-server",
@@ -195,7 +199,6 @@ impl Shard {
                 "slopty-agent",
                 "slopty-client",
                 "slopty-net",
-                "slopty-engine",
                 "slopty-grid",
                 "slopty-predict",
                 "slopty-shape",
