@@ -418,3 +418,76 @@ async fn only_the_orchestrator_tells_a_task_in_its_own_words() {
     assert_eq!(notes, ["The orchestrator told it: Also cover the iPad."]);
     delivering.abort();
 }
+
+/// A merged task whose agent's terminal closed with no settling (the person closed it, or it
+/// ended while its worker was away) frees its worktree all the same: at once while its worker
+/// is linked, else once the worker registers again without that terminal; asked once. A
+/// project let go frees its tasks' worktrees too.
+#[tokio::test]
+async fn a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    create(&hub, None).await;
+    let mut started = Vec::new();
+    for n in 1..=3 {
+        let task = new_task(&hub, None).await;
+        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+        let term = opened(&lease, &request(&mut rx).await);
+        assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+        let path = format!("/w/demo/.claude/worktrees/slopty-demo-{n}");
+        let worktree = Worktree {
+            name: format!("slopty-demo-{n}"),
+            path: path.clone(),
+            branch: Some(format!("worktree-slopty-demo-{n}")),
+            original_cwd: "/w/demo".to_owned(),
+            original_branch: Some("main".to_owned()),
+        };
+        let branch = AgentBranch { session: term.session, worktree: Some(worktree) };
+        lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+        if n < 3 {
+            for state in [TaskState::Done, TaskState::Merged] {
+                let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
+                let verb = Verb::TaskUpdate { project: project(), task, change };
+                assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+            }
+        }
+        started.push((term, path));
+    }
+    let landed = vec!["main".to_owned(), "origin/main".to_owned()];
+    let remove = |path: &str| Verb::RemoveWorktree {
+        worker,
+        worktree: path.to_owned(),
+        landed: landed.clone(),
+    };
+
+    // The person closes the first task's terminal: its worktree goes at once.
+    let (term, path) = started[0].clone();
+    let reason = slopty_proto::terminal::CloseReason::Requested;
+    lease.handle(ToServer::SessionClosed { session: term.session, reason });
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, remove(&path));
+    answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });
+
+    // The second's terminal ends while its worker is away: once back without it, it goes.
+    let (term, path) = started[1].clone();
+    drop(lease);
+    let (third, third_path) = started[2].clone();
+    let (_, lease, mut rx) =
+        worker_again(&hub, worker, "studio", Os::MacOs, vec![summary(third.session)]);
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, remove(&path), "{term:?}");
+    answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });
+    assert!(rx.try_recv().is_err(), "the third is not merged, and its terminal is open");
+
+    // Let go, the project frees what is left: the third task's worktree.
+    assert_eq!(hub.dispatch(Verb::ProjectDelete { project: project() }).await, Outcome::Done);
+    let (id, verb) = loop {
+        let (id, verb) = request(&mut rx).await;
+        if matches!(verb, Verb::RemoveWorktree { .. }) {
+            break (id, verb);
+        }
+    };
+    let main = vec!["main".to_owned(), "origin/main".to_owned()];
+    assert_eq!(verb, Verb::RemoveWorktree { worker, worktree: third_path, landed: main });
+    answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });
+}

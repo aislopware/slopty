@@ -58,7 +58,9 @@ use slopty_proto::terminal::{SessionState, SessionSummary};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 
 use crate::deliver::Deliveries;
-use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
+use crate::project::{
+    Caller, Change, Drove, Keep, Projects, ProjectsFile, Seen, Starting, Watched,
+};
 
 mod awake;
 mod codex;
@@ -621,8 +623,9 @@ impl Hub {
             (true, Vec::new(), opened)
         };
         let (name, liveness) = (info.name.clone(), info.liveness);
-        self.happen(Happening::Worker { worker, name, liveness });
+        self.happen(Happening::Worker { worker, name: name.clone(), liveness });
         self.announce(FromServer::Worker(info));
+        self.machine_seen(&mut state, worker, &name, Seen::Back);
         if !replaced.is_empty() {
             self.announce(FromServer::Directory(listing(&state)));
         }
@@ -647,6 +650,7 @@ impl Hub {
             .unwrap_or_default();
         let ended = state.projects.reconcile(worker, &open, WallMs::now());
         self.projects_moved(&mut state, ended);
+        self.free_closed(&mut state, worker);
         for summary in opened {
             let term = TermRef { worker, session: summary.id };
             self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
@@ -1238,6 +1242,7 @@ impl Hub {
         projects::unwatch(state, term.session);
         let updates = state.projects.session_ended(term, WallMs::now());
         self.projects_moved(state, updates);
+        self.free_closed(state, term.worker);
     }
 
     /// Log and push each project change, and send the store what it keeps. Called under the
@@ -1307,8 +1312,9 @@ impl Hub {
         let info = entry.info.clone();
         tracing::info!(%worker, name = %info.name, "worker unreachable");
         let (name, liveness) = (info.name.clone(), info.liveness);
-        self.happen(Happening::Worker { worker, name, liveness });
+        self.happen(Happening::Worker { worker, name: name.clone(), liveness });
         self.announce(FromServer::Worker(info));
+        self.machine_seen(&mut state, worker, &name, Seen::Away);
         self.persist(&state);
         drop(state);
         // A lease dropped as the runtime shuts down has no timer to run; the next start lists
@@ -1322,6 +1328,35 @@ impl Hub {
                 }
             });
         }
+    }
+
+    /// The machine of `worker` went away or came back: its tasks' timelines say so, and each
+    /// task's orchestrator hears of it, at once when it went away.
+    fn machine_seen(&self, state: &mut State, worker: WorkerId, name: &str, seen: Seen) {
+        let (changes, told) = state.projects.machine_seen(worker, name, seen, WallMs::now());
+        self.projects_moved(state, changes);
+        if told.is_empty() {
+            return;
+        }
+        let at = tokio::time::Instant::now();
+        for (project, task) in told {
+            let (kind, words) = match seen {
+                Seen::Away => (
+                    crate::deliver::Kind::Stuck,
+                    format!(
+                        "task {task}'s machine {name} stopped answering, with its agent at work \
+                         there. Its work waits for the machine to come back; to go on without \
+                         it, start the task again on another machine (task_start)."
+                    ),
+                ),
+                Seen::Back => (
+                    crate::deliver::Kind::NeedsInput,
+                    format!("task {task}'s machine {name} answers again; its agent goes on."),
+                ),
+            };
+            state.deliveries.notice((project, None), task, kind, &words, at);
+        }
+        self.inner.deliver.notify_one();
     }
 
     fn expire(&self, worker: WorkerId, generation: u64) {

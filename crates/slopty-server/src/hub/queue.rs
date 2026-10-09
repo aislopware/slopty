@@ -888,6 +888,21 @@ impl Hub {
             Ok((_, updates)) => self.projects_moved(&mut state, updates),
             Err(refused) => tracing::debug!(%project, %task, ?refused, "a merge not recorded"),
         }
+        // The task's work brought home is on the target now: its branch there goes.
+        let home = Task::home_branch(project, task);
+        if still && place.head == home {
+            let drop = Verb::DropBranches {
+                worker: place.worker,
+                repo: place.clone.clone(),
+                branches: vec![home],
+            };
+            let hub = self.clone();
+            tokio::spawn(async move {
+                if let failed @ Outcome::Error { .. } = hub.forward(None, drop).await {
+                    tracing::info!(?failed, "a merged task's branch kept");
+                }
+            });
+        }
         let words = match &push_failed {
             Some(why) => format!(
                 "task {task} merged into {} at {}, but the push to origin failed: {why}. The \

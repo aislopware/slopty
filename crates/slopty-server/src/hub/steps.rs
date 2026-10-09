@@ -484,6 +484,31 @@ impl Hub {
     }
 }
 
+/// The branches the server named in clones for `project`'s tasks, by worker and clone: each
+/// task's work brought home ([`Task::home_branch`]) in the orchestrator's clone, and the
+/// project's target sent to a task's clone on another machine ([`Task::target_branch`]). What
+/// letting the project go drops ([`Verb::DropBranches`]).
+pub(super) fn server_branches(
+    state: &State,
+    project: &ProjectId,
+) -> Vec<((WorkerId, String), Vec<String>)> {
+    let Ok(tasks) = state.projects.project_tasks(project) else { return Vec::new() };
+    let mut named: HashMap<(WorkerId, String), Vec<String>> = HashMap::new();
+    for task in tasks {
+        let Ok(Some(trip)) = route_in(state, project, task, None) else { continue };
+        if trip.there() {
+            continue;
+        }
+        named.entry(trip.to).or_default().push(trip.into);
+        let target = Task::target_branch(project);
+        let there = named.entry(trip.from).or_default();
+        if !there.contains(&target) {
+            there.push(target);
+        }
+    }
+    named.into_iter().collect()
+}
+
 /// [`Hub::route`] in `state`.
 fn route_in(
     state: &State,

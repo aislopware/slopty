@@ -54,7 +54,9 @@ const PICKS_CONVERSATION: [&str; 6] =
 pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
     let mut terminals = HashSet::new();
     let mut agents = HashSet::new();
-    for entry in state.workers.values() {
+    // A worker away holds no place: its agents cannot be seen at work, and a task of its may
+    // start again elsewhere.
+    for entry in state.workers.values().filter(|e| e.link.is_some()) {
         for s in &entry.sessions {
             let term = TermRef { worker: entry.info.worker, session: s.id };
             terminals.insert(term);
@@ -66,7 +68,8 @@ pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
         }
     }
     // A task's thread with no terminal of its own lives while its agent is there.
-    for seat in state.board.live_seats() {
+    let linked = |w: WorkerId| state.workers.get(&w).is_some_and(|e| e.link.is_some());
+    for seat in state.board.live_seats().into_iter().filter(|seat| linked(seat.worker)) {
         terminals.insert(seat);
         agents.insert(seat);
     }
@@ -834,9 +837,12 @@ impl Hub {
     pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
+        let branches = super::steps::server_branches(state, project);
+        let worktrees = state.projects.worktrees_of(project);
         if let Err(refused) = state.projects.delete(project) {
             return refused;
         }
+        self.clear_away(branches, worktrees);
         keep(state, Keep::Forget(project.clone()));
         let projects = Self::projects_snapshot(state);
         let seq = self.inner.log.lock().next.saturating_sub(1);
@@ -846,6 +852,32 @@ impl Hub {
         drop(guard);
         tracing::info!(%project, "project let go");
         Outcome::Done
+    }
+
+    /// What a project let go leaves on its workers goes: the branches the server named in its
+    /// clones, and its tasks' worktrees, each kept by its worker while anything in it is not
+    /// committed or a terminal works in it, with the branch of work that did not land.
+    fn clear_away(
+        &self,
+        branches: Vec<((WorkerId, String), Vec<String>)>,
+        worktrees: Vec<(WorkerId, String, Vec<String>)>,
+    ) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let hub = self.clone();
+        tokio::spawn(async move {
+            for (worker, worktree, landed) in worktrees {
+                let verb = Verb::RemoveWorktree { worker, worktree: worktree.clone(), landed };
+                let went = hub.forward(None, verb).await;
+                tracing::info!(%worker, %worktree, ?went, "a let-go project's worktree");
+            }
+            for ((worker, repo), branches) in branches {
+                let verb = Verb::DropBranches { worker, repo: repo.clone(), branches };
+                let went = hub.forward(None, verb).await;
+                tracing::info!(%worker, %repo, ?went, "a let-go project's branches");
+            }
+        });
     }
 
     pub(super) fn projects_snapshot(state: &mut State) -> Vec<ProjectStatus> {

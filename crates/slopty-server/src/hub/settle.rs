@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use slopty_agent::status::{AgentStatus, BlockReason};
-use slopty_core::WallMs;
+use slopty_core::{WallMs, WorkerId};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::terminal::SessionState;
@@ -79,7 +79,7 @@ impl Hub {
             let changes = state.projects.settled(&project, task, (mins, left), WallMs::now());
             self.projects_moved(state, changes);
             tracing::info!(%project, %task, session = %term.session, "a finished task's agent closed");
-            let free = state.projects.to_free(&project, task);
+            let free = state.projects.take_free(&project, task);
             closing.push((term, free.map(|(worktree, landed)| (project, task, worktree, landed))));
         }
         drop(guard);
@@ -90,6 +90,23 @@ impl Hub {
                 term
             })
             .collect()
+    }
+
+    /// Free the worktrees of the merged tasks on `worker` whose agent's terminal is closed
+    /// already, by the person or while the server was away: the settle loop frees only those
+    /// whose terminal it closes itself. Called once the worker is linked, as a terminal of its
+    /// closes and as it registers.
+    pub(super) fn free_closed(&self, state: &mut State, worker: WorkerId) {
+        if tokio::runtime::Handle::try_current().is_err()
+            || state.workers.get(&worker).is_none_or(|e| e.link.is_none())
+        {
+            return;
+        }
+        let (terminals, _) = live(state);
+        for (project, task, term, worktree, landed) in state.projects.unfreed(worker, &terminals) {
+            tracing::info!(%project, %task, %worktree, "a merged task's worktree freed");
+            self.close_and_free(term, false, Some((project, task, worktree, landed)));
+        }
     }
 
     /// Close `term` when `open`, then once it is closed free the worktree its task's agent

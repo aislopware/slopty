@@ -346,6 +346,21 @@ pub(crate) struct Projects {
     /// The steps under way when the server stopped, as they stood, until their worker is back
     /// to take them up ([`Self::resumable`]).
     restarted: HashMap<(ProjectId, TaskId), TaskStep>,
+    /// The tasks whose machine went away while their agent worked, until it is back
+    /// ([`Self::machine_seen`]).
+    away: HashSet<(ProjectId, TaskId)>,
+    /// The tasks whose worktree is being freed, until how it went is heard ([`Self::freed`]):
+    /// one is asked of its worker once.
+    freeing: HashSet<(ProjectId, TaskId)>,
+}
+
+/// Which way a worker's link went, for its tasks ([`Projects::machine_seen`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Seen {
+    /// It stopped answering.
+    Away,
+    /// It answers again.
+    Back,
 }
 
 /// What a step under way when the server stopped says until its worker is back to take it up.
@@ -568,6 +583,17 @@ fn open_term(t: &Task) -> Option<TermRef> {
 /// Whether a task's work is over (merged, or given up) and its agent is not at work: its
 /// terminal counts against no limit, though it may still be open. An agent that works again
 /// counts again, so giving up its own task frees no agent that goes on working.
+/// Where `t`'s work landed, for its worktree's branch to go with it: the merge's head and its
+/// target, or the project's target, and the target on `origin`.
+fn landed_of(record: &Record, t: &Task) -> Vec<String> {
+    let (head, target) = match &t.merge {
+        Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
+        _ => (None, record.project.target.clone()),
+    };
+    let origin = format!("origin/{target}");
+    head.into_iter().chain([target, origin]).collect()
+}
+
 const fn finished(t: &Task) -> bool {
     matches!(t.state, TaskState::Merged | TaskState::Failed) && t.spent.since_ms.is_none()
 }
@@ -905,6 +931,12 @@ impl Projects {
 
     pub(crate) fn project(&self, id: &ProjectId) -> Result<&Project, Refused> {
         self.records.get(id).map(|r| &r.project).ok_or_else(|| unknown_project(id))
+    }
+
+    /// The ids of `id`'s tasks.
+    pub(crate) fn project_tasks(&self, id: &ProjectId) -> Result<Vec<TaskId>, Refused> {
+        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
+        Ok(record.tasks.iter().map(|t| t.id).collect())
     }
 
     /// Words for the timeline, from the server itself, on a task or the project.
@@ -1797,16 +1829,59 @@ impl Projects {
     /// reported, and where its work landed (the merge queue's head, the target, the target on
     /// `origin`). Only a merged task's: one given up may be tried again, and its agent would
     /// remake a worktree gone, its branch reset to the base with it.
-    pub(crate) fn to_free(&self, id: &ProjectId, task: TaskId) -> Option<(String, Vec<String>)> {
+    pub(crate) fn take_free(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+    ) -> Option<(String, Vec<String>)> {
         let record = self.records.get(id)?;
         let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
-        let (head, target) = match &t.merge {
-            Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
-            _ => (None, record.project.target.clone()),
-        };
-        let origin = format!("origin/{target}");
-        let landed = head.into_iter().chain([target, origin]).collect();
-        Some((t.worktree.clone()?, landed))
+        let free = (t.worktree.clone()?, landed_of(record, t));
+        self.freeing.insert((id.clone(), task)).then_some(free)
+    }
+
+    /// The merged tasks on `worker` whose worktree is still there though their agent's
+    /// terminal is no longer open (`terminals`): the person closed it, or it ended while the
+    /// server was away, so the settle loop never closes it ([`Self::finished_agents`]). Each
+    /// with its project, its terminal, its worktree and where its work landed, once.
+    pub(crate) fn unfreed(
+        &mut self,
+        worker: WorkerId,
+        terminals: &HashSet<TermRef>,
+    ) -> Vec<(ProjectId, TaskId, TermRef, String, Vec<String>)> {
+        let mut found = Vec::new();
+        for record in self.records.values() {
+            for t in record.tasks.iter().filter(|t| t.state == TaskState::Merged) {
+                let (Some(worktree), Some(a)) = (&t.worktree, &t.assignment) else { continue };
+                if a.term.worker != worker || terminals.contains(&a.term) {
+                    continue;
+                }
+                let free = (record.project.id.clone(), t.id, a.term, worktree.clone());
+                found.push((free, landed_of(record, t)));
+            }
+        }
+        found
+            .into_iter()
+            .filter(|((id, task, ..), _)| self.freeing.insert((id.clone(), *task)))
+            .map(|((id, task, term, worktree), landed)| (id, task, term, worktree, landed))
+            .collect()
+    }
+
+    /// What letting project `id` go leaves on the workers: each task's worktree its agent
+    /// reported, on the worker it ran on, with where its work would have landed, but those being
+    /// freed already. Freeing one keeps anything not committed in it, and the branch of work
+    /// that did not land.
+    pub(crate) fn worktrees_of(&self, id: &ProjectId) -> Vec<(WorkerId, String, Vec<String>)> {
+        let Some(record) = self.records.get(id) else { return Vec::new() };
+        record
+            .tasks
+            .iter()
+            .filter(|t| !self.freeing.contains(&(id.clone(), t.id)))
+            .filter_map(|t| {
+                let (worktree, a) = (t.worktree.clone()?, t.assignment.as_ref()?);
+                Some((a.term.worker, worktree, landed_of(record, t)))
+            })
+            .collect()
     }
 
     /// What became of freeing `task`'s worktree `worktree`: gone, with whether its branch went
@@ -1818,6 +1893,10 @@ impl Projects {
         went: Result<(Option<String>, bool), String>,
         now: WallMs,
     ) -> Vec<Change> {
+        // One kept is not asked again on its own: the person frees it from the worktree list.
+        if went.is_ok() {
+            self.freeing.remove(&(id.clone(), task));
+        }
         let Ok(record) = self.record(id) else { return Vec::new() };
         let Ok(t) = record.task_mut(task) else { return Vec::new() };
         let text = match went {
@@ -1842,6 +1921,52 @@ impl Projects {
         let t = t.clone();
         let entry = record.log(Some(task), Moment::Note { text }, now);
         vec![record.task_update(&t, Some(entry))]
+    }
+
+    /// The machine of worker `worker`, named `name`, went away or came back. Every task whose
+    /// agent works there (an open assignment, its work not over) says so on its timeline;
+    /// going away stops its clock, as the agent's work cannot be seen. Returns the changes, and
+    /// the tasks told, for their orchestrators to hear of. Back, only the tasks told it went
+    /// away are told.
+    pub(crate) fn machine_seen(
+        &mut self,
+        worker: WorkerId,
+        name: &str,
+        seen: Seen,
+        now: WallMs,
+    ) -> (Vec<Change>, Vec<(ProjectId, TaskId)>) {
+        let (mut updates, mut told) = (Vec::new(), Vec::new());
+        for record in self.records.values_mut() {
+            let id = record.project.id.clone();
+            let on: Vec<TaskId> = record
+                .tasks
+                .iter()
+                .filter(|t| !finished(t) && open_term(t).is_some_and(|term| term.worker == worker))
+                .map(|t| t.id)
+                .collect();
+            for task in on {
+                let text = match seen {
+                    Seen::Away if self.away.insert((id.clone(), task)) => format!(
+                        "Its machine {name} stopped answering. Its agent's work waits for it to \
+                         come back, or the task can be started again elsewhere."
+                    ),
+                    Seen::Back if self.away.remove(&(id.clone(), task)) => {
+                        format!("Its machine {name} answers again.")
+                    }
+                    Seen::Away | Seen::Back => continue,
+                };
+                let Ok(t) = record.task_mut(task) else { continue };
+                if seen == Seen::Away {
+                    t.spent.follow(false, now);
+                }
+                t.updated_ms = now;
+                let t = t.clone();
+                let entry = record.log(Some(task), Moment::Note { text }, now);
+                updates.push(record.task_update(&t, Some(entry)));
+                told.push((id.clone(), task));
+            }
+        }
+        (updates, told)
     }
 
     /// A worker registered with `sessions` open: every assignment on it to a terminal it no

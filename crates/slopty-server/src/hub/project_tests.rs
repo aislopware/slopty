@@ -834,6 +834,82 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     assert!(matches!(merged, Outcome::Task(_)), "the person's own shell: {merged:?}");
 }
 
+/// A task's machine that stops answering mid-task is said on the task's timeline and to its
+/// orchestrator at once, and its agent no longer holds a place against the person's bound;
+/// back, the task and its orchestrator hear so, once.
+#[tokio::test(start_paused = true)]
+async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let (orchestrator, working) = (SessionId::new(), SessionId::new());
+    let (studio, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    let (mini, mini_lease, _mini_rx) = worker_on(&hub, "mini", Os::MacOs, Vec::new());
+    announce(&mini_lease, working, true);
+    hub.set_policy(Policy {
+        bounds: Bounds { live_agents: 2, ..Bounds::default() },
+        ..Policy::default()
+    });
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, None).await;
+    let assigned =
+        hub.assign_for_test(&project(), task, TermRef { worker: mini, session: working });
+    assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
+    let next_batch = async |rx: &mut mpsc::Receiver<FromServer>| loop {
+        match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return (session, batch, reports.text());
+            }
+            Ok(Some(_)) => {}
+            other => panic!("no batch: {other:?}"),
+        }
+    };
+    let (session, batch, _role) = next_batch(&mut rx).await;
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    let plain = || Verb::SpawnAgent {
+        worker: studio,
+        cwd: "~".to_owned(),
+        prompt: None,
+        args: Vec::new(),
+        env: Vec::new(),
+        size: None,
+        session: None,
+        permission_flags: false,
+        worktree: None,
+    };
+    refused(&hub.dispatch(plain()).await, ErrorCode::Limit);
+
+    drop(mini_lease);
+    let (session, batch, said) = next_batch(&mut rx).await;
+    assert!(said.contains("task 1's machine mini stopped answering"), "{said}");
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    let notes = async || {
+        let timeline = status(&hub).await.timeline;
+        timeline
+            .into_iter()
+            .filter_map(|e| match e.what {
+                Moment::Note { text } if e.task == Some(task) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<String>>()
+    };
+    let away = notes().await;
+    assert!(away.iter().any(|n| n.starts_with("Its machine mini stopped answering")), "{away:?}");
+    assert!(task_now(&hub, task).await.spent.since_ms.is_none(), "its clock stopped");
+    let asked = spawn(&hub, plain());
+    let (_, verb) = request(&mut rx).await;
+    assert!(matches!(verb, Verb::SpawnAgent { .. }), "the place it held is free: {verb:?}");
+    asked.abort();
+
+    let (_, _mini_back, _rx_back) =
+        worker_again(&hub, mini, "mini", Os::MacOs, vec![summary(working)]);
+    let (_, _, said) = next_batch(&mut rx).await;
+    assert!(said.contains("task 1's machine mini answers again"), "{said}");
+    let back = notes().await;
+    assert_eq!(back.iter().filter(|n| n.contains("answers again")).count(), 1, "{back:?}");
+    delivering.abort();
+}
+
 /// A machine's settings are the person's: an agent reading or editing a worker's or the
 /// server's is refused by the server, through MCP and through the CLI in an agent's terminal
 /// alike, and nothing reaches the worker; the person's edit goes on to it.

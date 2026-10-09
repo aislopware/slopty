@@ -1148,6 +1148,12 @@ mod tests {
         assert_eq!(git_out(studio_clone, &["rev-parse", "main"]), merged, "main fast-forwarded");
         assert_eq!(std::fs::read_to_string(studio_clone.join("work.txt")).unwrap(), "done\n");
         assert_eq!(git_out(forge, &["rev-parse", "main"]), *forge_main, "and not pushed");
+        let home = until("the work brought home goes with its merge", async || {
+            let left = git_out(studio_clone, &["branch", "--list", "slopty/demo/1"]);
+            left.is_empty().then_some(left)
+        })
+        .await;
+        assert_eq!(home, "", "slopty/demo/1 is gone from the orchestrator's clone");
         let place = root.join("home/slopty/verify/demo");
         let verified_tree = tree_of(&place, "HEAD");
         assert_eq!(verified_tree, tree_of(tree, &head), "verified in its own checkout");

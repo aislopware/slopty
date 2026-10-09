@@ -2483,3 +2483,44 @@ reordering and edited allows are gone" in `agents.md`.*
     `codex_worktrees_are_known_by_their_layout`, and
     `a_worktree_in_use_or_not_committed_is_kept` (the person's own is kept while it holds a
     change, then goes with its branch). Golden `worker_git_worktrees` changed.
+
+- ✅ **A task's machine that goes away is said, and frees its place** (2026-10-11, readiness
+  10-11 rank 13, the server's half). A task whose worker stopped answering stayed "Running",
+  its orchestrator heard nothing, and its agent still counted against `live_agents`.
+  - **Said.** When a worker's link drops (`Hub::lost`, the moment it is `Unreachable`), every
+    task whose agent works there (an open assignment, its work not over) gets a timeline note
+    ("Its machine mini stopped answering…"), and its clock stops (`Projects::machine_seen`).
+    Its orchestrator is told at once (`Kind::Stuck`), with the way on: start the task again on
+    another machine. When the worker registers again, those tasks, and only those, hear that
+    it answers again, and their orchestrators too. The set of tasks told is kept in memory, so
+    a server restart tells nobody that a machine is back when nobody heard it went.
+  - **Freed.** A worker away holds no place: `projects::live` counts only linked workers'
+    terminals and seats. So the fleet's and a project's bounds count none of its agents, and
+    its task may start again elsewhere (its terminal is no longer live, so the start is not
+    refused as "has a terminal already"). Should the worker come back with the old agent still
+    there, both run, which the person chose by starting it again.
+  - Test: `a_task_s_machine_going_away_is_said_and_frees_its_place` (slopty-server
+    `hub/project_tests.rs`).
+
+- ✅ **A merged task's worktree and the server's branches go, however its terminal ended**
+  (2026-10-11, readiness 10-11 rank 14).
+  - **Worktrees.** The settle loop freed a merged task's worktree only after closing the agent's
+    terminal itself. One the person closed, or that ended while its worker was away, leaked.
+    Now a terminal's close and a worker's registration both free the merged tasks on that worker
+    whose terminal is no longer open (`Projects::unfreed`, `Hub::free_closed`). Each task is
+    asked of its worker once (`Projects::freeing`). One the worker kept (something not committed,
+    a terminal in it) is not asked again on its own, so the timeline says why once. "Remove
+    merged" in the worktree list stays the person's way to try again.
+  - **Branches.** Once a task's work brought home (`slopty/<project>/<task>`) is merged, the
+    server drops that branch from the orchestrator's clone (`Verb::DropBranches`, which takes
+    only `slopty/` names, passes over one absent and keeps one a worktree has checked out).
+    `Task::base_ref` named a ref nothing ever wrote, and is deleted.
+  - **A project let go** frees what is left: each task's worktree on its worker (kept as above
+    when it holds work), and the server's branches in every clone they may be in: the home
+    branches in the orchestrator's clone, `slopty/<project>/target` in the tasks' clones on
+    other machines (`steps::server_branches`).
+  - Tests: `a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled` (slopty-server
+    `hub/outcome_tests.rs`), `the_server_s_branches_go_and_no_other` (slopty-worker
+    `repo/worktrees.rs`), and the merge across two machines now checks the home branch is gone
+    (`a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone`, slopty-cli
+    `tests/projects.rs`).
