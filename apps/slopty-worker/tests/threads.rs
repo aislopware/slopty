@@ -1165,7 +1165,7 @@ mod threads {
         };
         a.until(settled).await;
         a.until(|c| c.state().meters.context_window.is_some()).await;
-        assert_eq!(a.state().meters.context_window, Some(200_000), "the mod's measure");
+        assert_eq!(a.state().meters.context_window, Some(1_000_000), "the mod's measure");
         assert_eq!(post(&socket, &batches[bye]).await, 204);
 
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
