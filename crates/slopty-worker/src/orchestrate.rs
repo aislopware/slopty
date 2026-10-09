@@ -398,6 +398,10 @@ impl Orchestrator {
             | Verb::WorkingOn { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
+            Verb::Settings { .. } => Err(Failure::new(
+                ErrorCode::Unsupported,
+                "this worker does not share its settings yet",
+            )),
             Verb::OpenTerminal { worker, cwd, command, env, name, size, session, worktree } => {
                 self.mine(worker)?;
                 let _choosing = self.choosing(session).await;
@@ -528,7 +532,8 @@ impl Orchestrator {
             | Verb::FastForward { .. }
             | Verb::CatchUp { .. }
             | Verb::LandPull { .. }
-            | Verb::RemoveWorktree { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::RemoveWorktree { .. }
+            | Verb::DropBranches { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
                 let threads = inner.task_threads.get().cloned().ok_or_else(|| {
@@ -1014,6 +1019,17 @@ impl Orchestrator {
                     .map_err(|failed| worktree_failed(&failed))?;
                 let crate::repo::worktrees::Removed { branch, branch_removed } = removed;
                 Ok(Outcome::WorktreeRemoved { branch, branch_removed })
+            }
+            Verb::DropBranches { worker, repo, branches } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                crate::repo::worktrees::drop_branches(git, &repo, &branches)
+                    .await
+                    .map_err(|failed| worktree_failed(&failed))?;
+                Ok(Outcome::Done)
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }

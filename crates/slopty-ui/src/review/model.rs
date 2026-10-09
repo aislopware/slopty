@@ -365,7 +365,9 @@ mod tests {
             path: path.to_owned(),
             from: Some(format!("{path}@old")),
             to: Some(format!("{path}@new")),
-            binary: false,
+            kind: wire::FileKind::Text,
+            old_path: None,
+            modes: None,
             patch: Patch {
                 hunks: vec![Hunk {
                     old_start: 1,

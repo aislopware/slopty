@@ -906,6 +906,17 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server frees a finished task's worktree itself, once its agent is closed",
             ),
+            Verb::DropBranches { .. } => error(
+                ErrorCode::Forbidden,
+                "the server drops the branches it named itself, once their work has landed",
+            ),
+            Verb::Settings { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a machine's settings are the person's to read and change, never an agent's",
+            ),
+            Verb::Settings { of: None, .. } => {
+                error(ErrorCode::Unsupported, "this server does not share its settings yet")
+            }
             Verb::StartThread { .. } => error(
                 ErrorCode::Forbidden,
                 "the server starts a task's thread itself; task_start with an agent asks for it",
@@ -1754,7 +1765,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::CatchUp { worker, .. }
         | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
+        | Verb::DropBranches { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
+        Verb::Settings { of, .. } => *of,
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }

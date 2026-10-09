@@ -16,9 +16,10 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, NewWorktree, Outcome,
-        Page, PastSession, PastSessions, Pick, PromptHit, PullSeen, PullStands, Review,
-        ReviewScope, Setup, Start, TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
+        AuthorRun, Authors, Expanded, FileDiff, FileKind, Intent, IntentDone, ItemHit, Modes,
+        NewWorktree, Outcome, Page, PastSession, PastSessions, Pick, PromptHit, PullSeen,
+        PullStands, Review, ReviewScope, Setup, Start, TableFrame, ThreadFrame, ThreadHit,
+        ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
@@ -814,14 +815,36 @@ mod golden_thread {
                     path: "src/lib.rs".to_owned(),
                     from: Some("aa11".to_owned()),
                     to: Some("bb22".to_owned()),
-                    binary: false,
+                    kind: FileKind::Text,
+                    old_path: None,
+                    modes: None,
                     patch,
+                },
+                FileDiff {
+                    path: "bin/run".to_owned(),
+                    old_path: Some("scripts/run".to_owned()),
+                    from: Some("dd44".to_owned()),
+                    to: Some("dd44".to_owned()),
+                    kind: FileKind::Text,
+                    modes: Some(Modes { from: 0o100_644, to: 0o100_755 }),
+                    patch: Patch::default(),
+                },
+                FileDiff {
+                    path: "data/huge.csv".to_owned(),
+                    old_path: None,
+                    from: Some("ee55".to_owned()),
+                    to: Some("ff66".to_owned()),
+                    kind: FileKind::TooLarge { bytes: 6_000_000 },
+                    modes: None,
+                    patch: Patch::default(),
                 },
                 FileDiff {
                     path: "logo.png".to_owned(),
                     from: None,
                     to: Some("cc33".to_owned()),
-                    binary: true,
+                    kind: FileKind::Image { bytes: 2048 },
+                    old_path: None,
+                    modes: None,
                     patch: Patch {
                         hunks: vec![],
                         added: 0,

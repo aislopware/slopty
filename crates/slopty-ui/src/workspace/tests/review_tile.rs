@@ -220,7 +220,9 @@ fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
         path: "src/lib.rs".to_owned(),
         from: Some("old".to_owned()),
         to: Some("new".to_owned()),
-        binary: false,
+        kind: slopty_proto::thread::wire::FileKind::Text,
+        old_path: None,
+        modes: None,
         patch: Patch { hunks: Vec::new(), added: 1, removed: 0, clipped_lines: 0, full: None },
     };
     let review = Review {

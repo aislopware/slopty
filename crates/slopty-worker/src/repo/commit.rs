@@ -111,6 +111,13 @@ pub async fn apply(
                 .map(|patch| GitDone::FileDiff { from, to, patch: Box::new(patch) })
                 .map_err(|failed| GitOutcome::Failed { said: failed.0 })
         }
+        GitOp::Blob { blob } => super::snapshot::blob(git, &root, &blob)
+            .await
+            .map(|bytes| GitDone::Blob { blob, bytes })
+            .map_err(|failed| GitOutcome::Refused { why: failed.0 }),
+        GitOp::PullReview { .. } => {
+            Err(GitOutcome::Refused { why: "this worker cannot post a review yet".to_owned() })
+        }
         GitOp::Branches => {
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
         }

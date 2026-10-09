@@ -923,6 +923,33 @@ pub enum Verb {
         /// The branch.
         target: String,
     },
+    /// Server → worker: delete branches the server named in the clone at `repo`, once what
+    /// they carried has landed or their project is gone: a merged task's
+    /// [`crate::project::Task::home_branch`], a project's
+    /// [`crate::project::Task::target_branch`]. Only names under `slopty/` are taken; one
+    /// absent is passed over, and one a worktree has checked out stays. Answered with
+    /// [`Outcome::Done`].
+    DropBranches {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The branches, by name.
+        branches: Vec<String>,
+    },
+    /// Read a daemon's settings file, after making `edits` to it: the keys a worker or the
+    /// server reads itself (`[worker]`, `[server]`), which a settings page on another device
+    /// edits for it. Edits go in order, as the page writes them on its own device, and only to
+    /// the daemon's own tables; the daemon takes the file up again as it does after a hand
+    /// edit. Answered with [`Outcome::Settings`]; [`ErrorCode::Invalid`] for an edit outside
+    /// its tables or one that leaves the file unreadable, [`ErrorCode::Forbidden`] for an
+    /// agent.
+    Settings {
+        /// Whose: a worker's, or the server's own when `None`.
+        of: Option<WorkerId>,
+        /// What to change first; none only reads.
+        edits: Vec<crate::settings::SettingEdit>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1009,8 +1036,11 @@ impl Verb {
             | Self::FastForward { .. }
             | Self::CatchUp { .. }
             | Self::RemoveWorktree { .. }
+            | Self::DropBranches { .. }
             | Self::StartThread { .. }
             | Self::FsChange { .. } => true,
+            // Reading the file again is the same; an edit writes it.
+            Self::Settings { edits, .. } => !edits.is_empty(),
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1344,7 +1374,7 @@ pub enum Outcome {
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`]).
+    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`], [`Verb::DropBranches`]).
     Done,
     /// It failed.
     Error {
@@ -1498,6 +1528,8 @@ pub enum Outcome {
         /// Its page.
         url: String,
     },
+    /// For [`Verb::Settings`]: the daemon's settings file as it stands.
+    Settings(Box<crate::settings::DaemonSettings>),
 }
 
 /// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.

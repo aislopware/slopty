@@ -794,7 +794,7 @@ impl ReviewView {
         self.blocks.clear();
         if let Some(review) = self.model.review().cloned() {
             for (at, file) in review.files.iter().enumerate() {
-                if !file.binary {
+                if file.is_text() {
                     self.blocks.insert(at, diff::thread_blocks(&file.path, &file.patch));
                 }
             }
@@ -2141,12 +2141,12 @@ impl ReviewView {
         let s = self.theme.surfaces;
         if let Some(file) = self.model.file(at)
             && file.patch.clipped_lines > 0
-            && !file.binary
+            && file.is_text()
         {
             return self.whole_row(at, file.patch.clipped_lines, cx);
         }
         let words = match self.model.file(at) {
-            Some(f) if f.binary => "Binary file",
+            Some(f) if !f.is_text() => "Binary file",
             _ => "No lines to show",
         };
         div()

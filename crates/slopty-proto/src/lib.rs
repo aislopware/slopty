@@ -57,6 +57,7 @@ pub mod push;
 pub mod screen;
 pub mod search;
 pub mod server;
+pub mod settings;
 pub mod tailnet;
 pub mod terminal;
 pub mod thread;

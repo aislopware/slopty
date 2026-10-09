@@ -25,8 +25,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, DiffTag};
+use slopty_proto::git::BLOB_MAX;
 use slopty_proto::thread::detail::{Hunk, heading};
-use slopty_proto::thread::wire::{Against, FileDiff, Pick, Review, ReviewScope, reading_order};
+use slopty_proto::thread::wire::{
+    Against, FileDiff, FileKind, Pick, Review, ReviewScope, reading_order,
+};
 use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
 use tokio::io::AsyncWriteExt as _;
 
@@ -405,9 +408,11 @@ impl Repo {
             let (binary, patch) = self.patch(entry.from.as_deref(), entry.to.as_deref()).await?;
             files.push(FileDiff {
                 path: entry.path,
+                old_path: None,
                 from: entry.from,
                 to: entry.to,
-                binary,
+                kind: if binary { FileKind::Binary } else { FileKind::Text },
+                modes: None,
                 patch,
             });
         }
@@ -493,11 +498,18 @@ impl Repo {
     }
 
     /// Take `pick` into what `thread`'s person has kept, starting from `base` when they have
-    /// kept nothing yet: its old side must be what is kept of the file.
+    /// kept nothing yet.
+    ///
+    /// When what is kept of the file is the review's old side, the picked change is kept as it
+    /// is. When it is not (an earlier turn's change to the file is not kept, so the last turn's
+    /// review starts from lines the kept side lacks), the picked change is merged onto what is
+    /// kept, three ways from the review's old side ([`merge3`]), and refused only where the two
+    /// meet.
     ///
     /// # Errors
     ///
-    /// What is kept is not the review's old side, a hunk that is not there, or git failing.
+    /// The change meets lines kept otherwise (named by line), a side that is not text where
+    /// the kept side differs, a hunk that is not there, or git failing.
     pub async fn keep(
         &self,
         thread: ThreadId,
@@ -506,19 +518,47 @@ impl Repo {
     ) -> Result<TreeRef, Failed> {
         let kept = self.kept(thread).await?.unwrap_or_else(|| base.clone());
         let now = self.entry(&kept, &pick.path).await?;
-        if now.as_ref().map(|(_, blob)| blob) != pick.from.as_ref() {
-            return Err(Failed(format!("{} was kept otherwise since it was reviewed", pick.path)));
-        }
-        let blob = if pick.hunks.is_empty() {
-            pick.stamp.clone()
+        let kept_blob = now.as_ref().map(|(_, blob)| blob.clone());
+        let as_reviewed = kept_blob == pick.from;
+        let chosen = if pick.hunks.is_empty() {
+            Chosen::Blob(pick.stamp.clone())
         } else {
             let (old, new) =
                 (self.blob(pick.from.as_deref()).await?, self.blob(pick.stamp.as_deref()).await?);
             if !is_text(&old) || !is_text(&new) {
                 return Err(Failed(format!("{} is not text, so it is kept whole", pick.path)));
             }
-            let text = swap(&lossy(&old), &lossy(&new), &pick.hunks, Side::New)?;
-            Some(self.line_with(&["hash-object", "-w", "--stdin"], text.as_bytes()).await?)
+            Chosen::Text(swap(&lossy(&old), &lossy(&new), &pick.hunks, Side::New)?)
+        };
+        let blob = match chosen {
+            Chosen::Blob(blob) if as_reviewed => blob,
+            Chosen::Text(text) if as_reviewed => Some(self.hashed(&text).await?),
+            // The turn removed the file: it goes from what is kept too.
+            Chosen::Blob(None) => None,
+            chosen => {
+                let mine = match chosen {
+                    Chosen::Text(text) => text.into_bytes(),
+                    Chosen::Blob(blob) => self.blob(blob.as_deref()).await?,
+                };
+                let (from, held) = (
+                    self.blob(pick.from.as_deref()).await?,
+                    self.blob(kept_blob.as_deref()).await?,
+                );
+                if ![&from, &held, &mine].into_iter().all(|b| is_text(b)) {
+                    return Err(Failed(format!(
+                        "{} was kept otherwise since it was reviewed, and is not text to merge",
+                        pick.path
+                    )));
+                }
+                let merged = merge3(&lossy(&from), &lossy(&held), &lossy(&mine)).map_err(|at| {
+                    Failed(format!(
+                        "{}: this change meets lines kept otherwise, at {}",
+                        pick.path,
+                        lines_named(&at)
+                    ))
+                })?;
+                Some(self.hashed(&merged).await?)
+            }
         };
         let index = self.index.with_extension("kept");
         let index = Some(index.as_path());
@@ -537,6 +577,11 @@ impl Repo {
         let tree = TreeRef(self.line(&["write-tree"], index).await?);
         self.pin(thread, "kept", &tree).await?;
         Ok(tree)
+    }
+
+    /// `text` written as a blob of the repository.
+    async fn hashed(&self, text: &str) -> Result<String, Failed> {
+        self.line_with(&["hash-object", "-w", "--stdin"], text.as_bytes()).await
     }
 
     async fn line_with(&self, args: &[&str], input: &[u8]) -> Result<String, Failed> {
@@ -678,6 +723,24 @@ pub async fn file_diff(
     // Blobs are read from the object store alone: no index is ever named.
     let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
     repo.patch(from, to).await.map(|(_binary, patch)| patch)
+}
+
+/// The bytes of blob `id` in the repository at `root`, a review's picture side
+/// ([`slopty_proto::git::GitOp::Blob`]): refused past [`BLOB_MAX`] bytes, read from the
+/// object store alone.
+///
+/// # Errors
+///
+/// An id that is not a whole object id, a blob too large, or git failing.
+pub async fn blob(git: &Path, root: &Path, id: &str) -> Result<Vec<u8>, Failed> {
+    object_id(id)?;
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
+    let size = repo.line(&["cat-file", "-s", id], None).await?;
+    let size: u64 = size.parse().map_err(|e| Failed(format!("git sized {id} as {size:?}: {e}")))?;
+    if size > BLOB_MAX {
+        return Err(Failed(format!("{id} is {size} bytes, past the {BLOB_MAX} sent whole")));
+    }
+    repo.blob(Some(id)).await
 }
 
 const fn edge_name(edge: Edge) -> &'static str {
@@ -826,6 +889,94 @@ enum Side {
     New,
 }
 
+/// What a keep takes of a file: a side's blob as it is (`None`, removed), or the old side with
+/// the picked hunks.
+enum Chosen {
+    Blob(Option<String>),
+    Text(String),
+}
+
+/// One change of a three-way merge: lines `at` of the common old side, replaced by lines `to`
+/// of the changed side.
+struct Change {
+    at: Range<usize>,
+    to: Range<usize>,
+}
+
+/// The changes from `base` to `other`, in order: a run replaced is one change (the diff's
+/// capture folds a delete and the insert after it into one replace).
+fn changes(base: &[&str], other: &[&str]) -> Vec<Change> {
+    similar::capture_diff_slices(Algorithm::Myers, base, other)
+        .iter()
+        .filter(|op| op.tag() != DiffTag::Equal)
+        .map(|op| Change { at: op.old_range(), to: op.new_range() })
+        .collect()
+}
+
+/// `base` with the changes to it in `ours` and in `theirs` both made: three ways, as
+/// `git merge-file` merges. Two changes over the same lines, or touching, meet; the same change
+/// made on both sides is made once.
+///
+/// # Errors
+///
+/// Where the changes meet, as lines (counted from one) of `theirs`.
+fn merge3(base: &str, ours: &str, theirs: &str) -> Result<String, Vec<Range<usize>>> {
+    let (base_lines, our_lines, their_lines) = (lines(base), lines(ours), lines(theirs));
+    let ours_of = |c: &Change| our_lines.get(c.to.clone()).unwrap_or_default();
+    let theirs_of = |c: &Change| their_lines.get(c.to.clone()).unwrap_or_default();
+    let (mine, other) = (changes(&base_lines, &our_lines), changes(&base_lines, &their_lines));
+    let meets = |x: &Change, y: &Change| x.at.start <= y.at.end && y.at.start <= x.at.end;
+    let mut out = String::with_capacity(ours.len().max(theirs.len()));
+    let mut met = Vec::new();
+    let (mut a, mut b, mut at) = (mine.iter().peekable(), other.iter().peekable(), 0);
+    loop {
+        let (change, with) = match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => break,
+            (Some(x), Some(y)) if meets(x, y) => {
+                let (_ours, _theirs) = (a.next(), b.next());
+                if x.at != y.at || ours_of(x) != theirs_of(y) {
+                    met.push(y.to.start..y.to.end.max(y.to.start + 1));
+                    continue;
+                }
+                (x, ours_of(x))
+            }
+            (Some(x), Some(y)) if x.at.start <= y.at.start => {
+                let _ours = a.next();
+                (x, ours_of(x))
+            }
+            (Some(x), None) => {
+                let _ours = a.next();
+                (x, ours_of(x))
+            }
+            (_, Some(y)) => {
+                let _theirs = b.next();
+                (y, theirs_of(y))
+            }
+        };
+        out.extend(base_lines.get(at..change.at.start).unwrap_or_default().iter().copied());
+        out.extend(with.iter().copied());
+        at = change.at.end;
+    }
+    if !met.is_empty() {
+        return Err(met);
+    }
+    out.extend(base_lines.get(at..).unwrap_or_default().iter().copied());
+    Ok(out)
+}
+
+/// Line ranges (from zero) in words, counted from one: "line 4", "lines 4–6, 9".
+fn lines_named(ranges: &[Range<usize>]) -> String {
+    let named: Vec<String> = ranges
+        .iter()
+        .map(|r| match r.len() {
+            0 | 1 => format!("{}", r.start + 1),
+            _ => format!("{}\u{2013}{}", r.start + 1, r.end),
+        })
+        .collect();
+    let single = ranges.len() == 1 && ranges.first().is_some_and(|r| r.len() <= 1);
+    format!("{} {}", if single { "line" } else { "lines" }, named.join(", "))
+}
+
 /// One side with the hunks `picked` taken from the other.
 fn swap(old: &str, new: &str, picked: &[u32], take: Side) -> Result<String, Failed> {
     let (old_lines, new_lines) = (lines(old), lines(new));
@@ -866,6 +1017,26 @@ mod tests {
 
     fn changed() -> String {
         OLD.replace("b\n", "B\n").replace("l\n", "L\nL2\n")
+    }
+
+    /// Changes on each side apart from each other are both made; the same change on both is
+    /// made once; changes over the same lines, or touching, meet and are named by `theirs`'
+    /// lines; a change at the very end is made.
+    #[test]
+    fn three_ways_merge_apart_and_meet_where_they_touch() {
+        let ours = OLD.replace("b\n", "B\n");
+        let theirs = OLD.replace("l\n", "L\nL2\n");
+        assert_eq!(merge3(OLD, &ours, &theirs).as_deref(), Ok(changed().as_str()));
+        assert_eq!(merge3(OLD, &theirs, &theirs).as_deref(), Ok(theirs.as_str()), "the same");
+        let at_end = format!("{OLD}n\n");
+        assert_eq!(merge3(OLD, &ours, &at_end), Ok(format!("{ours}n\n")));
+
+        let over = OLD.replace("b\n", "b!\n");
+        assert_eq!(merge3(OLD, &ours, &over), Err(vec![1..2]), "the same line otherwise");
+        let touching = OLD.replace("c\n", "C\n");
+        assert_eq!(merge3(OLD, &ours, &touching), Err(vec![2..3]), "the line after");
+        assert_eq!(lines_named(&[1..2]), "line 2");
+        assert_eq!(lines_named(&[1..4, 8..9]), "lines 2\u{2013}4, 9");
     }
 
     /// Two changes far apart are two hunks, each with its context, numbered as git numbers

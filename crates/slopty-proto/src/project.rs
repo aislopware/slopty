@@ -777,8 +777,8 @@ pub struct Task {
     pub branch: Option<String>,
     /// The worktree its agent works in, on its worker.
     pub worktree: Option<String>,
-    /// The commit its work started from, in hex; kept in its worker's mirror as
-    /// [`Task::base_ref`], so a diff, a verification again or a rebase outlives a restart.
+    /// The commit its work started from, in hex, so a diff, a verification again or a rebase
+    /// outlives a restart.
     pub base: Option<String>,
     /// Its branch's pull request, as its thread's row last said it
     /// ([`crate::thread::wire::ThreadRow::pull`]): one watcher, the worker's, reads the forge.
@@ -1093,12 +1093,6 @@ impl Task {
     #[must_use]
     pub const fn ready_to_merge(&self) -> bool {
         matches!(self.state, TaskState::Done) && self.merge.is_none()
-    }
-
-    /// The git ref its base commit is kept under in a mirror of `project`'s repository.
-    #[must_use]
-    pub fn base_ref(&self, project: &ProjectId) -> String {
-        format!("refs/slopty/{project}/{}/base", self.id)
     }
 
     /// The branch its work lands as in the orchestrator's clone when it was done on another

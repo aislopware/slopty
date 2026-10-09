@@ -343,6 +343,8 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         GitDone::FileDiff { from, to, patch } => {
             repo.whole.insert((from, to), Whole::Came(Arc::from(patch)));
         }
+        // Asked by the review tile, which keeps what they bring; nothing here waits on them.
+        GitDone::Blob { .. } | GitDone::PullReviewed { .. } => {}
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {

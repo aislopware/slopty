@@ -834,6 +834,43 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     assert!(matches!(merged, Outcome::Task(_)), "the person's own shell: {merged:?}");
 }
 
+/// A machine's settings are the person's: an agent reading or editing a worker's or the
+/// server's is refused by the server, through MCP and through the CLI in an agent's terminal
+/// alike, and nothing reaches the worker; the person's edit goes on to it.
+#[tokio::test]
+async fn settings_are_never_an_agent_s() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let agent_here = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, agent_here, true);
+    let edit = || slopty_proto::settings::SettingEdit {
+        table: "worker".to_owned(),
+        key: "allow".to_owned(),
+        entry: None,
+        literal: Some(r#"["0.0.0.0/0"]"#.to_owned()),
+    };
+    for (who, why) in [
+        (Speaker::Agent, "an MCP surface"),
+        (Speaker::Shell(agent_here), "the CLI where an agent runs"),
+        (Speaker::Shell(SessionId::new()), "a terminal the server does not know"),
+    ] {
+        for verb in [
+            Verb::Settings { of: Some(worker), edits: vec![edit()] },
+            Verb::Settings { of: Some(worker), edits: Vec::new() },
+            Verb::Settings { of: None, edits: vec![edit()] },
+        ] {
+            let said = hub.dispatch_as(who, None, verb).await;
+            assert!(refused(&said, ErrorCode::Forbidden).contains("never an agent's"), "{why}");
+        }
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the worker");
+    let person =
+        spawn_as(&hub, Speaker::Person, Verb::Settings { of: Some(worker), edits: vec![edit()] });
+    let (_, asked) = request(&mut rx).await;
+    assert!(matches!(asked, Verb::Settings { of: Some(w), .. } if w == worker));
+    person.abort();
+}
+
 fn spawn_as(hub: &Hub, who: Speaker, verb: Verb) -> tokio::task::JoinHandle<Outcome> {
     let hub = hub.clone();
     tokio::spawn(async move { hub.dispatch_as(who, None, verb).await })

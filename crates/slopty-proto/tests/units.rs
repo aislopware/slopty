@@ -188,7 +188,9 @@ mod units {
             path: path.to_owned(),
             from: None,
             to: None,
-            binary: false,
+            kind: slopty_proto::thread::wire::FileKind::Text,
+            old_path: None,
+            modes: None,
             patch: Patch { hunks: Vec::new(), added, removed, clipped_lines: 0, full: None },
         };
         let files = [

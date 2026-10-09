@@ -181,7 +181,7 @@ mod review {
     /// A hunk put back leaves the other; a revert of a file that changed since is refused,
     /// and the same intent again is its first outcome with nothing done. What is kept leaves
     /// what is left to review, a hunk or a file at a time, and the thread is to review until
-    /// everything is kept.
+    /// everything is kept; a change kept twice is kept once.
     #[tokio::test]
     async fn changes_are_kept_and_put_back_by_hunk_and_by_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -216,7 +216,9 @@ mod review {
         let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
         assert!(file(&left, "a.txt").is_none(), "all of a.txt is kept: {left:#?}");
         let again = rig.pick(IntentId::new(), &keep).await;
-        assert!(matches!(again, Outcome::Refused { .. }), "kept otherwise since: {again:?}");
+        assert_eq!(again, Outcome::Done, "kept already: the same change again changes nothing");
+        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
+        assert!(file(&left, "a.txt").is_none(), "{left:#?}");
         let whole = Intent::Keep(pick(&left, "new.txt", vec![]));
         assert_eq!(rig.pick(IntentId::new(), &whole).await, Outcome::Done);
         let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
@@ -228,6 +230,73 @@ mod review {
         assert_eq!(rig.pick(IntentId::new(), &gone).await, Outcome::Done);
         assert!(!repo.join("new.txt").exists(), "an added file put back is no file");
         assert!(to_review(), "what was kept is gone from the tree: a change to review");
+    }
+
+    /// A file two turns changed, neither kept: keeping the last turn's review (the scope a
+    /// thread's review opens on) takes that turn's change onto what is kept, leaving the first
+    /// turn's still to review, and keeping the first turn then takes the rest. A change that
+    /// meets lines kept otherwise is refused, saying which lines, and nothing is kept.
+    #[tokio::test]
+    async fn the_last_turn_is_kept_though_an_earlier_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let rig = Rig::new(dir.path(), &repo);
+        rig.status(Phase::Working);
+        rig.begin(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
+        let first = A.replace("two\n", "TWO\n");
+        std::fs::write(repo.join("a.txt"), &first).unwrap();
+        rig.end(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
+        rig.begin(2);
+        rig.until(|s| s.turns.get(1).is_some_and(|t| t.before.is_some())).await;
+        let both = first.replace("eleven\n", "ELEVEN\nmore\n");
+        std::fs::write(repo.join("a.txt"), &both).unwrap();
+        rig.end(2);
+        rig.until(|s| s.turns.get(1).is_some_and(|t| t.after.is_some())).await;
+
+        let last = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(2))).await;
+        let keep = Intent::Keep(pick(&last, "a.txt", vec![0]));
+        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
+        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
+        let a = file(&left, "a.txt").expect("the first turn's change is left");
+        let shown: Vec<&str> =
+            a.patch.hunks.iter().flat_map(|h| &h.lines).map(String::as_str).collect();
+        assert!(shown.contains(&"+TWO"), "{shown:?}");
+        assert!(!shown.iter().any(|l| l.contains("ELEVEN")), "the last turn's is kept: {shown:?}");
+        let again = rig.pick(IntentId::new(), &keep).await;
+        assert_eq!(again, Outcome::Done, "kept already, so keeping it again changes nothing");
+
+        let earlier = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
+        let keep = Intent::Keep(pick(&earlier, "a.txt", vec![]));
+        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
+        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
+        assert!(left.files.is_empty(), "both turns kept: {left:#?}");
+
+        // A third turn rewrites a line the second turn changed; the person then keeps a
+        // revert of it by hand: the kept side now differs from the turn's old side on the
+        // very line the turn changes.
+        rig.begin(3);
+        rig.until(|s| s.turns.get(2).is_some_and(|t| t.before.is_some())).await;
+        std::fs::write(repo.join("a.txt"), both.replace("ELEVEN\n", "Eleven!\n")).unwrap();
+        rig.end(3);
+        rig.until(|s| s.turns.get(2).is_some_and(|t| t.after.is_some())).await;
+        let third = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(3))).await;
+        std::fs::write(repo.join("a.txt"), both.replace("ELEVEN\n", "eleven, as it was\n"))
+            .unwrap();
+        rig.status(Phase::Working);
+        rig.begin(4);
+        rig.until(|s| s.turns.get(3).is_some_and(|t| t.before.is_some())).await;
+        rig.end(4);
+        rig.until(|s| s.turns.get(3).is_some_and(|t| t.after.is_some())).await;
+        let fourth = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
+        let keep_fourth = Intent::Keep(pick(&fourth, "a.txt", vec![]));
+        assert_eq!(rig.pick(IntentId::new(), &keep_fourth).await, Outcome::Done);
+        let keep = Intent::Keep(pick(&third, "a.txt", vec![]));
+        match rig.pick(IntentId::new(), &keep).await {
+            Outcome::Refused { reason } => assert!(reason.contains("line 11"), "{reason}"),
+            other => panic!("a change over lines kept otherwise: {other:?}"),
+        }
     }
 
     /// Each side of a file a review showed reads back whole from its blob, for the lines
@@ -480,6 +549,36 @@ mod review {
         let bad = GitOp::FileDiff { from: Some("--output=/tmp/x".to_owned()), to: None };
         let refused = apply(&programs, &folder, bad, &[]).await;
         assert!(matches!(refused, GitOutcome::Failed { .. }), "{refused:?}");
+    }
+
+    /// A blob a review named comes whole by its id, for a picture's two sides; one past the cap
+    /// and a name that is no object id are refused.
+    #[tokio::test]
+    async fn a_blob_comes_whole_and_none_past_its_cap() {
+        use slopty_proto::git::{BLOB_MAX, GitDone, GitOp, GitOutcome};
+        use slopty_worker::repo::commit::{Programs, apply};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let png: Vec<u8> = b"\x89PNG\r\n\x1a\n".iter().copied().chain(0..=255).collect();
+        std::fs::write(repo.join("logo.png"), &png).unwrap();
+        let id = run(&repo, &["hash-object", "-w", "logo.png"]);
+        let huge = vec![0_u8; usize::try_from(BLOB_MAX).unwrap() + 1];
+        std::fs::write(repo.join("huge.bin"), &huge).unwrap();
+        let huge_id = run(&repo, &["hash-object", "-w", "huge.bin"]);
+        let programs = Programs { git: Some(git()), gh: None, glab: None };
+        let folder = repo.to_string_lossy().into_owned();
+
+        match apply(&programs, &folder, GitOp::Blob { blob: id.clone() }, &[]).await {
+            GitOutcome::Done(GitDone::Blob { blob, bytes }) => {
+                assert_eq!((blob, bytes), (id, png), "the bytes, byte for byte");
+            }
+            other => panic!("{other:?}"),
+        }
+        for blob in [huge_id, "--output=/tmp/x".to_owned()] {
+            let refused = apply(&programs, &folder, GitOp::Blob { blob }, &[]).await;
+            assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
+        }
     }
 
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one

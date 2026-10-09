@@ -1196,6 +1196,7 @@ impl CommitSheet {
                 }
                 GitOp::Merge { .. } => "Merging\u{2026}",
                 GitOp::RemoveWorktree => "Removing the worktree\u{2026}",
+                GitOp::PullReview { .. } => "Posting the review\u{2026}",
                 GitOp::Status
                 | GitOp::PullStatus
                 | GitOp::PullComments { .. }
@@ -1203,7 +1204,8 @@ impl CommitSheet {
                 | GitOp::Branches
                 | GitOp::Worktrees
                 | GitOp::Scripts
-                | GitOp::FileDiff { .. } => return None,
+                | GitOp::FileDiff { .. }
+                | GitOp::Blob { .. } => return None,
             };
             return Some(self.quiet("commit-busy", words).into_any_element());
         }

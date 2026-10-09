@@ -47,7 +47,7 @@ impl ReviewView {
     /// The op that reads the file at `at` whole, when it was left out and has a side to read.
     fn whole_op(&self, at: usize) -> Option<GitOp> {
         let file = self.model.file(at)?;
-        (file.patch.clipped_lines > 0 && !file.binary)
+        (file.patch.clipped_lines > 0 && file.is_text())
             .then(|| GitOp::FileDiff { from: file.from.clone(), to: file.to.clone() })
     }
 

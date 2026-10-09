@@ -1631,7 +1631,9 @@ fn a_folder_commented<'a>(
         path: "src/lib.rs".to_owned(),
         from: Some("old".to_owned()),
         to: Some("new".to_owned()),
-        binary: false,
+        kind: slopty_proto::thread::wire::FileKind::Text,
+        old_path: None,
+        modes: None,
         patch: Patch {
             hunks: vec![Hunk {
                 old_start: 10,

@@ -1,0 +1,6 @@
+---
+source: crates/slopty-proto/tests/golden_git.rs
+expression: hex(&bytes)
+---
+12 00 00 00 1c 0d 00 0d 04 63 63 33 33 08 89 50
+4e 47 0d 0a 1a 0a

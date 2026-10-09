@@ -23,6 +23,7 @@ mod golden_project {
         TaskStep, TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
+    use slopty_proto::settings::{DaemonSettings, SettingEdit};
     use slopty_proto::terminal::RepoId;
     use slopty_proto::thread::wire::{NewWorktree, PullSeen, PullStands, Start};
     use slopty_proto::thread::{AgentId, ThreadId};
@@ -620,6 +621,41 @@ mod golden_project {
                 branch: Some("worktree-slopty-slopty-3".to_owned()),
                 branch_removed: true,
             }),
+        );
+        snap(
+            "drop_branches",
+            &request(Verb::DropBranches {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                branches: vec!["slopty/slopty/3".to_owned(), "slopty/slopty/target".to_owned()],
+            }),
+        );
+        let edit = |key: &str, entry: Option<&str>, literal: Option<&str>| SettingEdit {
+            table: "worker".to_owned(),
+            key: key.to_owned(),
+            entry: entry.map(str::to_owned),
+            literal: literal.map(str::to_owned),
+        };
+        snap(
+            "settings_edit",
+            &request(Verb::Settings {
+                of: Some(worker),
+                edits: vec![
+                    edit("acp", Some("gemini"), Some(r#"["gemini", "--experimental-acp"]"#)),
+                    edit("allow", None, None),
+                ],
+            }),
+        );
+        snap("settings_read_server", &request(Verb::Settings { of: None, edits: vec![] }));
+        snap(
+            "settings",
+            &reply(Outcome::Settings(Box::new(DaemonSettings {
+                path: "/Users/me/Library/Application Support/Slopty/settings.toml".to_owned(),
+                text: "[worker]\nacp = { gemini = [\"gemini\", \"--experimental-acp\"] }\n"
+                    .to_owned(),
+                tables: vec!["worker".to_owned()],
+                problems: vec!["worker.display_linger: expected a number".to_owned()],
+            }))),
         );
         let merged = Merge::Merged {
             target: "main".to_owned(),

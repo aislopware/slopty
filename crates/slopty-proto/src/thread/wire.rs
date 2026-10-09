@@ -637,19 +637,61 @@ pub struct Review {
 /// One file of a review.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FileDiff {
-    /// The file, from the repository's root.
+    /// The file, from the repository's root; its new path when it was renamed.
     pub path: String,
+    /// Where it was on the old side when git found it renamed there (`-M`); `None` otherwise.
+    pub old_path: Option<String>,
     /// Its blob on the old side; `None` when it was added.
     pub from: Option<String>,
     /// Its blob on the new side; `None` when it was removed.
     pub to: Option<String>,
-    /// Its bytes are not text, so it has no hunks.
-    pub binary: bool,
-    /// Its hunks, the ones [`Pick::hunks`] count.
+    /// What its bytes are, and so whether it has hunks.
+    pub kind: FileKind,
+    /// Its mode on each side, when the two differ (an executable bit set, a file become a
+    /// link); `None` when they are the same or a side is absent.
+    pub modes: Option<Modes>,
+    /// Its hunks, the ones [`Pick::hunks`] count; none unless it is [`FileKind::Text`].
     pub patch: Patch,
 }
 
+/// What a reviewed file's bytes are: whether the worker cut it into hunks, and why not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FileKind {
+    /// Text, cut into hunks.
+    Text,
+    /// Bytes that are not text and not a picture the client draws.
+    Binary,
+    /// Text larger than the worker cuts into hunks; its whole diff is asked for by
+    /// [`crate::git::GitOp::FileDiff`].
+    TooLarge {
+        /// The larger side's size, in bytes.
+        bytes: u64,
+    },
+    /// A picture (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG), each side's bytes asked for by
+    /// [`crate::git::GitOp::Blob`].
+    Image {
+        /// The larger side's size, in bytes.
+        bytes: u64,
+    },
+}
+
+/// A file's mode on each side of a review, as git writes it (`0o100644`, `0o100755`,
+/// `0o120000` for a symbolic link).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Modes {
+    /// On the old side.
+    pub from: u32,
+    /// On the new side.
+    pub to: u32,
+}
+
 impl FileDiff {
+    /// Whether it was cut into hunks: its bytes are text the worker reads whole.
+    #[must_use]
+    pub const fn is_text(&self) -> bool {
+        matches!(self.kind, FileKind::Text)
+    }
+
     /// Lines added and removed: how much there is to read in it, hunks shown or not.
     #[must_use]
     pub const fn weight(&self) -> u32 {

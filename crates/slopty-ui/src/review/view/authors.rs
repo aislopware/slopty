@@ -49,7 +49,7 @@ impl ReviewView {
         if self.authored.contains_key(&at) {
             return;
         }
-        let Some(file) = self.model.file(at).filter(|f| !f.binary) else { return };
+        let Some(file) = self.model.file(at).filter(|f| f.is_text()) else { return };
         let Some(blob) = file.to.clone() else { return };
         let path = file.path.clone();
         self.authors_asked.insert(at);

@@ -36,6 +36,10 @@ pub const COMMENTS_MAX: usize = 100;
 pub const NOTES_MAX: usize = 20;
 /// The longest note kept, in bytes: its start.
 pub const NOTE_MAX: usize = 4000;
+/// The most notes on lines one review of the person's posts ([`GitOp::PullReview`]).
+pub const REVIEW_NOTES_MAX: usize = 200;
+/// The largest blob [`GitOp::Blob`] sends, in bytes: half a frame.
+pub const BLOB_MAX: u64 = 8 * 1024 * 1024;
 
 /// What to do in the repository.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -125,6 +129,66 @@ pub enum GitOp {
         /// Its blob on the new side; `None` when it was removed.
         to: Option<String>,
     },
+    /// One blob's bytes, as a review named it
+    /// ([`FileDiff::from`](crate::thread::wire::FileDiff::from)
+    /// or [`FileDiff::to`](crate::thread::wire::FileDiff::to)), for a picture's two sides
+    /// ([`FileKind::Image`](crate::thread::wire::FileKind::Image); [`GitDone::Blob`]). Refused
+    /// past [`BLOB_MAX`] bytes.
+    Blob {
+        /// The blob, in hex.
+        blob: String,
+    },
+    /// Post a review on pull request `number` through the person's own `gh` (a merge request's
+    /// discussion through `glab` on a GitLab): their notes on lines of its files and their word
+    /// over the whole, as one review ([`GitDone::PullReviewed`]). Nothing else on the forge
+    /// moves.
+    PullReview {
+        /// Its number.
+        number: u32,
+        /// What the review says of the whole.
+        verdict: ReviewVerdict,
+        /// The person's words over the whole, as they wrote them; may be empty for a
+        /// [`ReviewVerdict::Comment`] with notes.
+        body: String,
+        /// Their notes on lines, at most [`REVIEW_NOTES_MAX`].
+        notes: Vec<ReviewNote>,
+        /// The head commit the person reviewed, in hex: the notes are anchored at it, and the
+        /// forge refuses them when the pull request has moved past it.
+        head: Option<String>,
+    },
+}
+
+/// What a person's review of a pull request says of the whole ([`GitOp::PullReview`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ReviewVerdict {
+    /// Notes only, neither approving nor asking for changes.
+    Comment,
+    /// Approve it.
+    Approve,
+    /// Ask for changes before it merges.
+    RequestChanges,
+}
+
+/// One note of a person's review, on a line of a file ([`GitOp::PullReview`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReviewNote {
+    /// The file, from the repository's root.
+    pub path: String,
+    /// The line, counted from one on `side`.
+    pub line: u32,
+    /// Which side of the diff the line is on.
+    pub side: LineSide,
+    /// What the person wrote, at most [`NOTE_MAX`] bytes.
+    pub body: String,
+}
+
+/// Which side of a diff a line is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum LineSide {
+    /// The old side: a line removed.
+    Old,
+    /// The new side: a line added or kept.
+    New,
 }
 
 /// What a [`GitOp`] did.
@@ -194,6 +258,21 @@ pub enum GitDone {
         to: Option<String>,
         /// Its hunks.
         patch: Box<crate::thread::Patch>,
+    },
+    /// One blob's bytes.
+    Blob {
+        /// The blob, as asked.
+        blob: String,
+        /// Its bytes, at most [`BLOB_MAX`].
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// The person's review posted.
+    PullReviewed {
+        /// Its page, when the forge said.
+        url: Option<String>,
+        /// How many notes on lines went with it.
+        posted: u32,
     },
 }
 

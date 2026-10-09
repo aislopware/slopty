@@ -339,7 +339,9 @@ fn changes_in_review(
             .to_owned(),
         from: Some("old".to_owned()),
         to: Some("new".to_owned()),
-        binary: false,
+        kind: slopty_proto::thread::wire::FileKind::Text,
+        old_path: None,
+        modes: None,
         patch: Patch { hunks: Vec::new(), added: 12, removed: 3, clipped_lines: 0, full: None },
     };
     let review = Review {

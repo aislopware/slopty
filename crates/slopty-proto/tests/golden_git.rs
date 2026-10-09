@@ -6,7 +6,8 @@
 mod golden_git {
     use slopty_proto::git::{
         AgentWorktree, Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus,
-        PullCheck, PullComments, PullNote, PullStatus, PullThread, Worktrees,
+        LineSide, PullCheck, PullComments, PullNote, PullStatus, PullThread, ReviewNote,
+        ReviewVerdict, Worktrees,
     };
     use slopty_proto::thread::AgentId;
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
@@ -113,12 +114,41 @@ mod golden_git {
         snap("client_git_branches", &ask(10, GitOp::Branches));
         snap("client_git_pull_comments", &ask(11, GitOp::PullComments { number: 7 }));
         snap("client_git_worktrees", &ask(12, GitOp::Worktrees));
+        snap("client_git_blob", &ask(13, GitOp::Blob { blob: "cc33".to_owned() }));
+        let review = GitOp::PullReview {
+            number: 7,
+            verdict: ReviewVerdict::RequestChanges,
+            body: "Two things before this lands.".to_owned(),
+            notes: vec![
+                ReviewNote {
+                    path: "src/lib.rs".to_owned(),
+                    line: 12,
+                    side: LineSide::New,
+                    body: "This unwrap panics on an empty list.".to_owned(),
+                },
+                ReviewNote {
+                    path: "src/old.rs".to_owned(),
+                    line: 4,
+                    side: LineSide::Old,
+                    body: "Keep this guard.".to_owned(),
+                },
+            ],
+            head: Some("89abcdef0123456789abcdef0123456789abcdef".to_owned()),
+        };
+        snap("client_git_pull_review", &ask(14, review));
     }
 
     #[test]
     fn worker_git_done() {
         let done = |request, outcome| WorkerMsg::GitDone { request, outcome };
         snap("worker_git_status", &done(3, GitOutcome::Done(status())));
+        let blob = GitDone::Blob { blob: "cc33".to_owned(), bytes: b"\x89PNG\r\n\x1a\n".to_vec() };
+        snap("worker_git_blob", &done(13, GitOutcome::Done(blob)));
+        let reviewed = GitDone::PullReviewed {
+            url: Some("https://github.com/o/demo/pull/7#pullrequestreview-1".to_owned()),
+            posted: 2,
+        };
+        snap("worker_git_pull_reviewed", &done(14, GitOutcome::Done(reviewed)));
         let committed = GitDone::Committed {
             commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
             branch: Some("feature".to_owned()),
@@ -255,7 +285,7 @@ mod golden_git {
     #[test]
     fn folder_changes() {
         use slopty_proto::thread::detail::Hunk;
-        use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope};
+        use slopty_proto::thread::wire::{Against, FileDiff, FileKind, Review, ReviewScope};
         use slopty_proto::thread::{Patch, TreeRef};
 
         let ask = |request, op| ClientMsg::Git { request, repo: "~/src/demo".to_owned(), op };
@@ -265,7 +295,9 @@ mod golden_git {
             path: "src/lib.rs".to_owned(),
             from: Some("1f2e3d4c".to_owned()),
             to: Some("5a6b7c8d".to_owned()),
-            binary: false,
+            kind: FileKind::Text,
+            old_path: None,
+            modes: None,
             patch: Patch {
                 hunks: vec![Hunk {
                     old_start: 3,

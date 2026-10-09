@@ -709,6 +709,50 @@ async fn take_out(
     Ok(Removed { branch, branch_removed })
 }
 
+/// Delete `branches` of the clone at `clone`, names the server set under `slopty/`.
+///
+/// It answers [`slopty_proto::orchestration::Verb::DropBranches`]: a merged task's home branch,
+/// a gone project's target. One the clone lacks is passed over; one a worktree has checked out
+/// stays, as git keeps it. Returns the ones deleted.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a name not under `slopty/` (nothing is deleted then), and
+/// [`Failed::Other`] for a git that failed.
+pub async fn drop_branches(
+    git: &Path,
+    clone: &Path,
+    branches: &[String],
+) -> Result<Vec<String>, Failed> {
+    if let Some(stray) = branches.iter().find(|b| !server_named(b)) {
+        return Err(Failed::NotOne(format!("{stray} is no branch Slopty named")));
+    }
+    let mut dropped = Vec::new();
+    for branch in branches {
+        let reference = format!("refs/heads/{branch}");
+        let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
+        if bundle::run(git, clone, &verify).await.is_err() {
+            continue;
+        }
+        let args = ["branch", "-D", "--end-of-options", branch.as_str()];
+        match bundle::run(git, clone, &args).await {
+            Ok(_) => dropped.push(branch.clone()),
+            Err(e) => tracing::info!(%branch, error = %e, "a server's branch kept"),
+        }
+    }
+    Ok(dropped)
+}
+
+/// Whether `branch` is one the server names: under `slopty/`, with no part git would read as
+/// something else.
+fn server_named(branch: &str) -> bool {
+    branch.strip_prefix("slopty/").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.split('/').all(|part| !part.is_empty() && !part.starts_with('.'))
+            && !branch.contains("..")
+            && branch.bytes().all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+    })
+}
+
 /// Free the worktree at `worktree` for the person, as [`remove`] does for a task.
 ///
 /// What counts as landed is read from its clone: `origin`'s default branch and the branch the
@@ -874,6 +918,41 @@ mod tests {
         assert_eq!(kept, Removed { branch: Some(open_branch.clone()), branch_removed: false });
         assert!(!open.exists());
         assert!(has_branch(&clone, &open_branch), "its work is on its branch alone");
+    }
+
+    /// The server's branches go when it drops them: one absent is passed over, one a worktree
+    /// has checked out stays, and a name the server never sets deletes nothing at all.
+    #[tokio::test]
+    async fn the_server_s_branches_go_and_no_other() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        for branch in ["slopty/p/3", "slopty/p/target", "slopty/p/4", "feature"] {
+            git_in(&clone, &["branch", branch]);
+        }
+        let held = tmp.path().join("held");
+        git_in(&clone, &["worktree", "add", "-q", &held.to_string_lossy(), "slopty/p/4"]);
+
+        let stray = ["slopty/p/3".to_owned(), "feature".to_owned()];
+        let refused = drop_branches(git, &clone, &stray).await;
+        assert!(matches!(refused, Err(Failed::NotOne(_))), "{refused:?}");
+        assert!(has_branch(&clone, "slopty/p/3") && has_branch(&clone, "feature"));
+        for name in ["slopty/", "slopty/../main", "slopty/p/-x y"] {
+            let refused = drop_branches(git, &clone, &[name.to_owned()]).await;
+            assert!(matches!(refused, Err(Failed::NotOne(_))), "{name}: {refused:?}");
+        }
+
+        let asked: Vec<String> = ["slopty/p/3", "slopty/p/target", "slopty/p/4", "slopty/p/9"]
+            .map(str::to_owned)
+            .to_vec();
+        let dropped = drop_branches(git, &clone, &asked).await.expect("dropped");
+        assert_eq!(dropped, ["slopty/p/3", "slopty/p/target"]);
+        assert!(!has_branch(&clone, "slopty/p/3") && !has_branch(&clone, "slopty/p/target"));
+        assert!(has_branch(&clone, "slopty/p/4"), "checked out in a worktree, so kept");
+        assert!(has_branch(&clone, "feature"));
     }
 
     /// A worktree is made where Claude Code's `--worktree` makes one, on its branch from

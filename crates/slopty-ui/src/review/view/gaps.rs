@@ -67,7 +67,7 @@ impl ReviewView {
     pub(super) fn new_side(&self, at: usize) -> Option<String> {
         self.own()?;
         let file = self.model.file(at)?;
-        file.to.clone().filter(|_| !file.binary)
+        file.to.clone().filter(|_| file.is_text())
     }
 
     /// The lines of the file at `at`'s new side, once they came.

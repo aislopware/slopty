@@ -227,6 +227,8 @@ pub async fn git_op(
         GitOp::Worktrees => "worktrees",
         GitOp::Scripts => "run scripts",
         GitOp::FileDiff { .. } => "file diff",
+        GitOp::Blob { .. } => "blob",
+        GitOp::PullReview { .. } => "pull request review",
     };
     let terminals = if matches!(op, GitOp::RemoveWorktree | GitOp::Worktrees) {
         terminal_dirs(worker).await
