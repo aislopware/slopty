@@ -111,6 +111,7 @@ const BUBBLE_CHARS: usize = 480;
 mod aside;
 mod asking;
 mod branch;
+pub use branch::Elsewhere;
 mod changes;
 pub(crate) mod composer;
 mod composing;
@@ -201,6 +202,24 @@ pub enum ThreadViewEvent {
         /// Its path, absolute, or under `~`.
         path: String,
     },
+    /// "Branch from here" opened: the workspace names the other machines that have the
+    /// thread's repository ([`ThreadView::set_elsewhere`]).
+    AskElsewhere {
+        /// The thread.
+        thread: ThreadId,
+    },
+    /// Go on from the thread on another machine that has its repository: a new thread of
+    /// `agent` there in `cwd`, its first message written but not sent, opening on `seed`.
+    ContinueOn {
+        /// The machine.
+        worker: slopty_client::layout::WorkerKey,
+        /// Where the new thread works there.
+        cwd: String,
+        /// Its agent.
+        agent: AgentId,
+        /// What its composer opens with: a pointer back to this thread.
+        seed: String,
+    },
 }
 
 /// One thread, drawn.
@@ -219,6 +238,9 @@ pub struct ThreadView {
     /// How many runs the thread's first message has, itself among them: one, or as many as it
     /// was started on side by side ([`ThreadViewEvent::ReviewRuns`]).
     runs: usize,
+    /// The other machines that have the thread's repository, as the workspace last said: where
+    /// "Branch from here" can go on.
+    elsewhere: Vec<Elsewhere>,
     /// The last frame drew the empty thread's question with the composer under it.
     heroed: bool,
     /// How many times the composer has docked at the foot after the question, for the move's
@@ -484,6 +506,7 @@ impl ThreadView {
             briefed: false,
             photos: cfg!(target_os = "ios"),
             runs: 1,
+            elsewhere: Vec::new(),
             heroed: false,
             docks: None,
             width: 0.0,
@@ -631,6 +654,15 @@ impl ThreadView {
         if self.runs != runs {
             self.runs = runs;
             cx.notify();
+        }
+    }
+
+    /// The other machines that have the thread's repository, where it can go on
+    /// ([`ThreadViewEvent::AskElsewhere`]).
+    pub fn set_elsewhere(&mut self, elsewhere: Vec<Elsewhere>, cx: &mut Context<Self>) {
+        if self.elsewhere != elsewhere {
+            self.elsewhere = elsewhere;
+            self.rebuild(cx);
         }
     }
 

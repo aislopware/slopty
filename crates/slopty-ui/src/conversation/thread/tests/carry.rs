@@ -238,3 +238,73 @@ fn branching_from_a_message_keeps_or_puts_back_the_files(cx: &mut TestAppContext
     let (fresh, cx) = view(cx, &hub, new);
     assert_eq!(fresh.read_with(cx, ThreadView::draft), "Count the lines");
 }
+
+/// "Branch from here" asks the workspace which other machines have the thread's repository,
+/// and offers them under Machine. On one of them, the agent is chosen among that machine's,
+/// the thread's own first, and Branch hands the workspace a start there in its clone, opening
+/// on a pointer back that names this machine. Nothing is asked of this thread's worker.
+#[gpui::test]
+fn branching_onto_another_machine_hands_the_workspace_a_start_there(cx: &mut TestAppContext) {
+    use crate::conversation::thread::ThreadViewEvent;
+    use crate::conversation::thread::view::Elsewhere;
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::REWIND)];
+    state.meta.facts.insert("branch".to_owned(), "main".to_owned());
+    state.status.phase = Phase::Working;
+    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
+    state.items = vec![user("u", 1)];
+    let own = state.meta.agent.clone();
+    let codex = AgentId::named(AgentId::CODEX);
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    let heard: Rc<RefCell<Vec<ThreadViewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_v, event: &ThreadViewEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    open_branch(cx);
+    assert!(
+        matches!(heard.borrow().as_slice(), [ThreadViewEvent::AskElsewhere { thread: t }] if *t == thread),
+        "the workspace is asked where else it can go on"
+    );
+    assert!(cx.debug_bounds("branch-on-here").is_none(), "no other machine, no Machine row");
+
+    let forge = slopty_client::layout::WorkerKey::new(2);
+    let there = Elsewhere {
+        worker: forge,
+        machine: "forge".to_owned(),
+        cwd: "/home/f/atlas/crates/x".to_owned(),
+        agents: vec![own, codex.clone()],
+    };
+    view.update(cx, |v, cx| v.set_elsewhere(vec![there], cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("branch-on-here").is_some(), "this machine first");
+    click(cx, "branch-on-0");
+    assert!(cx.debug_bounds("branch-from-message").is_none(), "another machine takes it all");
+    click(cx, "branch-agent-1");
+    heard.borrow_mut().clear();
+    click(cx, "branch-go");
+    assert!(intents(&sent).is_empty(), "nothing asked of this worker, even mid-turn");
+    assert!(cx.debug_bounds("branch-panel").is_none(), "the panel shuts");
+    let heard = heard.borrow();
+    let [ThreadViewEvent::ContinueOn { worker, cwd, agent, seed }] = heard.as_slice() else {
+        panic!("one start elsewhere: {heard:?}");
+    };
+    assert_eq!((*worker, cwd.as_str(), agent), (forge, "/home/f/atlas/crates/x", &codex));
+    for part in [
+        thread.to_string(),
+        "on studio, in /w".to_owned(),
+        "on branch main".to_owned(),
+        format!("slopty agent read --thread {thread}"),
+    ] {
+        assert!(seed.contains(&part), "{part:?} in {seed:?}");
+    }
+}

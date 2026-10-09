@@ -39,6 +39,7 @@ use slopty_proto::{ClientMsg, RequestId};
 use super::actions::SwitchFace;
 use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
+use crate::conversation::thread::view::Elsewhere;
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, find, hub};
 use crate::icons::{Status, Symbol};
 use crate::palette::{CommandPalette, PaletteItem};
@@ -154,6 +155,9 @@ pub(super) struct ThreadFaces {
     review_asked: Vec<(WorkerKey, ThreadId, Option<crate::review::Scope>)>,
     /// The review tiles made and not yet opened, and the worker whose agent runs each thread.
     review_made: Vec<(WorkerKey, ThreadId)>,
+    /// The threads asked to go on on another machine, started in the next sync: there, the
+    /// agent, the folder and the first message.
+    continue_asked: Vec<(WorkerKey, AgentId, String, String)>,
     /// The thread view of each thread tile, kept while its tile is there.
     items: HashMap<ItemId, Entity<ThreadView>>,
     item_asks: HashMap<ItemId, gpui::Subscription>,
@@ -1454,7 +1458,70 @@ impl WorkspaceView {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
             ThreadViewEvent::OpenFile { path } => self.open_file_on(Some(key), &path, None, cx),
+            ThreadViewEvent::AskElsewhere { thread } => {
+                let elsewhere = self.going_on_elsewhere(key, thread);
+                view.update(cx, |v, cx| v.set_elsewhere(elsewhere, cx));
+            }
+            ThreadViewEvent::ContinueOn { worker, cwd, agent, seed } => {
+                self.continue_on(worker, agent, cwd, seed, cx);
+            }
         }
+    }
+
+    /// The other machines with a clone of `thread`'s repository, linked and able to start an
+    /// agent, where it can go on: each in the thread's folder within its clone there, its
+    /// agents the thread's own first.
+    pub(super) fn going_on_elsewhere(&self, key: WorkerKey, thread: ThreadId) -> Vec<Elsewhere> {
+        let threads = &self.faces.threads;
+        let Some(place) = threads.places.get(&thread) else { return Vec::new() };
+        let (Some(root), Some(id)) = (place.repo.as_deref(), place.repo_id.as_ref()) else {
+            return Vec::new();
+        };
+        let within = place.cwd.as_deref().and_then(|cwd| cwd.strip_prefix(root)).unwrap_or("");
+        let sessions = self.workers.iter().flat_map(|(w, worker)| {
+            worker
+                .sessions
+                .values()
+                .filter_map(move |s| Some((*w, s.repo.as_deref()?, s.repo_id.as_ref()?)))
+        });
+        let rows = threads.places.iter().filter_map(|(t, p)| {
+            let worker = threads.stands.get(t)?.worker;
+            Some((worker, p.repo.as_deref()?, p.repo_id.as_ref()?))
+        });
+        let own = threads.agents.get(&thread);
+        let mut out: Vec<Elsewhere> = clones_elsewhere(id, key, sessions.chain(rows))
+            .into_iter()
+            .filter_map(|(worker, clone)| {
+                let mut agents = self.startable_on(worker);
+                if let Some(at) = own.and_then(|own| agents.iter().position(|a| a == own)) {
+                    let own = agents.remove(at);
+                    agents.insert(0, own);
+                }
+                (!agents.is_empty()).then(|| Elsewhere {
+                    worker,
+                    machine: self.worker_name(worker),
+                    cwd: format!("{clone}{within}"),
+                    agents,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.machine.cmp(&b.machine));
+        out
+    }
+
+    /// Start a thread of `agent` on `worker` in `cwd`, its first message opening on `seed`
+    /// for the person to send: made in the next sync, which has the window.
+    pub(super) fn continue_on(
+        &mut self,
+        worker: WorkerKey,
+        agent: AgentId,
+        cwd: String,
+        seed: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.faces.threads.continue_asked.push((worker, agent, cwd, seed));
+        self.faces_dirty = true;
+        cx.notify();
     }
 
     /// The subagent threads under `session`'s own thread, however deep: each row whose chain
@@ -1546,6 +1613,15 @@ impl WorkspaceView {
                 if let Some(key) = self.worker_of_session(session) {
                     self.open_file_on(Some(key), &path, None, cx);
                 }
+            }
+            ThreadViewEvent::AskElsewhere { thread } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    let elsewhere = self.going_on_elsewhere(key, thread);
+                    view.update(cx, |v, cx| v.set_elsewhere(elsewhere, cx));
+                }
+            }
+            ThreadViewEvent::ContinueOn { worker, cwd, agent, seed } => {
+                self.continue_on(worker, agent, cwd, seed, cx);
             }
         }
     }
@@ -1658,6 +1734,13 @@ impl WorkspaceView {
         self.sync_thread_faces(&wanted, window, cx);
         self.sync_thread_items(window, cx);
         self.count_runs(cx);
+        for (worker, agent, cwd, seed) in std::mem::take(&mut self.faces.threads.continue_asked) {
+            let start = super::actions::StartThread { worker, agent, cwd, worktree: false };
+            let item = self.begin_start(start, window, cx);
+            if let Some(view) = self.starting.draft_view(item) {
+                view.update(cx, |v, cx| v.restore_draft(&seed, window, cx));
+            }
+        }
         self.sync_changes(window, cx);
         // Picks of sessions that are gone go with them, and views handed to a tile that went.
         let terminals = &self.terminals;
@@ -1984,3 +2067,24 @@ fn limit_resets(row: &ThreadRow) -> Option<slopty_core::WallMs> {
 
 /// A rate window used up, in hundredths of a percent.
 const FULL_BP: u32 = 10_000;
+
+/// The clones of repository `id` on machines other than `here`, one a machine: of `known`'s
+/// checkouts there (a worker, its root, its repository), the shortest root, so the clone
+/// itself wins over its worktrees.
+pub(super) fn clones_elsewhere<'a>(
+    id: &slopty_proto::terminal::RepoId,
+    here: WorkerKey,
+    known: impl IntoIterator<Item = (WorkerKey, &'a str, &'a slopty_proto::terminal::RepoId)>,
+) -> Vec<(WorkerKey, String)> {
+    let mut found: HashMap<WorkerKey, &str> = HashMap::new();
+    for (worker, root, other) in known {
+        if worker == here || !id.same(other) {
+            continue;
+        }
+        let kept = found.entry(worker).or_insert(root);
+        if (root.len(), root) < (kept.len(), *kept) {
+            *kept = root;
+        }
+    }
+    found.into_iter().map(|(w, root)| (w, root.to_owned())).collect()
+}

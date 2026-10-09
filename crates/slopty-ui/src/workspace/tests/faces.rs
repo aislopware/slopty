@@ -458,3 +458,59 @@ fn a_branch_opens_as_a_tile_and_an_aside_does_not(cx: &mut TestAppContext) {
         assert_eq!(v.needs_you_count(), 0, "its request is the sheet's");
     });
 }
+
+/// A thread goes on on another machine that has a clone of its repository: the machines that
+/// do (by its origin, the clone itself rather than a worktree of it, the thread's folder
+/// within it) are offered, one that has another repository is not, and going on opens a
+/// start there whose composer holds the pointer back, nothing sent until the person sends it.
+#[gpui::test]
+fn a_thread_goes_on_on_another_machine_with_its_repository(cx: &mut TestAppContext) {
+    use slopty_proto::terminal::RepoId;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let mut forge = connect(&view, cx, 2, "forge");
+    let attic = connect(&view, cx, 3, "attic");
+    let repo = |origin: &str| RepoId { origin: Some(origin.to_owned()), root: None, url: None };
+    let atlas = repo("github.com/o/atlas");
+    let checkout = |root: &str, id: &RepoId| SessionSummary {
+        repo: Some(root.to_owned()),
+        repo_id: Some(id.clone()),
+        ..summary(SessionId::new(), Some(root))
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.session_opened(forge.key, checkout("/home/f/atlas/.claude/worktrees/try-it", &atlas), cx);
+        v.session_opened(forge.key, checkout("/home/f/atlas", &atlas), cx);
+        v.session_opened(attic.key, checkout("/srv/other", &repo("github.com/o/other")), cx);
+    });
+    let (_tile, session) = agent_tile(&view, cx, &mut studio);
+    let state = thread_on(session);
+    let thread = state.meta.id;
+    let mut row = state.row(WallMs::ZERO);
+    row.cwd = Some("/w/atlas/crates/x".to_owned());
+    row.repo = Some("/w/atlas".to_owned());
+    row.repo_id = Some(atlas.clone());
+    table(&view, cx, studio.key, vec![row]);
+
+    let found = view.read_with(cx, |v, _| v.going_on_elsewhere(studio.key, thread));
+    let places: Vec<(&str, &str)> =
+        found.iter().map(|e| (e.machine.as_str(), e.cwd.as_str())).collect();
+    assert_eq!(places, [("forge", "/home/f/atlas/crates/x")]);
+    assert_eq!(found[0].agents.first(), Some(&state.meta.agent), "the thread's own agent leads");
+
+    let there = found[0].clone();
+    let pointer = "This goes on from thread …".to_owned();
+    view.update_in(cx, |v, _w, cx| {
+        v.continue_on(there.worker, there.agents[0].clone(), there.cwd, pointer.clone(), cx);
+    });
+    cx.run_until_parked();
+    let start = focused(&view, cx).expect("the start has the focus");
+    assert_eq!(start.worker, forge.key, "on the other machine");
+    let (cwd, drafted) = view.update(cx, |v, cx| {
+        let cwd = v.starting.get(start.item).map(|s| s.cwd.clone());
+        (cwd, v.starting.draft_view(start.item).map(|d| d.read(cx).draft(cx)))
+    });
+    assert_eq!(cwd.as_deref(), Some("/home/f/atlas/crates/x"));
+    assert_eq!(drafted, Some(pointer), "the pointer waits in its composer");
+    assert!(thread_starts(&mut forge).is_empty(), "nothing goes until the person sends it");
+}

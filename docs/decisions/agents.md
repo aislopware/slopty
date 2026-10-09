@@ -2396,3 +2396,29 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     the daemon's
     `threads::a_start_in_a_worktree_opens_its_agent_there_and_a_close_takes_it_away`, and
     `workspace::tests::agent_tile::keeping_a_run_closes_the_message_s_other_runs`.
+
+- ✅ **A thread goes on on another machine that has its repository** (readiness R18,
+  2026-10-09). "Branch from here" offered only the thread's own machine, so work begun on the
+  laptop could not move to the build box without starting over by hand. The panel now has a
+  Machine setting, shown when another linked machine has a clone of the thread's repository.
+  - **Which machines.** The workspace matches the thread's `RepoId` (its origin, else its first
+    commit) against every checkout it knows on the other machines: their shells' repositories
+    and their threads'. On each machine the shortest root wins, so the clone itself is chosen
+    over its worktrees. The new thread works in the thread's own folder within that clone. A
+    machine that can start no agent is left out. A clone on a machine with no shell or thread
+    open there is not known, so it is not offered; cloning a repository onto a machine is a
+    separate item (readiness R14).
+  - **What starts.** Nothing is asked of the thread's own worker. The panel hands the workspace
+    a start on the other machine (`ThreadViewEvent::ContinueOn`), and it opens as any start
+    does: a tile of its own with the agent's chips, its composer holding the same pointer back
+    as "Continue in…" does, naming the machine the thread is on. `slopty agent read --thread`
+    finds a thread on whichever worker holds it, so the new agent reads the old thread the same
+    way from anywhere. The person sends, changes or clears the pointer, and nothing goes until
+    they do. The agent is the thread's own when that machine has it, else that machine's
+    first, and the Agent row offers the rest. From and Files are not offered there: a fresh
+    thread elsewhere starts from the end and touches no files here.
+  - **No wire change.** The panel asks the workspace for the machines when it opens
+    (`ThreadViewEvent::AskElsewhere`, answered with `ThreadView::set_elsewhere`), so nothing is
+    worked out while it is shut.
+  - Tests: `conversation::thread::tests::carry::branching_onto_another_machine_hands_the_workspace_a_start_there`;
+    `workspace::tests::faces::a_thread_goes_on_on_another_machine_with_its_repository`.

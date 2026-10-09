@@ -6,7 +6,9 @@
 //! four settings, so they are one panel:
 //! - **As**: a thread of its own, or an aside: a question beside the work, asked of a fork of the
 //!   whole thread in a sheet over it (`super::aside`), where the agent forks.
-//! - **Agent**: this thread's own, or another the worker can start.
+//! - **Machine**: this one, or another that has a clone of the thread's repository ([`Elsewhere`]),
+//!   where a fresh thread starts in that clone.
+//! - **Agent**: this thread's own, or another the machine can start.
 //! - **From**: this message (the new thread starts just before it, the message waiting in its
 //!   composer) or the end (everything so far).
 //! - **Files**: keep them as they are, or put them back as they were before this message.
@@ -28,13 +30,27 @@ use gpui::{
     IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, div, px,
 };
+use slopty_client::layout::WorkerKey;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AgentId, Cap, ItemBody, ItemId, ThreadMeta, ThreadState, TurnId};
 
-use super::{ThreadView, agent_label, message_group};
+use super::{ThreadView, ThreadViewEvent, agent_label, message_group};
 use crate::colors::hsla;
 use crate::icons::Symbol;
 use crate::kit::{self, ButtonKind};
+
+/// Another machine with a clone of the thread's repository, which the thread can go on on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Elsewhere {
+    /// The machine.
+    pub worker: WorkerKey,
+    /// Its name, for people.
+    pub machine: String,
+    /// Where a thread going on there works: the thread's folder within the clone there.
+    pub cwd: String,
+    /// The agents it can start, the one it would start first leading.
+    pub agents: Vec<AgentId>,
+}
 
 /// The panel open under a message: its settings.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -43,6 +59,8 @@ pub(super) struct Branching {
     pub item: ItemId,
     /// Its turn.
     pub turn: TurnId,
+    /// The other machine the new thread starts on; this one when `None`.
+    pub on: Option<WorkerKey>,
     /// The agent the new thread runs.
     pub agent: AgentId,
     /// From the end, rather than from this message.
@@ -111,10 +129,17 @@ pub(super) fn message_of(state: &ThreadState, turn: TurnId) -> Option<String> {
 
 /// A fresh thread's first words: where the thread it goes on from is, and how to read it.
 fn pointer(meta: &ThreadMeta) -> String {
+    pointer_from(meta, None)
+}
+
+/// [`pointer()`], from another machine than `machine`'s when it is named: the thread is read
+/// the same way from any machine.
+fn pointer_from(meta: &ThreadMeta, machine: Option<&str>) -> String {
     let id = meta.id;
     let on = meta.facts.get("branch").map(|b| format!(" on branch {b}")).unwrap_or_default();
+    let at = machine.map(|m| format!("on {m}, ")).unwrap_or_default();
     format!(
-        "This goes on from thread {id}, in {}{on}. Read it with `slopty agent read --thread \
+        "This goes on from thread {id}, {at}in {}{on}. Read it with `slopty agent read --thread \
          {id}` (add `--activity` for its tool calls) before going on.",
         meta.cwd
     )
@@ -152,13 +177,44 @@ impl ThreadView {
             self.branching = Some(Branching {
                 item: item.clone(),
                 turn,
+                on: None,
                 agent: state.meta.agent.clone(),
                 from_end,
                 revert: false,
                 aside: false,
             });
+            cx.emit(ThreadViewEvent::AskElsewhere { thread: self.thread });
         }
         self.rebuild(cx);
+    }
+
+    /// The machine the panel's new thread starts on, when it is another.
+    fn branch_elsewhere(&self, b: &Branching) -> Option<&Elsewhere> {
+        let on = b.on?;
+        self.elsewhere.iter().find(|e| e.worker == on)
+    }
+
+    /// Start the new thread on another machine on these settings, or move it back here: the
+    /// agent is this thread's own where that machine has it, else its first.
+    fn branch_on(&mut self, on: Option<WorkerKey>, cx: &mut Context<Self>) {
+        let Some(own) = self.state(cx).map(|st| st.meta.agent.clone()) else { return };
+        let there = on.and_then(|w| self.elsewhere.iter().find(|e| e.worker == w));
+        let agent = match there {
+            Some(e) if e.agents.contains(&own) => Some(own),
+            Some(e) => e.agents.first().cloned(),
+            None => Some(own),
+        };
+        let Some(agent) = agent else { return };
+        self.set_branch(
+            move |b| {
+                b.on = on;
+                b.agent = agent;
+                b.from_end = b.from_end || on.is_some();
+                b.revert = b.revert && on.is_none();
+                b.aside = b.aside && on.is_none();
+            },
+            cx,
+        );
     }
 
     fn set_branch(&mut self, change: impl FnOnce(&mut Branching), cx: &mut Context<Self>) {
@@ -174,6 +230,26 @@ impl ThreadView {
             self.branching = None;
             self.ask_aside(window, cx);
             self.rebuild(cx);
+            return;
+        }
+        let away = self.branching.as_ref().and_then(|b| {
+            let there = self.branch_elsewhere(b)?;
+            let state = self.state(cx)?;
+            let here = self.hub.read(cx).worker().to_owned();
+            Some(ThreadViewEvent::ContinueOn {
+                worker: there.worker,
+                cwd: there.cwd.clone(),
+                agent: b.agent.clone(),
+                seed: pointer_from(&state.meta, Some(&here)),
+            })
+        });
+        if self.branching.as_ref().is_some_and(|b| b.on.is_some()) {
+            // A machine gone from the list since it was chosen starts nothing.
+            if let Some(away) = away {
+                self.branching = None;
+                cx.emit(away);
+                self.rebuild(cx);
+            }
             return;
         }
         let asked = self.branching.as_ref().and_then(|b| {
@@ -310,7 +386,8 @@ impl ThreadView {
         let state = self.state(cx)?;
         let theme = &self.theme;
         let s = theme.surfaces;
-        let own = b.agent == state.meta.agent;
+        let there = self.branch_elsewhere(b);
+        let own = b.agent == state.meta.agent && b.on.is_none();
         let aside = b.aside;
         let as_row = (own && self.can_aside(cx)).then(|| {
             let choice = |id: &str, label: &'static str, on: bool| {
@@ -328,7 +405,22 @@ impl ThreadView {
                 ],
             )
         });
-        let agents = self.branch_agents(cx);
+        let machine_row = (!aside && !self.elsewhere.is_empty()).then(|| {
+            let here = SharedString::from(self.hub.read(cx).worker().to_owned());
+            let choice = |id: String, label: SharedString, on: Option<WorkerKey>| {
+                self.branch_choice(id, label, b.on == on, None)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.branch_on(on, cx)))
+                    .into_any_element()
+            };
+            let others = self.elsewhere.iter().enumerate().map(|(ix, e)| {
+                let label = SharedString::from(e.machine.clone());
+                choice(format!("branch-on-{ix}"), label, Some(e.worker))
+            });
+            let choices =
+                std::iter::once(choice("branch-on-here".to_owned(), here, None)).chain(others);
+            self.branch_setting("Machine", choices.collect())
+        });
+        let agents = there.map_or_else(|| self.branch_agents(cx), |e| e.agents.clone());
         let agent_row = (!aside && agents.len() > 1).then(|| {
             let choices = agents
                 .iter()
@@ -392,8 +484,21 @@ impl ThreadView {
             )
         });
         let busy = self.working(cx);
-        let ready = aside || (branch_intent(state, b).is_some() && !busy);
+        let ready = aside
+            || there.is_some()
+            || (b.on.is_none() && branch_intent(state, b).is_some() && !busy);
         let what = match (own, b.from_end) {
+            _ if b.on.is_some() => there.map_or_else(
+                || "That machine is gone".to_owned(),
+                |e| {
+                    format!(
+                        "{} starts on {} in {}, its first message pointing back here",
+                        agent_label(&b.agent),
+                        e.machine,
+                        e.cwd
+                    )
+                },
+            ),
             _ if aside => {
                 "Your draft, asked of a copy of this thread in a sheet over it; gone when it \
                  closes unless you keep it"
@@ -407,7 +512,11 @@ impl ThreadView {
                 "A new thread from just before this message, which waits to be edited".to_owned()
             }
         };
-        let what = if busy && !aside { "Branches once the turn ends".to_owned() } else { what };
+        let what = if busy && !aside && b.on.is_none() {
+            "Branches once the turn ends".to_owned()
+        } else {
+            what
+        };
         let go = if aside { "Ask aside" } else { "Branch" };
         Some(
             kit::card(theme)
@@ -424,6 +533,7 @@ impl ThreadView {
                 .gap(px(theme.spacing.xs))
                 .text_size(px(theme.typography.small()))
                 .children(as_row)
+                .children(machine_row)
                 .children(agent_row)
                 .children(from_row)
                 .children(files_row)
@@ -493,6 +603,7 @@ mod tests {
         let b = |agent: &AgentId, from_end, revert| Branching {
             item: ItemId("u".to_owned()),
             turn: TurnId(2),
+            on: None,
             agent: agent.clone(),
             from_end,
             revert,
