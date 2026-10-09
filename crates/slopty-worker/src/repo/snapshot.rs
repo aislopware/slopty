@@ -503,7 +503,7 @@ impl Repo {
     /// When what is kept of the file is the review's old side, the picked change is kept as it
     /// is. When it is not (an earlier turn's change to the file is not kept, so the last turn's
     /// review starts from lines the kept side lacks), the picked change is merged onto what is
-    /// kept, three ways from the review's old side ([`merge3`]), and refused only where the two
+    /// kept, three ways from the review's old side (`merge3`), and refused only where the two
     /// meet.
     ///
     /// # Errors
