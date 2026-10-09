@@ -8,7 +8,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use slopty_core::{WorkerId, XferId};
 use slopty_platform::files::Directory;
-use slopty_proto::folder::FsOp;
+use slopty_proto::folder::{FileVersion, FsOp};
 use tokio::sync::mpsc;
 
 use crate::changes::{Change, Changes, Expired};
@@ -25,6 +25,24 @@ const REDIAL_MOST: Duration = Duration::from_secs(10);
 
 /// Called when there are changes for the system to ask for.
 pub type Signal = Arc<dyn Fn() + Send + Sync>;
+
+/// The most names a conflicted copy tries before it is sent up anew under the first.
+const COPY_NAMES: u32 = 20;
+
+/// How a file saved in Finder went back to the worker ([`Domain::replace`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Written {
+    /// Its contents are the file's on the worker now.
+    Replaced(Item),
+    /// The file changed on the worker since it was opened here, so it is left as it is, and
+    /// what was saved here lands beside it as a conflicted copy: nothing of either is lost.
+    Kept {
+        /// The file as the worker has it, which the system fetches again.
+        now: Item,
+        /// The copy holding what was saved here.
+        copy: Item,
+    },
+}
 
 /// One worker's domain.
 pub struct Domain {
@@ -183,6 +201,85 @@ impl Domain {
         let name = landed.rsplit('/').next().unwrap_or(&landed);
         let id = named(parent, name)?;
         self.worker().await?.item(&id).await
+    }
+
+    /// Put the contents at `local`, saved in Finder, in place of the file `id` on the worker,
+    /// only while it is still at `base`, the version they were made from. Sent up first into
+    /// the worker's drop directory as transfer `xfer`, then swapped in by the worker, so the
+    /// file is never half written. A file changed on the worker meanwhile (or a `base` not
+    /// known) is left as it is, and what was saved lands beside it as a conflicted copy
+    /// ([`Written::Kept`]), staged under its name in `temporary` when it has to be sent up
+    /// anew.
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, the transfer failed or was cancelled, or the worker would
+    /// not or could not put the file in place, or keep the copy.
+    pub async fn replace(
+        &self,
+        id: &str,
+        local: &Path,
+        base: Option<FileVersion>,
+        (temporary, xfer): (&Path, XferId),
+    ) -> Result<Written, FilesError> {
+        let worker = self.worker().await?;
+        let landed = tokio::select! {
+            landed = worker.upload_staged(local, xfer) => landed?,
+            never = self.keep_linked() => match never {},
+        };
+        let worker = self.worker().await?;
+        if let Some(base) = base {
+            let path = item::on_worker(worker.home(), id);
+            match worker.change(FsOp::Replace { path, with: landed.clone(), base }).await {
+                Ok(_replaced) => return worker.item(id).await.map(Written::Replaced),
+                Err(FilesError::Changed { now, .. }) => {
+                    tracing::info!(%id, ?base, ?now, "saved over a change on the worker: kept a copy");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let copy = self.keep_copy(&worker, id, &landed, (local, temporary)).await?;
+        let now = worker.item(id).await?;
+        Ok(Written::Kept { now, copy })
+    }
+
+    /// Put the file `landed` in the worker's drop directory beside `id` as its conflicted
+    /// copy, under the first free name ([`conflicted`]); sent up anew from `local`, staged in
+    /// `temporary`, when it cannot be moved there (another volume).
+    async fn keep_copy(
+        &self,
+        worker: &Worker,
+        id: &str,
+        landed: &str,
+        (local, temporary): (&Path, &Path),
+    ) -> Result<Item, FilesError> {
+        let (parent, name) = (item::parent(id), item::name(id));
+        for n in 1..=COPY_NAMES {
+            let copy = named(parent, &conflicted(name, n))?;
+            let op =
+                FsOp::Move { from: landed.to_owned(), to: item::on_worker(worker.home(), &copy) };
+            match worker.change(op).await {
+                Ok(_moved) => return worker.item(&copy).await,
+                Err(FilesError::Clash(_)) => {}
+                Err(FilesError::Declined { .. }) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        // Lands as the next free name when even that is taken.
+        let xfer = XferId::new();
+        let staging = temporary.join(xfer.to_string());
+        let staged = staging.join(conflicted(name, 1));
+        tokio::fs::create_dir_all(&staging)
+            .await
+            .map_err(|source| local_error(&staging, source))?;
+        if tokio::fs::hard_link(local, &staged).await.is_err() {
+            tokio::fs::copy(local, &staged).await.map_err(|source| local_error(&staged, source))?;
+        }
+        let sent = self.create_file(parent, &staged, xfer).await;
+        if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
+            tracing::debug!(error = %e, "a staged copy not cleared");
+        }
+        sent
     }
 
     /// Move the item `id` into the folder `parent` as `name`, a rename when its folder stays;
@@ -351,6 +448,25 @@ async fn take_in(
 /// # Errors
 ///
 /// [`FilesError::Declined`] for a name no single path component can be.
+/// The name of `name`'s `n`th conflicted copy: "notes (conflicted copy).txt", then
+/// "notes (conflicted copy 2).txt"; a name with no extension, or a dot file's, takes it at its
+/// end.
+fn conflicted(name: &str, n: u32) -> String {
+    let mark = if n <= 1 { "conflicted copy".to_owned() } else { format!("conflicted copy {n}") };
+    match name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) {
+        Some((stem, ext)) => format!("{stem} ({mark}).{ext}"),
+        None => format!("{name} ({mark})"),
+    }
+}
+
+/// A local file the extension could not stage.
+fn local_error(path: &Path, source: std::io::Error) -> FilesError {
+    FilesError::Transfer(slopty_client::xfer::XferError::Local {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
 fn named(parent: &str, name: &str) -> Result<String, FilesError> {
     item::child(parent, name).ok_or_else(|| FilesError::Declined {
         path: name.to_owned(),
@@ -365,4 +481,19 @@ pub struct Page {
     pub items: Vec<Item>,
     /// Where the next page starts.
     pub next: Option<Cursor>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A conflicted copy keeps its file's extension, and a later one is numbered.
+    #[test]
+    fn a_conflicted_copy_is_named_beside_its_file() {
+        assert_eq!(conflicted("notes.txt", 1), "notes (conflicted copy).txt");
+        assert_eq!(conflicted("notes.txt", 2), "notes (conflicted copy 2).txt");
+        assert_eq!(conflicted("Makefile", 1), "Makefile (conflicted copy)");
+        assert_eq!(conflicted(".env", 1), ".env (conflicted copy)");
+        assert_eq!(conflicted("a.tar.gz", 1), "a.tar (conflicted copy).gz");
+    }
 }

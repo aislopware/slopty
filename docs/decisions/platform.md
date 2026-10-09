@@ -585,10 +585,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       unless the deletion is recursive). A change the worker refuses (the home, a folder into
       itself, another volume, a volume with no trash) is undone in Finder, the item put back as
       the worker has it. Two forks:
-      - *Contents stay read-only.* A file's contents are never written back: the worker writes
-        nothing over, and an edit saved in place would have to. So a file in the domain is
-        read-only; an edited copy is saved as a new file. Writing contents back waits on a
-        replace the worker checks against the version the edit began from.
+      - *Contents were read-only until the save-back below.* A file's contents were never
+        written back: the worker writes nothing over, and an edit saved in place would have to.
+        So a file in the domain was read-only. That waited on a replace the worker checks
+        against the version the edit began from.
       - *The worker's replace (2026-10-10).* That replace is on the wire:
         `FsOp::Replace { path, with, base: FileVersion { size, modified_ms } }`. The new
         contents are sent up first, as any upload into the drop directory. The worker refuses
@@ -599,11 +599,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         and looks at `path` once more. Only then is the copy renamed over `path`, so a write
         made between the first look and the rename is refused rather than lost. The sent file
         goes after. A link at `path` keeps pointing at its file, which is the one replaced
-        (`slopty_platform::fs::replace_from`, `slopty_worker::fsop`). The domain's
-        save-back is wired on top of it, and until then contents stay read-only as above.
+        (`slopty_platform::fs::replace_from`, `slopty_worker::fsop`).
         Tests: `fsop::tests::a_replace_writes_only_over_the_version_seen`,
         `fs::tests::replace_from_puts_a_copy_in_place_only_when_ready`, goldens
         `client_fs_replace` and `worker_fs_refused_changed`.
+      - *Finder saves in place (2026-10-10).*
+        - Every item now allows writing (`AllowsWriting`, which is the same bit as adding to
+          a folder) and is `UserWritable`.
+        - A `modifyItem` that carries `Contents` sends the saved file up into the worker's
+          drop directory (`Dest::Staging`). It then asks a `Replace` over `base`. `base` is
+          read back from the `baseVersion` the system hands in: the content version the
+          extension gave the item, 8 bytes of size and 8 of modification time, little
+          endian (`item::version_of`).
+        - A rename in the same change is done first, and the save goes to the moved item.
+          The upload stops with the progress's cancel.
+        - **Saved over a change on the worker.** `Changed` means the file was written on the
+          worker meanwhile, or the base is not one the extension made. The worker's file is
+          then kept as it is, and the save is moved beside it as "notes (conflicted copy).txt",
+          numbered from 2 when that name is taken. If it cannot be moved there (another
+          volume), it is sent up anew under that name.
+        - **What the system is told.** It is answered with the worker's item and told to fetch
+          it again, so Finder shows the worker's file and the copy appears beside it. Nothing
+          of either side is lost, as Dropbox and iCloud keep a conflicted copy.
+        - **A refused or failed save.** It is undone the same way, the worker's contents
+          fetched back.
+        - Tests: `tests/domain.rs`
+          `a_file_saved_in_finder_replaces_only_the_version_it_was_opened_at` (a real worker:
+          replaced at the version seen, kept with a copy over a change, numbered, and a base
+          not known), `item::tests::a_content_version_names_the_files_version`, and
+          `domain::tests::a_conflicted_copy_is_named_beside_its_file`.
       - *A rename changes the item's identifier.* The identifier is the path, so a moved item
         comes back under its new one, which the system takes as the moved item merged into
         the one at the new place (the header's merge rule); a child of a folder moved before it

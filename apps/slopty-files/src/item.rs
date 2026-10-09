@@ -8,7 +8,8 @@
 //! listings and needs no table, so the extension keeps nothing between its launches. A file
 //! outside the home has no identifier: it is not in the domain.
 
-use slopty_proto::folder::FolderEntry;
+use slopty_core::WallMs;
+use slopty_proto::folder::{FileVersion, FolderEntry};
 use slopty_proto::orchestration::FileKind;
 
 /// The identifier of the domain's root: the worker's home.
@@ -85,12 +86,31 @@ impl Item {
         version
     }
 
+    /// The version of its contents as the worker judges a change against
+    /// ([`slopty_proto::folder::FsOp::Replace`]).
+    #[must_use]
+    pub const fn version(&self) -> FileVersion {
+        FileVersion { size: self.size, modified_ms: WallMs::from_millis(self.modified_ms) }
+    }
+
     /// The version of its metadata: the same pair, since a listing carries nothing more that
     /// the system shows.
     #[must_use]
     pub fn metadata_version(&self) -> Vec<u8> {
         self.content_version()
     }
+}
+
+/// The version a content version the system hands back names ([`Item::content_version`]);
+/// `None` for one not made here.
+#[must_use]
+pub fn version_of(content_version: &[u8]) -> Option<FileVersion> {
+    let (size, modified) = content_version.split_first_chunk::<8>()?;
+    let modified: [u8; 8] = modified.try_into().ok()?;
+    Some(FileVersion {
+        size: u64::from_le_bytes(*size),
+        modified_ms: WallMs::from_millis(u64::from_le_bytes(modified)),
+    })
 }
 
 /// The identifier of the entry `name` of the folder `parent`; `None` for a name that is no
@@ -154,6 +174,17 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "nul\0"] {
             assert_eq!(child("src", bad), None, "{bad:?}");
         }
+    }
+
+    /// The content version the system hands back with a change names the version the worker
+    /// judges the change against; one not made here names none.
+    #[test]
+    fn a_content_version_names_the_files_version() {
+        let file = Item::of_entry("src", &entry("main.rs", FileKind::File, 12)).unwrap();
+        assert_eq!(version_of(&file.content_version()), Some(file.version()));
+        assert_eq!(file.version().size, 12);
+        assert_eq!(version_of(b"short"), None);
+        assert_eq!(version_of(&[0; 17]), None, "a version of another shape");
     }
 
     /// A listing's files and folders are items, with a folder's count and a file's size; a

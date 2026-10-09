@@ -3,10 +3,11 @@
 //!
 //! The system calls in on queues of its own and hands completion handlers that may be called
 //! from any thread, so each call copies its handler, starts the work on the extension's own
-//! runtime and returns at once. What Finder makes, renames, moves or trashes in the domain is
-//! done on the worker, and nothing there is written over or unlinked: a file's contents are
-//! read-only, a new file lands beside the others, and a trashed one goes to the worker's own
-//! trash.
+//! runtime and returns at once. What Finder makes, renames, moves, saves or trashes in the
+//! domain is done on the worker, and nothing there is lost or unlinked: a new file lands
+//! beside the others, a file saved in place replaces the worker's only while that is the
+//! version it was opened at (else the save lands beside it as a conflicted copy), and a
+//! trashed one goes to the worker's own trash.
 
 use std::ffi::{CString, c_char, c_int};
 use std::path::{Path, PathBuf};
@@ -40,7 +41,7 @@ use slopty_core::{WorkerId, XferId};
 use tokio::runtime::Runtime;
 
 use crate::changes::Change;
-use crate::domain::{Domain, Page, Signal};
+use crate::domain::{Domain, Page, Signal, Written};
 use crate::item::{self, Item};
 use crate::pages::Cursor;
 use crate::worker::FilesError;
@@ -161,9 +162,10 @@ fn ns_error(error: &FilesError) -> Retained<NSError> {
         ) => provider(NSFileProviderErrorCode::ServerUnreachable),
         FilesError::Transfer(XferError::Cancelled) => cocoa(NSUserCancelledError),
         FilesError::Clash(_) => provider(NSFileProviderErrorCode::FilenameCollision),
-        FilesError::Transfer(_) | FilesError::Declined { .. } | FilesError::Failed { .. } => {
-            provider(NSFileProviderErrorCode::CannotSynchronize)
-        }
+        FilesError::Transfer(_)
+        | FilesError::Declined { .. }
+        | FilesError::Changed { .. }
+        | FilesError::Failed { .. } => provider(NSFileProviderErrorCode::CannotSynchronize),
     }
 }
 
@@ -287,16 +289,16 @@ define_class!(
         fn modify_item(
             &self,
             item: &NSFileProviderItem,
-            _version: &NSFileProviderItemVersion,
+            version: &NSFileProviderItemVersion,
             fields: NSFileProviderItemFields,
-            _contents: Option<&NSURL>,
+            contents: Option<&NSURL>,
             _options: NSFileProviderModifyItemOptions,
             _request: &NSFileProviderRequest,
             completion: &DynBlock<
                 dyn Fn(*mut NSFileProviderItem, NSFileProviderItemFields, Bool, *mut NSError),
             >,
         ) -> Retained<NSProgress> {
-            self.modify(item, fields, completion)
+            self.modify(item, (version, fields, contents), completion)
         }
 
         #[unsafe(method_id(deleteItemWithIdentifier:baseVersion:options:request:completionHandler:))]
@@ -414,49 +416,61 @@ impl Extension {
     /// Do on the worker what was done to an item in Finder, as
     /// `modifyItem:baseVersion:changedFields:contents:options:request:completionHandler:` asks:
     /// a rename or a move with `Move`, a move to the trash with `Trash`, to the worker's own
-    /// trash, where the person can put it back. A change the worker refuses is undone here, the
-    /// item put back as the worker has it. The rest (its dates, its tags) stays here; its
-    /// contents are never written, since a file in the domain is read-only.
+    /// trash, where the person can put it back, and a file saved in place with `Replace`, over
+    /// the version it was opened at ([`Domain::replace`]). A change the worker refuses is
+    /// undone here, the item put back as the worker has it; a file saved over a change made
+    /// on the worker meanwhile keeps the worker's, which the system fetches again, and what
+    /// was saved lands beside it as a conflicted copy. The rest (its dates, its tags) stays
+    /// here. A cancel of the progress returned stops a save's upload.
     fn modify(
         &self,
         item: &NSFileProviderItem,
-        fields: Fields,
+        (version, fields, contents): (&NSFileProviderItemVersion, Fields, Option<&NSURL>),
         completion: &ChangeHandler,
     ) -> Retained<NSProgress> {
         let reply = Reply(completion.copy());
         let moved = Fields::Filename | Fields::ParentItemIdentifier;
-        let pending = fields.difference(moved);
-        let Some(domain) = self.domain() else {
+        let local =
+            contents.filter(|_| fields.contains(Fields::Contents)).and_then(NSURL::to_file_path);
+        let saving = local.is_some();
+        let written = if saving { Fields::Contents } else { Fields::empty() };
+        let pending = fields.difference(moved | written);
+        let (Some(domain), Some(temporary)) = (self.domain(), self.temporary()) else {
             answer_change(&reply, Err(Unchanged::Error(no_domain())), pending);
             return finished();
         };
+        // SAFETY: FileProvider rule: a version's content version is a plain property, the
+        // data this extension gave the item it was made from.
+        let base = item::version_of(&unsafe { version.contentVersion() }.to_vec());
         let (id, parent, name) = placed(item);
         // SAFETY: FileProvider rule: the trash's identifier is a constant string.
         let trashed = parent.isEqualToString(unsafe { NSFileProviderTrashContainerItemIdentifier });
         let (id, parent) = (id_of(&id), id_of(&parent));
-        let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
+        let xfer = XferId::new();
+        let progress = cancellable(&domain, xfer);
         let done = Retained::clone(&progress);
         let started = spawn(async move {
             let changed = if trashed {
-                domain.trash(&id).await.map(|_trashed| None)
-            } else if fields.intersects(moved) {
-                domain.rename(&id, &parent, &name).await.map(Some)
+                domain.trash(&id).await.map(|_trashed| Changed::Left(None))
             } else {
-                domain.item(&id).await.map(Some)
+                let save = local.as_deref().map(|local| (local, base, (temporary.as_path(), xfer)));
+                changed(&domain, (&id, &parent, &name), fields.intersects(moved), save).await
             };
             let answer = match changed {
-                Ok(item) => Ok(item),
+                Ok(Changed::Left(item)) => Ok((item, false)),
+                Ok(Changed::Kept(item)) => Ok((Some(item), true)),
                 Err(FilesError::NoSuchItem(gone)) => {
                     tracing::info!(%gone, "changed in Finder, gone on the worker");
-                    Ok(None)
+                    Ok((None, false))
                 }
                 Err(e @ (FilesError::Declined { .. } | FilesError::Failed { .. })) => {
                     tracing::info!(%id, error = %e, "a change undone");
-                    domain.item(&id).await.map(Some).map_err(Unchanged::Error)
+                    // A save undone takes the worker's contents back too.
+                    domain.item(&id).await.map(|i| (Some(i), saving)).map_err(Unchanged::Error)
                 }
                 Err(e) => Err(Unchanged::Error(e)),
             };
-            answer_change(&reply, answer, pending);
+            answer_fetched(&reply, answer, pending);
             done.setCompletedUnitCount(1);
         });
         if !started {
@@ -735,6 +749,36 @@ fn made_as(template: &NSFileProviderItem) -> Made {
     }
 }
 
+/// What a change in Finder left on the worker.
+enum Changed {
+    /// The item as it is there now, or none when it is gone.
+    Left(Option<Item>),
+    /// The file as the worker kept it, its save landed beside it: fetched again.
+    Kept(Item),
+}
+
+/// Do on the worker what was done to the item `id`, now `name` in `parent`: moved there when
+/// it `moved`, then its contents saved over when `save` names the file they are in, the
+/// version they were made from, and where to stage a copy.
+async fn changed(
+    domain: &Domain,
+    (id, parent, name): (&str, &str, &str),
+    moved: bool,
+    save: Option<(&Path, Option<slopty_proto::folder::FileVersion>, (&Path, XferId))>,
+) -> Result<Changed, FilesError> {
+    let at = if moved { domain.rename(id, parent, name).await? } else { domain.item(id).await? };
+    let Some((local, base, staging)) = save else {
+        return Ok(Changed::Left(Some(at)));
+    };
+    Ok(match domain.replace(&at.id, local, base, staging).await? {
+        Written::Replaced(item) => Changed::Left(Some(item)),
+        Written::Kept { now, copy } => {
+            tracing::info!(id = %now.id, copy = %copy.id, "a save kept beside a change on the worker");
+            Changed::Kept(now)
+        }
+    })
+}
+
 /// Make the item `name` of the folder `parent` on the worker, a folder or a file from the
 /// contents at `local` (an empty one when none). Made `again`, it is the item already there
 /// when there is one, and nothing when it is a file with no contents to send that is not.
@@ -814,13 +858,23 @@ fn answer_change(
     answer: Result<Option<Item>, Unchanged>,
     pending: Fields,
 ) {
+    answer_fetched(reply, answer.map(|left| (left, false)), pending);
+}
+
+/// [`answer_change`], the item's contents fetched again when the answer says so: the worker's
+/// differ from what the system holds.
+fn answer_fetched(
+    reply: &Reply<ChangeFn>,
+    answer: Result<(Option<Item>, bool), Unchanged>,
+    pending: Fields,
+) {
     let error = match answer {
-        Ok(left) => {
+        Ok((left, fetch)) => {
             let item: Option<Retained<NSFileProviderItem>> =
                 left.map(|item| ProtocolObject::from_retained(FileItem::new(item)));
             let item =
                 item.as_ref().map_or(std::ptr::null_mut(), |i| Retained::as_ptr(i).cast_mut());
-            reply.0.call((item, pending, Bool::NO, std::ptr::null_mut()));
+            reply.0.call((item, pending, Bool::new(fetch), std::ptr::null_mut()));
             return;
         }
         Err(Unchanged::Error(e)) => {
@@ -909,16 +963,14 @@ define_class!(
             }
         }
 
-        /// What Finder may do with it: read it; add to a folder; rename, move and trash
-        /// anything but the root. A file's contents are never written, so it is read-only.
+        /// What Finder may do with it: read it; add to a folder; save a file in place, over
+        /// the version it was opened at; rename, move and trash anything but the root.
         #[unsafe(method(capabilities))]
         fn allowed(&self) -> NSFileProviderItemCapabilities {
             type Can = NSFileProviderItemCapabilities;
             let item = self.ivars();
-            let mut can = Can::AllowsReading;
-            if item.folder {
-                can |= Can::AllowsAddingSubItems;
-            }
+            // `AllowsAddingSubItems` is `AllowsWriting`'s bit: a folder's means adding to it.
+            let mut can = Can::AllowsReading | Can::AllowsWriting;
             if item.id != item::ROOT {
                 can |= Can::AllowsRenaming | Can::AllowsReparenting | Can::AllowsTrashing;
             }
@@ -928,7 +980,8 @@ define_class!(
         #[unsafe(method(fileSystemFlags))]
         fn file_system_flags(&self) -> NSFileProviderFileSystemFlags {
             let item = self.ivars();
-            let mut flags = NSFileProviderFileSystemFlags::UserReadable;
+            let mut flags = NSFileProviderFileSystemFlags::UserReadable
+                | NSFileProviderFileSystemFlags::UserWritable;
             if item.folder {
                 flags |= NSFileProviderFileSystemFlags::UserExecutable;
             }

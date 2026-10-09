@@ -20,7 +20,7 @@ use slopty_net::HostAddr;
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::endpoint::WORKER_PORT;
 use slopty_platform::files::Known;
-use slopty_proto::folder::{After, FsOp, FsOutcome, FsRefusal, Listing};
+use slopty_proto::folder::{After, FileVersion, FsOp, FsOutcome, FsRefusal, Listing};
 use slopty_proto::handshake::Hello;
 use slopty_proto::transfer::Dest;
 use slopty_proto::{ClientMsg, RequestId, WorkerMsg};
@@ -76,6 +76,15 @@ pub enum FilesError {
         /// Why not.
         why: String,
     },
+    /// The file is no longer the version a change of its contents was made from: it was
+    /// written on the worker meanwhile, and is left as it is.
+    #[error("{path}: changed on the worker meanwhile")]
+    Changed {
+        /// The file.
+        path: String,
+        /// Its version there now.
+        now: FileVersion,
+    },
     /// The worker tried the change, and its OS said no.
     #[error("{path}: {error}")]
     Failed {
@@ -100,6 +109,7 @@ impl FilesError {
             FsOutcome::Failed { error } => Err(Self::Failed { path, error }),
             FsOutcome::Refused(FsRefusal::Missing { path }) => Err(Self::NoSuchItem(path)),
             FsOutcome::Refused(FsRefusal::Clash { path }) => Err(Self::Clash(path)),
+            FsOutcome::Refused(FsRefusal::Changed { now }) => Err(Self::Changed { path, now }),
             FsOutcome::Refused(why) => {
                 Err(Self::Declined { why: slopty_client::folders::refused(&why), path })
             }
@@ -406,6 +416,19 @@ impl Worker {
         let files = [local.to_path_buf()];
         let landed = self.link.upload(xfer, &files, Dest::Path(into.clone())).await?;
         landed.into_iter().next().ok_or(FilesError::NoSuchItem(into))
+    }
+
+    /// Send the file `local` up into a directory of its own in the worker's drop directory as
+    /// transfer `xfer`, for a change to take ([`FsOp::Replace`]); where it landed on the
+    /// worker. Should this link go, it goes on over the next link to the worker.
+    ///
+    /// # Errors
+    ///
+    /// The transfer failed or was cancelled, or the worker named no place it landed.
+    pub async fn upload_staged(&self, local: &Path, xfer: XferId) -> Result<String, FilesError> {
+        let files = [local.to_path_buf()];
+        let landed = self.link.upload(xfer, &files, Dest::Staging).await?;
+        landed.into_iter().next().ok_or_else(|| FilesError::NoSuchItem(local.display().to_string()))
     }
 
     /// Stop transfer `xfer`.

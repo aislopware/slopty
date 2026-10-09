@@ -430,6 +430,61 @@ mod tests {
         drop(daemons);
     }
 
+    /// A file saved in Finder replaces the worker's while the worker's is still the version
+    /// it was opened at. Saved over a change made on the worker meanwhile, the worker's is
+    /// kept as it is and the save lands beside it as a conflicted copy, numbered when that
+    /// name is taken; a save from a version not known keeps a copy too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_saved_in_finder_replaces_only_the_version_it_was_opened_at() {
+        use slopty_files::domain::Written;
+
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let home = daemons.home.clone();
+        let (domain, _heard) =
+            domain(&dir.path().join("shared"), daemons.id, &daemons.addr.to_string());
+        let temporary = dir.path().join("temporary");
+        std::fs::create_dir_all(&temporary).unwrap();
+        let saved = dir.path().join("saved");
+        std::fs::create_dir_all(&saved).unwrap();
+        let save = |bytes: &[u8]| {
+            let local = saved.join("contents");
+            std::fs::write(&local, bytes).unwrap();
+            local
+        };
+
+        let opened = domain.item("a.txt").await.unwrap();
+        let local = save(b"hello, world");
+        let written = domain
+            .replace("a.txt", &local, Some(opened.version()), (&temporary, XferId::new()))
+            .await
+            .unwrap();
+        let Written::Replaced(now) = written else { panic!("replaced: {written:?}") };
+        assert_eq!((now.id.as_str(), now.size), ("a.txt", 12));
+        assert_eq!(std::fs::read(home.join("a.txt")).unwrap(), b"hello, world");
+
+        // Written on the worker after it was opened here.
+        std::fs::write(home.join("a.txt"), b"theirs").unwrap();
+        let local = save(b"mine");
+        let written = domain
+            .replace("a.txt", &local, Some(now.version()), (&temporary, XferId::new()))
+            .await
+            .unwrap();
+        let Written::Kept { now, copy } = written else { panic!("kept: {written:?}") };
+        assert_eq!((now.id.as_str(), now.size), ("a.txt", 6));
+        assert_eq!(std::fs::read(home.join("a.txt")).unwrap(), b"theirs", "theirs stays");
+        assert_eq!(copy.id, "a (conflicted copy).txt");
+        assert_eq!(std::fs::read(home.join("a (conflicted copy).txt")).unwrap(), b"mine");
+
+        let local = save(b"mine again");
+        let written =
+            domain.replace("a.txt", &local, None, (&temporary, XferId::new())).await.unwrap();
+        let Written::Kept { copy, .. } = written else { panic!("kept: {written:?}") };
+        assert_eq!(copy.id, "a (conflicted copy 2).txt", "the next free name");
+        assert_eq!(std::fs::read(home.join("a.txt")).unwrap(), b"theirs");
+        drop(daemons);
+    }
+
     /// [`domain`] in a shared container of its own, `name`, under `dir`.
     fn domain_elsewhere(dir: &Path, name: &str, id: WorkerId, addr: &str) -> (Domain, Arc<Notify>) {
         domain(&dir.join(name), id, addr)
