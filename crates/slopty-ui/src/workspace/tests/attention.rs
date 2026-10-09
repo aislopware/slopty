@@ -1201,3 +1201,41 @@ fn a_muted_projects_moments_post_nothing() {
     assert_eq!(posted.len(), 1, "only the other project's: {posted:?}");
     assert_eq!(posted[0].id, b.about.note_id());
 }
+
+/// Back in front, the notes a push put up while the app was away go too: the system lists them,
+/// though the app never posted them. A note about an ask still open stays, to be answered from
+/// the Notification Centre, and goes once it is answered; the app's own notes go as before.
+#[test]
+fn back_in_front_stale_pushed_notes_go_and_a_live_ask_stays() {
+    let (mut attention, memory) = attention();
+    let (live, answered, shell) = (route(1), route(2), route(3));
+    attention.set_active(false);
+    attention.look(&Look {
+        asking: vec![asking(live, "Run cargo test")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+        muted: HashSet::new(),
+    });
+    let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
+    attention.command_finished(shell, "api".into(), &done, Duration::from_secs(5));
+    let finished = shell.about.note_id();
+    // While the app was suspended, the server pushed the asks of the two threads and a project's
+    // word; the second was answered elsewhere since.
+    memory.push(&live.about.note_id());
+    memory.push(&answered.about.note_id());
+    memory.push("project-atlas-7");
+    memory.clear();
+
+    attention.set_active(true);
+    assert_eq!(memory.withdrawn(), [finished], "its own: the command's note goes, the ask stays");
+    attention.delivered(&memory.delivered());
+    assert_eq!(
+        memory.delivered(),
+        [live.about.note_id()],
+        "the pushed notes that say nothing now go; the live ask stays"
+    );
+
+    attention.look(&Look::default());
+    assert!(memory.delivered().is_empty(), "answered, the kept ask goes too");
+}

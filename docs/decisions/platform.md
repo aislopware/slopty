@@ -945,3 +945,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `window_min_size` 375 × 480 pt (`window::MIN_SIZE`): every size it can take is one the
   layout was drawn for. A frame kept from a smaller window opens at the floor where it stood.
   Popped-out streams keep their own sizes. Test: `window::tests::the_window_is_never_narrower_than_a_phone`.
+
+- ✅ **Back in front, notes that went stale while away are taken down** (readiness R4,
+  2026-10-09). Before, the app's own notes stayed in Notification Centre after the person came
+  back, and so did the notes a push put up while the phone was pocketed, which the app never
+  posted and so never withdrew. Now the app checks them each time it comes to the front:
+  - `Attention::set_active(true)` withdraws the notes it posted, except an ask still waiting on
+    the person. That note's Allow and Deny still work, and it goes once the ask is answered
+    anywhere.
+  - The app then asks the system for every note it shows (`notify::delivered`) and hands their
+    ids to `Attention::delivered`. Pushed notes use the same ids as posted ones
+    (`notify::pushed::note_id`). A pushed ask that is still live is adopted as the app's own,
+    so its answer takes it down. Every other note is withdrawn. The test notifier keeps the
+    list the same way the system does, so the behaviour is tested on the host.
+  - **Deferred: taking a note down while the phone stays pocketed.** That needs a background
+    push from the server when an ask is answered on another client. It also needs a second
+    push type through `slopty-push` and the relay, and the iOS delegate's
+    `didReceiveRemoteNotification` handler. iOS throttles such pushes and skips them once the
+    app has been force-quit, so the moment the app comes back is the one that holds. A stale
+    pocketed note answered elsewhere now lasts only until the app is next opened.
+  - Tests: `slopty-platform` `notify::tests::memory_keeps_what_the_notification_centre_shows`;
+    `slopty-ui` `workspace::tests::attention::back_in_front_stale_pushed_notes_go_and_a_live_ask_stays`.

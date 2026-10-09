@@ -227,6 +227,9 @@ pub trait Notifier {
 pub struct Memory {
     posted: RefCell<Vec<Note>>,
     withdrawn: RefCell<Vec<String>>,
+    /// What the Notification Centre would show now, by identifier: posted and not taken back,
+    /// or arrived by a push ([`Memory::push`]).
+    delivered: RefCell<Vec<String>>,
     badge: Cell<Option<usize>>,
     alerts: Cell<Alerts>,
 }
@@ -237,6 +240,7 @@ impl Default for Memory {
         Self {
             posted: RefCell::default(),
             withdrawn: RefCell::default(),
+            delivered: RefCell::default(),
             badge: Cell::default(),
             alerts: Cell::new(Alerts::Allowed),
         }
@@ -261,6 +265,20 @@ impl Memory {
         self.withdrawn.borrow().clone()
     }
 
+    /// A note arrives by a push while the app is away, as the notification extension shows it:
+    /// the system has it, though the app never posted it.
+    pub fn push(&self, id: &str) {
+        let mut delivered = self.delivered.borrow_mut();
+        delivered.retain(|d| d != id);
+        delivered.push(id.to_owned());
+    }
+
+    /// The identifiers of the notes shown now, oldest first, as the system lists its own.
+    #[must_use]
+    pub fn delivered(&self) -> Vec<String> {
+        self.delivered.borrow().clone()
+    }
+
     /// The badge last set, if any was.
     #[must_use]
     pub const fn badge(&self) -> Option<usize> {
@@ -276,10 +294,12 @@ impl Memory {
 
 impl Notifier for Memory {
     fn post(&self, note: Note) {
+        self.push(&note.id);
         self.posted.borrow_mut().push(note);
     }
 
     fn withdraw(&self, id: &str) {
+        self.delivered.borrow_mut().retain(|d| d != id);
         self.withdrawn.borrow_mut().push(id.to_owned());
     }
 
@@ -1106,6 +1126,20 @@ mod tests {
         memory.clear();
         assert!(memory.posted().is_empty() && memory.withdrawn().is_empty(), "cleared");
         assert_eq!(memory.badge(), Some(3), "clearing keeps the badge");
+    }
+
+    /// What the Notification Centre shows is kept as the system keeps it: a note posted, or
+    /// arrived by a push, until it is taken back; one posted again under its identifier is shown
+    /// once.
+    #[test]
+    fn memory_keeps_what_the_notification_centre_shows() {
+        let memory = Memory::default();
+        memory.post(Note { id: "a".into(), ..Note::default() });
+        memory.push("b");
+        memory.post(Note { id: "a".into(), ..Note::default() });
+        assert_eq!(memory.delivered(), ["b", "a"]);
+        memory.withdraw("b");
+        assert_eq!(memory.delivered(), ["a"]);
     }
 
     /// The approval note carries "Allow", "Deny" and "Show", registered with every other

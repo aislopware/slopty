@@ -339,12 +339,44 @@ impl Attention {
         self.active
     }
 
-    /// The app came to the front or left it. Coming back takes back every note up.
+    /// The app came to the front or left it. Coming back takes back every note it put up but a
+    /// live ask's, which stays to be answered from the Notification Centre and goes once it is
+    /// answered. The notes pushed while it was away are the system's to list
+    /// ([`Self::delivered`]).
     pub fn set_active(&mut self, active: bool) {
         if active && !self.active {
-            self.withdraw_all();
+            let asking = &self.asking;
+            let (kept, stale): (Vec<_>, Vec<_>) = self
+                .posted
+                .drain()
+                .partition(|(about, why)| *why == Why::Asks && asking.contains(about));
+            for (about, _) in stale {
+                self.notifier.withdraw(&about.note_id());
+            }
+            for id in self.project_notes.drain() {
+                self.notifier.withdraw(&id);
+            }
+            self.answers.retain(|about, _| kept.iter().any(|(k, _)| k == about));
+            self.posted.extend(kept);
         }
         self.active = active;
+    }
+
+    /// The notes the system shows now, by identifier, as it listed them once the app came back:
+    /// the ones a push put up while the app was away, which it never posted, go as its own do,
+    /// but a live ask's, which stays and goes once answered. Nothing goes while the app is away
+    /// again by the time the list came.
+    pub fn delivered(&mut self, ids: &[String]) {
+        if !self.active {
+            return;
+        }
+        for id in ids {
+            if let Some(about) = self.asking.iter().find(|a| a.note_id() == *id) {
+                self.posted.entry(*about).or_insert(Why::Asks);
+            } else if !self.posted.keys().any(|about| about.note_id() == *id) {
+                self.notifier.withdraw(id);
+            }
+        }
     }
 
     /// The person is at another of their devices, or has left it. Arriving there takes back
