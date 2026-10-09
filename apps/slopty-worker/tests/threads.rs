@@ -31,8 +31,8 @@ mod threads {
         ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
-        AgentId, AskId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId,
-        ThreadState,
+        AgentId, AskId, Cap, Cursor, IntentId, ItemBody, Notice, Request, RequestState, TableState,
+        ThreadId, ThreadState,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -847,6 +847,89 @@ mod threads {
         asked(&mut a, &[&first, &request]).await;
         a.send(ThreadRequest::Unfollow { thread }).await;
         assert_eq!(printed(released).await, "", "no decision: the TUI's dialog");
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// Auto mode's decline of a call the transcript has, as `slopty hook` hands it on: Claude
+    /// Code's `PermissionDenied` for the session `native`, with `reason`.
+    fn declined(native: &str, call: &str, reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": native, "hook_event_name": "PermissionDenied", "cwd": "/work",
+            "permission_mode": "auto", "tool_name": "Bash",
+            "tool_input": { "command": "rm -rf /tmp/build" },
+            "tool_use_id": call, "reason": reason
+        })
+    }
+
+    /// A call auto mode declined is said on the thread after its call, and while the thread is
+    /// followed, the relay waits on a request to let it try again: "Let it try again" prints
+    /// Claude Code's retry, and "Keep it declined" prints nothing. A decline without a verdict
+    /// is said and never held, since Claude Code ignores the retry for it.
+    #[tokio::test]
+    async fn an_auto_mode_decline_is_said_and_may_be_let_try_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("d1.jsonl");
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let mut start = first_ask("d1", &main);
+        start["hook_event_name"] = "SessionStart".into();
+        start["source"] = "startup".into();
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+
+        let thread = slopty_agent::observed::thread_of("d1");
+        let whole = entries(&main);
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|s| ids(s) == whole)).await;
+        let call = a
+            .state()
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                ItemBody::Tool(t) if t.kind == slopty_proto::thread::kind::EXEC => {
+                    Some(i.id.0.clone())
+                }
+                _ => None,
+            })
+            .expect("a command in the tools capture");
+        let said = format!("declined-{call}");
+
+        let unjudged = declined(
+            "d1",
+            &call,
+            "Auto mode could not evaluate this action and is blocking it for safety",
+        );
+        assert_eq!(printed(relay(dir.path(), session, &unjudged)).await, "", "not held");
+        a.until(|c| c.state().items.iter().any(|i| i.id.0 == said)).await;
+        let notice = a.state().items.iter().find(|i| i.id.0 == said).unwrap().clone();
+        let ItemBody::Notice(notice) = notice.body else { panic!("a notice: {notice:?}") };
+        assert_eq!(notice.kind, Notice::DECLINED);
+        assert_eq!(a.state().open_requests().count(), 0, "nothing to let try again");
+
+        let retry = declined("d1", &call, "[Irreversible Local Destruction]");
+        let held = relay(dir.path(), session, &retry);
+        let first = asked(&mut a, &[]).await;
+        assert_eq!(first.kind, Request::RETRY);
+        let again =
+            Intent::Answer { ask: first.id.clone(), choice: "allow".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), thread, again).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        assert_eq!(
+            output,
+            serde_json::json!({
+                "hookSpecificOutput": { "hookEventName": "PermissionDenied", "retry": true }
+            })
+        );
+
+        let kept = relay(dir.path(), session, &retry);
+        let second = asked(&mut a, &[&first]).await;
+        let keep = Intent::Answer { ask: second.id, choice: "deny".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), thread, keep).await, Outcome::Done);
+        assert_eq!(printed(kept).await, "", "the decline stands");
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 

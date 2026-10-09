@@ -258,6 +258,7 @@ mod claude_threads {
             mode: None,
             asked_ms: WallMs::from_millis(1),
             until_ms: WallMs::from_millis(2),
+            declined: None,
         };
         driver.permission(PermissionEvent::Asked(Box::new(prompt)));
         rig.status(AgentStatus::Blocked(slopty_agent::status::BlockReason::Permission {

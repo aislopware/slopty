@@ -106,7 +106,8 @@ impl ThreadView {
         let plain = plain_deny(&request.options).map(|c| c.id.clone());
         let hung =
             plain.is_some() && arranged.front.iter().any(|(c, _)| Some(&c.id) == plain.as_ref());
-        let release = self.release_words(cx);
+        // Auto mode's decline has no prompt of the agent's own to go back to.
+        let release = (request.kind != Request::RETRY).then(|| self.release_words(cx)).flatten();
         let leading = if hung { None } else { self.release_button(request, cx) };
         if arranged.front.is_empty() && arranged.standing.is_empty() && leading.is_none() {
             return None;

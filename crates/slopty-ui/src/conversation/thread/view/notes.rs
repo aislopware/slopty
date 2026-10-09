@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn};
+use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Notice, Retry, Turn};
 
 use super::{TOOL_ROW, ThreadView, composer, tokens};
 use crate::colors::hsla;
@@ -91,7 +91,13 @@ impl ThreadView {
                 let (shown, rest) = notice_lines(&n.text.text);
                 cut = rest && !self.whole.contains(id);
                 let words = if cut { shown } else { n.text.text.trim().to_owned() };
-                (Symbol::InfoCircle, words, n.retry.as_ref().map(retrying), None)
+                // Auto mode turning a call down reads as a refusal, not as a word in passing.
+                let icon = if n.kind == Notice::DECLINED {
+                    Symbol::XmarkCircle
+                } else {
+                    Symbol::InfoCircle
+                };
+                (icon, words, n.retry.as_ref().map(retrying), None)
             }
             // Codex's reviewer begins here; what it found follows as its answer.
             ItemBody::Review { entered } => {

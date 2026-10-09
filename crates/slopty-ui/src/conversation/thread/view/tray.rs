@@ -582,6 +582,10 @@ impl ThreadView {
         request: &Request,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
+        // Auto mode's decline has no prompt of the agent's own to go back to.
+        if request.kind == Request::RETRY {
+            return None;
+        }
         let words = self.release_words(cx)?;
         let only_way = request.options.is_empty() && request.questions.is_empty();
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
@@ -669,7 +673,7 @@ impl ThreadView {
                     .flatten()
             });
         // A command is code; anything else the agent says is a sentence.
-        let code = request.kind == Request::APPROVAL;
+        let code = request.kind == Request::APPROVAL || request.kind == Request::RETRY;
         let scroll = match placement {
             Placement::Above => Some(("Scroll \u{2191}", -1_isize)),
             Placement::Below => Some(("Scroll \u{2193}", 1)),

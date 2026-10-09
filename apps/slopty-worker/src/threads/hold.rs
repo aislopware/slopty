@@ -15,12 +15,17 @@
 //! phone as long as the relay waits instead: the person has to reach the phone, and a note's
 //! Allow reaches the server's link first, which answers it as orchestration does.
 //!
+//! A call auto mode declined (`PermissionDenied`) comes the same way. The thread is told of the
+//! decline whoever follows it, and when the person may let the model try again
+//! ([`permission::retryable`]) that yes or no is held as an approval is; an allow answers the
+//! hook with its retry, and anything else lets the decline stand.
+//!
 //! **Orchestration** follows too, as `ORCHESTRATION` ([`Orchestrated`]): the sessions whose
 //! conversation a verb read or whose agent a verb started, until they end.
 
 use std::time::Duration;
 
-use slopty_agent::{Hook, permission};
+use slopty_agent::{Hook, HookEvent, permission};
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, Settled, Verdict};
 use slopty_proto::ctl::Decision;
@@ -78,6 +83,15 @@ pub async fn ask(
     relay_wait: Duration,
     relay_gone: impl Future<Output = ()>,
 ) -> Decision {
+    if hook.event == HookEvent::PermissionDenied {
+        tell(
+            daemon,
+            PermissionEvent::Declined(Box::new(permission::declined(session, hook, WallMs::now()))),
+        );
+        if !permission::retryable(hook) {
+            return Decision::Pass;
+        }
+    }
     let (reply, decided) = oneshot::channel();
     let Some((prompt, reach, wait)) = hold(daemon, session, hook, reply, relay_wait) else {
         return Decision::Pass;

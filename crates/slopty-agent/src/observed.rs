@@ -26,6 +26,10 @@
 //!   [`verdict`] maps a chosen answer back. A prompt is held only through the `PermissionRequest`
 //!   hook, so the thread declares `approvals` once a hook has been heard and not before: a Claude
 //!   Code thread without it is one whose hooks are not installed.
+//! - **Auto mode's declines.** A call auto mode's classifier turned down is said by a notice
+//!   ([`Notice::DECLINED`]) right after the call, whose own entry ends as any failure does. When
+//!   the person may let the model try it again, the worker holds that as a request
+//!   ([`Request::RETRY`]): "Let it try again" allows, "Keep it declined" denies.
 //! - **Before the session id.** A Claude Code started by hand and idle at its prompt has no session
 //!   id yet (no hook, no transcript). Its terminal names a provisional thread
 //!   ([`Observed::provisional`], [`terminal_thread`]), which gives way to the session's own once
@@ -414,6 +418,9 @@ pub struct Observed {
     catalog: Option<live::Catalog>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
+    /// Auto mode's declines of calls the transcript does not have yet, by call: each is said
+    /// once its call is.
+    declines: HashMap<String, (Notice, WallMs)>,
 }
 
 impl Observed {
@@ -506,6 +513,7 @@ impl Observed {
             custom: Vec::new(),
             catalog: None,
             failed: false,
+            declines: HashMap::new(),
         }
     }
 
@@ -937,9 +945,49 @@ impl Observed {
                 };
                 Action::RequestResolved { id: AskId(id), state }
             }
+            PermissionEvent::Declined(declined) => {
+                self.declined(declined);
+                return self.drain();
+            }
         };
         self.push(self.meta.id, action);
         self.drain()
+    }
+
+    /// Auto mode turned a call down: say so after the call, or once the transcript has it.
+    fn declined(&mut self, declined: &conv::Declined) {
+        let notice = decline_notice(declined);
+        match &declined.call {
+            Some(call) if !self.threads.values().any(|m| m.items.contains_key(call)) => {
+                self.declines.insert(call.clone(), (notice, declined.at_ms));
+            }
+            call => self.say_declined(call.as_deref(), notice, declined.at_ms),
+        }
+    }
+
+    /// The notice of a decline, after call `call` in its thread and turn; with no call named,
+    /// at the end of the main thread's turn. Never before the first prompt.
+    fn say_declined(&mut self, call: Option<&str>, notice: Notice, at_ms: WallMs) {
+        let placed = call.and_then(|call| {
+            self.threads.iter().find_map(|(thread, m)| Some((thread.clone(), m.items.get(call)?.0)))
+        });
+        let main = || {
+            let turn = self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn);
+            (conv::ThreadId::Main, turn)
+        };
+        let (thread, turn) = placed.unwrap_or_else(main);
+        if turn == TurnId::BEFORE {
+            return;
+        }
+        let id = self.ensure(&thread);
+        let named = call.map_or_else(|| at_ms.as_millis().to_string(), str::to_owned);
+        let item = Item {
+            id: ItemId(format!("declined-{named}")),
+            turn,
+            at_ms,
+            body: ItemBody::Notice(notice),
+        };
+        self.push(id, Action::ItemCompleted(item));
     }
 
     /// When the block the thread is in began, while it is blocked on the person.
@@ -1191,6 +1239,9 @@ impl Observed {
         }
         for action in actions {
             self.push(id, action);
+        }
+        if let Some((notice, at_ms)) = self.declines.remove(&entry.id) {
+            self.say_declined(Some(&entry.id), notice, at_ms);
         }
         if opened {
             self.place_deferred(thread);
@@ -1932,6 +1983,35 @@ fn words(name: &str) -> String {
     out
 }
 
+/// The allow of a decline's request: the model may try the call again.
+pub const TRY_AGAIN: &str = "Let it try again";
+
+/// The deny of a decline's request: the decline stands.
+pub const KEEP_DECLINED: &str = "Keep it declined";
+
+/// What a decline's `reason` says in words: the rule a classifier verdict names, out of its
+/// brackets (`[Data Exfiltration]`), or the reason as Claude Code gave it.
+fn rule(reason: &str) -> &str {
+    let reason = reason.trim();
+    reason.strip_prefix('[').and_then(|r| r.strip_suffix(']')).unwrap_or(reason).trim()
+}
+
+/// The notice a decline is said by: what was turned down, then why.
+fn decline_notice(declined: &conv::Declined) -> Notice {
+    let words = permission_words(&declined.tool, declined.line.as_deref());
+    let mut text = if words.is_empty() {
+        "Auto mode declined a call".to_owned()
+    } else {
+        format!("Auto mode declined: {words}")
+    };
+    let rule = rule(&declined.reason);
+    if !rule.is_empty() {
+        text.push('\n');
+        text.push_str(rule);
+    }
+    Notice::new(Notice::DECLINED, Clipped::whole(&text))
+}
+
 /// A held permission prompt as a request, with the answers Claude Code takes.
 fn request(prompt: &PermissionPrompt) -> Request {
     let thread = conv::ThreadId::Main;
@@ -1944,35 +2024,59 @@ fn request(prompt: &PermissionPrompt) -> Request {
     };
     let deny = choice("deny", "Deny", Effect::Deny, None, false);
     let deny_stop = choice("deny-stop", "Deny and stop", Effect::Deny, None, true);
-    let (kind, title, options, questions, proposed) = match &prompt.detail {
-        conv::ToolDetail::Question(q) => {
-            let title =
-                q.questions.first().map_or_else(|| "A question".to_owned(), |q| q.text.clone());
-            (Request::QUESTION, title, vec![deny], question(q).questions, None)
-        }
-        conv::ToolDetail::Plan { .. } => {
-            let allow = choice("allow", "Approve the plan", Effect::Allow, None, false);
-            (Request::PLAN, "Approve the plan?".to_owned(), vec![allow, deny], Vec::new(), None)
-        }
-        detail => {
-            let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
-            if !prompt.suggestions.is_empty() {
-                options.push(choice(
-                    "always",
-                    "Always allow",
-                    Effect::Allow,
-                    grants(prompt),
-                    false,
-                ));
-            }
-            options.extend([deny, deny_stop]);
+    let (kind, title, options, questions, proposed) = match (&prompt.declined, &prompt.detail) {
+        (Some(reason), detail) => {
+            let options = vec![
+                choice("deny", KEEP_DECLINED, Effect::Deny, None, false),
+                choice("allow", TRY_AGAIN, Effect::Allow, None, false),
+            ];
             let proposed = match detail {
                 conv::ToolDetail::Edit(e) => Some(patch(&thread, &e.patch)),
                 conv::ToolDetail::Write(w) => Some(patch(&thread, &w.patch)),
                 _ => None,
             };
-            (Request::APPROVAL, format!("Allow {}?", prompt.tool), options, Vec::new(), proposed)
+            let title = match rule(reason) {
+                "" => format!("Auto mode declined {}", prompt.tool),
+                rule => format!("Auto mode declined {}: {rule}", prompt.tool),
+            };
+            (Request::RETRY, title, options, Vec::new(), proposed)
         }
+        (None, detail) => match detail {
+            conv::ToolDetail::Question(q) => {
+                let title =
+                    q.questions.first().map_or_else(|| "A question".to_owned(), |q| q.text.clone());
+                (Request::QUESTION, title, vec![deny], question(q).questions, None)
+            }
+            conv::ToolDetail::Plan { .. } => {
+                let allow = choice("allow", "Approve the plan", Effect::Allow, None, false);
+                (Request::PLAN, "Approve the plan?".to_owned(), vec![allow, deny], Vec::new(), None)
+            }
+            detail => {
+                let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
+                if !prompt.suggestions.is_empty() {
+                    options.push(choice(
+                        "always",
+                        "Always allow",
+                        Effect::Allow,
+                        grants(prompt),
+                        false,
+                    ));
+                }
+                options.extend([deny, deny_stop]);
+                let proposed = match detail {
+                    conv::ToolDetail::Edit(e) => Some(patch(&thread, &e.patch)),
+                    conv::ToolDetail::Write(w) => Some(patch(&thread, &w.patch)),
+                    _ => None,
+                };
+                (
+                    Request::APPROVAL,
+                    format!("Allow {}?", prompt.tool),
+                    options,
+                    Vec::new(),
+                    proposed,
+                )
+            }
+        },
     };
     let text = match &prompt.detail {
         conv::ToolDetail::Bash(b) => Some(clipped(&thread, &b.command)),

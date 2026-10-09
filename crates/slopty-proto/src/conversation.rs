@@ -993,7 +993,7 @@ pub enum LiveKind {
 }
 
 /// A permission prompt held on the worker, or its end, as the session's thread observer hears
-/// it.
+/// it; or a call auto mode turned down.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PermissionEvent {
     /// Claude Code asks, and the worker holds the question for whoever can answer it.
@@ -1007,6 +1007,9 @@ pub enum PermissionEvent {
         /// How it ended.
         outcome: Settled,
     },
+    /// Auto mode's classifier turned a call down (`PermissionDenied`). Told whether or not a
+    /// prompt to let it try again is held after it.
+    Declined(Box<Declined>),
 }
 
 impl PermissionEvent {
@@ -1016,17 +1019,30 @@ impl PermissionEvent {
         match self {
             Self::Asked(prompt) => prompt.session,
             Self::Settled { session, .. } => *session,
+            Self::Declined(declined) => declined.session,
         }
     }
+}
 
-    /// The prompt's [`PermissionPrompt::ask`].
-    #[must_use]
-    pub const fn ask(&self) -> u64 {
-        match self {
-            Self::Asked(prompt) => prompt.ask,
-            Self::Settled { ask, .. } => *ask,
-        }
-    }
+/// A call Claude Code's auto mode turned down without asking anyone.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Declined {
+    /// The terminal session the agent runs in.
+    pub session: SessionId,
+    /// The call's id (`tool_use_id`), which names its entry in the transcript.
+    pub call: Option<String>,
+    /// The tool's name as the model called it.
+    pub tool: String,
+    /// What the call would do, in a line (a command, a path).
+    pub line: Option<String>,
+    /// Why, as Claude Code said it: the rule that matched (`[Data Exfiltration]`), or that the
+    /// classifier reached no verdict.
+    pub reason: String,
+    /// Whether the person may let it try again: Claude Code ignores that for a decline with no
+    /// verdict.
+    pub retryable: bool,
+    /// When Claude Code said so, by the worker's clock.
+    pub at_ms: WallMs,
 }
 
 /// A permission Claude Code asks for before running a tool, held while a client follows the
@@ -1050,6 +1066,9 @@ pub struct PermissionPrompt {
     pub asked_ms: WallMs,
     /// When the worker gives up holding it and the TUI's dialog shows instead, on that clock.
     pub until_ms: WallMs,
+    /// For a call auto mode turned down (`PermissionDenied`), why: the prompt is then whether
+    /// the agent may try it again, and no dialog shows when nobody answers.
+    pub declined: Option<String>,
 }
 
 /// One permission update "allow always" applies.

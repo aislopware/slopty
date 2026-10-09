@@ -202,6 +202,50 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
     );
 }
 
+/// Auto mode's decline put to the person is two answers, the agent's own words on them: "Let it
+/// try again" the solid, "Keep it declined" beside it. Neither a reason nor the agent's terminal
+/// waits behind the keep, since a reason reaches nobody and the terminal asks nothing.
+#[gpui::test]
+fn auto_modes_decline_is_let_try_again_or_kept(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Choice, Effect, Request};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let mut declined = approval("r");
+    declined.kind = Request::RETRY.to_owned();
+    declined.title = "Auto mode declined Bash: Irreversible Local Destruction".to_owned();
+    let choice = |id: &str, label: &str, effect| Choice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    declined.options = vec![
+        choice("deny", "Keep it declined", Effect::Deny),
+        choice("allow", "Let it try again", Effect::Allow),
+    ];
+    state.requests = vec![declined];
+    state.meta.terminal = Some(SessionId::new());
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let (keep, again) = (cx.debug_bounds("answer-r-deny"), cx.debug_bounds("answer-r-allow"));
+    let (keep, again) = (keep.expect("Keep it declined"), again.expect("Let it try again"));
+    assert!(keep.right() < again.left(), "keep, then the solid");
+    assert!(cx.debug_bounds("denials-r").is_none(), "nothing waits behind the keep");
+    assert!(cx.debug_bounds("release-r").is_none(), "no prompt in the terminal");
+    click(cx, "answer-r-allow");
+    cx.run_until_parked();
+    assert_eq!(
+        intents(&sent),
+        [Intent::Answer { ask: AskId("r".to_owned()), choice: "allow".to_owned(), message: None }]
+    );
+}
+
 /// In a column beside a board (312 pt) long answers wrap among themselves rather than push
 /// the primary out of the card: every answer stands inside the card, and the one solid ends
 /// the last line.

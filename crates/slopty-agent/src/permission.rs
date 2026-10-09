@@ -31,28 +31,85 @@
 //! [`PermissionAnswer`]: slopty_proto::ctl::PermissionAnswer
 //!
 //! A worker that is not running reads nothing; the relay then prints nothing, at once.
+//!
+//! **Auto mode's declines.** In auto mode a classifier stands in for the person, and when it
+//! turns a call down Claude Code runs `PermissionDenied`, synchronously too. Its one answer is
+//! `hookSpecificOutput.retry: true`, which tells the model it may try the call again; the
+//! decline itself stands. So the same ask carries that hook: the worker shows the decline on
+//! the thread, and holds a yes or no ("Let it try again") for whoever can answer it, as it holds
+//! an approval. An allow prints the retry; anything else prints nothing, and the decline stands.
+//! A decline the classifier reached no verdict on is shown and not held, since Claude Code
+//! ignores the retry for it ([`retryable`]).
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::conversation::{Grant, PermissionPrompt, Suggestion, Verdict};
+use slopty_proto::conversation::{Declined, Grant, PermissionPrompt, Suggestion, Verdict};
 use slopty_proto::ctl::Decision;
 
 use crate::{Hook, HookEvent};
 
-/// The `timeout` the `PermissionRequest` entry is registered with, in seconds: Claude Code's
-/// own default for command hooks. Past it, Claude Code cancels the hook and shows its dialog.
+/// The hooks the relay asks the worker with and waits on, registered without `async`: a
+/// permission request, and auto mode's decline, which may be let try again.
+pub const HELD: [HookEvent; 2] = [HookEvent::PermissionRequest, HookEvent::PermissionDenied];
+
+/// The `timeout` the [`HELD`] entries are registered with, in seconds.
+///
+/// Claude Code's own default for command hooks. Past it, Claude Code cancels the hook and shows
+/// its dialog, or lets the decline stand.
 pub const HOOK_TIMEOUT_S: u32 = 600;
 
 /// How long the relay waits for a decision: the hook's timeout less a margin, so the relay
 /// answers "no decision" itself before Claude Code gives up on it.
 pub const WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_S as u64 - 5);
 
-/// What the hook prints for Claude Code on `decision`: `hookSpecificOutput.decision` as the
-/// hooks reference defines it for `PermissionRequest`; `None` (print nothing) for no decision.
+/// The start of the `reason` of a decline the classifier reached no verdict on, as Claude Code's
+/// hooks reference spells it.
+pub const NO_VERDICT: &str = "Auto mode could not evaluate this action";
+
+/// The whole `reason` of a decline because the classifier could not be reached.
+pub const CLASSIFIER_UNAVAILABLE: &str = "Classifier unavailable";
+
+/// Whether the `PermissionDenied` `hook` is a decline the person may let the model try again.
+///
+/// Claude Code ignores `retry` when the classifier produced no verdict (its reply did not
+/// parse, or a safety check refused the classifier's own request); a classifier that could not
+/// be reached gave none either.
 #[must_use]
-pub fn hook_output(decision: &Decision) -> Option<Value> {
+pub fn retryable(hook: &Hook) -> bool {
+    let reason = hook.reason.as_deref().unwrap_or_default().trim();
+    hook.event == HookEvent::PermissionDenied
+        && !reason.starts_with(NO_VERDICT)
+        && reason != CLASSIFIER_UNAVAILABLE
+}
+
+/// The decline a `PermissionDenied` `hook` in terminal `session`, heard at `at_ms`, tells the
+/// thread.
+#[must_use]
+pub fn declined(session: SessionId, hook: &Hook, at_ms: WallMs) -> Declined {
+    Declined {
+        session,
+        call: hook.tool_use_id.clone(),
+        tool: hook.tool_name.clone().unwrap_or_default(),
+        line: hook.tool_detail(),
+        reason: hook.reason.clone().unwrap_or_default(),
+        retryable: retryable(hook),
+        at_ms,
+    }
+}
+
+/// What the hook for `event` prints for Claude Code on `decision`; `None` prints nothing.
+///
+/// For `PermissionRequest`, `hookSpecificOutput.decision` as the hooks reference defines it,
+/// and nothing for no decision. For `PermissionDenied`, an allow is `retry: true` and anything
+/// else nothing: the decline stands.
+#[must_use]
+pub fn hook_output(event: HookEvent, decision: &Decision) -> Option<Value> {
+    if event == HookEvent::PermissionDenied {
+        return matches!(decision, Decision::Allow { .. } | Decision::AllowAlways { .. })
+            .then(|| json!({ "hookSpecificOutput": { "hookEventName": event, "retry": true } }));
+    }
     let output = match decision {
         Decision::Pass => return None,
         Decision::Allow { updated_input: None } => json!({ "behavior": "allow" }),
@@ -157,6 +214,8 @@ pub fn prompt(
         mode: hook.permission_mode.clone(),
         asked_ms,
         until_ms,
+        declined: (hook.event == HookEvent::PermissionDenied)
+            .then(|| hook.reason.clone().unwrap_or_default()),
     }
 }
 
@@ -220,10 +279,11 @@ mod tests {
     /// (The socket lines are pinned beside `CtlRequest` in `slopty-proto`.)
     #[test]
     fn a_decision_is_the_output_the_hooks_reference_defines() {
-        assert_eq!(hook_output(&Decision::Pass), None);
+        let asked = HookEvent::PermissionRequest;
+        assert_eq!(hook_output(asked, &Decision::Pass), None);
         let stop = Decision::Deny { message: "stop".to_owned(), interrupt: true };
         assert_eq!(
-            hook_output(&stop).map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            hook_output(asked, &stop).map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({ "behavior": "deny", "message": "stop", "interrupt": true }))
         );
     }
@@ -361,7 +421,8 @@ mod tests {
         ];
         let answered = decision(&Verdict::Answer { answers }, &hook);
         assert_eq!(
-            hook_output(&answered).map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            hook_output(HookEvent::PermissionRequest, &answered)
+                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({
                 "behavior": "allow",
                 "updatedInput": {
@@ -381,13 +442,13 @@ mod tests {
         )
         .expect("hook");
         assert_eq!(
-            hook_output(&decision(&Verdict::Allow, &hook))
+            hook_output(HookEvent::PermissionRequest, &decision(&Verdict::Allow, &hook))
                 .map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({ "behavior": "allow", "updatedInput": plan }))
         );
         let keep = Verdict::Deny { message: "Keep the old layout".to_owned(), interrupt: false };
         assert_eq!(
-            hook_output(&decision(&keep, &hook))
+            hook_output(HookEvent::PermissionRequest, &decision(&keep, &hook))
                 .map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({ "behavior": "deny", "message": "Keep the old layout" })),
             "keep planning is a denial that lets the turn go on"

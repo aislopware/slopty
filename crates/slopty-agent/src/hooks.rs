@@ -7,11 +7,12 @@
 //! settings file behind.
 //!
 //! Every entry is asynchronous, so the agent never waits on the relay, except
-//! `PermissionRequest`: that one runs synchronously so the relay can answer the prompt with a
-//! decision from the conversation face ([`crate::permission`]). Until the worker answers, the
-//! relay prints nothing at once and Claude Code shows its own dialog, as before. A session's
-//! start, a prompt and a turn's end also run `slopty hook reports` synchronously, which hands
-//! over the reports waiting for the agent ([`crate::reports`]) and prints nothing otherwise.
+//! `PermissionRequest` and `PermissionDenied` ([`permission::HELD`]): those run synchronously so
+//! the relay can answer the prompt with a decision from the conversation face, and let a call
+//! auto mode declined be tried again ([`crate::permission`]). When the worker gives no answer,
+//! the relay prints nothing and Claude Code shows its own dialog, or lets the decline stand. A
+//! session's start, a prompt and a turn's end also run `slopty hook reports` synchronously, which
+//! hands over the reports waiting for the agent ([`crate::reports`]) and prints nothing otherwise.
 
 use std::path::{Path, PathBuf};
 
@@ -427,10 +428,10 @@ fn reports_entry(command: &str) -> Value {
     })
 }
 
-/// The relay's entry for `event`: asynchronous, except for a permission request, which waits
-/// for a decision.
+/// The relay's entry for `event`: asynchronous, except for the hooks that wait for a decision
+/// ([`permission::HELD`]).
 fn relay_entry(command: &str, event: HookEvent) -> Value {
-    if event == HookEvent::PermissionRequest {
+    if permission::HELD.contains(&event) {
         return json!({
             "type": "command",
             "command": command,
@@ -665,6 +666,16 @@ mod tests {
         assert!(!install(&mut doc, "/opt/slopty"));
         for ev in HOOK_EVENTS {
             assert!(has_relay(&doc, ev), "{ev} registered");
+            // Only a prompt and auto mode's decline wait for the worker's word.
+            let groups = doc["hooks"][ev.as_str()].as_array().expect("groups");
+            let entry = groups
+                .iter()
+                .filter_map(|g| g["hooks"].as_array())
+                .flatten()
+                .find(|h| is_relay(h))
+                .expect("the relay");
+            let waits = entry.get("async").is_none();
+            assert_eq!(waits, permission::HELD.contains(&ev), "{ev}: {entry}");
         }
         assert!(
             doc["hooks"].get("MessageDisplay").is_none(),

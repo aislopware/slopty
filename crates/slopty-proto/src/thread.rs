@@ -720,8 +720,8 @@ pub struct Compaction {
 /// A notice from the agent.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Notice {
-    /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::INFO`], [`Notice::HOOK`],
-    /// [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REWOUND`].
+    /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::DECLINED`], [`Notice::INFO`],
+    /// [`Notice::HOOK`], [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REWOUND`].
     pub kind: String,
     /// What it says.
     pub text: Clipped,
@@ -745,6 +745,9 @@ impl Notice {
     pub const API_ERROR: &'static str = "api-error";
     /// What a command printed.
     pub const COMMAND: &'static str = "command";
+    /// The agent's own judge of risk (Claude Code's auto mode) turned a call down, with no
+    /// person asked.
+    pub const DECLINED: &'static str = "declined";
     /// A hook spoke or stopped the turn.
     pub const HOOK: &'static str = "hook";
     /// Something the agent wanted to say.
@@ -870,7 +873,7 @@ pub struct Request {
     /// The call it is about, when it is about one.
     pub item: Option<ItemId>,
     /// What it asks. Open: [`Request::APPROVAL`], [`Request::QUESTION`], [`Request::PLAN`],
-    /// [`Request::ELICITATION`].
+    /// [`Request::ELICITATION`], [`Request::RETRY`].
     pub kind: String,
     /// What it asks, in a line ("Run cargo test?").
     pub title: String,
@@ -903,6 +906,9 @@ impl Request {
     pub const PLAN: &'static str = "plan";
     /// Questions for the person.
     pub const QUESTION: &'static str = "question";
+    /// May the agent try again a call its own judge of risk turned down: the allow lets it,
+    /// the deny keeps the decline.
+    pub const RETRY: &'static str = "retry";
 
     /// Whether it still waits on an answer.
     #[must_use]

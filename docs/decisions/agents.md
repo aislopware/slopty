@@ -2423,3 +2423,38 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     worked out while it is shut.
   - Tests: `conversation::thread::tests::carry::branching_onto_another_machine_hands_the_workspace_a_start_there`;
     `workspace::tests::faces::a_thread_goes_on_on_another_machine_with_its_repository`.
+
+- ✅ **Auto mode's declines are said, and the person may let the call be tried again**
+  (readiness rank 3, 2026-10-09). Claude Code 2.1.295 starts a person's own `claude` in auto
+  mode, where a classifier stands in for the person. When the classifier turns a call down,
+  Claude Code runs the `PermissionDenied` hook, and the call ended like any failed one.
+  - **The door.** Claude Code's hooks reference gives `PermissionDenied` one answer:
+    `hookSpecificOutput.retry: true`, which tells the model it may try the call again. The
+    decline itself stands either way. Claude Code ignores the field when the classifier gave no
+    verdict. Its `reason` then starts "Auto mode could not evaluate this action". The fixed
+    "Classifier unavailable" has no verdict either (`permission::retryable`). Exit codes and
+    stderr mean nothing for this event. So Slopty answers only with the retry, only on the
+    person's word, and never invents a choice the agent does not offer.
+  - **Held like an approval.** `PermissionDenied` joins `PermissionRequest` as a synchronous
+    hook (`permission::HELD`, the same 600 s timeout). The relay asks the worker on the same
+    `CtlRequest::Permission`. The worker always tells the thread of the decline
+    (`PermissionEvent::Declined`). When it may be retried and someone can answer, the yes or no
+    is held as any approval is: by followers, by the table's holder for up to two minutes, or
+    for a pushed phone. Nobody to answer means no decision, and the decline stands at once, so
+    an unwatched agent is never slowed. "Let it try again" prints the retry. "Keep it declined"
+    and no answer print nothing.
+  - **On the thread.** The decline is a notice of its own kind (`Notice::DECLINED`). It reads
+    "Auto mode declined: Run …" and then the rule out of its brackets, or Claude Code's own
+    words when there was no verdict. It sits after its call, in the call's turn, whether the
+    hook arrives before the transcript has the call or after. The held question is a request of
+    a new kind (`Request::RETRY`) that keeps the approval's answer ids (`allow`, `deny`) with
+    the words "Let it try again" and "Keep it declined". The card shows the command as code. It
+    hangs no "Deny with a reason…" off the keep, since a reason would reach nobody. It offers
+    no "Answer in the terminal", since the TUI asks nothing.
+  - **Known limit.** The notice comes from the hook, not the transcript. A thread read again
+    from scratch (a worker restart) shows the call's failure without it.
+  - Tests: `observed::tests::an_auto_mode_decline_is_said_after_its_call_and_may_be_let_try_again`,
+    `hooks::tests::install_is_idempotent_and_uninstall_restores` (only the held hooks wait),
+    the daemon's `threads::an_auto_mode_decline_is_said_and_may_be_let_try_again` (the relay
+    as Claude Code runs it, a follower answering), and
+    `conversation::thread::tests::doors::auto_modes_decline_is_let_try_again_or_kept`.

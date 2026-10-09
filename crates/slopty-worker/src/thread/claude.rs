@@ -421,12 +421,14 @@ impl Session {
         }
     }
 
-    /// A prompt held for the terminal, or settled. One held while no thread is observed here
-    /// opens one: the session's own when its id is known, else the terminal's provisional one.
+    /// A prompt held for the terminal, or settled, or a call auto mode declined. One held, or a
+    /// decline, while no thread is observed here opens one: the session's own when its id is
+    /// known, else the terminal's provisional one.
     async fn permission(&mut self, event: &PermissionEvent) {
         match event {
             PermissionEvent::Asked(prompt) => self.held.push((**prompt).clone()),
             PermissionEvent::Settled { ask, .. } => self.held.retain(|p| p.ask != *ask),
+            PermissionEvent::Declined(_) => {}
         }
         if let Some(observed) = self.observed.as_mut() {
             take(&self.host, observed.permission(event));
@@ -444,6 +446,9 @@ impl Session {
             self.start(observed);
         }
         self.read().await;
+        if let (PermissionEvent::Declined(_), Some(observed)) = (event, self.observed.as_mut()) {
+            take(&self.host, observed.permission(event));
+        }
     }
 
     /// The session id the transcript's file name says, for a session no hook spoke for.

@@ -156,7 +156,11 @@ mod hooks {
             } else {
                 Decision::Allow { updated_input: None }
             };
-            assert_eq!(hook_output(&decision).as_ref(), Some(&record["output"]), "{command}");
+            assert_eq!(
+                hook_output(HookEvent::PermissionRequest, &decision).as_ref(),
+                Some(&record["output"]),
+                "{command}"
+            );
         }
     }
 

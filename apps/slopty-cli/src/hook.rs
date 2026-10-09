@@ -8,12 +8,12 @@
 //! `slopty hook report <status> [message]` is the same relay for any program: a wrapper around
 //! another agent reports `working|blocked|done|idle|gone` and gets Claude Code's treatment.
 //!
-//! A `PermissionRequest` is the one hook Claude Code waits on (it is registered without
-//! `async`). The relay sends it as the question itself, which the worker takes in as any hook,
-//! waits for the decision and prints what Claude Code expects. The worker decides only while a
-//! client follows the session; no decision prints nothing and Claude Code shows its own dialog
-//! ([`slopty_agent::permission`]). `slopty hook statusline` is the status-line wrapper
-//! ([`crate::statusline`]).
+//! A `PermissionRequest` and auto mode's `PermissionDenied` are the hooks Claude Code waits on
+//! (they are registered without `async`). The relay sends each as the question itself, which the
+//! worker takes in as any hook, waits for the decision and prints what Claude Code expects. The
+//! worker decides only while someone can answer; no decision prints nothing, and Claude Code
+//! shows its own dialog, or lets the decline stand ([`slopty_agent::permission`]). `slopty hook
+//! statusline` is the status-line wrapper ([`crate::statusline`]).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -141,9 +141,9 @@ pub async fn relay(data_dir: &Path) {
     }
 }
 
-/// Post one hook payload or, for a permission request, ask with it and wait up to `wait` for
-/// the worker's decision; what to print for Claude Code, if anything. The ask carries the hook
-/// the worker takes in, so it goes once, on one connection.
+/// Post one hook payload or, for a permission request or auto mode's decline, ask with it and
+/// wait up to `wait` for the worker's decision; what to print for Claude Code, if anything. The ask
+/// carries the hook the worker takes in, so it goes once, on one connection.
 async fn relay_at(
     socket: &Path,
     session: SessionId,
@@ -157,7 +157,7 @@ async fn relay_at(
             return None;
         }
     };
-    if event != HookEvent::PermissionRequest {
+    if !permission::HELD.contains(&event) {
         if let Err(e) = post(socket, session, forwarded).await {
             tracing::debug!(error = %e, "hook relay");
         }
@@ -165,7 +165,7 @@ async fn relay_at(
     }
     let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
     let ask = PermissionAsk { session, payload: forwarded, wait_ms };
-    hook_output(&decide(socket, ask, wait).await)
+    hook_output(event, &decide(socket, ask, wait).await)
 }
 
 /// Hand the reports kept for this session over through the hook that runs this: the worker
@@ -676,7 +676,7 @@ mod tests {
             worker(dir.path(), vec![Reply::Open(serde_json::to_string(&answer).expect("json"))]);
         let session = SessionId::new();
         let output = relay_at(&socket, session, &permission_request(), permission::WAIT).await;
-        assert_eq!(output, hook_output(&always));
+        assert_eq!(output, hook_output(HookEvent::PermissionRequest, &always));
         assert_eq!(
             output.map(|o| o["hookSpecificOutput"]["decision"]["updatedPermissions"].clone()),
             Some(suggested),

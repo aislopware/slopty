@@ -366,6 +366,7 @@ fn always_allow_says_a_mode_in_words() {
             mode: None,
             asked_ms: WallMs::from_millis(1),
             until_ms: WallMs::from_millis(2),
+            declined: None,
         };
         grants(&prompt)
     };
@@ -985,4 +986,120 @@ fn a_permission_waits_on_its_action() {
     for (tool, detail, words) in detailed {
         assert_eq!(permission_words(tool, Some(detail)), words, "{tool} {detail}");
     }
+}
+
+/// Auto mode's decline of `call` (a `PermissionDenied` hook, as the hooks reference shows one),
+/// with `reason`.
+fn decline(call: &str, reason: &str) -> Hook {
+    Hook::parse(
+        &serde_json::json!({
+            "hook_event_name": "PermissionDenied", "permission_mode": "auto",
+            "tool_name": "Bash", "tool_input": { "command": "rm -rf /tmp/build" },
+            "tool_use_id": call, "reason": reason
+        })
+        .to_string(),
+    )
+    .expect("hook")
+}
+
+/// A decline is a notice marked as auto mode's, after its call in the call's turn, whether the
+/// hook comes before the transcript has the call or after. One the person may let
+/// try again is held as a request whose allow lets it and whose deny keeps it; one without a
+/// verdict is not.
+#[test]
+fn an_auto_mode_decline_is_said_after_its_call_and_may_be_let_try_again() {
+    let dir = dir("conversation", "tools");
+    let (observed, host, _) = replay(&dir);
+    let calls: Vec<(String, TurnId)> = host
+        .thread(observed.main())
+        .items
+        .iter()
+        .filter(|i| matches!(&i.body, ItemBody::Tool(t) if t.kind == kind::EXEC))
+        .map(|i| (i.id.0.clone(), i.turn))
+        .collect();
+    let ((early, early_turn), (late, late_turn)) = match calls.as_slice() {
+        [first, .., last] => (first.clone(), last.clone()),
+        _ => panic!("two commands in the tools capture: {calls:?}"),
+    };
+    let session = SessionId::nil();
+    let said = |state: &ThreadState, call: &str, turn: TurnId| {
+        let at = |id: &str| state.items.iter().position(|i| i.id.0 == id);
+        let (call_at, said_at) = (at(call).expect("the call"), at(&format!("declined-{call}")));
+        let said_at = said_at.expect("the decline said");
+        assert!(said_at > call_at, "after its call");
+        let item = &state.items[said_at];
+        let ItemBody::Notice(notice) = &item.body else { panic!("a notice: {item:?}") };
+        assert_eq!((notice.kind.as_str(), item.turn), (Notice::DECLINED, turn), "{call}");
+        notice.text.text.clone()
+    };
+
+    // Heard before the transcript has its call: said once the call is read.
+    let mut transcripts = Transcripts::default();
+    let changes = transcripts.read(&dir.join("transcript.jsonl"), &subagents(&dir));
+    let mut fresh = Observed::new(
+        "00000000-0000-4000-8000-000000000001",
+        "2.1.295",
+        None,
+        "/work",
+        WallMs::ZERO,
+    );
+    let mut later = Host::default();
+    later.take(fresh.drain());
+    let held = crate::permission::declined(
+        session,
+        &decline(&early, "[Irreversible Local Destruction]"),
+        WallMs::from_millis(5),
+    );
+    assert!(held.retryable);
+    later.take(fresh.permission(&PermissionEvent::Declined(Box::new(held))));
+    assert!(later.thread(fresh.main()).items.is_empty(), "no call yet, so nothing said");
+    later.take(fresh.transcript(&changes, &[]));
+    assert_eq!(
+        said(later.thread(fresh.main()), &early, early_turn),
+        "Auto mode declined: Run rm -rf /tmp/build\nIrreversible Local Destruction"
+    );
+
+    // Heard after: said at once, and Claude Code's own words stand when there was no verdict.
+    let mut observed = observed;
+    let mut host = host;
+    let blind = decline(
+        &late,
+        "Auto mode could not evaluate this action and is blocking it for safety. Try later.",
+    );
+    let unjudged = crate::permission::declined(session, &blind, WallMs::from_millis(6));
+    assert!(!unjudged.retryable, "Claude Code ignores a retry without a verdict");
+    host.take(observed.permission(&PermissionEvent::Declined(Box::new(unjudged))));
+    assert!(said(host.thread(observed.main()), &late, late_turn).ends_with("Try later."));
+
+    // The held yes or no: its allow lets it try again, its deny keeps the decline.
+    let hook = decline(&late, "[Data Exfiltration]");
+    let prompt = crate::permission::prompt(
+        session,
+        9,
+        &hook,
+        WallMs::from_millis(7),
+        WallMs::from_millis(9),
+    );
+    host.take(observed.permission(&PermissionEvent::Asked(Box::new(prompt))));
+    let request = host.thread(observed.main()).open_requests().next().expect("held").clone();
+    assert_eq!(request.kind, Request::RETRY);
+    assert_eq!(request.title, "Auto mode declined Bash: Data Exfiltration");
+    let options: Vec<(&str, &str, Effect)> =
+        request.options.iter().map(|c| (c.id.as_str(), c.label.as_str(), c.effect)).collect();
+    assert_eq!(
+        options,
+        [("deny", KEEP_DECLINED, Effect::Deny), ("allow", TRY_AGAIN, Effect::Allow)]
+    );
+    let answered = |choice: &str| {
+        let verdict = verdict(choice, None).expect("a verdict");
+        let decision = crate::permission::decision(&verdict, &hook);
+        crate::permission::hook_output(crate::HookEvent::PermissionDenied, &decision)
+    };
+    assert_eq!(
+        answered("allow"),
+        Some(serde_json::json!({
+            "hookSpecificOutput": { "hookEventName": "PermissionDenied", "retry": true }
+        }))
+    );
+    assert_eq!(answered("deny"), None, "the decline stands");
 }

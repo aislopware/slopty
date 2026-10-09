@@ -38,11 +38,15 @@ pub(super) struct Denying {
     _entered: Subscription,
 }
 
-/// The deny `request` offers that a reason goes with: its plain one, else the first. Only an
-/// approval's: a question is answered in words already.
+/// The deny `request` offers that a reason goes with: its plain one, else the first.
+///
+/// Only an approval's: a question is answered in words already, and keeping auto mode's
+/// decline says nothing more to the agent.
 #[must_use]
 pub fn deny_choice(request: &Request) -> Option<&Choice> {
-    if !request.questions.is_empty() || request.kind == Request::QUESTION {
+    if !request.questions.is_empty()
+        || [Request::QUESTION, Request::RETRY].contains(&&*request.kind)
+    {
         return None;
     }
     plain_deny(&request.options)
