@@ -14,6 +14,7 @@ use slopty_proto::git::{CHECKS_MAX, Forge, GitDone, GitOutcome, PullCheck, PullS
 
 use super::commit::{Programs, REMOTE, run};
 
+mod comments;
 mod gitlab;
 
 /// What `gh pr view` is asked for.
@@ -66,6 +67,25 @@ pub async fn status(programs: &Programs, root: &Path) -> Result<Option<PullStatu
         Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => Ok(None),
         Err(other) => Err(other),
     }
+}
+
+/// The review still open on pull request `number` of the repository at `root`, for its agent
+/// to address: its threads not resolved and its reviewers' open words.
+///
+/// # Errors
+/// The forge's command line is missing, or says something other than its answer.
+pub async fn comments(
+    programs: &Programs,
+    root: &Path,
+    number: u32,
+) -> Result<GitDone, GitOutcome> {
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    let read = match forge {
+        Forge::GitHub => comments::read(program, root, number).await,
+        Forge::GitLab => gitlab::comments(program, root, number).await,
+    };
+    read.map(|c| GitDone::PullComments(Box::new(c)))
 }
 
 /// [`status`], as a done op.

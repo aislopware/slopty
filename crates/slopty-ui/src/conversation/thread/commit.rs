@@ -15,6 +15,7 @@
 //! one answer.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 use gpui::accesskit::{Role, Toggled};
@@ -30,7 +31,7 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::threads::Mirror;
 use slopty_proto::RequestId;
 use slopty_proto::git::{
-    CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullStanding, PullStatus,
+    CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStanding, PullStatus,
 };
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, Delivery, IntentId, ThreadId, TurnState};
@@ -299,6 +300,13 @@ impl CommitSheet {
     /// Ask the agent to commit what it changed, after its turn where it queues, so the work in
     /// hand is not cut into.
     fn ask_agent(&mut self, cx: &mut Context<Self>) {
+        self.tell(ASK_TO_COMMIT.to_owned(), cx);
+    }
+
+    /// Tell the thread's agent `text` on the person's press, after its turn where it queues; the
+    /// sheet waits on it as on an ask to commit, and reads the repository again once its turn
+    /// ends.
+    fn tell(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(thread) = self.ask.filter(|_| self.asked.is_none()) else { return };
         let Some((delivery, turns, active)) = ({
             let hub = self.hub.read(cx);
@@ -309,8 +317,7 @@ impl CommitSheet {
         }) else {
             return;
         };
-        let send =
-            Intent::Send { text: ASK_TO_COMMIT.to_owned(), delivery, attachments: Vec::new() };
+        let send = Intent::Send { text, delivery, attachments: Vec::new() };
         let intent = self.hub.update(cx, |hub, cx| hub.intent(thread, send, cx));
         let into_turn = active && delivery == Delivery::Steer;
         self.asked = Some(Asked { intent, turns, into_turn });
@@ -552,8 +559,9 @@ impl CommitSheet {
             )),
             (Pull::Unknown, None) => return None,
         };
+        let next = repo.pull.status().and_then(|pull| self.next_steps(pull, repo, cx));
         let merge = repo.pull.status().and_then(|pull| self.merge_row(pull, repo, cx));
-        Some(part.children(merge).into_any_element())
+        Some(part.children(next).children(merge).into_any_element())
     }
 
     fn pull_line(&self, pull: &PullStatus) -> AnyElement {
@@ -676,6 +684,62 @@ impl CommitSheet {
             );
         }
         rows
+    }
+
+    /// What the thread's agent can be asked to do for its open pull request, each on the
+    /// person's press: fix the checks that failed, address the review still open, bring the
+    /// branch up to date with its base. None where no agent takes a message, or while one is
+    /// asked.
+    fn next_steps(&self, pull: &PullStatus, repo: &Repo, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        self.asker(cx)?;
+        let off = self.asked.is_some();
+        let comments = repo.comments.as_deref().filter(|c| c.number == pull.number);
+        let mut steps: Vec<AnyElement> = Vec::new();
+        if let Some(text) = fix_checks_words(pull) {
+            steps.push(
+                self.button("commit-fix-checks", "Fix the checks", ButtonKind::Secondary, off)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.tell(text.clone(), cx)))
+                    .into_any_element(),
+            );
+        }
+        if let Some(text) = comments.and_then(|c| address_review_words(pull, c)) {
+            let listed = |c: &PullComments| u64::try_from(c.threads.len()).unwrap_or(u64::MAX);
+            let open = comments.map_or(0, |c| listed(c).saturating_add(u64::from(c.more)));
+            let label = format!("Address the review ({open})");
+            steps.push(
+                self.button("commit-address-review", label, ButtonKind::Secondary, off)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.tell(text.clone(), cx)))
+                    .into_any_element(),
+            );
+        }
+        if let Some(text) = up_to_date_words(pull) {
+            steps.push(
+                self.button(
+                    "commit-bring-up-to-date",
+                    "Bring up to date",
+                    ButtonKind::Secondary,
+                    off,
+                )
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.tell(text.clone(), cx)))
+                .into_any_element(),
+            );
+        }
+        if steps.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .debug_selector(|| "commit-next-steps".to_owned())
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .pt(px(theme.spacing.xs))
+                .children(steps)
+                .into_any_element(),
+        )
     }
 
     /// The merge, while the pull request is open: offered only while it is ready, else the
@@ -1087,9 +1151,11 @@ impl CommitSheet {
                 }
                 GitOp::Merge { .. } => "Merging\u{2026}",
                 GitOp::RemoveWorktree => "Removing the worktree\u{2026}",
-                GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. } | GitOp::Branches => {
-                    return None;
-                }
+                GitOp::Status
+                | GitOp::PullStatus
+                | GitOp::PullComments { .. }
+                | GitOp::Changes { .. }
+                | GitOp::Branches => return None,
             };
             return Some(self.quiet("commit-busy", words).into_any_element());
         }
@@ -1218,4 +1284,107 @@ pub(crate) const fn standing_tone(theme: &Theme, standing: PullStanding) -> Rgb 
         | PullStanding::Draft
         | PullStanding::Closed => s.text_muted,
     }
+}
+
+/// The longest message a next step sends its agent, in bytes: the review's threads past it are
+/// left to the pull request's page.
+const STEP_TEXT_MAX: usize = 32 * 1024;
+
+/// Whether `pull` is open, so a step on it means anything.
+fn open(pull: &PullStatus) -> bool {
+    pull.state.eq_ignore_ascii_case("OPEN")
+}
+
+/// What "Fix the checks" tells the agent: each check that failed, by name, workflow and page,
+/// and how its forge shows why; none while no check failed.
+#[must_use]
+pub fn fix_checks_words(pull: &PullStatus) -> Option<String> {
+    let failed: Vec<&PullCheck> =
+        pull.checks.iter().filter(|c| c.bucket() == CheckBucket::Failed).collect();
+    if failed.is_empty() || !open(pull) {
+        return None;
+    }
+    let named = format!("{} {}{}", pull.forge.noun(), pull.forge.mark(), pull.number);
+    let mut text = format!("These checks failed on {named}:\n");
+    for check in failed {
+        let workflow = check.workflow.as_deref().map_or_else(String::new, |w| format!(" ({w})"));
+        let link = check.link.as_deref().map_or_else(String::new, |l| format!(": {l}"));
+        let _infallible = writeln!(text, "- {}{workflow}{link}", check.name);
+    }
+    let see = match pull.forge {
+        Forge::GitHub => format!(
+            "`gh pr checks {}` lists them, and `gh run view <run> --log-failed` shows a run's \
+             failure",
+            pull.number
+        ),
+        Forge::GitLab => "`glab ci view` shows the pipeline, and `glab ci trace <job>` a \
+                          job's log"
+            .to_owned(),
+    };
+    let _infallible = write!(
+        text,
+        "\nFind why each failed ({see}), fix the cause rather than the check, then commit and \
+         push."
+    );
+    Some(text)
+}
+
+/// What "Address the review" tells the agent: each point still open, where it is and what was
+/// said, the reviewer's own words first; none when nothing is open.
+#[must_use]
+pub fn address_review_words(pull: &PullStatus, comments: &PullComments) -> Option<String> {
+    if comments.threads.is_empty() || !open(pull) {
+        return None;
+    }
+    let named = format!("{} {}{}", pull.forge.noun(), pull.forge.mark(), pull.number);
+    let mut text = format!(
+        "Address the review still open on {named} ({}). For each point, change the code, or \
+         where you disagree, tell me why instead. Then commit and push.\n",
+        pull.url
+    );
+    let mut left = u64::from(comments.more);
+    for (ix, thread) in comments.threads.iter().enumerate() {
+        let place = match (&thread.path, thread.line) {
+            (Some(path), Some(line)) => format!("{path}, line {line}"),
+            (Some(path), None) => path.clone(),
+            (None, _) => "The review".to_owned(),
+        };
+        let outdated = if thread.outdated { " (the code has changed since)" } else { "" };
+        let mut point = format!("\n{}. {place}{outdated}:\n", ix.saturating_add(1));
+        for note in &thread.notes {
+            let body = note.body.lines().collect::<Vec<_>>().join("\n   ");
+            let _infallible = writeln!(point, "   {}: {body}", note.author);
+        }
+        if text.len().saturating_add(point.len()) > STEP_TEXT_MAX {
+            let unsaid = comments.threads.len().saturating_sub(ix);
+            left = left.saturating_add(u64::try_from(unsaid).unwrap_or(u64::MAX));
+            break;
+        }
+        text.push_str(&point);
+    }
+    if left > 0 {
+        let _infallible = writeln!(text, "\n{left} more on its page: {}", pull.url);
+    }
+    Some(text)
+}
+
+/// What "Bring up to date" tells the agent, while the branch is behind its base or conflicts
+/// with it; none otherwise.
+#[must_use]
+pub fn up_to_date_words(pull: &PullStatus) -> Option<String> {
+    let conflicts = pull.mergeable.eq_ignore_ascii_case("CONFLICTING")
+        || pull.merge_state.eq_ignore_ascii_case("DIRTY");
+    let behind = pull.merge_state.eq_ignore_ascii_case("BEHIND");
+    if !(conflicts || behind) || !open(pull) {
+        return None;
+    }
+    let base = &pull.base;
+    let why =
+        if conflicts { format!("conflicts with `{base}`") } else { format!("is behind `{base}`") };
+    let named = format!("{} {}{}", pull.forge.noun(), pull.forge.mark(), pull.number);
+    Some(format!(
+        "This branch {why} ({named}). Fetch `origin`, bring `origin/{base}` into it the way this \
+         branch is kept (merge, or rebase if it is rebased), resolve any conflicts so both \
+         sides' intent holds, run the tests, then commit and push."
+    ))
 }

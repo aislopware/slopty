@@ -8,11 +8,15 @@
 //!   one check.
 //! - **Opened and merged** with `glab mr create` and `glab mr merge`, as gh's are, and never left
 //!   to merge on its own later: a merge is now, on the person's word.
+//! - **Its review still open** is each discussion that can be resolved and is not, read with `glab
+//!   api` as the pipeline's jobs are.
 
 use std::path::Path;
 
 use serde::Deserialize;
-use slopty_proto::git::{CHECKS_MAX, Forge, GitOutcome, PullCheck, PullStatus};
+use slopty_proto::git::{
+    CHECKS_MAX, Forge, GitOutcome, PullCheck, PullComments, PullStatus, PullThread,
+};
 
 use super::{REMOTE, run};
 
@@ -258,4 +262,94 @@ fn merge_state(detailed: &str) -> &'static str {
         "checking" | "unchecked" | "preparing" | "approvals_syncing" | "" => "UNKNOWN",
         _ => "BLOCKED",
     }
+}
+
+/// One discussion of a merge request, as `GET projects/:id/merge_requests/:iid/discussions`
+/// lists it.
+#[derive(Debug, Deserialize)]
+struct Discussion {
+    #[serde(default)]
+    notes: Vec<Note>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Note {
+    #[serde(default)]
+    body: String,
+    author: Option<NoteAuthor>,
+    /// Written by GitLab itself: "added 2 commits", "approved this merge request".
+    #[serde(default)]
+    system: bool,
+    /// It can be resolved: a thread, rather than a comment that stands on its own.
+    #[serde(default)]
+    resolvable: bool,
+    #[serde(default)]
+    resolved: bool,
+    position: Option<Position>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NoteAuthor {
+    username: String,
+}
+
+/// Where a diff note is: the file and line of the change's new side, else its old side's.
+#[derive(Debug, Deserialize)]
+struct Position {
+    new_path: Option<String>,
+    new_line: Option<u32>,
+    old_path: Option<String>,
+    old_line: Option<u32>,
+}
+
+/// The most discussions of a merge request read: past it the rest are not asked for.
+const DISCUSSIONS_PAGE: &str = "100";
+
+/// The review still open on merge request `number`, read with `glab` under the project it
+/// resolves from the checkout at `root`: each thread not resolved.
+///
+/// # Errors
+/// glab says something other than its answer.
+pub(super) async fn comments(
+    glab: &Path,
+    root: &Path,
+    number: u32,
+) -> Result<PullComments, GitOutcome> {
+    let route =
+        format!("projects/:id/merge_requests/{number}/discussions?per_page={DISCUSSIONS_PAGE}");
+    let out = run(glab, root, &["api", &route], None, REMOTE).await?;
+    read_comments(&out, number)
+}
+
+/// glab's discussions of merge request `number`, as the review still open: a thread that can be
+/// resolved and is not, in its notes' order, GitLab's own notes left out.
+///
+/// # Errors
+/// It is not the answer asked for.
+pub(super) fn read_comments(out: &str, number: u32) -> Result<PullComments, GitOutcome> {
+    let discussions: Vec<Discussion> = serde_json::from_str(out)
+        .map_err(|e| GitOutcome::Failed { said: format!("glab listed no discussions: {e}") })?;
+    let threads = discussions
+        .into_iter()
+        .filter_map(|d| {
+            let first = d.notes.first()?;
+            if first.system || !first.resolvable || first.resolved {
+                return None;
+            }
+            let at = first.position.as_ref();
+            let path = at.and_then(|p| p.new_path.clone().or_else(|| p.old_path.clone()));
+            let line = at.and_then(|p| p.new_line.or(p.old_line));
+            let notes = d
+                .notes
+                .iter()
+                .filter(|n| !n.system)
+                .map(|n| {
+                    let author = n.author.as_ref().map_or("someone", |a| a.username.as_str());
+                    super::comments::note(author, &n.body)
+                })
+                .collect();
+            Some(PullThread { path, line, outdated: false, url: None, notes })
+        })
+        .collect();
+    Ok(super::comments::bounded(number, threads, 0))
 }

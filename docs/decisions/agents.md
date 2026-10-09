@@ -2330,3 +2330,42 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     remote behind a GitLab URL), `pulls::tests`,
     `thread::tests::commit::a_gitlab_repository_s_sheet_speaks_of_merge_requests`, and the
     `worker_git_merge_request_status` golden.
+
+- ✅ **A thread's agent fixes its checks, addresses its review and catches up, on the person's
+  press** (2026-10-09, `.research/readiness-2026-10-08.md` R6). The commit sheet showed a pull
+  request's failed checks and changes asked for, but the next step was the person's to type.
+  Only a project task's board offered Fix CI, and it named the checks by count.
+  - *The steps.* Over an open pull request, a thread's sheet (one whose agent takes a message)
+    offers, side by side:
+    - "Fix the checks" while a check failed. It names each failed check with its workflow and
+      page (the passing ones are left out) and the forge's own way to see why (`gh pr checks
+      N` and `gh run view --log-failed`, or `glab ci view` and `glab ci trace`).
+    - "Address the review (n)" while points are open. Each point goes by file and line, the
+      reviewer's own words first, every note in order. A point on code that has changed since
+      says so. Past 32 KiB the rest are counted and left to the page.
+    - "Bring up to date" while the branch is behind its base or conflicts with it.
+  - Each is one `Intent::Send` through the agent's own door, queued after its turn, the same as
+    "Ask to commit". The sheet waits on it the same way and reads the repository again once
+    that turn ends. Nothing is sent without the press, and Slopty never answers a reviewer
+    itself.
+  - *The review* is a new read, `GitOp::PullComments { number }`, answered with
+    `GitDone::PullComments`: threads with their notes, each held to `COMMENTS_MAX`,
+    `NOTES_MAX` and `NOTE_MAX`, and the rest counted. The client asks for it whenever it reads
+    the pull request open.
+    - On GitHub, the person's own gh asks GraphQL (`gh api graphql`, with the repository gh
+      resolves from the checkout). GraphQL is the one API that says whether a review thread is
+      resolved. Each reviewer's latest review counts when it asked for changes or commented
+      with words. Approvals, empty reviews and reviews the reviewer replaced ask nothing.
+    - On GitLab, glab lists the merge request's discussions (`glab api
+      projects/:id/merge_requests/N/discussions`). A discussion that can be resolved and is not
+      is open. GitLab's own notes and comments that stand alone are left out.
+  - A missing glab is now remembered as a missing gh is, so the sheet offers no open or merge
+    it cannot do.
+  - Tests:
+    - `repo::pull::tests::a_pull_request_s_open_review_is_read_with_gh` and
+      `a_merge_request_s_open_review_is_read_with_glab` (stand-in gh and glab).
+    - `repo::pull::comments::tests` (what counts as open, the bounds).
+    - In `slopty-ui`: `the_sheet_asks_the_agent_to_fix_the_checks_naming_them`,
+      `the_sheet_asks_the_agent_to_address_the_review_and_to_catch_up` and
+      `no_next_step_without_an_agent_to_take_it`.
+    - The goldens `client_git_pull_comments` and `worker_git_pull_comments`.

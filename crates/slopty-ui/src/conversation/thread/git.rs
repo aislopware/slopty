@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use slopty_proto::git::{
-    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullStanding, PullStatus,
+    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStanding, PullStatus,
 };
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
@@ -114,6 +114,9 @@ pub struct Repo {
     pub changes: HashMap<Against, Arc<Review>>,
     /// The branches a new worktree of it could start from, as last read.
     pub branches: Option<Arc<Branches>>,
+    /// Its open pull request's review still open, as last read: asked whenever the pull request
+    /// is read open.
+    pub comments: Option<Arc<PullComments>>,
 }
 
 impl Repo {
@@ -216,7 +219,7 @@ impl GitBook {
                 missed(repo, request, &asked.op, said, |said| Said::Failed { said });
             }
             GitOutcome::Unavailable { program, why } => {
-                if program == "gh" {
+                if program == "gh" || program == "glab" {
                     repo.no_gh = Some(why.clone());
                 }
                 missed(repo, request, &asked.op, why, refused);
@@ -250,6 +253,7 @@ enum Then {
     Push,
     Status,
     Pull,
+    Comments(u32),
 }
 
 impl Then {
@@ -258,6 +262,7 @@ impl Then {
             Self::Push => GitOp::Push,
             Self::Status => GitOp::Status,
             Self::Pull => GitOp::PullStatus,
+            Self::Comments(number) => GitOp::PullComments { number: *number },
         }
     }
 }
@@ -269,9 +274,14 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             repo.unread = None;
         }
         GitDone::PullStatus(pull) => {
+            match pull.as_deref().filter(|p| p.state.eq_ignore_ascii_case("OPEN")) {
+                Some(open) => then.push(Then::Comments(open.number)),
+                None => repo.comments = None,
+            }
             repo.pull = pull.map_or(Pull::None, Pull::Known);
             repo.pull_unread = None;
         }
+        GitDone::PullComments(comments) => repo.comments = Some(Arc::from(comments)),
         GitDone::Committed { commit, files, .. } => {
             repo.said = Some((request, Said::Committed { commit, files }));
             if push {
@@ -342,6 +352,9 @@ fn missed(
         // Branches that could not be read (not a repository, out of reach) leave a start's
         // place as words: there is no worktree to make of it.
         GitOp::Branches => {}
+        // A review that could not be read offers nothing to address; the sheet shows the pull
+        // request as it is.
+        GitOp::PullComments { .. } => repo.comments = None,
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -352,7 +365,14 @@ const fn refused(why: String) -> Said {
 
 /// Whether `op` changes the repository or its pull request, rather than reads it.
 const fn changes(op: &GitOp) -> bool {
-    !matches!(op, GitOp::Status | GitOp::PullStatus | GitOp::Changes { .. } | GitOp::Branches)
+    !matches!(
+        op,
+        GitOp::Status
+            | GitOp::PullStatus
+            | GitOp::PullComments { .. }
+            | GitOp::Changes { .. }
+            | GitOp::Branches
+    )
 }
 
 /// A file's status in git's letters as the person reads it: the working tree's letter where it

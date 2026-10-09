@@ -343,3 +343,124 @@ fn an_agent_that_takes_no_message_is_not_asked(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("commit-sheet").is_some());
     assert!(cx.debug_bounds("commit-ask").is_none(), "nothing to ask");
 }
+
+/// The messages sent to the thread's agent, in order.
+fn told(sent: &Sent) -> Vec<String> {
+    use slopty_proto::thread::wire::{Intent, ThreadRequest};
+    sent.borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                intent: Intent::Send { text, .. }, ..
+            }) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A thread whose agent queues, its commit sheet open over its pull request.
+fn opened_with_agent(
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<ThreadHub>, Sent, &mut VisualTestContext) {
+    use slopty_proto::thread::Cap;
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    state.meta.caps = vec![Cap::named(Cap::QUEUE)];
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
+    (hub, sent, cx)
+}
+
+/// Over a pull request whose checks failed, the sheet offers to ask the thread's agent to fix
+/// them: one message, after its turn, naming each check that failed with its workflow and page
+/// (not the ones that passed) and how the forge shows why. The sheet then waits on the agent.
+#[gpui::test]
+fn the_sheet_asks_the_agent_to_fix_the_checks_naming_them(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened_with_agent(cx);
+    let mut failing = pull("BEHIND", &["SUCCESS", "FAILURE", "FAILURE"]);
+    failing.checks[1].link = Some("https://github.com/o/r/actions/runs/9".to_owned());
+    failing.checks[2].name = "lint".to_owned();
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(failing))));
+    click(cx, "commit-fix-checks");
+    let [fix] = told(&sent).try_into().expect("one message");
+    assert!(fix.starts_with("These checks failed on pull request #7:"), "{fix}");
+    assert!(fix.contains("- ci FAILURE (CI): https://github.com/o/r/actions/runs/9"), "{fix}");
+    assert!(fix.contains("- lint (CI)") && !fix.contains("ci SUCCESS"), "{fix}");
+    assert!(fix.contains("`gh pr checks 7`"), "{fix}");
+    assert!(cx.debug_bounds("commit-asked").is_some(), "the sheet waits on the agent");
+}
+
+/// The review still open, read with the open pull request, is a step of its own: one message
+/// naming each point where it is, the reviewer's own words first and every note in order. A
+/// branch behind its base is offered a catch-up beside it.
+#[gpui::test]
+fn the_sheet_asks_the_agent_to_address_the_review_and_to_catch_up(cx: &mut TestAppContext) {
+    use slopty_proto::git::{PullComments, PullNote, PullThread};
+
+    let (hub, sent, cx) = opened_with_agent(cx);
+    answer(
+        &hub,
+        cx,
+        last(&sent, &GitOp::PullStatus),
+        GitDone::PullStatus(Some(Box::new(pull("BEHIND", &["SUCCESS"])))),
+    );
+    assert!(cx.debug_bounds("commit-fix-checks").is_none(), "no check failed");
+    let note =
+        |author: &str, body: &str| PullNote { author: author.to_owned(), body: body.to_owned() };
+    let comments = PullComments {
+        number: 7,
+        threads: vec![
+            PullThread {
+                path: None,
+                line: None,
+                outdated: false,
+                url: None,
+                notes: vec![note("ada", "Split the parser out first.")],
+            },
+            PullThread {
+                path: Some("src/lib.rs".to_owned()),
+                line: Some(42),
+                outdated: true,
+                url: None,
+                notes: vec![note("sam", "This unwrap panics."), note("ada", "Agreed.")],
+            },
+        ],
+        more: 0,
+    };
+    let review = GitOp::PullComments { number: 7 };
+    answer(&hub, cx, last(&sent, &review), GitDone::PullComments(Box::new(comments)));
+
+    click(cx, "commit-address-review");
+    let [address] = told(&sent).try_into().expect("one message");
+    assert!(address.starts_with("Address the review still open on pull request #7"), "{address}");
+    assert!(address.contains("1. The review:\n   ada: Split the parser out first."), "{address}");
+    assert!(
+        address.contains(
+            "2. src/lib.rs, line 42 (the code has changed since):\n   sam: This unwrap panics.\n   \
+             ada: Agreed."
+        ),
+        "{address}"
+    );
+    assert!(cx.debug_bounds("commit-bring-up-to-date").is_some(), "behind main");
+}
+
+/// Where no agent takes a message the sheet offers no next step, however the pull request
+/// stands.
+#[gpui::test]
+fn no_next_step_without_an_agent_to_take_it(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    answer(
+        &hub,
+        cx,
+        last(&sent, &GitOp::PullStatus),
+        GitDone::PullStatus(Some(Box::new(pull("BEHIND", &["FAILURE"])))),
+    );
+    assert!(cx.debug_bounds("commit-pull").is_some());
+    assert!(cx.debug_bounds("commit-next-steps").is_none());
+}

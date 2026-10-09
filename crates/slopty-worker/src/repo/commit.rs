@@ -106,6 +106,7 @@ pub async fn apply(
         GitOp::Branches => {
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
         }
+        GitOp::PullComments { number } => super::pull::comments(programs, &root, number).await,
         GitOp::RemoveWorktree => {
             use super::worktrees::{Failed, Removed, free};
             match free(git, programs, &root, terminals).await {

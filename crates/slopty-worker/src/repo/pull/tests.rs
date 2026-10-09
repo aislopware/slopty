@@ -25,6 +25,7 @@ const VIEW: &str = r#"{"number":7,"url":"https://github.com/o/demo/pull/7","titl
 fn stand_in(dir: &Path, mode: &str) -> PathBuf {
     let gh = dir.join("gh");
     std::fs::write(dir.join("view.json"), VIEW).expect("written");
+    std::fs::write(dir.join("review.json"), REVIEW).expect("written");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
          case \"$1 $2\" in\n\
@@ -32,6 +33,7 @@ fn stand_in(dir: &Path, mode: &str) -> PathBuf {
            cat \"{dir}/view.json\" ;;\n\
          'pr merge') if [ {mode} = refuse ]; then echo 'Pull request #7 is not mergeable: the base branch policy prohibits the merge.' >&2; exit 1; fi\n\
            echo '✓ Squashed and merged pull request #7 (Keep it)' ;;\n\
+         'api graphql'*) cat \"{dir}/review.json\" ;;\n\
          *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
          esac\n",
         dir = dir.display()
@@ -201,6 +203,7 @@ fn stand_in_glab(dir: &Path, mode: &str) -> PathBuf {
     std::fs::write(dir.join("mr.json"), MR_VIEW).expect("written");
     std::fs::write(dir.join("jobs.json"), MR_JOBS).expect("written");
     std::fs::write(dir.join("merged.json"), MR_MERGED).expect("written");
+    std::fs::write(dir.join("discussions.json"), MR_DISCUSSIONS).expect("written");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
          case \"$*\" in\n\
@@ -209,6 +212,7 @@ fn stand_in_glab(dir: &Path, mode: &str) -> PathBuf {
          'mr list --merged'*) if [ {mode} = merged ]; then echo '[{{\"iid\":5}}]'; else echo '[]'; fi ;;\n\
          'mr view 5 --output json') cat \"{dir}/merged.json\" ;;\n\
          'api projects/:id/pipelines/77/jobs?per_page=100') cat \"{dir}/jobs.json\" ;;\n\
+         'api projects/:id/merge_requests/7/discussions?per_page=100') cat \"{dir}/discussions.json\" ;;\n\
          'mr create'*) echo 'Creating merge request for feature into main in o/demo'; \
            echo '!12 Keep it (feature)'; echo ' https://gitlab.example.com/o/demo/-/merge_requests/12' ;;\n\
          'mr merge'*) echo '✓ Merged!' ;;\n\
@@ -366,4 +370,94 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
             .as_slice()
         )
     );
+}
+
+/// What the stand-in gh answers GitHub's GraphQL with: a reviewer asking for changes, a thread
+/// resolved and one still open.
+const REVIEW: &str = r#"{"data":{"repository":{"pullRequest":{
+"reviews":{"nodes":[{"author":{"login":"ada"},"body":"Split the parser out first.",
+ "state":"CHANGES_REQUESTED","url":"https://github.com/o/demo/pull/7#pullrequestreview-2"}]},
+"reviewThreads":{"totalCount":2,"nodes":[
+ {"isResolved":true,"isOutdated":false,"path":"src/a.rs","line":3,"comments":{"totalCount":1,
+  "nodes":[{"author":{"login":"sam"},"body":"Typo.","url":null}]}},
+ {"isResolved":false,"isOutdated":false,"path":"src/lib.rs","line":42,"comments":{"totalCount":1,
+  "nodes":[{"author":{"login":"sam"},"body":"This unwrap panics on an empty file.",
+  "url":"https://github.com/o/demo/pull/7#discussion_r2"}]}}]}}}}}"#;
+
+/// The discussions of merge request 7, as `GET projects/:id/merge_requests/7/discussions` lists
+/// them: GitLab's own note, a comment that stands alone, a resolved thread and an open one on a
+/// line, with a reply.
+const MR_DISCUSSIONS: &str = r#"[
+{"id":"a","individual_note":true,"notes":[{"body":"added 2 commits","author":{"username":"ada"},
+ "system":true,"resolvable":false,"resolved":false}]},
+{"id":"b","individual_note":true,"notes":[{"body":"Nice work.","author":{"username":"lin"},
+ "system":false,"resolvable":false,"resolved":false}]},
+{"id":"c","individual_note":false,"notes":[{"body":"Typo.","author":{"username":"sam"},
+ "system":false,"resolvable":true,"resolved":true,
+ "position":{"new_path":"src/a.rs","new_line":3,"old_path":"src/a.rs","old_line":3}}]},
+{"id":"d","individual_note":false,"notes":[
+ {"body":"This unwrap panics on an empty file.","author":{"username":"sam"},"system":false,
+  "resolvable":true,"resolved":false,
+  "position":{"new_path":"src/lib.rs","new_line":42,"old_path":"src/lib.rs","old_line":40}},
+ {"body":"Agreed; return the error.","author":{"username":"ada"},"system":false,
+  "resolvable":true,"resolved":false}]}]"#;
+
+/// The review still open on a pull request is read with gh, under the repository gh resolves
+/// from the checkout: the reviewer's ask for changes, then the thread not resolved, on its file
+/// and line. The resolved thread asks nothing.
+#[tokio::test]
+async fn a_pull_request_s_open_review_is_read_with_gh() {
+    let dir = tempfile::tempdir().expect("temp");
+    let programs = Programs {
+        git: crate::changes::git().map(Path::to_path_buf),
+        gh: Some(stand_in(dir.path(), "open")),
+        glab: None,
+    };
+    let work = repo(dir.path());
+    let op = GitOp::PullComments { number: 7 };
+    let GitOutcome::Done(GitDone::PullComments(read)) =
+        apply(&programs, &work.to_string_lossy(), op, &[]).await
+    else {
+        panic!("no review read")
+    };
+    let said: Vec<(Option<&str>, Option<u32>, &str)> = read
+        .threads
+        .iter()
+        .map(|t| (t.path.as_deref(), t.line, t.notes[0].body.as_str()))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (None, None, "Split the parser out first."),
+            (Some("src/lib.rs"), Some(42), "This unwrap panics on an empty file."),
+        ]
+    );
+    let [graphql] = asked(dir.path()).try_into().expect("one call");
+    for field in ["api graphql", "-F owner={owner}", "-F name={repo}", "-F number=7"] {
+        assert!(graphql.contains(field), "{field} in {graphql}");
+    }
+}
+
+/// A merge request's review still open is each discussion that can be resolved and is not, read
+/// with glab: GitLab's own notes, a comment standing alone and a resolved thread ask nothing.
+#[tokio::test]
+async fn a_merge_request_s_open_review_is_read_with_glab() {
+    let dir = tempfile::tempdir().expect("temp");
+    let work = gitlab_repo(dir.path());
+    let programs = with_glab(stand_in_glab(dir.path(), "open"));
+    let op = GitOp::PullComments { number: 7 };
+    let GitOutcome::Done(GitDone::PullComments(read)) =
+        apply(&programs, &work.to_string_lossy(), op, &[]).await
+    else {
+        panic!("no review read")
+    };
+    let [open] = read.threads.as_slice() else { panic!("{read:?}") };
+    assert_eq!((open.path.as_deref(), open.line), (Some("src/lib.rs"), Some(42)));
+    let notes: Vec<(&str, &str)> =
+        open.notes.iter().map(|n| (n.author.as_str(), n.body.as_str())).collect();
+    assert_eq!(
+        notes,
+        [("sam", "This unwrap panics on an empty file."), ("ada", "Agreed; return the error.")]
+    );
+    assert_eq!(asked(dir.path()), ["api projects/:id/merge_requests/7/discussions?per_page=100"]);
 }

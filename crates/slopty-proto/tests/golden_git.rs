@@ -6,7 +6,7 @@
 mod golden_git {
     use slopty_proto::git::{
         Branch, Branches, Forge, GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck,
-        PullStatus,
+        PullComments, PullNote, PullStatus, PullThread,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
 
@@ -110,6 +110,7 @@ mod golden_git {
         };
         snap("client_git_remove_worktree", &free);
         snap("client_git_branches", &ask(10, GitOp::Branches));
+        snap("client_git_pull_comments", &ask(11, GitOp::PullComments { number: 7 }));
     }
 
     #[test]
@@ -177,6 +178,34 @@ mod golden_git {
             more: 3,
         }));
         snap("worker_git_branches", &done(10, GitOutcome::Done(branches)));
+        let note = |author: &str, body: &str| PullNote {
+            author: author.to_owned(),
+            body: body.to_owned(),
+        };
+        let comments = GitDone::PullComments(Box::new(PullComments {
+            number: 7,
+            threads: vec![
+                PullThread {
+                    path: None,
+                    line: None,
+                    outdated: false,
+                    url: Some("https://github.com/o/demo/pull/7#pullrequestreview-1".to_owned()),
+                    notes: vec![note("ada", "Split the parser out before this lands.")],
+                },
+                PullThread {
+                    path: Some("src/lib.rs".to_owned()),
+                    line: Some(42),
+                    outdated: true,
+                    url: Some("https://github.com/o/demo/pull/7#discussion_r2".to_owned()),
+                    notes: vec![
+                        note("ada", "This unwrap panics on an empty file."),
+                        note("lin", "Agreed; return the error."),
+                    ],
+                },
+            ],
+            more: 1,
+        }));
+        snap("worker_git_pull_comments", &done(11, GitOutcome::Done(comments)));
         let refused = GitOutcome::Refused { why: "choose the files to commit".to_owned() };
         snap("worker_git_refused", &done(4, refused));
         let unavailable = GitOutcome::Unavailable {
