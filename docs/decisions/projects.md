@@ -2198,3 +2198,11 @@ reordering and edited allows are gone" in `agents.md`.*
     pointer, a never-run task refused, a task's own agent forbidden); `slopty-ui`
     `project::tests::a_task_starts_fresh_or_goes_to_another_agent`; goldens `task_restart` and
     `task_restart_codex`.
+
+- ✅ **An orchestrator's plan is confirmed and started** (2026-10-09). When a project's
+  orchestrator puts its plan to the person, allowing it sets the project's tasks going, so the
+  plan's plain allow reads "Confirm & start" in the tray and on the plan's card. The workspace
+  tells a thread view that its terminal is an orchestrator (`ThreadView::set_orchestrates`,
+  from the projects mirror). Any other agent's plan, and an orchestrator's approval of a
+  command, keep the agent's own words. Test: `slopty-ui`
+  `conversation::thread::tests::face::an_orchestrator_s_plan_is_confirmed_and_started`.

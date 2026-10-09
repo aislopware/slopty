@@ -34,6 +34,9 @@ pub(crate) const OTHER_DENIALS: &str = "Other ways to deny";
 /// The menu's row that denies with the person's reason.
 pub(crate) const WITH_A_REASON: &str = "Deny with a reason\u{2026}";
 
+/// The allow of an orchestrator's plan: it starts the project's work.
+pub(crate) const CONFIRM_AND_START: &str = "Confirm & start";
+
 /// What the standing grants are named by, for a screen reader.
 pub(crate) const STANDING: &str = "Grants that last";
 
@@ -161,9 +164,15 @@ impl ThreadView {
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         let (ask, id) = (request.id.clone(), choice.id.clone());
+        // An orchestrator's plan, allowed, sets the project's tasks going.
+        let starts = self.orchestrates
+            && request.kind == Request::PLAN
+            && choice.effect == Effect::Allow
+            && choice.scope.is_none();
+        let words = if starts { CONFIRM_AND_START.to_owned() } else { choice.label.clone() };
         self.answer_button(
             format!("answer-{}-{}", ask.0, choice.id),
-            (choice.label.clone(), answer_scope(choice).map(str::to_owned)),
+            (words, answer_scope(choice).map(str::to_owned)),
             kind,
         )
         .on_click(cx.listener(move |this, _ev, _w, cx| this.answer(ask.clone(), id.clone(), cx)))

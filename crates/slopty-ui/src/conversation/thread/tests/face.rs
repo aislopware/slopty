@@ -1133,3 +1133,39 @@ fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
         assert_eq!(at_foot, bleeds, "{width}: at the foot only when it bleeds");
     }
 }
+
+/// A plan a project's orchestrator puts to the person starts the project's work when allowed,
+/// so its allow says so: "Confirm & start". Any other agent's plan, and an orchestrator's
+/// approval of a command, keep the agent's own words.
+#[gpui::test]
+fn an_orchestrator_s_plan_is_confirmed_and_started(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::NeedsYou;
+    state.turns = vec![live_turn()];
+    let mut plan = approval("p");
+    plan.kind = Request::PLAN.to_owned();
+    plan.text = Some(Clipped::whole("# Split the parser\n\n1. Lex\n2. Parse"));
+    state.requests = vec![plan, approval("c")];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let labelled = |cx: &mut VisualTestContext, label: &str| {
+        cx.update(|window, _cx| window.refresh());
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.iter().any(|n| n.label.as_deref() == Some(label))
+    };
+    assert!(cx.debug_bounds("answer-p-allow").is_some(), "the plan's answers in the tray");
+    assert!(!labelled(cx, "Confirm & start"), "another agent's plan keeps its words");
+
+    view.update(cx, |v, cx| v.set_orchestrates(true, cx));
+    assert!(labelled(cx, "Confirm & start"), "the orchestrator's plan starts the work");
+    let next = cx.debug_bounds("asked-next").expect("two requests").center();
+    cx.simulate_click(next, Modifiers::none());
+    assert!(cx.debug_bounds("answer-c-allow").is_some(), "the command's answers");
+    assert!(!labelled(cx, "Confirm & start"), "a command is allowed in its own words");
+}

@@ -232,6 +232,9 @@ pub struct ThreadView {
     /// Its brief came from elsewhere (a project's orchestrator, or its task): it is never asked
     /// what to do, even before its first row.
     briefed: bool,
+    /// Its terminal is a project's orchestrator: a plan it puts to the person is the project's
+    /// plan, and allowing it starts the work ("Confirm & start").
+    orchestrates: bool,
     /// Its "+" menu offers the Photos picker beside the Files one: on iOS, where pictures live
     /// in Photos.
     photos: bool,
@@ -504,6 +507,7 @@ impl ThreadView {
             thread,
             draft,
             briefed: false,
+            orchestrates: false,
             photos: cfg!(target_os = "ios"),
             runs: 1,
             elsewhere: Vec::new(),
@@ -639,6 +643,15 @@ impl ThreadView {
         if self.briefed != briefed {
             self.briefed = briefed;
             cx.notify();
+        }
+    }
+
+    /// Whether its terminal is a project's orchestrator, whose plan's allow reads "Confirm &
+    /// start".
+    pub fn set_orchestrates(&mut self, orchestrates: bool, cx: &mut Context<Self>) {
+        if self.orchestrates != orchestrates {
+            self.orchestrates = orchestrates;
+            self.rebuild(cx);
         }
     }
 

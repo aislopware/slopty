@@ -1350,18 +1350,22 @@ impl WorkspaceView {
         // A project's orchestrator and its tasks' agents have their brief from the project, so
         // their threads never ask what to do; the board moving brings this back here.
         let mirror = self.projects();
-        let briefed: Vec<(Entity<ThreadView>, bool)> = self
+        let briefed: Vec<(Entity<ThreadView>, bool, bool)> = self
             .faces
             .threads
             .views
             .iter()
             .map(|(s, view)| {
-                let briefed = mirror.of_orchestrator(*s).is_some() || mirror.of_agent(*s).is_some();
-                (view.clone(), briefed)
+                let orchestrates = mirror.of_orchestrator(*s).is_some();
+                let briefed = orchestrates || mirror.of_agent(*s).is_some();
+                (view.clone(), briefed, orchestrates)
             })
             .collect();
-        for (view, briefed) in briefed {
-            view.update(cx, |v, cx| v.set_briefed(briefed, cx));
+        for (view, briefed, orchestrates) in briefed {
+            view.update(cx, |v, cx| {
+                v.set_briefed(briefed, cx);
+                v.set_orchestrates(orchestrates, cx);
+            });
         }
     }
 
