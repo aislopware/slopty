@@ -232,6 +232,14 @@ impl std::fmt::Debug for Plate {
 }
 
 impl Plate {
+    /// The plate of a list steered from a field (the palette's, a picker's): the keyed wash
+    /// alone, as `MonoCode` marks its palette's row. The field keeps the focus and its own
+    /// ring, so the list draws no second one; a list that holds the keyboard itself (the
+    /// navigator's) keeps the focus line, its keyboard's cursor.
+    pub(crate) fn plain() -> Self {
+        Self(Rc::new(RefCell::new(Glide { plain: true, ..Glide::default() })))
+    }
+
     /// Whether the keyboard is in the list (as it is unless said otherwise): the plate is then
     /// the keyed wash with the focus line, the keyboard's cursor, and else the selected wash
     /// ([`crate::kit::selected`]).
@@ -313,9 +321,17 @@ impl Plate {
         let theme = theme.clone();
         let radius = px(theme.radii.sm);
         // Read now: the glide is held while the plate paints.
-        let keyed = !self.0.borrow().away;
+        let (keyed, plain) = {
+            let glide = self.0.borrow();
+            (!glide.away, glide.plain)
+        };
         self.under_painted(moves, now, move |plate, window| {
-            crate::kit::paint_chosen(&theme, plate, radius, keyed, window);
+            if plain {
+                let fill = gpui::fill(plate, hsla(theme.surfaces.keyed));
+                window.paint_quad(fill.corner_radii(gpui::Corners::all(radius)));
+            } else {
+                crate::kit::paint_chosen(&theme, plate, radius, keyed, window);
+            }
         })
     }
 
@@ -400,6 +416,8 @@ struct Glide {
     flight: Option<Flight>,
     /// The keyboard is not in the list: the plate is the selected wash, not the keyed one.
     away: bool,
+    /// The plate is the keyed wash alone, with no focus line: a list a field steers.
+    plain: bool,
 }
 
 /// A move in flight: how far off the row the plate started, when, and how long it takes.
@@ -1572,7 +1590,7 @@ impl CommandPalette {
             sheet: false,
             fades_in: false,
             leaving: false,
-            plate: Plate::default(),
+            plate: Plate::plain(),
             empty: NO_COMMAND_MATCHES.into(),
             theme,
             _events: events,
@@ -2596,6 +2614,31 @@ mod tests {
         assert_eq!(faded(cx), gpui::Edges::default(), "at the end nothing lies below");
     }
 
+    /// In a window narrower than its sheet width the palette is a sheet the window's width, its
+    /// field at the foot, what it finds above the field, and a scrim over the work.
+    #[gpui::test]
+    fn a_phone_palette_is_a_sheet_with_its_field_at_the_foot(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (palette, cx) = palette_of(3, cx);
+        assert!(cx.debug_bounds("palette-scrim").is_none(), "a desktop palette has no scrim");
+        let field = cx.debug_bounds("palette-field").expect("the field");
+        let list = cx.debug_bounds("palette-list").expect("the list");
+        assert!(field.bottom() <= list.top() + px(0.5), "on a desktop the field heads the list");
+        let width = cx.update(|window, _| f32::from(window.viewport_size().width));
+        palette.update(cx, |p, cx| {
+            p.set_sheet_below(width + 1.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let sheet = cx.debug_bounds("palette").expect("the sheet");
+        let field = cx.debug_bounds("palette-field").expect("the field");
+        let list = cx.debug_bounds("palette-list").expect("the list");
+        assert!((f32::from(sheet.size.width) - width).abs() < 0.5, "the window's width");
+        assert!(list.bottom() <= field.top() + px(0.5), "what it finds lists above the field");
+        assert!(sheet.bottom() - field.bottom() < px(1.0), "the field sits at the sheet's foot");
+        assert!(cx.debug_bounds("palette-scrim").is_some(), "the sheet dims the work");
+    }
+
     fn plate(palette: &Entity<CommandPalette>, cx: &VisualTestContext) -> Bounds<Pixels> {
         palette.read_with(cx, |p, _| p.plate.drawn()).expect("the plate is drawn")
     }
@@ -2603,6 +2646,35 @@ mod tests {
     fn step(palette: &Entity<CommandPalette>, cx: &mut VisualTestContext) {
         palette.update(cx, |p, cx| p.step(1, cx));
         cx.run_until_parked();
+    }
+
+    /// The selected line is marked by the keyed wash alone: the field holds the keyboard and
+    /// its own ring, so the list draws no focus line round its plate.
+    #[gpui::test]
+    fn the_selected_line_is_the_fill_alone(cx: &mut TestAppContext) {
+        let (palette, cx) = palette_of(3, cx);
+        let at = plate(&palette, cx);
+        let theme = Theme::default();
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+        let plates: Vec<gpui::Quad> = quads
+            .into_iter()
+            .filter(|q| {
+                near(q.bounds.origin.y.0, at.origin.y)
+                    && near(q.bounds.size.height.0, at.size.height)
+                    && near(q.bounds.size.width.0, at.size.width)
+            })
+            .collect();
+        let keyed = hsla(theme.surfaces.keyed);
+        assert!(
+            plates.iter().any(|q| q.background == gpui::solid_background(keyed)),
+            "{plates:#?}"
+        );
+        let focus = hsla(theme.surfaces.focus);
+        assert!(
+            plates.iter().all(|q| q.border_color != focus || q.border_widths.left.0 == 0.0),
+            "no focus line round the plate: {plates:#?}"
+        );
     }
 
     /// A line fills the list's width whatever its words, so the plate spans the list and a

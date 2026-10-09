@@ -734,9 +734,11 @@ impl WorkspaceView {
         }
     }
 
-    /// A file tile for `path` on `key` (the context worker when `None`): an existing tile for
-    /// it is focused, else a new one opens right of the focus and asks the worker for the text.
-    /// `line` (1-based) is where the tile lands.
+    /// A file opened in passing (a thread's call, a tree, a review, a path, a search hit): a
+    /// file tile for `path` on `key` (the context worker when `None`) as the preview
+    /// (`preview`). An existing tile for it is focused, else a new one takes the place of the
+    /// preview in the tab on show, or opens right of the focus, and asks the worker for the
+    /// text. `line` (1-based) is where the tile lands.
     pub fn open_file_on(
         &mut self,
         key: Option<WorkerKey>,
@@ -744,15 +746,27 @@ impl WorkspaceView {
         line: Option<u32>,
         cx: &mut Context<Self>,
     ) {
-        let _shown = self.show_file(key, path, line, cx);
+        let _shown = self.show_file_as(key, path, line, true, cx);
     }
 
-    /// [`Self::open_file_on`], saying which item shows the file.
+    /// A file picked on purpose: [`Self::open_file_on`] kept rather than a preview, saying
+    /// which item shows the file.
     pub(super) fn show_file(
         &mut self,
         key: Option<WorkerKey>,
         path: &str,
         line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Option<ItemId> {
+        self.show_file_as(key, path, line, false, cx)
+    }
+
+    fn show_file_as(
+        &mut self,
+        key: Option<WorkerKey>,
+        path: &str,
+        line: Option<u32>,
+        preview: bool,
         cx: &mut Context<Self>,
     ) -> Option<ItemId> {
         let key = key.or_else(|| self.context_worker())?;
@@ -763,6 +777,9 @@ impl WorkspaceView {
             })
         });
         let id = if let Some(id) = existing {
+            if !preview {
+                self.keep_preview(TileRef { worker: key, item: id }, cx);
+            }
             self.request_file(id);
             self.go_to(id, cx);
             id
@@ -774,8 +791,16 @@ impl WorkspaceView {
                 facts: std::collections::BTreeMap::new(),
             };
             let id = item.id;
-            tracing::info!(%id, %path, ?line, "open file tile");
+            tracing::info!(%id, %path, ?line, preview, "open file tile");
+            let replaced = if preview { self.preview_to_replace() } else { None };
+            if preview {
+                self.preview_opened(TileRef { worker: key, item: id }, replaced.map(|r| r.1));
+            }
             self.propose(key, ItemOp::Add(item), cx);
+            // The new preview stands in the old one's pane, next to it: the old one goes.
+            if let Some((old, _)) = replaced {
+                self.propose(old.worker, ItemOp::Remove(old.item), cx);
+            }
             id
         };
         match self.files.get(&id) {
@@ -791,9 +816,9 @@ impl WorkspaceView {
         Some(id)
     }
 
-    /// A file tile on the context worker (the self-test socket's and the palette's way).
+    /// A file tile on the context worker, kept (the self-test socket's way).
     pub fn open_file(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
-        self.open_file_on(None, path, line, cx);
+        let _shown = self.show_file(None, path, line, cx);
     }
 
     /// `path` made absolute against the session's directory as the worker last reported it;
@@ -1140,6 +1165,8 @@ impl WorkspaceView {
     ) {
         let Some(item) = self.item(tile).cloned() else { return };
         let placeholder = self.derived_title(&item);
+        // A name given keeps a preview.
+        self.keep_preview(tile, cx);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)

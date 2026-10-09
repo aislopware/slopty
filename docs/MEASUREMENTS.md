@@ -15723,3 +15723,31 @@ Draw time in ms, p50 / p95 / p99 / max:
 cargo xtask e2e smooth --filter 'test(a_sash_drag_beside_five_flooding_shells_on_the_mac)'
 # and again, with what that built: --no-build
 ```
+
+## 2026-10-07 — a new pane's slide
+
+A pane new to the tab on show comes in from the edge it opened at (`workspace::panes`, 260 ms,
+`Pace::Pane`). It travels 24 pt by whole device pixels while the ground over it thins out, so
+only its place moves. The headless test opens two shells, holds the layout's clock, and steps it
+over the slide in 20 frames, 16 of them inside it. It counts how often each shell's view was
+built.
+
+| shell | built before | built after | frames |
+| --- | --- | --- | --- |
+| the one beside | 4 | 4 | 20 |
+| the new one | 2 | 12 | 20 |
+
+- **No other pane is built again.** The panes beside the new one are drawn from last frame as
+  they stand.
+- **The new pane is built on 10 of the slide's 16 frames.** A view whose bounds moved is built
+  again: gpui-fast draws a moved element or keyed stretch again shifted, but not a moved view.
+  It is drawn again on the frames where the eased travel holds to the same device pixel, which
+  is the slide's soft landing. A fade of the pane's own opacity, or a travel by parts of a
+  pixel, built it on every frame. The ground laid over it as a thinning cover, and the travel
+  snapped to device pixels, are what this saves. The cost matches a sash drag's (a resized pane
+  is built on each step), for one pane over 260 ms.
+- **Reduce Motion, and a tab shown anew, put every pane in place at once.**
+
+```sh
+cargo test -p slopty-ui --lib a_sliding_pane_builds_no_other_pane -- --nocapture
+```

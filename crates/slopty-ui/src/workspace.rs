@@ -58,6 +58,7 @@ mod overlays;
 mod panes;
 mod popout;
 mod presence;
+mod preview;
 mod project_lines;
 mod project_search;
 mod projects;
@@ -691,6 +692,10 @@ pub struct WorkspaceView {
     sash_before: Vec<(ItemId, (f32, f32))>,
     /// Where the title bar's tabs are scrolled.
     title_scroll: gpui::ScrollHandle,
+    /// The title tabs that closed and still fold away.
+    title_closing: title_tabs::Closing,
+    /// The file tile open as a preview, which the next file opened in passing replaces.
+    preview: preview::Preview,
     /// The title tabs as last drawn: a header's news draws them again only where it changed
     /// what they say.
     title_tabs_drawn: std::cell::RefCell<Vec<title_tabs::TitleTab>>,
@@ -1047,6 +1052,8 @@ impl WorkspaceView {
             panes: panes::Panes::default(),
             sash_before: Vec::new(),
             title_scroll: gpui::ScrollHandle::new(),
+            title_closing: title_tabs::Closing::default(),
+            preview: preview::Preview::default(),
             title_tabs_drawn: std::cell::RefCell::default(),
             epoch: Instant::now(),
             away_ticking: false,
@@ -1598,8 +1605,20 @@ impl WorkspaceView {
                     Some(area::Landing::Strip(at)) => Some(*at),
                     _ => None,
                 };
-                let drops = title_tabs::Drops { spots: &self.drop_spots, at };
-                let drawn = title_tabs::render(&self.theme, &tabs, &self.title_scroll, &drops, cx);
+                // A closed tab folds away on the layout's clock, among the project's own tabs.
+                let closing = self.layout.shown_project().map(|project| {
+                    let mut hasher = std::hash::DefaultHasher::new();
+                    std::hash::Hash::hash(project.home(), &mut hasher);
+                    let clock = title_tabs::Clock {
+                        project: std::hash::Hasher::finish(&hasher),
+                        now: self.clock_instant(),
+                        moves: self.animate && crate::kit::motion(cx),
+                    };
+                    (&self.title_closing, clock)
+                });
+                let drops = title_tabs::Drops { spots: &self.drop_spots, at, closing };
+                let drawn =
+                    title_tabs::render(&self.theme, &tabs, &self.title_scroll, &drops, window, cx);
                 *self.title_tabs_drawn.borrow_mut() = tabs;
                 drawn
             }

@@ -1652,6 +1652,7 @@ mod pins;
 mod played;
 mod popout;
 mod presence;
+mod preview;
 mod projects;
 mod relaunch;
 mod remote;

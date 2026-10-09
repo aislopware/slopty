@@ -243,7 +243,7 @@ impl WorkspaceView {
         let Some(path) = self.workers.get(&edit.worker).and_then(|w| w.settings.clone()) else {
             return;
         };
-        self.open_file_on(Some(edit.worker), &path, None, cx);
+        let _shown = self.show_file(Some(edit.worker), &path, None, cx);
     }
 
     /// "Edit `<machine>`'s settings" for each machine whose greeting said where its file is.

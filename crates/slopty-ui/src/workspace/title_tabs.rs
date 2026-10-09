@@ -4,8 +4,11 @@
 //! A tab says the title of its focused work, then a mark for each agent in it that works or
 //! has finished (`MonoCode`'s `TabHarnesses`), then its close. They are drawn as every tab is
 //! ([`super::tab_look`]): the one on show opens into the layout under the bar, the rest are
-//! bare words that take the hover wash. Tabs that do not fit scroll, and chevrons at the row's
-//! ends step it a tab's width at a time while there is more past them.
+//! bare words that take the hover wash. Tabs that do not fit scroll, and an end past which tabs
+//! lie fades out as deep as they run past it.
+//!
+//! A tab that closes folds its width away over 200 ms (`MonoCode`'s tab close, [`Pace::Sheet`])
+//! while the tabs after it close the gap ([`Closing`]); under Reduce Motion it is gone at once.
 //!
 //! A right click or a long press on a tab opens its menu: close it, the others, those to its
 //! right or to its left.
@@ -14,24 +17,25 @@
 //! project's row in the navigator it goes to that project. While something carried is over
 //! the row, a mark stands where it would land ([`render`]'s `drop_at`).
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, FontWeight, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
+    Context, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
     ParentElement as _, Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div, px,
 };
 use slopty_client::layout::tiling::TabId;
-use slopty_theme::{Theme, Typography, stroke};
+use slopty_theme::{Theme, stroke};
 
 use super::area::{self, DropSpots};
 use super::tab_look::{self, Look};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Status, Symbol};
-use crate::kit;
+use crate::icons::Status;
+use crate::kit::{self, Pace};
 
 /// A tab's width bounds, in points: room for a short title, and no more than a long one needs.
 const TAB_MIN: f32 = 96.0;
@@ -77,11 +81,104 @@ pub(super) trait TitleTabsHost: Sized + 'static {
     );
 }
 
-/// What [`render`] draws besides the tabs: where the row takes a drop, and where a drop
-/// would land, before the tab at that index (past the last, after it).
+/// What [`render`] draws besides the tabs: where the row takes a drop, where a drop would
+/// land, before the tab at that index (past the last, after it), and the tabs closing.
 pub(super) struct Drops<'a> {
     pub spots: &'a Rc<DropSpots>,
     pub at: Option<usize>,
+    pub closing: Option<(&'a Closing, Clock)>,
+}
+
+/// The project whose tabs are on show, as a number its key hashes to, and the instant the frame
+/// stands for; `moves` off (Reduce Motion, a test's frame) closes a tab at once.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Clock {
+    pub project: u64,
+    pub now: Instant,
+    pub moves: bool,
+}
+
+/// The title tabs that closed and still fold away, worked out as the row is built from the tabs
+/// it drew last: one gone from the same project since, while motion is on, leaves a bare ghost
+/// of its title at its last width, which narrows to nothing. Another project's tabs shown anew
+/// close nothing. Read and written while the row is built, which never writes its host.
+#[derive(Debug, Default)]
+pub(super) struct Closing(RefCell<Folding>);
+
+#[derive(Debug, Default)]
+struct Folding {
+    project: Option<u64>,
+    last: Vec<(TabId, SharedString)>,
+    ghosts: Vec<Ghost>,
+}
+
+/// A closed tab folding away: the tab it stood before (none past the last), its title, the
+/// width it had, and when it closed.
+#[derive(Clone, Debug)]
+struct Ghost {
+    before: Option<TabId>,
+    title: SharedString,
+    width: Pixels,
+    start: Instant,
+}
+
+impl Folding {
+    /// The ghosts at `clock.now`, each with its width then, from `tabs` and where `widths` says
+    /// each tab lay last frame.
+    fn step(
+        &mut self,
+        tabs: &[TitleTab],
+        widths: &[(TabId, gpui::Bounds<Pixels>)],
+        clock: Clock,
+    ) -> Vec<(Option<TabId>, SharedString, Pixels)> {
+        let now: Vec<(TabId, SharedString)> =
+            tabs.iter().map(|t| (t.id, t.title.clone())).collect();
+        let stays = |id: TabId| tabs.iter().any(|t| t.id == id);
+        if self.project == Some(clock.project) && clock.moves {
+            for (i, (id, title)) in self.last.iter().enumerate() {
+                if stays(*id) {
+                    continue;
+                }
+                let Some((_, at)) = widths.iter().find(|(t, _)| t == id) else { continue };
+                let before = self.last.iter().skip(i).map(|(t, _)| *t).find(|t| stays(*t));
+                let (title, width) = (title.clone(), at.size.width);
+                self.ghosts.push(Ghost { before, title, width, start: clock.now });
+            }
+        } else {
+            self.ghosts.clear();
+        }
+        self.project = Some(clock.project);
+        self.last = now;
+        let length = Pace::Sheet.duration();
+        let curve = Pace::Sheet.curve();
+        self.ghosts
+            .retain(|g| clock.moves && clock.now.saturating_duration_since(g.start) < length);
+        self.ghosts
+            .iter()
+            .map(|g| {
+                let gone = clock.now.saturating_duration_since(g.start);
+                let t = curve.at((gone.as_secs_f32() / length.as_secs_f32()).min(1.0));
+                (g.before, g.title.clone(), g.width * (1.0 - t))
+            })
+            .collect()
+    }
+}
+
+/// A closed tab's ghost at `width`: its title, bare, cut by the narrowing width.
+fn ghost(theme: &Theme, title: SharedString, width: Pixels) -> gpui::AnyElement {
+    let s = &theme.surfaces;
+    kit::typed(div(), theme.roles().chrome)
+        .debug_selector(|| "title-tab-closing".to_owned())
+        .flex_none()
+        .w(width)
+        .h_full()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .pl(px(theme.spacing.sm))
+        .text_color(hsla(s.text_secondary))
+        .child(div().flex_none().whitespace_nowrap().child(title))
+        .into_any_element()
 }
 
 /// The row of `tabs`, scrolled by `scroll`, writing where it and each tab lie to `drops`.
@@ -90,15 +187,30 @@ pub(super) fn render<V: TitleTabsHost>(
     tabs: &[TitleTab],
     scroll: &ScrollHandle,
     drops: &Drops<'_>,
+    window: &Window,
     cx: &Draw<'_, V>,
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
+    // Where each tab lay last frame is the width a closed one folds from.
+    let ghosts = drops.closing.map_or_else(Vec::new, |(closing, clock)| {
+        closing.0.borrow_mut().step(tabs, &drops.spots.tabs.borrow(), clock)
+    });
+    if !ghosts.is_empty() {
+        window.request_animation_frame();
+    }
+    let ghosts_before = |before: Option<TabId>| -> Vec<gpui::AnyElement> {
+        ghosts
+            .iter()
+            .filter(|(b, ..)| *b == before)
+            .map(|(_, title, width)| ghost(theme, title.clone(), *width))
+            .collect()
+    };
     drops.spots.tabs.borrow_mut().clear();
     let last = tabs.len().saturating_sub(1);
-    let items: Vec<gpui::AnyElement> =
+    let mut items: Vec<gpui::AnyElement> =
         tabs.iter()
             .enumerate()
-            .map(|(i, tab)| {
+            .flat_map(|(i, tab)| {
                 let id = tab.id;
                 let spots = Rc::clone(drops.spots);
                 let spot = area::spot(move |b| spots.put_tab(id, b));
@@ -135,7 +247,11 @@ pub(super) fn render<V: TitleTabsHost>(
                 let el = kit::menu_press(div().id(("title-tab", n)), move |at, window, cx| {
                     let _gone = host.update(cx, |this, cx| this.title_tab_menu(id, at, window, cx));
                 });
-                tab_look::tab(theme, el, look)
+                // The chrome's own size, its words at the action role while it is on show: the
+                // tab is a control's words, as the breadcrumb beside it is.
+                let roles = theme.roles();
+                let role = if tab.shown { roles.action } else { roles.chrome };
+                let el = kit::typed(tab_look::tab(theme, el, look), role)
                     .debug_selector(move || format!("title-tab-{n}"))
                     .group(TAB_GROUP)
                     .role(Role::Tab)
@@ -148,7 +264,6 @@ pub(super) fn render<V: TitleTabsHost>(
                     .pl(px(theme.spacing.sm))
                     .pr(px(theme.spacing.xs))
                     .text_color(hsla(ink))
-                    .when(tab.shown, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this: &mut V, ev: &MouseDownEvent, _window, cx| {
@@ -159,6 +274,7 @@ pub(super) fn render<V: TitleTabsHost>(
                     )
                     .child(
                         div()
+                            .debug_selector(move || format!("title-tab-text-{n}"))
                             .flex_auto()
                             .min_w_0()
                             .overflow_hidden()
@@ -170,23 +286,14 @@ pub(super) fn render<V: TitleTabsHost>(
                     .child(close)
                     .child(spot)
                     .children(mark)
-                    .into_any_element()
+                    .into_any_element();
+                // A tab closed just before this one folds away in its place.
+                let mut here = ghosts_before(Some(id));
+                here.push(el);
+                here
             })
             .collect();
-    // The chevrons show only while tabs lie past that end.
-    let (offset, most) = (scroll.offset().x, scroll.max_offset().x);
-    let back = offset < px(0.0);
-    let on = most > px(0.0) && offset > -most;
-    let step = px(TAB_MIN);
-    let chevron = |name: &'static str, symbol: Symbol, label: &'static str, by: Pixels| {
-        let scroll = scroll.clone();
-        kit::icon_button(theme, name, symbol, label).on_click(move |_ev, window, _cx| {
-            let at = scroll.offset();
-            let x = (at.x + by).min(px(0.0)).max(-scroll.max_offset().x);
-            scroll.set_offset(gpui::point(x, at.y));
-            window.refresh();
-        })
-    };
+    items.extend(ghosts_before(None));
     let strip = div()
         .id("title-tabs")
         .debug_selector(|| "title-tabs".to_owned())
@@ -198,6 +305,11 @@ pub(super) fn render<V: TitleTabsHost>(
         .overflow_x_scroll()
         .track_scroll(scroll)
         .children(items);
+    // An end past which tabs lie fades out per pixel, as deep as they run past it, as a pane's
+    // tabs do (`tile::render_tabs`). How far they run is known only once the strip is laid
+    // out, so the fade reads it as the strip prepaints, in the frame that lays it out.
+    let strip =
+        gpui::edge_fade(strip, gpui::EdgeFade::x(px(theme.spacing.xl))).hidden_by_scroll(scroll);
     let spots = Rc::clone(drops.spots);
     let spot = area::spot(move |b| spots.strip.set(Some(b)));
     // As wide as its tabs and no wider, so what is left of the bar stays its empty span.
@@ -208,13 +320,7 @@ pub(super) fn render<V: TitleTabsHost>(
         .h_full()
         .flex()
         .items_center()
-        .when(back, |el| {
-            el.child(chevron("title-tabs-back", Symbol::ChevronLeft, "Earlier tabs", step))
-        })
         .child(strip)
-        .when(on, |el| {
-            el.child(chevron("title-tabs-on", Symbol::ChevronRight, "Later tabs", -step))
-        })
         .child(spot)
         .into_any_element()
 }

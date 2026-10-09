@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{App, Context, SharedString, WeakEntity, Window};
 use slopty_client::layout::tiling::TabId;
-use slopty_client::layout::{Drop, GroupKey, Side, Tab, TileRef, WorkerKey};
+use slopty_client::layout::{Drop, GroupKey, Pos, Side, Tab, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::RequestId;
 use slopty_proto::items::ItemKind;
@@ -38,6 +38,8 @@ pub(super) enum Opening {
     Terminal,
     /// Where a drop on a pane of the tab on show said: a thread's row carried there.
     At(Drop),
+    /// In the pane of the preview it replaces, beside it (`preview`).
+    Into(Pos),
 }
 
 /// The shells asked of one worker and not come yet, the first asked first.
@@ -156,6 +158,9 @@ impl WorkspaceView {
     /// Where `id`, which this client caused on `key`, goes: a shell where its ask said, the
     /// first one not come yet; anything else beside the focus.
     pub(super) fn opening_of(&mut self, key: WorkerKey, id: ItemId) -> Opening {
+        if let Some(at) = self.preview_place(id) {
+            return Opening::Into(at);
+        }
         let Some(w) = self.workers.get_mut(&key) else { return Opening::Beside };
         if let Some(drop) = w.dropped.remove(&id) {
             return Opening::At(drop);
@@ -193,6 +198,11 @@ impl WorkspaceView {
                 if self.layout.place(tile, drop) {
                     self.layout.focus(tile);
                 } else {
+                    self.layout.open_beside(tile, &home);
+                }
+            }
+            Opening::Into(at) => {
+                if !self.layout.put_back(tile, at) {
                     self.layout.open_beside(tile, &home);
                 }
             }

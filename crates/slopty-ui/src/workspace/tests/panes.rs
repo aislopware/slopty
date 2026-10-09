@@ -104,7 +104,7 @@ struct Shown {
 
 impl Render for Shown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::draw::build(&self.harness.downgrade(), window, cx, |this, _window, cx| {
+        crate::draw::build(&self.harness.downgrade(), window, cx, |this, window, cx| {
             let frame = this.tiling.frame();
             let tabs = title_tabs(&this.tiling);
             let body = |laid: &slopty_client::layout::tree::Laid| {
@@ -119,15 +119,16 @@ impl Render for Shown {
                     &this.theme,
                     &tabs,
                     &this.tabs_scroll,
-                    &title_tabs::Drops { spots: &this.spots, at: None },
+                    &title_tabs::Drops { spots: &this.spots, at: None, closing: None },
+                    window,
                     cx,
                 )))
                 .child(div().flex_1().w_full().child(panes::render(
                     this,
                     &this.theme,
-                    &frame,
-                    this.drop,
+                    &panes::Shown { frame: &frame, drop: this.drop, arrive: None },
                     body,
+                    window,
                     cx,
                 )))
                 .into_any_element()

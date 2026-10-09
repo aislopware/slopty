@@ -1432,3 +1432,100 @@ fn a_tab_row_names_folders_only_where_files_read_alike(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("place", a.item)).is_none(), "nor after a file's tab");
 }
+
+/// A pane new to the tab on show comes in from the edge it opened at: it starts
+/// `ARRIVE_TRAVEL` short of its place, away from the sash it shares, clear, and lands in place
+/// once `Pace::Pane` is over, its size the same all the way. Under Reduce Motion it is in place
+/// at once, and the panes of a tab shown anew never travel.
+#[gpui::test]
+fn a_new_pane_slides_in_from_its_edge(cx: &mut TestAppContext) {
+    use crate::kit::Pace;
+    use crate::workspace::panes::ARRIVE_TRAVEL;
+
+    let (view, cx) = workspace(cx);
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let fake = connect(&view, cx, 1, "studio");
+    let _first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let pane_of = |view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, _| v.layout.shown_tab().and_then(|t| t.pane_of(tile)))
+            .expect("its pane")
+            .get()
+    };
+    let bounds = |cx: &mut VisualTestContext, pane: u64| {
+        cx.debug_bounds(Box::leak(format!("pane-{pane}").into_boxed_str())).expect("drawn")
+    };
+    let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    let pane = pane_of(&view, cx, second);
+    let start = bounds(cx, pane);
+    view.update(cx, |v, _| v.hold_clock(Some(Pace::Pane.duration())));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    let end = bounds(cx, pane);
+    assert_eq!(start.size, end.size, "it travels, it does not grow");
+    let moved =
+        (f32::from(start.origin.x - end.origin.x), f32::from(start.origin.y - end.origin.y));
+    let travel = moved.0.abs().max(moved.1.abs());
+    assert!((travel - ARRIVE_TRAVEL).abs() < 0.5, "from {start:?} to {end:?}");
+    assert!(moved.0 == 0.0 || moved.1 == 0.0, "along one axis: {moved:?}");
+    // The room rule put the second below the first: it comes up from below.
+    assert!(moved.1 > 0.0, "from the edge it opened at: {moved:?}");
+
+    // Under Reduce Motion a new pane is in place at once.
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    let third = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
+    let pane = pane_of(&view, cx, third);
+    let at = bounds(cx, pane);
+    view.update(cx, |v, _| v.hold_clock(Some(Pace::Pane.duration().saturating_mul(3))));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    assert_eq!(bounds(cx, pane), at, "in place at once");
+    cx.update(|_, cx| cx.set_reduce_motion(false));
+
+    // A tab shown anew draws its panes in place.
+    let fourth = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
+    on_new_tab(&view, cx, fourth);
+    let pane = pane_of(&view, cx, fourth);
+    let at = bounds(cx, pane);
+    view.update(cx, |v, _| v.hold_clock(Some(Pace::Pane.duration().saturating_mul(5))));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    assert_eq!(bounds(cx, pane), at, "a new tab's pane does not travel");
+}
+
+/// A pane sliding in builds no other pane again, and itself at most once a frame: the panes
+/// beside it are drawn again from last frame as they stand, and on frames where the eased
+/// travel holds to the same device pixel it is drawn again too. Measured in
+/// `docs/MEASUREMENTS.md` ("A new pane's slide").
+#[gpui::test]
+fn a_sliding_pane_builds_no_other_pane(cx: &mut TestAppContext) {
+    use crate::kit::Pace;
+    const FRAMES: u32 = 20;
+    let (view, cx) = workspace(cx);
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let fake = connect(&view, cx, 1, "studio");
+    let (s1, s2) = (SessionId::new(), SessionId::new());
+    let _first = opens(&view, cx, &fake, s1, fake.me, 1);
+    let _second = opens(&view, cx, &fake, s2, fake.me, 2);
+    let shell = |s| view.read_with(cx, |v, _| v.terminal(s).cloned()).expect("a shell");
+    let (t1, t2) = (shell(s1), shell(s2));
+    let builds = |cx: &mut VisualTestContext| {
+        (t1.read_with(cx, |t, _| t.renders()), t2.read_with(cx, |t, _| t.renders()))
+    };
+    let before = builds(cx);
+    let frame = Pace::Pane.duration().checked_div(16).unwrap_or_default();
+    for step in 1..=FRAMES {
+        view.update(cx, |v, _| v.hold_clock(Some(frame.saturating_mul(step))));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    }
+    let after = builds(cx);
+    eprintln!("a new pane's slide: shells built {before:?} -> {after:?} over {FRAMES} frames");
+    assert_eq!(after.0, before.0, "the pane beside is not built again");
+    assert!(after.1.saturating_sub(before.1) <= 16, "at most once a frame of the slide");
+}

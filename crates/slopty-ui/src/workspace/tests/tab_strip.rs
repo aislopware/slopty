@@ -200,4 +200,65 @@ fn the_shown_title_tab_opens_into_the_layout(cx: &mut TestAppContext) {
         quads.iter().any(|q| at(bar, q) && fill(q) == Some(chrome)),
         "the bar on the chrome step"
     );
+    // Each tab's words are set on the chrome's line, not the window's 16 pt one.
+    let line = px(theme.roles().chrome.line);
+    for n in [on, off] {
+        let text = bounds(cx, format!("title-tab-text-{n}"));
+        assert_eq!(text.size.height, line, "a title tab's words on the chrome's line");
+    }
+}
+
+/// A title tab that closes folds its width away over `Pace::Sheet` in its place, bare and with
+/// no control, and is gone after; under Reduce Motion it is gone at once.
+#[gpui::test]
+fn a_closed_title_tab_folds_away(cx: &mut TestAppContext) {
+    use crate::kit::Pace;
+    use crate::workspace::title_tabs::TitleTabsHost as _;
+
+    let (view, cx) = workspace(cx);
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let studio = connect(&view, cx, 1, "studio");
+    let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    for n in 2..=4_u64 {
+        let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, n);
+        on_new_tab(&view, cx, tile);
+    }
+    let tabs = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.title_tabs().into_iter().map(|t| t.id).collect::<Vec<_>>())
+    };
+    let close = |cx: &mut VisualTestContext, at: usize| {
+        let id = tabs(cx)[at];
+        let width = cx
+            .debug_bounds(Box::leak(format!("title-tab-{}", id.get()).into_boxed_str()))
+            .expect("the tab is drawn")
+            .size
+            .width;
+        view.update_in(cx, |v, window, cx| v.close_title_tab(id, window, cx));
+        cx.run_until_parked();
+        width
+    };
+    let step = |cx: &mut VisualTestContext, at: Duration| {
+        view.update(cx, |v, _| v.hold_clock(Some(at)));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    };
+    let width = close(cx, 1);
+    let ghost = cx.debug_bounds("title-tab-closing").expect("it folds away");
+    assert_eq!(ghost.size.width, width, "from the width it had");
+    let next = cx
+        .debug_bounds(Box::leak(format!("title-tab-{}", tabs(cx)[1].get()).into_boxed_str()))
+        .expect("the tab after it");
+    assert!(ghost.right() <= next.left() + px(0.5), "in its place, before the next");
+    step(cx, Pace::Sheet.duration().checked_div(2).unwrap_or_default());
+    let half = cx.debug_bounds("title-tab-closing").expect("still folding").size.width;
+    assert!(half < width && half > px(0.0), "narrowing: {half:?} of {width:?}");
+    step(cx, Pace::Sheet.duration());
+    assert!(cx.debug_bounds("title-tab-closing").is_none(), "gone once folded");
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    let _width = close(cx, 1);
+    assert!(cx.debug_bounds("title-tab-closing").is_none(), "gone at once under Reduce Motion");
 }

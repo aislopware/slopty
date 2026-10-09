@@ -1490,8 +1490,10 @@ impl WorkspaceView {
     fn header_name(&self, tile: TileRef, id: ItemId, title: String) -> gpui::AnyElement {
         match self.rename_field(tile, id) {
             Some(field) => field,
+            // A preview's name is set in italics, as a passing look rather than a tab kept.
             None => div()
                 .debug_selector(move || format!("name-{}", id.as_uuid()))
+                .when(self.is_preview(tile), gpui::Styled::italic)
                 .min_w_0()
                 .overflow_hidden()
                 .child(ChromeText::new(title, px(self.theme.typography.ui_size)).fill())
@@ -1700,7 +1702,7 @@ impl WorkspaceView {
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                                 if ev.click_count == 2 {
-                                    this.start_rename(tab, window, cx);
+                                    this.keep_or_rename(tab, window, cx);
                                 } else {
                                     this.begin_move(tab, ev, cx);
                                 }
@@ -2411,7 +2413,7 @@ impl WorkspaceView {
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             if ev.click_count == 2 {
-                                this.start_rename(tile, window, cx);
+                                this.keep_or_rename(tile, window, cx);
                                 cx.stop_propagation();
                             }
                         }),

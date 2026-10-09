@@ -228,7 +228,7 @@ impl WindowPicker {
             selected: 0,
             scroll: ScrollHandle::new(),
             reveal: false,
-            plate: Plate::default(),
+            plate: Plate::plain(),
             chords: true,
             leaving: false,
         }

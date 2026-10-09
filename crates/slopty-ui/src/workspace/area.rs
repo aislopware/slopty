@@ -515,7 +515,14 @@ impl WorkspaceView {
             let notices = self.tile_notices(p, cx);
             div().relative().size_full().children(tile).children(notices).into_any_element()
         };
-        let panes = super::panes::render(self, &self.theme, &frame, self.drop_shown(), body, cx);
+        // A pane new to the tab on show arrives from its edge, on the layout's clock.
+        let arrive = self.layout.shown_tab().map(|tab| super::panes::Arrive {
+            tab: tab.id(),
+            now: self.clock_instant(),
+            moves: self.animate && kit::motion(cx),
+        });
+        let shown = super::panes::Shown { frame: &frame, drop: self.drop_shown(), arrive };
+        let panes = super::panes::render(self, &self.theme, &shown, body, window, cx);
         // Only now: a body drawn above reads the focus it was last drawn with, so the two the
         // focus moved between are built again in this frame (`tile::body_view`).
         drawn.focus.set(self.layout.focused());

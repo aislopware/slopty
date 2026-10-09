@@ -482,7 +482,8 @@ impl WorkspaceView {
                     let path = this.absolute_in_active_shell(path);
                     if let Some(key) = this.context_worker() {
                         if *found {
-                            this.open_file_on(Some(key), &path, *line, cx);
+                            // Picked on purpose: kept, not a preview.
+                            let _shown = this.show_file(Some(key), &path, *line, cx);
                         } else {
                             this.open_path_on(key, &path, *line, cx);
                         }

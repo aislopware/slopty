@@ -2158,3 +2158,62 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     tile is already here moves that tile. The title strip and the projects' rows take no thread.
   - A tile's row already carried its tile onto a pane's edge (step 5).
   - Tests: `workspace::tests::drag::a_threads_row_warms_on_its_press_and_drops_on_a_panes_edge`.
+- ✅ **The title tabs fade where they run past the bar, and are set at the chrome's size**
+  (2026-10-07, after the goldens retake).
+  - **Why.** The gallery's transfers frame was stale: the title strip drew its "Later tabs"
+    chevron only from what the last frame laid out (`ScrollHandle::max_offset`, read in
+    render). The frame in which the tabs first ran past the bar laid them out without it, and
+    nothing drew the strip again, so the frame drawn from scratch had the chevron and the
+    frame shown did not. Not a gpui-fast bug: the view read layout state that changes after
+    its render.
+  - **What.** The chevrons are gone. An end past which tabs lie fades out as deep as they run
+    past it (`gpui::edge_fade(..).hidden_by_scroll`), as a pane's tabs already did. The fade
+    reads the scroll as the strip prepaints, so it is right in the frame that lays the strip
+    out. The strip still scrolls under the wheel and a trackpad.
+  - **Size.** A title tab is set in the chrome role (13/19), the shown one in the action role
+    (13/19 medium), as the breadcrumb beside it. It had inherited the window's 16 pt. The
+    Zed/Warp system (item 3) names the tab's tone and weight, not its size.
+  - Tests: `workspace::tests::retained::title_tabs_that_overflow_are_drawn_as_from_scratch`.
+- ✅ **A list steered from a field marks its row with the fill alone** (2026-10-07).
+  - The palette's and the pickers' selected row is the keyed wash with no focus line
+    (`Plate::plain`), as `MonoCode` marks its palette's row. The field has the keyboard and its
+    own ring, so a second green line round the row only shouted, worst on the phone. A list
+    that holds the keyboard itself (the navigator) keeps the line, its keyboard's cursor.
+  - Tests: `palette::tests::the_selected_line_is_the_fill_alone`.
+- ✅ **The phone's palette is a sheet with its field at the foot, over a scrim** (2026-10-07,
+  checked after the retake).
+  - The field sits at the sheet's foot, just above the soft keyboard, and what it finds lists
+    above it. That is where the thumb already is when the keyboard is up, as iOS's own bottom
+    search fields (Safari, Spotlight) put it. The field at the top would sit a hand's
+    length from the keys it is typed with. The empty ground under the sheet in
+    `ios-phone-palette` is the keyboard's place: a render holds the app's window, not the
+    keyboard's.
+  - The phone keeps the scrim. The desktop's palette is a float typed at, with no scrim. The
+    phone's is a presented sheet nearly the screen's height, and the dimmed strip above it is
+    both iOS's sign of a presented sheet and the one place a finger taps to close it, since
+    glass has no Esc.
+- ✅ **A file opened in passing is a preview tab** (2026-10-09, MonoCode audit row 14).
+  - A file opened from a thread's call, a folder's tree, a review, a path in a shell or a search
+    hit opens as the preview, its name in italics. The next file opened that way takes its place:
+    it joins the old one's pane right after it, and the old one goes, so reading through a turn's
+    files leaves one tab, not a row of them. MonoCode's `layout.ts` `preview` does the same, as
+    does VS Code.
+  - An edit, a double-click on its name, or naming it keeps it. A double-click on a kept tab's
+    name still names it. A file picked on purpose (the palette, a new note, a shell's handoff,
+    a machine's settings, the self-test) opens kept, and keeps a preview it lands on.
+  - Only a preview in the tab on show is replaced. Opening a file never reaches into a tab out
+    of sight; a preview there stays, and the new one opens beside the focus.
+  - The preview is the client's own and is not saved with the layout: after a relaunch every
+    tab is kept.
+  - Tests: `workspace::tests::preview::a_file_opened_in_passing_takes_the_previews_place`,
+    `workspace::tests::preview::a_preview_out_of_sight_stays_where_it_is`.
+- ✅ **The title tabs are drawn in the frame that lays them out, all at once too** (2026-10-09).
+  - Three scheduled e2e frames were stale in the title tabs: a forwarded port and an upload,
+    a relaunch onto twenty tiles, and files pasted into a shell. All three had one cause. The
+    "Later tabs" chevron was shown from the scroll as the last frame laid it out, so the frame
+    where the tabs first ran past the bar lacked it, and the strip's clip, the cut tab's fill
+    and its glyphs differed from a frame drawn from scratch. The fade that replaced the chevrons
+    resolves at prepaint (see the entry above).
+  - Tests: `workspace::tests::retained::title_tabs_that_overflow_at_once_are_drawn_as_from_scratch`
+    (twelve tabs in one snapshot, as a relaunch lays them out, then a narrower window). It and
+    the one-by-one test fail when an element sized from the last frame's scroll is put back.

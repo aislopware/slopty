@@ -224,6 +224,7 @@ impl WorkspaceView {
         if self.facts.files.insert(id, now) != Some(now) {
             App::notify(cx, self.area_host.entity_id());
         }
+        self.keep_edited(id, cx);
     }
 
     /// Copy item `id`'s page again. Its title or address names its tile everywhere; its way
