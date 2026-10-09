@@ -358,8 +358,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     home, the domain does not hold, and every file on a Mac without the domain go on as before:
     no file URL (a worker's path would name whatever sits at it here), their names as text,
     and a paste into a worker still moving them. A folder keeps its trailing `/`, and Finder
-    copies it whole, listing it through the domain (its first 2000 entries,
-    `FOLDER_ENTRIES`).
+    copies it whole, listing it through the domain page by page (`platform.md`, "A big folder
+    pages").
     - Tests: `a_workers_files_go_on_as_their_place_here` (slopty-client: the mapping, a folder,
       a name that needs escaping, and a copy reaching outside the home left alone),
       `only_a_path_in_the_home_is_under_it` (slopty-proto), and

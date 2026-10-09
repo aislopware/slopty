@@ -589,15 +589,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`docs/decisions/transport.md`, "A download outlives its link"). Pasting copied worker
     files into Finder, the reason for the 2026-09-25 ruling, uses the roots above
     (`docs/decisions/audio.md`, "Worker files paste into Finder").
-  - **Not yet.** A folder of more than 2000 entries shows its first 2000 (`FOLDER_ENTRIES`),
-    until the listing pages. The fetch's progress moves only at its end.
+  - **A big folder pages (2026-10-10).** The system enumerates a folder page by page, and each
+    page is one of the worker's (`FOLDER_ENTRIES`, 2000): the system's first page asks for the
+    folder's first (`ListFolder`), and the extension hands back, as the next page's bytes, the
+    worker's cursor (`FolderPage`'s `After`, with the count told so far) for the page after it
+    (`apps/slopty-files/src/pages.rs`). So the extension keeps nothing between pages or across
+    its launches, and an entry added or removed between pages neither repeats nor is skipped.
+    A page's bytes are at most 500; a name too long for them (only HFS+ holds one) is cut at a
+    character, so the next page starts a little early and repeats a few entries rather than
+    skipping one. A full page asks for one more, which ends empty when nothing came meanwhile.
+    The listing the working set's changes are told against is the whole folder: the system's
+    pages are joined once its last comes, and a watched folder's relist, which the worker sends
+    as its first page, is made whole with its pages before it is compared, so the entries past
+    the first page are never taken for deletions. An item is looked up in its folder's whole
+    listing. The relists wait in an unbounded queue, each folder's latest kept, so the link's
+    reader never waits on the domain while the domain waits on a page the reader brings.
+  - **Not yet.** The fetch's progress moves only at its end.
   - Tests: `files::tests` (slopty-platform: the directory, the roots, one domain per worker and
     none for a forgotten one, and no container for a build the team did not sign),
     `finder::tests` (slopty-app: the switch before a worker's home, and each notice),
     `the_palette_offers_the_workers_in_finder_on_a_mac`, `bundle::tests` (xtask: the
     extension's place in `PlugIns`, its plist and entitlements), `item::tests` and
-    `changes::tests` (slopty-files), and `tests/domain.rs` against a real worker daemon: the
-    home lists, a deeper item is found, a file's bytes come down with its version, a file made,
+    `changes::tests` and `pages::tests` (slopty-files: a 4500-entry paged fake told in three
+    pages each entry once, entries added and removed between pages, a page that is exactly
+    full, a long name cut without a skip, the system's own first pages, and a folder gathered
+    whole), and `tests/domain.rs` against a real worker daemon: a folder of 4500 files paged
+    through from each page's bytes, an item past the first page, and a change past it logged
+    alone (`a_big_folder_pages_through_and_its_changes_stay_whole`), the home lists, a deeper item is found, a file's bytes come down with its version, a file made,
     changed or removed on the worker reaches the working set, and a missing item, a file asked to
     list, a forgotten worker, another worker at the address and an address nobody answers each
     fail as the system is told, a fetch goes on once its worker restarts on its port

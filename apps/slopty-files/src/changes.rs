@@ -41,6 +41,8 @@ pub struct Changes {
     log: VecDeque<(u64, Change)>,
     /// Every folder given, by identifier: its items, by name.
     folders: HashMap<String, HashMap<String, Item>>,
+    /// The folders being given a page at a time: the items of their pages so far.
+    paging: HashMap<String, Vec<Item>>,
 }
 
 impl Default for Changes {
@@ -50,6 +52,7 @@ impl Default for Changes {
             seq: 0,
             log: VecDeque::new(),
             folders: HashMap::new(),
+            paging: HashMap::new(),
         }
     }
 }
@@ -101,8 +104,31 @@ impl Changes {
         any
     }
 
+    /// A page of the folder `folder` the system was given (`crate::pages`): the `first` starts
+    /// it anew, and the `last` makes the pages so far its listing, as [`Self::listed`] takes one.
+    /// A page after a first never seen (an enumeration the extension did not start) adds
+    /// nothing, as the folder's listing would be wanting. Whether anything was logged.
+    pub fn page(&mut self, folder: &str, first: bool, items: Vec<Item>, last: bool) -> bool {
+        let pages = if first {
+            Some(items)
+        } else {
+            self.paging.remove(folder).map(|mut pages| {
+                pages.extend(items);
+                pages
+            })
+        };
+        let Some(pages) = pages else { return false };
+        if last {
+            self.listed(folder, pages)
+        } else {
+            self.paging.insert(folder.to_owned(), pages);
+            false
+        }
+    }
+
     /// The folder `folder` is gone, or is no longer a folder. Whether the system had it.
     pub fn gone(&mut self, folder: &str) -> bool {
+        self.paging.remove(folder);
         if self.folders.remove(folder).is_none() {
             return false;
         }
@@ -139,6 +165,7 @@ impl Changes {
     fn forget_under(&mut self, id: &str) {
         let prefix = format!("{id}/");
         self.folders.retain(|folder, _| folder != id && !folder.starts_with(&prefix));
+        self.paging.retain(|folder, _| folder != id && !folder.starts_with(&prefix));
     }
 }
 
@@ -180,6 +207,30 @@ mod tests {
         assert!(seen.contains(&Change::Updated(file("", "b.txt", 1))));
         assert!(seen.contains(&Change::Deleted("src".to_owned())));
         assert_eq!(changes.since(&read).unwrap(), (Vec::new(), read));
+    }
+
+    /// A folder given a page at a time is listed once its last page comes, from all of them: a
+    /// first page starts it again, and a page whose first was never seen adds nothing.
+    #[test]
+    fn a_folder_given_in_pages_is_listed_once_whole() {
+        let mut changes = Changes::default();
+        let start = changes.anchor();
+        assert!(!changes.page("", true, vec![file("", "a.txt", 1)], false));
+        assert_eq!(changes.folders().count(), 0, "not given until its last page");
+        assert!(!changes.page("", false, vec![file("", "b.txt", 1)], true));
+        assert_eq!(changes.folders().collect::<Vec<_>>(), [""]);
+        assert_eq!(changes.since(&start).unwrap().0, [], "its first listing logs nothing");
+
+        assert!(!changes.page("", true, vec![file("", "a.txt", 1)], false));
+        assert!(!changes.page("", true, vec![file("", "a.txt", 1)], false), "started again");
+        assert!(changes.page("", false, vec![file("", "c.txt", 1)], true));
+        let (seen, _) = changes.since(&start).unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen.contains(&Change::Updated(file("", "c.txt", 1))));
+        assert!(seen.contains(&Change::Deleted("b.txt".to_owned())), "against both pages before");
+
+        assert!(!changes.page("src", false, vec![file("src", "x", 1)], true), "no first page");
+        assert!(!changes.folders().any(|f| f == "src"));
     }
 
     /// A folder that goes takes the folders kept under it, which log nothing more of their own,

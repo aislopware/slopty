@@ -2,7 +2,7 @@
 //! the folders the system was given, kept watched, and the changes the worker reports.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -11,11 +11,9 @@ use slopty_platform::files::Directory;
 use tokio::sync::mpsc;
 
 use crate::changes::{Change, Changes, Expired};
-use crate::item::Item;
+use crate::item::{self, Item};
+use crate::pages::Cursor;
 use crate::worker::{FilesError, Pushed, Worker};
-
-/// How many unasked listings may wait for the domain to take them in.
-const PUSHES: usize = 64;
 
 /// The first wait before dialing a worker again that did not answer, doubled up to
 /// [`REDIAL_MOST`] while a fetch waits for it.
@@ -66,22 +64,47 @@ impl Domain {
         self.worker().await?.item(id).await
     }
 
-    /// The items of folder `id`, which the system is given: from now on, the worker's changes
-    /// to it are logged for [`Self::since`].
+    /// The items of folder `id`, every page of them ([`Self::list_page`]).
     ///
     /// # Errors
     ///
     /// The worker is out of reach, or the folder is not there or not one.
     pub async fn list(&self, id: &str) -> Result<Vec<Item>, FilesError> {
+        let mut all = Vec::new();
+        let mut from = None;
+        loop {
+            let page = self.list_page(id, from.as_ref()).await?;
+            all.extend(page.items);
+            match page.next {
+                Some(next) => from = Some(next),
+                None => return Ok(all),
+            }
+        }
+    }
+
+    /// A page of the items of folder `id`, which the system is given: its first, or the one
+    /// at `from`. Once its last page is given, the worker's changes to it are logged for
+    /// [`Self::since`].
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, or the folder is not there or not one.
+    pub async fn list_page(&self, id: &str, from: Option<&Cursor>) -> Result<Page, FilesError> {
         let worker = self.worker().await?;
-        let listed = worker.list(id).await;
+        let path = item::on_worker(worker.home(), id);
+        let listed = worker.listing(id, from.map(|c| &c.after)).await.and_then(|listing| {
+            let next = Cursor::next(from.map_or(0, |c| c.held), &listing);
+            Ok(Page { items: crate::worker::items(id, &path, listing)?, next })
+        });
         let watch = {
             let mut changes = self.changes.lock();
             match &listed {
-                Ok(items) => {
+                Ok(page) => {
                     let new = !changes.folders().any(|folder| folder == id);
-                    let _changed = changes.listed(id, items.clone());
-                    new.then(|| changes.folders().map(str::to_owned).collect::<Vec<_>>())
+                    let last = page.next.is_none();
+                    let _changed = changes.page(id, from.is_none(), page.items.clone(), last);
+                    let given = changes.folders().any(|folder| folder == id);
+                    (new && given).then(|| changes.folders().map(str::to_owned).collect::<Vec<_>>())
                 }
                 Err(FilesError::NotFolder(_) | FilesError::Refused { .. }) => {
                     changes.gone(id).then(|| changes.folders().map(str::to_owned).collect())
@@ -177,7 +200,7 @@ impl Domain {
         let known = directory.get(self.id).ok_or_else(|| {
             FilesError::Unreachable(format!("worker {} is no longer in the app", self.id))
         })?;
-        let (tx, rx) = mpsc::channel(PUSHES);
+        let (tx, rx) = mpsc::unbounded_channel();
         let worker = Arc::new(Worker::open(known, tx).await?);
         let folders: Vec<String> = self.changes.lock().folders().map(str::to_owned).collect();
         if !folders.is_empty() {
@@ -185,6 +208,7 @@ impl Domain {
         }
         tokio::spawn(take_in(
             rx,
+            Arc::downgrade(&worker),
             worker.home().to_owned(),
             Arc::clone(&self.changes),
             Arc::clone(&self.signal),
@@ -195,21 +219,50 @@ impl Domain {
     }
 }
 
-/// Log what each listing the worker sends unasked changed, and say so.
+/// Log what each listing the worker sends unasked changed, and say so. A listing is a folder's
+/// first page: one of a big folder is made whole with its pages first, over the link it came
+/// on, and the listings that came meanwhile wait, all but each folder's last dropped.
 async fn take_in(
-    mut pushes: mpsc::Receiver<Pushed>,
+    mut pushes: mpsc::UnboundedReceiver<Pushed>,
+    worker: Weak<Worker>,
     home: String,
     changes: Arc<Mutex<Changes>>,
     signal: Signal,
 ) {
-    while let Some(Pushed { path, listing }) = pushes.recv().await {
-        let Some(folder) = slopty_proto::folder::under_home(&home, &path) else { continue };
-        let changed = match crate::worker::items(&folder, &path, listing) {
-            Ok(items) => changes.lock().listed(&folder, items),
-            Err(_) => changes.lock().gone(&folder),
-        };
+    while let Some(first) = pushes.recv().await {
+        let mut came = vec![first];
+        while let Ok(more) = pushes.try_recv() {
+            came.retain(|held| held.path != more.path);
+            came.push(more);
+        }
+        let mut changed = false;
+        for Pushed { path, listing } in came {
+            let Some(folder) = slopty_proto::folder::under_home(&home, &path) else { continue };
+            let Some(link) = worker.upgrade() else { return };
+            let listing = match link.rest(&folder, listing).await {
+                Ok(listing) => listing,
+                Err(e) => {
+                    tracing::info!(%path, error = %e, "a changed folder not listed whole");
+                    continue;
+                }
+            };
+            drop(link);
+            changed |= match crate::worker::items(&folder, &path, listing) {
+                Ok(items) => changes.lock().listed(&folder, items),
+                Err(_) => changes.lock().gone(&folder),
+            };
+        }
         if changed {
             signal();
         }
     }
+}
+
+/// A page of a folder's items, and where the next starts; `None` after its last.
+#[derive(Clone, Debug)]
+pub struct Page {
+    /// The items.
+    pub items: Vec<Item>,
+    /// Where the next page starts.
+    pub next: Option<Cursor>,
 }

@@ -4,7 +4,8 @@
 //! The system runs the extension whether the app is open or not, so it reaches the workers
 //! itself, at the addresses the app writes to the container the two share
 //! (`slopty_platform::files`). [`item`] names a worker's files as the system does, [`worker`]
-//! is the extension's link to one worker, [`changes`] keeps what the system was told so the
+//! is the extension's link to one worker, [`pages`] takes a big folder a page at a time,
+//! [`changes`] keeps what the system was told so the
 //! changes the worker reports can follow, and [`domain`] holds one worker's domain together.
 //! The Objective-C face the system calls is `extension`, on macOS.
 
@@ -14,5 +15,6 @@ pub mod domain;
 #[cfg(target_os = "macos")]
 pub mod extension;
 pub mod item;
+pub mod pages;
 #[cfg(target_os = "macos")]
 pub mod worker;

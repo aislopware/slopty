@@ -36,8 +36,9 @@ use slopty_core::{WorkerId, XferId};
 use tokio::runtime::Runtime;
 
 use crate::changes::Change;
-use crate::domain::{Domain, Signal};
+use crate::domain::{Domain, Page, Signal};
 use crate::item::{self, Item};
+use crate::pages::Cursor;
 use crate::worker::FilesError;
 
 unsafe extern "C" {
@@ -688,14 +689,16 @@ define_class!(
         #[unsafe(method(invalidate))]
         fn ended(&self) {}
 
-        /// A folder's items, all in one page; the working set lists none, since every folder
-        /// the system holds is listed on its own and its changes come through
-        /// [`Self::enumerate_changes`].
+        /// A folder's items a page at a time, each the worker's own page of it
+        /// ([`crate::pages`]): the system's first page asks for the folder's first, and each
+        /// page the extension hands back asks for the one after it. The working set lists none,
+        /// since every folder the system holds is listed on its own and its changes come
+        /// through [`Self::enumerate_changes`].
         #[unsafe(method(enumerateItemsForObserver:startingAtPage:))]
         fn enumerate_items(
             &self,
             observer: &ProtocolObject<dyn NSFileProviderEnumerationObserver>,
-            _page: &NSData,
+            page: &NSData,
         ) {
             let observer = Held(observer.retain());
             let Listing { domain, folder } = self.ivars();
@@ -706,19 +709,22 @@ define_class!(
                 }
                 return;
             };
+            let from = Cursor::decode(&page.to_vec());
             let domain = Arc::clone(domain);
             let started = spawn(async move {
-                match domain.list(&folder).await {
-                    Ok(items) => {
+                match domain.list_page(&folder, from.as_ref()).await {
+                    Ok(Page { items, next }) => {
                         let items = items_array(items);
+                        let next = next.map(|next| NSData::with_bytes(&next.encode()));
                         // SAFETY: FileProvider rule: an observer takes the items of one page,
-                        // then is told the enumeration ended, from any thread.
+                        // then is told where the next starts, or that there is none, from any
+                        // thread.
                         unsafe {
                             observer.get().didEnumerateItems(&items);
                         }
                         // SAFETY: as above.
                         unsafe {
-                            observer.get().finishEnumeratingUpToPage(None);
+                            observer.get().finishEnumeratingUpToPage(next.as_deref());
                         }
                     }
                     Err(e) => {

@@ -292,6 +292,54 @@ mod tests {
         drop(daemons);
     }
 
+    /// A folder of 4500 files is given to the system in three pages, each from the bytes the
+    /// one before handed back, every file once; an item past the first page is found; and once
+    /// the folder is watched, a file made past the first page is the one change logged, the
+    /// pages past the first not taken for deletions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_big_folder_pages_through_and_its_changes_stay_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let big = daemons.home.join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        for n in 0..4500 {
+            std::fs::write(big.join(format!("f{n:05}.txt")), b"").unwrap();
+        }
+        let (domain, heard) =
+            domain(&dir.path().join("shared"), daemons.id, &daemons.addr.to_string());
+
+        let (mut told, mut sizes, mut page) = (Vec::new(), Vec::new(), None::<Vec<u8>>);
+        loop {
+            let from = page.as_deref().and_then(slopty_files::pages::Cursor::decode);
+            let listed = domain.list_page("big", from.as_ref()).await.unwrap();
+            sizes.push(listed.items.len());
+            told.extend(listed.items.into_iter().map(|i| i.name));
+            let Some(next) = listed.next else { break };
+            page = Some(next.encode());
+        }
+        assert_eq!(sizes, [2000, 2000, 500]);
+        let all: Vec<String> = (0..4500).map(|n| format!("f{n:05}.txt")).collect();
+        assert_eq!(told, all, "each file once, in order");
+        let deep = domain.item("big/f04400.txt").await.unwrap();
+        assert_eq!(deep.parent, "big", "found past the first page");
+
+        armed(&domain, &heard, &daemons.home, &["big"]).await;
+        let before = domain.anchor();
+        std::fs::write(big.join("f04400a.txt"), b"new").unwrap();
+        let made = |changes: &[Change]| updated(changes, "big/f04400a.txt");
+        let changes = tokio::time::timeout(STEP, heard_until(&domain, &heard, &before, made))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("changes so far: {:?}", domain.since(&before)));
+        assert!(
+            !changes.iter().any(|c| matches!(c, Change::Deleted(_))),
+            "the pages past the first are still there: {:?}",
+            changes.iter().filter(|c| matches!(c, Change::Deleted(_))).take(3).collect::<Vec<_>>()
+        );
+        drop(daemons);
+    }
+
     /// A missing item, a file asked to list, a worker the app no longer names, another worker
     /// at the address written for this one, and an address nobody answers each say so as the
     /// error the system is told.
