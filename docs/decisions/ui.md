@@ -9240,3 +9240,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (the made display asked for at the tile's size, no physical open first, the pick back to
     physical saved and read back, and an unasked pick not kept) and
     `a_display_made_for_this_device_follows_its_tile` (a Mac's pick kept).
+
+- ✅ **The commit sheet frees a merged pull request's worktree** (2026-10-10, readiness audit
+  item 22).
+  - **The gap.** Once an agent's pull request merged, the sheet showed it merged and offered
+    nothing more. "Remove worktree" lived only on an exited thread, a folder tile's path bar
+    and the palette, so the person had to go looking for it at the moment it was due.
+  - **The press.** With the pull request merged and the repository an agent's worktree under
+    its clone's `.claude/worktrees/`, the sheet's pull request part ends with "Remove worktree"
+    (the exited thread's words). The sheet tells its tile (`CommitEvent::RemoveWorktree`), and
+    the thread's or the review's tile hands it to the workspace (`ThreadViewEvent` and
+    `ReviewEvent::RemoveWorktree`), which asks it as the palette does: refused in words while
+    an agent that has not exited works there, and refused by the worker while a terminal works
+    in it or anything in it is not committed. "Removing the worktree…" shows while it is
+    asked, and once it went the press goes and the sheet says what went.
+  - Tests: `conversation::thread::tests::commit::{a_merged_pull_request_offers_to_remove_its_worktree,
+    a_merged_pull_request_outside_a_worktree_offers_no_removal}` and
+    `workspace::tests::review_tile::a_reviews_sheet_frees_a_merged_worktree`.

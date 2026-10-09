@@ -1213,6 +1213,9 @@ impl ThreadView {
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
                     cx.notify();
                 }
+                CommitEvent::RemoveWorktree(root) => {
+                    cx.emit(ThreadViewEvent::RemoveWorktree(root.clone()));
+                }
             });
         self.commit = Some((sheet, closing));
         cx.notify();

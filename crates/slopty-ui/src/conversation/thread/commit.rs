@@ -64,10 +64,13 @@ struct Asked {
 }
 
 /// What the sheet tells its tile.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CommitEvent {
     /// The person closed it.
     Close,
+    /// The pull request merged, and the person asked to free the agent's worktree the
+    /// repository is, at this root: the workspace asks it of the worker, as anywhere else.
+    RemoveWorktree(String),
 }
 
 /// Which face the sheet shows.
@@ -561,7 +564,8 @@ impl CommitSheet {
         };
         let next = repo.pull.status().and_then(|pull| self.next_steps(pull, repo, cx));
         let merge = repo.pull.status().and_then(|pull| self.merge_row(pull, repo, cx));
-        Some(part.children(next).children(merge).into_any_element())
+        let free = repo.pull.status().and_then(|pull| self.free_row(pull, repo, cx));
+        Some(part.children(next).children(merge).children(free).into_any_element())
     }
 
     fn pull_line(&self, pull: &PullStatus) -> AnyElement {
@@ -738,6 +742,43 @@ impl CommitSheet {
                 .gap(px(theme.spacing.xs))
                 .pt(px(theme.spacing.xs))
                 .children(steps)
+                .into_any_element(),
+        )
+    }
+
+    /// Once the pull request merged, the worktree the repository is goes on the person's
+    /// press: its work has landed, so nothing is left for it to hold. Only for an agent's
+    /// worktree under its clone's `.claude/worktrees/`, and not once it went.
+    fn free_row(&self, pull: &PullStatus, repo: &Repo, cx: &Context<Self>) -> Option<AnyElement> {
+        if pull.standing() != PullStanding::Merged {
+            return None;
+        }
+        let root = crate::workspace::worktree_root(&self.repo)?;
+        if matches!(repo.said, Some((_, Said::Freed { .. }))) {
+            return None;
+        }
+        let busy = self.busy(cx).is_some();
+        Some(
+            div()
+                .debug_selector(|| "commit-free".to_owned())
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(self.theme.spacing.xs))
+                .pt(px(self.theme.spacing.xs))
+                .child(
+                    self.button(
+                        "commit-remove-worktree",
+                        super::view::exited::REMOVE_WORKTREE,
+                        ButtonKind::Secondary,
+                        busy,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        if this.busy(cx).is_none() {
+                            cx.emit(CommitEvent::RemoveWorktree(root.clone()));
+                        }
+                    })),
+                )
                 .into_any_element(),
         )
     }

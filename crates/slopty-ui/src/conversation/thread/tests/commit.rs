@@ -464,3 +464,72 @@ fn no_next_step_without_an_agent_to_take_it(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("commit-pull").is_some());
     assert!(cx.debug_bounds("commit-next-steps").is_none());
 }
+
+/// Once the pull request of an agent's worktree merged, the sheet offers to remove the
+/// worktree, which the tile hands to the workspace; never while the pull request is open, nor
+/// in a folder that is no agent's worktree, and not once it went.
+#[gpui::test]
+fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::conversation::thread::ThreadViewEvent;
+
+    const ROOT: &str = "/r/.claude/worktrees/fix";
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    ROOT.clone_into(&mut state.meta.cwd);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let heard: Rc<RefCell<Vec<String>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_v, event: &ThreadViewEvent, _cx| {
+            if let ThreadViewEvent::RemoveWorktree(root) = event {
+                into.borrow_mut().push(root.clone());
+            }
+        })
+        .detach();
+    });
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    let read = |sent: &Sent| {
+        sent.borrow()
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                ClientMsg::Git { request, op: GitOp::PullStatus, .. } => Some(*request),
+                _ => None,
+            })
+            .expect("the pull request read")
+    };
+    answer(&hub, cx, read(&sent), GitDone::PullStatus(Some(Box::new(pull("CLEAN", &[])))));
+    assert!(cx.debug_bounds("commit-remove-worktree").is_none(), "not while it is open");
+
+    hub.update(cx, |hub, cx| {
+        let _asked = hub.git_op(ROOT, GitOp::PullStatus, cx);
+    });
+    let merged = PullStatus { state: "MERGED".to_owned(), ..pull("CLEAN", &[]) };
+    answer(&hub, cx, read(&sent), GitDone::PullStatus(Some(Box::new(merged))));
+    click(cx, "commit-remove-worktree");
+    assert_eq!(*heard.borrow(), [ROOT], "handed to the workspace, by its root");
+
+    // The workspace asks it of the worker; once it went, the press goes too.
+    let asked = hub.update(cx, |hub, cx| hub.git_op(ROOT, GitOp::RemoveWorktree, cx));
+    let freed = GitDone::WorktreeRemoved { branch: Some("fix".to_owned()), branch_removed: true };
+    answer(&hub, cx, asked.expect("linked"), freed);
+    assert!(cx.debug_bounds("commit-remove-worktree").is_none(), "gone once it went");
+}
+
+/// A merged pull request in a folder that is no agent's worktree offers nothing to remove.
+#[gpui::test]
+fn a_merged_pull_request_outside_a_worktree_offers_no_removal(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let merged = PullStatus { state: "MERGED".to_owned(), ..pull("CLEAN", &[]) };
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(merged))));
+    assert!(cx.debug_bounds("commit-pull-standing").is_some(), "the merged pull request shows");
+    assert!(cx.debug_bounds("commit-remove-worktree").is_none());
+}

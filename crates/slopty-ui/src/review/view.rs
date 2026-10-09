@@ -186,6 +186,9 @@ pub enum ReviewEvent {
         /// Its whole path on the machine.
         path: String,
     },
+    /// The commit sheet over it asked to free the agent's worktree at this root, its pull
+    /// request merged.
+    RemoveWorktree(String),
 }
 
 /// One row of the diff.
@@ -688,6 +691,9 @@ impl ReviewView {
                     this.commit = None;
                     window.focus(&this.focus, cx);
                     cx.notify();
+                }
+                CommitEvent::RemoveWorktree(root) => {
+                    cx.emit(ReviewEvent::RemoveWorktree(root.clone()));
                 }
             });
         self.commit = Some((sheet, closing));

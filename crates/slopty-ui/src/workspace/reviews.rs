@@ -206,6 +206,7 @@ impl WorkspaceView {
             }
             ReviewEvent::OpenThread(opens) => self.open_thread_at(*opens, cx),
             ReviewEvent::OpenFile { path } => self.open_file_on(Some(key), path, None, cx),
+            ReviewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, root, cx),
             // A folder's alone, heard with the window it starts in (`sync_changes`).
             ReviewEvent::NewAgent { .. } => {}
         }

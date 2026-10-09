@@ -574,6 +574,33 @@ fn a_reviews_open_file_opens_it_on_its_machine(cx: &mut TestAppContext) {
     assert_eq!(files_added(&mut studio), [path], "a folder's review");
 }
 
+/// A folder's review whose commit sheet asks to free its merged worktree has the workspace ask
+/// it of the worker, as the palette's line does.
+#[gpui::test]
+fn a_reviews_sheet_frees_a_merged_worktree(cx: &mut TestAppContext) {
+    use slopty_proto::git::GitOp;
+
+    use crate::review::ReviewEvent;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let root = "/r/.claude/worktrees/fix".to_owned();
+    let kind = ItemKind::Changes { path: root.clone(), against: None };
+    let changes = arrives(&view, cx, &studio, kind, 20);
+    frames(cx);
+    let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
+    let folder = folder.expect("the folder's review");
+    studio.drain();
+    folder.update(cx, |_, cx| cx.emit(ReviewEvent::RemoveWorktree(root.clone())));
+    frames(cx);
+    let asked = studio.drain().into_iter().any(
+        |m| matches!(m, ClientMsg::Git { repo, op: GitOp::RemoveWorktree, .. } if repo == root),
+    );
+    assert!(asked, "the worktree asked to go");
+}
+
 /// A folder's review is heard as a thread's is: a press on who wrote a line opens that
 /// thread, where before it went nowhere.
 #[gpui::test]
