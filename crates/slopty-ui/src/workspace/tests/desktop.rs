@@ -193,6 +193,9 @@ fn a_display_made_for_this_device_follows_its_tile(cx: &mut TestAppContext) {
         "the physical display's stream goes: {asked:?}"
     );
     assert!(dir.path().join(slopty_client::screen::display::KEY_FILE).exists(), "key kept");
+    let saved = view.read_with(cx, |v, _| v.to_save().displays);
+    let kept = slopty_client::layout::SavedDisplay { tile, sized: true };
+    assert_eq!(saved, [kept], "on a Mac, the pick is kept for the next run");
 
     let made = DisplayId(9);
     view.update_in(cx, |v, _w, cx| {
@@ -245,6 +248,66 @@ fn a_display_made_for_this_device_follows_its_tile(cx: &mut TestAppContext) {
         )),
         "the physical display again: {back:?}"
     );
+}
+
+/// On a touch device a desktop comes at the device's own size unasked: the display tile opens
+/// on a display made for it, never on the Mac's physical display first. Turned back to the
+/// physical display, the pick is saved with the layout, and the next run starts from it; a pick
+/// that matches what the device does unasked is not kept.
+#[gpui::test]
+fn a_touch_device_opens_a_desktop_at_its_own_size_and_keeps_the_pick(cx: &mut TestAppContext) {
+    use slopty_client::layout::SavedDisplay;
+
+    let (view, cx) = workspace(cx);
+    let dir = tempfile::tempdir().expect("a directory");
+    view.update(cx, |v, _| {
+        v.set_layout_path(dir.path().join("layout.json"));
+        v.desktop.sized_first();
+    });
+    let mut fake = connect(&view, cx, 1, "studio");
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, WorkerCaps { virtual_displays: true, ..healthy() }, cx);
+    });
+    let physical = DisplayId(1);
+    sent(&mut fake, cx);
+    let tile = arrives(&view, cx, &fake, ItemKind::Display { display: physical }, 2);
+    let asked = sent(&mut fake, cx);
+    let body = body_pixels(&view, cx, tile);
+    let made = asked.iter().find_map(|m| match m {
+        ClientMsg::Screen(ScreenRequest::OpenDisplay { shape, .. }) => {
+            Some((shape.width, shape.height))
+        }
+        _ => None,
+    });
+    assert_eq!(made, Some(body), "a display made for this device, sized to the tile: {asked:?}");
+    let physical_open = |msgs: &[ClientMsg]| {
+        msgs.iter().any(|m| {
+            matches!(
+                m,
+                ClientMsg::Screen(ScreenRequest::Open { target: CaptureTarget::Display(d), .. })
+                    if *d == physical
+            )
+        })
+    };
+    assert!(!physical_open(&asked), "never the physical display first: {asked:?}");
+    let saved = view.read_with(cx, |v, _| v.to_save().displays);
+    assert!(saved.is_empty(), "what the device does unasked is not a pick to keep");
+
+    view.update_in(cx, |v, window, cx| {
+        v.focus_tile(tile, cx);
+        v.toggle_sized_display(&ToggleSizedDisplay, window, cx);
+    });
+    assert!(physical_open(&sent(&mut fake, cx)), "back to the physical display");
+    let saved = view.read_with(cx, |v, _| v.to_save());
+    assert_eq!(saved.displays, [SavedDisplay { tile, sized: false }], "the pick, kept");
+    let next = crate::workspace::desktop::Desktop::of(Some(&saved));
+    assert_eq!(next.chosen(tile), Some(false), "and read back by the next run");
+
+    // Sized again, the pick is what the device does unasked: nothing left to keep.
+    view.update_in(cx, |v, window, cx| v.toggle_sized_display(&ToggleSizedDisplay, window, cx));
+    sent(&mut fake, cx);
+    assert!(view.read_with(cx, |v, _| v.to_save().displays.is_empty()));
 }
 
 /// A stand-in for the session tap: whether macOS would allow it, what it was armed to, and

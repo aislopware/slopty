@@ -140,6 +140,9 @@ pub struct Saved {
     pub faces: Vec<SavedFace>,
     /// The tiles shown in windows of their own, and where those stood.
     pub popouts: Vec<SavedPopout>,
+    /// The display tiles the person streamed from a display made for this device, or from the
+    /// physical one, where that differs from what this device does unasked.
+    pub displays: Vec<SavedDisplay>,
     /// How far this device read each project's timeline, for the recap its board opens on.
     pub looked: Vec<SavedLooked>,
     /// How often and how lately each project was gone to here, for the palette to rank them.
@@ -186,6 +189,16 @@ pub struct SavedFace {
     pub tile: TileRef,
     /// The face rather than the TUI.
     pub face: bool,
+}
+
+/// A display tile streamed from a display made for this device (`true`) or from the physical
+/// one, as the person picked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SavedDisplay {
+    /// Which.
+    pub tile: TileRef,
+    /// From a display made for this device.
+    pub sized: bool,
 }
 
 /// A tile shown in a window of its own.

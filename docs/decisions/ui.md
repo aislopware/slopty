@@ -3641,7 +3641,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     displays. The same command, now "Back to the physical display", undoes it. One key has one
     display, so a second tile on the same worker takes it over from the first. A worker that
     streams a physical display instead says why in a notice. The choice lives in this client
-    only, for this run.
+    and is kept with the layout ("A phone's desktop comes at its own size", 2026-10-10).
   - **The stats overlay says 4:4:4.** The details' first line is the picture: size, capture
     scale, "4:4:4" or "4:2:0" read off the decoded picture's format (`xf44` or `444f` is
     full chroma), and the frame's age. Rate, bitrate and round trip left it, since the plain
@@ -9218,3 +9218,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `review::tests::a_file_past_the_review_s_budget_says_so_and_comes_whole_on_a_press`
     (slopty-ui: the row, the ask by blobs in the thread's repository, reading, the hunks in
     its place, a failure said with the press again).
+
+- ✅ **A phone's desktop comes at its own size, and a display pick is kept** (2026-10-10,
+  readiness audit item 12).
+  - **The defect.** A desktop opened from a phone came at the Mac display's size, letterboxed
+    to a strip. The display made for the device was a palette toggle held in memory, so iOS
+    killing the app in the background lost it, and the person had to find the palette line
+    again on every launch.
+  - **Touch takes the device's size unasked.** On iOS (`Desktop::sized_first`) a display tile
+    on show whose worker can make displays takes one made for the device at the next frame
+    (`adopt_sized_displays`), and its physical display is never opened meanwhile
+    (`awaiting_sized` holds it out of `reconcile_screens`). One key has one display, so one
+    tile per worker takes it and the rest stream their physical displays. A worker that
+    refused to make one, or a device with no key kept, falls back to the physical display and
+    is not asked again until it links again. On the Mac nothing changes unasked.
+  - **The pick is kept.** "Open a display sized to this window" and "Back to the physical
+    display" record the person's pick for that tile in `layout.json` (`Saved::displays`), only
+    where it differs from what the device does unasked, so the next launch starts from it on
+    either device.
+  - Tests: `workspace::tests::desktop::a_touch_device_opens_a_desktop_at_its_own_size_and_keeps_the_pick`
+    (the made display asked for at the tile's size, no physical open first, the pick back to
+    physical saved and read back, and an unasked pick not kept) and
+    `a_display_made_for_this_device_follows_its_tile` (a Mac's pick kept).

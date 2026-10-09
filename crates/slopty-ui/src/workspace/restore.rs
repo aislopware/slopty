@@ -1,6 +1,7 @@
 //! What a relaunch puts back beside the arrangement the layout restores: the main window's
-//! frame, the face or the TUI each agent's tile showed, and the tiles shown in windows of their
-//! own. All three are saved in `layout.json` with the arrangement they frame.
+//! frame, the face or the TUI each agent's tile showed, the tiles shown in windows of their own,
+//! and the display each display tile was picked to stream from. All are saved in `layout.json`
+//! with the arrangement they frame.
 
 use gpui::Context;
 use slopty_client::layout::{Saved, SavedFace, SavedPopout, WindowFrame};
@@ -83,6 +84,13 @@ impl WorkspaceView {
             });
         let waiting: Vec<SavedPopout> = waiting.cloned().collect();
         saved.popouts.extend(waiting);
+        saved.displays = tiles
+            .iter()
+            .filter_map(|tile| {
+                let sized = self.desktop.chosen(*tile)?;
+                Some(slopty_client::layout::SavedDisplay { tile: *tile, sized })
+            })
+            .collect();
         saved.frecency.clone_from(&self.frecency);
         saved.looked = self
             .projects_looked()

@@ -1,12 +1,14 @@
 //! What the palette does to a remote window or desktop tile beyond its header: type this
 //! device's clipboard into it, stream a display tile from a display the worker makes for this
 //! device (sized to the tile, following it as it resizes), and on the Mac send the system's own
-//! shortcuts to a remote Mac.
+//! shortcuts to a remote Mac. On a phone or a tablet a display tile takes a display made for the
+//! device unasked; the person's pick either way is kept with the layout.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use gpui::{Context, Focusable as _, Task, Window};
-use slopty_client::layout::{Rect, WorkerKey};
+use slopty_client::layout::{Rect, TileRef, WorkerKey};
 use slopty_client::screen::display::{self, Follow};
 use slopty_core::{ItemId, StreamId};
 use slopty_proto::ClientMsg;
@@ -154,6 +156,15 @@ pub(super) struct Desktop {
     deactivated: Option<gpui::Subscription>,
     /// A tile whose view went while it had the keyboard: its next view takes it.
     refocus: Option<ItemId>,
+    /// Whether a display tile streams from a display made for this device unless the person
+    /// picked otherwise: on a touch device, whose screen is nothing like the Mac's.
+    sized_first: bool,
+    /// The display tiles the person picked a display for: made for this device (`true`) or
+    /// the physical one. Saved with the layout.
+    chosen: HashMap<TileRef, bool>,
+    /// The workers that could not make this device a display on their current link: not asked
+    /// again unasked until they link again.
+    declined: HashSet<WorkerKey>,
 }
 
 impl Default for Desktop {
@@ -171,7 +182,40 @@ impl Default for Desktop {
             in_main: false,
             deactivated: None,
             refocus: None,
+            sized_first: cfg!(target_os = "ios"),
+            chosen: HashMap::new(),
+            declined: HashSet::new(),
         }
+    }
+}
+
+impl Desktop {
+    /// The desktop as the last run left it: the displays the person picked.
+    pub(super) fn of(saved: Option<&slopty_client::layout::Saved>) -> Self {
+        let chosen = saved.map(|s| s.displays.iter().map(|d| (d.tile, d.sized)).collect());
+        Self { chosen: chosen.unwrap_or_default(), ..Self::default() }
+    }
+
+    /// The display the person picked for `tile`: made for this device (`true`) or the
+    /// physical one; `None` where they picked neither.
+    pub(super) fn chosen(&self, tile: TileRef) -> Option<bool> {
+        self.chosen.get(&tile).copied()
+    }
+
+    /// `worker` links again: it may be asked for a display again.
+    pub(super) fn relinked(&mut self, worker: WorkerKey) {
+        self.declined.remove(&worker);
+    }
+
+    /// `worker` could not make this device a display: not asked again unasked on this link.
+    pub(super) fn declined(&mut self, worker: WorkerKey) {
+        self.declined.insert(worker);
+    }
+
+    /// Take a display made for this device unasked, as a touch device does.
+    #[cfg(test)]
+    pub(super) const fn sized_first(&mut self) {
+        self.sized_first = true;
     }
 }
 
@@ -440,29 +484,119 @@ impl WorkspaceView {
             if let Some(w) = self.workers.get_mut(&tile.worker) {
                 w.sized = None;
             }
+            self.choose_display(tile, false, cx);
             self.screens.remove(&tile.item);
             self.reconcile_screens();
             cx.notify();
             return;
         }
-        if !self.offers_displays(tile.worker) || self.display_key().is_none() {
+        if !self.size_display(tile, window) {
             return;
         }
-        let Some(placed) = self.placed_tiles().into_iter().find(|p| p.tile == tile) else { return };
-        let scale = window.scale_factor();
-        let pixels = body_pixels(placed.rect, self.header_h(), scale);
-        let shape = display::shape(pixels, scale, crate::screen::main_refresh_hz());
-        if let Some(w) = self.workers.get_mut(&tile.worker) {
-            w.sized = Some(Sized::new(tile.item, shape));
-        }
-        // Dropping a view closes its stream: the physical display's, and the one a tile of
-        // this worker had before.
-        self.screens.remove(&tile.item);
+        self.choose_display(tile, true, cx);
+        // Another tile of this worker that had one goes back to its physical display.
         if let Some(old) = was {
             self.screens.remove(&old);
         }
         self.reconcile_screens();
         cx.notify();
+    }
+
+    /// The person picked a display for `tile`: one made for this device, or the physical one.
+    /// Kept with the layout where it differs from what this device does unasked.
+    fn choose_display(&mut self, tile: TileRef, sized: bool, cx: &Context<Self>) {
+        let unasked = self.desktop.sized_first;
+        let before = self.desktop.chosen.get(&tile).copied();
+        if sized == unasked {
+            self.desktop.chosen.remove(&tile);
+        } else {
+            self.desktop.chosen.insert(tile, sized);
+        }
+        if before != self.desktop.chosen.get(&tile).copied() {
+            self.layout_touched(cx);
+        }
+    }
+
+    /// Whether display tile `tile` streams from a display made for this device: as the person
+    /// picked, else as this device does unasked ([`Desktop::sized_first`]).
+    fn wants_sized(&self, tile: TileRef) -> bool {
+        self.desktop.chosen.get(&tile).copied().unwrap_or(self.desktop.sized_first)
+    }
+
+    /// Stream display tile `tile` from a display made for this device, sized to where it is
+    /// placed: its physical display's stream goes. Whether it will.
+    fn size_display(&mut self, tile: TileRef, window: &Window) -> bool {
+        if !self.offers_displays(tile.worker) || self.display_key().is_none() {
+            return false;
+        }
+        let Some(placed) = self.placed_tiles().into_iter().find(|p| p.tile == tile) else {
+            return false;
+        };
+        let scale = window.scale_factor();
+        let pixels = body_pixels(placed.rect, self.header_h(), scale);
+        let shape = display::shape(pixels, scale, crate::screen::main_refresh_hz());
+        let Some(w) = self.workers.get_mut(&tile.worker) else { return false };
+        w.sized = Some(Sized::new(tile.item, shape));
+        // Dropping a view closes its stream: the physical display's.
+        self.screens.remove(&tile.item);
+        true
+    }
+
+    /// The display tiles about to take a display made for this device unasked
+    /// ([`Self::adopt_sized_displays`], at the next frame): their physical display is not
+    /// opened meanwhile, only to close at once.
+    pub(super) fn awaiting_sized(&self) -> HashSet<ItemId> {
+        if !self.desktop.sized_first && !self.desktop.chosen.values().any(|sized| *sized) {
+            return HashSet::new();
+        }
+        self.layout
+            .tiles()
+            .filter(|tile| {
+                matches!(self.item(*tile).map(|i| &i.kind), Some(ItemKind::Display { .. }))
+                    && self.workers.get(&tile.worker).is_some_and(|w| w.sized.is_none())
+                    && !self.desktop.declined.contains(&tile.worker)
+                    && !self.popouts.holds(tile.item)
+                    && self.offers_displays(tile.worker)
+                    && self.wants_sized(*tile)
+            })
+            .map(|tile| tile.item)
+            .collect()
+    }
+
+    /// Each worker with no display made for this device takes one for the first display tile on
+    /// show that wants one ([`Self::wants_sized`]): on a phone or a tablet, a desktop comes at
+    /// the device's size without a word. A worker that could not make one is not asked again
+    /// until it links again.
+    fn adopt_sized_displays(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.desktop.sized_first && !self.desktop.chosen.values().any(|sized| *sized) {
+            return;
+        }
+        let placed = self.placed_tiles();
+        let mut adopted = false;
+        for p in placed {
+            let tile = p.tile;
+            let display =
+                matches!(self.item(tile).map(|i| &i.kind), Some(ItemKind::Display { .. }));
+            let free = self.workers.get(&tile.worker).is_some_and(|w| w.sized.is_none());
+            if !display
+                || !free
+                || self.desktop.declined.contains(&tile.worker)
+                || self.popouts.holds(tile.item)
+                || !self.wants_sized(tile)
+            {
+                continue;
+            }
+            // One that cannot be sized (no key kept for this device) shows its physical
+            // display instead, and is not tried again on this link.
+            if !self.size_display(tile, window) {
+                self.desktop.declined(tile.worker);
+            }
+            adopted = true;
+        }
+        if adopted {
+            self.reconcile_screens();
+            cx.notify();
+        }
     }
 
     /// The worker says what the stream it opened for this device's key shows: a display made
@@ -498,6 +632,7 @@ impl WorkspaceView {
     /// [`display::SETTLE`]; the frame then is woken for it. The shape a tile rests at is kept
     /// for the next open.
     pub(super) fn follow_sized_displays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.adopt_sized_displays(window, cx);
         if let Some(item) = self.desktop.refocus
             && let Some(view) = self.screens.get(&item)
         {

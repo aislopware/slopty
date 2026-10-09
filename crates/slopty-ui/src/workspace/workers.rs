@@ -254,6 +254,7 @@ impl WorkspaceView {
         w.name = name;
         w.status = WorkerStatus::Connected;
         w.away_since = None;
+        self.desktop.relinked(key);
         self.clip_sharing_changed();
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.outbox =
@@ -1004,6 +1005,7 @@ impl WorkspaceView {
         }
         let quality = self.quality_for();
         let key = self.desktop_key();
+        let awaiting = self.awaiting_sized();
         let mut keep: Vec<ItemId> = Vec::new();
         for w in self.workers.values_mut() {
             if w.link.is_none() {
@@ -1048,7 +1050,9 @@ impl WorkspaceView {
             let wanted: Vec<(ItemId, CaptureTarget)> = w
                 .doc
                 .items()
-                .filter(|i| !self.parked.contains(&i.id) && Some(i.id) != sized)
+                .filter(|i| {
+                    !self.parked.contains(&i.id) && Some(i.id) != sized && !awaiting.contains(&i.id)
+                })
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
@@ -1270,7 +1274,11 @@ impl WorkspaceView {
         let Some(w) = self.workers.get_mut(&key) else { return };
         let id = match asked {
             OpenAsk::Target(target) => w.pending_opens.remove(&target),
-            OpenAsk::Made(_) => w.sized.take().map(|s| s.item()),
+            OpenAsk::Made(_) => {
+                // Not made: not asked again unasked on this link.
+                self.desktop.declined(key);
+                w.sized.take().map(|s| s.item())
+            }
         };
         let Some(id) = id else {
             tracing::debug!(?asked, ?why, "a refused open nobody waits on");

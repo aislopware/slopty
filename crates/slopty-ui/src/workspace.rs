@@ -1210,7 +1210,7 @@ impl WorkspaceView {
             more_entries: Vec::new(),
             server_entries: Vec::new(),
             show_stats: false,
-            desktop: desktop::Desktop::default(),
+            desktop: desktop::Desktop::of(saved.as_ref()),
             toast: None,
             closed: Vec::new(),
             closed_seq: 0,
