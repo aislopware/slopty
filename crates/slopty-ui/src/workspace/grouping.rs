@@ -502,19 +502,26 @@ impl WorkspaceView {
     }
 
     /// Put `arriving` (tiles from elsewhere: another client, an orchestrator, the worker's own
-    /// list) in the tiling, each a background tab in its project
-    /// ([`slopty_client::layout::Tiling::arrive`]). The projects are worked out once over the
-    /// tiling and the arrivals together, so a snapshot of many lands in one pass, and the tiles
-    /// already placed say their project first.
+    /// list) in the tiling: a task's agent beside its orchestrator ([`super::seating`]), any
+    /// other a background tab in its project ([`slopty_client::layout::Tiling::arrive`]),
+    /// kept in mind in case the project names it a task's agent later. The projects are worked
+    /// out once over the tiling and the arrivals together, so a snapshot of many lands in one
+    /// pass, and the tiles already placed say their project first.
     pub(super) fn place_from_elsewhere(&mut self, arriving: &[TileRef]) {
         let mut tiles = self.reading_order();
         tiles.extend(arriving.iter().filter(|t| !self.layout.contains(**t)));
         let grouping = self.grouping(tiles, &groups::DEFAULT_CHAIN);
+        let layout = &self.layout;
+        self.projects.arrived.retain(|t| layout.contains(*t));
         for &tile in arriving {
+            if self.layout.contains(tile) || self.arrive_beside_lead(tile) {
+                continue;
+            }
             let home = grouping
                 .group_of(tile)
                 .map_or_else(|| GroupKey::machine(tile.worker), |g| g.key.clone());
             self.layout.arrive(tile, &home);
+            self.projects.arrived.insert(tile);
         }
     }
 

@@ -113,7 +113,7 @@ impl WorkspaceView {
     }
 
     /// What the projects other than the one on show add up to: what waits out of view.
-    fn elsewhere(&self) -> Rollup {
+    fn waiting_elsewhere(&self) -> Rollup {
         let shown = self.layout.shown_index();
         let mut all = Rollup::default();
         for ix in (0..self.layout.projects().len()).filter(|ix| Some(*ix) != shown) {
@@ -145,7 +145,7 @@ impl WorkspaceView {
                 .into_any_element()
         };
         let name = SharedString::from(self.project_name());
-        let elsewhere = self.elsewhere();
+        let elsewhere = self.waiting_elsewhere();
         let label = match elsewhere.words() {
             Some(words) => format!("{name}, elsewhere {words}"),
             None => name.to_string(),

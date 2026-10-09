@@ -671,6 +671,9 @@ struct NavTile {
     restored: bool,
     /// Its agent's branch's pull request, as its worker's table last read it.
     pull: Option<PullSeen>,
+    /// It helps the tile listed above it, its project's orchestrator, and is set in under it
+    /// ([`nest_helpers`]).
+    nested: bool,
 }
 
 impl NavTile {
@@ -734,7 +737,20 @@ const fn has_figure(progress: Progress) -> bool {
 /// it into one line. It is drawn rather than hidden by a group hover, so the rows' layer keeps
 /// its cache while the pointer moves about the list.
 fn nesting_guide(theme: &Theme) -> Div {
-    let x = theme.spacing.inset() - theme.spacing.xs + theme.typography.icon_large() / 2.0;
+    nesting_guide_at(theme, 0)
+}
+
+/// How far a row set in under another starts past it: from a group's icon to a row's glyph.
+fn nest_step(theme: &Theme) -> f32 {
+    theme.typography.icon_large() - glyph_margin(theme) + theme.spacing.xs
+}
+
+/// The guide `depth` steps in: under a group's icon at 0, under a lead row's glyph at 1.
+fn nesting_guide_at(theme: &Theme, depth: u8) -> Div {
+    let x = f32::from(depth).mul_add(
+        nest_step(theme),
+        theme.spacing.inset() - theme.spacing.xs + theme.typography.icon_large() / 2.0,
+    );
     div()
         .absolute()
         .top_0()
@@ -742,6 +758,42 @@ fn nesting_guide(theme: &Theme) -> Div {
         .left(px(x))
         .border_l(kit::HAIR)
         .border_color(hsla(theme.surfaces.stroke))
+}
+
+/// A group's tiles with each orchestrator's helpers set in right under it (`MonoCode`'s
+/// `OrchestrationSidebarAgents`): a tile whose `lead_of` is listed here follows that lead,
+/// nested, in the order it had. A helper whose lead is not listed, or is itself set in under
+/// another, keeps its own place.
+fn nest_helpers(tiles: Vec<NavTile>, lead_of: impl Fn(TileRef) -> Option<TileRef>) -> Vec<NavTile> {
+    let leads: Vec<Option<TileRef>> = tiles.iter().map(|t| lead_of(t.tile)).collect();
+    let listed: Vec<TileRef> = tiles.iter().map(|t| t.tile).collect();
+    // A lead that is itself a listed helper keeps its own helpers flat: one level only.
+    let heads: Vec<TileRef> = listed
+        .iter()
+        .zip(&leads)
+        .filter(|(_, lead)| lead.is_none_or(|l| !listed.contains(&l)))
+        .map(|(t, _)| *t)
+        .collect();
+    let mut under: Vec<(TileRef, Vec<NavTile>)> = Vec::new();
+    let mut rest = Vec::with_capacity(tiles.len());
+    for (t, lead) in tiles.into_iter().zip(leads) {
+        match lead.filter(|l| heads.contains(l)) {
+            Some(l) => match under.iter_mut().find(|(k, _)| *k == l) {
+                Some((_, list)) => list.push(NavTile { nested: true, ..t }),
+                None => under.push((l, vec![NavTile { nested: true, ..t }])),
+            },
+            None => rest.push(t),
+        }
+    }
+    let mut out = Vec::with_capacity(rest.len());
+    for t in rest {
+        let tile = t.tile;
+        out.push(t);
+        if let Some(at) = under.iter().position(|(k, _)| *k == tile) {
+            out.extend(under.swap_remove(at).1);
+        }
+    }
+    out
 }
 
 /// What an agent says, its subagents at work folded in as a count: "Editing parser.rs, 2
@@ -1623,6 +1675,7 @@ impl WorkspaceView {
                 progress,
                 restored,
                 pull: self.tile_pull(item).cloned(),
+                nested: false,
             };
             let class = attention(mark, unseen);
             match (own_group, at.and_then(|g| by_group.get_mut(g))) {
@@ -1652,7 +1705,7 @@ impl WorkspaceView {
             if group.key.worker().is_some() || empty {
                 continue;
             }
-            let tiles = ordered(tiles);
+            let tiles = nest_helpers(ordered(tiles), |t| self.lead_of(t));
             let mut rollup = Rollup::default();
             for t in &tiles {
                 rollup.add(t.mark, t.unseen);
@@ -3743,8 +3796,12 @@ impl WorkspaceView {
             .items_center()
             // The kind's glyph under the worker's name, past its icon and the gap after it: the
             // slot is wider than the glyph centred in it, so it starts that margin to the left.
-            .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+            .pl(px(f32::from(u8::from(t.nested)).mul_add(
+                nest_step(theme),
+                theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme),
+            )))
             .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
+            .when(self.nav.hovered.get() && t.nested, |el| el.child(nesting_guide_at(theme, 1)))
             .child(
                 div()
                     .debug_selector(move || format!("nav-lines-{id}"))

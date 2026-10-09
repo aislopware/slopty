@@ -70,6 +70,7 @@ pub mod remote;
 mod restore;
 mod reviews;
 mod rollup;
+mod seating;
 mod secure;
 mod settings_page;
 mod starting;

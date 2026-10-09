@@ -2228,3 +2228,24 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     longer waiting. The app is told it may sleep (`TapsSettled`) only once the answer is out.
   - With the worker linked, the answer goes through its thread hub as before.
   - Tests: `workspace::tests::approvals::a_notes_answer_goes_through_the_server_while_its_worker_is_away`.
+- ✅ **An orchestrator's helpers open beside it, and their rows sit under its row**
+  (2026-10-09, MonoCode audit row 21, M27 `queueWorkerPanes` and
+  `OrchestrationSidebarAgents`).
+  - **Their tiles.** Any other tile from elsewhere is a background tab of its project. A
+    task's agent started by an orchestrator instead takes a pane right of the orchestrator's
+    tile, in that tile's tab. The next ones join that pane as its tabs, so a lead with many
+    helpers keeps one column beside it rather than slivers
+    (`slopty_client::layout::Tiling::arrive_beside`, `workspace::seating`). The person's focus
+    stays where it was, in that tab and in the workspace.
+  - **When the server names it late.** A tile can come before the project says it is a
+    task's agent. It waits alone in its background tab and is seated with the rest once the
+    project names it. A tile the person has shown, moved or given company is theirs, and the
+    naming moves nothing. Tiles restored at a relaunch are never moved.
+  - **On a phone** one pane is on show, so every arrival stays a tab.
+  - **In the navigator** a helper's row follows its orchestrator's row, set in one more step
+    with its own guide under the lead's glyph. One level only: a helper that orchestrates
+    keeps its own helpers flat.
+  - **Not done here.** The plan that starts the workers is a card with "Confirm & start".
+    That belongs to the thread's plan card (`conversation/`), which is lane W's.
+  - Tests: `workspace::tests::seating::*`, `slopty_client`'s
+    `layout::tiling::tests::a_leads_helpers_arrive_beside_it_in_one_column`.

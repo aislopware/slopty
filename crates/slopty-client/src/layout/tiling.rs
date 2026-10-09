@@ -433,6 +433,40 @@ impl Tiling {
         }
     }
 
+    /// `tile` came from elsewhere to help `lead` (a task's agent its project's orchestrator
+    /// started): a pane right of `lead`'s in its tab, or a tab of the pane that already holds
+    /// one of `lead`'s helpers (`helps`), so a lead with many keeps them in one column beside
+    /// it. The focus stays where it was, in that tab and in the workspace. `false`, with
+    /// nothing changed, when `tile` is placed already, `lead` is not, or on a phone, whose one
+    /// pane it would cover: the caller lets it arrive as any tile does.
+    pub fn arrive_beside(
+        &mut self,
+        tile: TileRef,
+        lead: TileRef,
+        helps: impl Fn(TileRef) -> bool,
+    ) -> bool {
+        if self.contains(tile) || self.is_phone() {
+            return false;
+        }
+        let Some(at) = self.position(lead) else { return false };
+        let id = self.pane_id();
+        let Some(tab) = self.projects.get_mut(at.project).and_then(|p| p.tab_mut(at.tab)) else {
+            return false;
+        };
+        let before = tab.focus();
+        let column = tab
+            .tiles()
+            .filter(|t| *t != lead && helps(*t))
+            .find_map(|t| tab.pane_of(t))
+            .filter(|pane| *pane != at.pane);
+        let placed = match column {
+            Some(pane) => tab.join(pane, tile),
+            None => tab.split(at.pane, Side::Right, id, tile),
+        };
+        tab.focus_pane(before, None);
+        placed
+    }
+
     /// Make `tile` the tab's terminal (⌘⌥T's first press): a pane below the whole tab, a third
     /// of its height, focused. Nothing when nothing is on show or it is placed already.
     pub fn set_terminal(&mut self, tile: TileRef) -> bool {

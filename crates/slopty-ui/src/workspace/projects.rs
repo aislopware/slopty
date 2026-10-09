@@ -85,6 +85,10 @@ pub(super) struct ProjectsState {
     pub open: HashSet<ProjectId>,
     /// What changed since the last look, for each board that opened onto news.
     pub recaps: HashMap<ProjectId, Recap>,
+    /// Tiles that came from elsewhere this run, each alone in a background tab, not yet known
+    /// as a task's agent: one that turns out to be is seated beside its orchestrator
+    /// ([`super::seating`]).
+    pub arrived: HashSet<slopty_client::layout::TileRef>,
 }
 
 /// The last entry of `board`'s timeline, 0 for an empty one.
@@ -419,6 +423,7 @@ impl WorkspaceView {
             self.open_project(&project, cx);
         }
         self.projects.dirty = true;
+        self.seat_helpers(cx);
         // Whether a thread is a project's to brief moves with the boards.
         self.faces_dirty = true;
         self.changed(cx);
