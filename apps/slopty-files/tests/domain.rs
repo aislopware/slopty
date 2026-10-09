@@ -370,6 +370,66 @@ mod tests {
         drop((daemons, silent));
     }
 
+    /// What Finder makes, renames, moves and trashes in the domain is done on the worker, and
+    /// nothing there is written over or unlinked: a folder is made, and one of a taken name is
+    /// refused as a clash; a file goes up under its own name, and one of a taken name lands
+    /// beside it; a rename and a move are moves, one onto a taken name is refused and both are
+    /// kept, and a child whose folder moved before it is the item where it went (the system's
+    /// merge); a trashed file goes to the worker's trash, one already gone is no error, and
+    /// the home is not trashed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_finder_makes_moves_and_trashes_is_done_on_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let home = daemons.home.clone();
+        let (domain, _heard) =
+            domain(&dir.path().join("shared"), daemons.id, &daemons.addr.to_string());
+
+        let made = domain.make_folder(ROOT, "notes").await.unwrap();
+        assert_eq!((made.id.as_str(), made.folder), ("notes", true));
+        assert!(home.join("notes").is_dir());
+        let again = domain.make_folder(ROOT, "notes").await.unwrap_err();
+        assert!(matches!(again, FilesError::Clash(_)), "{again:?}");
+
+        let staged = dir.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let local = staged.join("todo.txt");
+        std::fs::write(&local, b"buy milk").unwrap();
+        let sent = domain.create_file("notes", &local, XferId::new()).await.unwrap();
+        assert_eq!((sent.id.as_str(), sent.folder, sent.size), ("notes/todo.txt", false, 8));
+        assert_eq!(std::fs::read(home.join("notes/todo.txt")).unwrap(), b"buy milk");
+        std::fs::write(&local, b"other").unwrap();
+        let beside = domain.create_file("notes", &local, XferId::new()).await.unwrap();
+        assert!(beside.id.starts_with("notes/todo") && beside.id != sent.id, "{}", beside.id);
+        assert_eq!(beside.size, 5);
+        assert_eq!(std::fs::read(home.join("notes/todo.txt")).unwrap(), b"buy milk");
+
+        let renamed = domain.rename("notes/todo.txt", "notes", "done.txt").await.unwrap();
+        assert_eq!(renamed.id, "notes/done.txt");
+        assert!(home.join("notes/done.txt").is_file() && !home.join("notes/todo.txt").exists());
+        let moved = domain.rename("notes", "src", "notes").await.unwrap();
+        assert_eq!((moved.id.as_str(), moved.folder), ("src/notes", true));
+        assert!(home.join("src/notes/done.txt").is_file() && !home.join("notes").exists());
+        let merged = domain.rename("notes/done.txt", "src/notes", "done.txt").await.unwrap();
+        assert_eq!(merged.id, "src/notes/done.txt");
+        let taken = domain.rename("a.txt", "src", "main.rs").await.unwrap_err();
+        assert!(matches!(taken, FilesError::Clash(_)), "{taken:?}");
+        assert_eq!(std::fs::read(home.join("src/main.rs")).unwrap(), b"fn main() {}\n");
+        assert_eq!(std::fs::read(home.join("a.txt")).unwrap(), b"hello");
+
+        let trashed = domain.trash("src/notes/done.txt").await.unwrap().expect("trashed");
+        assert!(!home.join("src/notes/done.txt").exists());
+        let trashed = PathBuf::from(trashed);
+        assert_eq!(std::fs::read(&trashed).unwrap(), b"buy milk", "kept in the worker's trash");
+        // The test's own file, taken back out of this Mac's trash.
+        std::fs::remove_file(&trashed).unwrap();
+        assert_eq!(domain.trash("src/notes/done.txt").await.unwrap(), None);
+        let whole = domain.trash(ROOT).await.unwrap_err();
+        assert!(matches!(whole, FilesError::Declined { .. }), "{whole:?}");
+        assert!(home.join("a.txt").is_file());
+        drop(daemons);
+    }
+
     /// [`domain`] in a shared container of its own, `name`, under `dir`.
     fn domain_elsewhere(dir: &Path, name: &str, id: WorkerId, addr: &str) -> (Domain, Arc<Notify>) {
         domain(&dir.join(name), id, addr)

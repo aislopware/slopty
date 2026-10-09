@@ -170,7 +170,9 @@ fn done(op: &FsOp) -> String {
     }
 }
 
-fn refused(why: &FsRefusal) -> String {
+/// Why the worker would not try an op, in a sentence for the person.
+#[must_use]
+pub fn refused(why: &FsRefusal) -> String {
     match why {
         FsRefusal::NotAbsolute { path } => format!("“{path}” is not a full path"),
         FsRefusal::BadName { name } => format!("“{name}” cannot be a file’s name"),

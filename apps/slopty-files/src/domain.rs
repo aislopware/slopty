@@ -8,6 +8,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use slopty_core::{WorkerId, XferId};
 use slopty_platform::files::Directory;
+use slopty_proto::folder::FsOp;
 use tokio::sync::mpsc;
 
 use crate::changes::{Change, Changes, Expired};
@@ -142,6 +143,93 @@ impl Domain {
         Ok((landed, self.worker().await?.item(id).await?))
     }
 
+    /// Make the folder `name` in the folder `parent`; the item it is.
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, `parent` is not there ([`FilesError::NoSuchItem`]),
+    /// something is already called `name` there ([`FilesError::Clash`]), or the worker would
+    /// not or could not make it.
+    pub async fn make_folder(&self, parent: &str, name: &str) -> Result<Item, FilesError> {
+        let id = named(parent, name)?;
+        let worker = self.worker().await?;
+        let op =
+            FsOp::MakeDir { parent: item::on_worker(worker.home(), parent), name: name.to_owned() };
+        worker.change(op).await?;
+        worker.item(&id).await
+    }
+
+    /// Send the file `local` up into the folder `parent` as transfer `xfer`; the item it is
+    /// there, under its own name or, when that was taken, the next free one, as a file dropped
+    /// on the worker lands. Nothing on the worker is written over.
+    ///
+    /// A link that goes meanwhile is dialed again, and the transfer goes on over the new one
+    /// from what the worker holds.
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, or the transfer failed or was cancelled.
+    pub async fn create_file(
+        &self,
+        parent: &str,
+        local: &Path,
+        xfer: XferId,
+    ) -> Result<Item, FilesError> {
+        let worker = self.worker().await?;
+        let landed = tokio::select! {
+            landed = worker.upload(local, parent, xfer) => landed?,
+            never = self.keep_linked() => match never {},
+        };
+        let name = landed.rsplit('/').next().unwrap_or(&landed);
+        let id = named(parent, name)?;
+        self.worker().await?.item(&id).await
+    }
+
+    /// Move the item `id` into the folder `parent` as `name`, a rename when its folder stays;
+    /// the item it is there. When `id` is gone and the item is already there (it went with a
+    /// folder moved before it), it is that item.
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, `id` is not there ([`FilesError::NoSuchItem`]), something
+    /// is already at the new place ([`FilesError::Clash`]), or the worker would not or could
+    /// not move it.
+    pub async fn rename(&self, id: &str, parent: &str, name: &str) -> Result<Item, FilesError> {
+        let to = named(parent, name)?;
+        let worker = self.worker().await?;
+        if to == id {
+            return worker.item(id).await;
+        }
+        let op = FsOp::Move {
+            from: item::on_worker(worker.home(), id),
+            to: item::on_worker(worker.home(), &to),
+        };
+        match worker.change(op).await {
+            Ok(_moved) => worker.item(&to).await,
+            Err(gone @ FilesError::NoSuchItem(_)) => {
+                worker.item(&to).await.map_err(|_not_there| gone)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Move the item `id` to the worker's own trash, where the person can put it back; where
+    /// it went there, or `None` when it was already gone.
+    ///
+    /// # Errors
+    ///
+    /// The worker is out of reach, or would not or could not trash it (its volume has no
+    /// trash, or it holds the home).
+    pub async fn trash(&self, id: &str) -> Result<Option<String>, FilesError> {
+        let worker = self.worker().await?;
+        let op = FsOp::Trash { path: item::on_worker(worker.home(), id) };
+        match worker.change(op).await {
+            Ok(trashed) => Ok(Some(trashed)),
+            Err(FilesError::NoSuchItem(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Stop transfer `xfer`, on whichever link it is, or while it waits for one.
     pub async fn cancel(&self, xfer: XferId) {
         if slopty_client::xfer::Line::of(self.id).cancel(xfer) {
@@ -256,6 +344,18 @@ async fn take_in(
             signal();
         }
     }
+}
+
+/// The identifier of the entry `name` of the folder `parent`.
+///
+/// # Errors
+///
+/// [`FilesError::Declined`] for a name no single path component can be.
+fn named(parent: &str, name: &str) -> Result<String, FilesError> {
+    item::child(parent, name).ok_or_else(|| FilesError::Declined {
+        path: name.to_owned(),
+        why: format!("“{name}” cannot be a file’s name"),
+    })
 }
 
 /// A page of a folder's items, and where the next starts; `None` after its last.

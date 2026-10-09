@@ -271,7 +271,8 @@ struct Sending {
 struct SendingState {
     started: HashSet<String>,
     landed: HashSet<String>,
-    finished: bool,
+    /// The worker said every file is in place: the paths it named, its top-level entries.
+    finished: Option<Vec<String>>,
     failed: Option<String>,
 }
 
@@ -292,7 +293,7 @@ impl Sending {
     /// The worker said the transfer finished or failed: nothing more is sent.
     fn over(&self) -> bool {
         let state = self.state.lock();
-        state.finished || state.failed.is_some()
+        state.finished.is_some() || state.failed.is_some()
     }
 }
 
@@ -543,9 +544,9 @@ impl Table {
                 fetch.changed.notify_waiters();
                 true
             }
-            XferMsg::Finished { xfer, .. } => {
+            XferMsg::Finished { xfer, paths } => {
                 if let Some(sending) = self.sending(*xfer) {
-                    sending.update(|s| s.finished = true);
+                    sending.update(|s| s.finished = Some(paths.clone()));
                 }
                 false
             }
@@ -774,14 +775,42 @@ pub async fn upload(
     dest: Dest,
     again: bool,
 ) {
-    let mut following = line.follow(xfer);
-    let to = To { xfer, dest, again };
-    let (now, ended) = carry(up.clone(), line, &mut following.stop, files, to).await;
-    // Off the line before it is said to have ended, so whoever hears the end finds it gone.
-    drop(following);
+    let (now, ended) = followed(up, line, To { xfer, dest, again }, files).await;
     if let Err(error) = ended {
         let _gone = now.events.send(LinkEvent::XferFailed { xfer, error }).await;
     }
+}
+
+/// [`upload`] for a caller that awaits its end rather than hearing it as a link event.
+///
+/// Where the files landed, as the worker's `Finished` names them: the top-level entries, each
+/// under its own name or, where that was taken, the next free one.
+///
+/// # Errors
+///
+/// Why it ended without them: as [`upload`] tells in [`LinkEvent::XferFailed`].
+pub async fn upload_landed(
+    up: &Uplink,
+    line: &Arc<Line>,
+    xfer: XferId,
+    files: &[PathBuf],
+    dest: Dest,
+) -> Result<Vec<String>, XferError> {
+    followed(up, line, To { xfer, dest, again: false }, files).await.1
+}
+
+/// An upload carried on `line` until it ends: the link it ended on, and how.
+async fn followed(
+    up: &Uplink,
+    line: &Arc<Line>,
+    to: To,
+    files: &[PathBuf],
+) -> (Uplink, Result<Vec<String>, XferError>) {
+    let mut following = line.follow(to.xfer);
+    let ended = carry(up.clone(), line, &mut following.stop, files, to).await;
+    // Off the line before it is said to have ended, so whoever hears the end finds it gone.
+    drop(following);
+    ended
 }
 
 /// Where an upload goes, as which transfer, and whether an earlier run of the app began it.
@@ -798,7 +827,7 @@ async fn carry(
     stop: &mut watch::Receiver<bool>,
     files: &[PathBuf],
     to: To,
-) -> (Uplink, Result<(), XferError>) {
+) -> (Uplink, Result<Vec<String>, XferError>) {
     let To { xfer, dest, again } = to;
     // The walk of a dropped tree is blocking I/O: off the runtime that carries the keystrokes.
     let walked = files.to_vec();
@@ -834,9 +863,9 @@ async fn carry(
         };
         up.table.untrack_upload(xfer);
         let (name, error) = match ran {
-            Ok(()) => {
+            Ok(paths) => {
                 shown.work().end(true);
-                return (up, Ok(()));
+                return (up, Ok(paths));
             }
             Err(failed) => failed,
         };
@@ -887,7 +916,7 @@ async fn over_link(
     begin: &Begin<'_>,
     list: &mut [Entry],
     sending: &Sending,
-) -> Result<(), (Option<String>, XferError)> {
+) -> Result<Vec<String>, (Option<String>, XferError)> {
     let Begin { xfer, dest, files, bytes, relinked } = *begin;
     let files = if relinked {
         let left = list.iter().filter(|e| !sending.landed(&e.name)).count();
@@ -921,18 +950,19 @@ async fn changed_since(list: &mut [Entry], sending: &Sending) {
     }
 }
 
-/// Wait for the worker's `Finished`; its `Failed` ends the wait. Once every file is said to
+/// Wait for the worker's `Finished`, and the paths it names; its `Failed` ends the wait. Once
+/// every file is said to
 /// have landed, the end follows at once, so a worker that does not say it is not waited on
 /// past [`OFFSET_WAIT`].
-async fn finished(up: &Uplink, sending: &Sending, files: usize) -> Result<(), XferError> {
+async fn finished(up: &Uplink, sending: &Sending, files: usize) -> Result<Vec<String>, XferError> {
     loop {
         let changed = sending.changed.notified();
         let mut changed = std::pin::pin!(changed);
         changed.as_mut().enable();
         let all = {
             let state = sending.state.lock();
-            if state.finished {
-                return Ok(());
+            if let Some(paths) = &state.finished {
+                return Ok(paths.clone());
             }
             if let Some(failed) = &state.failed {
                 return Err(XferError::Worker(failed.clone()));

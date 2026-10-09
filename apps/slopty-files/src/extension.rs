@@ -3,8 +3,10 @@
 //!
 //! The system calls in on queues of its own and hands completion handlers that may be called
 //! from any thread, so each call copies its handler, starts the work on the extension's own
-//! runtime and returns at once. The domain is read-only: an item may be read and evicted, and
-//! a change made in Finder is refused.
+//! runtime and returns at once. What Finder makes, renames, moves or trashes in the domain is
+//! done on the worker, and nothing there is written over or unlinked: a file's contents are
+//! read-only, a new file lands beside the others, and a trashed one goes to the worker's own
+//! trash.
 
 use std::ffi::{CString, c_char, c_int};
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
-    AnyThread as _, ClassType as _, DefinedClass as _, Message as _, define_class, msg_send,
+    AnyThread as _, ClassType as _, DefinedClass as _, Message as _, define_class, msg_send, sel,
 };
 use objc2_file_provider::{
     NSFileProviderChangeObserver, NSFileProviderCreateItemOptions, NSFileProviderDeleteItemOptions,
@@ -24,13 +26,15 @@ use objc2_file_provider::{
     NSFileProviderItemFields, NSFileProviderItemProtocol, NSFileProviderItemVersion,
     NSFileProviderManager, NSFileProviderModifyItemOptions, NSFileProviderReplicatedExtension,
     NSFileProviderRequest, NSFileProviderRootContainerItemIdentifier,
-    NSFileProviderWorkingSetContainerItemIdentifier,
+    NSFileProviderTrashContainerItemIdentifier, NSFileProviderWorkingSetContainerItemIdentifier,
 };
 use objc2_foundation::{
-    NSArray, NSCocoaErrorDomain, NSData, NSDate, NSError, NSFeatureUnsupportedError, NSNumber,
-    NSProgress, NSString, NSURL, NSUserCancelledError,
+    NSArray, NSCocoaErrorDomain, NSData, NSDate, NSError, NSNumber, NSProgress, NSString, NSURL,
+    NSUserCancelledError,
 };
-use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
+use objc2_uniform_type_identifiers::{
+    UTType, UTTypeAliasFile, UTTypeData, UTTypeFolder, UTTypePackage, UTTypeSymbolicLink,
+};
 use slopty_client::xfer::XferError;
 use slopty_core::{WorkerId, XferId};
 use tokio::runtime::Runtime;
@@ -145,11 +149,7 @@ fn id_of(identifier: &NSString) -> String {
 
 /// The error the system is told for `error`.
 fn ns_error(error: &FilesError) -> Retained<NSError> {
-    let provider = |code: NSFileProviderErrorCode| {
-        // SAFETY: FileProvider rule: the domain is a constant string, and a code of its own
-        // with no user info makes a valid error.
-        unsafe { NSError::errorWithDomain_code_userInfo(NSFileProviderErrorDomain, code.0, None) }
-    };
+    let provider = provider_error;
     match error {
         FilesError::NoSuchItem(_) | FilesError::NotFolder(_) | FilesError::Refused { .. } => {
             provider(NSFileProviderErrorCode::NoSuchItem)
@@ -160,8 +160,18 @@ fn ns_error(error: &FilesError) -> Retained<NSError> {
             XferError::LinkClosed | XferError::Cut(_) | XferError::Unanswered(_),
         ) => provider(NSFileProviderErrorCode::ServerUnreachable),
         FilesError::Transfer(XferError::Cancelled) => cocoa(NSUserCancelledError),
-        FilesError::Transfer(_) => provider(NSFileProviderErrorCode::CannotSynchronize),
+        FilesError::Clash(_) => provider(NSFileProviderErrorCode::FilenameCollision),
+        FilesError::Transfer(_) | FilesError::Declined { .. } | FilesError::Failed { .. } => {
+            provider(NSFileProviderErrorCode::CannotSynchronize)
+        }
     }
+}
+
+/// The File Provider error `code`.
+fn provider_error(code: NSFileProviderErrorCode) -> Retained<NSError> {
+    // SAFETY: FileProvider rule: the domain is a constant string, and a code of its own with no
+    // user info makes a valid error.
+    unsafe { NSError::errorWithDomain_code_userInfo(NSFileProviderErrorDomain, code.0, None) }
 }
 
 /// Foundation's error `code`.
@@ -261,25 +271,24 @@ define_class!(
         #[unsafe(method_id(createItemBasedOnTemplate:fields:contents:options:request:completionHandler:))]
         fn create_item(
             &self,
-            _template: &NSFileProviderItem,
+            template: &NSFileProviderItem,
             _fields: NSFileProviderItemFields,
-            _contents: Option<&NSURL>,
-            _options: NSFileProviderCreateItemOptions,
+            contents: Option<&NSURL>,
+            options: NSFileProviderCreateItemOptions,
             _request: &NSFileProviderRequest,
             completion: &DynBlock<
                 dyn Fn(*mut NSFileProviderItem, NSFileProviderItemFields, Bool, *mut NSError),
             >,
         ) -> Retained<NSProgress> {
-            refuse_change(completion);
-            finished()
+            self.create(template, contents, options, completion)
         }
 
         #[unsafe(method_id(modifyItem:baseVersion:changedFields:contents:options:request:completionHandler:))]
         fn modify_item(
             &self,
-            _item: &NSFileProviderItem,
+            item: &NSFileProviderItem,
             _version: &NSFileProviderItemVersion,
-            _fields: NSFileProviderItemFields,
+            fields: NSFileProviderItemFields,
             _contents: Option<&NSURL>,
             _options: NSFileProviderModifyItemOptions,
             _request: &NSFileProviderRequest,
@@ -287,22 +296,19 @@ define_class!(
                 dyn Fn(*mut NSFileProviderItem, NSFileProviderItemFields, Bool, *mut NSError),
             >,
         ) -> Retained<NSProgress> {
-            refuse_change(completion);
-            finished()
+            self.modify(item, fields, completion)
         }
 
         #[unsafe(method_id(deleteItemWithIdentifier:baseVersion:options:request:completionHandler:))]
         fn delete_item(
             &self,
-            _identifier: &NSString,
+            identifier: &NSString,
             _version: &NSFileProviderItemVersion,
-            _options: NSFileProviderDeleteItemOptions,
+            options: NSFileProviderDeleteItemOptions,
             _request: &NSFileProviderRequest,
             completion: &DynBlock<dyn Fn(*mut NSError)>,
         ) -> Retained<NSProgress> {
-            let error = cocoa(NSFeatureUnsupportedError);
-            completion.call((Retained::as_ptr(&error).cast_mut(),));
-            finished()
+            self.delete(identifier, options, completion)
         }
     }
 
@@ -329,9 +335,8 @@ impl Extension {
         completion: &DynBlock<dyn Fn(*mut NSURL, *mut NSFileProviderItem, *mut NSError)>,
     ) -> Retained<NSProgress> {
         let reply = Reply(completion.copy());
-        let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
         let (Some(domain), Some(temporary)) = (self.domain(), self.temporary()) else {
-            let error = ns_error(&FilesError::Unreachable("no domain".to_owned()));
+            let error = ns_error(&no_domain());
             reply.0.call((
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -340,17 +345,7 @@ impl Extension {
             return finished();
         };
         let xfer = XferId::new();
-        let stopping = Arc::clone(&domain);
-        let cancel = RcBlock::new(move || {
-            let domain = Arc::clone(&stopping);
-            let _started = spawn(async move { domain.cancel(xfer).await });
-        });
-        // SAFETY: Foundation rule: a progress's cancellation handler may be any block; it
-        // is called once, on a queue of the progress's choosing, and holds only `Send`
-        // values.
-        unsafe {
-            progress.setCancellationHandler(Some(&cancel));
-        }
+        let progress = cancellable(&domain, xfer);
         let done = Retained::clone(&progress);
         let id = id_of(identifier);
         let started = spawn(async move {
@@ -367,6 +362,145 @@ impl Extension {
         });
         if !started {
             tracing::error!("no runtime to fetch a file on");
+        }
+        progress
+    }
+
+    /// Make on the worker what was made in Finder, as
+    /// `createItemBasedOnTemplate:fields:contents:options:request:completionHandler:` asks: a
+    /// folder with `MakeDir`, a file sent up beside the others in its folder, where nothing is
+    /// written over (a taken name lands as the next free one, which the system then shows). An
+    /// item made again after the domain was reset (`MayAlreadyExist`) is the one already there
+    /// when there is one, so nothing is sent twice. A link, an alias or a package stays on this
+    /// Mac only. A cancel of the progress returned stops the upload.
+    fn create(
+        &self,
+        template: &NSFileProviderItem,
+        contents: Option<&NSURL>,
+        options: NSFileProviderCreateItemOptions,
+        completion: &ChangeHandler,
+    ) -> Retained<NSProgress> {
+        let reply = Reply(completion.copy());
+        let (Some(domain), Some(temporary)) = (self.domain(), self.temporary()) else {
+            answer_change(&reply, Err(Unchanged::Error(no_domain())), Fields::empty());
+            return finished();
+        };
+        let (_made_as, parent, name) = placed(template);
+        let parent = id_of(&parent);
+        let kind = made_as(template);
+        if kind == Made::Kept {
+            tracing::info!(%parent, %name, "a link, an alias or a package kept on this Mac");
+            let kept = provider_error(NSFileProviderErrorCode::ExcludedFromSync);
+            answer_change(&reply, Err(Unchanged::Refused(kept)), Fields::empty());
+            return finished();
+        }
+        let local = contents.and_then(NSURL::to_file_path);
+        let again = options.contains(NSFileProviderCreateItemOptions::MayAlreadyExist);
+        let xfer = XferId::new();
+        let progress = cancellable(&domain, xfer);
+        let done = Retained::clone(&progress);
+        let started = spawn(async move {
+            let to = (parent.as_str(), name.as_str());
+            let made = make(&domain, to, kind, local, again, (&temporary, xfer)).await;
+            answer_change(&reply, made, Fields::empty());
+            done.setCompletedUnitCount(1);
+        });
+        if !started {
+            tracing::error!("no runtime to make an item on");
+        }
+        progress
+    }
+
+    /// Do on the worker what was done to an item in Finder, as
+    /// `modifyItem:baseVersion:changedFields:contents:options:request:completionHandler:` asks:
+    /// a rename or a move with `Move`, a move to the trash with `Trash`, to the worker's own
+    /// trash, where the person can put it back. A change the worker refuses is undone here, the
+    /// item put back as the worker has it. The rest (its dates, its tags) stays here; its
+    /// contents are never written, since a file in the domain is read-only.
+    fn modify(
+        &self,
+        item: &NSFileProviderItem,
+        fields: Fields,
+        completion: &ChangeHandler,
+    ) -> Retained<NSProgress> {
+        let reply = Reply(completion.copy());
+        let moved = Fields::Filename | Fields::ParentItemIdentifier;
+        let pending = fields.difference(moved);
+        let Some(domain) = self.domain() else {
+            answer_change(&reply, Err(Unchanged::Error(no_domain())), pending);
+            return finished();
+        };
+        let (id, parent, name) = placed(item);
+        // SAFETY: FileProvider rule: the trash's identifier is a constant string.
+        let trashed = parent.isEqualToString(unsafe { NSFileProviderTrashContainerItemIdentifier });
+        let (id, parent) = (id_of(&id), id_of(&parent));
+        let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
+        let done = Retained::clone(&progress);
+        let started = spawn(async move {
+            let changed = if trashed {
+                domain.trash(&id).await.map(|_trashed| None)
+            } else if fields.intersects(moved) {
+                domain.rename(&id, &parent, &name).await.map(Some)
+            } else {
+                domain.item(&id).await.map(Some)
+            };
+            let answer = match changed {
+                Ok(item) => Ok(item),
+                Err(FilesError::NoSuchItem(gone)) => {
+                    tracing::info!(%gone, "changed in Finder, gone on the worker");
+                    Ok(None)
+                }
+                Err(e @ (FilesError::Declined { .. } | FilesError::Failed { .. })) => {
+                    tracing::info!(%id, error = %e, "a change undone");
+                    domain.item(&id).await.map(Some).map_err(Unchanged::Error)
+                }
+                Err(e) => Err(Unchanged::Error(e)),
+            };
+            answer_change(&reply, answer, pending);
+            done.setCompletedUnitCount(1);
+        });
+        if !started {
+            tracing::error!("no runtime to change an item on");
+        }
+        progress
+    }
+
+    /// Take away on the worker what was deleted under the domain outside Finder (Finder itself
+    /// only moves to the trash), as
+    /// `deleteItemWithIdentifier:baseVersion:options:request:completionHandler:` asks: to the
+    /// worker's own trash, never unlinked. A folder still holding items there is not taken
+    /// unless the deletion is recursive; one already gone is.
+    fn delete(
+        &self,
+        identifier: &NSString,
+        options: NSFileProviderDeleteItemOptions,
+        completion: &DynBlock<dyn Fn(*mut NSError)>,
+    ) -> Retained<NSProgress> {
+        let reply = Reply(completion.copy());
+        let Some(domain) = self.domain() else {
+            let error = ns_error(&no_domain());
+            reply.0.call((Retained::as_ptr(&error).cast_mut(),));
+            return finished();
+        };
+        let id = id_of(identifier);
+        let recursive = options.contains(NSFileProviderDeleteItemOptions::Recursive);
+        let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
+        let done = Retained::clone(&progress);
+        let started = spawn(async move {
+            let held = match domain.item(&id).await {
+                Ok(item) => item.folder && item.children.is_some_and(|n| n > 0),
+                Err(_) => false,
+            };
+            let error = if held && !recursive {
+                Some(provider_error(NSFileProviderErrorCode::DirectoryNotEmpty))
+            } else {
+                domain.trash(&id).await.err().map(|e| ns_error(&e))
+            };
+            answer_deleted(&reply, error.as_deref());
+            done.setCompletedUnitCount(1);
+        });
+        if !started {
+            tracing::error!("no runtime to delete an item on");
         }
         progress
     }
@@ -543,19 +677,190 @@ fn answer_contents(
     }
 }
 
-/// Refuse a change made in Finder: the domain is read-only.
-fn refuse_change(
-    completion: &DynBlock<
-        dyn Fn(*mut NSFileProviderItem, NSFileProviderItemFields, Bool, *mut NSError),
-    >,
+/// The fields of an item a change names.
+type Fields = NSFileProviderItemFields;
+
+/// What a creation or a change is answered with: the item it left, the fields still to apply,
+/// whether to fetch its contents again, and why it failed.
+type ChangeFn = dyn Fn(*mut NSFileProviderItem, Fields, Bool, *mut NSError);
+
+/// The completion handler of a creation or a change.
+type ChangeHandler = DynBlock<ChangeFn>;
+
+/// Why a creation or a change left nothing on the worker.
+enum Unchanged {
+    /// The worker could not be reached, or would not or could not make it.
+    Error(FilesError),
+    /// The extension keeps it from the worker, with this error.
+    Refused(Retained<NSError>),
+}
+
+/// What a template makes on the worker.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Made {
+    Folder,
+    File,
+    /// Nothing: a link, an alias or a package, which stays on this Mac.
+    Kept,
+}
+
+/// Where `item` is: its identifier, its folder's and its name.
+fn placed(item: &NSFileProviderItem) -> (Retained<NSString>, Retained<NSString>, String) {
+    // SAFETY: FileProvider rule: an item's identifier is a plain property, read on the call's
+    // own thread.
+    let id = unsafe { item.itemIdentifier() };
+    // SAFETY: as above, its folder's.
+    let parent = unsafe { item.parentItemIdentifier() };
+    // SAFETY: as above, its name.
+    let name = unsafe { item.filename() };
+    (id, parent, name.to_string())
+}
+
+/// What `template` makes, by its type: a file when it names none.
+fn made_as(template: &NSFileProviderItem) -> Made {
+    if !template.respondsToSelector(sel!(contentType)) {
+        return Made::File;
+    }
+    // SAFETY: FileProvider rule: `contentType` is optional, and the template answers it.
+    let kind = unsafe { template.contentType() };
+    // SAFETY: UniformTypeIdentifiers rule: the core types are constant objects.
+    let (folder, link, alias, package) =
+        unsafe { (UTTypeFolder, UTTypeSymbolicLink, UTTypeAliasFile, UTTypePackage) };
+    if [link, alias, package].iter().any(|kept| kind.conformsToType(kept)) {
+        Made::Kept
+    } else if kind.conformsToType(folder) {
+        Made::Folder
+    } else {
+        Made::File
+    }
+}
+
+/// Make the item `name` of the folder `parent` on the worker, a folder or a file from the
+/// contents at `local` (an empty one when none). Made `again`, it is the item already there
+/// when there is one, and nothing when it is a file with no contents to send that is not.
+async fn make(
+    domain: &Domain,
+    (parent, name): (&str, &str),
+    kind: Made,
+    local: Option<PathBuf>,
+    again: bool,
+    (temporary, xfer): (&Path, XferId),
+) -> Result<Option<Item>, Unchanged> {
+    let Some(id) = item::child(parent, name) else {
+        let why = format!("“{name}” cannot be a file’s name");
+        return Err(Unchanged::Error(FilesError::Declined { path: name.to_owned(), why }));
+    };
+    if again {
+        match domain.item(&id).await {
+            Ok(there) => return Ok(Some(there)),
+            Err(FilesError::NoSuchItem(_) | FilesError::Refused { .. }) => {}
+            Err(e) => return Err(Unchanged::Error(e)),
+        }
+        if kind == Made::File && local.is_none() {
+            return Ok(None);
+        }
+    }
+    let made = match kind {
+        Made::Folder => domain.make_folder(parent, name).await,
+        Made::File | Made::Kept => {
+            send_up(domain, (parent, name), local.as_deref(), temporary, xfer).await
+        }
+    };
+    made.map(Some).map_err(Unchanged::Error)
+}
+
+/// Send the contents at `local` (an empty file when none) up into the folder `parent` as
+/// `name`: put under that name in a directory of its own in `temporary`, since the system's
+/// file is named otherwise, and the upload names a file by its own name.
+async fn send_up(
+    domain: &Domain,
+    (parent, name): (&str, &str),
+    local: Option<&Path>,
+    temporary: &Path,
+    xfer: XferId,
+) -> Result<Item, FilesError> {
+    let staging = temporary.join(xfer.to_string());
+    let staged = staging.join(name);
+    let put = async {
+        tokio::fs::create_dir_all(&staging).await?;
+        match local {
+            // A link where the volume allows it, else a copy (a clone on APFS).
+            Some(from) => {
+                if tokio::fs::hard_link(from, &staged).await.is_err() {
+                    tokio::fs::copy(from, &staged).await?;
+                }
+            }
+            None => drop(tokio::fs::File::create(&staged).await?),
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let sent = match put.await {
+        Ok(()) => domain.create_file(parent, &staged, xfer).await,
+        Err(source) => Err(FilesError::Transfer(XferError::Local {
+            path: staged.display().to_string(),
+            source,
+        })),
+    };
+    if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
+        tracing::debug!(error = %e, "a staged upload not cleared");
+    }
+    sent
+}
+
+/// Answer a creation or a change: the item it left, or none when it is gone, `pending` the
+/// fields left as they are here; or why it failed.
+fn answer_change(
+    reply: &Reply<ChangeFn>,
+    answer: Result<Option<Item>, Unchanged>,
+    pending: Fields,
 ) {
-    let error = cocoa(NSFeatureUnsupportedError);
-    completion.call((
+    let error = match answer {
+        Ok(left) => {
+            let item: Option<Retained<NSFileProviderItem>> =
+                left.map(|item| ProtocolObject::from_retained(FileItem::new(item)));
+            let item =
+                item.as_ref().map_or(std::ptr::null_mut(), |i| Retained::as_ptr(i).cast_mut());
+            reply.0.call((item, pending, Bool::NO, std::ptr::null_mut()));
+            return;
+        }
+        Err(Unchanged::Error(e)) => {
+            tracing::info!(error = %e, "a change not made on the worker");
+            ns_error(&e)
+        }
+        Err(Unchanged::Refused(error)) => error,
+    };
+    reply.0.call((
         std::ptr::null_mut(),
-        NSFileProviderItemFields::empty(),
+        Fields::empty(),
         Bool::NO,
         Retained::as_ptr(&error).cast_mut(),
     ));
+}
+
+/// Answer a deletion: done, or why not.
+fn answer_deleted(reply: &Reply<dyn Fn(*mut NSError)>, error: Option<&NSError>) {
+    reply.0.call((error.map_or(std::ptr::null_mut(), |e| std::ptr::from_ref(e).cast_mut()),));
+}
+
+/// The extension has no domain to act in.
+fn no_domain() -> FilesError {
+    FilesError::Unreachable("no domain".to_owned())
+}
+
+/// A progress of one unit whose cancel stops transfer `xfer` of `domain`.
+fn cancellable(domain: &Arc<Domain>, xfer: XferId) -> Retained<NSProgress> {
+    let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
+    let stopping = Arc::clone(domain);
+    let cancel = RcBlock::new(move || {
+        let domain = Arc::clone(&stopping);
+        let _started = spawn(async move { domain.cancel(xfer).await });
+    });
+    // SAFETY: Foundation rule: a progress's cancellation handler may be any block; it is
+    // called once, on a queue of the progress's choosing, and holds only `Send` values.
+    unsafe {
+        progress.setCancellationHandler(Some(&cancel));
+    }
+    progress
 }
 
 define_class!(
@@ -604,9 +909,20 @@ define_class!(
             }
         }
 
+        /// What Finder may do with it: read it; add to a folder; rename, move and trash
+        /// anything but the root. A file's contents are never written, so it is read-only.
         #[unsafe(method(capabilities))]
         fn allowed(&self) -> NSFileProviderItemCapabilities {
-            NSFileProviderItemCapabilities::AllowsReading
+            type Can = NSFileProviderItemCapabilities;
+            let item = self.ivars();
+            let mut can = Can::AllowsReading;
+            if item.folder {
+                can |= Can::AllowsAddingSubItems;
+            }
+            if item.id != item::ROOT {
+                can |= Can::AllowsRenaming | Can::AllowsReparenting | Can::AllowsTrashing;
+            }
+            can
         }
 
         #[unsafe(method(fileSystemFlags))]

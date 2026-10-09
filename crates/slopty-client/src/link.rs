@@ -23,7 +23,7 @@ use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::{Frame, TermEvent, TermRequest, frame_head};
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::ThreadFrame;
-use slopty_proto::transfer::{BulkHeader, Purpose};
+use slopty_proto::transfer::{BulkHeader, Dest, Purpose};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -371,6 +371,23 @@ impl WorkerLink {
     ) -> Result<Vec<std::path::PathBuf>, XferError> {
         crate::xfer::download(&self.up, &self.line, crate::xfer::Download::new(xfer, path, into))
             .await
+    }
+
+    /// Send `files` up into `dest` as transfer `xfer`, for a caller that awaits it: a File
+    /// Provider's creation of a file. Should this link go, it goes on over the next link to the
+    /// worker ([`Line`]), which the caller dials; `self.remote().cancel(xfer)` or
+    /// [`Line::cancel`] stops it. Where they landed, as the worker named them.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::xfer::upload_landed`].
+    pub async fn upload(
+        &self,
+        xfer: XferId,
+        files: &[std::path::PathBuf],
+        dest: Dest,
+    ) -> Result<Vec<String>, XferError> {
+        crate::xfer::upload_landed(&self.up, &self.line, xfer, files, dest).await
     }
 
     /// Resolves once the connection is closed, from either end.

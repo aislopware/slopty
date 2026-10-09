@@ -575,8 +575,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       so a file made on the worker shows in an open Finder window without a refresh. An anchor
       from an earlier run of the extension, or older than the 10 000 changes kept, is expired,
       and the system lists again.
-    - *Read-only for now.* Finder refuses a change in the domain. Writing back would need delete,
-      rename and make-folder on the wire, which the worker does not offer yet.
+    - *Finder writes, and nothing on the worker is written over (2026-10-10).* What Finder
+      makes, renames, moves or trashes in the domain is done on the worker with the file tile's
+      own ops (`FsOp`): a new folder with `MakeDir`; a new file sent up into its folder as a
+      dropped file is, where a taken name lands as the next free one, which the system then
+      shows; a rename or a move with `Move`, refused onto a taken name; and Move to Trash with
+      `Trash`, to the worker's own trash, where the person can put it back (so a deletion made
+      under the domain from a shell trashes too, and a folder still holding items is not taken
+      unless the deletion is recursive). A change the worker refuses (the home, a folder into
+      itself, another volume, a volume with no trash) is undone in Finder, the item put back as
+      the worker has it. Two forks:
+      - *Contents stay read-only.* A file's contents are never written back: the worker writes
+        nothing over, and an edit saved in place would have to. So a file in the domain is
+        read-only; an edited copy is saved as a new file. Writing contents back waits on a
+        replace the worker checks against the version the edit began from.
+      - *A rename changes the item's identifier.* The identifier is the path, so a moved item
+        comes back under its new one, which the system takes as the moved item merged into
+        the one at the new place (the header's merge rule); a child of a folder moved before it
+        is then the item already where it went. Links, aliases and packages stay on the Mac,
+        out of sync (`NSFileProviderErrorExcludedFromSync`), and an item made again after the
+        domain was reset is the one already on the worker, so nothing is sent twice.
   - **Where the root is.** The app needs the root's path to name worker files by, but a process
     that asks the system for it (`getUserVisibleURLForItemIdentifier`) may never read the
     domain's files after (`EDEADLK`). The extension never reads its own files, so it asks, and

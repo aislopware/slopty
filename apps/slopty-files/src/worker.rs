@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -20,9 +20,10 @@ use slopty_net::HostAddr;
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::endpoint::WORKER_PORT;
 use slopty_platform::files::Known;
-use slopty_proto::folder::{After, Listing};
+use slopty_proto::folder::{After, FsOp, FsOutcome, FsRefusal, Listing};
 use slopty_proto::handshake::Hello;
-use slopty_proto::{ClientMsg, WorkerMsg};
+use slopty_proto::transfer::Dest;
+use slopty_proto::{ClientMsg, RequestId, WorkerMsg};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::item::{self, Item};
@@ -63,6 +64,47 @@ pub enum FilesError {
     /// The transfer of a file's bytes failed.
     #[error(transparent)]
     Transfer(#[from] XferError),
+    /// Something is already where a change would put an item; it is left as it was.
+    #[error("{0}: something is already there")]
+    Clash(String),
+    /// The worker will not make this change, in its words: a place no change may touch, a
+    /// folder moved into itself, a move to another volume, a volume with no trash.
+    #[error("{path}: {why}")]
+    Declined {
+        /// The path the change was of.
+        path: String,
+        /// Why not.
+        why: String,
+    },
+    /// The worker tried the change, and its OS said no.
+    #[error("{path}: {error}")]
+    Failed {
+        /// The path the change was of.
+        path: String,
+        /// The OS's word for it.
+        error: String,
+    },
+}
+
+impl FilesError {
+    /// The worker's answer to a change of `path`: where the item is now when it was done, else
+    /// why not.
+    ///
+    /// # Errors
+    ///
+    /// The change was refused or failed.
+    pub fn of_outcome(path: &str, outcome: FsOutcome) -> Result<String, Self> {
+        let path = path.to_owned();
+        match outcome {
+            FsOutcome::Done { path } => Ok(path),
+            FsOutcome::Failed { error } => Err(Self::Failed { path, error }),
+            FsOutcome::Refused(FsRefusal::Missing { path }) => Err(Self::NoSuchItem(path)),
+            FsOutcome::Refused(FsRefusal::Clash { path }) => Err(Self::Clash(path)),
+            FsOutcome::Refused(why) => {
+                Err(Self::Declined { why: slopty_client::folders::refused(&why), path })
+            }
+        }
+    }
 }
 
 /// A folder's listing the worker sent unasked: a watched folder changed.
@@ -80,6 +122,9 @@ type Asked = (String, Option<(bool, String)>);
 
 type Waiting = Arc<Mutex<HashMap<Asked, Vec<oneshot::Sender<Listing>>>>>;
 
+/// The changes asked of the worker, by their number, until it answers each.
+type Changing = Arc<Mutex<HashMap<RequestId, oneshot::Sender<FsOutcome>>>>;
+
 /// What a listing asked for is waited on by.
 fn asked(path: String, after: Option<&After>) -> Asked {
     (path, after.map(|a| (a.folder, a.name.clone())))
@@ -91,6 +136,9 @@ pub struct Worker {
     link: WorkerLink,
     name: String,
     waiting: Waiting,
+    changing: Changing,
+    /// The number of the last change asked.
+    asked: AtomicU64,
     alive: Arc<AtomicBool>,
     _endpoint: slopty_net::Endpoint,
     reader: tokio::task::JoinHandle<()>,
@@ -146,9 +194,11 @@ impl Worker {
     ) -> Self {
         let mut link = WorkerLink::start(conn);
         let waiting: Waiting = Arc::default();
+        let changing: Changing = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
         let events = link.events();
         let (answered, living) = (Arc::clone(&waiting), Arc::clone(&alive));
+        let done = Arc::clone(&changing);
         let reader = tokio::spawn(async move {
             if let Some(mut events) = events {
                 while let Some(event) = events.recv().await {
@@ -172,6 +222,12 @@ impl Worker {
                                 }
                             }
                         }
+                        LinkEvent::Control(WorkerMsg::FsDone { request, outcome }) => {
+                            let waiter = done.lock().remove(&request);
+                            if let Some(waiter) = waiter {
+                                let _gone = waiter.send(outcome);
+                            }
+                        }
                         LinkEvent::Disconnected(why) => {
                             tracing::info!(%why, "the worker's link closed");
                             break;
@@ -181,10 +237,20 @@ impl Worker {
                 }
             }
             living.store(false, Ordering::Release);
-            // Every listing still waiting hears the link went as its sender drops.
+            // Every listing and change still waiting hears the link went as its sender drops.
             answered.lock().clear();
+            done.lock().clear();
         });
-        Self { link, name: name.to_owned(), waiting, alive, _endpoint: endpoint, reader }
+        Self {
+            link,
+            name: name.to_owned(),
+            waiting,
+            changing,
+            asked: AtomicU64::new(0),
+            alive,
+            _endpoint: endpoint,
+            reader,
+        }
     }
 
     /// The worker's id, which names its domain.
@@ -293,6 +359,53 @@ impl Worker {
         let path = item::on_worker(self.home(), id);
         let landed = self.link.download(xfer, path.clone(), into.to_path_buf()).await?;
         landed.into_iter().next().ok_or(FilesError::NoSuchItem(path))
+    }
+
+    /// Make the folder `name` in the folder `parent`, move `from` to `to`, or trash `path`, as
+    /// `op` says, its paths on the worker; where the item is now.
+    ///
+    /// # Errors
+    ///
+    /// The worker refused it or its OS said no, as [`FilesError::of_outcome`] tells, or the
+    /// link went before it answered.
+    pub async fn change(&self, op: FsOp) -> Result<String, FilesError> {
+        let path = match &op {
+            FsOp::MakeDir { parent, name } => format!("{parent}/{name}"),
+            FsOp::Move { from, .. } => from.clone(),
+            FsOp::Trash { path } => path.clone(),
+        };
+        let request = self.asked.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let (tx, rx) = oneshot::channel();
+        self.changing.lock().insert(request, tx);
+        if let Err(e) = self.send(ClientMsg::FsOp { request, op }).await {
+            self.changing.lock().remove(&request);
+            return Err(e);
+        }
+        let answered = tokio::time::timeout(ANSWER, rx).await;
+        self.changing.lock().remove(&request);
+        let outcome = answered
+            .map_err(|_elapsed| FilesError::Unreachable(format!("{path}: no answer")))?
+            .map_err(|_gone| FilesError::Unreachable("the link closed".to_owned()))?;
+        FilesError::of_outcome(&path, outcome)
+    }
+
+    /// Send the file `local` up into the folder `parent` as transfer `xfer`; where it landed on
+    /// the worker, under its own name or, when that was taken, the next free one. Should this
+    /// link go, it goes on over the next link to the worker, once something dials it.
+    ///
+    /// # Errors
+    ///
+    /// The transfer failed or was cancelled, or the worker named no place it landed.
+    pub async fn upload(
+        &self,
+        local: &Path,
+        parent: &str,
+        xfer: XferId,
+    ) -> Result<String, FilesError> {
+        let into = item::on_worker(self.home(), parent);
+        let files = [local.to_path_buf()];
+        let landed = self.link.upload(xfer, &files, Dest::Path(into.clone())).await?;
+        landed.into_iter().next().ok_or(FilesError::NoSuchItem(into))
     }
 
     /// Stop transfer `xfer`.
