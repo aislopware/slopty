@@ -518,3 +518,67 @@ async fn work_on_a_protected_target_goes_up_as_a_pull_request() {
     let flag = Landing { branch: "--upload-pack=x", ..landing };
     assert!(land(&programs, &work, flag, ("t", "b")).await.is_err(), "no branch's name");
 }
+
+/// On a GitLab host the same landing goes through the person's own glab: the commit goes up as
+/// the task's branch, forced, and a merge request of it into the target is opened, its number
+/// read from the page glab names. Asked again, the open one is found and none is opened twice.
+/// gh is never asked.
+#[tokio::test]
+async fn work_on_a_protected_gitlab_target_goes_up_as_a_merge_request() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(dir.path()).expect("real");
+    let git = crate::changes::git().expect("git");
+    let in_dir = |at: &Path, args: &[&str]| {
+        let ran = std::process::Command::new(git)
+            .arg("-C")
+            .arg(at)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "{args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    };
+    // `origin` reads as the GitLab host, and pushes go to a bare forge on disk.
+    let work = gitlab_repo(&root);
+    in_dir(&work, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let head = in_dir(&work, &["rev-parse", "HEAD"]);
+    in_dir(&root, &["init", "-q", "--bare", "forge.git"]);
+    let forge = root.join("forge.git");
+    in_dir(&work, &["config", "remote.origin.pushurl", &forge.to_string_lossy()]);
+    let page = "https://gitlab.example.com/o/demo/-/merge_requests/12";
+    let glab = root.join("glab");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
+         case \"$1 $2\" in\n\
+         'mr list') if [ -f \"{dir}/opened\" ]; then \
+           echo '[{{\"iid\":12,\"web_url\":\"{page}\"}}]'; else echo '[]'; fi ;;\n\
+         'mr create') touch \"{dir}/opened\"; \
+           echo 'Creating merge request for slopty/demo/3 into main in o/demo'; \
+           echo '!12 Split the parser (slopty/demo/3)'; echo ' {page}' ;;\n\
+         *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+         esac\n",
+        dir = root.display()
+    );
+    std::fs::write(&glab, script).expect("written");
+    std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    let programs = with_glab(glab);
+    let landing = Landing { head: &head, branch: "slopty/demo/3", target: "main" };
+
+    let opened = land(&programs, &work, landing, ("Split the parser", "Task #3")).await;
+    assert_eq!(opened, Ok((12, page.to_owned())));
+    let up = in_dir(&forge, &["rev-parse", "refs/heads/slopty/demo/3"]);
+    assert_eq!(up, head, "the work went up as the task's branch");
+    let found = land(&programs, &work, landing, ("Split the parser", "Task #3")).await;
+    assert_eq!(found, Ok((12, page.to_owned())));
+    let calls = asked(&root);
+    let creates: Vec<&String> = calls.iter().filter(|a| a.starts_with("mr create")).collect();
+    assert_eq!(creates.len(), 1, "found the second time, not opened again: {calls:?}");
+    assert!(creates[0].contains("--target-branch main"), "{creates:?}");
+    assert!(creates[0].contains("--source-branch slopty/demo/3"), "{creates:?}");
+    assert!(
+        calls.iter().any(|a| a.contains("--source-branch slopty/demo/3 --target-branch main")),
+        "the open one is looked for by its branches: {calls:?}"
+    );
+}

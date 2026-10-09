@@ -2245,7 +2245,10 @@ reordering and edited allows are gone" in `agents.md`.*
     `repo::verify::tests::a_protected_target_refuses_the_push_and_nothing_moves` (a bare
     forge whose pre-receive hook speaks GitHub's words) and
     `repo::pull::tests::work_on_a_protected_target_goes_up_as_a_pull_request` (a stand-in gh;
-    found, not opened twice); `slopty-server`
+    found, not opened twice) and
+    `work_on_a_protected_gitlab_target_goes_up_as_a_merge_request` (a stand-in glab on a GitLab
+    `origin` whose pushes go to a bare forge on disk; found by its branches, not opened twice,
+    gh never asked; added 2026-10-10); `slopty-server`
     `hub::queue::tests::a_protected_target_takes_the_work_through_a_pull_request`; `slopty-ui`
     `project::tests::work_waiting_in_a_pull_request_says_where`; goldens
     `land_pull`, `pull_opened`, `project_reply_protected` and `task_in_pull_card`.
