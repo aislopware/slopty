@@ -23,7 +23,7 @@ use crate::tools::repo_root;
 
 /// The pi version Slopty speaks: its fixtures are recorded with it. It is also
 /// `slopty_agent::pi::VERSION`, which the fixtures are held to.
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.1.0";
 
 /// Names a `pi` to use instead of the installed one.
 const OVERRIDE: &str = "SLOPTY_PI";

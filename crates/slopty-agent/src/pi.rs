@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 /// The pi version the gate and the codec were recorded against
 /// (`crates/slopty-agent/tests/fixtures/pi`, `cargo xtask pi fixtures`).
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.1.0";
 
 /// What the gate names itself in each dialog it opens.
 pub const GATE_PROTOCOL: &str = "slopty-gate/1";

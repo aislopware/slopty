@@ -308,6 +308,9 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         .args(["-p", "--model", "haiku", "--output-format", "stream-json", "--verbose"])
         .args(["--input-format", "stream-json", "--session-mirror", "--include-hook-events"])
         .args(["--setting-sources", "", "--strict-mcp-config", "--permission-prompts", "none"])
+        // From 2.1.295 a session with no settings starts in auto mode, whose classifier decides
+        // what the scenarios' allowed tools already settle; the fixtures record `default`.
+        .args(["--permission-mode", "default"])
         .args(["--allowedTools", scenario.allowed, "--settings", &settings.to_string()])
         .current_dir(&work)
         .stdin(Stdio::piped())
