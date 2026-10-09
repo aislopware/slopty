@@ -2237,10 +2237,16 @@ reordering and edited allows are gone" in `agents.md`.*
     Merged, with `pushed`. Closed without a merge, the task waits for the person's Merge
     again. The board shows the pull request on the task's pipeline until the watcher has read
     it.
-  - **Known gap.** The clone's target is not moved when a pull request merges on the forge, so
-    later tasks are rebased onto the clone's own target until someone pulls it. The forge
-    still merges them against its target, and a conflict shows on the pull request. Bringing
-    the clone's target up to the forge's before each rebase is the next step if that bites.
+  - **The clone catches up** (2026-10-10). Once the watcher reads a task's pull request merged,
+    the server sends the orchestrator's worker `Verb::CatchUp` (`Hub::catch_up`). The worker
+    fetches `origin`'s target to its tracking ref and fast-forwards the clone's target to it, as
+    `Verb::FastForward` moves a branch (`repo::verify::catch_up`): in the checkout that has it
+    checked out, through `merge --ff-only`, so the person's checkout gets the merge and nothing
+    of theirs is overwritten. A target already there, or ahead, stays. One with commits the
+    forge's lacks is not moved: the worker answers `Conflict` and the server logs it. The next
+    task is then rebased onto what the forge holds, not onto the clone's old target. It runs
+    in the background, since a fetch is the network's to take, and a race with the lane's own
+    fast-forward is settled by the compare-and-swap both use.
   - Tests: `slopty-worker`
     `repo::verify::tests::a_protected_target_refuses_the_push_and_nothing_moves` (a bare
     forge whose pre-receive hook speaks GitHub's words) and
@@ -2249,7 +2255,10 @@ reordering and edited allows are gone" in `agents.md`.*
     `work_on_a_protected_gitlab_target_goes_up_as_a_merge_request` (a stand-in glab on a GitLab
     `origin` whose pushes go to a bare forge on disk; found by its branches, not opened twice,
     gh never asked; added 2026-10-10); `slopty-server`
-    `hub::queue::tests::a_protected_target_takes_the_work_through_a_pull_request`; `slopty-ui`
+    `hub::queue::tests::a_protected_target_takes_the_work_through_a_pull_request` (now through
+    the catch-up); `repo::verify::tests::the_clone_s_target_catches_up_with_origin_s` (a bare
+    forge another checkout pushes the merge to: caught up and checked out, stays when there or
+    ahead, refused when diverged); golden `catch_up`; `slopty-ui`
     `project::tests::work_waiting_in_a_pull_request_says_where`; goldens
     `land_pull`, `pull_opened`, `project_reply_protected` and `task_in_pull_card`.
 

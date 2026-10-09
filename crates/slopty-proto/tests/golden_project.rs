@@ -599,6 +599,14 @@ mod golden_project {
             }),
         );
         snap(
+            "catch_up",
+            &request(Verb::CatchUp {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                target: "main".to_owned(),
+            }),
+        );
+        snap(
             "remove_worktree",
             &request(Verb::RemoveWorktree {
                 worker,

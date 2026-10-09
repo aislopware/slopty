@@ -910,6 +910,19 @@ pub enum Verb {
         /// A new pull request's description.
         body: String,
     },
+    /// Server → worker, once a task's pull request merged on the forge: bring the branch
+    /// `target` of the clone at `repo` up to `origin`'s, fetched now, as a fast-forward only,
+    /// as [`Verb::FastForward`] moves it, so the next task is rebased onto what the forge holds.
+    /// A branch already there or ahead stays. Answered with [`Outcome::FastForwarded`], never
+    /// pushed, or [`ErrorCode::Conflict`] when the clone's branch has commits `origin`'s lacks.
+    CatchUp {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The branch.
+        target: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -994,6 +1007,7 @@ impl Verb {
             | Self::Verify { .. }
             | Self::Rebase { .. }
             | Self::FastForward { .. }
+            | Self::CatchUp { .. }
             | Self::RemoveWorktree { .. }
             | Self::StartThread { .. }
             | Self::FsChange { .. } => true,

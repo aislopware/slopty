@@ -761,8 +761,8 @@ async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
 
 /// A target the forge protects refuses the queue's push, so the work, rebased and verified,
 /// goes up as a pull request there: the task waits in it, out of the queue, and is merged once
-/// its thread's pull request watch reads it merged. A pull request closed unmerged leaves it
-/// for the person's Merge again.
+/// its thread's pull request watch reads it merged, when the clone's target is brought up to the
+/// forge's. A pull request closed unmerged leaves it for the person's Merge again.
 #[tokio::test]
 async fn a_protected_target_takes_the_work_through_a_pull_request() {
     use slopty_proto::git::Forge;
@@ -840,4 +840,13 @@ async fn a_protected_target_takes_the_work_through_a_pull_request() {
         matches!(&merged, Some(Merge::Merged { head, pushed: true, .. }) if *head == commit('a')),
         "{merged:?}"
     );
+    let (id, verb) = studio.request().await;
+    let Verb::CatchUp { repo, target, .. } = &verb else { panic!("{verb:?}") };
+    assert_eq!(
+        (repo.as_str(), target.as_str()),
+        ("/w/demo", "main"),
+        "merged there, the clone's target catches up with the forge's"
+    );
+    let caught = Outcome::FastForwarded { head: commit('c'), pushed: false, push_failed: None };
+    answer(&studio.lease, id, caught);
 }

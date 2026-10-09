@@ -519,7 +519,7 @@ fn a_task_s_card_follows_its_thread_s_pull_request() {
         running: 0,
     };
     let said = |p: &mut Projects, worker, pull: Option<PullSeen>| {
-        kept(&p.pulls_seen(worker, &[(at.session, pull)], now()))
+        kept(&p.pulls_seen(worker, &[(at.session, pull)], now()).0)
     };
     let card = |p: &Projects| p.task(&id(), t).unwrap().pull.clone();
 

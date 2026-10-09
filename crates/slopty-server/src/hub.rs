@@ -849,6 +849,7 @@ impl Hub {
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
+            | Verb::CatchUp { .. }
             | Verb::LandPull { .. }
             | Verb::TestDiff { .. } => error(
                 ErrorCode::Forbidden,
@@ -1446,8 +1447,12 @@ impl Lease {
                     moved.extend(state.projects.report(worker, &report, now));
                 }
                 let pulls = state.board.pulls(worker);
-                moved.extend(state.projects.pulls_seen(worker, &pulls, now));
+                let (seen, merged) = state.projects.pulls_seen(worker, &pulls, now);
+                moved.extend(seen);
                 hub.projects_moved(&mut state, moved);
+                for (project, task) in merged {
+                    hub.catch_up(project, task);
+                }
                 hub.threads_ended(&mut state, worker, now);
             }
             ToServer::Hello { .. }
@@ -1687,6 +1692,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Rebase { worker, .. }
         | Verb::TestDiff { worker, .. }
         | Verb::FastForward { worker, .. }
+        | Verb::CatchUp { worker, .. }
         | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),

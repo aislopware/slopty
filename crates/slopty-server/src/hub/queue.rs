@@ -276,6 +276,37 @@ impl Hub {
         }
     }
 
+    /// `task`'s pull request merged on the forge: the target of the orchestrator's clone is
+    /// brought up to the forge's ([`Verb::CatchUp`]), so the next task is rebased onto what the
+    /// forge holds and the person's checkout of the target has the merge. In the background:
+    /// a fetch is the network's to take. One that cannot catch up (the clone's target has
+    /// commits the forge's lacks) is left as it is, and the next merge says so if it matters.
+    pub(super) fn catch_up(&self, project: ProjectId, task: TaskId) {
+        let hub = self.downgrade();
+        tokio::spawn(async move {
+            let Some(hub) = hub.upgrade() else { return };
+            let place = match hub.lane_place(&project, task) {
+                Ok(place) => place,
+                Err(why) => {
+                    tracing::debug!(%project, %task, %why, "no clone to catch up");
+                    return;
+                }
+            };
+            let target = place.target.clone();
+            let verb = Verb::CatchUp { worker: place.worker, repo: place.clone, target };
+            match hub.forward(None, verb).await {
+                Outcome::FastForwarded { head, .. } => {
+                    let (target, head) = (place.target, short(&head));
+                    tracing::info!(%project, target, head, "caught up with the forge");
+                }
+                other => {
+                    let (target, why) = (place.target, said(&other));
+                    tracing::warn!(%project, target, %why, "the clone's target did not catch up");
+                }
+            }
+        });
+    }
+
     /// Where `task`'s work is verified and merged: the orchestrator's clone, with the task's
     /// branch as it is there.
     pub(super) fn lane_place(&self, project: &ProjectId, task: TaskId) -> Result<Place, String> {

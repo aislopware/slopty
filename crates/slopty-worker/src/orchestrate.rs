@@ -227,7 +227,7 @@ impl From<WorkerError> for Failure {
 fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
     use crate::repo::verify::Failed;
     let code = match failed {
-        Failed::Conflict(_) | Failed::Moved(_) => ErrorCode::Conflict,
+        Failed::Conflict(_) | Failed::Moved(_) | Failed::Diverged(_) => ErrorCode::Conflict,
         Failed::Protected(_) => ErrorCode::Protected,
         Failed::Other(_) => ErrorCode::Failed,
     };
@@ -526,6 +526,7 @@ impl Orchestrator {
             | Verb::Rebase { .. }
             | Verb::TestDiff { .. }
             | Verb::FastForward { .. }
+            | Verb::CatchUp { .. }
             | Verb::LandPull { .. }
             | Verb::RemoveWorktree { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
@@ -965,6 +966,18 @@ impl Orchestrator {
                     crate::repo::verify::fast_forward(git, &repo, &target, &from, &to, push)
                         .await
                         .map_err(|f| verify_failure(&f))?;
+                let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
+                Ok(Outcome::FastForwarded { head, pushed, push_failed })
+            }
+            Verb::CatchUp { worker, repo, target } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let moved = crate::repo::verify::catch_up(git, &repo, &target)
+                    .await
+                    .map_err(|f| verify_failure(&f))?;
                 let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
                 Ok(Outcome::FastForwarded { head, pushed, push_failed })
             }

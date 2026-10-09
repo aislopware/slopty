@@ -31,6 +31,8 @@ pub enum Failed {
     Moved(String),
     /// The forge refused the push because the branch is protected, in its words: nothing moved.
     Protected(String),
+    /// The clone's branch has commits `origin`'s, at this commit, lacks: it was not caught up.
+    Diverged(String),
     /// Anything else, in words.
     Other(String),
 }
@@ -41,6 +43,7 @@ impl std::fmt::Display for Failed {
             Self::Conflict(paths) => write!(f, "conflicts in {}", paths.join(", ")),
             Self::Moved(at) => write!(f, "the branch moved to {at}"),
             Self::Protected(why) => write!(f, "the branch is protected: {why}"),
+            Self::Diverged(at) => write!(f, "the branch has commits origin's, at {at}, lacks"),
             Self::Other(why) => f.write_str(why),
         }
     }
@@ -367,6 +370,35 @@ pub async fn fast_forward(
         bundle::run(git, repo, &["update-ref", "-m", why, &reference, &to, &from]).await?;
     }
     Ok(Moved { head: to, pushed, push_failed })
+}
+
+/// Bring the branch `target` of the clone at `repo` up to `origin`'s, fetched now.
+///
+/// Once a task's pull request merged on the forge, the clone's branch is behind it, and the
+/// next task would be rebased onto the old one.
+///
+/// It moves only as a fast-forward, as [`fast_forward`] moves it, never pushed. `origin`'s
+/// branch is fetched to its tracking ref (`refs/remotes/origin/<target>`), where a plain `git
+/// fetch` puts it. A branch already there, or ahead of `origin`'s, stays as it is.
+///
+/// # Errors
+/// [`Failed::Diverged`] with `origin`'s commit when the clone's branch has commits `origin`'s
+/// lacks; otherwise a fetch that failed, or a move [`fast_forward`] refuses.
+pub async fn catch_up(git: &Path, repo: &Path, target: &str) -> Result<Moved, Failed> {
+    let reference = branch_ref(target)?;
+    let tracking = format!("refs/remotes/origin/{target}");
+    let refspec = format!("+{reference}:{tracking}");
+    let fetch = ["fetch", "--quiet", "--no-tags", "--end-of-options", "origin", &refspec];
+    bundle::run(git, repo, &fetch).await?;
+    let now = commit_of(git, repo, &reference).await?;
+    let upstream = commit_of(git, repo, &tracking).await?;
+    if is_ancestor(git, repo, &upstream, &now).await {
+        return Ok(Moved { head: now, pushed: false, push_failed: None });
+    }
+    if !is_ancestor(git, repo, &now, &upstream).await {
+        return Err(Failed::Diverged(upstream));
+    }
+    fast_forward(git, repo, target, &now, &upstream, false).await
 }
 
 /// The project's checkout at `place` made a worktree of the clone at `repo` if it is not one,

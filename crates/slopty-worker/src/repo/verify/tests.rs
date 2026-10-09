@@ -264,3 +264,42 @@ async fn a_protected_target_refuses_the_push_and_nothing_moves() {
     let local = fast_forward(git, &repo, "main", &first, &task, false).await.expect("moved");
     assert_eq!(local.head, task, "a merge kept here is no push, and nothing refuses it");
 }
+
+/// Once a pull request merged on the forge, the clone's target is brought up to `origin`'s:
+/// fetched, then fast-forwarded where it is checked out, so the person's checkout has the merge
+/// too. Asked again it stays; a branch ahead of `origin`'s stays; one with commits `origin`'s
+/// lacks is not moved and says so.
+#[tokio::test]
+async fn the_clone_s_target_catches_up_with_origin_s() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, _task) = clone_with_a_task(&root);
+    git_in(&root, &["clone", "-q", "--bare", "demo", "forge.git"]);
+    let forge = root.join("forge.git");
+    git_in(&repo, &["remote", "add", "origin", &forge.to_string_lossy()]);
+    // Someone else's checkout, where the forge's merges land.
+    git_in(&root, &["clone", "-q", &forge.to_string_lossy(), "elsewhere"]);
+    let elsewhere = root.join("elsewhere");
+    let merged = commit(&elsewhere, "c.txt", "merged on the forge\n");
+    git_in(&elsewhere, &["push", "-q", "origin", "main"]);
+
+    let caught = catch_up(git, &repo, "main").await.expect("caught up");
+    assert_eq!(caught.head, merged);
+    assert!(!caught.pushed);
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), merged);
+    assert!(repo.join("c.txt").is_file(), "the checkout that has main moved with it");
+    let again = catch_up(git, &repo, "main").await.expect("still there");
+    assert_eq!(again.head, merged, "already there, it stays");
+
+    let ahead = commit(&repo, "d.txt", "here only\n");
+    let kept = catch_up(git, &repo, "main").await.expect("ahead");
+    assert_eq!(kept.head, ahead, "ahead of origin's, it stays");
+
+    let theirs = commit(&elsewhere, "e.txt", "the forge moved on\n");
+    git_in(&elsewhere, &["push", "-q", "origin", "main"]);
+    let diverged = catch_up(git, &repo, "main").await;
+    assert_eq!(diverged, Err(Failed::Diverged(theirs)), "commits origin's lacks");
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), ahead, "nothing moved");
+    assert_ne!(first, merged);
+}

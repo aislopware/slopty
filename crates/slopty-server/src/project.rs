@@ -1438,14 +1438,16 @@ impl Projects {
     /// its thread runs at: the card of the task assigned that seat follows its thread's
     /// ([`Task::pull`]), cut to a card's bounds. A pull request first seen, or come to stand
     /// otherwise, is worth the timeline; one gone, or with only its words changed, the card
-    /// alone.
+    /// alone. With the changes, the tasks whose pull request was seen merged just now
+    /// ([`Merge::Pull`] become [`Merge::Merged`]), whose clone's target is behind the forge's.
     pub(crate) fn pulls_seen(
         &mut self,
         worker: WorkerId,
         seen: &[(SessionId, Option<PullSeen>)],
         now: WallMs,
-    ) -> Vec<Change> {
+    ) -> (Vec<Change>, Vec<(ProjectId, TaskId)>) {
         let mut updates = Vec::new();
+        let mut merged = Vec::new();
         for record in self.records.values_mut() {
             let mut changed = Vec::new();
             for t in &mut record.tasks {
@@ -1476,7 +1478,12 @@ impl Projects {
             for (task, moment, landed) in changed {
                 let entry = moment.map(|pull| record.log(Some(task), Moment::Pull(pull), now));
                 let entry = match landed {
-                    Some(moved) => Some(record.log(Some(task), moved, now)),
+                    Some(moved) => {
+                        if matches!(moved, Moment::State { to: TaskState::Merged, .. }) {
+                            merged.push((record.project.id.clone(), task));
+                        }
+                        Some(record.log(Some(task), moved, now))
+                    }
                     None => entry,
                 };
                 if let Ok(task_now) = record.task(task).cloned() {
@@ -1484,7 +1491,7 @@ impl Projects {
                 }
             }
         }
-        updates
+        (updates, merged)
     }
 
     /// What `task`'s work did to the project's tests, read once its branch came home: on its
