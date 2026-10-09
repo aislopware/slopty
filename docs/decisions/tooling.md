@@ -1323,6 +1323,19 @@ more full-window layer.
     fork both before and after this sync. It shapes a lone `.` before `1.`. Not from this
     change; still to find.
 
+- ✅ **libghostty-rs rebased onto upstream `0fe5bfa7`** (2026-10-09, fork `2818a556`). Upstream
+  merged most of the stack our fork carried (#83 PNG decoder, #84–#88, #98, #99), each in a later
+  form than ours, so 59 of our commits were dropped as upstream's and 34 remain. The 26 commits
+  that each moved the ghostty pin are now one, `d68cf05`, which also points the flake at our
+  ghostty fork (`95b7cc6f`); the bindings regenerated from `vendor/ghostty` without a diff.
+  - What Slopty adopts: `graphemes_utf8` now empties its buffer itself, so the engine's two
+    `scratch.clear()` calls before it are gone. A `DecodePng` result must come from the
+    allocator it was given, as `graphics::PngDecoder` already does.
+  - Waiting upstream: #94 (secure random) makes `set_png_decoder` unsafe and process-wide. The
+    engine sets the decoder per terminal (`GhosttyEngine::new`); once #94 lands it moves to
+    once at start-up. #89–#92 (paste, snapshot, streamed formatting, unsupported sequences) are
+    still open and stay on the fork.
+
 - ✅ **ghostty takes upstream `c3203ea4`** (2026-10-06, fork `02fe7604`, libghostty-rs `88358b7a`).
   Its three commits release the renderer's shaders when the render thread exits (#14542) and
   update the vouched list. Slopty builds only libghostty-vt, which they do not touch; taken to

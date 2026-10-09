@@ -1333,7 +1333,6 @@ impl GhosttyEngine {
                     };
                     let text = match at {
                         Some(it) if placeholder || cluster => {
-                            self.scratch.clear();
                             it.graphemes_utf8(&mut self.scratch)?;
                             if placeholder {
                                 // The image goes where the placeholder is; the character
@@ -1460,7 +1459,6 @@ impl GhosttyEngine {
                         } else {
                             Style::DEFAULT
                         };
-                        self.scratch.clear();
                         cell.graphemes_utf8(&mut self.scratch)?;
                         runs.cell(x, y, placeholder_cell(&style, &self.scratch));
                     } else {

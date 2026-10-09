@@ -88,8 +88,8 @@ fork = "https://github.com/aislopware/libghostty-rs.git"
 branch = "master"
 checkout = ".research/libghostty-rs"
 strategy = "rebase"
-base = "8953a740bc378cec3e07e1f6ca949f0595eab19b"
-base_date = "2026-09-28"
+base = "0fe5bfa73c6cb6f36dfad5e1cc49280f45bb5895"
+base_date = "2026-10-09"
 checked = "2026-10-09"
 check_every_days = 7
 
