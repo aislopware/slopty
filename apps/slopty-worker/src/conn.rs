@@ -1217,19 +1217,18 @@ impl Peer<'_> {
                     Dest::SessionCwd(session) => Some(*session),
                     Dest::Staging | Dest::Path(_) | Dest::Attachment | Dest::Drag(_) => None,
                 };
-                let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
+                let (daemon, client) = (self.daemon.clone(), self.client);
+                // Begun again from a link after the one that heard it end: told again.
                 let begin = move |cwd: Option<String>| {
                     tracing::info!(%client, %xfer, ?dest, ?cwd, files, bytes, "upload begins");
                     let begun = daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
-                    // Begun again from a link after the one that heard it end: told again.
-                    if let Begun::Finished(finished) = begun {
-                        let paths = finished.paths.iter().map(|p| p.to_string_lossy().into_owned());
-                        let msg = XferMsg::Finished { xfer, paths: paths.collect() };
-                        if let Err(e) = out.try_send(WorkerMsg::Xfer(msg)) {
-                            tracing::debug!(%client, %xfer, error = %e, "an upload's end not told");
-                        }
-                    }
+                    let Begun::Finished(finished) = begun else { return None };
+                    let paths = finished.paths.iter().map(|p| p.to_string_lossy().into_owned());
+                    Some(WorkerMsg::Xfer(XferMsg::Finished { xfer, paths: paths.collect() }))
                 };
+                // The end told again waits for room: the client holds the upload open until it
+                // hears it.
+                let out = self.out.clone();
                 // The directory is a question for the session's actor and then ptyd; the
                 // upload's files wait for the `Begin` (`xfer::BEGIN_WAIT`), nothing else does.
                 match in_session {
@@ -1238,10 +1237,18 @@ impl Peer<'_> {
                         self.tasks.spawn(async move {
                             let asked =
                                 tokio::time::timeout(CWD_WAIT, session_cwd(&daemon, session));
-                            begin(asked.await.ok().flatten());
+                            if let Some(end) = begin(asked.await.ok().flatten()) {
+                                let _gone = out.send(end).await;
+                            }
                         });
                     }
-                    None => begin(None),
+                    None => {
+                        if let Some(end) = begin(None) {
+                            self.tasks.spawn(async move {
+                                let _gone = out.send(end).await;
+                            });
+                        }
+                    }
                 }
             }
             XferMsg::Resume { xfer, name } => {

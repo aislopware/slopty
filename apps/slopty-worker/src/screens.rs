@@ -217,14 +217,30 @@ pub async fn run_display(
     serve_opened(link, id, made, opened, commands).await;
 }
 
-/// What a stream tells its client outside its commands' answers.
+/// What a stream tells its client outside its commands' answers. A cursor lost to a full link
+/// is drawn over by the next; a stream's end is never lost, or the client would wait on a
+/// stream that is gone: one that finds the link full is sent on the daemon's runtime, which
+/// waits for room.
 fn on_event(id: StreamId, events: mpsc::Sender<WorkerMsg>) -> impl Fn(StreamEvent) + Send + Sync {
-    move |e: StreamEvent| {
-        let event = match e {
-            StreamEvent::Stopped(e) => ScreenEvent::Closed { stream: id, reason: e.to_string() },
-            StreamEvent::Cursor(shape) => ScreenEvent::Cursor { stream: id, shape: Some(shape) },
-        };
-        let _sent = events.try_send(WorkerMsg::Screen(event));
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    move |e: StreamEvent| match e {
+        StreamEvent::Stopped(e) => {
+            let closed = ScreenEvent::Closed { stream: id, reason: e.to_string() };
+            match events.try_send(WorkerMsg::Screen(closed)) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(msg)) => {
+                    let Some(runtime) = &runtime else { return };
+                    let events = events.clone();
+                    drop(runtime.spawn(async move {
+                        let _gone = events.send(msg).await;
+                    }));
+                }
+            }
+        }
+        StreamEvent::Cursor(shape) => {
+            let cursor = ScreenEvent::Cursor { stream: id, shape: Some(shape) };
+            let _full = events.try_send(WorkerMsg::Screen(cursor));
+        }
     }
 }
 
@@ -777,6 +793,39 @@ mod tests {
     use slopty_worker::DatagramSink as _;
 
     use super::QuicSink;
+
+    /// A stream's end reaches its client through a link that is full at that moment, once
+    /// there is room; a cursor that finds it full is dropped, the next drawing over it.
+    #[tokio::test]
+    async fn a_stream_end_waits_for_room_on_a_full_link() {
+        use slopty_proto::screen::ScreenEvent;
+        use slopty_worker::screen::StreamEvent;
+
+        let id = slopty_core::StreamId(7);
+        let (out, mut client) = tokio::sync::mpsc::channel(1);
+        let told = super::on_event(id, out);
+        let shape = slopty_proto::screen::CursorShape {
+            w: 1,
+            h: 1,
+            hot_x: 0,
+            hot_y: 0,
+            bgra: vec![0; 4],
+            scale: 1,
+        };
+        told(StreamEvent::Cursor(shape.clone()));
+        told(StreamEvent::Cursor(shape));
+        told(StreamEvent::Stopped(slopty_capture::CaptureError::NotFound(
+            slopty_proto::screen::CaptureTarget::Display(slopty_core::DisplayId(1)),
+        )));
+        let first = client.recv().await.expect("the cursor");
+        assert!(matches!(first, slopty_net::WorkerMsg::Screen(ScreenEvent::Cursor { .. })));
+        let next = tokio::time::timeout(Duration::from_secs(5), client.recv()).await;
+        let Ok(Some(slopty_net::WorkerMsg::Screen(ScreenEvent::Closed { stream, .. }))) = next
+        else {
+            panic!("the stream's end, after the one cursor: {next:?}");
+        };
+        assert_eq!(stream, id);
+    }
 
     /// The client's end of a sound: how many datagrams came.
     #[cfg(target_os = "macos")]
