@@ -538,6 +538,9 @@ pub enum Message {
         /// What it gave.
         #[serde(default)]
         content: Vec<Content>,
+        /// What the tool kept for its own rendering.
+        #[serde(default)]
+        details: Option<Value>,
         /// Whether it failed.
         #[serde(default, rename = "isError")]
         is_error: bool,
@@ -710,6 +713,9 @@ pub struct ToolOutput {
     /// The tool's structured result, when it declares one.
     #[serde(default, rename = "structuredContent")]
     pub structured: Option<Value>,
+    /// What the tool keeps for its own rendering: an edit's unified `patch`, for one.
+    #[serde(default)]
+    pub details: Option<Value>,
 }
 
 /// The tokens of a response.

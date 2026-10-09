@@ -4,9 +4,9 @@
 //! answer offered, and what a thread is left as when its agent ends unheard.
 
 use slopty_core::WallMs;
-use slopty_proto::thread::detail::Clip;
+use slopty_proto::thread::detail::{Clip, Hunk, header_heading};
 use slopty_proto::thread::{
-    Action, Cap, Choice, Effect, Item, ItemBody, Liveness, Phase, RequestState, Status,
+    Action, Cap, Choice, Effect, Item, ItemBody, Liveness, Patch, Phase, RequestState, Status,
     ThreadState, ToolCall, ToolState, TurnState,
 };
 
@@ -51,6 +51,75 @@ pub fn choice(id: &str, label: &str, effect: Effect, stops: bool) -> Choice {
 #[must_use]
 pub fn tool(call: ToolCall) -> ItemBody {
     ItemBody::Tool(Box::new(call))
+}
+
+/// The diff of texts replaced, each `(old, new)` one hunk without line numbers: the agent sends
+/// the texts, not where in the file they are. An empty `old` is a whole file written.
+#[must_use]
+pub fn replaced_patch(replacements: &[(String, String)]) -> Patch {
+    let made = crate::conversation::proposed_patch(replacements);
+    Patch {
+        hunks: made
+            .hunks
+            .into_iter()
+            .map(|h| Hunk {
+                old_start: h.old_start,
+                old_lines: h.old_lines,
+                new_start: h.new_start,
+                new_lines: h.new_lines,
+                heading: h.heading,
+                lines: h.lines,
+            })
+            .collect(),
+        added: made.added,
+        removed: made.removed,
+        clipped_lines: made.clipped_lines,
+        full: None,
+    }
+}
+
+/// A unified diff's hunks, as Codex writes a file change's and pi an edit's: file headers are
+/// skipped, and each `@@` header starts a hunk numbered as it says.
+#[must_use]
+pub fn unified_patch(diff: &str) -> Patch {
+    let mut patch = Patch::default();
+    for line in diff.lines() {
+        if let Some(head) = line.strip_prefix("@@ ") {
+            let mut ranges = head.split(' ');
+            let old = ranges.next().and_then(|r| r.strip_prefix('-')).map(range);
+            let new = ranges.next().and_then(|r| r.strip_prefix('+')).map(range);
+            let ((old_start, old_lines), (new_start, new_lines)) =
+                (old.unwrap_or_default(), new.unwrap_or_default());
+            patch.hunks.push(Hunk {
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+                heading: header_heading(line),
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        let Some(hunk) = patch.hunks.last_mut() else { continue };
+        if line.starts_with('+') {
+            patch.added = patch.added.saturating_add(1);
+        } else if line.starts_with('-') {
+            patch.removed = patch.removed.saturating_add(1);
+        }
+        hunk.lines.push(line.to_owned());
+    }
+    patch
+}
+
+/// `start,lines` of a hunk header; one line when it says no count.
+fn range(text: &str) -> (u32, u32) {
+    let mut parts = text.split(',');
+    let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or_default();
+    let lines = parts.next().map_or(1, |s| s.parse().unwrap_or_default());
+    (start, lines)
 }
 
 /// A thread's title from the first thing the person said: its first line, cut to a length.

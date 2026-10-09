@@ -571,6 +571,63 @@ mod tests {
             assert_eq!(notice.retry, Some(retry));
         }
 
+        /// The last tool call `actions` carry.
+        fn last_call(actions: &[Action]) -> slopty_proto::thread::ToolCall {
+            let call = actions.iter().rev().find_map(|a| match a {
+                Action::ItemStarted(i) | Action::ItemUpdated(i) | Action::ItemCompleted(i) => {
+                    match &i.body {
+                        ItemBody::Tool(call) => Some((**call).clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            });
+            call.unwrap_or_else(|| panic!("a call: {actions:?}"))
+        }
+
+        /// pi's `edit` carries its diff: from the texts it replaces while it runs, then the
+        /// numbered patch pi's result keeps once it is made; `write` carries the file it
+        /// writes as one whole hunk. Shapes as pi 1.1.0 publishes them.
+        #[test]
+        fn an_edit_and_a_write_carry_their_diff() {
+            use slopty_proto::thread::detail::ToolDetail;
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let opened = r#"{"type":"message_start","message":{"role":"assistant","content":[],"model":"canned-1","provider":"canned","timestamp":0}}"#;
+            heard(&mut driven, opened, 1);
+            let edit = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"e1","name":"edit","arguments":{"path":"src/a.rs","edits":[{"oldText":"fn a() {\n    1\n}","newText":"fn a() {\n    2\n}"},{"oldText":"// old","newText":"// new"}]}}}}"#;
+            let call = last_call(&heard(&mut driven, edit, 2));
+            let Some(ToolDetail::Edit(detail)) = call.detail else {
+                panic!("an edit's detail: {call:?}")
+            };
+            assert_eq!((detail.path.as_str(), detail.edits), ("src/a.rs", 2));
+            assert_eq!((detail.patch.added, detail.patch.removed), (2, 2));
+            let lines: Vec<&str> =
+                detail.patch.hunks.iter().flat_map(|h| &h.lines).map(String::as_str).collect();
+            assert_eq!(lines, [" fn a() {", "-    1", "+    2", " }", "-// old", "+// new"]);
+
+            let ended = r#"{"type":"tool_execution_end","toolCallId":"e1","toolName":"edit","isError":false,"result":{"content":[{"type":"text","text":"Successfully replaced 2 block(s) in src/a.rs."}],"details":{"diff":"","patch":"--- src/a.rs\n+++ src/a.rs\n@@ -9,4 +9,4 @@ mod b\n-// old\n+// new\n fn a() {\n-    1\n+    2\n }\n","firstChangedLine":10}}}"#;
+            let call = last_call(&heard(&mut driven, ended, 3));
+            let Some(ToolDetail::Edit(detail)) = call.detail else {
+                panic!("an edit's detail: {call:?}")
+            };
+            let hunk = detail.patch.hunks.first().unwrap();
+            assert_eq!(
+                (hunk.old_start, hunk.new_start, hunk.heading.as_deref()),
+                (9, 9, Some("mod b"))
+            );
+            assert_eq!((hunk.old_lines, hunk.lines.len()), (4, 6), "pi's patch, as made");
+
+            let write = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"w1","name":"write","arguments":{"path":"notes.md","content":"one\ntwo\n"}}}}"#;
+            let call = last_call(&heard(&mut driven, write, 4));
+            let Some(ToolDetail::Write(detail)) = call.detail else {
+                panic!("a write's detail: {call:?}")
+            };
+            assert_eq!((detail.path.as_str(), detail.lines, detail.created), ("notes.md", 2, None));
+            let lines: Vec<&str> =
+                detail.patch.hunks.iter().flat_map(|h| &h.lines).map(String::as_str).collect();
+            assert_eq!(lines, ["+one", "+two"]);
+        }
+
         /// Each turn names the model that answered in it, as pi's messages say it.
         #[test]
         fn each_turn_names_the_model_that_answered() {

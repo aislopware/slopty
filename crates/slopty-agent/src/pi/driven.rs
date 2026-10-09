@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde_json::Value;
 use slopty_core::WallMs;
-use slopty_proto::thread::detail::{ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail};
+use slopty_proto::thread::detail::{
+    EditDetail, ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail, WriteDetail,
+};
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
     Effort, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Pending,
@@ -50,7 +52,7 @@ use super::rpc::{
     Stats, StreamingBehavior, ToolOutput, UiMethod, UiRequest,
 };
 use crate::attach::Attached;
-use crate::driven::{OUTPUT, PROSE, caps, choice, title_of, tool};
+use crate::driven::{OUTPUT, PROSE, caps, choice, replaced_patch, title_of, tool, unified_patch};
 use crate::queue::Queue;
 
 /// What a driven pi can do through Slopty.
@@ -969,12 +971,16 @@ impl Driven {
                 }
                 actions
             }
-            Message::ToolResult { tool_call_id, content, is_error, .. } => {
+            Message::ToolResult { tool_call_id, content, details, is_error, .. } => {
                 // Live, the call's end said it all; read again, this is where its end is.
                 if self.calls.get(tool_call_id).is_some_and(|(_, call)| call.state.is_final()) {
                     return Vec::new();
                 }
-                let output = ToolOutput { content: content.clone(), structured: None };
+                let output = ToolOutput {
+                    content: content.clone(),
+                    structured: None,
+                    details: details.clone(),
+                };
                 self.call_ended(tool_call_id, &output, *is_error, now)
             }
             Message::Other => Vec::new(),
@@ -1146,15 +1152,26 @@ impl Driven {
         actions.extend(self.withdraw(|open| open.call() == Some(id)));
         let text = rpc::text_of(&result.content);
         let output = (!text.is_empty()).then(|| Clipped::tail(&text, OUTPUT, None));
-        if let Some((_, call)) = self.calls.get_mut(id)
-            && let Some(ToolDetail::Exec(exec)) = call.detail.as_mut()
-        {
-            exec.exit_code = result
-                .structured
-                .as_ref()
-                .and_then(|s| s.get("exit_code"))
-                .and_then(Value::as_i64)
-                .and_then(|c| i32::try_from(c).ok());
+        match self.calls.get_mut(id).and_then(|(_, call)| call.detail.as_mut()) {
+            Some(ToolDetail::Exec(exec)) => {
+                exec.exit_code = result
+                    .structured
+                    .as_ref()
+                    .and_then(|s| s.get("exit_code"))
+                    .and_then(Value::as_i64)
+                    .and_then(|c| i32::try_from(c).ok());
+            }
+            // The edit made says where in the file it is: its patch, numbered, replaces the one
+            // the call's texts gave.
+            Some(ToolDetail::Edit(edit)) => {
+                let made = result.details.as_ref().and_then(|d| d.get("patch"));
+                if let Some(patch) = made.and_then(Value::as_str).map(unified_patch)
+                    && !patch.hunks.is_empty()
+                {
+                    edit.patch = patch;
+                }
+            }
+            _ => {}
         }
         actions.extend(self.call_state(id, state, output, now));
         actions.push(self.status(now));
@@ -1281,8 +1298,26 @@ fn tool_call(name: &str, arguments: &Value, state: ToolState) -> ToolCall {
             };
             (kind::READ, format!("Read {path}"), Some(ToolDetail::Read(read)))
         }
-        "edit" => (kind::EDIT, format!("Edit {path}"), None),
-        "write" => (kind::WRITE, format!("Write {path}"), None),
+        "edit" => {
+            let replacements = replacements(arguments);
+            let edit = EditDetail {
+                path: path.clone(),
+                edits: u32::try_from(replacements.len()).unwrap_or(u32::MAX),
+                replace_all: false,
+                patch: replaced_patch(&replacements),
+            };
+            (kind::EDIT, format!("Edit {path}"), Some(ToolDetail::Edit(edit)))
+        }
+        "write" => {
+            let content = text("content").unwrap_or_default();
+            let write = WriteDetail {
+                path: path.clone(),
+                lines: u32::try_from(content.lines().count()).unwrap_or(u32::MAX),
+                created: None,
+                patch: replaced_patch(&[(String::new(), content)]),
+            };
+            (kind::WRITE, format!("Write {path}"), Some(ToolDetail::Write(write)))
+        }
         "grep" | "find" | "ls" => {
             let pattern = text("pattern").unwrap_or_default();
             let search = SearchDetail {
@@ -1315,6 +1350,27 @@ fn tool_call(name: &str, arguments: &Value, state: ToolState) -> ToolCall {
         child: None,
         ended_ms: None,
     }
+}
+
+/// An `edit` call's replacements, each `(oldText, newText)`, read as pi prepares its arguments:
+/// `edits` as a list, as one edit, or as either written as a JSON string, and a lone top-level
+/// `oldText` and `newText` as one more.
+fn replacements(arguments: &Value) -> Vec<(String, String)> {
+    let one = |edit: &Value| {
+        let text = |key: &str| edit.get(key).and_then(Value::as_str).map(str::to_owned);
+        text("oldText").zip(text("newText"))
+    };
+    let parsed = arguments
+        .get("edits")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let mut made: Vec<(String, String)> = match parsed.as_ref().or_else(|| arguments.get("edits")) {
+        Some(Value::Array(edits)) => edits.iter().filter_map(one).collect(),
+        Some(edit) => one(edit).into_iter().collect(),
+        None => Vec::new(),
+    };
+    made.extend(one(arguments));
+    made
 }
 
 fn usage_of(usage: &rpc::Usage) -> thread::Usage {

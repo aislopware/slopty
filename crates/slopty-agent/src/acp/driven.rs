@@ -28,8 +28,7 @@ use agent_client_protocol_schema::{MaybeUndefined, ProtocolVersion};
 use serde_json::Value;
 use slopty_core::WallMs;
 use slopty_proto::thread::detail::{
-    EditDetail, ExecDetail, ExecStatus, FetchDetail, Hunk, Patch, ReadDetail, SearchDetail,
-    WriteDetail,
+    EditDetail, ExecDetail, ExecStatus, FetchDetail, ReadDetail, SearchDetail, WriteDetail,
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
@@ -1430,30 +1429,6 @@ const fn plan_status(status: &acp::PlanEntryStatus) -> &'static str {
     }
 }
 
-/// The diff from `old` to `new`, as one hunk without line numbers: the agent sends both
-/// texts, not where in the file they are.
-fn patch_of(old: &str, new: &str) -> Patch {
-    let made = crate::conversation::proposed_patch(&[(old.to_owned(), new.to_owned())]);
-    Patch {
-        hunks: made
-            .hunks
-            .into_iter()
-            .map(|h| Hunk {
-                old_start: h.old_start,
-                old_lines: h.old_lines,
-                new_start: h.new_start,
-                new_lines: h.new_lines,
-                heading: h.heading,
-                lines: h.lines,
-            })
-            .collect(),
-        added: made.added,
-        removed: made.removed,
-        clipped_lines: made.clipped_lines,
-        full: None,
-    }
-}
-
 /// A select option's choices, its groups flattened: each value and its name.
 /// A select option's values, its groups flattened.
 fn select_options(option: &acp::SessionConfigOption) -> Vec<&acp::SessionConfigSelectOption> {
@@ -1506,7 +1481,7 @@ fn shown(raw: &Told) -> ToolCall {
         (_, Some(diff)) => {
             let path = diff.path.to_string_lossy().into_owned();
             let old = diff.old_text.clone().unwrap_or_default();
-            let patch = patch_of(&old, &diff.new_text);
+            let patch = crate::driven::replaced_patch(&[(old.clone(), diff.new_text.clone())]);
             if old.is_empty() {
                 // The protocol says a new file has no old text; OpenCode gives it an empty one,
                 // which is a whole file written either way.

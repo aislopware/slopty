@@ -1066,7 +1066,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_question_asked_through_the_permission_hook_stays_a_question`.
   - **Left:** Codex background terminals, hooks, MCP startup and rewind (not in the generated
     protocol yet), Claude Code `StopFailure` as failed and its per-turn cost, MCP servers as
-    model state, pi commands and edit diffs, and ACP subagents and compaction.
+    model state, pi commands (pi edit diffs since rank 16), and ACP subagents and compaction.
 
 - ✅ **A Codex thread reads like every other agent's** (2026-10-02, from the showcase).
   - A thread Codex has not named takes its first prompt as its title, as pi and ACP threads do,
@@ -2504,3 +2504,17 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     "·" between them.
   - Tests: `observed::tests::always_allow_says_what_it_grants_as_claude_code_does`,
     `decision::tests::a_scoped_answer_says_how_far_it_reaches`; golden `thread-phone`.
+
+- ✅ **pi's edits and writes carry their diff** (readiness rank 16, 2026-10-09). A pi `edit`
+  or `write` used to be a title with no body, so the review surfaces had nothing to show.
+  - **While it runs.** An `edit` is an `EditDetail` built from the texts it replaces, one
+    hunk per replacement and no line numbers yet. Its arguments are read the way pi itself
+    prepares them: a list of `{oldText, newText}`, a single edit, either sent as a JSON string,
+    or a loose top-level pair. A `write` is a `WriteDetail` whose whole content is one hunk.
+  - **Once made.** pi's result keeps a standard unified patch (`details.patch`, four lines of
+    context). When it ends, that patch, numbered and headed, replaces the one built from the
+    texts. A resumed session reads the same `details` from the session's tool result.
+  - **One parser.** The unified-diff reader Codex used and ACP's patch from two texts now
+    live in `driven` (`unified_patch`, `replaced_patch`), which pi shares.
+  - Test: `pi::driven::an_edit_and_a_write_carry_their_diff` (slopty-agent), using the
+    shapes pi 1.1.0 publishes.

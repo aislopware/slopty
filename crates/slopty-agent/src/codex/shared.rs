@@ -41,14 +41,13 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::detail::{
-    AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail, Offered,
-    Question, header_heading,
+    AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, McpDetail, Offered, Question,
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
     Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
-    Mode, Notice, Offers, PartKey, Patch, Phase, Plan, Request, RequestState, Retry, Status, Step,
+    Mode, Notice, Offers, PartKey, Phase, Plan, Request, RequestState, Retry, Status, Step,
     ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
     UserMessage, Wait, kind,
 };
@@ -802,7 +801,7 @@ impl Shared {
     /// added and removed.
     fn turn_diff(&mut self, codex: &str, diff: &str) -> Vec<Action> {
         let turn = self.turn(codex);
-        let patch = patch_of(diff);
+        let patch = crate::driven::unified_patch(diff);
         let changed = Changed { added: patch.added, removed: patch.removed };
         match self.begun.get_mut(&turn) {
             Some(begun) if begun.changed != changed => {
@@ -1471,7 +1470,7 @@ impl Shared {
                         path: change.path.clone(),
                         edits: 1,
                         replace_all: false,
-                        patch: patch_of(&change.diff),
+                        patch: crate::driven::unified_patch(&change.diff),
                     })
                 });
                 let input = serde_json::to_string(changes).unwrap_or_default();
@@ -1972,40 +1971,6 @@ fn push_choice<T: serde::Serialize>(
     answers.insert(id, value);
 }
 
-/// A unified diff's hunks, as Codex writes a file change's.
-fn patch_of(diff: &str) -> Patch {
-    let mut patch = Patch::default();
-    for line in diff.lines() {
-        if let Some(head) = line.strip_prefix("@@ ") {
-            let mut ranges = head.split(' ');
-            let old = ranges.next().and_then(|r| r.strip_prefix('-')).map(range);
-            let new = ranges.next().and_then(|r| r.strip_prefix('+')).map(range);
-            let ((old_start, old_lines), (new_start, new_lines)) =
-                (old.unwrap_or_default(), new.unwrap_or_default());
-            patch.hunks.push(Hunk {
-                old_start,
-                old_lines,
-                new_start,
-                new_lines,
-                heading: header_heading(line),
-                lines: Vec::new(),
-            });
-            continue;
-        }
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        let Some(hunk) = patch.hunks.last_mut() else { continue };
-        if line.starts_with('+') {
-            patch.added = patch.added.saturating_add(1);
-        } else if line.starts_with('-') {
-            patch.removed = patch.removed.saturating_add(1);
-        }
-        hunk.lines.push(line.to_owned());
-    }
-    patch
-}
-
 /// A rate-limit window's name by its length: `five-hour`, `seven-day`, else in minutes.
 fn window_name(minutes: i64) -> String {
     match minutes {
@@ -2015,14 +1980,6 @@ fn window_name(minutes: i64) -> String {
         m if m % 60 == 0 => format!("{}-hour", m / 60),
         m => format!("{m}-minute"),
     }
-}
-
-/// `start,lines` of a hunk header; one line when it says no count.
-fn range(text: &str) -> (u32, u32) {
-    let mut parts = text.split(',');
-    let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or_default();
-    let lines = parts.next().map_or(1, |s| s.parse().unwrap_or_default());
-    (start, lines)
 }
 
 /// A Codex question as the thread asks it. Codex offers one answer of those it lists, and an
