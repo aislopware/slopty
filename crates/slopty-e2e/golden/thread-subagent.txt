@@ -27,12 +27,12 @@ Group │ Do these steps in order, using the named tools, then reply "done". 1)�
 Group │ Thread (focused)
 Navigation │ Subagent Count lines
 Button │ Back
-Article │ You: Read the file /work/main.rs and count how many lines it has. Reply with just the number, nothing else.
+Article │ You: Use the Read tool to read the file /work/main.rs and count its lines. Reply with just the number, nothing else.
 Button │ Copy message
 Button │ Working: Read a file
 Button │ Read /work/main.rs
 Link │ Open /work/main.rs
-Article │ 4
+Article │ 3
 Button │ Copy message
 Group │ Status
 Status │ Claude Code

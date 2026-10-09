@@ -54,14 +54,12 @@ async fn start_recorded(stack: &Stack, session: &str, name: &str) -> String {
 
 /// Start the session whose main transcript is `main` in `session` through the relay, and give
 /// it a status line (the model and the context in use). Returns the transcript's path.
+///
+/// The status line speaks first. The session's thread reads the whole recorded transcript the
+/// moment the start names it, so a status line heard after it could land after the settled
+/// turn a test waits for, and its golden would show the model only on a slow run.
 async fn start(stack: &Stack, session: &str, main: &Path) -> String {
     let transcript = main.to_string_lossy().into_owned();
-    let start = json!({
-        "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
-        "transcript_path": transcript, "cwd": stack.path("home"),
-    });
-    let done = stack.relay_hook(session, &[], &start).unwrap().wait().await.unwrap();
-    assert!(done.success(), "the relay ran");
     let status = json!({
         "session_id": "s1", "transcript_path": transcript,
         "model": { "id": "claude-opus-5-5", "display_name": "Opus 5.5" },
@@ -69,6 +67,12 @@ async fn start(stack: &Stack, session: &str, main: &Path) -> String {
     });
     let line = stack.relay_hook(session, &["statusline", "--command", "true"], &status).unwrap();
     assert!(line.wait_with_output().await.unwrap().status.success(), "the status line ran");
+    let start = json!({
+        "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+        "transcript_path": transcript, "cwd": stack.path("home"),
+    });
+    let done = stack.relay_hook(session, &[], &start).unwrap().wait().await.unwrap();
+    assert!(done.success(), "the relay ran");
     transcript
 }
 
