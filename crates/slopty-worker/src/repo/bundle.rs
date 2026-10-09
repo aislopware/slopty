@@ -289,10 +289,20 @@ pub(super) async fn run_within(
     let said = String::from_utf8_lossy(&out.stderr);
     let line = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("git failed");
     let all = said.trim();
+    // What the remote said is why a push was refused (a protected branch, a hook): it goes
+    // before git's own last line, which says only that it was.
+    let remote: Vec<&str> = said
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("remote:"))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     Err(Failed::Other(if all.contains("prerequisite") {
         all.to_owned()
-    } else {
+    } else if remote.is_empty() {
         line.trim().to_owned()
+    } else {
+        format!("{}: {}", remote.join(" "), line.trim())
     }))
 }
 

@@ -767,9 +767,12 @@ pub enum Verb {
     },
     /// Move the branch `target` of the clone at `repo` from `from` to `to`, a commit that
     /// descends from it, and nothing else: in the checkout that has it checked out, as `git
-    /// merge --ff-only` does, so nothing of the person's there is overwritten. Then push it to
-    /// `origin` when asked. Answered with [`Outcome::FastForwarded`], or
-    /// [`ErrorCode::Conflict`] when the branch is no longer at `from`.
+    /// merge --ff-only` does, so nothing of the person's there is overwritten. With `push`, it
+    /// goes to `origin` first: a push the forge refuses because the branch is protected moves
+    /// nothing and is answered [`ErrorCode::Protected`], so the work lands through a pull
+    /// request ([`Verb::LandPull`]); a push that fails otherwise leaves the branch moved and
+    /// says why. Answered with [`Outcome::FastForwarded`], or [`ErrorCode::Conflict`] when the
+    /// branch is no longer at `from`.
     FastForward {
         /// Where.
         worker: WorkerId,
@@ -933,6 +936,26 @@ pub enum Verb {
         /// The agent that takes it; the one it ran last when absent.
         agent: Option<AgentId>,
     },
+    /// Server → worker: land `head` on the protected `target` through the forge. It is pushed
+    /// to `origin` as `branch` (forced: it is the task's work rebased by the merge queue), and
+    /// the open pull request of `branch` into `target` is found, or opened with `title` and
+    /// `body`, by the person's own `gh` or `glab`. Answered with [`Outcome::PullOpened`].
+    LandPull {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The commit that lands.
+        head: String,
+        /// The branch it goes up as.
+        branch: String,
+        /// The branch it lands on.
+        target: String,
+        /// A new pull request's title.
+        title: String,
+        /// A new pull request's description.
+        body: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1006,6 +1029,7 @@ impl Verb {
             | Self::TaskUpdate { .. }
             | Self::TaskSpawn { .. }
             | Self::TaskRestart { .. }
+            | Self::LandPull { .. }
             | Self::TaskTell { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
@@ -1299,6 +1323,9 @@ pub enum ErrorCode {
     /// There is nothing new to carry: the branch has no commit beyond the one it would start
     /// after, so the other side has it from the same forge.
     NothingNew,
+    /// The forge refused a push to the branch because it is protected: work lands on it
+    /// through a pull request.
+    Protected,
 }
 
 /// The answer to a [`Verb`].
@@ -1499,6 +1526,13 @@ pub enum Outcome {
     FsDone {
         /// The path.
         path: String,
+    },
+    /// For [`Verb::LandPull`]: the pull request the work waits in.
+    PullOpened {
+        /// Its number.
+        number: u32,
+        /// Its page.
+        url: String,
     },
 }
 

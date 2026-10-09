@@ -142,6 +142,106 @@ pub async fn create(
     })
 }
 
+/// Where the merge queue lands a task's work through the forge ([`land`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Landing<'a> {
+    /// The commit that lands.
+    pub head: &'a str,
+    /// The branch it goes up as.
+    pub branch: &'a str,
+    /// The protected branch it lands on.
+    pub target: &'a str,
+}
+
+/// A refusal of the forge's or git's, in words.
+fn words(outcome: GitOutcome) -> String {
+    match outcome {
+        GitOutcome::Refused { why } | GitOutcome::Unavailable { why, .. } => why,
+        GitOutcome::Failed { said } => said,
+        GitOutcome::Done(_) => "done".to_owned(),
+    }
+}
+
+/// The number a pull request's page ends with.
+fn number_of(url: &str) -> Option<u32> {
+    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
+/// One pull request as `gh pr list --json number,url` lists it.
+#[derive(Debug, serde::Deserialize)]
+struct Listed {
+    number: u32,
+    url: String,
+}
+
+/// Land `landing.head` on its protected target through the forge of the clone at `root`; the
+/// pull request's number and page.
+///
+/// The commit goes to `origin` as its branch, forced, as the merge queue rebased it. Then the
+/// open pull request of that branch into the target is found, else one is opened with `title`
+/// and `body`.
+///
+/// # Errors
+/// The branch is no branch's name, git, gh or glab is missing, or git or the forge refused, in
+/// their words.
+pub async fn land(
+    programs: &Programs,
+    root: &Path,
+    landing: Landing<'_>,
+    (title, body): (&str, &str),
+) -> Result<(u32, String), String> {
+    let Landing { head, branch, target } = landing;
+    let named = |b: &str| !b.is_empty() && !b.starts_with('-') && !b.contains("..");
+    if !named(branch) || !named(target) {
+        return Err(format!("{branch:?} into {target:?} names no branches"));
+    }
+    let git = programs.git.as_deref().ok_or_else(|| "this worker has no git".to_owned())?;
+    let forge = forge(root);
+    let program = program(programs, forge).map_err(words)?;
+    let refspec = format!("{head}:refs/heads/{branch}");
+    let push = ["push", "--quiet", "--force", "--end-of-options", "origin", &refspec];
+    run(git, root, &push, None, REMOTE).await.map_err(words)?;
+    let (found, open) = match forge {
+        Forge::GitHub => {
+            let list = [
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--base",
+                target,
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+                "--limit",
+                "1",
+            ];
+            let listed = run(program, root, &list, None, REMOTE).await.map_err(words)?;
+            let listed: Vec<Listed> = serde_json::from_str(&listed)
+                .map_err(|e| format!("gh listed no pull requests: {e}"))?;
+            let found = listed.into_iter().next().map(|l| (l.number, l.url));
+            let mut open = vec!["pr", "create", "--head", branch, "--base", target];
+            open.extend(["--title", title.trim(), "--body", body]);
+            (found, open)
+        }
+        Forge::GitLab => {
+            let found = gitlab::open_of(program, root, branch, target).await.map_err(words)?;
+            let mut open = gitlab::create_args((title, body), Some(target), false);
+            open.extend(["--source-branch", branch]);
+            (found, open)
+        }
+    };
+    if let Some(found) = found {
+        return Ok(found);
+    }
+    let out = run(program, root, &open, None, REMOTE).await.map_err(words)?;
+    let url = out.split_whitespace().rev().find(|w| w.starts_with("http"));
+    url.and_then(|u| Some((number_of(u)?, u.to_owned()))).ok_or_else(|| {
+        format!("{} opened no {} it named: {}", forge.program(), forge.noun(), out.trim())
+    })
+}
+
 /// Merge the branch's pull request by `method`, only while it ends at `head` when given.
 ///
 /// # Errors

@@ -461,3 +461,60 @@ async fn a_merge_request_s_open_review_is_read_with_glab() {
     );
     assert_eq!(asked(dir.path()), ["api projects/:id/merge_requests/7/discussions?per_page=100"]);
 }
+
+/// The merge queue lands work on a protected target through the forge: the commit goes up as
+/// the task's branch, forced, and a pull request of that branch into the target is opened by
+/// the person's own gh, its number read from its page. Asked again, the one already open is
+/// found and none is opened twice.
+#[tokio::test]
+async fn work_on_a_protected_target_goes_up_as_a_pull_request() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(dir.path()).expect("real");
+    let git = crate::changes::git().expect("git");
+    let in_dir = |at: &Path, args: &[&str]| {
+        let ran = std::process::Command::new(git)
+            .arg("-C")
+            .arg(at)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "{args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    };
+    let work = repo(&root);
+    in_dir(&work, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let head = in_dir(&work, &["rev-parse", "HEAD"]);
+    in_dir(&root, &["init", "-q", "--bare", "forge.git"]);
+    in_dir(&work, &["remote", "add", "origin", &root.join("forge.git").to_string_lossy()]);
+    let gh = root.join("gh");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
+         case \"$1 $2\" in\n\
+         'pr list') if [ -f \"{dir}/opened\" ]; then \
+           echo '[{{\"number\":12,\"url\":\"https://github.com/o/demo/pull/12\"}}]'; \
+           else echo '[]'; fi ;;\n\
+         'pr create') touch \"{dir}/opened\"; echo 'https://github.com/o/demo/pull/12' ;;\n\
+         *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+         esac\n",
+        dir = root.display()
+    );
+    std::fs::write(&gh, script).expect("written");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    let programs = Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None };
+    let landing = Landing { head: &head, branch: "slopty/demo/3", target: "main" };
+
+    let opened = land(&programs, &work, landing, ("Split the parser", "Task #3")).await;
+    assert_eq!(opened, Ok((12, "https://github.com/o/demo/pull/12".to_owned())));
+    let up = in_dir(&root.join("forge.git"), &["rev-parse", "refs/heads/slopty/demo/3"]);
+    assert_eq!(up, head, "the work went up as the task's branch");
+    let found = land(&programs, &work, landing, ("Split the parser", "Task #3")).await;
+    assert_eq!(found, Ok((12, "https://github.com/o/demo/pull/12".to_owned())));
+    let creates = asked(&root).iter().filter(|a| a.starts_with("pr create")).count();
+    assert_eq!(creates, 1, "found the second time, not opened again: {:?}", asked(&root));
+    assert!(asked(&root).iter().any(|a| a.contains("--head slopty/demo/3 --base main")));
+
+    let flag = Landing { branch: "--upload-pack=x", ..landing };
+    assert!(land(&programs, &work, flag, ("t", "b")).await.is_err(), "no branch's name");
+}

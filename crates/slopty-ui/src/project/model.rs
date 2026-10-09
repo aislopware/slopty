@@ -888,7 +888,7 @@ impl Board {
         if card.state == TaskState::Merged {
             let failed = card.merge.as_ref().and_then(|m| match m {
                 Merge::Merged { push_failed: Some(why), .. } => Some(why),
-                Merge::Merged { .. } | Merge::Queued { .. } => None,
+                Merge::Merged { .. } | Merge::Queued { .. } | Merge::Pull { .. } => None,
             });
             return failed
                 .map(|why| {
@@ -920,6 +920,13 @@ impl Board {
             out.push(stage(StageKind::Queue, "Merging".to_owned(), false));
         } else if let Some((place, _)) = self.queue_place(task) {
             out.push(stage(StageKind::Queue, queue_words(place), false));
+        }
+        // Its protected target takes it through a pull request, which its thread's watch may
+        // not have read yet.
+        if let Some(Merge::Pull { number, target, .. }) = &card.merge
+            && card.pull.as_ref().is_none_or(|p| p.number != *number)
+        {
+            out.push(stage(StageKind::Pull, format!("#{number} into {target}"), false));
         }
         // The pull request, its checks and its review apart, so a narrow lane wraps them
         // rather than cutting one long chip.

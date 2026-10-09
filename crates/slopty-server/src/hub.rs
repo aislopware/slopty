@@ -853,6 +853,7 @@ impl Hub {
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
+            | Verb::LandPull { .. }
             | Verb::TestDiff { .. } => error(
                 ErrorCode::Forbidden,
                 "the server checks and merges tasks itself, one at a time; a task's done report \
@@ -1682,6 +1683,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Rebase { worker, .. }
         | Verb::TestDiff { worker, .. }
         | Verb::FastForward { worker, .. }
+        | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),

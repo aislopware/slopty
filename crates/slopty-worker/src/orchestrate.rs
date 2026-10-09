@@ -229,6 +229,7 @@ fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
     use crate::repo::verify::Failed;
     let code = match failed {
         Failed::Conflict(_) | Failed::Moved(_) => ErrorCode::Conflict,
+        Failed::Protected(_) => ErrorCode::Protected,
         Failed::Other(_) => ErrorCode::Failed,
     };
     Failure::new(code, failed.to_string())
@@ -548,6 +549,7 @@ impl Orchestrator {
             | Verb::Rebase { .. }
             | Verb::TestDiff { .. }
             | Verb::FastForward { .. }
+            | Verb::LandPull { .. }
             | Verb::RemoveWorktree { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
@@ -992,6 +994,18 @@ impl Orchestrator {
                         .map_err(|f| verify_failure(&f))?;
                 let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
                 Ok(Outcome::FastForwarded { head, pushed, push_failed })
+            }
+            Verb::LandPull { worker, repo, head, branch, target, title, body } => {
+                self.mine(worker)?;
+                let programs = crate::repo::commit::Programs::here();
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let landing =
+                    crate::repo::pull::Landing { head: &head, branch: &branch, target: &target };
+                let (number, url) =
+                    crate::repo::pull::land(&programs, &repo, landing, (&title, &body))
+                        .await
+                        .map_err(|why| Failure::new(ErrorCode::Failed, why))?;
+                Ok(Outcome::PullOpened { number, url })
             }
             Verb::RemoveWorktree { worker, worktree, landed } => {
                 self.mine(worker)?;

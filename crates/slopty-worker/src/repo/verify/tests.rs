@@ -234,3 +234,33 @@ async fn the_target_moves_only_forward_and_never_under_the_person_s_changes() {
     assert_eq!((moved.head.as_str(), moved.pushed), (next.as_str(), false));
     assert_eq!(git_in(&repo, &["rev-parse", "main"]), next);
 }
+
+/// A forge that protects the target refuses the push in its own words: the move is refused as
+/// [`Failed::Protected`] before anything moves here, so the clone's target stays where the
+/// forge's is and the work can go up as a pull request instead.
+#[tokio::test]
+async fn a_protected_target_refuses_the_push_and_nothing_moves() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, task) = clone_with_a_task(&root);
+    git_in(&root, &["clone", "-q", "--bare", "demo", "forge.git"]);
+    git_in(&repo, &["remote", "add", "origin", &root.join("forge.git").to_string_lossy()]);
+    let hook = root.join("forge.git/hooks/pre-receive");
+    let refuse = "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    \
+                  echo 'GH006: Protected branch update failed for refs/heads/main.' >&2; exit 1\n  \
+                  fi\ndone\n";
+    std::fs::write(&hook, refuse).expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("executable");
+
+    let refused = fast_forward(git, &repo, "main", &first, &task, true).await;
+    assert!(
+        matches!(&refused, Err(Failed::Protected(why)) if why.contains("GH006")),
+        "{refused:?}"
+    );
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), first, "nothing moved here");
+    assert_eq!(git_in(&root.join("forge.git"), &["rev-parse", "main"]), first, "nor there");
+    let local = fast_forward(git, &repo, "main", &first, &task, false).await.expect("moved");
+    assert_eq!(local.head, task, "a merge kept here is no push, and nothing refuses it");
+}

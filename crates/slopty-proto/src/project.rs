@@ -610,6 +610,20 @@ pub enum Merge {
         /// and the person pushes again.
         push_failed: Option<String>,
     },
+    /// Its target is protected on the forge, so its work, rebased and verified, waits in a pull
+    /// request there; the task is merged once the pull request is.
+    Pull {
+        /// The branch it lands on.
+        target: String,
+        /// The commit that went up.
+        head: String,
+        /// The pull request's number.
+        number: u32,
+        /// Its page.
+        url: String,
+        /// When it was opened or found, by the server's clock.
+        since_ms: WallMs,
+    },
 }
 
 impl Merge {
@@ -618,7 +632,7 @@ impl Merge {
     pub const fn queued(&self) -> Option<WallMs> {
         match self {
             Self::Queued { since_ms } => Some(*since_ms),
-            Self::Merged { .. } => None,
+            Self::Merged { .. } | Self::Pull { .. } => None,
         }
     }
 }
@@ -1285,6 +1299,11 @@ impl TaskCard {
                     .len()
                     .saturating_add(head.len())
                     .saturating_add(push_failed.as_deref().map_or(0, str::len))
+                    .saturating_add(32),
+                Merge::Pull { target, head, url, .. } => target
+                    .len()
+                    .saturating_add(head.len())
+                    .saturating_add(url.len())
                     .saturating_add(32),
             }),
             self.assignment

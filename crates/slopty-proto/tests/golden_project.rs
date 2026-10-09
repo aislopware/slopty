@@ -656,6 +656,29 @@ mod golden_project {
         };
         let card = Task { merge: Some(unpushed), state: TaskState::Merged, ..task() };
         snap("task_merged_unpushed_card", &card.card(&Natives::default()));
+        snap(
+            "land_pull",
+            &request(Verb::LandPull {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                head: commit('d'),
+                branch: "worktree-slopty-slopty-3".to_owned(),
+                target: "main".to_owned(),
+                title: "Split the parser".to_owned(),
+                body: "Task #3 of the Slopty project slopty.".to_owned(),
+            }),
+        );
+        let url = "https://github.com/o/slopty/pull/12".to_owned();
+        snap("pull_opened", &reply(Outcome::PullOpened { number: 12, url: url.clone() }));
+        let waiting = Merge::Pull {
+            target: "main".to_owned(),
+            head: commit('d'),
+            number: 12,
+            url,
+            since_ms: at(),
+        };
+        let card = Task { merge: Some(waiting), state: TaskState::Done, ..task() };
+        snap("task_in_pull_card", &card.card(&Natives::default()));
     }
 
     /// The person letting a project go.
@@ -793,6 +816,7 @@ mod golden_project {
             ("project_reply_limit", ErrorCode::Limit),
             ("project_reply_bad_expression", ErrorCode::BadExpression),
             ("project_reply_nothing_new", ErrorCode::NothingNew),
+            ("project_reply_protected", ErrorCode::Protected),
         ] {
             snap(name, &reply(Outcome::Error { code, message: String::new() }));
         }

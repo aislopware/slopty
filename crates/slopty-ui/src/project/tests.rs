@@ -746,3 +746,26 @@ fn a_task_starts_fresh_or_goes_to_another_agent(cx: &mut gpui::TestAppContext) {
     assert_eq!(*heard.borrow(), [ProjectEvent::GiveTo(TaskId(3), codex)]);
     assert!(cx.debug_bounds("project-card-give-3").is_none(), "the picker shuts");
 }
+
+/// A task whose protected target took its work through a pull request shows that pull
+/// request on its way, before its thread's watch has read it, and offers no Merge again.
+#[test]
+fn work_waiting_in_a_pull_request_says_where() {
+    use slopty_proto::project::Merge;
+
+    use super::model::TaskAction;
+
+    let mut waiting = card(3, "In review", TaskState::Done);
+    waiting.merge = Some(Merge::Pull {
+        target: "main".to_owned(),
+        head: "a".repeat(40),
+        number: 12,
+        url: "https://github.com/o/demo/pull/12".to_owned(),
+        since_ms: AT,
+    });
+    let mirror = one(vec![waiting]);
+    let b = board(&mirror);
+    let words: Vec<String> = b.pipeline(TaskId(3)).into_iter().map(|s| s.words).collect();
+    assert!(words.contains(&"#12 into main".to_owned()), "{words:?}");
+    assert!(!b.actions(TaskId(3)).contains(&TaskAction::Merge), "it is the forge's to merge");
+}

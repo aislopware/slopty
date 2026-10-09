@@ -29,6 +29,8 @@ pub enum Failed {
     Conflict(Vec<String>),
     /// The target branch is no longer where it was asked to move from: it is at this commit.
     Moved(String),
+    /// The forge refused the push because the branch is protected, in its words: nothing moved.
+    Protected(String),
     /// Anything else, in words.
     Other(String),
 }
@@ -38,6 +40,7 @@ impl std::fmt::Display for Failed {
         match self {
             Self::Conflict(paths) => write!(f, "conflicts in {}", paths.join(", ")),
             Self::Moved(at) => write!(f, "the branch moved to {at}"),
+            Self::Protected(why) => write!(f, "the branch is protected: {why}"),
             Self::Other(why) => f.write_str(why),
         }
     }
@@ -297,12 +300,28 @@ fn tests_in(listed: &str, head: String, test_paths: &[String]) -> TestDiff {
     diff
 }
 
-/// Move the branch `target` of the clone at `repo` from `from` to `to`, and push it to
-/// `origin` when `push` says.
+/// The words of a forge refusing a push to a protected branch: GitHub's protection and its
+/// rulesets, GitLab's protected branches, and git's own for a hook that names it.
+const PROTECTED: [&str; 4] =
+    ["protected branch", "gh006", "gh013", "not allowed to push code to protected branches"];
+
+/// Whether a push refused with `words` was refused because the branch is protected.
+fn protected(words: &str) -> bool {
+    let words = words.to_lowercase();
+    PROTECTED.iter().any(|p| words.contains(p))
+}
+
+/// Move the branch `target` of the clone at `repo` from `from` to `to`, pushing it to
+/// `origin` first when `push` says.
+///
+/// The push goes first so that a forge which protects the branch refuses it before anything
+/// moves here: the work then lands through a pull request, and the clone's branch stays where
+/// the forge's is. A push refused for any other reason leaves the branch moved, and says why.
 ///
 /// # Errors
-/// [`Failed::Moved`] when the branch is no longer at `from`; otherwise `to` not descending
-/// from `from`, or the checkout that has the branch holding changes the move would overwrite.
+/// [`Failed::Moved`] when the branch is no longer at `from`; [`Failed::Protected`] when the
+/// forge refused the push for its protection; otherwise `to` not descending from `from`, or
+/// the checkout that has the branch holding changes the move would overwrite.
 pub async fn fast_forward(
     git: &Path,
     repo: &Path,
@@ -324,6 +343,20 @@ pub async fn fast_forward(
             short(&from)
         )));
     }
+    let (pushed, push_failed) = if push {
+        let refspec = format!("{to}:{reference}");
+        match bundle::run(git, repo, &["push", "--quiet", "--end-of-options", "origin", &refspec])
+            .await
+        {
+            Ok(_) => (true, None),
+            Err(why) if protected(&why.to_string()) => {
+                return Err(Failed::Protected(why.to_string()));
+            }
+            Err(why) => (false, Some(why.to_string())),
+        }
+    } else {
+        (false, None)
+    };
     // `merge --ff-only` stops, changing nothing, when the person's changes there are in its
     // way; `update-ref` would move the branch under them and leave the index stale.
     if let Some(tree) = checked_out(git, repo, &reference).await? {
@@ -333,17 +366,6 @@ pub async fn fast_forward(
         let why = "slopty: merge queue";
         bundle::run(git, repo, &["update-ref", "-m", why, &reference, &to, &from]).await?;
     }
-    let (pushed, push_failed) = if push {
-        let refspec = format!("{to}:{reference}");
-        match bundle::run(git, repo, &["push", "--quiet", "--end-of-options", "origin", &refspec])
-            .await
-        {
-            Ok(_) => (true, None),
-            Err(why) => (false, Some(why.to_string())),
-        }
-    } else {
-        (false, None)
-    };
     Ok(Moved { head: to, pushed, push_failed })
 }
 

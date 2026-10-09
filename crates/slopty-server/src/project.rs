@@ -31,7 +31,7 @@ use slopty_proto::project::{
 pub use slopty_proto::project::{Bounds, ProjectId};
 use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::ThreadId;
-use slopty_proto::thread::wire::PullSeen;
+use slopty_proto::thread::wire::{PullSeen, PullStands};
 
 mod scripts;
 
@@ -1473,10 +1473,15 @@ impl Projects {
                 let moved = pull.is_some() && standing(&t.pull) != standing(&pull);
                 t.pull.clone_from(&pull);
                 t.updated_ms = now;
-                changed.push((t.id, pull.filter(|_| moved)));
+                let landed = landed(t, pull.as_ref(), now);
+                changed.push((t.id, pull.filter(|_| moved), landed));
             }
-            for (task, moment) in changed {
+            for (task, moment, landed) in changed {
                 let entry = moment.map(|pull| record.log(Some(task), Moment::Pull(pull), now));
+                let entry = match landed {
+                    Some(moved) => Some(record.log(Some(task), moved, now)),
+                    None => entry,
+                };
                 if let Ok(task_now) = record.task(task).cloned() {
                     updates.push(record.task_update(&task_now, entry));
                 }
@@ -2048,6 +2053,34 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
         }
     }
     true
+}
+
+/// `t`, waiting in its pull request ([`Merge::Pull`]), as `pull` (its thread's) stands now:
+/// merged there, it is merged; closed without a merge, it waits for the person's Merge again.
+/// The move, for the timeline.
+fn landed(t: &mut Task, pull: Option<&PullSeen>, now: WallMs) -> Option<Moment> {
+    let Some(Merge::Pull { target, head, number, .. }) = &t.merge else { return None };
+    let pull = pull.filter(|p| p.number == *number)?;
+    match pull.stands {
+        PullStands::Merged if t.state.may_become(TaskState::Merged) => {
+            let merged = Merge::Merged {
+                target: target.clone(),
+                head: head.clone(),
+                at_ms: now,
+                pushed: true,
+                push_failed: None,
+            };
+            let from = t.state;
+            t.merge = Some(merged);
+            t.state = TaskState::Merged;
+            Some(Moment::State { from, to: TaskState::Merged })
+        }
+        PullStands::Closed => {
+            t.merge = None;
+            None
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -2206,3 +2206,42 @@ reordering and edited allows are gone" in `agents.md`.*
   from the projects mirror). Any other agent's plan, and an orchestrator's approval of a
   command, keep the agent's own words. Test: `slopty-ui`
   `conversation::thread::tests::face::an_orchestrator_s_plan_is_confirmed_and_started`.
+
+- ✅ **Work lands through a pull request when the target is protected** (readiness R23,
+  2026-10-09). With "push after each merge" on, the queue moved the target in the
+  orchestrator's clone and then pushed it. A forge that protects the branch refused the push,
+  which left the clone's target ahead of the forge's, a merge only on paper, and "Push again"
+  failing the same way each time.
+  - **Detected by the push itself.** `Verb::FastForward` with `push` now pushes first, and
+    moves the clone's branch only after. A push the forge refuses for protection, in its own
+    words (GitHub's `GH006` and its rulesets' `GH013`, GitLab's "not allowed to push code to
+    protected branches", "protected branch" from a hook), moves nothing and is answered
+    `ErrorCode::Protected`. The rules are the forge's, applied to the person's own
+    credentials, so an admin whose push is allowed still merges directly. Asking the forge's
+    API instead would need rights a developer may not have, and could disagree with what the
+    push meets. A push refused for any other reason keeps the old behaviour: the branch moves
+    and the step says why. What a remote says (`remote:` lines) now leads a failed git's
+    message, so the reason is kept.
+  - **Landing.** On `Protected` the lane sends `Verb::LandPull`. The worker pushes the
+    rebased, verified commit as the task's branch (forced, since it is the task's own work
+    rebased), then finds the open pull request of that branch into the target or opens one
+    with the person's `gh` or `glab`. The task keeps state Done with `Merge::Pull { number,
+    url, head, … }`. That takes it out of the queue, which moves on, and the orchestrator is
+    told where the work waits.
+  - **Merged there, merged here.** The task's thread already watches its branch's pull
+    request (the one PR watcher). When it reads that pull request merged, the task becomes
+    Merged, with `pushed`. Closed without a merge, the task waits for the person's Merge
+    again. The board shows the pull request on the task's pipeline until the watcher has read
+    it.
+  - **Known gap.** The clone's target is not moved when a pull request merges on the forge, so
+    later tasks are rebased onto the clone's own target until someone pulls it. The forge
+    still merges them against its target, and a conflict shows on the pull request. Bringing
+    the clone's target up to the forge's before each rebase is the next step if that bites.
+  - Tests: `slopty-worker`
+    `repo::verify::tests::a_protected_target_refuses_the_push_and_nothing_moves` (a bare
+    forge whose pre-receive hook speaks GitHub's words) and
+    `repo::pull::tests::work_on_a_protected_target_goes_up_as_a_pull_request` (a stand-in gh;
+    found, not opened twice); `slopty-server`
+    `hub::queue::tests::a_protected_target_takes_the_work_through_a_pull_request`; `slopty-ui`
+    `project::tests::work_waiting_in_a_pull_request_says_where`; goldens
+    `land_pull`, `pull_opened`, `project_reply_protected` and `task_in_pull_card`.

@@ -669,6 +669,10 @@ impl Hub {
                     self.merged(at, &place, &head, (pushed, push_failed), step);
                     return Went::Next;
                 }
+                // The forge protects the target: the work lands through a pull request there.
+                Outcome::Error { code: ErrorCode::Protected, .. } => {
+                    return self.land_pull(at, &place, &rebased, step).await;
+                }
                 // The target moved since the rebase: the rebased work goes on top of it.
                 Outcome::Error { code: ErrorCode::Conflict, .. } => candidate = rebased,
                 other => {
@@ -868,6 +872,85 @@ impl Hub {
         state.deliveries.notice((project.clone(), None), task, kind, &words, at);
         drop(state);
         self.inner.deliver.notify_one();
+    }
+
+    /// Land `task`'s work, rebased and verified at `head`, on the protected target through the
+    /// forge: pushed as its branch, into a pull request found or opened there. The task waits
+    /// in it ([`Merge::Pull`]) until the forge merges it, as its thread's pull request watch
+    /// says; the queue goes on meanwhile.
+    async fn land_pull(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        place: &Place,
+        head: &str,
+        step: impl Fn(StepState) -> TaskStep,
+    ) -> Went {
+        let at = (project, task);
+        let (branch, title) = {
+            let state = self.inner.state.lock();
+            let t = state.projects.task(project, task).ok();
+            let branch = t.and_then(|t| t.branch.clone());
+            let read = (branch, t.map(|t| t.title.clone()).unwrap_or_default());
+            drop(state);
+            read
+        };
+        let branch = branch.unwrap_or_else(|| format!("slopty/{project}/{task}"));
+        let phase = format!("{} is protected: opening a pull request", place.target);
+        self.progress(at, step(StepState::Running { phase, percent: None }));
+        let body = format!(
+            "Task #{task} of the Slopty project {project}, rebased onto {} and checked by its \
+             merge queue. {} is protected, so the work lands through this pull request.",
+            place.target, place.target
+        );
+        let verb = Verb::LandPull {
+            worker: place.worker,
+            repo: place.clone.clone(),
+            head: head.to_owned(),
+            branch,
+            target: place.target.clone(),
+            title: if title.trim().is_empty() { format!("Task #{task}") } else { title },
+            body,
+        };
+        let (number, url) = match self.forward(None, verb).await {
+            Outcome::PullOpened { number, url } => (number, url),
+            other => {
+                self.held(at, StepKind::Merge, place.worker, said(&other));
+                return Went::Hold;
+            }
+        };
+        let detail = format!("pull request #{number} into {}, which is protected", place.target);
+        let done = step(StepState::Done { detail });
+        let now = WallMs::now();
+        let mut state = self.inner.state.lock();
+        let merge = Merge::Pull {
+            target: place.target.clone(),
+            head: head.to_owned(),
+            number,
+            url: crate::project::clipped(&url, slopty_proto::project::REF_MAX),
+            since_ms: now,
+        };
+        let advance = Advance {
+            moment: Some(Moment::Step(done.clone())),
+            step: Some(done),
+            merge: Queue::Set(merge),
+            ..Advance::default()
+        };
+        match state.projects.advance(project, task, advance, now) {
+            Ok((_, updates)) => self.projects_moved(&mut state, updates),
+            Err(refused) => {
+                tracing::debug!(%project, %task, ?refused, "a pull request not recorded");
+            }
+        }
+        let words = format!(
+            "task {task}'s work waits in pull request #{number} ({url}): {} is protected, so it \
+             merges there.",
+            place.target
+        );
+        let at = tokio::time::Instant::now();
+        state.deliveries.notice((project.clone(), None), task, Kind::NeedsInput, &words, at);
+        drop(state);
+        self.inner.deliver.notify_one();
+        Went::Next
     }
 
     /// The person pushes `task`'s target to `origin` again after the push that went with its

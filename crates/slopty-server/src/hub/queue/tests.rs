@@ -758,3 +758,86 @@ async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
         )
     );
 }
+
+/// A target the forge protects refuses the queue's push, so the work, rebased and verified,
+/// goes up as a pull request there: the task waits in it, out of the queue, and is merged once
+/// its thread's pull request watch reads it merged. A pull request closed unmerged leaves it
+/// for the person's Merge again.
+#[tokio::test]
+async fn a_protected_target_takes_the_work_through_a_pull_request() {
+    use slopty_proto::git::Forge;
+    use slopty_proto::thread::Phase;
+    use slopty_proto::thread::wire::{PullSeen, PullStands};
+
+    use super::super::ladder::tests::{row, snapshot};
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    done(&hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, verb) = studio.past_screens(&["ok"]).await;
+    assert!(matches!(verb, Verb::Close { .. }), "{verb:?}");
+    answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
+    let (id, _rebase) = studio.request().await;
+    let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true };
+    answer(&studio.lease, id, rebased);
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::FastForward { push: true, .. }), "{verb:?}");
+    let message = "the branch is protected: GH006: Protected branch update failed".to_owned();
+    answer(&studio.lease, id, Outcome::Error { code: ErrorCode::Protected, message });
+    let (id, verb) = studio.request().await;
+    let Verb::LandPull { repo, head, branch, target, title, .. } = &verb else {
+        panic!("{verb:?}")
+    };
+    assert_eq!(
+        (repo.as_str(), head.as_str(), branch.as_str(), target.as_str(), title.as_str()),
+        ("/w/demo", commit('a').as_str(), BRANCH, "main", "Server"),
+        "the rebased work, as the task's branch, into the target"
+    );
+    let url = "https://github.com/o/demo/pull/12".to_owned();
+    answer(&studio.lease, id, Outcome::PullOpened { number: 12, url: url.clone() });
+    let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let card = task_now(&hub, task).await;
+            if matches!(card.merge, Some(Merge::Pull { .. })) {
+                return card;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("it waits in its pull request");
+    assert_eq!(waiting.state, TaskState::Done);
+    assert!(
+        matches!(&waiting.merge, Some(Merge::Pull { number: 12, url: u, .. }) if *u == url),
+        "{:?}",
+        waiting.merge
+    );
+
+    let seen = |stands| PullSeen {
+        forge: Forge::GitHub,
+        number: 12,
+        url: url.clone(),
+        title: "Server".to_owned(),
+        base: "main".to_owned(),
+        stands,
+        failed: 0,
+        failed_first: None,
+        running: 0,
+    };
+    let mut thread = row(Phase::Idle, 1, Some(agent.session));
+    thread.pull = Some(seen(PullStands::Waiting));
+    studio.lease.handle(snapshot(vec![thread.clone()]));
+    assert!(matches!(task_now(&hub, task).await.merge, Some(Merge::Pull { .. })), "still open");
+    thread.pull = Some(seen(PullStands::Merged));
+    studio.lease.handle(snapshot(vec![thread]));
+    until_state(&hub, task, TaskState::Merged).await;
+    let merged = task_now(&hub, task).await.merge;
+    assert!(
+        matches!(&merged, Some(Merge::Merged { head, pushed: true, .. }) if *head == commit('a')),
+        "{merged:?}"
+    );
+}

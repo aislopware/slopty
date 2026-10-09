@@ -86,6 +86,43 @@ struct Listed {
     iid: u32,
 }
 
+/// One open merge request as `glab mr list --output json` lists it, with its page.
+#[derive(Debug, Deserialize)]
+struct Open {
+    iid: u32,
+    #[serde(default)]
+    web_url: String,
+}
+
+/// The open merge request of `branch` into `target`, as its number and page; none when there
+/// is none.
+///
+/// # Errors
+/// glab says something other than its answer.
+pub(super) async fn open_of(
+    glab: &Path,
+    root: &Path,
+    branch: &str,
+    target: &str,
+) -> Result<Option<(u32, String)>, GitOutcome> {
+    let list = [
+        "mr",
+        "list",
+        "--source-branch",
+        branch,
+        "--target-branch",
+        target,
+        "--per-page",
+        "1",
+        "--output",
+        "json",
+    ];
+    let listed = run(glab, root, &list, None, REMOTE).await?;
+    let listed: Vec<Open> = serde_json::from_str(&listed)
+        .map_err(|e| GitOutcome::Failed { said: format!("glab listed no merge requests: {e}") })?;
+    Ok(listed.into_iter().next().map(|o| (o.iid, o.web_url)))
+}
+
 /// The merge request of the branch checked out at `root`, read with `glab`; none when the
 /// branch has none, open or merged.
 ///
