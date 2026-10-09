@@ -2549,3 +2549,24 @@ reordering and edited allows are gone" in `agents.md`.*
     and the store log's replay covering keys and merges (`store.rs`). Also
     `a_verb_whose_answer_a_drop_lost_goes_again_under_its_key` (slopty-client
     `tests/server_link.rs`).
+
+- ✅ **The person's pin reaches the orchestrator, and every way in can restart a task**
+  (2026-10-11, readiness 10-11 rank 17, the server and tools half).
+  - **A pin is told.** "Run on…" set a planned task's pin and told nobody, so an orchestrator
+    could start the task elsewhere. When the person moves a task's pin (`TaskUpdate { run_on }`
+    that changes it), the orchestrator now gets a notice through its hooks, paced like a done
+    report. The notice names the machine, or says the task may now run anywhere. A change that
+    leaves the pin as it was, and an agent's own pin, are not told.
+  - **A pinned start with nothing to work on is refused.** A start with no directory goes beside
+    a clone of the project's repository. Pinned to a worker with no clone, and with no address to
+    clone from, it used to start in that worker's home. It is now refused (`Unplaced`), saying to
+    clone it there, pin it to a worker that has a clone, or name a cwd. The GUI's Start sends
+    exactly such a start.
+  - **Restart and push everywhere.** `TaskRestart` reached the server only from the GUI. Now the
+    orchestrator has the `task_restart` tool, and the CLI has `slopty task restart [--agent]`.
+    The CLI also has `slopty task push`; push stays the person's, so it is no agent tool.
+  - Tests:
+    - `the_person_s_pin_is_told_to_the_orchestrator` and the pinned refusal in
+      `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (slopty-server);
+    - `task_restart_hands_a_task_to_a_new_agent` and the tool list (slopty-tools);
+    - `restart_and_push_name_their_task` (slopty-cli).

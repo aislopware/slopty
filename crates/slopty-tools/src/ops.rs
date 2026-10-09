@@ -988,6 +988,53 @@ pub async fn task_merge<D: Dispatch>(
     task_answer(dispatch, key, Verb::TaskMerge { project, task }).await
 }
 
+/// The agent a name means: `claude` or Claude Code's id, `codex`, `pi`, an ACP agent by the
+/// registry's name or `acp:<name>`.
+#[must_use]
+pub fn agent_id(name: &str) -> slopty_proto::thread::AgentId {
+    use slopty_proto::thread::AgentId;
+    match name.trim() {
+        "claude" | AgentId::CLAUDE_CODE => AgentId::named(AgentId::CLAUDE_CODE),
+        name @ (AgentId::CODEX | AgentId::PI) => AgentId::named(name),
+        name if name.starts_with(AgentId::ACP_PREFIX) => AgentId::named(name),
+        name => AgentId::acp(name),
+    }
+}
+
+/// Start a task's work again with a new agent ([`Verb::TaskRestart`]).
+///
+/// The one on it now is closed, and `agent` (else the one it ran last) starts where it ran, in
+/// its worktree, told its brief and where the earlier agent's thread is.
+///
+/// # Errors
+/// As [`task_report`]; a merged task, an agent's own task, and another project's are refused.
+pub async fn task_restart<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    task: Option<&str>,
+    agent: Option<&str>,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, task) = project_task(dispatch, project, task).await?;
+    let agent = agent.map(str::trim).filter(|a| !a.is_empty()).map(agent_id);
+    task_answer(dispatch, key, Verb::TaskRestart { project, task, agent }).await
+}
+
+/// Push a merged task's work to the forge again, as the person ([`Verb::TaskPush`]): after a
+/// push that failed.
+///
+/// # Errors
+/// As [`task_report`]; an agent is refused, and so is a task not merged.
+pub async fn task_push<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    task: Option<&str>,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, task) = project_task(dispatch, project, task).await?;
+    task_answer(dispatch, key, Verb::TaskPush { project, task }).await
+}
+
 /// Tell a task's agent something, through its hooks as a report goes.
 ///
 /// The words are the person's, or the orchestrator's, marked as the orchestrator's. Nothing is

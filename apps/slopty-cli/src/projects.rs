@@ -156,6 +156,22 @@ pub enum TaskCmd {
         #[command(flatten)]
         which: TaskRef,
     },
+    /// Start a task's work again with a new agent, on the machine it ran on and in its worktree
+    /// there, the work so far kept: the agent on it now is closed, and the new one is told the
+    /// task's brief and where the earlier agent's thread is.
+    Restart {
+        #[command(flatten)]
+        which: TaskRef,
+        /// Hand it to this agent (`claude`, `codex`, `pi`, an ACP agent); the one it ran last
+        /// when omitted.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Push a merged task's work to the forge again, as the person: after a push that failed.
+    Push {
+        #[command(flatten)]
+        which: TaskRef,
+    },
     /// Tell a task's agent something: the words reach it through its hooks as a report does,
     /// never typed into its terminal (fix CI, address the comments, resolve the conflicts).
     /// Inside the orchestrator's session they are the orchestrator's, and marked so.
@@ -496,6 +512,14 @@ pub async fn task(
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_merge(link, project, task, key).await?
         }
+        TaskCmd::Restart { which, agent } => {
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_restart(link, project, task, agent.as_deref(), key).await?
+        }
+        TaskCmd::Push { which } => {
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_push(link, project, task, key).await?
+        }
         TaskCmd::Tell { which, words } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_tell(link, project, task, words.join(" "), key).await?;
@@ -551,4 +575,37 @@ async fn print_status(
         res.workers().await?.iter().map(|w| (w.worker, w.name.clone())).collect();
     print!("{}", view::status_text(status, &names));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser, Debug)]
+    struct Cli {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    }
+
+    /// `task restart` names the task and, when it hands it on, the agent; `task push` names
+    /// the task.
+    #[test]
+    fn restart_and_push_name_their_task() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("task").chain(args.iter().copied())).map(|c| c.cmd)
+        };
+        let TaskCmd::Restart { which, agent } =
+            parse(&["restart", "--project", "demo", "--task", "3", "--agent", "codex"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((which.project.as_deref(), which.task.as_deref()), (Some("demo"), Some("3")));
+        assert_eq!(agent.as_deref(), Some("codex"));
+        let TaskCmd::Restart { agent, .. } = parse(&["restart"]).unwrap() else { panic!() };
+        assert_eq!(agent, None, "the agent it ran last");
+        let TaskCmd::Push { which } = parse(&["push", "--task", "#4"]).unwrap() else { panic!() };
+        assert_eq!(which.task.as_deref(), Some("#4"));
+    }
 }

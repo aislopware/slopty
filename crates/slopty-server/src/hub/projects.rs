@@ -919,6 +919,32 @@ impl Hub {
         }
     }
 
+    /// The person pinned `task` to a worker, or let it run anywhere: its orchestrator hears of
+    /// it once it rests, so it starts the task where the person said and moves it nowhere else.
+    fn pinned(&self, state: &mut State, project: &ProjectId, task: &Task) {
+        let (id, title) = (task.id, &task.title);
+        let words = match task.pin {
+            Some(worker) => {
+                let name = state
+                    .workers
+                    .get(&worker)
+                    .map_or_else(|| worker.to_string(), |entry| entry.info.name.clone());
+                format!(
+                    "the person pinned task {id} ({title}) to the machine {name}: it runs there \
+                     and nowhere else. Start it there when it is due (task_start takes the pin)."
+                )
+            }
+            None => format!(
+                "the person let task {id} ({title}) run on any machine: the server places it \
+                 where it fits when it starts."
+            ),
+        };
+        let at = tokio::time::Instant::now();
+        let node = (project.clone(), None);
+        state.deliveries.notice(node, id, crate::deliver::Kind::Done, &words, at);
+        self.inner.deliver.notify_one();
+    }
+
     /// A project change the store answers at once: made once per key, logged and pushed.
     pub(super) fn project_change(
         &self,
@@ -1025,10 +1051,17 @@ impl Hub {
                     (Outcome::Done, u)
                 })
             }
-            Verb::TaskUpdate { project, task: id, change } => state
-                .projects
-                .update_task(&project, id, *change, caller, now)
-                .map(|(t, u)| (task(t), u)),
+            Verb::TaskUpdate { project, task: id, change } => {
+                let was = state.projects.task(&project, id).ok().map(|t| t.pin);
+                let updated = state.projects.update_task(&project, id, *change, caller, now);
+                if let Ok((t, _)) = &updated
+                    && caller == Caller::Person
+                    && was.is_some_and(|was| was != t.pin)
+                {
+                    self.pinned(state, &project, t);
+                }
+                updated.map(|(t, u)| (task(t), u))
+            }
             Verb::TaskReport { project, task: id, report } => {
                 let reported = state.projects.report_task(&project, id, &report, now);
                 if reported.is_ok() {
@@ -1711,14 +1744,13 @@ impl Hub {
                     placement::choose(&candidates, &wanted).map_err(|why| unplaced(&why))?;
                 let beside = candidates.iter().any(|c| c.worker == worker && c.clone);
                 let repo = state.projects.project(project)?.repo_id.as_ref();
-                // Named, a worker is taken as it is; chosen, it gets a clone or has one.
-                match repo.filter(|id| {
-                    wanted.clone && wanted.pin.is_none() && !beside && id.url.is_none()
-                }) {
+                // Named or chosen, a worker with no directory given gets a clone or has one:
+                // a task's agent started in the worker's home would work on nothing.
+                match repo.filter(|id| wanted.clone && !beside && id.url.is_none()) {
                     Some(id) => Err(unplaced(&format!(
-                        "with no cwd it goes beside a clone of {}, no worker that fits has one, \
-                         and no address to clone it from is known: clone it on a worker, name \
-                         the worker, or name a cwd",
+                        "with no cwd it goes beside a clone of {}, the worker it would go to has \
+                         none, and no address to clone it from is known: clone it on a worker, \
+                         pin the task to one that has it, or name a cwd",
                         id.keys().next().unwrap_or_default()
                     ))),
                     None => Ok(worker),

@@ -10,8 +10,8 @@ use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::Worktree;
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
-    ASKING_ENV, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV,
-    TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+    ASKING_ENV, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, RunOn, Runner,
+    TASK_ENV, TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::{PullStands, TableFrame};
@@ -932,6 +932,54 @@ async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
     delivering.abort();
 }
 
+/// The person pinning a task to a machine, or letting it run anywhere, is told to its
+/// orchestrator, naming the machine; an agent's own pin, and a change that leaves the pin, are
+/// not.
+#[tokio::test(start_paused = true)]
+async fn the_person_s_pin_is_told_to_the_orchestrator() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let orchestrator = SessionId::new();
+    let (studio, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    let (mini, _mini_lease, _mini_rx) = worker_on(&hub, "mini", Os::MacOs, Vec::new());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, None).await;
+    let next_batch = async |rx: &mut mpsc::Receiver<FromServer>| loop {
+        match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return (session, batch, reports.text());
+            }
+            Ok(Some(_)) => {}
+            other => panic!("no batch: {other:?}"),
+        }
+    };
+    let (session, batch, _role) = next_batch(&mut rx).await;
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    let run_on = |run_on| Verb::TaskUpdate {
+        project: project(),
+        task,
+        change: Box::new(TaskChange { run_on: Some(run_on), ..TaskChange::default() }),
+    };
+    let noted = Verb::TaskUpdate {
+        project: project(),
+        task,
+        change: Box::new(TaskChange { note: Some("soon".to_owned()), ..TaskChange::default() }),
+    };
+    assert!(matches!(hub.dispatch(noted).await, Outcome::Task(_)));
+    assert!(matches!(hub.dispatch(run_on(RunOn::Worker(mini))).await, Outcome::Task(_)));
+    let (session, batch, said) = next_batch(&mut rx).await;
+    assert!(said.contains("the person pinned task 1 (Server) to the machine mini"), "{said}");
+    assert!(!said.contains("soon"), "a note is no pin: {said}");
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    assert!(matches!(hub.dispatch(run_on(RunOn::Worker(mini))).await, Outcome::Task(_)));
+    assert!(matches!(hub.dispatch(run_on(RunOn::Anywhere)).await, Outcome::Task(_)));
+    let (_, _, said) = next_batch(&mut rx).await;
+    assert!(said.contains("let task 1 (Server) run on any machine"), "{said}");
+    assert!(!said.contains("pinned"), "the same pin again is not told: {said}");
+    delivering.abort();
+}
+
 /// A machine's settings are the person's: an agent reading or editing a worker's or the
 /// server's is refused by the server, through MCP and through the CLI in an agent's terminal
 /// alike, and nothing reaches the worker; the person's edit goes on to it.
@@ -1828,7 +1876,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
     let linux = vec![in_clone(SessionId::new(), "/home/c/slopty", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
-    let (_bare, _bare_lease, _bare_rx) = worker_on(&hub, "bare", Os::Linux, Vec::new());
+    let (bare, _bare_lease, _bare_rx) = worker_on(&hub, "bare", Os::Linux, Vec::new());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
 
@@ -1913,6 +1961,13 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     assert_eq!(cwd, "/w/slopty", "beside a clone, on the worker running fewer agents");
     opened(&studio_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    // Pinned to a worker with no clone, and no address to clone from, it is refused rather
+    // than started in that worker's home with nothing to work on.
+    let homeless = new_task(&hub, Some(bare)).await;
+    let verb = Verb::TaskSpawn { project: project(), task: homeless, launch: anywhere.clone() };
+    let said = refused(&hub.dispatch(verb).await, ErrorCode::Unplaced).to_owned();
+    assert!(said.contains("pin the task to one that has it"), "{said}");
 
     drop((studio_lease, linux_lease));
     let stranded = new_task(&hub, None).await;

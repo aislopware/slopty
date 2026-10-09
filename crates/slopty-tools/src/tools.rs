@@ -31,7 +31,8 @@ with since and timeout_ms waits for the next change; task_get shows one task in 
 orchestrator starts work with task_start: each task is one agent (Claude Code, Codex, pi or an \
 ACP agent) or a command, working from its brief in a worktree of its own on the worker named \
 or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
-more to a task's agent, task_wait waits for tasks' news, and task_update changes a task. A \
+more to a task's agent, task_restart starts its work again with a fresh or another agent, \
+task_wait waits for tasks' news, and task_update changes a task. A \
 task's agent moves its own task with task_update and reports it with task_report; its project \
 and task are the defaults. read_thread reads another agent's thread; the requests on it are \
 the person's to answer, never an agent's. Everything else, the workers and their facts, \
@@ -288,6 +289,21 @@ struct TaskTellArgs {
     idempotency_key: Option<String>,
 }
 
+/// `task_restart`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskRestartArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// The task to start again: any of the project you orchestrate but your own.
+    task: TaskArg,
+    /// The agent to hand it to: `claude`, `codex`, `pi`, or an ACP agent by the registry's
+    /// name. The one it ran last when omitted.
+    agent: Option<String>,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
 /// `task_wait`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -494,6 +510,16 @@ pub fn list() -> Vec<Tool> {
              person is refused until it moves on. A task's agent reports with task_report.",
             Kind::Write,
         ),
+        tool::<TaskRestartArgs>(
+            "task_restart",
+            "Start a task's work again with a new agent, on the machine it ran on and in its \
+             worktree there, the work so far kept: for an agent that is stuck, lost its way or \
+             filled its context, or to hand the task to another `agent`. The agent on it now is \
+             closed. The new one is told the task's brief and where the earlier agent's thread \
+             is (read_thread). To move a task to another machine, task_start it there instead. \
+             Returns the task with its new terminal's `term`.",
+            Kind::Write,
+        ),
         tool::<TaskWaitArgs>(
             "task_wait",
             "Wait for news of tasks: a report, a move of state (its agent ending a turn without \
@@ -607,6 +633,14 @@ async fn run<D: Dispatch>(
             let task = a.task.text();
             ops::task_tell(dispatch, a.project.as_deref(), Some(&task), a.text, key).await?;
             json(&view::DONE)
+        }
+        "task_restart" => {
+            let a: TaskRestartArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let task = a.task.text();
+            let (project, agent) = (a.project.as_deref(), a.agent.as_deref());
+            let restarted = ops::task_restart(dispatch, project, Some(&task), agent, key);
+            json(&view::projects::task(&restarted.await?))
         }
         "task_wait" => {
             let a: TaskWaitArgs = args(arguments)?;
@@ -849,7 +883,7 @@ mod tests {
                     code: ErrorCode::UnknownTask,
                     message: "no task #9".to_owned(),
                 },
-                Verb::TaskSpawn { task, .. } => {
+                Verb::TaskSpawn { task, .. } | Verb::TaskRestart { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, "Fix the hub", true)))
                 }
                 // The server's record of the terminal, over what its environment says.
@@ -950,6 +984,38 @@ mod tests {
         assert!(failed && text.contains("name the project"), "{text}");
     }
 
+    /// `task_restart` starts a task of the caller's project again, handing it to the agent
+    /// named, or to the one it ran last when it names none.
+    #[tokio::test]
+    async fn task_restart_hands_a_task_to_a_new_agent() {
+        use slopty_proto::thread::AgentId;
+        let fake = Fake::default();
+        let restart = json!({"project": "slopty", "task": 4, "agent": "codex"});
+        let (failed, text) = call_json(&fake, "task_restart", restart).await;
+        assert!(!failed, "{text}");
+        let again = json!({"project": "slopty", "task": 4, "idempotency_key": "again-1"});
+        let (failed, text) = call_json(&fake, "task_restart", again).await;
+        assert!(!failed, "{text}");
+        let restarts: Vec<_> = fake
+            .verbs()
+            .into_iter()
+            .filter_map(|v| match v {
+                Verb::TaskRestart { project, task, agent } => Some((project, task, agent)),
+                _ => None,
+            })
+            .collect();
+        let slopty: ProjectId = "slopty".parse().unwrap();
+        assert_eq!(
+            restarts,
+            [
+                (slopty.clone(), TaskId(4), Some(AgentId::named(AgentId::CODEX))),
+                (slopty, TaskId(4), None),
+            ]
+        );
+        let (failed, text) = call_json(&fake, "task_restart", json!({"project": "slopty"})).await;
+        assert!(failed && text.contains("missing field `task`"), "{text}");
+    }
+
     /// The server's record of the caller's terminal says which task is its own, over the
     /// `SLOPTY_TASK` it was started with: an agent put on another task acts on that one.
     #[tokio::test]
@@ -979,7 +1045,7 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
-    /// The tools are the project's eight and nothing else: the rest is the `slopty` command.
+    /// The tools are the project's nine and nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -993,6 +1059,7 @@ mod tests {
                 "task_update",
                 "task_report",
                 "task_tell",
+                "task_restart",
                 "task_wait",
                 "read_thread",
             ]

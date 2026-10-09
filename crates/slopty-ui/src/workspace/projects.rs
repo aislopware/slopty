@@ -258,7 +258,7 @@ impl WorkspaceView {
     /// Show `project`'s board in its orchestrator's tile, and go there. Where its orchestrator
     /// has no tile here, one is opened for it on its worker. With no orchestrator, one whose
     /// agent ended, or one on a machine away, the board opens in a tile of its own
-    /// ([`super::board_tiles`]).
+    /// (`board_tiles`).
     pub fn open_project(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
         let Some(board) = self.projects.mirror.get(project) else { return };
         let Some(term) = board.project.orchestrator else {
