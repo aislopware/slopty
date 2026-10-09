@@ -932,13 +932,15 @@ fn merge3(base: &str, ours: &str, theirs: &str) -> Result<String, Vec<Range<usiz
     loop {
         let (change, with) = match (a.peek().copied(), b.peek().copied()) {
             (None, None) => break,
-            (Some(x), Some(y)) if meets(x, y) => {
+            (Some(mine), Some(theirs)) if meets(mine, theirs) => {
                 let (_ours, _theirs) = (a.next(), b.next());
-                if x.at != y.at || ours_of(x) != theirs_of(y) {
-                    met.push(y.to.start..y.to.end.max(y.to.start + 1));
+                let (lines_mine, lines_theirs) = (ours_of(mine), theirs_of(theirs));
+                if mine.at != theirs.at || lines_mine != lines_theirs {
+                    let to = &theirs.to;
+                    met.push(to.start..to.end.max(to.start.saturating_add(1)));
                     continue;
                 }
-                (x, ours_of(x))
+                (mine, lines_mine)
             }
             (Some(x), Some(y)) if x.at.start <= y.at.start => {
                 let _ours = a.next();
@@ -969,8 +971,8 @@ fn lines_named(ranges: &[Range<usize>]) -> String {
     let named: Vec<String> = ranges
         .iter()
         .map(|r| match r.len() {
-            0 | 1 => format!("{}", r.start + 1),
-            _ => format!("{}\u{2013}{}", r.start + 1, r.end),
+            0 | 1 => format!("{}", r.start.saturating_add(1)),
+            _ => format!("{}\u{2013}{}", r.start.saturating_add(1), r.end),
         })
         .collect();
     let single = ranges.len() == 1 && ranges.first().is_some_and(|r| r.len() <= 1);
@@ -1031,11 +1033,9 @@ mod tests {
         let at_end = format!("{OLD}n\n");
         assert_eq!(merge3(OLD, &ours, &at_end), Ok(format!("{ours}n\n")));
 
-        let over = OLD.replace("b\n", "b!\n");
-        assert_eq!(merge3(OLD, &ours, &over), Err(vec![1..2]), "the same line otherwise");
-        let touching = OLD.replace("c\n", "C\n");
-        assert_eq!(merge3(OLD, &ours, &touching), Err(vec![2..3]), "the line after");
-        assert_eq!(lines_named(&[1..2]), "line 2");
+        let met = |theirs: &str| merge3(OLD, &ours, theirs).map_err(|at| lines_named(&at));
+        assert_eq!(met(&OLD.replace("b\n", "b!\n")), Err("line 2".to_owned()), "the same line");
+        assert_eq!(met(&OLD.replace("c\n", "C\n")), Err("line 3".to_owned()), "the line after");
         assert_eq!(lines_named(&[1..4, 8..9]), "lines 2\u{2013}4, 9");
     }
 

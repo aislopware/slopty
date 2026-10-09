@@ -293,8 +293,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Keep and revert act once per id, checked against what the review showed.** A revert
     writes the file's old side back, whole or by hunk, only while the file is still the blob
     the review showed. Keeping moves the file, whole or by hunk, into a kept tree
-    (`refs/slopty/threads/<thread>/kept`), only while what is kept of it is still the review's
-    old side. "What is left to review" is the kept tree against now, starting from the
+    (`refs/slopty/threads/<thread>/kept`). When what is kept of it is no longer the review's
+    old side, the change is merged onto it three ways and refused only where the two meet
+    (below, "Keep takes a turn's change onto what is kept"). "What is left to review" is the kept tree against now, starting from the
     thread's first snapshot. Both run git, so they are answered from a task of their own, and a
     repeat that comes while one is under way gets nothing until it is done.
   - **Every adapter advertises `Cap::SNAPSHOTS`** (corrected 2026-10-04). The worker takes the
@@ -2704,3 +2705,28 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again` (slopty-worker
     `tests/claude_start.rs`: the offer and its reach, the flag kept, the same command opened
     again and the thread in its new terminal, a second press refused).
+
+- ✅ **Keep takes a turn's change onto what is kept** (2026-10-11, readiness 10-11 rank 2, the
+  worker's half). A thread's review opens on its last turn. When an earlier turn had changed
+  the same file and was not kept, Keep and "Mark reviewed" there failed with "was kept otherwise
+  since it was reviewed". The last turn's old side holds the earlier turn's lines, and what is
+  kept does not, so the strict check never passed. A two-turn worker test showed the refusal.
+  - **The merge.** `Repo::keep` still keeps the picked change as it is when what is kept of
+    the file is the review's old side. Otherwise it merges the change onto what is kept, three
+    ways from the review's old side (`snapshot::merge3`, over the same `similar` diff the hunks
+    come from), as `git merge-file` would. Changes apart are both made, the same change on both
+    sides is made once, and changes over the same lines, or touching, meet. A meeting refuses
+    the keep and names the lines of the change it meets at ("a.txt: this change meets lines
+    kept otherwise, at line 11"). A turn that removed the file removes it from what is kept.
+    A side that is not text where the kept side differs is refused, as before.
+  - **Why in Rust, not `git merge-file`.** The keep already holds the three texts. `merge-file`
+    would need them written to temporary files, and it answers a conflict count through its
+    exit code, which the worker's git runner reads as a failure. The diff is the one the
+    review's hunks come from, so a pick and its merge agree on what a change is.
+  - **A keep made twice is made once.** The same change kept again now merges to what is
+    already kept and answers Done, where it was refused.
+  - Tests: `the_last_turn_is_kept_though_an_earlier_one_is_not` (slopty-worker
+    `tests/review.rs`). Two turns edit one file; keeping the second turn leaves only the first
+    to review, keeping the first then leaves nothing, and a later change over a line kept
+    otherwise is refused naming it. Also `three_ways_merge_apart_and_meet_where_they_touch`
+    (`repo/snapshot.rs`).
