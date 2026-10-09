@@ -2548,3 +2548,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     round-trip a verb on the link after sending it.
   - Tests: `link::tests::a_worker_hears_the_pushes_word_past_a_full_queue`,
     `hub::ladder::tests::the_workers_hear_whether_a_pocketed_phone_can_answer` (slopty-server).
+
+- ✅ **An intent's answer is never dropped** (2026-10-10, readiness 10-10 rank 3). The worker
+  answered an interrupt, a model change, a fork and the other quick intents with `try_send` on
+  the connection's control queue (`CONTROL_DEPTH`, 1024), and dropped the answer when the queue
+  was full. The client keeps such an intent pending until its `IntentDone` comes, and nothing
+  sends it again short of a relink, so the control stayed spinning. Now a full queue hands the
+  answer to one of the connection's tasks, which waits for room and ends with the connection
+  (`threads::post_on`). The reader is never held up, and the answer comes after what was queued
+  before it. Test: `threads::tests::an_intent_s_answer_waits_for_room_in_a_full_queue`
+  (`slopty-workerd`).

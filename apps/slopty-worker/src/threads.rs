@@ -359,12 +359,26 @@ impl Origin<'_> {
         Who { daemon: self.daemon, link: self.link, client: self.client }
     }
 
-    /// Queue `msg` for the client without waiting, as the connection's own answers are: a
-    /// client that has not read a full queue loses it, and an intent's answer is had again by
-    /// sending the intent again.
-    fn post(&self, msg: WorkerMsg) {
-        if let Err(mpsc::error::TrySendError::Full(msg)) = self.out.try_send(msg) {
-            tracing::warn!(client = %self.client, ?msg, "control queue full; answer dropped");
+    /// Answer the client: at once while its control queue has room, else on a task of the
+    /// connection's that waits for room ([`post_on`]).
+    fn post(&mut self, msg: WorkerMsg) {
+        post_on(self.out, self.tasks, msg);
+    }
+}
+
+/// Queue `msg` on `out` without holding up the connection's reader: at once while there is
+/// room, else on one of `tasks`, which waits for room and ends with the connection.
+///
+/// An intent's answer is never dropped. The client keeps the intent pending until it comes
+/// (an interrupt, a model change, a fork), and nothing would send it again short of a relink.
+fn post_on(out: &mpsc::Sender<WorkerMsg>, tasks: &mut JoinSet<()>, msg: WorkerMsg) {
+    match out.try_send(msg) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            let out = out.clone();
+            tasks.spawn(async move {
+                let _gone = out.send(msg).await;
+            });
         }
     }
 }
@@ -1472,5 +1486,31 @@ impl Threads {
             (outcome, Vec::new())
         });
         decided.unwrap_or_else(|| refused("no such thread".to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An intent's answer that finds the client's control queue full waits for room rather
+    /// than being dropped, and comes after what was queued before it.
+    #[tokio::test]
+    async fn an_intent_s_answer_waits_for_room_in_a_full_queue() {
+        let (out, mut rx) = mpsc::channel(1);
+        let mut tasks = JoinSet::new();
+        let first = IntentId::new();
+        let done = |id| WorkerMsg::IntentDone(IntentDone { id, outcome: refused("no".to_owned()) });
+        post_on(&out, &mut tasks, done(first));
+        let second = IntentId::new();
+        post_on(&out, &mut tasks, done(second));
+        let ids = [rx.recv().await, rx.recv().await].map(|msg| match msg {
+            Some(WorkerMsg::IntentDone(done)) => done.id,
+            other => panic!("{other:?}"),
+        });
+        assert_eq!(ids, [first, second], "the full queue's answer came once there was room");
+        drop(out);
+        while tasks.join_next().await.is_some() {}
+        assert!(rx.recv().await.is_none(), "each answer once");
     }
 }
