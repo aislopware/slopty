@@ -15751,3 +15751,27 @@ built.
 ```sh
 cargo test -p slopty-ui --lib a_sliding_pane_builds_no_other_pane -- --nocapture
 ```
+
+## 2026-10-09 — a shell's output and the panes' builds
+
+The pane headers and the bar's strip now read a shell's `OSC 9;4` progress from the workspace's
+copy (`facts.progress`) instead of from the shell. The headless test opens three shells, writes
+five lines of output into one that is on show, and counts the builds over the frame each line
+draws: the area that holds the panes (`AreaHost`) and each shell's view. The frame from scratch
+that then judges each line builds every view once more and is left out of the count.
+
+| headers read | lines | area builds | the busy shell | the other two |
+| --- | --- | --- | --- | --- |
+| the shell | 5 | 5 | 5 | 0, 0 |
+| the workspace's copy | 5 | 0 | 5 | 0, 0 |
+
+- **A line of output now builds only its shell.** A header that reads a shell's entity makes
+  the shell's notify the panes' news too, so the area was built on every line. Reading the copy,
+  which changes only when the program reports a new state, takes the panes off the output path.
+- **The other two shells were never built again**, either way (one on show beside it, one in a
+  tab behind): the area's build replays them from their caches.
+- **The "before" row** was taken by putting back the shell read in `tile.rs` for one run.
+
+```sh
+cargo test -p slopty-ui --lib a_shells_output_builds_only_that_shell
+```

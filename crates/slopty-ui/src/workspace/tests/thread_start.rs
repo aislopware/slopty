@@ -736,8 +736,10 @@ fn a_start_is_written_in_the_threads_composer(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the + menu is open");
     assert!(cx.debug_bounds("thread-add-menu-modes").is_none(), "Codex: no mode offered");
     // A press outside the menu closes it, and the keyboard is the composer's again.
+    // Alone in its tab, the start's tile is named by its title tab, its header the bar's.
     let tile = view.read_with(cx, |v, _| v.focused()).expect("the start's tile");
-    let title: &'static str = format!("title-{}", tile.item.as_uuid()).leak();
+    let tab = view.read_with(cx, |v, _| v.layout().position(tile)).expect("placed").tab;
+    let title: &'static str = format!("title-tab-{}", tab.get()).leak();
     click(title, cx);
     assert!(cx.debug_bounds("thread-add-menu-files").is_none(), "and closed");
     cx.simulate_keystrokes("enter");

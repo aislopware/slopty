@@ -1247,15 +1247,10 @@ impl WorkspaceView {
         });
         // A program's progress report (`OSC 9;4`): the kit's bar with its figure beside it, where
         // a tile says how it stands, not a line along the terminal's edge.
-        // The bar reads the workspace's copy, so a shell's output never builds it. A pane's
-        // header still reads the shell: with the copy, the panes are no longer built with each
-        // line of output, and gpui-fast's splice of the shell's cached view into panes it did
-        // not build fails (`Window::splice_gaps`, an invalid layout key).
+        // Read from the workspace's copy, never the shell: a header that read the shell would
+        // build the panes again with each line of output, as the shell's news is theirs too.
         let report = match &item.kind {
-            ItemKind::Terminal { session } if bar => self.shell_progress(*session),
-            ItemKind::Terminal { session } => {
-                self.terminals.get(session).and_then(|view| view.read(cx).progress())
-            }
+            ItemKind::Terminal { session } => self.shell_progress(*session),
             _ => None,
         };
         let report = report.map(|progress| {

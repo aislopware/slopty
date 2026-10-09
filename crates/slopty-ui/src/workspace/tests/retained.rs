@@ -507,3 +507,43 @@ fn title_tabs_that_overflow_at_once_are_drawn_as_from_scratch(cx: &mut TestAppCo
     cx.simulate_resize(size(px(700.0), px(900.0)));
     fresh(cx, "a narrower window");
 }
+
+/// A shell's output builds that shell's view once a line and nothing around it: its header
+/// reads the program's progress report from the workspace's copy, never the shell, so a line
+/// is no news for the panes, and the shells beside it are replayed from their caches. After
+/// each line the window shows what a frame from scratch shows.
+#[gpui::test]
+fn a_shells_output_builds_only_that_shell(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shells = three_shells(&view, cx, &fake);
+    let busy = shells[2].0;
+    let terminals: Vec<Entity<TerminalView>> = shells
+        .iter()
+        .filter_map(|(session, _)| view.read_with(cx, |v, _| v.terminal(*session).cloned()))
+        .collect();
+    assert_eq!(terminals.len(), 3, "three shells open");
+    let renders = |cx: &mut VisualTestContext| -> Vec<u32> {
+        terminals.iter().map(|t| t.read_with(cx, |t, _| t.renders())).collect()
+    };
+    let builds = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.builds.get());
+    view.update_in(cx, |v, _w, cx| v.term_event(busy, frame(&["~ % "]), cx));
+    fresh(cx, "three shells");
+    // Counted over the frame each line draws, before the frame from scratch that judges it,
+    // which builds every view once more.
+    let (mut area, mut built) = (0_u64, [0_u32; 3]);
+    for seq in 2..=6 {
+        let (before, rendered) = (builds(cx), renders(cx));
+        let line = format!("line {seq}");
+        let output = marked_frame(seq, &[(&line, SemanticMark::Output)], 0);
+        view.update_in(cx, |v, _w, cx| v.term_event(busy, output, cx));
+        cx.run_until_parked();
+        area = area.wrapping_add(builds(cx).wrapping_sub(before));
+        for (n, (now, then)) in built.iter_mut().zip(renders(cx).iter().zip(&rendered)) {
+            *n = n.wrapping_add(now.wrapping_sub(*then));
+        }
+        fresh(cx, "a line of output");
+    }
+    assert_eq!(built, [0, 0, 5], "the busy shell built once a line, the others not at all");
+    assert_eq!(area, 0, "the panes around it not built again");
+}

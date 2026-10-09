@@ -9103,12 +9103,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     header. A phone is unchanged: its bar was the focused tile's already.
   - **Drawing.** The strip is a view of its own (`Region::TileStrip`), always in the bar and
     empty while the tab holds more. It is told the news a header is told
-    (`WorkspaceView::panes_news`), so a header's news never builds the bar. It reads a program's
-    progress report from the workspace's copy (`facts.progress`), never the shell.
-  - **Left as found.** A pane's header still reads the shell for that report, so the panes are
-    built with each line of output. Moving it to the copy too makes gpui-fast's splice of a
-    shell's cached view into panes it did not build fail (`Window::splice_gaps`, an invalid
-    taffy key; `workspace::tests::output_redraws_its_own_tile_only` panics). Fix that in the
-    fork, then read the copy.
+    (`WorkspaceView::panes_news`), so a header's news never builds the bar. Every header reads a
+    program's progress report from the workspace's copy (`facts.progress`), never the shell.
+  - **The copy, for the panes too** (amended after the gpui-fast bump to `fa876f7c`). Before
+    that bump a pane's header had to read the shell, because with the copy gpui-fast's splice
+    of a shell's cached view into panes it had not built failed (`Window::splice_gaps`, an
+    invalid taffy key). Its cached-layout fix (longbridge#52) ended that, so the panes read the
+    copy too, and a line of output builds only its shell: over five lines the panes were built
+    five times while their headers read the shell and not at all with the copy, the shells
+    beside it never (`workspace::tests::retained::a_shells_output_builds_only_that_shell`;
+    `docs/MEASUREMENTS.md`, 2026-10-09).
   - Tests: `workspace::tests::lone_tile::*`; the header tests give their tile a neighbour
     (`tests::paired`).
