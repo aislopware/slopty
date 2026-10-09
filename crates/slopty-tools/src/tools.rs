@@ -724,7 +724,6 @@ mod tests {
     fn project_status(id: ProjectId) -> ProjectStatus {
         ProjectStatus {
             project: Project {
-                scripts: Vec::new(),
                 orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
                 title: "Slopty".to_owned(),

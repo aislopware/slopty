@@ -876,50 +876,6 @@ pub enum Verb {
         /// What to do.
         op: FsOp,
     },
-    /// Keep `script` in `project`, in place of one of its name. Answered with
-    /// [`Outcome::Project`]. The person's alone.
-    ScriptSet {
-        /// The project.
-        project: ProjectId,
-        /// The script.
-        script: crate::project::Script,
-    },
-    /// Take script `name` away from `project`. Answered with [`Outcome::Project`]. The
-    /// person's alone.
-    ScriptDelete {
-        /// The project.
-        project: ProjectId,
-        /// The script's name.
-        name: String,
-    },
-    /// Run script `name` of `project` in a terminal of the person's: in `task`'s worktree on
-    /// its worker, else in the project's folder on `worker` (its orchestrator's when absent).
-    /// Answered with [`Outcome::Opened`]. The person's alone.
-    ScriptRun {
-        /// The project.
-        project: ProjectId,
-        /// The script's name.
-        name: String,
-        /// The worker; the task's, or the orchestrator's, when absent.
-        worker: Option<WorkerId>,
-        /// The task whose worktree it runs in.
-        task: Option<TaskId>,
-    },
-    /// Server → worker, for [`Verb::ScriptRun`]: open a terminal in `cwd` running `line`
-    /// through the person's login shell, then leave them that shell. Answered with
-    /// [`Outcome::Opened`].
-    RunScript {
-        /// Where.
-        worker: WorkerId,
-        /// The folder it runs in.
-        cwd: String,
-        /// The command line.
-        line: String,
-        /// The terminal's title.
-        name: String,
-        /// The terminal's id, chosen by the server.
-        session: SessionId,
-    },
     /// Start a task's work again with a new agent: the one on it now, if one runs, is closed,
     /// and a new one starts on the worker it ran on, in the task's worktree there, the work so
     /// far kept. Its first prompt is the task's brief, and a pointer to the earlier agent's
@@ -1040,11 +996,7 @@ impl Verb {
             | Self::FastForward { .. }
             | Self::RemoveWorktree { .. }
             | Self::StartThread { .. }
-            | Self::FsChange { .. }
-            | Self::ScriptSet { .. }
-            | Self::ScriptDelete { .. }
-            | Self::ScriptRun { .. }
-            | Self::RunScript { .. } => true,
+            | Self::FsChange { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),

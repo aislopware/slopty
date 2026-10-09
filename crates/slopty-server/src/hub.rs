@@ -837,16 +837,6 @@ impl Hub {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
             Verb::ProjectDelete { project } => self.project_delete(&project),
-            verb @ (Verb::ScriptSet { .. } | Verb::ScriptDelete { .. }) => {
-                self.script_change(caller, key, &verb)
-            }
-            Verb::ScriptRun { project, name, worker, task } => {
-                self.script_run(caller, key, (project, name), worker, task).await
-            }
-            Verb::RunScript { .. } => error(
-                ErrorCode::Forbidden,
-                "the server opens a script's terminal itself; ask it with script run",
-            ),
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -1661,17 +1651,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskReport { .. }
         | Verb::TaskMerge { .. }
         | Verb::TaskPush { .. }
-        | Verb::ProjectDelete { .. }
-        | Verb::ScriptSet { .. }
-        | Verb::ScriptDelete { .. }
-        | Verb::ScriptRun { .. } => None,
+        | Verb::ProjectDelete { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
         | Verb::FsChange { worker, .. }
-        | Verb::RunScript { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }

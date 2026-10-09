@@ -385,9 +385,6 @@ impl Orchestrator {
             | Verb::TaskMerge { .. }
             | Verb::TaskPush { .. }
             | Verb::ProjectDelete { .. }
-            | Verb::ScriptSet { .. }
-            | Verb::ScriptDelete { .. }
-            | Verb::ScriptRun { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
@@ -438,24 +435,6 @@ impl Orchestrator {
                     inner.agent_terms.lock().insert(handle.id());
                 }
                 Ok(opened(TermRef { worker, session: handle.id() }, made))
-            }
-            Verb::RunScript { worker, cwd, line, name, session } => {
-                self.mine(worker)?;
-                let shell = crate::repo::script::login_shell();
-                let req = OpenSession {
-                    size: ORCHESTRATED_SIZE,
-                    cwd: Some(cwd),
-                    command: crate::repo::script::command_line(&line, &shell),
-                    env: Vec::new(),
-                    title: Some(name),
-                    attach: false,
-                };
-                let _choosing = self.choosing(Some(session)).await;
-                if let Some(running) = self.running(Some(session)) {
-                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
-                }
-                let handle = self.open_as(Some(session), &req, ORCHESTRATOR).await?;
-                Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
             }
             Verb::SpawnAgent {
                 worker,
@@ -1097,8 +1076,8 @@ fn worktree_failed(failed: &crate::repo::worktrees::Failed) -> Failure {
         Failed::NotOne(_) => ErrorCode::Invalid,
         Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
         Failed::Other(_) => ErrorCode::Failed,
-        // The board and the orchestrator read why: the setup's last lines go with it.
-        Failed::Setup(setup) => {
+        // The board and the orchestrator read why: the script's last lines go with it.
+        Failed::Setup(setup) | Failed::Archive(setup) => {
             let said = setup.setup.tail.join("\n");
             return Failure::new(ErrorCode::Failed, format!("{failed}\n{said}"));
         }

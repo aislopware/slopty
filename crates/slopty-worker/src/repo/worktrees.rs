@@ -40,6 +40,8 @@ pub enum Failed {
     Other(String),
     /// The worktree was made, but the repository's setup in it failed.
     Setup(super::setup::Failed),
+    /// The repository's archive script failed, so the worktree was kept.
+    Archive(super::setup::Failed),
 }
 
 impl std::fmt::Display for Failed {
@@ -48,8 +50,9 @@ impl std::fmt::Display for Failed {
             Self::NotOne(why) | Self::Busy(why) | Self::Uncommitted(why) | Self::Other(why) => {
                 f.write_str(why)
             }
-            Self::Setup(failed) => {
-                write!(f, "the setup from {} ", failed.setup.from)?;
+            Self::Setup(failed) | Self::Archive(failed) => {
+                let what = if matches!(self, Self::Setup(_)) { "setup" } else { "archive script" };
+                write!(f, "the {what} from {} ", failed.setup.from)?;
                 match failed.code {
                     Some(code) => write!(f, "exited {code}")?,
                     None => f.write_str("was stopped")?,
@@ -419,7 +422,7 @@ async fn set_up(
 /// The main checkout of the repository `cwd` is in, and where `cwd` stands in its own
 /// checkout. A worktree's main checkout is the one its git directory is shared from; a
 /// submodule's, whose shared directory is no checkout's `.git`, is its own.
-fn clone_of(cwd: &Path) -> Result<(PathBuf, PathBuf), Failed> {
+pub(super) fn clone_of(cwd: &Path) -> Result<(PathBuf, PathBuf), Failed> {
     let root = super::root_of(cwd)
         .ok_or_else(|| Failed::NotOne(format!("{} is in no git repository", cwd.display())))?;
     let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -614,6 +617,31 @@ pub async fn discard(git: &Path, worktree: &Path, cwds: &[PathBuf]) -> Result<Re
     take_out(git, (&tree, &clone, branch), &landed, true).await
 }
 
+/// Run the repository's archive script in worktree `tree` of `clone`, the one its own checkout
+/// keeps ([`super::run::archive`]), before it goes: to stop what its setup or a run left going.
+/// One that fails keeps the worktree, unless it goes by `force`, which goes on and says so.
+async fn archive_in(tree: &Path, clone: &Path, force: bool) -> Result<(), Failed> {
+    let found = {
+        let tree = tree.to_path_buf();
+        tokio::task::spawn_blocking(move || super::run::archive(&tree))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))?
+    };
+    let Some(found) = found else { return Ok(()) };
+    let name = tree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let at = super::setup::Places { root: clone, tree, name: &name, base: None };
+    match super::setup::run(&found, &at, &|_| {}).await {
+        Ok(()) => Ok(()),
+        Err(failed) if force => {
+            let (code, from) = (failed.code, found.from);
+            let tree = tree.display();
+            tracing::warn!(%tree, from, ?code, "an archive script failed; its worktree goes anyway");
+            Ok(())
+        }
+        Err(failed) => Err(Failed::Archive(failed)),
+    }
+}
+
 /// Take worktree `tree` out of `clone`, by force when `force` (its changes go), and its branch
 /// with it once every commit on it is in one of `landed`.
 async fn take_out(
@@ -622,6 +650,7 @@ async fn take_out(
     landed: &[String],
     force: bool,
 ) -> Result<Removed, Failed> {
+    archive_in(tree, clone, force).await?;
     let tree_text = tree.to_string_lossy();
     let mut args = vec!["worktree", "remove"];
     if force {
@@ -1345,5 +1374,48 @@ mod tests {
         let mut want = [real(&open), real(&squashed)];
         want.sort_unstable();
         assert_eq!(asked_in, want, "the forge is asked only where the commits leave it open");
+    }
+
+    /// A worktree's archive script, from the files its own checkout keeps, runs in it before it
+    /// goes, with the places in its environment. One that fails keeps the worktree and says
+    /// why, in its last words; a discard runs it and goes anyway.
+    #[tokio::test]
+    async fn the_archive_script_runs_before_a_worktree_goes() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(clone.join(".conductor")).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        let marker = tmp.path().join("archived");
+        let settings = format!(
+            "[scripts]\narchive = \"echo \\\"$SLOPTY_WORKSPACE_NAME in $PWD\\\" >> {}\"\n",
+            marker.display()
+        );
+        std::fs::write(clone.join(".conductor/settings.toml"), settings).expect("write");
+        git_in(&clone, &["add", "."]);
+        git_in(&clone, &["commit", "-q", "-m", "c0"]);
+        let (tree, _) = agent_tree(&clone, "fine");
+        let real = std::fs::canonicalize(&tree).expect("there");
+        remove(git, &tree, &["main".to_owned()], &[]).await.expect("removed");
+        let said = std::fs::read_to_string(&marker).expect("the archive script ran");
+        assert_eq!(said.trim(), format!("fine in {}", real.display()));
+        assert!(!tree.exists());
+
+        // A script that fails, committed on the worktree's own branch: its checkout's is read.
+        let (tree, _) = agent_tree(&clone, "stuck");
+        let failing = "[scripts]\narchive = \"echo cannot stop the dev server; exit 3\"\n";
+        std::fs::write(tree.join(".conductor/settings.toml"), failing).expect("write");
+        git_in(&tree, &["commit", "-q", "-am", "failing archive"]);
+        let kept = remove(git, &tree, &["main".to_owned()], &[]).await;
+        let Err(failed @ Failed::Archive(_)) = kept else { panic!("kept: {kept:?}") };
+        let why = failed.to_string();
+        assert!(
+            why.starts_with("the archive script from .conductor/settings.toml exited 3"),
+            "{why}"
+        );
+        assert!(why.contains("cannot stop the dev server"), "{why}");
+        assert!(tree.exists(), "kept");
+        discard(git, &tree, &[]).await.expect("discarded");
+        assert!(!tree.exists(), "a discard goes anyway");
     }
 }

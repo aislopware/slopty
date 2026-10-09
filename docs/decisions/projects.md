@@ -1890,6 +1890,10 @@ reordering and edited allows are gone" in `agents.md`.*
     carries the pull request.
 
 **A project keeps the person's scripts.** ✅ 2026-10-04
+- Superseded 2026-10-09 by "The repository's run and archive scripts": a project no longer
+  keeps scripts. `Project.scripts`, `Script`, the verbs `ScriptSet`, `ScriptDelete`,
+  `ScriptRun` and `RunScript`, and `slopty project script` are gone. The scripts are read from
+  the files the repository's other tools already keep, so the person writes them once.
 - Before: the person typed the project's dev server, test run or build into a terminal they
   opened and moved into the right folder themselves, on each worker and each task's worktree.
 - Prior art: T3 Code's project scripts, named commands per project run from the thread with
@@ -2086,7 +2090,7 @@ reordering and edited allows are gone" in `agents.md`.*
     counts. Sources are never merged. A file that does not parse is passed over. Orca's
     `orca.yaml`, the rarest, is not read: it would take a YAML parser for one tool.
   - **How it runs.** After `.worktreeinclude`'s copies, in the worktree, with stdin closed:
-    the person's login shell, interactive (their `PATH` and toolchains, as project scripts and
+    the person's login shell, interactive (their `PATH` and toolchains, as run scripts and
     verifiers), then `bash -e` (the shell those files are written for), so the first command
     that fails stops it. A list of commands is joined with `&&`. It is told its places as
     `SLOPTY_ROOT_PATH`, `_WORKSPACE_PATH`, `_WORKSPACE_NAME` and `_DEFAULT_BRANCH`, the same under
@@ -2335,3 +2339,42 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_clone_asked_by_a_client_is_found_or_refused` (`apps/slopty-worker/tests/e2e.rs`);
     goldens `client_clone_repo`, `worker_repo_cloning`, `worker_repo_cloned`,
     `worker_repo_clone_refused` and `worker_repo_clone_failed`.
+
+- ✅ **The repository's run and archive scripts** (2026-10-09, readiness rank 15, R12). The
+  scripts a project kept were Slopty's own, typed in once more per project, while the
+  repository usually holds them already in another tool's file. Conductor, the Codex app,
+  Superset and T3 Code each have a Run action for a dev server or a test watch, and Conductor
+  and Superset an archive (teardown) script that stops what a worktree left going before it
+  is removed.
+  - **Read, never a file of our own,** as the setup is (`repo::run`), from the checkout the
+    scripts would run in, in the order of `setup::SOURCES`. For each kind the first file that
+    names one wins, and sources are never merged.
+    - Run: `.conductor/settings.toml` (`[scripts] run`, a string, or named
+      `[scripts.run.<id>]` tables with `command`, `args`, `options.cwd`, `default` and
+      `hide`), `conductor.json` (`scripts.run`), `.codex/environments/environment.toml`
+      (`[[actions]]`, each a `name` and a `command`), `.superset/config.json` (`run`, with its
+      `cwd`) and `t3.json` (the scripts not marked `runOnWorktreeCreate`). A file's one script
+      is named "Run". The default comes first. A folder that climbs out of the checkout runs
+      in the checkout.
+    - Archive: `.conductor/settings.toml` and `conductor.json` (`scripts.archive`) and
+      `.superset/config.json` (`teardown`). Cursor and Codex keep none.
+  - **The wire.** `GitOp::Scripts` on a folder answers `GitDone::Scripts(RunScripts { from,
+    list })`. Each `RunScript` is ready to open: its name, its line, and the `command`, `cwd`
+    and `env` a client passes to `OpenSession` as they are. The command runs the line through
+    the person's login shell, which takes the terminal over when it ends (`repo::script`). The
+    environment names the places as a setup from the same file gets them. So no new message
+    opens one, and a script runs where its client is connected, with or without a server.
+  - **The archive runs before a worktree goes** (`repo::worktrees::take_out`), so it runs for
+    every removal: a thread's, "Remove merged worktrees" and a task's. It runs as the setup
+    does, in the worktree with the same environment. When it fails the worktree stays and the
+    removal fails with its exit code and last line (`Failed::Archive`). A discard (a forced
+    removal) logs the failure and goes on, since its changes go anyway.
+  - **Agents.** A script is the person's to start from the client. An agent that wants the
+    command reads the repository's file itself.
+  - The client's Run (a palette line, and a picker when there are several) belongs to the UI.
+  - Tests: `repo::run` (slopty-worker): each tool's form and the order, then the real files
+    of public repositories as their tools read them (`run_fixtures/`), and a script ready to
+    open; `repo::worktrees::the_archive_script_runs_before_a_worktree_goes` (a failure keeps
+    the worktree, a discard goes on); goldens `client_git_scripts` and `worker_git_scripts`.
+    The project goldens changed, and `script_set`, `script_delete`, `script_run` and
+    `run_script` are gone with their verbs.

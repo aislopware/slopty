@@ -1,5 +1,5 @@
-//! How a project's script runs in its terminal (`docs/decisions/projects.md`, "A project keeps
-//! the person's scripts").
+//! How a repository's run script runs in its terminal (`docs/decisions/projects.md`, "The
+//! repository's run and archive scripts").
 //!
 //! Through the person's login shell, interactive, as their own terminal runs a command, so
 //! their `PATH`, toolchains and aliases apply. When it ends, however it ends (Ctrl-C on a dev

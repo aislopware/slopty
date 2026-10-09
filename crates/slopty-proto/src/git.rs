@@ -108,6 +108,10 @@ pub enum GitOp {
     /// is fetched or moved; a pull request is asked of the forge only for a branch whose commits
     /// alone do not say it landed.
     Worktrees,
+    /// The repository's own run scripts, read from the files its other tools keep, ready to
+    /// open in a terminal ([`GitDone::Scripts`]): a dev server, a test watch, what a tool's Run
+    /// button starts.
+    Scripts,
 }
 
 /// What a [`GitOp`] did.
@@ -166,6 +170,8 @@ pub enum GitDone {
     PullComments(Box<PullComments>),
     /// The agents' worktrees of a clone.
     Worktrees(Box<Worktrees>),
+    /// The repository's run scripts.
+    Scripts(Box<RunScripts>),
 }
 
 /// The branches of a repository, as a start offers them for a new worktree's base.
@@ -228,6 +234,31 @@ pub struct AgentWorktree {
     pub merged: bool,
     /// When its newest commit was made: seconds since the Unix epoch, as git keeps them.
     pub committed: i64,
+}
+
+/// A repository's run scripts, as the checkout a folder is in keeps them.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct RunScripts {
+    /// The file they were read from (`.conductor/settings.toml`); none when it keeps none.
+    pub from: Option<String>,
+    /// Each, the one marked default first.
+    pub list: Vec<RunScript>,
+}
+
+/// One run script, ready to open in a terminal with `ClientMsg::OpenSession`: through the
+/// person's login shell, which takes the terminal over once it ends.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct RunScript {
+    /// Its name, as its file names it; the terminal's title.
+    pub name: String,
+    /// The script, as its file has it, for the person to read.
+    pub line: String,
+    /// The program and arguments that run it.
+    pub command: Vec<String>,
+    /// Where it runs, absolute.
+    pub cwd: String,
+    /// The places in its environment, under Slopty's names and its own tool's.
+    pub env: Vec<(String, String)>,
 }
 
 impl AgentWorktree {

@@ -15,6 +15,7 @@ pub mod bundle;
 pub mod cloning;
 pub mod commit;
 pub mod pull;
+pub mod run;
 pub mod script;
 pub mod setup;
 pub mod snapshot;

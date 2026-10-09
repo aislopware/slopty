@@ -322,4 +322,29 @@ mod golden_git {
         let said = "fatal: repository 'https://github.com/o/demo.git/' not found".to_owned();
         snap("worker_repo_clone_failed", &done(CloneOutcome::Failed { said }));
     }
+
+    /// A repository's run scripts asked of a worker, and the scripts ready to open.
+    #[test]
+    fn run_scripts() {
+        use slopty_proto::git::{RunScript, RunScripts};
+
+        let ask = ClientMsg::Git { request: 14, repo: "~/src/demo".to_owned(), op: GitOp::Scripts };
+        snap("client_git_scripts", &ask);
+        let script = RunScript {
+            name: "web".to_owned(),
+            line: "bun dev".to_owned(),
+            command: ["/bin/zsh", "-l", "-i", "-c", "bun dev\nexec /bin/zsh -l"]
+                .map(str::to_owned)
+                .to_vec(),
+            cwd: "/Users/ada/src/demo/apps/web".to_owned(),
+            env: vec![("SLOPTY_WORKSPACE_PATH".to_owned(), "/Users/ada/src/demo".to_owned())],
+        };
+        let scripts =
+            RunScripts { from: Some(".conductor/settings.toml".to_owned()), list: vec![script] };
+        let done = WorkerMsg::GitDone {
+            request: 14,
+            outcome: GitOutcome::Done(GitDone::Scripts(Box::new(scripts))),
+        };
+        snap("worker_git_scripts", &done);
+    }
 }

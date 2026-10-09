@@ -462,65 +462,6 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// A script the person sets with the CLI runs on the real worker in the project's clone,
-    /// under the folder it names, through the login shell: its terminal is the person's, and
-    /// listed. `script ls` names it, and taken away it is gone.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_script_set_from_the_cli_runs_in_the_project_s_clone() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let repo = root.join("demo");
-        std::fs::create_dir_all(repo.join("web")).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
-        let (server, _daemons, worker) = fleet(&root, "").await;
-        let hub = server.hub().clone();
-        let addr = server.quic_addr();
-        let shell = Verb::OpenTerminal {
-            worker,
-            cwd: Some(repo.to_string_lossy().into_owned()),
-            command: Vec::new(),
-            env: Vec::new(),
-            name: None,
-            size: None,
-            session: None,
-            worktree: None,
-        };
-        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("no shell") };
-        let term = format!("{}/{}", orchestrator.worker, orchestrator.session);
-        let made = ["project", "create", "demo", "--title", "Demo", "--repo", "demo"];
-        slopty(&root, addr, &[&made[..], &["--orchestrator", &term]].concat()).await;
-        let project = ProjectId::new("demo").unwrap();
-        until("the project learns its repository", async || {
-            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
-        })
-        .await;
-
-        let out = root.join("ran-in");
-        let command = format!("printf %s \"$PWD\" > '{}'", out.display());
-        let set = ["project", "script", "set", "--project", "demo", "--dir", "web", "where"];
-        slopty(&root, addr, &[&set[..], &[command.as_str()]].concat()).await;
-        let listed = slopty(&root, addr, &["project", "script", "ls", "--project", "demo"]).await;
-        assert_eq!(listed, format!("script where (in web): {command}\n"));
-
-        let ran =
-            slopty(&root, addr, &["project", "script", "run", "--project", "demo", "where"]).await;
-        // The shell makes the file before printf fills it.
-        let ran_in = until("the script runs", async || {
-            std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
-        })
-        .await;
-        assert_eq!(PathBuf::from(ran_in), repo.join("web"));
-        let session = ran.trim().rsplit('/').next().unwrap().to_owned();
-        let terminals = slopty(&root, addr, &["--json", "terminals"]).await;
-        assert!(terminals.contains(&session), "its terminal is listed: {terminals}");
-
-        slopty(&root, addr, &["project", "script", "rm", "--project", "demo", "where"]).await;
-        let none = slopty(&root, addr, &["project", "script", "ls", "--project", "demo"]).await;
-        assert_eq!(none, "demo has no script\n");
-        server.shutdown().await;
-    }
-
     /// What a worker has reaches `slopty workers` as facts. A command task made and started in one
     /// `slopty task start` runs on the worker it names, with its project and task in its
     /// environment.

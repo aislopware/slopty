@@ -149,7 +149,7 @@ fn is_empty(value: &serde_json::Value) -> bool {
 }
 
 /// A list of commands as one script that stops at the first to fail.
-fn joined(commands: &serde_json::Value) -> Option<String> {
+pub(super) fn joined(commands: &serde_json::Value) -> Option<String> {
     let commands: Vec<&str> = commands
         .as_array()?
         .iter()
@@ -160,7 +160,7 @@ fn joined(commands: &serde_json::Value) -> Option<String> {
 }
 
 /// `path` quoted for a shell.
-fn quoted(path: &Path) -> String {
+pub(super) fn quoted(path: &Path) -> String {
     slopty_core::shell_quote(&path.to_string_lossy())
 }
 

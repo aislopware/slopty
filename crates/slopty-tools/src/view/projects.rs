@@ -10,8 +10,8 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Bounds, Fact, Facts, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, NodeDetail,
-    Project, ProjectStatus, Report, Script, StepKind, StepState, Task, TaskCard, TaskState,
-    TaskStep, TestDiff, TimelineEntry, VerifierRun,
+    Project, ProjectStatus, Report, StepKind, StepState, Task, TaskCard, TaskState, TaskStep,
+    TestDiff, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::{PullSeen, PullStands};
@@ -96,17 +96,7 @@ pub struct ProjectView<'a> {
     orchestrator: Option<String>,
     limits: Limits,
     metadata: Option<Value>,
-    /// The person's named commands for it.
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    scripts: &'a [Script],
     created_ms: WallMs,
-}
-
-/// A script on one line: its name, where under the folder it runs, and its command.
-#[must_use]
-pub fn script_text(s: &Script) -> String {
-    let dir = s.dir.as_deref().map_or_else(String::new, |d| format!(" (in {d})"));
-    format!("script {}{dir}: {}", s.name, s.command)
 }
 
 /// A project, for JSON.
@@ -121,7 +111,6 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         orchestrator: p.orchestrator.map(term_string),
         limits: p.limits,
         metadata: metadata(p.metadata.as_deref()),
-        scripts: &p.scripts,
         created_ms: p.created_ms,
     }
 }
@@ -618,9 +607,6 @@ pub fn status_text<S: std::hash::BuildHasher>(
         None => out.push_str("  orchestrator  none named\n"),
     }
     counts_text(&mut out, s.orchestrator_natives, 2);
-    for s in &p.scripts {
-        let _infallible = writeln!(out, "  {}", script_text(s));
-    }
     let waiting = s.tasks.iter().filter(|t| t.waits_on_person()).count();
     if waiting > 0 {
         let _infallible =

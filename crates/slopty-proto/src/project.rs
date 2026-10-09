@@ -1,4 +1,4 @@
-//! Projects: one goal worked on by many agents across the fleet (`docs/decisions/projects.md`).
+//! Project: one goal worked on by many agents across the fleet (`docs/decisions/projects.md`).
 //!
 //! A [`Project`] lives on the server. Its [`Task`]s are its orchestrator's, one level under it,
 //! and form a graph by [`Task::depends_on`]. Each may be pinned to a
@@ -402,8 +402,6 @@ pub struct Project {
     pub limits: Limits,
     /// Anything its agents keep with it: the text of a JSON object.
     pub metadata: Option<String>,
-    /// The person's named commands for it (dev, test, build), at most [`SCRIPTS_MAX`].
-    pub scripts: Vec<Script>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
 }
@@ -930,64 +928,6 @@ pub fn is_test_path(path: &str, extra: &[String]) -> bool {
         || ["_test", "_spec", ".test", ".spec"].iter().any(|end| stem.ends_with(end))
 }
 
-/// The most scripts a project keeps.
-pub const SCRIPTS_MAX: usize = 32;
-/// The longest script name, in bytes ([`Script::name`]).
-pub const SCRIPT_NAME_MAX: usize = 32;
-/// The longest script command line, in bytes ([`Script::command`]).
-pub const SCRIPT_COMMAND_MAX: usize = 4096;
-
-/// A command the person named for a project: `dev`, `test`, `build`, anything.
-///
-/// Run, it opens a terminal of the person's own in the project's folder or a task's worktree,
-/// on the worker they choose (`docs/decisions/projects.md`, "A project keeps the person's
-/// scripts").
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Script {
-    /// Its name: letters, digits, `-`, `_` and `.`, at most [`SCRIPT_NAME_MAX`] bytes, unique
-    /// in its project.
-    pub name: String,
-    /// The command line, as the person would type it in their shell, at most
-    /// [`SCRIPT_COMMAND_MAX`] bytes.
-    pub command: String,
-    /// Where under the folder it runs in, relative (`web`); the folder itself when absent.
-    pub dir: Option<String>,
-}
-
-impl Script {
-    /// Why `self` cannot be kept, in words; none when it can.
-    #[must_use]
-    pub fn refusal(&self) -> Option<String> {
-        let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
-        if self.name.is_empty()
-            || self.name.len() > SCRIPT_NAME_MAX
-            || !self.name.chars().all(named)
-        {
-            return Some(format!(
-                "a script's name is 1 to {SCRIPT_NAME_MAX} letters, digits, '-', '_' or '.'; \
-                 {:?} is not",
-                self.name
-            ));
-        }
-        if self.command.trim().is_empty() {
-            return Some(format!("script {} runs no command", self.name));
-        }
-        if self.command.len() > SCRIPT_COMMAND_MAX {
-            return Some(format!("a script's command is at most {SCRIPT_COMMAND_MAX} bytes"));
-        }
-        let inside = |dir: &str| {
-            let path = std::path::Path::new(dir);
-            !dir.is_empty()
-                && path.components().all(|c| matches!(c, std::path::Component::Normal(_)))
-        };
-        match &self.dir {
-            Some(dir) if !inside(dir) => {
-                Some(format!("a script runs in a folder under the project's, not {dir:?}"))
-            }
-            _ => None,
-        }
-    }
-}
 /// How long an agent worked: the stretches it was at work, the waits between left out.
 ///
 /// The server follows the agent's thread: a stretch begins when it starts working and ends
@@ -1519,10 +1459,6 @@ impl Project {
             self.verifier.as_deref().map_or(0, str::len),
             self.metadata.as_deref().map_or(0, str::len),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
-            self.scripts
-                .iter()
-                .map(|s| s.command.len().saturating_add(s.name.len()).saturating_add(32))
-                .sum(),
         ]
         .into_iter()
         .fold(128_usize, |sum, len| sum.saturating_add(len).saturating_add(10))

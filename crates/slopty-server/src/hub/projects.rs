@@ -29,8 +29,6 @@ use super::{
     known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
-
-mod scripts;
 use crate::placement::{self, Candidate, Installed, Wanted};
 use crate::project::{
     Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,

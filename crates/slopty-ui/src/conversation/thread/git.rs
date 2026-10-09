@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use slopty_proto::git::{
     Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStanding, PullStatus,
-    Worktrees,
+    RunScripts, Worktrees,
 };
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
@@ -120,6 +120,8 @@ pub struct Repo {
     pub comments: Option<Arc<PullComments>>,
     /// The agents' worktrees of its clone, each as it stands, as last read.
     pub worktrees: Option<Arc<Worktrees>>,
+    /// Its own run scripts, as last read; why they could not be is said where they were asked.
+    pub scripts: Option<Arc<RunScripts>>,
 }
 
 impl Repo {
@@ -321,6 +323,7 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         }
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
+        GitDone::Scripts(scripts) => repo.scripts = Some(Arc::from(scripts)),
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {
@@ -371,6 +374,10 @@ fn missed(
             repo.worktrees = None;
             repo.said = Some((request, said(words)));
         }
+        GitOp::Scripts => {
+            repo.scripts = None;
+            repo.said = Some((request, said(words)));
+        }
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -389,6 +396,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::Changes { .. }
             | GitOp::Branches
             | GitOp::Worktrees
+            | GitOp::Scripts
     )
 }
 

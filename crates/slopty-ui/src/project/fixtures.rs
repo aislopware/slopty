@@ -30,7 +30,6 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         orchestrator,
         limits: Limits::default(),
         metadata: None,
-        scripts: Vec::new(),
         created_ms: AT,
         members: Vec::new(),
     }

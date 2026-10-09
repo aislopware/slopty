@@ -33,8 +33,6 @@ use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::{PullSeen, PullStands};
 
-mod scripts;
-
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
 pub const RECENT_ENTRIES: usize = 64;
 /// Subagents and task-list items kept per node, the oldest dropped first.
@@ -949,7 +947,6 @@ impl Projects {
         within("a repository", Some(&new.repo), REF_MAX)?;
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
-            scripts: Vec::new(),
             orchestrator_spent: Spent::default(),
             id: new.id.clone(),
             title,
